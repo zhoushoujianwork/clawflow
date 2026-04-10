@@ -1,6 +1,6 @@
 ---
 name: clawflow
-description: "自动化 Issue → 修复 → PR 流水线。当仓库 owner 给 issue 贴上 `ready-for-agent` 标签时，OpenClaw cron agent 自动收割、评估、调度 sub-agent 完成修复并提交 PR。触发条件：(1) 用户说'ClawFlow run'、'检查 ClawFlow'、'收割 ready-for-agent'；(2) cron 定时任务自动触发。与 gh-issues 的区别：ClawFlow 使用标签触发机制（`ready-for-agent`），而非参数过滤。"
+description: "自动化 Issue → 评估 → 修复 → PR 流水线。两阶段机制：(1) 评估阶段：自动扫描新 issues，评估置信度，评论提案并添加 `agent-evaluated` 标签；(2) 执行阶段：owner 确认后手动添加 `ready-for-agent` 标签，agent 执行修复并提交 PR。触发条件：(1) 用户说'ClawFlow run'、'检查 ClawFlow'；(2) cron 定时任务自动触发。关键约束：agent 不自己添加 `ready-for-agent` 标签，必须等待 owner 批准。"
 metadata:
   openclaw:
     requires:
@@ -36,30 +36,47 @@ REPOS_FILE="~/.openclaw/workspace/clawflow/config/repos.yaml"
 
 ## Phase 2 — Issue 收割
 
-对于每个启用的仓库，使用 GitHub API 搜索带触发标签的开放 issues：
+### 2.1 评估队列（新 issues）
+
+扫描所有开放的 issues，筛选需要评估的：
 
 ```bash
 curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/{owner}/{repo}/issues?state=open&labels={trigger_label}"
+  "https://api.github.com/repos/{owner}/{repo}/issues?state=open"
 ```
 
-**重要：** GitHub Issues API 也返回 PRs，必须过滤掉 `pull_request` 字段存在的项。
+**过滤规则（需评估）：**
+- 没有 `pull_request` 字段（排除 PRs）
+- 没有 `agent-evaluated` 标签（未评估过）
+- 没有 `in-progress` 标签
+- 没有 `agent-skipped` 标签
+- 没有 `agent-failed` 标签
 
-对于每个找到的 issue：
+这些 issues 加入 `ISSUES_TO_EVALUATE` 列表。
 
-1. 检查是否已有 `in-progress` 标签 → 跳过（已在处理）
-2. 检查是否已有 `agent-skipped` 标签 → 跳过（已评估过）
-3. 检查是否已有 `agent-failed` 标签 → 跳过（已失败过）
+### 2.2 执行队列（已批准）
 
-如果 issue 没有以上任何标签，加入 `ISSUES_TO_PROCESS` 列表。
+扫描带 `ready-for-agent` 标签的 issues：
+
+```bash
+curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/{owner}/{repo}/issues?state=open&labels=ready-for-agent"
+```
+
+**过滤规则（可执行）：**
+- 没有 `pull_request` 字段
+- 没有 `in-progress` 标签（未在处理中）
+- 有 `agent-evaluated` 标签（已评估过）
+
+这些 issues 加入 `ISSUES_TO_EXECUTE` 列表。
 
 ---
 
-## Phase 3 — Issue 评估
+## Phase 3 — Issue 评估（评估队列）
 
-对于每个待处理的 issue，进行置信度评估：
+对于 `ISSUES_TO_EVALUATE` 中的每个 issue，进行置信度评估并评论。
 
-**评估维度（各 1-10 分）：**
+### 评估维度（各 1-10 分）
 
 | 维度 | 标准 |
 |------|------|
@@ -69,33 +86,53 @@ curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+
 
 **置信度 = (清晰度 + 范围 + 可行性) / 3**
 
-读取配置中的 `confidence_threshold`（默认 7）。
+### 高置信度处理（推荐修复）
 
-对于每个 issue：
+对于置信度 >= threshold 的 issue：
 
-- **置信度 >= threshold:** 加入 `HIGH_CONFIDENCE_ISSUES`
-- **置信度 < threshold:** 加入 `LOW_CONFIDENCE_ISSUES`
-
-### 低置信度处理
-
-对于 `LOW_CONFIDENCE_ISSUES`：
-
-1. 添加 `agent-skipped` 标签（使用 GitHub API）
-2. 在 issue 中评论说明跳过原因：
+1. **添加 `agent-evaluated` 标签**
+2. **评论评估结果和修复提案**
 
 ```bash
 curl -s -X POST \
   -H "Authorization: Bearer $GH_TOKEN" \
   -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/{owner}/{repo}/issues/{number}/labels \
+  -d '{"labels":["agent-evaluated"]}'
+
+curl -s -X POST \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
   https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments \
-  -d '{"body": "ClawFlow 评估：置信度 {score}/10，低于阈值 {threshold}。\n\n跳过原因：{reason}\n\n如需人工处理，请移除 `agent-skipped` 标签并重新添加 `ready-for-agent`。"}'
+  -d '{"body": "## 🔍 ClawFlow 评估报告\n\n**置信度:** {score}/10 ✅ (高于阈值 {threshold})\n\n**评估详情:**\n- 清晰度: {clarity}/10 — {clarity_reason}\n- 范围: {scope}/10 — {scope_reason}\n- 可行性: {feasibility}/10 — {feasibility_reason}\n\n**修复提案:**\n{fix_proposal}\n\n---\n\n👉 **如果您同意此修复方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**\n\n⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。"}'
+```
+
+### 低置信度处理（需要补充信息）
+
+对于置信度 < threshold 的 issue：
+
+1. **添加 `agent-evaluated` 和 `agent-skipped` 标签**
+2. **评论说明缺少什么信息**
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/{owner}/{repo}/issues/{number}/labels \
+  -d '{"labels":["agent-evaluated","agent-skipped"]}'
+
+curl -s -X POST \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments \
+  -d '{"body": "## 🔍 ClawFlow 评估报告\n\n**置信度:** {score}/10 ⚠️ (低于阈值 {threshold})\n\n**评估详情:**\n- 清晰度: {clarity}/10 — {clarity_reason}\n- 范围: {scope}/10 — {scope_reason}\n- 可行性: {feasibility}/10 — {feasibility_reason}\n\n**需要补充的信息:**\n{missing_info}\n\n---\n\n💡 请补充以上信息后，移除 `agent-skipped` 标签并添加 `ready-for-agent` 以重新触发评估。"}'
 ```
 
 ---
 
-## Phase 4 — Sub-agent 调度
+## Phase 4 — Sub-agent 调度（执行队列）
 
-对于每个 `HIGH_CONFIDENCE_ISSUES`：
+对于 `ISSUES_TO_EXECUTE` 中的每个 issue（已带 `ready-for-agent` 标签）：
 
 ### Step 4.1 — 添加处理中标签
 
@@ -229,11 +266,29 @@ echo "# Issue #{number} - {title}
 
 **严格执行：**
 
-1. **只处理带 `ready-for-agent` 标签的 issue**
-2. **不自己添加 `ready-for-agent` 标签**（只有 owner 可以）
-3. **PR 目标分支固定为配置的 `base_branch`**
-4. **超时强制停止**（60 分钟）
-5. **低置信度直接跳过**（不强行修复）
+1. **评估阶段不执行修复** — 只评论评估结果
+2. **执行阶段只处理 `ready-for-agent` 标签** — 必须有 owner 批准
+3. **不自己添加 `ready-for-agent` 标签** — 只有 owner 可以
+4. **PR 目标分支固定为配置的 `base_branch`**
+5. **超时强制停止**（60 分钟）
+6. **低置信度不强行修复** — 请求补充信息
+
+### 标签流程图
+
+```
+新 Issue
+    ↓
+[自动评估] → agent-evaluated + 评论
+    ↓
+┌─────────────────────────────────────┐
+│ 高置信度: 等待 owner 添加 ready-for-agent │
+│ 低置信度: agent-skipped, 等待补充信息    │
+└─────────────────────────────────────┘
+    ↓
+[owner 添加 ready-for-agent]
+    ↓
+[执行修复] → in-progress → 创建 PR → 完成
+```
 
 ---
 
