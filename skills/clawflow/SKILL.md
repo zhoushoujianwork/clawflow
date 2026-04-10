@@ -76,35 +76,142 @@ curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+
 
 对于 `ISSUES_TO_EVALUATE` 中的每个 issue，进行置信度评估并评论。
 
-### 评估维度（各 1-10 分）
+### 评估策略（按类型区分）
 
-| 维度 | 标准 |
-|------|------|
-| **清晰度** | 问题描述是否清楚？有明确的预期行为和实际行为？ |
-| **范围** | 修复范围是否合理？单文件/单函数=好，整个子系统=差 |
-| **可行性** | 能否找到相关代码？是否有足够上下文？ |
+根据 issue 的标签类型，采用不同的评估策略：
 
-**置信度 = (清晰度 + 范围 + 可行性) / 3**
+#### Bug 类型评估
+
+对于带有 `bug` 标签的 issue，评估**复现情况**：
+
+| 维度 | 标准 | 分数 (1-10) |
+|------|------|-------------|
+| **复现性** | 能否根据描述复现问题？有明确的复现步骤？ | 复现清晰=高分，无法复现=低分 |
+| **根因定位** | 能否定位到具体代码位置？根因是否明确？ | 已定位=高分，模糊=低分 |
+| **修复难度** | 修复是否简单直接？是否涉及核心逻辑？ | 单点修复=高分，系统性改动=低分 |
+
+**Bug 评估输出内容：**
+- **复现步骤**：如何复现这个 bug？
+- **根因分析**：问题出在哪里？哪个文件/函数？
+- **修复建议**：如何修复？改动范围多大？
+
+#### Feature 类型评估
+
+对于带有 `enhancement` 或 `feat` 标签的 issue，评估**实现方案与架构对齐**：
+
+| 维度 | 标准 | 分数 (1-10) |
+|------|------|-------------|
+| **需求清晰度** | 功能需求是否明确？有清晰的输入输出定义？ | 明确=高分，模糊=低分 |
+| **设计合理性** | 提出的设计方案是否合理？是否与整体项目架构一致？ | 符合架构=高分，架构偏离=低分 |
+| **确认必要性** | 该实现是否涉及重大设计决策，需要 owner 额外确认？ | 无需确认=高分，需确认=低分 |
+
+**Feature 评估输出内容：**
+- **实现方案**：如何实现这个功能？具体步骤？
+- **技术选型**：用什么技术/库/API？
+- **改动范围**：需要改动哪些文件/模块？
+- **架构对齐分析**：设计方案是否遵循项目的整体架构原则？是否存在架构偏离风险？
+- **Owner 确认标记**：是否需要 owner 在设计层面进一步确认？（是/否）
+
+**置信度 = (维度1 + 维度2 + 维度3) / 3**
 
 ### 高置信度处理（推荐修复）
 
 对于置信度 >= threshold 的 issue：
 
 1. **添加 `agent-evaluated` 标签**
-2. **评论评估结果和修复提案**
+2. **评论评估结果和修复/实现方案**
+
+**优先使用 gh CLI**（已配置认证）：
 
 ```bash
-curl -s -X POST \
-  -H "Authorization: Bearer $GH_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/{owner}/{repo}/issues/{number}/labels \
-  -d '{"labels":["agent-evaluated"]}'
+# 添加标签
+gh issue edit {number} -R {owner}/{repo} --add-label "agent-evaluated"
 
-curl -s -X POST \
-  -H "Authorization: Bearer $GH_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments \
-  -d '{"body": "## 🔍 ClawFlow 评估报告\n\n**置信度:** {score}/10 ✅ (高于阈值 {threshold})\n\n**评估详情:**\n- 清晰度: {clarity}/10 — {clarity_reason}\n- 范围: {scope}/10 — {scope_reason}\n- 可行性: {feasibility}/10 — {feasibility_reason}\n\n**修复提案:**\n{fix_proposal}\n\n---\n\n👉 **如果您同意此修复方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**\n\n⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。"}'
+# 评论（根据类型选择模板）
+gh issue comment {number} -R {owner}/{repo} --body "<evaluation_body>"
+
+# 添加多个标签
+gh issue edit {number} -R {owner}/{repo} --add-label "agent-evaluated,agent-skipped"
+```
+
+**Bug 类型评论模板：**
+
+```
+## 🔍 ClawFlow 评估报告
+
+**Issue 类型:** Bug
+**置信度:** {score}/10 ✅ (高于阈值 {threshold})
+
+---
+
+### 复现情况分析
+
+**复现性:** {reproducibility}/10 — {repro_reason}
+**根因定位:** {root_cause}/10 — {root_reason}
+**修复难度:** {fix_difficulty}/10 — {fix_reason}
+
+**复现步骤：**
+{repro_steps}
+
+**⚠️ 复现验证状态:** {reproduction_verified} ⚠️
+- **验证结果：** {verify_result}
+- **验证详情：** {verify_details}
+
+**根因分析:**
+{root_cause_analysis}
+
+**修复建议:**
+{fix_suggestion}
+
+---
+
+👉 **如果您同意此方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**
+
+⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
+```
+
+**Feature 类型评论模板：**
+
+```
+## 🔍 ClawFlow 评估报告
+
+**Issue 类型:** Feature
+**置信度:** {score}/10 ✅ (高于阈值 {threshold})
+
+---
+
+### 实现方案分析
+
+**需求清晰度:** {clarity}/10 — {clarity_reason}
+**设计合理性:** {design}/10 — {design_reason}
+**确认必要性:** {confirmation}/10 — {confirm_reason}
+
+**实现方案:**
+{implementation_plan}
+
+**技术选型:**
+{tech_choice}
+
+**改动范围:**
+{change_scope}
+
+---
+
+### 🏗️ 架构对齐分析
+
+**架构一致性:** {arch_alignment} — {arch_reason}
+
+> {architecture_notes}
+
+**Owner 确认标记：** {owner_confirmation_flag} ⚠️
+- **是否需要确认：** {need_owner_confirmation}
+- **确认理由：** {confirmation_reason}
+
+---
+
+👉 **如果您同意此方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**
+
+⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
 ```
 
 ### 低置信度处理（需要补充信息）
@@ -115,17 +222,32 @@ curl -s -X POST \
 2. **评论说明缺少什么信息**
 
 ```bash
-curl -s -X POST \
-  -H "Authorization: Bearer $GH_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/{owner}/{repo}/issues/{number}/labels \
-  -d '{"labels":["agent-evaluated","agent-skipped"]}'
+gh issue edit {number} -R {owner}/{repo} --add-label "agent-evaluated,agent-skipped"
+gh issue comment {number} -R {owner}/{repo} --body "<missing_info_body>"
+```
 
-curl -s -X POST \
-  -H "Authorization: Bearer $GH_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments \
-  -d '{"body": "## 🔍 ClawFlow 评估报告\n\n**置信度:** {score}/10 ⚠️ (低于阈值 {threshold})\n\n**评估详情:**\n- 清晰度: {clarity}/10 — {clarity_reason}\n- 范围: {scope}/10 — {scope_reason}\n- 可行性: {feasibility}/10 — {feasibility_reason}\n\n**需要补充的信息:**\n{missing_info}\n\n---\n\n💡 请补充以上信息后，移除 `agent-skipped` 标签并添加 `ready-for-agent` 以重新触发评估。"}'
+**重要**：优先使用 `gh` CLI 命令操作 GitHub，不要用 curl API。gh CLI 已配置好认证。
+
+**低置信度评论模板：**
+
+```
+## 🔍 ClawFlow 评估报告
+
+**Issue 类型:** {type}
+**置信度:** {score}/10 ⚠️ (低于阈值 {threshold})
+
+---
+
+### 评估详情
+
+{evaluation_details}
+
+**需要补充的信息:**
+{missing_info}
+
+---
+
+💡 请补充以上信息后，移除 `agent-skipped` 标签并添加 `ready-for-agent` 以重新触发评估。
 ```
 
 ---
@@ -137,12 +259,10 @@ curl -s -X POST \
 ### Step 4.1 — 添加处理中标签
 
 ```bash
-curl -s -X POST \
-  -H "Authorization: Bearer $GH_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/{owner}/{repo}/issues/{number}/labels \
-  -d '{"labels":["in-progress"]}'
+gh issue edit {number} -R {owner}/{repo} --add-label "in-progress"
 ```
+
+**重要**：使用 `gh` CLI 操作 GitHub，不要用 curl API。
 
 ### Step 4.2 — Spawn Sub-agent
 
@@ -185,10 +305,6 @@ Issue: #{number}
 7. PUSH — 推送分支
 8. PR — 创建 Pull Request
 
-使用 GitHub REST API（不要用 gh CLI）：
-- GH_TOKEN 已在环境中
-- curl -H "Authorization: Bearer $GH_TOKEN" ...
-
 PR body 必须包含：
 - 修复摘要
 - Files changed 列表
@@ -210,20 +326,6 @@ PR body 必须包含：
 ```bash
 MEMORY_FILE="~/.openclaw/workspace/clawflow/memory/repos/{owner}-{repo}/issue-{number}.md"
 mkdir -p $(dirname $MEMORY_FILE)
-
-echo "# Issue #{number} - {title}
-
-- 仓库: {owner}/{repo}
-- 置信度: {score}/10
-- 状态: processing
-- Sub-agent session: {session_id}
-- 开始时间: {timestamp}
-- Issue URL: {url}
-
-## Issue Body
-
-{body}
-" > $MEMORY_FILE
 ```
 
 ---
@@ -248,17 +350,6 @@ echo "# Issue #{number} - {title}
 1. 添加 `agent-failed` 标签
 2. 在 issue 评论失败原因
 3. 更新 memory 文件记录失败
-
-### 通知格式
-
-使用 `message` tool：
-
-```json
-{
-  "action": "send",
-  "message": "✅ ClawFlow PR 已创建\n\n仓库: {owner}/{repo}\nIssue: #{number} - {title}\nPR: {pr_url}\n置信度: {score}/10"
-}
-```
 
 ---
 
@@ -294,43 +385,11 @@ echo "# Issue #{number} - {title}
 
 ## 手动触发命令
 
-用户可以通过以下命令手动触发：
-
 | 命令 | 行为 |
 |------|------|
 | `ClawFlow run` | 执行一轮完整收割流程 |
 | `检查 ClawFlow 状态` | 显示所有配置仓库和待处理 issue 数量 |
-| `收割 ready-for-agent` | 立即执行收割（同 `ClawFlow run`） |
 | `ClawFlow 添加仓库 <owner/repo>` | 将新仓库添加到配置 |
-
----
-
-## Cron 配置
-
-在 OpenClaw 中配置定时任务（已创建）：
-
-```json
-{
-  "name": "ClawFlow Issue Harvest",
-  "schedule": { "kind": "every", "everyMs": 900000 },
-  "payload": {
-    "kind": "agentTurn",
-    "message": "执行 ClawFlow issue 收割",
-    "thinking": "low"
-  }
-}
-```
-
----
-
-## 与 gh-issues 技能的区别
-
-| 特性 | ClawFlow | gh-issues |
-|------|----------|-----------|
-| 触发方式 | 标签 `ready-for-agent` | 命令参数 |
-| 安全机制 | Owner-only 标签控制 | 无 |
-| 评估机制 | 置信度评估 | 无（直接处理） |
-| 适用场景 | 需要人工审批的自动化 | 批量处理已知 issues |
 
 ---
 
@@ -339,18 +398,3 @@ echo "# Issue #{number} - {title}
 - 仓库配置: `~/.openclaw/workspace/clawflow/config/repos.yaml`
 - 标签定义: `~/.openclaw/workspace/clawflow/config/labels.yaml`
 - 处理记录: `~/.openclaw/workspace/clawflow/memory/repos/{owner}-{repo}/`
-
----
-
-## 示例：手动收割
-
-```bash
-# 检查 llm-wiki 的 ready-for-agent issues
-curl -s -H "Authorization: Bearer $GH_TOKEN" \
-  "https://api.github.com/repos/zhoushoujianwork/llm-wiki/issues?state=open&labels=ready-for-agent"
-
-# 添加标签
-curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" \
-  https://api.github.com/repos/zhoushoujianwork/llm-wiki/issues/123/labels \
-  -d '{"labels":["in-progress"]}'
-```
