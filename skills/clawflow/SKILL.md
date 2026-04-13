@@ -15,12 +15,27 @@ metadata:
 
 ---
 
+## Setup
+
+1. Install [GitHub CLI](https://cli.github.com/) and authenticate: `gh auth login`
+2. Ensure `git` is installed
+3. Edit `~/.clawflow/config/repos.yaml` — add the repositories you want to monitor
+4. Set `GH_TOKEN` environment variable (or rely on `gh auth` token)
+
+```bash
+# Verify setup
+gh auth status
+gh repo view <your-org/your-repo>
+```
+
+---
+
 ## Phase 1 — 配置加载
 
 读取仓库配置文件：
 
 ```bash
-REPOS_FILE="~/.openclaw/workspace/clawflow/config/repos.yaml"
+REPOS_FILE="~/.clawflow/config/repos.yaml"
 ```
 
 解析 YAML，提取所有 `enabled: true` 的仓库。对于每个仓库：
@@ -324,7 +339,7 @@ PR body 必须包含：
 将处理记录写入 memory：
 
 ```bash
-MEMORY_FILE="~/.openclaw/workspace/clawflow/memory/repos/{owner}-{repo}/issue-{number}.md"
+MEMORY_FILE="~/.clawflow/memory/repos/{owner}-{repo}/issue-{number}.md"
 mkdir -p $(dirname $MEMORY_FILE)
 ```
 
@@ -395,6 +410,6 @@ mkdir -p $(dirname $MEMORY_FILE)
 
 ## 配置文件位置
 
-- 仓库配置: `~/.openclaw/workspace/clawflow/config/repos.yaml`
-- 标签定义: `~/.openclaw/workspace/clawflow/config/labels.yaml`
-- 处理记录: `~/.openclaw/workspace/clawflow/memory/repos/{owner}-{repo}/`
+- 仓库配置: `~/.clawflow/config/repos.yaml`
+- 标签定义: `~/.clawflow/config/labels.yaml`
+- 处理记录: `~/.clawflow/memory/repos/{owner}-{repo}/`
