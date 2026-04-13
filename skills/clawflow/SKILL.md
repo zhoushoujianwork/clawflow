@@ -74,14 +74,28 @@ curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+
 扫描带 `ready-for-agent` 标签的 issues：
 
 ```bash
-curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/{owner}/{repo}/issues?state=open&labels=ready-for-agent"
+gh issue list -R {owner}/{repo} --label "ready-for-agent" --state open --json number,title,labels
 ```
 
 **过滤规则（可执行）：**
 - 没有 `pull_request` 字段
 - 没有 `in-progress` 标签（未在处理中）
 - 有 `agent-evaluated` 标签（已评估过）
+- **没有已开放的 PR 关联此 issue**（PR 检查见下方）
+
+### 2.3 PR 去重检查
+
+对执行队列中的每个 issue，检查是否已存在关联 PR，避免重复工作：
+
+```bash
+# 列出所有开放 PR，过滤包含 "issue-{number}" 的分支名或 body 含 "Fixes #{number}"
+gh pr list -R {owner}/{repo} --state open --json number,title,headRefName,body \
+  | jq '[.[] | select(.headRefName | test("issue-{number}")) or select(.body | test("Fixes #{number}"))]'
+```
+
+- 若已有开放 PR → **跳过此 issue**，不重复修复
+- 若 PR 已合并（state=MERGED）→ 移除 `ready-for-agent` 和 `in-progress` 标签，记录为完成
+- 若无 PR → 加入 `ISSUES_TO_EXECUTE`
 
 这些 issues 加入 `ISSUES_TO_EXECUTE` 列表。
 
@@ -279,9 +293,21 @@ gh issue edit {number} -R {owner}/{repo} --add-label "in-progress"
 
 **重要**：使用 `gh` CLI 操作 GitHub，不要用 curl API。
 
-### Step 4.2 — Spawn Sub-agent
+### Step 4.2 — 创建 Git Worktree
 
-使用 `sessions_spawn` 启动修复 agent：
+每个 issue 使用独立的 worktree，从 main 分支创建，互不干扰：
+
+```bash
+REPO_LOCAL_PATH=$(find ~/github -maxdepth 2 -name "{repo}" -type d | head -1)
+WORKTREE_PATH="/tmp/clawflow-fix/{owner}-{repo}-issue-{number}"
+BRANCH_NAME="fix/issue-{number}"
+
+git -C "$REPO_LOCAL_PATH" worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" main
+```
+
+### Step 4.3 — Spawn Sub-agent
+
+使用 `sessions_spawn` 启动修复 agent，工作目录指向对应 worktree：
 
 ```json
 {
@@ -300,6 +326,8 @@ gh issue edit {number} -R {owner}/{repo} --add-label "in-progress"
 
 <config>
 仓库: {owner}/{repo}
+本地 worktree 路径: /tmp/clawflow-fix/{owner}-{repo}-issue-{number}
+分支: fix/issue-{number}
 Base branch: {base_branch}
 Issue: #{number}
 </config>
@@ -334,7 +362,7 @@ PR body 必须包含：
 </constraints>
 ```
 
-### Step 4.3 — 记录处理状态
+### Step 4.4 — 记录处理状态
 
 将处理记录写入 memory：
 
