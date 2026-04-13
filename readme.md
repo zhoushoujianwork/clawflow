@@ -7,99 +7,95 @@
 
 ## Install
 
-ClawFlow is a skill that can be installed into any AI agent that supports the skill format (Claude Code, OpenClaw, etc.).
-
-### One-line install
+### Option A — from source (recommended)
 
 ```bash
 git clone https://github.com/zhoushoujianwork/clawflow
 cd clawflow && ./install.sh
 ```
 
-The installer auto-detects your agent (`~/.claude/skills/` for Claude Code, `~/.openclaw/` for OpenClaw).
+The installer:
+- Auto-detects your agent (`~/.claude/skills/` for Claude Code, `~/.openclaw/` for OpenClaw)
+- Builds and installs the `clawflow` CLI to `~/.clawflow/bin/clawflow`
+- Initializes `~/.clawflow/config/` with template config files
+- Records install location to `~/.clawflow/config/install.yaml` (used by `clawflow update`)
 
-### Install for a specific agent
+For a specific agent:
 
 ```bash
-# Claude Code
-./install.sh --agent claude
-
-# OpenClaw
-./install.sh --agent openclaw
-
-# Custom directory
-./install.sh --agent custom --dir /path/to/your/skills
+./install.sh --agent claude     # Claude Code
+./install.sh --agent openclaw  # OpenClaw
+./install.sh --agent custom --dir /path/to/skills
 ```
 
-### Manual install
+### Option B — download binary
 
-Copy the skill definition into your agent's skills folder, and initialize the user data directory:
+```bash
+# macOS Apple Silicon
+curl -L https://github.com/zhoushoujianwork/clawflow/releases/latest/download/clawflow_darwin_arm64 \
+  -o ~/.clawflow/bin/clawflow && chmod +x ~/.clawflow/bin/clawflow
 
+# macOS Intel
+curl -L https://github.com/zhoushoujianwork/clawflow/releases/latest/download/clawflow_darwin_amd64 \
+  -o ~/.clawflow/bin/clawflow && chmod +x ~/.clawflow/bin/clawflow
+
+# Linux x86_64
+curl -L https://github.com/zhoushoujianwork/clawflow/releases/latest/download/clawflow_linux_amd64 \
+  -o ~/.clawflow/bin/clawflow && chmod +x ~/.clawflow/bin/clawflow
 ```
-~/.claude/skills/clawflow/
-└── SKILL.md              ← skill definition (the brain)
 
-~/.clawflow/              ← user data (created by installer)
-├── config/
-│   ├── repos.yaml        ← repos to monitor (edit this)
-│   └── labels.yaml       ← GitHub label definitions
-└── memory/
-    └── repos/            ← per-repo issue records (auto-created)
+Then add to PATH:
+
+```bash
+echo 'export PATH="$HOME/.clawflow/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
 
 ---
 
 ## Setup
 
-After installing:
-
-### 1. Configure repos to monitor
-
-Edit `~/.clawflow/config/repos.yaml`:
-
-```yaml
-repos:
-  your-org/your-repo:
-    enabled: true
-    base_branch: main
-    owner: your-org
-    description: "Short description"
-    added_at: 2026-01-01
-```
-
-### 2. Authenticate GitHub CLI
+### 1. Store GitHub token
 
 ```bash
-gh auth login
+clawflow config set-token ghp_xxxxxxxxxxxx
 ```
 
-### 3. Create GitHub labels in each monitored repo
+Token is saved to `~/.clawflow/config/credentials.yaml` (mode 0600) and auto-injected into all `gh` calls.
 
-| Label | Color | Meaning |
-|---|---|---|
-| `ready-for-agent` | `#00FF00` Green | Owner approves — triggers the fix pipeline |
-| `agent-evaluated` | `#0075CA` Blue | ClawFlow has assessed this issue |
-| `in-progress` | `#FFA500` Orange | Agent is actively working on it |
-| `agent-skipped` | `#BDBDBD` Gray | Low confidence — needs more info |
-| `agent-failed` | `#FF0000` Red | Agent attempted but failed |
+Required scopes: `repo` (full), `read:org`.
 
-用安装脚本一键创建：
+### 2. Add repositories to monitor
+
+```bash
+clawflow repo add your-org/your-repo --base main --local-path ~/github/your-repo
+```
+
+Or manage repos interactively:
+
+```bash
+clawflow repo list                        # show all repos and status
+clawflow repo enable  your-org/your-repo  # resume monitoring
+clawflow repo disable your-org/your-repo  # pause without removing
+clawflow repo remove  your-org/your-repo  # delete from config
+```
+
+### 3. Create GitHub labels
 
 ```bash
 ./install.sh --create-labels your-org/your-repo
 ```
 
-或者手动逐条创建：
+Labels created:
 
-```bash
-gh label create "ready-for-agent" --color "00FF00" --description "Triggers ClawFlow fix pipeline" -R your-org/your-repo
-gh label create "agent-evaluated"  --color "0075CA" --description "ClawFlow has assessed this issue" -R your-org/your-repo
-gh label create "in-progress"      --color "FFA500" --description "Agent is working on it" -R your-org/your-repo
-gh label create "agent-skipped"    --color "BDBDBD" --description "Skipped — needs more info" -R your-org/your-repo
-gh label create "agent-failed"     --color "FF0000" --description "Agent attempt failed" -R your-org/your-repo
-```
+| Label | Color | Meaning |
+|---|---|---|
+| `ready-for-agent` | `#00FF00` Green | Owner approved — triggers fix pipeline |
+| `agent-evaluated` | `#0075CA` Blue | ClawFlow has assessed this issue |
+| `in-progress` | `#FFA500` Orange | Agent is actively working on it |
+| `agent-skipped` | `#BDBDBD` Gray | Low confidence — needs more info |
+| `agent-failed` | `#FF0000` Red | Agent attempted but failed |
 
-### 4. Trigger a run
+### 4. Run
 
 Tell your AI agent:
 
@@ -109,61 +105,116 @@ ClawFlow run
 
 ---
 
+## CLI Reference
+
+```
+clawflow [command]
+
+Pipeline:
+  harvest            Scan repos and output pending issues as JSON
+  status             Show current state of all monitored repos
+
+Repo management:
+  repo list          List all configured repos
+  repo add           Add a repo to monitor
+  repo remove        Remove a repo from config
+  repo enable        Enable a repo
+  repo disable       Disable a repo (pause without removing)
+
+Labels:
+  label add          Add a label to an issue
+  label remove       Remove a label from an issue
+
+Worktrees:
+  worktree create    Create an isolated git worktree for an issue
+  worktree remove    Remove worktree after fix (success or failure)
+
+Records:
+  memory write       Write an issue processing record
+  pr-check           Check if an open PR already exists for an issue
+
+Config:
+  config set-token   Store GitHub token (saved to credentials.yaml)
+  config show        Show current config and token status
+
+Updates:
+  update             Download latest binary + update SKILL.md
+  update --from-source  Rebuild from local source
+```
+
+---
+
 ## How It Works
 
 ```
 New Issue
     ↓
-[Phase 1] Harvest — scan open issues
+[clawflow harvest] — scan all repos, filter + PR dedup
     ↓
-[Phase 2] Evaluate — assess feasibility, post comment with proposal
+[AI evaluates] — confidence score, posts proposal as comment
+                → adds agent-evaluated label
     ↓
-[owner adds ready-for-agent]
+[owner adds ready-for-agent]        [low confidence → agent-skipped]
     ↓
-[Phase 3] Execute — sub-agent clones repo, implements fix, opens PR
+[clawflow worktree create] — isolated branch per issue
+    ↓
+[sub-agent implements fix] — in the worktree
+    ↓
+[PR opened] → [clawflow worktree remove] — cleanup always runs
 ```
-
-1. ClawFlow scans configured repos for open issues
-2. Each unreviewed issue gets a feasibility assessment posted as a comment
-3. Owner reviews the proposal and adds `ready-for-agent` to approve
-4. ClawFlow spawns a sub-agent to implement the fix and open a PR
 
 **ClawFlow never adds `ready-for-agent` itself — owner approval is always required.**
 
 ---
 
-## Usage
+## Directory Layout
 
-| Command | What it does |
-|---------|--------------|
-| `ClawFlow run` | Run a full harvest + fix cycle |
-| `检查 ClawFlow 状态` | Show configured repos and pending issue counts |
-| `ClawFlow 添加仓库 <owner/repo>` | Add a new repo to the config |
+```
+~/.clawflow/                        ← user data (created by install.sh)
+├── bin/
+│   └── clawflow                    ← CLI binary
+├── config/
+│   ├── repos.yaml                  ← repos to monitor
+│   ├── labels.yaml                 ← label definitions
+│   ├── credentials.yaml            ← GH token (0600, not committed)
+│   └── install.yaml                ← install location record
+└── memory/
+    └── repos/
+        └── owner-repo/
+            └── issue-7.md          ← per-issue processing records
+
+~/.claude/skills/clawflow/          ← skill definition (agent brain)
+└── SKILL.md
+
+clawflow/ (this repo)
+├── cmd/clawflow/                   ← Go CLI source
+├── internal/
+│   ├── config/                     ← config parsing + write
+│   └── github/                     ← gh CLI wrapper
+├── skills/clawflow/SKILL.md        ← source for SKILL.md
+└── install.sh                      ← installer
+```
 
 ---
 
-## Project Structure
+## Updating
 
-```
-clawflow/
-├── install.sh              ← skill installer
-├── readme.md               ← this file
-├── skills/
-│   └── clawflow/
-│       └── SKILL.md        ← skill definition (installed to agent)
-└── config/
-    ├── repos.yaml          ← repos to monitor (template)
-    └── labels.yaml         ← label definitions (template)
+```bash
+clawflow update                  # download latest binary + update SKILL.md
+clawflow update --from-source    # rebuild from cloned repo
 ```
 
 ---
 
 ## Roadmap
 
-- [ ] Smarter feasibility scoring — historical issue matching, code similarity
+- [x] Go CLI for deterministic pipeline operations
+- [x] Worktree isolation per issue
+- [x] PR deduplication check
+- [x] `clawflow update` for self-updating
+- [ ] Smarter feasibility scoring — historical issue matching
 - [ ] Parallel processing — concurrent sub-agents
 - [ ] Webhook-first triggering — real-time instead of cron polling
-- [ ] Rollback & learning — record rejection reasons and adapt
 
 ---
 
@@ -171,7 +222,7 @@ clawflow/
 
 1. Fork this repository
 2. Edit `skills/clawflow/SKILL.md` to improve agent logic
-3. Update `config/repos.yaml` to add new repositories
+3. Edit `cmd/clawflow/` to add CLI features
 4. Submit a PR
 
 ---
