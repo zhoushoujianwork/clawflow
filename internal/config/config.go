@@ -36,6 +36,59 @@ type Config struct {
 	Settings Settings        `yaml:"settings"`
 }
 
+// Credentials holds sensitive config (GH token).
+type Credentials struct {
+	GHToken string `yaml:"gh_token,omitempty"`
+}
+
+// CredentialsPath returns the path to the credentials file.
+func CredentialsPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".clawflow", "config", "credentials.yaml")
+}
+
+// LoadCredentials reads ~/.clawflow/config/credentials.yaml.
+func LoadCredentials() (*Credentials, error) {
+	data, err := os.ReadFile(CredentialsPath())
+	if os.IsNotExist(err) {
+		return &Credentials{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var c Credentials
+	return &c, yaml.Unmarshal(data, &c)
+}
+
+// Save writes the config back to ~/.clawflow/config/repos.yaml.
+func (c *Config) Save() error {
+	if c.Repos == nil {
+		c.Repos = make(map[string]Repo)
+	}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("cannot marshal config: %w", err)
+	}
+	path := ConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// SaveCredentials writes credentials with restricted permissions (0600).
+func SaveCredentials(c *Credentials) error {
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	path := CredentialsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
 // Load reads the config from ~/.clawflow/config/repos.yaml.
 func Load() (*Config, error) {
 	path := ConfigPath()

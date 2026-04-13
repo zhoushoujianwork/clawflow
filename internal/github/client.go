@@ -4,7 +4,9 @@ package github
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -96,8 +98,11 @@ func RemoveLabel(repo string, issueNumber int, labels ...string) error {
 }
 
 // gh runs a gh CLI subcommand and returns stdout.
+// It injects GH_TOKEN from credentials.yaml if not already set in the environment.
 func gh(args ...string) ([]byte, error) {
-	out, err := exec.Command("gh", args...).Output()
+	cmd := exec.Command("gh", args...)
+	injectToken(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return nil, fmt.Errorf("gh %s: %w\n%s", strings.Join(args, " "), err, ee.Stderr)
@@ -105,4 +110,28 @@ func gh(args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("gh %s: %w", strings.Join(args, " "), err)
 	}
 	return out, nil
+}
+
+// injectToken sets GH_TOKEN on the command if not already in the environment.
+func injectToken(cmd *exec.Cmd) {
+	if os.Getenv("GH_TOKEN") != "" {
+		return // already set, nothing to do
+	}
+	home, _ := os.UserHomeDir()
+	credsPath := filepath.Join(home, ".clawflow", "config", "credentials.yaml")
+	data, err := os.ReadFile(credsPath)
+	if err != nil {
+		return
+	}
+	// Simple extraction — avoid importing config to prevent import cycle.
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "gh_token:") {
+			token := strings.TrimSpace(strings.TrimPrefix(line, "gh_token:"))
+			token = strings.Trim(token, `"'`)
+			if token != "" {
+				cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+			}
+			return
+		}
+	}
 }

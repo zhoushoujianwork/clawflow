@@ -18,6 +18,8 @@ The AI skill (SKILL.md) handles evaluation and sub-agent orchestration.`,
 	root.AddCommand(NewStatusCmd())
 	root.AddCommand(NewPRCheckCmd())
 	root.AddCommand(NewUpdateCmd())
+	root.AddCommand(NewRepoCmd())
+	root.AddCommand(NewConfigCmd())
 
 	return root
 }
