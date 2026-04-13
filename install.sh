@@ -132,6 +132,15 @@ if [[ -n "$CREATE_LABELS_REPO" ]]; then
   create_label "agent-failed"     "FF0000" "Agent attempted but failed"
 fi
 
+# ---------- 5. write install record ----------
+cat > "$CLAWFLOW_HOME/config/install.yaml" <<YAML
+agent: $AGENT
+skill_dir: $SKILL_DEST
+repo_dir: $REPO_ROOT
+installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+YAML
+echo "  [ok] install record saved to ~/.clawflow/config/install.yaml"
+
 # ---------- done ----------
 echo ""
 echo "Done! ClawFlow is ready."

@@ -127,7 +127,7 @@ func newWorktreeRemoveCmd() *cobra.Command {
 // resolveLocalPath returns the local repo path from config or auto-discovery.
 func resolveLocalPath(ownerRepo, configured string) (string, error) {
 	if configured != "" {
-		expanded := expandHome(configured)
+		expanded := expandHomeStr(configured)
 		if _, err := os.Stat(expanded); err == nil {
 			return expanded, nil
 		}
@@ -145,7 +145,7 @@ func resolveLocalPath(ownerRepo, configured string) (string, error) {
 	return "", fmt.Errorf("cannot find local clone of %q — set local_path in repos.yaml", ownerRepo)
 }
 
-func expandHome(path string) string {
+func expandHomeStr(path string) string {
 	if strings.HasPrefix(path, "~/") {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, path[2:])
