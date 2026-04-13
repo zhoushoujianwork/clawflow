@@ -90,7 +90,22 @@ for f in repos.yaml labels.yaml; do
   fi
 done
 
-# ---------- 3. create GitHub labels (optional) ----------
+# ---------- 3. build and install clawflow CLI ----------
+if command -v go &>/dev/null; then
+  echo ""
+  echo "Building clawflow CLI..."
+  mkdir -p "$CLAWFLOW_HOME/bin"
+  if go build -o "$CLAWFLOW_HOME/bin/clawflow" "$REPO_ROOT/cmd/clawflow/" 2>/dev/null; then
+    echo "  [ok] clawflow binary installed to ~/.clawflow/bin/clawflow"
+    echo "  [tip] Add to PATH: export PATH=\"\$HOME/.clawflow/bin:\$PATH\""
+  else
+    echo "  [warn] go build failed — CLI not installed (SKILL.md will use gh/git directly)"
+  fi
+else
+  echo "  [skip] Go not found — clawflow CLI not built (install Go to enable)"
+fi
+
+# ---------- 4. create GitHub labels (optional) ----------
 if [[ -n "$CREATE_LABELS_REPO" ]]; then
   echo ""
   echo "Creating GitHub labels in $CREATE_LABELS_REPO ..."
@@ -127,4 +142,5 @@ echo "  2. Authenticate GitHub CLI: gh auth login"
 if [[ -z "$CREATE_LABELS_REPO" ]]; then
   echo "  3. Create GitHub labels: ./install.sh --create-labels <owner/repo>"
 fi
-echo "  4. Tell your agent: ClawFlow run"
+echo "  4. Add CLI to PATH: export PATH=\"\$HOME/.clawflow/bin:\$PATH\""
+echo "  5. Tell your agent: ClawFlow run"

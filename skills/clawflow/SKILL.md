@@ -4,8 +4,7 @@ description: "自动化 Issue → 评估 → 修复 → PR 流水线。两阶段
 metadata:
   openclaw:
     requires:
-      bins: ["curl", "git"]
-      anyBins: ["gh"]
+      bins: ["git", "gh", "clawflow"]
     primaryEnv: "GH_TOKEN"
 ---
 
@@ -17,87 +16,55 @@ metadata:
 
 ## Setup
 
-1. Install [GitHub CLI](https://cli.github.com/) and authenticate: `gh auth login`
-2. Ensure `git` is installed
-3. Edit `~/.clawflow/config/repos.yaml` — add the repositories you want to monitor
-4. Set `GH_TOKEN` environment variable (or rely on `gh auth` token)
+1. 安装 [GitHub CLI](https://cli.github.com/) 并认证：`gh auth login`
+2. 安装 ClawFlow CLI：`./install.sh`（自动构建 `~/.clawflow/bin/clawflow`）
+3. 确认 CLI 可用：`clawflow --help`
+4. 编辑 `~/.clawflow/config/repos.yaml`，添加要监控的仓库（含 `local_path`）
 
 ```bash
-# Verify setup
-gh auth status
-gh repo view <your-org/your-repo>
+# 验证环境
+clawflow status
 ```
 
 ---
 
-## Phase 1 — 配置加载
-
-读取仓库配置文件：
+## Phase 1 — 状态检查
 
 ```bash
-REPOS_FILE="~/.clawflow/config/repos.yaml"
+clawflow status
 ```
 
-解析 YAML，提取所有 `enabled: true` 的仓库。对于每个仓库：
-
-- `owner/repo` — 仓库标识
-- `base_branch` — PR 目标分支
-- `labels.trigger` — 触发标签（默认 `ready-for-agent`）
-- `labels.in_progress` — 处理中标签
-
-存储为 `REPOS_LIST`。
+输出各仓库的 issue 计数。确认有待处理 issue 后进入 Phase 2。
 
 ---
 
 ## Phase 2 — Issue 收割
 
-### 2.1 评估队列（新 issues）
-
-扫描所有开放的 issues，筛选需要评估的：
+调用 CLI 一次性完成所有过滤和 PR 去重检查：
 
 ```bash
-curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/{owner}/{repo}/issues?state=open"
+clawflow harvest
 ```
 
-**过滤规则（需评估）：**
-- 没有 `pull_request` 字段（排除 PRs）
-- 没有 `agent-evaluated` 标签（未评估过）
-- 没有 `in-progress` 标签
-- 没有 `agent-skipped` 标签
-- 没有 `agent-failed` 标签
+输出 JSON，包含两个列表：
 
-这些 issues 加入 `ISSUES_TO_EVALUATE` 列表。
+```json
+{
+  "to_evaluate": [{"repo":"owner/repo","number":1,"title":"...","body":"..."}],
+  "to_execute":  [{"repo":"owner/repo","number":5,"title":"...","body":"...","worktree_path":"..."}]
+}
+```
 
-### 2.2 执行队列（已批准）
+- `to_evaluate` — 新 issue，未评估，无 agent 标签
+- `to_execute` — 已有 `ready-for-agent` + `agent-evaluated`，无 in-progress，无已开放 PR
 
-扫描带 `ready-for-agent` 标签的 issues：
+将两个列表分别存为 `ISSUES_TO_EVALUATE` 和 `ISSUES_TO_EXECUTE`。
+
+如果只需处理某个仓库：
 
 ```bash
-gh issue list -R {owner}/{repo} --label "ready-for-agent" --state open --json number,title,labels
+clawflow harvest --repo owner/repo
 ```
-
-**过滤规则（可执行）：**
-- 没有 `pull_request` 字段
-- 没有 `in-progress` 标签（未在处理中）
-- 有 `agent-evaluated` 标签（已评估过）
-- **没有已开放的 PR 关联此 issue**（PR 检查见下方）
-
-### 2.3 PR 去重检查
-
-对执行队列中的每个 issue，检查是否已存在关联 PR，避免重复工作：
-
-```bash
-# 列出所有开放 PR，过滤包含 "issue-{number}" 的分支名或 body 含 "Fixes #{number}"
-gh pr list -R {owner}/{repo} --state open --json number,title,headRefName,body \
-  | jq '[.[] | select(.headRefName | test("issue-{number}")) or select(.body | test("Fixes #{number}"))]'
-```
-
-- 若已有开放 PR → **跳过此 issue**，不重复修复
-- 若 PR 已合并（state=MERGED）→ 移除 `ready-for-agent` 和 `in-progress` 标签，记录为完成
-- 若无 PR → 加入 `ISSUES_TO_EXECUTE`
-
-这些 issues 加入 `ISSUES_TO_EXECUTE` 列表。
 
 ---
 
@@ -147,20 +114,12 @@ gh pr list -R {owner}/{repo} --state open --json number,title,headRefName,body \
 
 对于置信度 >= threshold 的 issue：
 
-1. **添加 `agent-evaluated` 标签**
-2. **评论评估结果和修复/实现方案**
-
-**优先使用 gh CLI**（已配置认证）：
-
 ```bash
-# 添加标签
-gh issue edit {number} -R {owner}/{repo} --add-label "agent-evaluated"
+# 1. 添加标签
+clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
 
-# 评论（根据类型选择模板）
+# 2. 发表评论（根据类型选择模板）
 gh issue comment {number} -R {owner}/{repo} --body "<evaluation_body>"
-
-# 添加多个标签
-gh issue edit {number} -R {owner}/{repo} --add-label "agent-evaluated,agent-skipped"
 ```
 
 **Bug 类型评论模板：**
@@ -247,15 +206,11 @@ gh issue edit {number} -R {owner}/{repo} --add-label "agent-evaluated,agent-skip
 
 对于置信度 < threshold 的 issue：
 
-1. **添加 `agent-evaluated` 和 `agent-skipped` 标签**
-2. **评论说明缺少什么信息**
-
 ```bash
-gh issue edit {number} -R {owner}/{repo} --add-label "agent-evaluated,agent-skipped"
+clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
+clawflow label add --repo {owner}/{repo} --issue {number} --label agent-skipped
 gh issue comment {number} -R {owner}/{repo} --body "<missing_info_body>"
 ```
-
-**重要**：优先使用 `gh` CLI 命令操作 GitHub，不要用 curl API。gh CLI 已配置好认证。
 
 **低置信度评论模板：**
 
@@ -283,41 +238,24 @@ gh issue comment {number} -R {owner}/{repo} --body "<missing_info_body>"
 
 ## Phase 4 — Sub-agent 调度（执行队列）
 
-对于 `ISSUES_TO_EXECUTE` 中的每个 issue（已带 `ready-for-agent` 标签）：
+对于 `ISSUES_TO_EXECUTE` 中的每个 issue：
 
 ### Step 4.1 — 添加处理中标签
 
 ```bash
-gh issue edit {number} -R {owner}/{repo} --add-label "in-progress"
+clawflow label add --repo {owner}/{repo} --issue {number} --label in-progress
 ```
-
-**重要**：使用 `gh` CLI 操作 GitHub，不要用 curl API。
 
 ### Step 4.2 — 创建 Git Worktree
 
-每个 issue 使用独立的 worktree，从 main 分支创建，互不干扰：
-
 ```bash
-REPO_LOCAL_PATH=$(find ~/github -maxdepth 2 -name "{repo}" -type d | head -1)
-WORKTREE_PATH="/tmp/clawflow-fix/{owner}-{repo}-issue-{number}"
-BRANCH_NAME="fix/issue-{number}"
-
-git -C "$REPO_LOCAL_PATH" worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" main
+WORKTREE_PATH=$(clawflow worktree create --repo {owner}/{repo} --issue {number})
+# 输出示例: /tmp/clawflow-fix/owner-repo-issue-7
 ```
 
 ### Step 4.3 — Spawn Sub-agent
 
-使用 `sessions_spawn` 启动修复 agent，工作目录指向对应 worktree：
-
-```json
-{
-  "runtime": "subagent",
-  "mode": "run",
-  "cleanup": "keep",
-  "runTimeoutSeconds": 3600,
-  "task": "<task_prompt>"
-}
-```
+启动修复 agent，工作目录指向 worktree：
 
 **Task Prompt Template:**
 
@@ -326,7 +264,7 @@ git -C "$REPO_LOCAL_PATH" worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" main
 
 <config>
 仓库: {owner}/{repo}
-本地 worktree 路径: /tmp/clawflow-fix/{owner}-{repo}-issue-{number}
+本地 worktree 路径: {worktree_path}
 分支: fix/issue-{number}
 Base branch: {base_branch}
 Issue: #{number}
@@ -335,23 +273,16 @@ Issue: #{number}
 <issue>
 标题: {title}
 内容: {body}
-标签: {labels}
 </issue>
 
 <instructions>
-1. CLONE/FETCH — 获取代码
-2. BRANCH — 创建 fix/issue-{number} 分支
-3. ANALYZE — 分析问题，定位相关代码
-4. IMPLEMENT — 实现修复（最小化改动）
-5. TEST — 运行测试（如果存在）
-6. COMMIT — 提交改动
-7. PUSH — 推送分支
-8. PR — 创建 Pull Request
-
-PR body 必须包含：
-- 修复摘要
-- Files changed 列表
-- "Fixes #{number}" 链接
+1. 在 worktree 路径中工作（不要 clone，已有代码）
+2. ANALYZE — 阅读代码，理解问题
+3. IMPLEMENT — 实现修复（最小化改动）
+4. TEST — 运行测试（如果存在）
+5. COMMIT — git commit
+6. PUSH — git push origin fix/issue-{number}
+7. PR — gh pr create，body 必须包含 "Fixes #{number}"
 </instructions>
 
 <constraints>
@@ -364,35 +295,45 @@ PR body 必须包含：
 
 ### Step 4.4 — 记录处理状态
 
-将处理记录写入 memory：
-
 ```bash
-MEMORY_FILE="~/.clawflow/memory/repos/{owner}-{repo}/issue-{number}.md"
-mkdir -p $(dirname $MEMORY_FILE)
+clawflow memory write --repo {owner}/{repo} --issue {number} --status in-progress
 ```
 
 ---
 
-## Phase 5 — 结果收集与通知
+## Phase 5 — 结果收集与清理
 
-### Sub-agent 完成后
+等待 sub-agent 返回结果，**无论成功或失败，最后都必须清理 worktree**。
 
-等待 sub-agent 返回结果：
+### 成功处理
 
-- **成功：** PR URL
-- **失败：** 错误信息
+```bash
+# 1. 写入 memory
+clawflow memory write --repo {owner}/{repo} --issue {number} --status success --pr-url {pr_url}
 
-**成功处理：**
+# 2. 移除 in-progress 标签
+clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
 
-1. 更新 memory 文件，添加 PR URL
-2. 移除 `in-progress` 标签
-3. 通过 OpenClaw message 发送通知
+# 3. 清理 worktree（必须执行）
+clawflow worktree remove --repo {owner}/{repo} --issue {number}
+```
 
-**失败处理：**
+### 失败处理
 
-1. 添加 `agent-failed` 标签
-2. 在 issue 评论失败原因
-3. 更新 memory 文件记录失败
+```bash
+# 1. 写入 memory
+clawflow memory write --repo {owner}/{repo} --issue {number} --status failed --reason "{error}"
+
+# 2. 添加 agent-failed 标签，移除 in-progress
+clawflow label add    --repo {owner}/{repo} --issue {number} --label agent-failed
+clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
+
+# 3. 在 issue 评论失败原因
+gh issue comment {number} -R {owner}/{repo} --body "ClawFlow agent 处理失败：{error}"
+
+# 4. 清理 worktree（必须执行，即使失败）
+clawflow worktree remove --repo {owner}/{repo} --issue {number}
+```
 
 ---
 
@@ -406,13 +347,16 @@ mkdir -p $(dirname $MEMORY_FILE)
 4. **PR 目标分支固定为配置的 `base_branch`**
 5. **超时强制停止**（60 分钟）
 6. **低置信度不强行修复** — 请求补充信息
+7. **worktree 必须在 Phase 5 清理** — 无论成功或失败
 
 ### 标签流程图
 
 ```
 新 Issue
     ↓
-[自动评估] → agent-evaluated + 评论
+[Phase 2] clawflow harvest
+    ↓
+[Phase 3] 评估 → agent-evaluated + 评论
     ↓
 ┌─────────────────────────────────────┐
 │ 高置信度: 等待 owner 添加 ready-for-agent │
@@ -421,7 +365,9 @@ mkdir -p $(dirname $MEMORY_FILE)
     ↓
 [owner 添加 ready-for-agent]
     ↓
-[执行修复] → in-progress → 创建 PR → 完成
+[Phase 4] clawflow worktree create → sub-agent 修复 → PR
+    ↓
+[Phase 5] clawflow worktree remove（成功或失败都执行）
 ```
 
 ---
@@ -431,8 +377,8 @@ mkdir -p $(dirname $MEMORY_FILE)
 | 命令 | 行为 |
 |------|------|
 | `ClawFlow run` | 执行一轮完整收割流程 |
-| `检查 ClawFlow 状态` | 显示所有配置仓库和待处理 issue 数量 |
-| `ClawFlow 添加仓库 <owner/repo>` | 将新仓库添加到配置 |
+| `检查 ClawFlow 状态` | `clawflow status` |
+| `ClawFlow 添加仓库 <owner/repo>` | 编辑 `~/.clawflow/config/repos.yaml` |
 
 ---
 
@@ -441,3 +387,4 @@ mkdir -p $(dirname $MEMORY_FILE)
 - 仓库配置: `~/.clawflow/config/repos.yaml`
 - 标签定义: `~/.clawflow/config/labels.yaml`
 - 处理记录: `~/.clawflow/memory/repos/{owner}-{repo}/`
+- CLI 二进制: `~/.clawflow/bin/clawflow`
