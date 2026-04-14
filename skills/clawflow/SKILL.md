@@ -72,6 +72,58 @@ clawflow harvest --repo owner/repo
 
 对于 `ISSUES_TO_EVALUATE` 中的每个 issue，进行置信度评估并评论。
 
+### Step 3.0 — 重复 Issue 检查
+
+在评估之前，先检查当前 issue 是否与已有工作重复：
+
+#### 检查步骤
+
+```bash
+# 1. 检查已合并 PR 是否覆盖该 issue 功能
+gh pr list -R {owner}/{repo} --state merged --json number,title,body | \
+  jq '.[] | select(.title + .body | test("{keywords}"; "i"))'
+
+# 2. 检查已关闭的 agent-evaluated issues 是否有相同功能
+gh issue list -R {owner}/{repo} --state closed --label agent-evaluated \
+  --json number,title,body | \
+  jq '.[] | select(.title + .body | test("{keywords}"; "i"))'
+
+# 3. 检查 issue body 中是否有 "Parent Issue" 或 "Related to #X" 链接
+# （手动检查 issue body 中的关联引用）
+```
+
+#### 判断标准
+
+| 检查类型 | 判断方法 |
+|---------|---------|
+| **PR 已合并** | 已合并 PR 的标题/描述覆盖当前 issue 的核心功能 |
+| **Issue 已关闭** | 已关闭的 agent-evaluated issue 与当前 issue 功能相同 |
+| **父 Issue 分解** | issue body 中存在 "Parent Issue" 或 "Related to #X" 引用 |
+
+#### 发现重复时的处理流程
+
+```bash
+# 1. 评论说明重复原因
+gh issue comment {number} -R {owner}/{repo} --body "## 🔄 重复 Issue 检查报告
+
+经自动检查，此 issue 与已有工作存在重复：
+
+**重复原因：** {duplicate_reason}
+**关联参考：** {reference_link}
+
+因此关闭此 issue，避免重复处理。"
+
+# 2. 添加 agent-evaluated 标签
+clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
+
+# 3. 关闭 issue
+gh issue close {number} -R {owner}/{repo}
+```
+
+**无重复时**：直接进入下方评估策略。
+
+---
+
 ### 评估策略（按类型区分）
 
 根据 issue 的标签类型，采用不同的评估策略：
