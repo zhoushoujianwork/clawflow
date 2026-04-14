@@ -2,6 +2,8 @@ package commands
 
 import "github.com/spf13/cobra"
 
+var Version = "dev"
+
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "clawflow",
@@ -9,6 +11,7 @@ func NewRootCmd() *cobra.Command {
 		Long: `ClawFlow CLI handles the deterministic parts of the pipeline:
 harvesting issues, managing labels, creating worktrees, and writing memory records.
 The AI skill (SKILL.md) handles evaluation and sub-agent orchestration.`,
+		Version: Version,
 	}
 
 	root.AddCommand(NewHarvestCmd())
