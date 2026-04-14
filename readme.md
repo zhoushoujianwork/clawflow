@@ -1,6 +1,6 @@
 # ClawFlow
 
-> **让 bug 自己修自己。**  
+> **Coding as a Service.**  
 > ClawFlow watches your GitHub repositories, picks up issues tagged `ready-for-agent`, and autonomously attempts to fix them — then opens a Pull Request.
 
 ---
