@@ -31,8 +31,8 @@ func newMemoryWriteCmd() *cobra.Command {
 		Example: `  clawflow memory write --repo owner/repo --issue 7 --status success --pr-url https://...
   clawflow memory write --repo owner/repo --issue 7 --status failed --reason "timeout"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if status != "success" && status != "failed" && status != "skipped" {
-				return fmt.Errorf("--status must be success, failed, or skipped")
+			if status != "success" && status != "failed" && status != "skipped" && status != "ci-failed" {
+				return fmt.Errorf("--status must be success, failed, skipped, or ci-failed")
 			}
 
 			slug := config.RepoSlug(repo)
@@ -55,7 +55,7 @@ func newMemoryWriteCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
-	cmd.Flags().StringVar(&status, "status", "", "success | failed | skipped (required)")
+	cmd.Flags().StringVar(&status, "status", "", "success | failed | skipped | ci-failed (required)")
 	cmd.Flags().StringVar(&prURL, "pr-url", "", "PR URL (for success status)")
 	cmd.Flags().StringVar(&reason, "reason", "", "reason (for failed/skipped status)")
 	_ = cmd.MarkFlagRequired("repo")

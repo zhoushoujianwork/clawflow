@@ -11,14 +11,17 @@ import (
 
 // Repo holds per-repository settings.
 type Repo struct {
-	Enabled          bool              `yaml:"enabled"`
-	BaseBranch       string            `yaml:"base_branch"`
-	LocalPath        string            `yaml:"local_path"`
-	Owner            string            `yaml:"owner"`
-	Description      string            `yaml:"description"`
-	AddedAt          string            `yaml:"added_at"`
-	WebhookConfigured bool             `yaml:"webhook_configured"`
-	Labels           map[string]string `yaml:"labels"`
+	Enabled           bool              `yaml:"enabled"`
+	BaseBranch        string            `yaml:"base_branch"`
+	LocalPath         string            `yaml:"local_path"`
+	Owner             string            `yaml:"owner"`
+	Description       string            `yaml:"description"`
+	AddedAt           string            `yaml:"added_at"`
+	WebhookConfigured bool              `yaml:"webhook_configured"`
+	Labels            map[string]string `yaml:"labels"`
+	TestCommand       string            `yaml:"test_command,omitempty"`
+	CIRequired        bool              `yaml:"ci_required,omitempty"`
+	CITimeout         int               `yaml:"ci_timeout,omitempty"`
 }
 
 // Settings holds global ClawFlow settings.
