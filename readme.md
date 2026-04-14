@@ -146,24 +146,24 @@ Updates:
 
 ## Supported Agents
 
-ClawFlow 以「技能（Skill）」的形式运行在 AI agent 工具之上。目前支持：
+ClawFlow runs on top of AI agent tools as a Skill. Currently supported:
 
-| Agent 工具 | 状态 | 说明 |
+| Agent | Status | Notes |
 |---|---|---|
-| **Claude Code** | ✅ 推荐 | 最强代码能力，sub-agent 编程实现 issue 效果最佳 |
-| **OpenClaw** | ✅ 支持 | 轻量本地 agent，适合资源受限场景 |
-| 自定义 agent | 🔧 可配置 | 通过 `--agent custom --dir` 指定 skill 目录 |
+| **Claude Code** | ✅ Recommended | Best code capability — sub-agent fix quality is highest |
+| **OpenClaw** | ✅ Supported | Lightweight local agent, good for resource-constrained setups |
+| Custom agent | 🔧 Configurable | Specify skill directory via `--agent custom --dir` |
 
-### 为什么推荐 Claude Code？
+### Why Claude Code?
 
-ClawFlow 的核心执行阶段（Phase 4）会 spawn 一个 **sub-agent** 去阅读代码、理解问题、实现修复、提交 PR。这个过程对模型的代码理解和生成能力要求很高。
+ClawFlow's core execution phase (Phase 4) spawns a **sub-agent** to read code, understand the issue, implement a fix, and open a PR. This demands strong code comprehension and generation from the model.
 
-Claude Code 使用 claude-sonnet-4-6 或更强的模型，在以下方面表现最好：
-- 理解复杂代码库结构
-- 最小化改动实现精准修复
-- 正确处理 git 操作和 PR 创建
+Claude Code uses claude-sonnet-4-6 or stronger and excels at:
+- Understanding complex codebase structure
+- Minimal-diff, precise fixes
+- Correct git operations and PR creation
 
-> 查看本地运行指南：[基于 Claude Code 快速上手](docs/quickstart-claude-code.md)
+> Local quickstart: [Getting started with Claude Code](docs/quickstart-claude-code.md)
 
 ---
 
