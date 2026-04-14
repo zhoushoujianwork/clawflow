@@ -30,7 +30,13 @@ The AI skill (SKILL.md) handles evaluation and sub-agent orchestration.`,
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print version",
-		Run:   func(cmd *cobra.Command, args []string) { fmt.Println(Version) },
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(Version)
+			latest := FetchLatestTag()
+			if latest != "" && latest != Version {
+				fmt.Printf("  → new version available: %s  (run: clawflow update)\n", latest)
+			}
+		},
 	})
 
 	return root

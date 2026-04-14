@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
+
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -240,4 +242,24 @@ func atomicReplace(dest string, src io.Reader) error {
 	}
 	fmt.Printf("  [ok] binary updated → %s\n", dest)
 	return nil
+}
+
+// FetchLatestTag queries GitHub for the latest release tag.
+// Returns empty string on any error or timeout (5s).
+func FetchLatestTag() string {
+	client := &http.Client{Timeout: 5 * time.Second}
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
+	resp, err := client.Get(apiURL) //nolint:gosec
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return ""
+	}
+	return release.TagName
 }
