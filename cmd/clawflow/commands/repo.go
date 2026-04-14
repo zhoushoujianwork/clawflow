@@ -62,9 +62,9 @@ func newRepoAddCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		Example: "  clawflow repo add zhoushoujianwork/llm-wiki --local-path ~/github/llm-wiki",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ownerRepo := args[0]
+			ownerRepo := normalizeRepo(args[0])
 			if !strings.Contains(ownerRepo, "/") {
-				return fmt.Errorf("repo must be in owner/repo format")
+				return fmt.Errorf("repo must be in owner/repo format, got %q", args[0])
 			}
 			parts := strings.SplitN(ownerRepo, "/", 2)
 
@@ -192,4 +192,16 @@ func loadOrNewConfig() (*config.Config, error) {
 		cfg.Repos = make(map[string]config.Repo)
 	}
 	return cfg, nil
+}
+
+// normalizeRepo converts GitHub URLs to owner/repo format.
+// e.g. https://github.com/owner/repo.git → owner/repo
+func normalizeRepo(input string) string {
+	s := strings.TrimSuffix(strings.TrimSpace(input), ".git")
+	for _, prefix := range []string{"https://github.com/", "http://github.com/", "git@github.com:"} {
+		if strings.HasPrefix(s, prefix) {
+			return strings.TrimPrefix(s, prefix)
+		}
+	}
+	return s
 }
