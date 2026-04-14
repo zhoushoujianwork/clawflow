@@ -135,3 +135,9 @@ func injectToken(cmd *exec.Cmd) {
 		}
 	}
 }
+
+// PostIssueComment posts a comment on a GitHub issue.
+func PostIssueComment(repo string, issueNumber int, body string) error {
+	_, err := gh("issue", "comment", fmt.Sprint(issueNumber), "-R", repo, "--body", body)
+	return err
+}

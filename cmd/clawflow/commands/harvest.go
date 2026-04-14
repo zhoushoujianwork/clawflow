@@ -11,18 +11,19 @@ import (
 
 // HarvestIssue is an issue returned in the harvest output.
 type HarvestIssue struct {
-	Repo        string `json:"repo"`
-	Number      int    `json:"number"`
-	Title       string `json:"title"`
-	Body        string `json:"body"`
+	Repo         string `json:"repo"`
+	Number       int    `json:"number"`
+	Title        string `json:"title"`
+	Body         string `json:"body"`
 	WorktreePath string `json:"worktree_path,omitempty"`
 }
 
 // HarvestResult is the JSON output of clawflow harvest.
 type HarvestResult struct {
-	ToEvaluate []HarvestIssue `json:"to_evaluate"`
-	ToExecute  []HarvestIssue `json:"to_execute"`
-	ToQueue    []HarvestIssue `json:"to_queue"`
+	ToEvaluate    []HarvestIssue `json:"to_evaluate"`
+	ToExecute     []HarvestIssue `json:"to_execute"`
+	ToQueue       []HarvestIssue `json:"to_queue"`
+	RetryEligible []HarvestIssue `json:"retry_eligible"`
 }
 
 func NewHarvestCmd() *cobra.Command {
@@ -47,9 +48,10 @@ func NewHarvestCmd() *cobra.Command {
 			}
 
 			result := HarvestResult{
-				ToEvaluate: []HarvestIssue{},
-				ToExecute:  []HarvestIssue{},
-				ToQueue:    []HarvestIssue{},
+				ToEvaluate:    []HarvestIssue{},
+				ToExecute:     []HarvestIssue{},
+				ToQueue:       []HarvestIssue{},
+				RetryEligible: []HarvestIssue{},
 			}
 
 			maxConcurrent := cfg.Settings.MaxConcurrentAgents
@@ -119,6 +121,22 @@ func NewHarvestCmd() *cobra.Command {
 							inProgressCount++
 						} else {
 							result.ToQueue = append(result.ToQueue, item)
+						}
+
+					// Retry-eligible: has agent-evaluated, no in-progress, no open PR,
+					// and memory shows a prior success (merged PR)
+					case evaluated && !inProgress && !readyForAgent:
+						hasPR, err := gh.PRExistsForIssue(repoName, issue.Number)
+						if err != nil {
+							fmt.Fprintf(cmd.ErrOrStderr(), "warn: PR check failed for %s#%d: %v\n", repoName, issue.Number, err)
+						}
+						if !hasPR && HasMergedPRInMemory(repoName, issue.Number) {
+							result.RetryEligible = append(result.RetryEligible, HarvestIssue{
+								Repo:   repoName,
+								Number: issue.Number,
+								Title:  issue.Title,
+								Body:   issue.Body,
+							})
 						}
 					}
 				}

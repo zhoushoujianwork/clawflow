@@ -328,7 +328,16 @@ WORKTREE_PATH=$(clawflow worktree create --repo {owner}/{repo} --issue {number})
 
 ### Step 4.3 — Spawn Sub-agent
 
-启动修复 agent，工作目录指向 worktree：
+启动修复 agent，工作目录指向 worktree。
+
+**在生成 Task Prompt 之前，先读取 previous attempts 上下文：**
+
+```bash
+# 读取该 issue 的历史记录（如有）
+PREV_ATTEMPTS=$(clawflow memory read --repo {owner}/{repo} --issue {number} 2>/dev/null || echo "")
+```
+
+如果 `PREV_ATTEMPTS` 非空，将其内容填入 `{previous_attempts_context}`；否则填入 `(no previous attempts)`。
 
 **Task Prompt Template:**
 
@@ -347,6 +356,10 @@ Issue: #{number}
 标题: {title}
 内容: {body}
 </issue>
+
+<previous_attempts>
+{previous_attempts_context}
+</previous_attempts>
 
 <instructions>
 1. 在 worktree 路径中工作（不要 clone，已有代码）

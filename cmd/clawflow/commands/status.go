@@ -35,7 +35,9 @@ func NewStatusCmd() *cobra.Command {
 					continue
 				}
 
-				var toEvaluate, toExecute, inProgress, skipped, failed int
+				var toEvaluate, toExecute, inProgress, skipped, failed, retryEligible int
+				var retryIssues []gh.Issue
+
 				for _, issue := range issues {
 					switch {
 					case issue.HasLabel("in-progress"):
@@ -48,6 +50,13 @@ func NewStatusCmd() *cobra.Command {
 						toExecute++
 					case !issue.HasLabel("agent-evaluated"):
 						toEvaluate++
+					case issue.HasLabel("agent-evaluated") && !issue.HasLabel("in-progress") && !issue.HasLabel("ready-for-agent"):
+						// Check if retry-eligible: no open PR + memory has prior success
+						hasPR, _ := gh.PRExistsForIssue(repoName, issue.Number)
+						if !hasPR && HasMergedPRInMemory(repoName, issue.Number) {
+							retryEligible++
+							retryIssues = append(retryIssues, issue)
+						}
 					}
 				}
 
@@ -56,6 +65,13 @@ func NewStatusCmd() *cobra.Command {
 				fmt.Printf("    处理中:  %d\n", inProgress)
 				fmt.Printf("    已跳过:  %d\n", skipped)
 				fmt.Printf("    已失败:  %d\n", failed)
+				if retryEligible > 0 {
+					fmt.Printf("    可重试:  %d\n", retryEligible)
+					for _, issue := range retryIssues {
+						fmt.Printf("      #%d %s  (run: clawflow retry --repo %s --issue %d)\n",
+							issue.Number, issue.Title, repoName, issue.Number)
+					}
+				}
 				fmt.Println()
 			}
 
