@@ -1,6 +1,10 @@
 package commands
 
-import "github.com/spf13/cobra"
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
 
 var Version = "dev"
 
@@ -23,6 +27,11 @@ The AI skill (SKILL.md) handles evaluation and sub-agent orchestration.`,
 	root.AddCommand(NewUpdateCmd())
 	root.AddCommand(NewRepoCmd())
 	root.AddCommand(NewConfigCmd())
+	root.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print version",
+		Run:   func(cmd *cobra.Command, args []string) { fmt.Println(Version) },
+	})
 
 	return root
 }
