@@ -11,7 +11,7 @@ var Version = "dev"
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "clawflow",
-		Short: "ClawFlow — automated issue → fix → PR pipeline",
+		Short: "让 bug 自己修自己 — automated issue → fix → PR pipeline",
 		Long: `ClawFlow CLI handles the deterministic parts of the pipeline:
 harvesting issues, managing labels, creating worktrees, and writing memory records.
 The AI skill (SKILL.md) handles evaluation and sub-agent orchestration.`,

@@ -1,6 +1,6 @@
 # ClawFlow
 
-> **Automated Issue → Fix → PR pipeline powered by AI agents.**  
+> **让 bug 自己修自己。**  
 > ClawFlow watches your GitHub repositories, picks up issues tagged `ready-for-agent`, and autonomously attempts to fix them — then opens a Pull Request.
 
 ---
