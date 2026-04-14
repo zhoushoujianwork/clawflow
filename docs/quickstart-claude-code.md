@@ -11,12 +11,17 @@
 | [Claude Code](https://claude.ai/code) | AI agent 运行环境，需登录 Claude 账号 |
 | [GitHub CLI](https://cli.github.com/) | ClawFlow 所有 GitHub 操作依赖 `gh` |
 | Go 1.22+ | 从源码安装时需要 |
+| Node.js | claude-hud 插件依赖，需在系统 PATH 可见 |
 
 ```bash
 # 验证环境
 claude --version
 gh auth status
 go version
+
+# 如果 Claude Code 启动时报 "env: node: No such file or directory"
+# 是因为 Claude Code 不继承 shell PATH，需要将 node 链接到系统路径：
+sudo ln -sf $(which node) /usr/local/bin/node
 ```
 
 ---
