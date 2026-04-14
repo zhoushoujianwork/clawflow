@@ -53,7 +53,9 @@ func newWorktreeCreateCmd() *cobra.Command {
 			}
 
 			// Fetch latest base branch first
-			_ = runGit(localPath, "fetch", "origin", base)
+			if err := runGit(localPath, "fetch", "origin", base); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: fetch failed, using cached origin/%s: %v\n", base, err)
+			}
 
 			if err := runGit(localPath, "worktree", "add", worktreePath, "-b", branch, "origin/"+base); err != nil {
 				return fmt.Errorf("git worktree add failed: %w", err)
@@ -125,12 +127,19 @@ func newWorktreeRemoveCmd() *cobra.Command {
 }
 
 // resolveLocalPath returns the local repo path from config or auto-discovery.
+// If the path doesn't exist, it clones the repo automatically.
 func resolveLocalPath(ownerRepo, configured string) (string, error) {
 	if configured != "" {
 		expanded := expandHomeStr(configured)
 		if _, err := os.Stat(expanded); err == nil {
 			return expanded, nil
 		}
+		// Configured path doesn't exist — clone there
+		fmt.Fprintf(os.Stderr, "local path %q not found, cloning %s ...\n", expanded, ownerRepo)
+		if err := cloneRepo(ownerRepo, expanded); err != nil {
+			return "", fmt.Errorf("auto-clone failed: %w", err)
+		}
+		return expanded, nil
 	}
 
 	// Fallback: search ~/github/<repo>
@@ -142,7 +151,23 @@ func resolveLocalPath(ownerRepo, configured string) (string, error) {
 		return candidate, nil
 	}
 
-	return "", fmt.Errorf("cannot find local clone of %q — set local_path in repos.yaml", ownerRepo)
+	// Not found anywhere — clone to ~/github/<repo>
+	fmt.Fprintf(os.Stderr, "local clone not found, cloning %s to %s ...\n", ownerRepo, candidate)
+	if err := cloneRepo(ownerRepo, candidate); err != nil {
+		return "", fmt.Errorf("auto-clone failed: %w", err)
+	}
+	return candidate, nil
+}
+
+func cloneRepo(ownerRepo, dest string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return err
+	}
+	url := "https://github.com/" + ownerRepo + ".git"
+	c := exec.Command("git", "clone", url, dest)
+	c.Stdout = os.Stderr // progress to stderr
+	c.Stderr = os.Stderr
+	return c.Run()
 }
 
 func expandHomeStr(path string) string {
