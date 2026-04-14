@@ -208,6 +208,9 @@ gh issue comment {number} -R {owner}/{repo} --body "<evaluation_body>"
 👉 **如果您同意此方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**
 
 ⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
+
+---
+🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
 ```
 
 **Feature 类型评论模板：**
@@ -252,6 +255,9 @@ gh issue comment {number} -R {owner}/{repo} --body "<evaluation_body>"
 👉 **如果您同意此方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**
 
 ⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
+
+---
+🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
 ```
 
 ### 低置信度处理（需要补充信息）
@@ -284,6 +290,9 @@ gh issue comment {number} -R {owner}/{repo} --body "<missing_info_body>"
 ---
 
 💡 请补充以上信息后，移除 `agent-skipped` 标签并添加 `ready-for-agent` 以重新触发评估。
+
+---
+🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
 ```
 
 ---
