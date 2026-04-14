@@ -358,12 +358,6 @@ Issue: #{number}
 </constraints>
 ```
 
-### Step 4.4 — 记录处理状态
-
-```bash
-clawflow memory write --repo {owner}/{repo} --issue {number} --status in-progress
-```
-
 ---
 
 ## Phase 5 — 结果收集与清理
