@@ -340,7 +340,32 @@ Issue: #{number}
    - 测试失败 → 停止流程，报告失败原因
 5. COMMIT — git commit（包含测试改动）
 6. PUSH — git push origin fix/issue-{number}
-7. PR — gh pr create，body 必须包含 "Fixes #{number}"
+7. PR — 使用以下模板创建 PR：
+   ```bash
+   gh pr create -R {owner}/{repo} \
+     --title "{title}" \
+     --base {base_branch} \
+     --head fix/issue-{number} \
+     --body "$(cat <<'EOF'
+   ## Summary
+
+   {summary}
+
+   ## Changes
+
+   {changes}
+
+   ## Test plan
+
+   {test_plan}
+
+   Fixes #{number}
+
+   ---
+   🤖 Created by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
+   EOF
+   )"
+   ```
 8. CI_WAIT — 等待 GitHub CI（最长 10 分钟）
    ```bash
    gh pr checks {pr_number} -R {owner}/{repo} --watch --timeout 600 || true
