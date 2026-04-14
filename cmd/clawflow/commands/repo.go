@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	gh "github.com/zhoushoujianwork/clawflow/internal/github"
 )
 
 func NewRepoCmd() *cobra.Command {
@@ -99,6 +100,10 @@ func newRepoAddCmd() *cobra.Command {
 			fmt.Printf("  base branch: %s\n", baseBranch)
 			if localPath != "" {
 				fmt.Printf("  local path:  %s\n", localPath)
+			}
+			fmt.Printf("Initializing ClawFlow labels in %s ...\n", ownerRepo)
+			if err := gh.InitLabels(ownerRepo); err != nil {
+				fmt.Printf("  [warn] label init failed: %v\n", err)
 			}
 			return nil
 		},

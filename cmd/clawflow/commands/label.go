@@ -14,6 +14,7 @@ func NewLabelCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newLabelAddCmd())
 	cmd.AddCommand(newLabelRemoveCmd())
+	cmd.AddCommand(newLabelInitCmd())
 	return cmd
 }
 
@@ -67,4 +68,18 @@ func newLabelRemoveCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("issue")
 	_ = cmd.MarkFlagRequired("label")
 	return cmd
+}
+
+func newLabelInitCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "init <owner/repo>",
+		Short:   "Create standard ClawFlow labels in a repository",
+		Args:    cobra.ExactArgs(1),
+		Example: "  clawflow label init zhoushoujianwork/clawflow",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repo := args[0]
+			fmt.Printf("Initializing ClawFlow labels in %s ...\n", repo)
+			return gh.InitLabels(repo)
+		},
+	}
 }

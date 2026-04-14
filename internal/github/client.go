@@ -141,3 +141,39 @@ func PostIssueComment(repo string, issueNumber int, body string) error {
 	_, err := gh("issue", "comment", fmt.Sprint(issueNumber), "-R", repo, "--body", body)
 	return err
 }
+
+// clawflowLabels are the standard labels ClawFlow requires on every monitored repo.
+var clawflowLabels = []struct{ name, color, desc string }{
+	{"ready-for-agent", "00FF00", "Owner approved — triggers ClawFlow fix pipeline"},
+	{"agent-evaluated", "0075CA", "ClawFlow has assessed this issue and posted a proposal"},
+	{"in-progress",     "FFA500", "Agent is actively working on this issue"},
+	{"agent-skipped",   "BDBDBD", "Low confidence — needs more information"},
+	{"agent-failed",    "FF0000", "Agent attempted but failed"},
+}
+
+// InitLabels creates the standard ClawFlow labels in a repo, skipping any that already exist.
+func InitLabels(repo string) error {
+	out, err := gh("label", "list", "-R", repo, "--json", "name", "--limit", "200")
+	if err != nil {
+		return err
+	}
+	var existing []struct{ Name string `json:"name"` }
+	if err := json.Unmarshal(out, &existing); err != nil {
+		return err
+	}
+	has := make(map[string]bool, len(existing))
+	for _, l := range existing {
+		has[l.Name] = true
+	}
+	for _, l := range clawflowLabels {
+		if has[l.name] {
+			fmt.Printf("  [skip] %s\n", l.name)
+			continue
+		}
+		if _, err := gh("label", "create", l.name, "--color", l.color, "--description", l.desc, "-R", repo); err != nil {
+			return err
+		}
+		fmt.Printf("  [ok]   %s\n", l.name)
+	}
+	return nil
+}
