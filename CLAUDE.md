@@ -8,52 +8,29 @@
 
 ## 发版规范
 
-每次新版本发布必须按以下步骤执行，不能跳过：
+每次新版本发布只需两步：
 
-### 1. 构建二进制（含 OS/arch 后缀）
-
-```bash
-# macOS arm64（Apple Silicon）
-GOOS=darwin  GOARCH=arm64  go build -o clawflow_darwin_arm64  ./cmd/clawflow/
-# macOS amd64（Intel）
-GOOS=darwin  GOARCH=amd64  go build -o clawflow_darwin_amd64  ./cmd/clawflow/
-# Linux amd64
-GOOS=linux   GOARCH=amd64  go build -o clawflow_linux_amd64   ./cmd/clawflow/
-```
-
-asset 命名格式：`clawflow_{os}_{arch}`（Windows 加 `.exe`）。
-`clawflow update` 命令会自动按当前平台匹配对应 asset 名称。
-
-### 2. 打 Tag 并推送
+### 1. 打 Tag 并推送
 
 ```bash
 git tag v{x.y.z}
 git push origin v{x.y.z}
 ```
 
+GitHub Actions（`.github/workflows/release.yml`）会自动完成：
+- 三平台构建（darwin arm64/amd64、linux amd64）
+- 创建 GitHub Release 并上传所有平台二进制
+
 版本号规则：
 - `v0.x.0` — 新功能（minor）
 - `v0.x.y` — bug 修复（patch）
 - `v1.0.0` — 首个稳定版
 
-### 3. 创建 GitHub Release 并上传所有平台二进制
-
-```bash
-gh release create v{x.y.z} \
-  clawflow_darwin_arm64 \
-  clawflow_darwin_amd64 \
-  clawflow_linux_amd64 \
-  --title "v{x.y.z} — {简短描述}" \
-  --notes "{release notes}"
-```
-
-**必须上传各平台二进制**，`clawflow update` 依赖这些 asset 实现自动更新。
-
-### 4. 验证用户可以自动更新
+### 2. 验证用户可以自动更新
 
 ```bash
 gh release view v{x.y.z}
-# 确认 assets 列表有各平台文件
+# 确认 assets 列表有各平台文件（Actions 完成后）
 
 # 模拟用户更新
 clawflow update

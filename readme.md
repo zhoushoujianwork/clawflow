@@ -144,6 +144,29 @@ Updates:
 
 ---
 
+## Supported Agents
+
+ClawFlow 以「技能（Skill）」的形式运行在 AI agent 工具之上。目前支持：
+
+| Agent 工具 | 状态 | 说明 |
+|---|---|---|
+| **Claude Code** | ✅ 推荐 | 最强代码能力，sub-agent 编程实现 issue 效果最佳 |
+| **OpenClaw** | ✅ 支持 | 轻量本地 agent，适合资源受限场景 |
+| 自定义 agent | 🔧 可配置 | 通过 `--agent custom --dir` 指定 skill 目录 |
+
+### 为什么推荐 Claude Code？
+
+ClawFlow 的核心执行阶段（Phase 4）会 spawn 一个 **sub-agent** 去阅读代码、理解问题、实现修复、提交 PR。这个过程对模型的代码理解和生成能力要求很高。
+
+Claude Code 使用 claude-sonnet-4-6 或更强的模型，在以下方面表现最好：
+- 理解复杂代码库结构
+- 最小化改动实现精准修复
+- 正确处理 git 操作和 PR 创建
+
+> 查看本地运行指南：[基于 Claude Code 快速上手](docs/quickstart-claude-code.md)
+
+---
+
 ## How It Works
 
 ```
