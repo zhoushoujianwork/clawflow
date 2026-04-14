@@ -1,0 +1,66 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            suffix: darwin_arm64
+          - goos: darwin
+            goarch: amd64
+            suffix: darwin_amd64
+          - goos: linux
+            goarch: amd64
+            suffix: linux_amd64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          go build -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=${VERSION}" \
+            -o clawflow_${{ matrix.suffix }} ./cmd/clawflow/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clawflow_${{ matrix.suffix }}
+          path: clawflow_${{ matrix.suffix }}
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: bin
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/clawflow_*
+          generate_release_notes: true

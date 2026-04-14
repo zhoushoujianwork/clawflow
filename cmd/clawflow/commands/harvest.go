@@ -22,6 +22,7 @@ type HarvestIssue struct {
 type HarvestResult struct {
 	ToEvaluate []HarvestIssue `json:"to_evaluate"`
 	ToExecute  []HarvestIssue `json:"to_execute"`
+	ToQueue    []HarvestIssue `json:"to_queue"`
 }
 
 func NewHarvestCmd() *cobra.Command {
@@ -48,15 +49,32 @@ func NewHarvestCmd() *cobra.Command {
 			result := HarvestResult{
 				ToEvaluate: []HarvestIssue{},
 				ToExecute:  []HarvestIssue{},
+				ToQueue:    []HarvestIssue{},
 			}
 
+			maxConcurrent := cfg.Settings.MaxConcurrentAgents
+			if maxConcurrent <= 0 {
+				maxConcurrent = 3 // default
+			}
+
+			// Count currently running agents across all repos
+			inProgressCount := 0
+			allIssuesByRepo := make(map[string][]gh.Issue)
 			for repoName := range repos {
 				issues, err := gh.ListOpenIssues(repoName)
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list issues for %s: %v\n", repoName, err)
 					continue
 				}
+				allIssuesByRepo[repoName] = issues
+				for _, issue := range issues {
+					if issue.HasLabel("in-progress") {
+						inProgressCount++
+					}
+				}
+			}
 
+			for repoName, issues := range allIssuesByRepo {
 				for _, issue := range issues {
 					// Skip PRs
 					if issue.HasLabel("pull_request") {
@@ -68,10 +86,11 @@ func NewHarvestCmd() *cobra.Command {
 					skipped := issue.HasLabel("agent-skipped")
 					failed := issue.HasLabel("agent-failed")
 					readyForAgent := issue.HasLabel("ready-for-agent")
+					queued := issue.HasLabel("agent-queued")
 
 					switch {
 					// Evaluate queue: no evaluation labels yet
-					case !evaluated && !inProgress && !skipped && !failed && !readyForAgent:
+					case !evaluated && !inProgress && !skipped && !failed && !readyForAgent && !queued:
 						result.ToEvaluate = append(result.ToEvaluate, HarvestIssue{
 							Repo:   repoName,
 							Number: issue.Number,
@@ -88,13 +107,19 @@ func NewHarvestCmd() *cobra.Command {
 						if hasPR {
 							continue // skip — PR already exists
 						}
-						result.ToExecute = append(result.ToExecute, HarvestIssue{
-							Repo:        repoName,
-							Number:      issue.Number,
-							Title:       issue.Title,
-							Body:        issue.Body,
+						item := HarvestIssue{
+							Repo:         repoName,
+							Number:       issue.Number,
+							Title:        issue.Title,
+							Body:         issue.Body,
 							WorktreePath: config.WorktreePath(repoName, issue.Number),
-						})
+						}
+						if inProgressCount < maxConcurrent {
+							result.ToExecute = append(result.ToExecute, item)
+							inProgressCount++
+						} else {
+							result.ToQueue = append(result.ToQueue, item)
+						}
 					}
 				}
 			}

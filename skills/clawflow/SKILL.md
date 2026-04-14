@@ -46,19 +46,21 @@ clawflow status
 clawflow harvest
 ```
 
-输出 JSON，包含两个列表：
+输出 JSON，包含三个列表：
 
 ```json
 {
   "to_evaluate": [{"repo":"owner/repo","number":1,"title":"...","body":"..."}],
-  "to_execute":  [{"repo":"owner/repo","number":5,"title":"...","body":"...","worktree_path":"..."}]
+  "to_execute":  [{"repo":"owner/repo","number":5,"title":"...","body":"...","worktree_path":"..."}],
+  "to_queue":    [{"repo":"owner/repo","number":6,"title":"...","body":"...","worktree_path":"..."}]
 }
 ```
 
 - `to_evaluate` — 新 issue，未评估，无 agent 标签
-- `to_execute` — 已有 `ready-for-agent` + `agent-evaluated`，无 in-progress，无已开放 PR
+- `to_execute` — 已有 `ready-for-agent` + `agent-evaluated`，无 in-progress，无已开放 PR，且当前并发数未超限
+- `to_queue` — 同上但当前并发已满（`in-progress` 数量 >= `max_concurrent_agents`），等待下次调度
 
-将两个列表分别存为 `ISSUES_TO_EVALUATE` 和 `ISSUES_TO_EXECUTE`。
+将两个列表分别存为 `ISSUES_TO_EVALUATE` 和 `ISSUES_TO_EXECUTE`，`to_queue` 存为 `ISSUES_TO_QUEUE`。
 
 如果只需处理某个仓库：
 
@@ -299,6 +301,16 @@ gh issue comment {number} -R {owner}/{repo} --body "<missing_info_body>"
 
 ## Phase 4 — Sub-agent 调度（执行队列）
 
+### Step 4.0 — 处理排队 issue
+
+对于 `ISSUES_TO_QUEUE` 中的每个 issue，添加 `agent-queued` 标签（如果还没有）：
+
+```bash
+clawflow label add --repo {owner}/{repo} --issue {number} --label agent-queued
+```
+
+> `agent-queued` 表示该 issue 已批准但当前并发已满，等待下次调度。下次 harvest 时并发槽位空出后会自动进入 `to_execute`。
+
 对于 `ISSUES_TO_EXECUTE` 中的每个 issue：
 
 ### Step 4.1 — 添加处理中标签
@@ -404,8 +416,10 @@ Issue: #{number}
 # 1. 写入 memory
 clawflow memory write --repo {owner}/{repo} --issue {number} --status success --pr-url {pr_url}
 
-# 2. 移除 in-progress 标签
+# 2. 移除工作流标签
 clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
+clawflow label remove --repo {owner}/{repo} --issue {number} --label ready-for-agent
+clawflow label remove --repo {owner}/{repo} --issue {number} --label agent-queued
 
 # 3. 清理 worktree（必须执行）
 clawflow worktree remove --repo {owner}/{repo} --issue {number}
@@ -479,9 +493,16 @@ clawflow worktree remove --repo {owner}/{repo} --issue {number}
     ↓
 [owner 添加 ready-for-agent]
     ↓
-[Phase 4] clawflow worktree create → sub-agent 修复 → PR
+[Phase 4] clawflow harvest（下次调度）
     ↓
-[Phase 5] clawflow worktree remove（成功或失败都执行）
+┌─────────────────────────────────────────────────────┐
+│ 并发槽位充足 → to_execute → in-progress → sub-agent  │
+│ 并发已满     → to_queue  → agent-queued（等待下轮）  │
+└─────────────────────────────────────────────────────┘
+    ↓
+[Phase 5] 成功：移除 in-progress / ready-for-agent / agent-queued
+          失败：添加 agent-failed，移除 in-progress
+          均需：clawflow worktree remove
 ```
 
 ---
