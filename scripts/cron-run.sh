@@ -23,6 +23,13 @@ if ! command -v node &>/dev/null; then
   done
 fi
 
+# ── Auth / Proxy env ──────────────────────────────────────────────────────────
+ENV_FILE="$HOME/.clawflow/config/env"
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+fi
+
 # ── Config ────────────────────────────────────────────────────────────────────
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CLAUDE="${CLAUDE_BIN:-/Users/mikas/.claude/local/claude}"
@@ -47,6 +54,7 @@ echo "▶ ClawFlow run  $START_TIME" >> "$LOG_FILE"
 echo "  repo:   $REPO_DIR" >> "$LOG_FILE"
 echo "  claude: $CLAUDE" >> "$LOG_FILE"
 echo "  node:   $(command -v node 2>/dev/null || echo 'not found')" >> "$LOG_FILE"
+echo "  env:    ${ENV_FILE} $([ -f "$ENV_FILE" ] && echo '(loaded)' || echo '(not found)')" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
 
 EXIT_CODE=0
