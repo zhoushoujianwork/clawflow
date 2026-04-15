@@ -58,8 +58,57 @@ echo "  env:    ${ENV_FILE} $([ -f "$ENV_FILE" ] && echo '(loaded)' || echo '(no
 echo "" >> "$LOG_FILE"
 
 EXIT_CODE=0
+TMP_JSON=$(mktemp)
+TMP_ERR=$(mktemp)
+
 cd "$REPO_DIR"
-"$CLAUDE" -p "ClawFlow run" >> "$LOG_FILE" 2>&1 || EXIT_CODE=$?
+"$CLAUDE" -p "ClawFlow run" --output-format stream-json \
+  > "$TMP_JSON" 2>"$TMP_ERR" || EXIT_CODE=$?
+
+# ── Parse assistant output & token stats ──────────────────────────────────────
+python3 - "$TMP_JSON" <<'PYEOF' >> "$LOG_FILE"
+import json, sys
+
+path = sys.argv[1]
+with open(path) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            t = obj.get('type', '')
+            if t == 'assistant':
+                for block in obj.get('message', {}).get('content', []):
+                    if block.get('type') == 'text':
+                        text = block['text'].strip()
+                        if text:
+                            print(text)
+            elif t == 'result':
+                u = obj.get('usage', {})
+                cost = obj.get('cost_usd', 0)
+                dur  = obj.get('duration_ms', 0)
+                turns = obj.get('num_turns', 0)
+                print("")
+                print("── Token Usage ──────────────────────────────────────")
+                print(f"  input:        {u.get('input_tokens', 0):,}")
+                print(f"  output:       {u.get('output_tokens', 0):,}")
+                print(f"  cache read:   {u.get('cache_read_input_tokens', 0):,}")
+                print(f"  cache write:  {u.get('cache_creation_input_tokens', 0):,}")
+                print(f"  cost:         ${cost:.4f} USD")
+                print(f"  duration:     {dur/1000:.1f}s  ({turns} turns)")
+        except Exception:
+            pass
+PYEOF
+
+# ── Stderr (errors / warnings) ────────────────────────────────────────────────
+if [[ -s "$TMP_ERR" ]]; then
+  echo "" >> "$LOG_FILE"
+  echo "── stderr ───────────────────────────────────────────────────────────────" >> "$LOG_FILE"
+  cat "$TMP_ERR" >> "$LOG_FILE"
+fi
+
+rm -f "$TMP_JSON" "$TMP_ERR"
 
 END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 echo "" >> "$LOG_FILE"

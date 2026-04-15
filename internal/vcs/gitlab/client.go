@@ -153,28 +153,75 @@ func (c *Client) PRExistsForIssue(repo string, issueNumber int) (bool, error) {
 	return false, nil
 }
 
-func (c *Client) AddLabel(repo string, issueNumber int, labels ...string) error {
+func (c *Client) getIssueLabels(repo string, issueNumber int) ([]string, error) {
 	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
-	form := url.Values{"add_labels": {strings.Join(labels, ",")}}
-	_, status, err := c.do("PUT", path, form)
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("gitlab get issue: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	return raw.Labels, nil
+}
+
+func (c *Client) AddLabel(repo string, issueNumber int, labels ...string) error {
+	current, err := c.getIssueLabels(repo, issueNumber)
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool, len(current))
+	for _, l := range current {
+		existing[l] = true
+	}
+	for _, l := range labels {
+		existing[l] = true
+	}
+	all := make([]string, 0, len(existing))
+	for l := range existing {
+		all = append(all, l)
+	}
+	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
+	form := url.Values{"labels": {strings.Join(all, ",")}}
+	data, status, err := c.do("PUT", path, form)
 	if err != nil {
 		return err
 	}
 	if status != 200 {
-		return fmt.Errorf("gitlab add label: HTTP %d", status)
+		return fmt.Errorf("gitlab add label: HTTP %d: %s", status, data)
 	}
 	return nil
 }
 
 func (c *Client) RemoveLabel(repo string, issueNumber int, labels ...string) error {
+	current, err := c.getIssueLabels(repo, issueNumber)
+	if err != nil {
+		return err
+	}
+	remove := make(map[string]bool, len(labels))
+	for _, l := range labels {
+		remove[l] = true
+	}
+	var remaining []string
+	for _, l := range current {
+		if !remove[l] {
+			remaining = append(remaining, l)
+		}
+	}
 	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
-	form := url.Values{"remove_labels": {strings.Join(labels, ",")}}
-	_, status, err := c.do("PUT", path, form)
+	form := url.Values{"labels": {strings.Join(remaining, ",")}}
+	data, status, err := c.do("PUT", path, form)
 	if err != nil {
 		return err
 	}
 	if status != 200 {
-		return fmt.Errorf("gitlab remove label: HTTP %d", status)
+		return fmt.Errorf("gitlab remove label: HTTP %d: %s", status, data)
 	}
 	return nil
 }
