@@ -1,7 +1,7 @@
 # ClawFlow
 
 > **Coding as a Service.**  
-> ClawFlow watches your GitHub repositories, picks up issues tagged `ready-for-agent`, and autonomously attempts to fix them — then opens a Pull Request.
+> ClawFlow watches your GitHub and GitLab repositories, picks up issues tagged `ready-for-agent`, and autonomously attempts to fix them — then opens a Pull Request.
 
 ---
 
@@ -54,38 +54,69 @@ echo 'export PATH="$HOME/.clawflow/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 
 ## Setup
 
-### 1. Store GitHub token
+### 1. Store tokens
 
+**GitHub:**
 ```bash
 clawflow config set-token ghp_xxxxxxxxxxxx
 ```
-
-Token is saved to `~/.clawflow/config/credentials.yaml` (mode 0600) and auto-injected into all `gh` calls.
-
 Required scopes: `repo` (full), `read:org`.
+
+**GitLab:**
+```bash
+clawflow config set-gitlab-token glpat-xxxxxxxxxxxx
+```
+Required scopes: `api`.
+
+Tokens are saved to `~/.clawflow/config/credentials.yaml` (mode 0600).  
+Environment variables take priority over the file: `GH_TOKEN`, `GITLAB_TOKEN`.
 
 ### 2. Add repositories to monitor
 
-```bash
-clawflow repo add your-org/your-repo --base main --local-path ~/github/your-repo
-```
-
-Or manage repos interactively:
+`repo add` auto-detects the platform from the input — no flags needed in most cases:
 
 ```bash
-clawflow repo list                        # show all repos and status
-clawflow repo enable  your-org/your-repo  # resume monitoring
-clawflow repo disable your-org/your-repo  # pause without removing
-clawflow repo remove  your-org/your-repo  # delete from config
+# GitHub — URL, SSH, or short form
+clawflow repo add https://github.com/owner/repo
+clawflow repo add git@github.com:owner/repo.git
+clawflow repo add owner/repo
+
+# GitLab self-hosted — full URL (nested namespaces supported)
+clawflow repo add https://gitlab.company.com/ns/group/repo
+clawflow repo add git@gitlab.company.com:ns/group/repo.git
+
+# Local directory — reads .git/config origin automatically
+clawflow repo add .
+clawflow repo add ~/github/my-repo
 ```
 
-### 3. Create GitHub labels
+Override platform or instance URL manually:
+```bash
+clawflow repo add ns/repo --platform gitlab --base-url https://gitlab.company.com
+```
+
+For GitLab self-hosted, you can also register the host in `~/.clawflow/config/repos.yaml` so short-form inputs are recognized:
+```yaml
+settings:
+  gitlab_hosts:
+    - gitlab.company.com
+```
+
+Manage repos:
+```bash
+clawflow repo list
+clawflow repo enable  owner/repo
+clawflow repo disable owner/repo
+clawflow repo remove  owner/repo
+```
+
+### 3. Initialize labels
+
+Labels are created automatically on `repo add`. To create them manually:
 
 ```bash
-./install.sh --create-labels your-org/your-repo
+clawflow label init owner/repo
 ```
-
-Labels created:
 
 | Label | Color | Meaning |
 |---|---|---|
@@ -113,17 +144,23 @@ clawflow [command]
 Pipeline:
   harvest            Scan repos and output pending issues as JSON
   status             Show current state of all monitored repos
+  retry              Re-trigger pipeline for a previously processed issue
 
 Repo management:
   repo list          List all configured repos
-  repo add           Add a repo to monitor
+  repo add           Add a repo (URL / SSH / local path / owner/repo)
   repo remove        Remove a repo from config
   repo enable        Enable a repo
   repo disable       Disable a repo (pause without removing)
 
+Issues:
+  issue create       Create an issue (useful for testing the pipeline)
+  issue list         List open issues in a repo
+
 Labels:
   label add          Add a label to an issue
   label remove       Remove a label from an issue
+  label init         Create standard ClawFlow labels in a repo
 
 Worktrees:
   worktree create    Create an isolated git worktree for an issue
@@ -134,8 +171,9 @@ Records:
   pr-check           Check if an open PR already exists for an issue
 
 Config:
-  config set-token   Store GitHub token (saved to credentials.yaml)
-  config show        Show current config and token status
+  config set-token         Store GitHub token
+  config set-gitlab-token  Store GitLab token
+  config show              Show current config and token status
 
 Updates:
   update             Download latest binary + update SKILL.md
@@ -144,24 +182,20 @@ Updates:
 
 ---
 
-## Supported Agents
+## Supported Platforms
 
-ClawFlow runs on top of AI agent tools as a Skill. Currently supported:
+| Platform | Status | Notes |
+|---|---|---|
+| **GitHub** | ✅ Supported | REST API v3 |
+| **GitLab** | ✅ Supported | REST API v4, compatible with self-hosted v11.11+ |
+
+## Supported Agents
 
 | Agent | Status | Notes |
 |---|---|---|
-| **Claude Code** | ✅ Recommended | Best code capability — sub-agent fix quality is highest |
-| **OpenClaw** | ✅ Supported | Lightweight local agent, good for resource-constrained setups |
-| Custom agent | 🔧 Configurable | Specify skill directory via `--agent custom --dir` |
-
-### Why Claude Code?
-
-ClawFlow's core execution phase (Phase 4) spawns a **sub-agent** to read code, understand the issue, implement a fix, and open a PR. This demands strong code comprehension and generation from the model.
-
-Claude Code uses claude-sonnet-4-6 or stronger and excels at:
-- Understanding complex codebase structure
-- Minimal-diff, precise fixes
-- Correct git operations and PR creation
+| **Claude Code** | ✅ Recommended | Best code capability |
+| **OpenClaw** | ✅ Supported | Lightweight local agent |
+| Custom agent | 🔧 Configurable | `--agent custom --dir /path` |
 
 > Local quickstart: [Getting started with Claude Code](docs/quickstart-claude-code.md)
 
@@ -197,9 +231,8 @@ New Issue
 ├── bin/
 │   └── clawflow                    ← CLI binary
 ├── config/
-│   ├── repos.yaml                  ← repos to monitor
-│   ├── labels.yaml                 ← label definitions
-│   ├── credentials.yaml            ← GH token (0600, not committed)
+│   ├── repos.yaml                  ← repos to monitor (platform, base_url per repo)
+│   ├── credentials.yaml            ← GH + GitLab tokens (0600, not committed)
 │   └── install.yaml                ← install location record
 └── memory/
     └── repos/
@@ -213,7 +246,10 @@ clawflow/ (this repo)
 ├── cmd/clawflow/                   ← Go CLI source
 ├── internal/
 │   ├── config/                     ← config parsing + write
-│   └── github/                     ← gh CLI wrapper
+│   └── vcs/                        ← platform-agnostic VCS interface
+│       ├── interface.go            ← Client interface + shared types
+│       ├── github/                 ← GitHub REST API v3 client
+│       └── gitlab/                 ← GitLab REST API v4 client
 ├── skills/clawflow/SKILL.md        ← source for SKILL.md
 └── install.sh                      ← installer
 ```
@@ -235,6 +271,9 @@ clawflow update --from-source    # rebuild from cloned repo
 - [x] Worktree isolation per issue
 - [x] PR deduplication check
 - [x] `clawflow update` for self-updating
+- [x] GitLab support (REST API, self-hosted v11.11+)
+- [x] Auto-detect platform from URL / SSH / local `.git/config`
+- [x] `issue create/list` for pipeline testing
 - [ ] Smarter feasibility scoring — historical issue matching
 - [ ] Parallel processing — concurrent sub-agents
 - [ ] Webhook-first triggering — real-time instead of cron polling
