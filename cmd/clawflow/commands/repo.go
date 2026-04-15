@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
-	gh "github.com/zhoushoujianwork/clawflow/internal/github"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 func NewRepoCmd() *cobra.Command {
@@ -56,34 +56,57 @@ func newRepoAddCmd() *cobra.Command {
 	var baseBranch  string
 	var localPath   string
 	var description string
+	var platform    string
+	var baseURL     string
 
 	cmd := &cobra.Command{
-		Use:     "add <owner/repo>",
+		Use:     "add <owner/repo|URL>",
 		Short:   "Add a repository to monitor",
 		Args:    cobra.ExactArgs(1),
-		Example: "  clawflow repo add zhoushoujianwork/llm-wiki --local-path ~/github/llm-wiki",
+		Example: "  clawflow repo add owner/repo\n  clawflow repo add https://github.com/owner/repo\n  clawflow repo add https://gitlab.company.com/ns/repo",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ownerRepo := normalizeRepo(args[0])
-			if !strings.Contains(ownerRepo, "/") {
-				return fmt.Errorf("repo must be in owner/repo format, got %q", args[0])
-			}
-			parts := strings.SplitN(ownerRepo, "/", 2)
-
 			cfg, err := loadOrNewConfig()
 			if err != nil {
 				return err
 			}
+
+			info, err := config.ParseRepoInput(args[0], cfg.Settings.GitLabHosts)
+			if err != nil {
+				return err
+			}
+
+			// manual flags override auto-detected values
+			if platform != "" {
+				info.Platform = platform
+			}
+			if baseURL != "" {
+				info.BaseURL = baseURL
+			}
+			if info.Platform == "gitlab" && info.BaseURL == "" {
+				return fmt.Errorf("cannot determine GitLab instance URL — pass --base-url or add the host to settings.gitlab_hosts")
+			}
+
+			// local path: from flag, or auto-detected from .git/config
+			if localPath == "" {
+				localPath = info.LocalPath
+			}
+
+			ownerRepo := info.OwnerRepo
+			parts := strings.SplitN(ownerRepo, "/", 2)
+
 			if _, exists := cfg.Repos[ownerRepo]; exists {
 				return fmt.Errorf("repo %q already configured — use enable/disable to change status", ownerRepo)
 			}
 
 			cfg.Repos[ownerRepo] = config.Repo{
-				Enabled:    true,
-				BaseBranch: baseBranch,
-				LocalPath:  localPath,
-				Owner:      parts[0],
+				Enabled:     true,
+				Platform:    info.Platform,
+				BaseURL:     info.BaseURL,
+				BaseBranch:  baseBranch,
+				LocalPath:   localPath,
+				Owner:       parts[0],
 				Description: description,
-				AddedAt:    time.Now().Format("2006-01-02"),
+				AddedAt:     time.Now().Format("2006-01-02"),
 				Labels: map[string]string{
 					"trigger":     "ready-for-agent",
 					"in_progress": "in-progress",
@@ -97,12 +120,20 @@ func newRepoAddCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("repo %q added and enabled\n", ownerRepo)
+			fmt.Printf("  platform:    %s\n", info.Platform)
+			if info.BaseURL != "" {
+				fmt.Printf("  base url:    %s\n", info.BaseURL)
+			}
 			fmt.Printf("  base branch: %s\n", baseBranch)
 			if localPath != "" {
 				fmt.Printf("  local path:  %s\n", localPath)
 			}
 			fmt.Printf("Initializing ClawFlow labels in %s ...\n", ownerRepo)
-			if err := gh.InitLabels(ownerRepo); err != nil {
+			repoCfg := cfg.Repos[ownerRepo]
+			client, err := newVCSClient(repoCfg)
+			if err != nil {
+				fmt.Printf("  [warn] label init failed: %v\n", err)
+			} else if err := client.InitLabels(ownerRepo, vcs.ClawFlowLabels); err != nil {
 				fmt.Printf("  [warn] label init failed: %v\n", err)
 			}
 			return nil
@@ -112,6 +143,8 @@ func newRepoAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&baseBranch,  "base",        "main", "base branch for PRs")
 	cmd.Flags().StringVar(&localPath,   "local-path",  "",     "local clone path (for worktree)")
 	cmd.Flags().StringVar(&description, "description", "",     "short description")
+	cmd.Flags().StringVar(&platform,    "platform",    "",     "override platform: github or gitlab")
+	cmd.Flags().StringVar(&baseURL,     "base-url",    "",     "override instance URL for self-hosted GitLab")
 	return cmd
 }
 

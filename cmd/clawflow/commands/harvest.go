@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
-	gh "github.com/zhoushoujianwork/clawflow/internal/github"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // HarvestIssue is an issue returned in the harvest output.
@@ -56,14 +56,18 @@ func NewHarvestCmd() *cobra.Command {
 
 			maxConcurrent := cfg.Settings.MaxConcurrentAgents
 			if maxConcurrent <= 0 {
-				maxConcurrent = 3 // default
+				maxConcurrent = 3
 			}
 
-			// Count currently running agents across all repos
 			inProgressCount := 0
-			allIssuesByRepo := make(map[string][]gh.Issue)
-			for repoName := range repos {
-				issues, err := gh.ListOpenIssues(repoName)
+			allIssuesByRepo := make(map[string][]vcs.Issue)
+			for repoName, repoCfg := range repos {
+				client, err := newVCSClient(repoCfg)
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot create client for %s: %v\n", repoName, err)
+					continue
+				}
+				issues, err := client.ListOpenIssues(repoName)
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list issues for %s: %v\n", repoName, err)
 					continue
@@ -77,12 +81,12 @@ func NewHarvestCmd() *cobra.Command {
 			}
 
 			for repoName, issues := range allIssuesByRepo {
+				repoCfg := repos[repoName]
+				client, err := newVCSClient(repoCfg)
+				if err != nil {
+					continue
+				}
 				for _, issue := range issues {
-					// Skip PRs
-					if issue.HasLabel("pull_request") {
-						continue
-					}
-
 					evaluated := issue.HasLabel("agent-evaluated")
 					inProgress := issue.HasLabel("in-progress")
 					skipped := issue.HasLabel("agent-skipped")
@@ -91,7 +95,6 @@ func NewHarvestCmd() *cobra.Command {
 					queued := issue.HasLabel("agent-queued")
 
 					switch {
-					// Evaluate queue: no evaluation labels yet
 					case !evaluated && !inProgress && !skipped && !failed && !readyForAgent && !queued:
 						result.ToEvaluate = append(result.ToEvaluate, HarvestIssue{
 							Repo:   repoName,
@@ -100,14 +103,13 @@ func NewHarvestCmd() *cobra.Command {
 							Body:   issue.Body,
 						})
 
-					// Execute queue: approved by owner, evaluated, not in-progress
 					case readyForAgent && evaluated && !inProgress:
-						hasPR, err := gh.PRExistsForIssue(repoName, issue.Number)
+						hasPR, err := client.PRExistsForIssue(repoName, issue.Number)
 						if err != nil {
 							fmt.Fprintf(cmd.ErrOrStderr(), "warn: PR check failed for %s#%d: %v\n", repoName, issue.Number, err)
 						}
 						if hasPR {
-							continue // skip — PR already exists
+							continue
 						}
 						item := HarvestIssue{
 							Repo:         repoName,
@@ -123,10 +125,8 @@ func NewHarvestCmd() *cobra.Command {
 							result.ToQueue = append(result.ToQueue, item)
 						}
 
-					// Retry-eligible: has agent-evaluated, no in-progress, no open PR,
-					// and memory shows a prior success (merged PR)
 					case evaluated && !inProgress && !readyForAgent:
-						hasPR, err := gh.PRExistsForIssue(repoName, issue.Number)
+						hasPR, err := client.PRExistsForIssue(repoName, issue.Number)
 						if err != nil {
 							fmt.Fprintf(cmd.ErrOrStderr(), "warn: PR check failed for %s#%d: %v\n", repoName, issue.Number, err)
 						}

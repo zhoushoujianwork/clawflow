@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -14,6 +13,7 @@ func NewConfigCmd() *cobra.Command {
 		Short: "Manage ClawFlow configuration",
 	}
 	cmd.AddCommand(newConfigSetTokenCmd())
+	cmd.AddCommand(newConfigSetGitLabTokenCmd())
 	cmd.AddCommand(newConfigShowCmd())
 	return cmd
 }
@@ -23,30 +23,48 @@ func newConfigSetTokenCmd() *cobra.Command {
 		Use:   "set-token <gh-token>",
 		Short: "Store GitHub token in ~/.clawflow/config/credentials.yaml",
 		Long: `Saves the GitHub personal access token to ~/.clawflow/config/credentials.yaml (mode 0600).
-The token is used by clawflow harvest, status, and label commands.
 
 Required scopes: repo (full), read:org`,
 		Args:    cobra.ExactArgs(1),
 		Example: "  clawflow config set-token ghp_xxxxxxxxxxxx",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			token := args[0]
-			if token == "" {
-				return fmt.Errorf("token cannot be empty")
-			}
-
-			creds := &config.Credentials{GHToken: token}
-			if err := config.SaveCredentials(creds); err != nil {
-				return fmt.Errorf("failed to save token: %w", err)
-			}
-
-			// Also set in current process environment so immediate commands work
-			os.Setenv("GH_TOKEN", token)
-
-			fmt.Printf("GitHub token saved to %s\n", config.CredentialsPath())
-			fmt.Println("Token is loaded automatically on every clawflow run.")
-			return nil
+			return setToken(func(c *config.Credentials, v string) { c.GHToken = v }, args[0], "GitHub")
 		},
 	}
+}
+
+func newConfigSetGitLabTokenCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set-gitlab-token <token>",
+		Short: "Store GitLab token in ~/.clawflow/config/credentials.yaml",
+		Long: `Saves the GitLab personal access token to ~/.clawflow/config/credentials.yaml (mode 0600).
+
+Required scopes: api`,
+		Args:    cobra.ExactArgs(1),
+		Example: "  clawflow config set-gitlab-token glpat-xxxxxxxxxxxx",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setToken(func(c *config.Credentials, v string) { c.GitLabToken = v }, args[0], "GitLab")
+		},
+	}
+}
+
+func setToken(apply func(*config.Credentials, string), token, platform string) error {
+	if token == "" {
+		return fmt.Errorf("token cannot be empty")
+	}
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return err
+	}
+	if creds == nil {
+		creds = &config.Credentials{}
+	}
+	apply(creds, token)
+	if err := config.SaveCredentials(creds); err != nil {
+		return fmt.Errorf("failed to save token: %w", err)
+	}
+	fmt.Printf("%s token saved to %s\n", platform, config.CredentialsPath())
+	return nil
 }
 
 func newConfigShowCmd() *cobra.Command {
@@ -69,6 +87,12 @@ func newConfigShowCmd() *cobra.Command {
 				tokenStatus = "set (***" + creds.GHToken[max(0, len(creds.GHToken)-4):] + ")"
 			}
 			fmt.Printf("GH Token:     %s\n", tokenStatus)
+
+			glTokenStatus := "not set"
+			if creds != nil && creds.GitLabToken != "" {
+				glTokenStatus = "set (***" + creds.GitLabToken[max(0, len(creds.GitLabToken)-4):] + ")"
+			}
+			fmt.Printf("GitLab Token: %s\n", glTokenStatus)
 			fmt.Println()
 
 			fmt.Printf("Settings:\n")

@@ -2,9 +2,9 @@ BIN_DIR := $(HOME)/.clawflow/bin
 BINARY  := $(BIN_DIR)/clawflow
 SRC     := ./cmd/clawflow/
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS := -ldflags "-X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$(VERSION)"
+LDFLAGS := -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$(VERSION)"
 
-.PHONY: install build release clean
+.PHONY: install build release clean test fmt vet tidy dev
 
 # 构建并替换本地二进制
 install:
@@ -17,12 +17,31 @@ build:
 	go build $(LDFLAGS) -o clawflow $(SRC)
 	@echo "built → ./clawflow ($(VERSION))"
 
+# tidy + build，开发日常用
+dev: tidy install
+
 # 构建所有平台发版二进制
 release:
 	GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o clawflow_darwin_arm64  $(SRC)
 	GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o clawflow_darwin_amd64  $(SRC)
 	GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o clawflow_linux_amd64   $(SRC)
 	@echo "release binaries built ($(VERSION))"
+
+# 运行测试
+test:
+	go test -v -race ./...
+
+# 格式化
+fmt:
+	gofmt -s -w .
+
+# go vet
+vet:
+	go vet ./...
+
+# 整理依赖
+tidy:
+	go mod tidy
 
 clean:
 	rm -f clawflow clawflow_darwin_arm64 clawflow_darwin_amd64 clawflow_linux_amd64

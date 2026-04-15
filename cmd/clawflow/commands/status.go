@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
-	gh "github.com/zhoushoujianwork/clawflow/internal/github"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 func NewStatusCmd() *cobra.Command {
@@ -26,17 +26,23 @@ func NewStatusCmd() *cobra.Command {
 
 			fmt.Printf("ClawFlow status — %d repo(s) monitored\n\n", len(repos))
 
-			for repoName := range repos {
+			for repoName, repoCfg := range repos {
 				fmt.Printf("  %s\n", repoName)
 
-				issues, err := gh.ListOpenIssues(repoName)
+				client, err := newVCSClient(repoCfg)
+				if err != nil {
+					fmt.Printf("    error: %v\n\n", err)
+					continue
+				}
+
+				issues, err := client.ListOpenIssues(repoName)
 				if err != nil {
 					fmt.Printf("    error: %v\n\n", err)
 					continue
 				}
 
 				var toEvaluate, toExecute, inProgress, skipped, failed, retryEligible int
-				var retryIssues []gh.Issue
+				var retryIssues []vcs.Issue
 
 				for _, issue := range issues {
 					switch {
@@ -51,8 +57,7 @@ func NewStatusCmd() *cobra.Command {
 					case !issue.HasLabel("agent-evaluated"):
 						toEvaluate++
 					case issue.HasLabel("agent-evaluated") && !issue.HasLabel("in-progress") && !issue.HasLabel("ready-for-agent"):
-						// Check if retry-eligible: no open PR + memory has prior success
-						hasPR, _ := gh.PRExistsForIssue(repoName, issue.Number)
+						hasPR, _ := client.PRExistsForIssue(repoName, issue.Number)
 						if !hasPR && HasMergedPRInMemory(repoName, issue.Number) {
 							retryEligible++
 							retryIssues = append(retryIssues, issue)

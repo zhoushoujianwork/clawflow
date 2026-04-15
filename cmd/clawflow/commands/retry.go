@@ -8,7 +8,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
-	gh "github.com/zhoushoujianwork/clawflow/internal/github"
 )
 
 func NewRetryCmd() *cobra.Command {
@@ -20,11 +19,15 @@ func NewRetryCmd() *cobra.Command {
 		Short: "Re-trigger the pipeline for a previously processed issue",
 		Example: `  clawflow retry --repo owner/repo --issue 7`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+
 			// 1. Remove blocking labels so issue re-enters to_evaluate
 			labelsToRemove := []string{"agent-evaluated", "agent-failed", "agent-skipped"}
 			for _, label := range labelsToRemove {
-				if err := gh.RemoveLabel(repo, issue, label); err != nil {
-					// Ignore "label not found" errors — label may not exist
+				if err := client.RemoveLabel(repo, issue, label); err != nil {
 					if !isLabelNotFoundErr(err) {
 						fmt.Fprintf(os.Stderr, "warn: cannot remove label %q: %v\n", label, err)
 					}
@@ -66,7 +69,7 @@ func NewRetryCmd() *cobra.Command {
 
 			// 4. Post comment on the issue
 			commentBody := buildRetryComment(prevPRURL)
-			if err := gh.PostIssueComment(repo, issue, commentBody); err != nil {
+			if err := client.PostIssueComment(repo, issue, commentBody); err != nil {
 				fmt.Fprintf(os.Stderr, "warn: cannot post comment: %v\n", err)
 			}
 
