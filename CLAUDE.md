@@ -13,7 +13,7 @@
 ### 1. 打 Tag 并推送
 
 ```bash
-git tag v{x.y.z}
+git tag -a v{x.y.z} -m "{release message}"
 git push origin v{x.y.z}
 ```
 
@@ -25,6 +25,38 @@ GitHub Actions（`.github/workflows/release.yml`）会自动完成：
 - `v0.x.0` — 新功能（minor）
 - `v0.x.y` — bug 修复（patch）
 - `v1.0.0` — 首个稳定版
+
+#### Release Tag 描述规范
+
+Tag message 即 GitHub Release 的标题和正文，格式：
+
+```
+{一句话概括本版本核心变化}
+
+## What's New
+- {功能1}：{一句话说明用户能感知到的变化}
+- {功能2}：{同上}
+
+## Bug Fixes
+- {修复1}：{影响范围}
+
+## Breaking Changes（如有）
+- {变更说明}：{迁移方式}
+```
+
+示例：
+
+```
+feat: GitLab 支持 + 自动克隆缺失仓库
+
+## What's New
+- GitLab 支持（v11.11+）：可监控 GitLab 仓库的 issue，自动评估并提 MR
+- 自动克隆：repos.yaml 中配置的仓库本地路径不存在时自动 clone，无需手动操作
+- 标签自动初始化：`clawflow repo add` 时自动在目标仓库创建所需标签
+
+## Bug Fixes
+- 修复 GitHub URL 格式化问题（normalize 处理 https/ssh 混用场景）
+```
 
 ### 2. 验证用户可以自动更新
 
