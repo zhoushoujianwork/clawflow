@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # ── PATH ──────────────────────────────────────────────────────────────────────
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+export PATH="$HOME/.clawflow/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 # Ensure node is visible (claude-hud plugin requires it)
 if ! command -v node &>/dev/null; then
@@ -87,7 +87,7 @@ with open(path) as f:
                             print(text)
             elif t == 'result':
                 u = obj.get('usage', {})
-                cost = obj.get('cost_usd', 0)
+                cost = obj.get('total_cost_usd') or obj.get('cost_usd') or 0
                 dur  = obj.get('duration_ms', 0)
                 turns = obj.get('num_turns', 0)
                 print("")
