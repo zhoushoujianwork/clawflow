@@ -390,13 +390,43 @@ clawflow label add --repo {owner}/{repo} --issue {number} --label agent-queued
 
 对于 `ISSUES_TO_EXECUTE` 中的每个 issue：
 
-### Step 4.1 — 添加处理中标签
+### Step 4.1 — 检查历史 PR 状态
+
+在添加标签之前，先读取 memory 判断是否有历史记录：
+
+```bash
+PREV_ATTEMPTS=$(clawflow memory read --repo {owner}/{repo} --issue {number} 2>/dev/null || echo "")
+```
+
+如果 `PREV_ATTEMPTS` 包含 `status: success` 且有 `pr_url`，**必须验证 PR 实际状态**：
+
+```bash
+# GitHub
+gh pr view {pr_url} --json state,mergedAt --jq '{state,mergedAt}'
+
+# GitLab（MR）
+# 从 pr_url 提取 MR iid，调用 GET /projects/{id}/merge_requests/{iid}
+```
+
+| PR 状态 | 处理方式 |
+|---------|---------|
+| `merged` | PR 已合并，执行 Phase 5 成功清理，**不重新处理** |
+| `open` | PR 仍在 review，跳过本轮，**不重新处理** |
+| `closed`（未合并） | PR 被退回，清除旧 memory 记录，**继续执行修复** |
+
+**PR 被退回时**，在 issue 评论说明原因后继续：
+
+```bash
+gh issue comment {number} -R {owner}/{repo} --body "之前的 PR 已关闭未合并，ClawFlow 将重新处理此 issue。"
+```
+
+### Step 4.2 — 添加处理中标签
 
 ```bash
 clawflow label add --repo {owner}/{repo} --issue {number} --label in-progress
 ```
 
-### Step 4.2 — 创建 Git Worktree
+### Step 4.3 — 创建 Git Worktree
 
 ```bash
 WORKTREE_PATH=$(clawflow worktree create --repo {owner}/{repo} --issue {number})
