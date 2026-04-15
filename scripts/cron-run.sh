@@ -54,6 +54,7 @@ echo "▶ ClawFlow run  $START_TIME" >> "$LOG_FILE"
 echo "  repo:   $REPO_DIR" >> "$LOG_FILE"
 echo "  claude: $CLAUDE" >> "$LOG_FILE"
 echo "  node:   $(command -v node 2>/dev/null || echo 'not found')" >> "$LOG_FILE"
+echo "  clawflow: $(clawflow version 2>/dev/null || echo 'not found')" >> "$LOG_FILE"
 echo "  env:    ${ENV_FILE} $([ -f "$ENV_FILE" ] && echo '(loaded)' || echo '(not found)')" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
 
@@ -62,7 +63,7 @@ TMP_JSON=$(mktemp)
 TMP_ERR=$(mktemp)
 
 cd "$REPO_DIR"
-"$CLAUDE" -p "ClawFlow run" --output-format stream-json \
+"$CLAUDE" -p "ClawFlow run" --output-format stream-json --verbose \
   > "$TMP_JSON" 2>"$TMP_ERR" || EXIT_CODE=$?
 
 # ── Parse assistant output & token stats ──────────────────────────────────────
