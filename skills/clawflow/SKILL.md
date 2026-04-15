@@ -1,6 +1,6 @@
 ---
 name: clawflow
-description: "自动化 Issue → 评估 → 修复 → PR 流水线，同时支持用户主动使用 CLI 管理仓库、issue、token 配置。两阶段机制：(1) 评估阶段：自动扫描新 issues，评估置信度，评论提案并添加 `agent-evaluated` 标签；(2) 执行阶段：owner 确认后手动添加 `ready-for-agent` 标签，agent 执行修复并提交 PR。触发条件：(1) 用户说'ClawFlow run'、'检查 ClawFlow'；(2) 用户请求管理仓库/issue/配置；(3) cron 定时任务自动触发。关键约束：agent 不自己添加 `ready-for-agent` 标签，必须等待 owner 批准。"
+description: "ClawFlow Issue→Fix→PR 自动化流水线。触发条件：用户说 'ClawFlow run' / '检查 ClawFlow'；管理监控仓库（repo add/remove/list/enable/disable）；管理 issue（issue list/create/retry）；配置 token（config set-token）；cron 定时任务。两阶段：评估置信度 → owner 添加 ready-for-agent → 自动修复提 PR。"
 metadata:
   openclaw:
     requires:
