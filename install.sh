@@ -77,6 +77,7 @@ cp "$REPO_ROOT/skills/clawflow/SKILL.md" "$SKILL_DEST/SKILL.md"
 echo "  [ok] SKILL.md installed"
 
 # ---------- 2. init user data directory ----------
+mkdir -p "$CLAWFLOW_HOME/bin"
 mkdir -p "$CLAWFLOW_HOME/config"
 mkdir -p "$CLAWFLOW_HOME/memory/repos"
 
@@ -94,7 +95,6 @@ done
 if command -v go &>/dev/null; then
   echo ""
   echo "Building clawflow CLI..."
-  mkdir -p "$CLAWFLOW_HOME/bin"
   if go build -o "$CLAWFLOW_HOME/bin/clawflow" "$REPO_ROOT/cmd/clawflow/" 2>/dev/null; then
     echo "  [ok] clawflow binary installed to ~/.clawflow/bin/clawflow"
     echo "  [tip] Add to PATH: export PATH=\"\$HOME/.clawflow/bin:\$PATH\""
