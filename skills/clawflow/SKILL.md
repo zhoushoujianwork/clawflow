@@ -1,6 +1,6 @@
 ---
 name: clawflow
-description: "自动化 Issue → 评估 → 修复 → PR 流水线。两阶段机制：(1) 评估阶段：自动扫描新 issues，评估置信度，评论提案并添加 `agent-evaluated` 标签；(2) 执行阶段：owner 确认后手动添加 `ready-for-agent` 标签，agent 执行修复并提交 PR。触发条件：(1) 用户说'ClawFlow run'、'检查 ClawFlow'；(2) cron 定时任务自动触发。关键约束：agent 不自己添加 `ready-for-agent` 标签，必须等待 owner 批准。"
+description: "自动化 Issue → 评估 → 修复 → PR 流水线，同时支持用户主动使用 CLI 管理仓库、issue、token 配置。两阶段机制：(1) 评估阶段：自动扫描新 issues，评估置信度，评论提案并添加 `agent-evaluated` 标签；(2) 执行阶段：owner 确认后手动添加 `ready-for-agent` 标签，agent 执行修复并提交 PR。触发条件：(1) 用户说'ClawFlow run'、'检查 ClawFlow'；(2) 用户请求管理仓库/issue/配置；(3) cron 定时任务自动触发。关键约束：agent 不自己添加 `ready-for-agent` 标签，必须等待 owner 批准。"
 metadata:
   openclaw:
     requires:
@@ -31,6 +31,47 @@ metadata:
 ```bash
 # 验证环境
 clawflow status
+```
+
+---
+
+## 用户 CLI 操作
+
+当用户主动请求管理操作时，直接调用对应 CLI，不需要走 Phase 1-6 流水线。
+
+### 仓库管理
+
+```bash
+clawflow repo list                          # 查看所有监控仓库
+clawflow repo add owner/repo                # 添加仓库（GitHub）
+clawflow repo add https://gitlab.com/ns/repo  # 添加仓库（GitLab）
+clawflow repo remove owner/repo             # 移除仓库
+clawflow repo enable owner/repo             # 启用
+clawflow repo disable owner/repo            # 暂停监控
+```
+
+### Issue 管理
+
+```bash
+clawflow issue list --repo owner/repo       # 列出仓库 open issues
+clawflow issue create --repo owner/repo \
+  --title "bug: xxx" --body "details..."    # 创建 issue
+clawflow retry --repo owner/repo --issue 7  # 重新触发已处理 issue 的流水线
+```
+
+### Token 配置
+
+```bash
+clawflow config set-token                   # 设置 GitHub token
+clawflow config set-gitlab-token            # 设置 GitLab token
+clawflow config show                        # 查看当前配置
+```
+
+### 更新
+
+```bash
+clawflow update                             # 更新 binary + SKILL.md
+clawflow update --from-source               # 从本地源码重新构建（开发用）
 ```
 
 ---
