@@ -9,8 +9,36 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Unit tests
+        run: go test -v -race ./...
+
+      - name: CLI smoke tests
+        run: |
+          go build -o clawflow ./cmd/clawflow/
+          ./clawflow --help
+          ./clawflow version
+          ./clawflow repo --help
+          ./clawflow issue --help
+          ./clawflow label --help
+          ./clawflow harvest --help
+          ./clawflow config --help
+          ./clawflow status --help
+          ./clawflow retry --help
+          ./clawflow pr-check --help
+
   build:
     name: Build
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:
