@@ -226,6 +226,31 @@ func (c *Client) RemoveLabel(repo string, issueNumber int, labels ...string) err
 	return nil
 }
 
+func (c *Client) ListIssueComments(repo string, issueNumber int) ([]string, error) {
+	path := fmt.Sprintf("/projects/%s/issues/%d/notes?per_page=100", projectID(repo), issueNumber)
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("gitlab list comments: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		Body   string `json:"body"`
+		System bool   `json:"system"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range raw {
+		if !r.System {
+			out = append(out, r.Body)
+		}
+	}
+	return out, nil
+}
+
 func (c *Client) PostIssueComment(repo string, issueNumber int, body string) error {
 	path := fmt.Sprintf("/projects/%s/issues/%d/notes", projectID(repo), issueNumber)
 	form := url.Values{"body": {body}}

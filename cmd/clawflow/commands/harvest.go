@@ -11,11 +11,12 @@ import (
 
 // HarvestIssue is an issue returned in the harvest output.
 type HarvestIssue struct {
-	Repo         string `json:"repo"`
-	Number       int    `json:"number"`
-	Title        string `json:"title"`
-	Body         string `json:"body"`
-	WorktreePath string `json:"worktree_path,omitempty"`
+	Repo         string   `json:"repo"`
+	Number       int      `json:"number"`
+	Title        string   `json:"title"`
+	Body         string   `json:"body"`
+	Comments     []string `json:"comments,omitempty"`
+	WorktreePath string   `json:"worktree_path,omitempty"`
 }
 
 // HarvestResult is the JSON output of clawflow harvest.
@@ -96,11 +97,16 @@ func NewHarvestCmd() *cobra.Command {
 
 					switch {
 					case !evaluated && !inProgress && !skipped && !failed && !readyForAgent && !queued:
+						comments, err := client.ListIssueComments(repoName, issue.Number)
+						if err != nil {
+							fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list comments for %s#%d: %v\n", repoName, issue.Number, err)
+						}
 						result.ToEvaluate = append(result.ToEvaluate, HarvestIssue{
-							Repo:   repoName,
-							Number: issue.Number,
-							Title:  issue.Title,
-							Body:   issue.Body,
+							Repo:     repoName,
+							Number:   issue.Number,
+							Title:    issue.Title,
+							Body:     issue.Body,
+							Comments: comments,
 						})
 
 					case readyForAgent && evaluated && !inProgress:

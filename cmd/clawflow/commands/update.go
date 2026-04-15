@@ -36,12 +36,14 @@ and updates SKILL.md in your agent's skills directory.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			record, err := loadInstallRecord()
 			if err != nil {
-				return fmt.Errorf("install record not found — run install.sh first: %w", err)
+				// No install record — manual curl install. Use defaults.
+				record = defaultInstallRecord()
+				fmt.Printf("Updating ClawFlow (no install record found, using defaults)...\n")
+			} else {
+				fmt.Printf("Updating ClawFlow...\n")
+				fmt.Printf("  Agent:     %s\n", record.Agent)
+				fmt.Printf("  Skill dir: %s\n", record.SkillDir)
 			}
-
-			fmt.Printf("Updating ClawFlow...\n")
-			fmt.Printf("  Agent:     %s\n", record.Agent)
-			fmt.Printf("  Skill dir: %s\n", record.SkillDir)
 			fmt.Println()
 
 			// ---------- 1. update binary ----------
@@ -75,6 +77,22 @@ and updates SKILL.md in your agent's skills directory.`,
 
 	cmd.Flags().BoolVar(&fromSource, "from-source", false, "Rebuild binary from local source instead of downloading")
 	return cmd
+}
+
+// defaultInstallRecord returns a best-effort record for manual (curl) installs.
+func defaultInstallRecord() *installRecord {
+	home, _ := os.UserHomeDir()
+	// Try to detect agent skill dir from common locations.
+	candidates := []struct{ agent, dir string }{
+		{"claude", filepath.Join(home, ".claude", "skills", "clawflow")},
+		{"openclaw", filepath.Join(home, ".openclaw", "skills", "clawflow")},
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c.dir); err == nil {
+			return &installRecord{Agent: c.agent, SkillDir: c.dir}
+		}
+	}
+	return &installRecord{}
 }
 
 // loadInstallRecord reads ~/.clawflow/config/install.yaml.

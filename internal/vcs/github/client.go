@@ -180,6 +180,32 @@ func (c *Client) RemoveLabel(repo string, issueNumber int, labels ...string) err
 	return nil
 }
 
+func (c *Client) ListIssueComments(repo string, issueNumber int) ([]string, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", owner, name, issueNumber)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github list comments: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]string, len(raw))
+	for i, r := range raw {
+		out[i] = r.Body
+	}
+	return out, nil
+}
+
 func (c *Client) PostIssueComment(repo string, issueNumber int, body string) error {
 	owner, name, err := splitRepo(repo)
 	if err != nil {

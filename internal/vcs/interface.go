@@ -66,6 +66,7 @@ type Client interface {
 	// Issues
 	ListOpenIssues(repo string) ([]Issue, error)
 	ListIssues(repo string, state string, labels []string) ([]Issue, error)
+	ListIssueComments(repo string, issueNumber int) ([]string, error)
 	CloseIssue(repo string, issueNumber int) error
 	CreateIssue(repo string, title, body string) (Issue, error)
 	PostIssueComment(repo string, issueNumber int, body string) error
