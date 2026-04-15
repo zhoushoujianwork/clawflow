@@ -260,6 +260,196 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 	return vcs.Issue{Number: raw.IID, Title: raw.Title, Body: raw.Body}, nil
 }
 
+func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.Issue, error) {
+	// GitLab uses "opened"/"closed" instead of "open"/"closed"
+	glState := state
+	if state == "open" {
+		glState = "opened"
+	}
+	path := fmt.Sprintf("/projects/%s/issues?state=%s&per_page=100", projectID(repo), glState)
+	if len(labels) > 0 {
+		path += "&labels=" + strings.Join(labels, ",")
+	}
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("gitlab list issues: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		IID    int      `json:"iid"`
+		Title  string   `json:"title"`
+		Body   string   `json:"description"`
+		State  string   `json:"state"`
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	issues := make([]vcs.Issue, len(raw))
+	for i, r := range raw {
+		s := r.State
+		if s == "opened" {
+			s = "open"
+		}
+		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, State: s, Labels: r.Labels}
+	}
+	return issues, nil
+}
+
+func (c *Client) CloseIssue(repo string, issueNumber int) error {
+	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
+	form := url.Values{"state_event": {"close"}}
+	data, status, err := c.do("PUT", path, form)
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return fmt.Errorf("gitlab close issue: HTTP %d: %s", status, data)
+	}
+	return nil
+}
+
+func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
+	glState := state
+	if state == "open" {
+		glState = "opened"
+	} else if state == "merged" {
+		glState = "merged"
+	}
+	path := fmt.Sprintf("/projects/%s/merge_requests?state=%s&per_page=100", projectID(repo), glState)
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("gitlab list MRs: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		IID          int    `json:"iid"`
+		Title        string `json:"title"`
+		Description  string `json:"description"`
+		State        string `json:"state"`
+		WebURL       string `json:"web_url"`
+		MergedAt     string `json:"merged_at"`
+		SourceBranch string `json:"source_branch"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	prs := make([]vcs.PR, len(raw))
+	for i, r := range raw {
+		s := r.State
+		if s == "opened" {
+			s = "open"
+		}
+		prs[i] = vcs.PR{Number: r.IID, Title: r.Title, Body: r.Description, State: s, HeadBranch: r.SourceBranch, MergedAt: r.MergedAt, URL: r.WebURL}
+	}
+	return prs, nil
+}
+
+func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
+	path := fmt.Sprintf("/projects/%s/merge_requests", projectID(repo))
+	form := url.Values{
+		"title":         {opts.Title},
+		"description":   {opts.Body},
+		"source_branch": {opts.Head},
+		"target_branch": {opts.Base},
+	}
+	data, status, err := c.do("POST", path, form)
+	if err != nil {
+		return vcs.PR{}, err
+	}
+	if status != 201 {
+		return vcs.PR{}, fmt.Errorf("gitlab create MR: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		IID          int    `json:"iid"`
+		Title        string `json:"title"`
+		State        string `json:"state"`
+		WebURL       string `json:"web_url"`
+		SourceBranch string `json:"source_branch"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.PR{}, err
+	}
+	s := raw.State
+	if s == "opened" {
+		s = "open"
+	}
+	return vcs.PR{Number: raw.IID, Title: raw.Title, State: s, HeadBranch: raw.SourceBranch, URL: raw.WebURL}, nil
+}
+
+func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d", projectID(repo), prNumber)
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return vcs.PR{}, err
+	}
+	if status != 200 {
+		return vcs.PR{}, fmt.Errorf("gitlab get MR: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		IID          int    `json:"iid"`
+		Title        string `json:"title"`
+		Description  string `json:"description"`
+		State        string `json:"state"`
+		WebURL       string `json:"web_url"`
+		MergedAt     string `json:"merged_at"`
+		SourceBranch string `json:"source_branch"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.PR{}, err
+	}
+	s := raw.State
+	if s == "opened" {
+		s = "open"
+	}
+	return vcs.PR{Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, MergedAt: raw.MergedAt, URL: raw.WebURL}, nil
+}
+
+func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), prNumber)
+	form := url.Values{"body": {body}}
+	_, status, err := c.do("POST", path, form)
+	if err != nil {
+		return err
+	}
+	if status != 201 {
+		return fmt.Errorf("gitlab post MR comment: HTTP %d", status)
+	}
+	return nil
+}
+
+func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/pipelines?per_page=1", projectID(repo), prNumber)
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return vcs.CIStatusNone, err
+	}
+	if status != 200 {
+		return vcs.CIStatusNone, fmt.Errorf("gitlab get MR pipelines: HTTP %d", status)
+	}
+	var raw []struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.CIStatusNone, err
+	}
+	if len(raw) == 0 {
+		return vcs.CIStatusNone, nil
+	}
+	switch raw[0].Status {
+	case "success":
+		return vcs.CIStatusSuccess, nil
+	case "failed", "canceled":
+		return vcs.CIStatusFailure, nil
+	default:
+		return vcs.CIStatusPending, nil
+	}
+}
+
 func (c *Client) InitLabels(repo string, labels []vcs.Label) error {
 	path := fmt.Sprintf("/projects/%s/labels?per_page=100", projectID(repo))
 	data, status, err := c.doJSON("GET", path, nil)

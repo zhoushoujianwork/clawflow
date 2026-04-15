@@ -264,6 +264,214 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 	return vcs.Issue{Number: raw.Number, Title: raw.Title, Body: raw.Body}, nil
 }
 
+func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.Issue, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues?state=%s&per_page=100&filter=all", owner, name, state)
+	if len(labels) > 0 {
+		path += "&labels=" + strings.Join(labels, ",")
+	}
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github list issues: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		Body        string `json:"body"`
+		State       string `json:"state"`
+		PullRequest *struct{} `json:"pull_request"`
+		Labels      []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	var issues []vcs.Issue
+	for _, r := range raw {
+		if r.PullRequest != nil {
+			continue
+		}
+		issue := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, State: r.State}
+		for _, l := range r.Labels {
+			issue.Labels = append(issue.Labels, l.Name)
+		}
+		issues = append(issues, issue)
+	}
+	return issues, nil
+}
+
+func (c *Client) CloseIssue(repo string, issueNumber int) error {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d", owner, name, issueNumber)
+	_, status, err := c.do("PATCH", path, map[string]string{"state": "closed"})
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return fmt.Errorf("github close issue: HTTP %d", status)
+	}
+	return nil
+}
+
+func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls?state=%s&per_page=100", owner, name, state)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github list PRs: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		Number   int    `json:"number"`
+		Title    string `json:"title"`
+		Body     string `json:"body"`
+		State    string `json:"state"`
+		HTMLURL  string `json:"html_url"`
+		MergedAt string `json:"merged_at"`
+		Head     struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	prs := make([]vcs.PR, len(raw))
+	for i, r := range raw {
+		s := r.State
+		if r.MergedAt != "" {
+			s = "merged"
+		}
+		prs[i] = vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: s, HeadBranch: r.Head.Ref, MergedAt: r.MergedAt, URL: r.HTMLURL}
+	}
+	return prs, nil
+}
+
+func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return vcs.PR{}, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls", owner, name)
+	data, status, err := c.do("POST", path, map[string]string{
+		"title": opts.Title,
+		"body":  opts.Body,
+		"head":  opts.Head,
+		"base":  opts.Base,
+	})
+	if err != nil {
+		return vcs.PR{}, err
+	}
+	if status != 201 {
+		return vcs.PR{}, fmt.Errorf("github create PR: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		HTMLURL string `json:"html_url"`
+		State   string `json:"state"`
+		Head    struct{ Ref string `json:"ref"` } `json:"head"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.PR{}, err
+	}
+	return vcs.PR{Number: raw.Number, Title: raw.Title, State: raw.State, HeadBranch: raw.Head.Ref, URL: raw.HTMLURL}, nil
+}
+
+func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return vcs.PR{}, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, name, prNumber)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return vcs.PR{}, err
+	}
+	if status != 200 {
+		return vcs.PR{}, fmt.Errorf("github get PR: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		Number   int    `json:"number"`
+		Title    string `json:"title"`
+		Body     string `json:"body"`
+		State    string `json:"state"`
+		HTMLURL  string `json:"html_url"`
+		MergedAt string `json:"merged_at"`
+		Head     struct{ Ref string `json:"ref"` } `json:"head"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.PR{}, err
+	}
+	s := raw.State
+	if raw.MergedAt != "" {
+		s = "merged"
+	}
+	return vcs.PR{Number: raw.Number, Title: raw.Title, Body: raw.Body, State: s, HeadBranch: raw.Head.Ref, MergedAt: raw.MergedAt, URL: raw.HTMLURL}, nil
+}
+
+func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
+	// GitHub PR comments use the issues endpoint
+	return c.PostIssueComment(repo, prNumber, body)
+}
+
+func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return vcs.CIStatusNone, err
+	}
+	// Get the PR head SHA first
+	pr, err := c.GetPR(repo, prNumber)
+	if err != nil {
+		return vcs.CIStatusNone, err
+	}
+	// Get check runs for the head branch
+	path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", owner, name, pr.HeadBranch)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return vcs.CIStatusNone, err
+	}
+	if status != 200 {
+		return vcs.CIStatusNone, fmt.Errorf("github get check runs: HTTP %d", status)
+	}
+	var raw struct {
+		TotalCount int `json:"total_count"`
+		CheckRuns  []struct {
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
+		} `json:"check_runs"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.CIStatusNone, err
+	}
+	if raw.TotalCount == 0 {
+		return vcs.CIStatusNone, nil
+	}
+	for _, r := range raw.CheckRuns {
+		if r.Status != "completed" {
+			return vcs.CIStatusPending, nil
+		}
+		if r.Conclusion != "success" && r.Conclusion != "skipped" && r.Conclusion != "neutral" {
+			return vcs.CIStatusFailure, nil
+		}
+	}
+	return vcs.CIStatusSuccess, nil
+}
+
 func splitRepo(repo string) (owner, name string, err error) {
 	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) != 2 {

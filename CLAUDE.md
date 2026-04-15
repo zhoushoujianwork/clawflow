@@ -6,7 +6,21 @@
 
 ---
 
-## 发版规范
+## 工具规范
+
+**禁止使用 `gh` CLI**，所有 VCS 操作（issue、PR、label、comment）统一使用 `clawflow` 命令：
+
+```bash
+clawflow issue list/create/comment/close
+clawflow pr list/create/view/comment/ci-wait
+clawflow label add/remove
+```
+
+`gh` 仅允许在 `clawflow update` 内部实现中使用（拉取 release assets），其他场景一律禁止。
+
+---
+
+
 
 每次新版本发布只需两步：
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 func NewIssueCmd() *cobra.Command {
@@ -14,13 +14,13 @@ func NewIssueCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newIssueCreateCmd())
 	cmd.AddCommand(newIssueListCmd())
+	cmd.AddCommand(newIssueCommentCmd())
+	cmd.AddCommand(newIssueCloseCmd())
 	return cmd
 }
 
 func newIssueCreateCmd() *cobra.Command {
-	var repo string
-	var title string
-	var body string
+	var repo, title, body string
 
 	cmd := &cobra.Command{
 		Use:     "create",
@@ -48,46 +48,98 @@ func newIssueCreateCmd() *cobra.Command {
 }
 
 func newIssueListCmd() *cobra.Command {
-	var repo string
+	var repo, state string
+	var labels []string
 
 	cmd := &cobra.Command{
 		Use:     "list",
-		Short:   "List open issues in a repository",
+		Short:   "List issues in a repository",
 		Aliases: []string{"ls"},
-		Example: "  clawflow issue list --repo owner/repo",
+		Example: "  clawflow issue list --repo owner/repo\n  clawflow issue list --repo owner/repo --state closed --label agent-evaluated",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			client, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
-			info, err := config.ParseRepoInput(repo, cfg.Settings.GitLabHosts)
-			if err != nil {
-				return err
+			var issues []vcs.Issue
+			if state == "open" && len(labels) == 0 {
+				issues, err = client.ListOpenIssues(repo)
+			} else {
+				issues, err = client.ListIssues(repo, state, labels)
 			}
-			repoCfg, ok := cfg.Repos[info.OwnerRepo]
-			if !ok {
-				return fmt.Errorf("repo %q not found in config", info.OwnerRepo)
-			}
-			client, err := newVCSClient(repoCfg)
-			if err != nil {
-				return err
-			}
-			issues, err := client.ListOpenIssues(info.OwnerRepo)
 			if err != nil {
 				return err
 			}
 			if len(issues) == 0 {
-				fmt.Printf("no open issues in %s\n", info.OwnerRepo)
+				fmt.Printf("no issues in %s\n", repo)
 				return nil
 			}
-			fmt.Printf("%-6s  %s\n", "NUMBER", "TITLE")
+			fmt.Printf("%-6s  %-8s  %s\n", "NUMBER", "STATE", "TITLE")
 			for _, i := range issues {
-				fmt.Printf("#%-5d  %s\n", i.Number, i.Title)
+				fmt.Printf("#%-5d  %-8s  %s\n", i.Number, i.State, i.Title)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().StringVar(&state, "state", "open", "issue state: open, closed, all")
+	cmd.Flags().StringArrayVar(&labels, "label", nil, "filter by label (repeatable)")
 	_ = cmd.MarkFlagRequired("repo")
+	return cmd
+}
+
+func newIssueCommentCmd() *cobra.Command {
+	var repo, body string
+	var issue int
+
+	cmd := &cobra.Command{
+		Use:     "comment",
+		Short:   "Post a comment on an issue",
+		Example: "  clawflow issue comment --repo owner/repo --issue 7 --body \"looks good\"",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			if err := client.PostIssueComment(repo, issue, body); err != nil {
+				return err
+			}
+			fmt.Printf("commented on %s#%d\n", repo, issue)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
+	cmd.Flags().StringVar(&body, "body", "", "comment body (required)")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("issue")
+	_ = cmd.MarkFlagRequired("body")
+	return cmd
+}
+
+func newIssueCloseCmd() *cobra.Command {
+	var repo string
+	var issue int
+
+	cmd := &cobra.Command{
+		Use:     "close",
+		Short:   "Close an issue",
+		Example: "  clawflow issue close --repo owner/repo --issue 7",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			if err := client.CloseIssue(repo, issue); err != nil {
+				return err
+			}
+			fmt.Printf("closed %s#%d\n", repo, issue)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("issue")
 	return cmd
 }
