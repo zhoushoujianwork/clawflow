@@ -15,6 +15,8 @@ func NewIssueCmd() *cobra.Command {
 	cmd.AddCommand(newIssueCreateCmd())
 	cmd.AddCommand(newIssueListCmd())
 	cmd.AddCommand(newIssueCommentCmd())
+	cmd.AddCommand(newIssueCommentListCmd())
+	cmd.AddCommand(newIssueCommentDeleteCmd())
 	cmd.AddCommand(newIssueCloseCmd())
 	cmd.AddCommand(newIssueUnblockCmd())
 	return cmd
@@ -140,6 +142,100 @@ func newIssueCloseCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("issue")
+	return cmd
+}
+
+func newIssueCommentListCmd() *cobra.Command {
+	var repo string
+	var issue int
+
+	cmd := &cobra.Command{
+		Use:     "comment-list",
+		Short:   "List comments on an issue with IDs and authors",
+		Example: "  clawflow issue comment-list --repo owner/repo --issue 7",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			comments, err := client.ListIssueCommentsDetail(repo, issue)
+			if err != nil {
+				return err
+			}
+			if len(comments) == 0 {
+				fmt.Printf("no comments on %s#%d\n", repo, issue)
+				return nil
+			}
+			fmt.Printf("%-12s  %-20s  %s\n", "ID", "AUTHOR", "BODY")
+			for _, c := range comments {
+				body := c.Body
+				if len(body) > 60 {
+					body = body[:57] + "..."
+				}
+				fmt.Printf("%-12d  %-20s  %s\n", c.ID, c.Author, body)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("issue")
+	return cmd
+}
+
+func newIssueCommentDeleteCmd() *cobra.Command {
+	var repo, author string
+	var issue int
+	var commentID int64
+
+	cmd := &cobra.Command{
+		Use:   "comment-delete",
+		Short: "Delete a comment (by ID) or all comments by an author on an issue",
+		Example: "  clawflow issue comment-delete --repo owner/repo --issue 7 --comment-id 123456\n" +
+			"  clawflow issue comment-delete --repo owner/repo --issue 7 --author bot-user",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if commentID == 0 && author == "" {
+				return fmt.Errorf("provide --comment-id or --author")
+			}
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			// Single comment delete by ID
+			if commentID != 0 {
+				if err := client.DeleteIssueComment(repo, issue, commentID); err != nil {
+					return err
+				}
+				fmt.Printf("deleted comment %d on %s#%d\n", commentID, repo, issue)
+				return nil
+			}
+			// Batch delete by author
+			comments, err := client.ListIssueCommentsDetail(repo, issue)
+			if err != nil {
+				return err
+			}
+			deleted := 0
+			for _, c := range comments {
+				if c.Author != author {
+					continue
+				}
+				if err := client.DeleteIssueComment(repo, issue, c.ID); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot delete comment %d: %v\n", c.ID, err)
+					continue
+				}
+				deleted++
+			}
+			fmt.Printf("deleted %d comment(s) by %q on %s#%d\n", deleted, author, repo, issue)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
+	cmd.Flags().Int64Var(&commentID, "comment-id", 0, "delete a specific comment by ID")
+	cmd.Flags().StringVar(&author, "author", "", "delete all comments by this author")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("issue")
 	return cmd

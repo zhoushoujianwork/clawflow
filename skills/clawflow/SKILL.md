@@ -63,7 +63,20 @@ clawflow issue comment --repo owner/repo --issue 7 \
   --body "comment text"                                        # 发表评论
 clawflow issue close --repo owner/repo --issue 7               # 关闭 issue
 clawflow retry --repo owner/repo --issue 7                     # 重新触发流水线
+clawflow issue unblock --repo owner/repo --issue 7             # 手动检查并解锁单个 blocked issue
+clawflow unblock-scan --repo owner/repo                        # 扫描所有 blocked issue，自动解锁依赖已满足的
 ```
+
+### 依赖声明语法
+
+在 issue body 中用 HTML 注释声明依赖，harvest 会自动解析：
+
+```
+<!-- clawflow:depends-on #N -->        # 依赖另一个 issue 关闭
+<!-- clawflow:depends-on-pr #N -->     # 依赖某个 PR 合并
+```
+
+被依赖的 issue/PR 满足条件后，harvest 自动移除 `blocked` 标签解锁下游 issue。
 
 ### PR / MR 管理
 
@@ -122,9 +135,11 @@ clawflow harvest
 }
 ```
 
-- `to_evaluate` — 新 issue，未评估，无 agent 标签
+- `to_evaluate` — 新 issue，未评估，无 agent 标签，**无 `blocked` 标签**
 - `to_execute` — 已有 `ready-for-agent` + `agent-evaluated`，无 in-progress，无已开放 PR，且当前并发数未超限
 - `to_queue` — 同上但当前并发已满（`in-progress` 数量 >= `max_concurrent_agents`），等待下次调度
+
+> **`blocked` 标签**：带有 `blocked` 标签的 issue 会被 harvest 完全跳过。harvest 同时会扫描所有 blocked issue 的依赖声明（`depends-on` / `depends-on-pr`），依赖满足时自动移除 `blocked` 标签解锁下游 issue。
 
 将两个列表分别存为 `ISSUES_TO_EVALUATE` 和 `ISSUES_TO_EXECUTE`，`to_queue` 存为 `ISSUES_TO_QUEUE`。
 
@@ -627,12 +642,16 @@ clawflow worktree remove --repo {owner}/{repo} --issue {number}
     ↓
 [Phase 2] clawflow harvest
     ↓
+┌─────────────────────────────────────────┐
+│ 带 blocked 标签 → 跳过，等待依赖满足自动解锁 │
+└─────────────────────────────────────────┘
+    ↓（无 blocked）
 [Phase 3] 评估 → agent-evaluated + 评论
     ↓
-┌─────────────────────────────────────┐
+┌─────────────────────────────────────────┐
 │ 高置信度: 等待 owner 添加 ready-for-agent │
 │ 低置信度: agent-skipped, 等待补充信息    │
-└─────────────────────────────────────┘
+└─────────────────────────────────────────┘
     ↓
 [owner 添加 ready-for-agent]
     ↓

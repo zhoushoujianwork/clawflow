@@ -1,6 +1,13 @@
 // Package vcs defines the platform-agnostic VCS client interface.
 package vcs
 
+// IssueComment represents a single comment on an issue.
+type IssueComment struct {
+	ID     int64
+	Author string
+	Body   string
+}
+
 // Issue represents a VCS issue/ticket.
 type Issue struct {
 	Number int
@@ -67,9 +74,11 @@ type Client interface {
 	ListOpenIssues(repo string) ([]Issue, error)
 	ListIssues(repo string, state string, labels []string) ([]Issue, error)
 	ListIssueComments(repo string, issueNumber int) ([]string, error)
+	ListIssueCommentsDetail(repo string, issueNumber int) ([]IssueComment, error)
 	CloseIssue(repo string, issueNumber int) error
 	CreateIssue(repo string, title, body string) (Issue, error)
 	PostIssueComment(repo string, issueNumber int, body string) error
+	DeleteIssueComment(repo string, issueNumber int, commentID int64) error
 
 	// Labels
 	AddLabel(repo string, issueNumber int, labels ...string) error

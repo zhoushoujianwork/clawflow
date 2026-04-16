@@ -264,6 +264,47 @@ func (c *Client) PostIssueComment(repo string, issueNumber int, body string) err
 	return nil
 }
 
+func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.IssueComment, error) {
+	path := fmt.Sprintf("/projects/%s/issues/%d/notes?per_page=100", projectID(repo), issueNumber)
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("gitlab list comments: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		ID     int64  `json:"id"`
+		Body   string `json:"body"`
+		System bool   `json:"system"`
+		Author struct {
+			Username string `json:"username"`
+		} `json:"author"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	var out []vcs.IssueComment
+	for _, r := range raw {
+		if !r.System {
+			out = append(out, vcs.IssueComment{ID: r.ID, Author: r.Author.Username, Body: r.Body})
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) DeleteIssueComment(repo string, issueNumber int, commentID int64) error {
+	path := fmt.Sprintf("/projects/%s/issues/%d/notes/%d", projectID(repo), issueNumber, commentID)
+	_, status, err := c.do("DELETE", path, nil)
+	if err != nil {
+		return err
+	}
+	if status != 204 {
+		return fmt.Errorf("gitlab delete comment: HTTP %d", status)
+	}
+	return nil
+}
+
 func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error) {
 	path := fmt.Sprintf("/projects/%s/issues", projectID(repo))
 	form := url.Values{"title": {title}, "description": {body}}

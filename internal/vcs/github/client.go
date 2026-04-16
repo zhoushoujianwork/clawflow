@@ -222,6 +222,52 @@ func (c *Client) PostIssueComment(repo string, issueNumber int, body string) err
 	return nil
 }
 
+func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.IssueComment, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", owner, name, issueNumber)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github list comments: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]vcs.IssueComment, len(raw))
+	for i, r := range raw {
+		out[i] = vcs.IssueComment{ID: r.ID, Author: r.User.Login, Body: r.Body}
+	}
+	return out, nil
+}
+
+func (c *Client) DeleteIssueComment(repo string, _ int, commentID int64) error {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, name, commentID)
+	_, status, err := c.do("DELETE", path, nil)
+	if err != nil {
+		return err
+	}
+	if status != 204 {
+		return fmt.Errorf("github delete comment: HTTP %d", status)
+	}
+	return nil
+}
+
 func (c *Client) InitLabels(repo string, labels []vcs.Label) error {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
