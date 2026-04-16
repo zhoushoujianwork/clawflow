@@ -220,7 +220,14 @@ clawflow issue close --repo {owner}/{repo} --issue {number}
 
 ### 评估策略（按类型区分）
 
-根据 issue 的标签类型，采用不同的评估策略：
+根据 issue 的 `labels` 字段，采用不同的评估策略：
+
+**类型判断规则（按优先级）：**
+1. labels 包含 `bug` → Bug 类型评估
+2. labels 包含 `enhancement` 或 `feat` → Feature 类型评估
+3. 以上均不包含 → 通用评估（fallback）
+
+---
 
 #### Bug 类型评估
 
@@ -253,6 +260,14 @@ clawflow issue close --repo {owner}/{repo} --issue {number}
 - **改动范围**：需要改动哪些文件/模块？
 - **架构对齐分析**：设计方案是否遵循项目的整体架构原则？是否存在架构偏离风险？
 - **Owner 确认标记**：是否需要 owner 在设计层面进一步确认？（是/否）
+
+#### 通用评估（无类型标签 fallback）
+
+对于没有 `bug`、`enhancement`、`feat` 标签的 issue，先推断类型再评估：
+
+1. **类型推断**：根据 title 和 body 判断是 bug（描述异常行为/错误）还是 feature（描述新功能/改进），并在评估报告中注明推断结果
+2. **评估维度**：按推断类型套用对应的 Bug 或 Feature 评估维度
+3. **标签建议**：在评估评论中建议 owner 补充对应类型标签（`bug` 或 `enhancement`）
 
 **置信度 = (维度1 + 维度2 + 维度3) / 3**
 

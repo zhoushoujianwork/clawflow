@@ -15,6 +15,7 @@ type HarvestIssue struct {
 	Number       int      `json:"number"`
 	Title        string   `json:"title"`
 	Body         string   `json:"body"`
+	Labels       []string `json:"labels,omitempty"`
 	Comments     []string `json:"comments,omitempty"`
 	WorktreePath string   `json:"worktree_path,omitempty"`
 }
@@ -106,6 +107,7 @@ func NewHarvestCmd() *cobra.Command {
 							Number:   issue.Number,
 							Title:    issue.Title,
 							Body:     issue.Body,
+							Labels:   issue.Labels,
 							Comments: comments,
 						})
 
@@ -122,6 +124,7 @@ func NewHarvestCmd() *cobra.Command {
 							Number:       issue.Number,
 							Title:        issue.Title,
 							Body:         issue.Body,
+							Labels:       issue.Labels,
 							WorktreePath: config.WorktreePath(repoName, issue.Number),
 						}
 						if inProgressCount < maxConcurrent {
@@ -142,6 +145,7 @@ func NewHarvestCmd() *cobra.Command {
 								Number: issue.Number,
 								Title:  issue.Title,
 								Body:   issue.Body,
+								Labels: issue.Labels,
 							})
 						}
 					}
