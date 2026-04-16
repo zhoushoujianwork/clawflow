@@ -3,6 +3,7 @@ package commands
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -26,6 +27,7 @@ type HarvestResult struct {
 	ToExecute     []HarvestIssue `json:"to_execute"`
 	ToQueue       []HarvestIssue `json:"to_queue"`
 	RetryEligible []HarvestIssue `json:"retry_eligible"`
+	SplitDone     []HarvestIssue `json:"split_done,omitempty"`
 }
 
 func NewHarvestCmd() *cobra.Command {
@@ -54,6 +56,7 @@ func NewHarvestCmd() *cobra.Command {
 				ToExecute:     []HarvestIssue{},
 				ToQueue:       []HarvestIssue{},
 				RetryEligible: []HarvestIssue{},
+				SplitDone:     []HarvestIssue{},
 			}
 
 			maxConcurrent := cfg.Settings.MaxConcurrentAgents
@@ -166,6 +169,49 @@ func NewHarvestCmd() *cobra.Command {
 				}
 				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnMerge, sw)
 				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnPR, sw)
+			}
+
+			// Check agent-split main issues: if all sub-issues are closed, add to split_done.
+			for repoName, repoCfg := range repos {
+				client, err := newVCSClient(repoCfg)
+				if err != nil {
+					continue
+				}
+				splitIssues, err := client.ListIssues(repoName, "open", []string{"agent-split"})
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list agent-split issues for %s: %v\n", repoName, err)
+					continue
+				}
+				for _, mainIssue := range splitIssues {
+					keyword := fmt.Sprintf("Parent Issue: #%d", mainIssue.Number)
+					subIssues, err := client.ListIssuesByBodyKeyword(repoName, keyword)
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot search sub-issues for %s#%d: %v\n", repoName, mainIssue.Number, err)
+						continue
+					}
+					// Also check closed sub-issues to count total
+					closedSubs, err := client.ListIssues(repoName, "closed", nil)
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list closed issues for %s: %v\n", repoName, err)
+						continue
+					}
+					totalSubs := len(subIssues)
+					for _, ci := range closedSubs {
+						if strings.Contains(ci.Body, keyword) {
+							totalSubs++
+						}
+					}
+					// If there are sub-issues and all are closed (none open), mark for closing
+					if totalSubs > 0 && len(subIssues) == 0 {
+						result.SplitDone = append(result.SplitDone, HarvestIssue{
+							Repo:   repoName,
+							Number: mainIssue.Number,
+							Title:  mainIssue.Title,
+							Body:   mainIssue.Body,
+							Labels: mainIssue.Labels,
+						})
+					}
+				}
 			}
 
 			out, _ := json.MarshalIndent(result, "", "  ")

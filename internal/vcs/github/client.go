@@ -544,6 +544,23 @@ func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
 	return vcs.CIStatusSuccess, nil
 }
 
+// ListIssuesByBodyKeyword returns all open issues whose body contains keyword.
+// It fetches all open issues and filters client-side (GitHub search API has
+// indexing delays that make it unreliable for freshly-created issues).
+func (c *Client) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.Issue, error) {
+	issues, err := c.ListOpenIssues(repo)
+	if err != nil {
+		return nil, err
+	}
+	var out []vcs.Issue
+	for _, i := range issues {
+		if strings.Contains(i.Body, keyword) {
+			out = append(out, i)
+		}
+	}
+	return out, nil
+}
+
 func splitRepo(repo string) (owner, name string, err error) {
 	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) != 2 {

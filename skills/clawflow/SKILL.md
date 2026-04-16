@@ -244,6 +244,7 @@ clawflow issue close --repo {owner}/{repo} --issue {number}
 - Bug / Feature / 通用（fallback）三种评估维度
 - 高置信度 / 低置信度评论模板
 - 置信度计算公式
+- **拆分建议评估维度与评论模板**
 
 执行命令：
 
@@ -302,7 +303,52 @@ clawflow issue comment --repo {owner}/{repo} --issue {number} \
   --body "之前的 PR 已关闭未合并，ClawFlow 将重新处理此 issue。"
 ```
 
-### Step 4.2 — 添加处理中标签
+### Step 4.2 — 检查是否需要拆分执行
+
+检查 issue 的评估评论中是否包含拆分建议（含 `🔀 拆分建议` 字样）：
+
+```bash
+clawflow issue comment-list --repo {owner}/{repo} --issue {number}
+```
+
+**如果评估评论包含拆分建议**，执行拆分流程：
+
+```bash
+# 1. 创建子 issue（每个子任务一个）
+clawflow issue create --repo {owner}/{repo} \
+  --title "{子任务标题}" \
+  --body "{子任务描述}
+
+Parent Issue: #{主issue编号}
+
+---
+🤖 Created by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — sub-issue split from #{主issue编号}"
+
+# 2. 在主 issue 评论子 issue 列表
+clawflow issue comment --repo {owner}/{repo} --issue {number} \
+  --body "## 🔀 拆分执行
+
+已创建以下子 issue，各自独立走评估 → 执行流水线：
+
+- #{子issue1编号}：{标题}
+- #{子issue2编号}：{标题}
+
+主 issue 将在所有子 issue 关闭后自动关闭。
+
+---
+🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow)"
+
+# 3. 主 issue 添加 agent-split 标签，移除 ready-for-agent 和 in-progress
+clawflow label add    --repo {owner}/{repo} --issue {number} --label agent-split
+clawflow label remove --repo {owner}/{repo} --issue {number} --label ready-for-agent
+clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
+```
+
+> **不在主 issue 上直接 fix**，子 issue 各自走正常评估 → 执行流水线。
+
+**如果评估评论不包含拆分建议**，继续正常执行流程（Step 4.3）。
+
+### Step 4.3 — 添加处理中标签
 
 ```bash
 clawflow label add --repo {owner}/{repo} --issue {number} --label in-progress
@@ -326,6 +372,30 @@ WORKTREE_PATH=$(clawflow worktree create --repo {owner}/{repo} --issue {number})
 ## Phase 5 — 结果收集与清理
 
 等待 sub-agent 返回结果，**无论成功或失败，最后都必须清理 worktree**。
+
+### Step 5.0 — 处理 split_done（主 issue 自动关闭）
+
+`clawflow harvest` 输出的 `split_done` 列表包含所有子 issue 已全部关闭的主 issue。
+对每个 `split_done` 中的主 issue：
+
+```bash
+# 1. 汇总子 issue 列表（从主 issue 评论中提取）
+clawflow issue comment-list --repo {owner}/{repo} --issue {number}
+
+# 2. 评论汇总并关闭主 issue
+clawflow issue comment --repo {owner}/{repo} --issue {number} \
+  --body "## ✅ 所有子任务已完成
+
+以下子 issue 均已关闭，主 issue 自动关闭：
+
+{子issue列表，每行一个 - #{n}：{标题}}
+
+---
+🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow)"
+
+# 3. 关闭主 issue
+clawflow issue close --repo {owner}/{repo} --issue {number}
+```
 
 ### 成功处理
 
@@ -412,23 +482,27 @@ clawflow worktree remove --repo {owner}/{repo} --issue {number}
     ↓（无 blocked）
 [Phase 3] 评估 → agent-evaluated + 评论
     ↓
-┌─────────────────────────────────────────┐
-│ 高置信度: 等待 owner 添加 ready-for-agent │
-│ 低置信度: agent-skipped, 等待补充信息    │
-└─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│ 高置信度（含拆分建议）: 等待 owner 添加 ready-for-agent │
+│ 高置信度（无拆分建议）: 等待 owner 添加 ready-for-agent │
+│ 低置信度: agent-skipped, 等待补充信息                  │
+└──────────────────────────────────────────────────────┘
     ↓
 [owner 添加 ready-for-agent]
     ↓
 [Phase 4] clawflow harvest（下次调度）
     ↓
-┌─────────────────────────────────────────────────────┐
-│ 并发槽位充足 → to_execute → in-progress → sub-agent  │
-│ 并发已满     → to_queue  → agent-queued（等待下轮）  │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ 并发槽位充足 → to_execute                                         │
+│   ├─ 评估含拆分建议 → 创建子 issue → agent-split（不直接 fix）    │
+│   └─ 无拆分建议    → in-progress → sub-agent → fix → PR          │
+│ 并发已满     → to_queue  → agent-queued（等待下轮）               │
+└──────────────────────────────────────────────────────────────────┘
     ↓
 [Phase 5] 成功：移除 in-progress / ready-for-agent / agent-queued
           失败：添加 agent-failed，移除 in-progress
-          均需：clawflow worktree remove
+          split_done：所有子 issue 关闭 → 关闭主 issue
+          均需：clawflow worktree remove（非拆分分支）
 ```
 
 ---
