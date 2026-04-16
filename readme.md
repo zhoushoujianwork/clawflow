@@ -7,48 +7,15 @@
 
 ## Install
 
-### Option A — from source (recommended)
-
 ```bash
-git clone https://github.com/zhoushoujianwork/clawflow
-cd clawflow && ./install.sh
+curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/clawflow/main/get.sh | bash
 ```
 
-The installer:
-- Auto-detects your agent (`~/.claude/skills/` for Claude Code, `~/.openclaw/` for OpenClaw)
-- Builds and installs the `clawflow` CLI to `~/.clawflow/bin/clawflow`
-- Initializes `~/.clawflow/config/` with template config files
-- Records install location to `~/.clawflow/config/install.yaml` (used by `clawflow update`)
-
-For a specific agent:
-
-```bash
-./install.sh --agent claude     # Claude Code
-./install.sh --agent openclaw  # OpenClaw
-./install.sh --agent custom --dir /path/to/skills
-```
-
-### Option B — download binary
-
-```bash
-# macOS Apple Silicon
-curl -L https://github.com/zhoushoujianwork/clawflow/releases/latest/download/clawflow_darwin_arm64 \
-  -o ~/.clawflow/bin/clawflow && chmod +x ~/.clawflow/bin/clawflow
-
-# macOS Intel
-curl -L https://github.com/zhoushoujianwork/clawflow/releases/latest/download/clawflow_darwin_amd64 \
-  -o ~/.clawflow/bin/clawflow && chmod +x ~/.clawflow/bin/clawflow
-
-# Linux x86_64
-curl -L https://github.com/zhoushoujianwork/clawflow/releases/latest/download/clawflow_linux_amd64 \
-  -o ~/.clawflow/bin/clawflow && chmod +x ~/.clawflow/bin/clawflow
-```
-
-Then add to PATH:
-
-```bash
-echo 'export PATH="$HOME/.clawflow/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
-```
+Supports macOS (Apple Silicon & Intel) and Linux (x86_64 & arm64). The script:
+- Downloads the correct binary for your platform
+- Auto-detects your agent (`~/.claude/skills/` or `~/.openclaw/skills/`) and installs SKILL.md
+- Initializes `~/.clawflow/config/` with template config
+- Adds `~/.clawflow/bin` to your shell PATH
 
 ---
 
