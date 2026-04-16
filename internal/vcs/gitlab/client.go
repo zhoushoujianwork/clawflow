@@ -516,6 +516,21 @@ func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
 	}
 }
 
+// ListIssuesByBodyKeyword returns all open issues whose body contains keyword.
+func (c *Client) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.Issue, error) {
+	issues, err := c.ListOpenIssues(repo)
+	if err != nil {
+		return nil, err
+	}
+	var out []vcs.Issue
+	for _, i := range issues {
+		if strings.Contains(i.Body, keyword) {
+			out = append(out, i)
+		}
+	}
+	return out, nil
+}
+
 func (c *Client) InitLabels(repo string, labels []vcs.Label) error {
 	path := fmt.Sprintf("/projects/%s/labels?per_page=100", projectID(repo))
 	data, status, err := c.doJSON("GET", path, nil)

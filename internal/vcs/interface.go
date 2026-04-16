@@ -79,6 +79,8 @@ type Client interface {
 	CreateIssue(repo string, title, body string) (Issue, error)
 	PostIssueComment(repo string, issueNumber int, body string) error
 	DeleteIssueComment(repo string, issueNumber int, commentID int64) error
+	// ListIssuesByBodyKeyword returns open issues whose body contains keyword.
+	ListIssuesByBodyKeyword(repo string, keyword string) ([]Issue, error)
 
 	// Labels
 	AddLabel(repo string, issueNumber int, labels ...string) error
@@ -105,4 +107,5 @@ var ClawFlowLabels = []Label{
 	{"agent-skipped", "BDBDBD", "Low confidence — needs more information"},
 	{"agent-failed", "FF0000", "Agent attempted but failed"},
 	{"blocked", "E4E669", "Waiting on dependency issues to be resolved"},
+	{"agent-split", "8B5CF6", "Issue split into sub-issues; main issue closed when all sub-issues close"},
 }
