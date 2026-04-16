@@ -6,7 +6,6 @@ set -e
 
 REPO="zhoushoujianwork/clawflow"
 CLAWFLOW_HOME="$HOME/.clawflow"
-BIN_DIR="$CLAWFLOW_HOME/bin"
 CONFIG_DIR="$CLAWFLOW_HOME/config"
 
 # ---------- platform detection ----------
@@ -43,13 +42,34 @@ fetch() {
   fi
 }
 
+# ---------- resolve install dir ----------
+# Prefer /usr/local/bin (system-wide, no PATH setup needed).
+# Fall back to ~/.local/bin if we don't have write access.
+if [[ -w /usr/local/bin ]]; then
+  BIN_DIR="/usr/local/bin"
+elif sudo -n true 2>/dev/null; then
+  BIN_DIR="/usr/local/bin"
+  USE_SUDO=1
+else
+  BIN_DIR="$HOME/.local/bin"
+fi
+
 # ---------- create directories ----------
-mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$CLAWFLOW_HOME/memory/repos"
+mkdir -p "$CONFIG_DIR" "$CLAWFLOW_HOME/memory/repos"
+if [[ "$BIN_DIR" == "$HOME/.local/bin" ]]; then
+  mkdir -p "$BIN_DIR"
+fi
 
 # ---------- download binary ----------
 echo "  [dl] downloading ${ASSET}..."
-fetch "$DOWNLOAD_URL" "$BIN_DIR/clawflow"
-chmod +x "$BIN_DIR/clawflow"
+TMP_BIN="$(mktemp)"
+fetch "$DOWNLOAD_URL" "$TMP_BIN"
+chmod +x "$TMP_BIN"
+if [[ -n "${USE_SUDO:-}" ]]; then
+  sudo mv "$TMP_BIN" "$BIN_DIR/clawflow"
+else
+  mv "$TMP_BIN" "$BIN_DIR/clawflow"
+fi
 echo "  [ok] binary → $BIN_DIR/clawflow"
 
 # ---------- detect agent & install SKILL.md ----------
@@ -87,9 +107,17 @@ fi
 
 # ---------- init config (skip if already exists) ----------
 if [[ ! -f "$CONFIG_DIR/repos.yaml" ]]; then
-  fetch "https://raw.githubusercontent.com/${REPO}/main/config/repos.yaml" \
-        "$CONFIG_DIR/repos.yaml"
-  echo "  [ok] config → $CONFIG_DIR/repos.yaml"
+  cat > "$CONFIG_DIR/repos.yaml" << 'YAML'
+# ClawFlow monitored repositories
+# Add repos you want ClawFlow to watch for issues.
+#
+# Example:
+# repos:
+#   - repo: owner/repo-name
+#     enabled: true
+repos: []
+YAML
+  echo "  [ok] config → $CONFIG_DIR/repos.yaml (default template)"
 else
   echo "  [skip] config already exists — keeping your version"
 fi
@@ -103,20 +131,21 @@ installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 YAML
 echo "  [ok] install record saved"
 
-# ---------- PATH setup ----------
-PATH_LINE='export PATH="$HOME/.clawflow/bin:$PATH"'
-SHELL_RC=""
-case "${SHELL:-}" in
-  */zsh)  SHELL_RC="$HOME/.zshrc" ;;
-  */bash) SHELL_RC="$HOME/.bashrc" ;;
-esac
+# ---------- PATH setup (only needed for ~/.local/bin) ----------
+NEED_SOURCE=""
+if [[ "$BIN_DIR" == "$HOME/.local/bin" ]]; then
+  PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+  SHELL_RC=""
+  case "${SHELL:-}" in
+    */zsh)  SHELL_RC="$HOME/.zshrc" ;;
+    */bash) SHELL_RC="$HOME/.bashrc" ;;
+  esac
 
-if [[ -n "$SHELL_RC" ]] && ! grep -q '.clawflow/bin' "$SHELL_RC" 2>/dev/null; then
-  printf '\n# ClawFlow\n%s\n' "$PATH_LINE" >> "$SHELL_RC"
-  echo "  [ok] PATH added to $SHELL_RC"
-  NEED_SOURCE="$SHELL_RC"
-else
-  NEED_SOURCE=""
+  if [[ -n "$SHELL_RC" ]] && ! grep -q '.local/bin' "$SHELL_RC" 2>/dev/null; then
+    printf '\n# ClawFlow\n%s\n' "$PATH_LINE" >> "$SHELL_RC"
+    echo "  [ok] PATH added to $SHELL_RC"
+    NEED_SOURCE="$SHELL_RC"
+  fi
 fi
 
 # ---------- done ----------
