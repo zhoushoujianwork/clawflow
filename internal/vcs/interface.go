@@ -95,4 +95,5 @@ var ClawFlowLabels = []Label{
 	{"in-progress", "FFA500", "Agent is actively working on this issue"},
 	{"agent-skipped", "BDBDBD", "Low confidence — needs more information"},
 	{"agent-failed", "FF0000", "Agent attempted but failed"},
+	{"blocked", "E4E669", "Waiting on dependency issues to be resolved"},
 }

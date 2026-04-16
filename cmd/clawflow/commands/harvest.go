@@ -89,6 +89,11 @@ func NewHarvestCmd() *cobra.Command {
 					continue
 				}
 				for _, issue := range issues {
+					// Skip issues that are waiting on dependencies.
+					if issue.HasLabel("blocked") {
+						continue
+					}
+
 					evaluated := issue.HasLabel("agent-evaluated")
 					inProgress := issue.HasLabel("in-progress")
 					skipped := issue.HasLabel("agent-skipped")
@@ -150,6 +155,17 @@ func NewHarvestCmd() *cobra.Command {
 						}
 					}
 				}
+			}
+
+			// After scanning, unlock any blocked issues whose deps are now satisfied.
+			sw := &stderrWriter{cmd}
+			for repoName, repoCfg := range repos {
+				client, err := newVCSClient(repoCfg)
+				if err != nil {
+					continue
+				}
+				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnMerge, sw)
+				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnPR, sw)
 			}
 
 			out, _ := json.MarshalIndent(result, "", "  ")

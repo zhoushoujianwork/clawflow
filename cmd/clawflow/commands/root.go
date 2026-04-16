@@ -30,6 +30,7 @@ The AI skill (SKILL.md) handles evaluation and sub-agent orchestration.`,
 	root.AddCommand(NewRetryCmd())
 	root.AddCommand(NewIssueCmd())
 	root.AddCommand(NewPRCmd())
+	root.AddCommand(NewUnblockScanCmd())
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print version",
