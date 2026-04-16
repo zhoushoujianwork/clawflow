@@ -187,47 +187,83 @@ func rebuildFromSource(repoDir string) error {
 	return nil
 }
 
-// updateSkillMD copies the latest SKILL.md from source repo or GitHub raw.
+// updateSkillMD syncs all files in skills/clawflow/ from source repo or GitHub.
 func updateSkillMD(record *installRecord) error {
-	dest := filepath.Join(record.SkillDir, "SKILL.md")
+	if err := os.MkdirAll(record.SkillDir, 0o755); err != nil {
+		return err
+	}
 
-	// Try local repo first
+	// Try local repo first — copy entire directory
 	if record.RepoDir != "" {
-		src := filepath.Join(expandHomeStr(record.RepoDir), "skills", "clawflow", "SKILL.md")
-		if _, err := os.Stat(src); err == nil {
-			data, err := os.ReadFile(src)
-			if err != nil {
-				return err
+		srcDir := filepath.Join(expandHomeStr(record.RepoDir), "skills", "clawflow")
+		if entries, err := os.ReadDir(srcDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				data, err := os.ReadFile(filepath.Join(srcDir, e.Name()))
+				if err != nil {
+					return err
+				}
+				dest := filepath.Join(record.SkillDir, e.Name())
+				if err := os.WriteFile(dest, data, 0o644); err != nil {
+					return err
+				}
+				fmt.Printf("  [ok] %s updated from local repo\n", e.Name())
 			}
-			if err := os.WriteFile(dest, data, 0o644); err != nil {
-				return err
-			}
-			fmt.Printf("  [ok] SKILL.md updated from local repo → %s\n", dest)
 			return nil
 		}
 	}
 
-	// Fallback: download from GitHub raw
-	rawURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/skills/clawflow/SKILL.md", githubRepo)
-	fmt.Printf("  [dl] downloading SKILL.md from GitHub...\n")
-	resp, err := http.Get(rawURL) //nolint:gosec
+	// Fallback: list files via GitHub Contents API, then download each
+	return downloadSkillDir(record.SkillDir)
+}
+
+// downloadSkillDir fetches all files in skills/clawflow/ from GitHub Contents API.
+func downloadSkillDir(destDir string) error {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/contents/skills/clawflow", githubRepo)
+	resp, err := http.Get(apiURL) //nolint:gosec
 	if err != nil {
-		return err
+		return fmt.Errorf("contents API: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status %d fetching SKILL.md", resp.StatusCode)
+		return fmt.Errorf("contents API returned %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
+	var entries []struct {
+		Name        string `json:"name"`
+		Type        string `json:"type"`
+		DownloadURL string `json:"download_url"`
 	}
-	if err := os.WriteFile(dest, data, 0o644); err != nil {
-		return err
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return fmt.Errorf("decode contents API: %w", err)
 	}
-	fmt.Printf("  [ok] SKILL.md updated → %s\n", dest)
+
+	for _, e := range entries {
+		if e.Type != "file" || e.DownloadURL == "" {
+			continue
+		}
+		fmt.Printf("  [dl] downloading %s...\n", e.Name)
+		fr, err := http.Get(e.DownloadURL) //nolint:gosec
+		if err != nil {
+			return fmt.Errorf("download %s: %w", e.Name, err)
+		}
+		data, err := io.ReadAll(fr.Body)
+		fr.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read %s: %w", e.Name, err)
+		}
+		if fr.StatusCode != http.StatusOK {
+			return fmt.Errorf("download %s: status %d", e.Name, fr.StatusCode)
+		}
+		dest := filepath.Join(destDir, e.Name)
+		if err := os.WriteFile(dest, data, 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("  [ok] %s updated → %s\n", e.Name, dest)
+	}
 	return nil
 }
 

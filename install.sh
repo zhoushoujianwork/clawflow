@@ -73,8 +73,8 @@ echo ""
 
 # ---------- 1. install skill definition ----------
 mkdir -p "$SKILL_DEST"
-cp "$REPO_ROOT/skills/clawflow/SKILL.md" "$SKILL_DEST/SKILL.md"
-echo "  [ok] SKILL.md installed"
+cp -r "$REPO_ROOT/skills/clawflow/." "$SKILL_DEST/"
+echo "  [ok] skill files installed → $SKILL_DEST/"
 
 # ---------- 2. init user data directory ----------
 mkdir -p "$CLAWFLOW_HOME/bin"

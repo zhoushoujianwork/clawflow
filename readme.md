@@ -207,7 +207,9 @@ New Issue
             └── issue-7.md          ← per-issue processing records
 
 ~/.claude/skills/clawflow/          ← skill definition (agent brain)
-└── SKILL.md
+├── SKILL.md                        ← main pipeline instructions
+├── evaluation.md                   ← evaluation strategy + comment templates
+└── subagent-prompt.md              ← sub-agent task prompt template
 
 clawflow/ (this repo)
 ├── cmd/clawflow/                   ← Go CLI source

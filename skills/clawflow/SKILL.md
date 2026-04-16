@@ -233,190 +233,24 @@ clawflow issue close --repo {owner}/{repo} --issue {number}
 
 ---
 
-### 评估策略（按类型区分）
+### 评估策略与评论模板
 
-根据 issue 的 `labels` 字段，采用不同的评估策略：
+详见 [evaluation.md](evaluation.md)，包含：
+- Bug / Feature / 通用（fallback）三种评估维度
+- 高置信度 / 低置信度评论模板
+- 置信度计算公式
 
-**类型判断规则（按优先级）：**
-1. labels 包含 `bug` → Bug 类型评估
-2. labels 包含 `enhancement` 或 `feat` → Feature 类型评估
-3. 以上均不包含 → 通用评估（fallback）
-
----
-
-#### Bug 类型评估
-
-对于带有 `bug` 标签的 issue，评估**复现情况**：
-
-| 维度 | 标准 | 分数 (1-10) |
-|------|------|-------------|
-| **复现性** | 能否根据描述复现问题？有明确的复现步骤？ | 复现清晰=高分，无法复现=低分 |
-| **根因定位** | 能否定位到具体代码位置？根因是否明确？ | 已定位=高分，模糊=低分 |
-| **修复难度** | 修复是否简单直接？是否涉及核心逻辑？ | 单点修复=高分，系统性改动=低分 |
-
-**Bug 评估输出内容：**
-- **复现步骤**：如何复现这个 bug？
-- **根因分析**：问题出在哪里？哪个文件/函数？
-- **修复建议**：如何修复？改动范围多大？
-
-#### Feature 类型评估
-
-对于带有 `enhancement` 或 `feat` 标签的 issue，评估**实现方案与架构对齐**：
-
-| 维度 | 标准 | 分数 (1-10) |
-|------|------|-------------|
-| **需求清晰度** | 功能需求是否明确？有清晰的输入输出定义？ | 明确=高分，模糊=低分 |
-| **设计合理性** | 提出的设计方案是否合理？是否与整体项目架构一致？ | 符合架构=高分，架构偏离=低分 |
-| **确认必要性** | 该实现是否涉及重大设计决策，需要 owner 额外确认？ | 无需确认=高分，需确认=低分 |
-
-**Feature 评估输出内容：**
-- **实现方案**：如何实现这个功能？具体步骤？
-- **技术选型**：用什么技术/库/API？
-- **改动范围**：需要改动哪些文件/模块？
-- **架构对齐分析**：设计方案是否遵循项目的整体架构原则？是否存在架构偏离风险？
-- **Owner 确认标记**：是否需要 owner 在设计层面进一步确认？（是/否）
-
-#### 通用评估（无类型标签 fallback）
-
-对于没有 `bug`、`enhancement`、`feat` 标签的 issue，先推断类型再评估：
-
-1. **类型推断**：根据 title 和 body 判断是 bug（描述异常行为/错误）还是 feature（描述新功能/改进），并在评估报告中注明推断结果
-2. **评估维度**：按推断类型套用对应的 Bug 或 Feature 评估维度
-3. **标签建议**：在评估评论中建议 owner 补充对应类型标签（`bug` 或 `enhancement`）
-
-**置信度 = (维度1 + 维度2 + 维度3) / 3**
-
-### 高置信度处理（推荐修复）
-
-对于置信度 >= threshold 的 issue：
+执行命令：
 
 ```bash
-# 1. 添加标签
+# 高置信度
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
-
-# 2. 发表评论（根据类型选择模板）
 clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluation_body>"
-```
 
-**Bug 类型评论模板：**
-
-```
-## 🔍 ClawFlow 评估报告
-
-**Issue 类型:** Bug
-**置信度:** {score}/10 ✅ (高于阈值 {threshold})
-
----
-
-### 复现情况分析
-
-**复现性:** {reproducibility}/10 — {repro_reason}
-**根因定位:** {root_cause}/10 — {root_reason}
-**修复难度:** {fix_difficulty}/10 — {fix_reason}
-
-**复现步骤：**
-{repro_steps}
-
-**⚠️ 复现验证状态:** {reproduction_verified} ⚠️
-- **验证结果：** {verify_result}
-- **验证详情：** {verify_details}
-
-**根因分析:**
-{root_cause_analysis}
-
-**修复建议:**
-{fix_suggestion}
-
----
-
-👉 **如果您同意此方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**
-
-⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
-
----
-🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
-```
-
-**Feature 类型评论模板：**
-
-```
-## 🔍 ClawFlow 评估报告
-
-**Issue 类型:** Feature
-**置信度:** {score}/10 ✅ (高于阈值 {threshold})
-
----
-
-### 实现方案分析
-
-**需求清晰度:** {clarity}/10 — {clarity_reason}
-**设计合理性:** {design}/10 — {design_reason}
-**确认必要性:** {confirmation}/10 — {confirm_reason}
-
-**实现方案:**
-{implementation_plan}
-
-**技术选型:**
-{tech_choice}
-
-**改动范围:**
-{change_scope}
-
----
-
-### 🏗️ 架构对齐分析
-
-**架构一致性:** {arch_alignment} — {arch_reason}
-
-> {architecture_notes}
-
-**Owner 确认标记：** {owner_confirmation_flag} ⚠️
-- **是否需要确认：** {need_owner_confirmation}
-- **确认理由：** {confirmation_reason}
-
----
-
-👉 **如果您同意此方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**
-
-⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
-
----
-🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
-```
-
-### 低置信度处理（需要补充信息）
-
-对于置信度 < threshold 的 issue：
-
-```bash
+# 低置信度
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-skipped
 clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<missing_info_body>"
-```
-
-**低置信度评论模板：**
-
-```
-## 🔍 ClawFlow 评估报告
-
-**Issue 类型:** {type}
-**置信度:** {score}/10 ⚠️ (低于阈值 {threshold})
-
----
-
-### 评估详情
-
-{evaluation_details}
-
-**需要补充的信息:**
-{missing_info}
-
----
-
-💡 请补充以上信息后，移除 `agent-skipped` 标签并添加 `ready-for-agent` 以重新触发评估。
-
----
-🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
 ```
 
 ---
@@ -478,84 +312,9 @@ WORKTREE_PATH=$(clawflow worktree create --repo {owner}/{repo} --issue {number})
 
 ### Step 4.4 — Spawn Sub-agent
 
-启动修复 agent，工作目录指向 worktree。
+启动修复 agent，工作目录指向 worktree。完整 Task Prompt 见 [subagent-prompt.md](subagent-prompt.md)。
 
 如果 `PREV_ATTEMPTS` 非空，将其内容填入 `{previous_attempts_context}`；否则填入 `(no previous attempts)`。
-
-**Task Prompt Template:**
-
-```
-你是代码修复 agent。任务：修复 GitHub/GitLab issue 并创建 PR。
-
-<config>
-仓库: {owner}/{repo}
-本地 worktree 路径: {worktree_path}
-分支: fix/issue-{number}
-Base branch: {base_branch}
-Issue: #{number}
-</config>
-
-<issue>
-标题: {title}
-内容: {body}
-</issue>
-
-<previous_attempts>
-{previous_attempts_context}
-</previous_attempts>
-
-<instructions>
-1. 在 worktree 路径中工作（不要 clone，已有代码）
-2. ANALYZE — 阅读代码，理解问题
-3. IMPLEMENT — 实现修复（最小化改动）
-4. TEST_LOCAL — 强制运行本地测试（失败则停止，不上传）
-   - go.mod 存在 → `go test ./...`
-   - package.json 存在 → `npm test`
-   - pytest.ini / setup.py 存在 → `pytest`
-   - Makefile 含 test 目标 → `make test`
-   - 以上均无 → 跳过（项目无测试）
-   - 测试失败 → 停止流程，报告失败原因
-5. COMMIT — git commit（包含测试改动）
-6. PUSH — git push origin fix/issue-{number}
-7. PR — 创建 PR：
-   ```bash
-   clawflow pr create --repo {owner}/{repo} \
-     --title "{title}" \
-     --base {base_branch} \
-     --head fix/issue-{number} \
-     --body "## Summary
-
-   {summary}
-
-   ## Changes
-
-   {changes}
-
-   ## Test plan
-
-   {test_plan}
-
-   Fixes #{number}
-
-   ---
-   🤖 Created by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline"
-   ```
-8. CI_WAIT — 等待 CI（最长 10 分钟）
-   ```bash
-   clawflow pr ci-wait --repo {owner}/{repo} --pr {pr_number} --timeout 600
-   ```
-   - 退出码 0 → CI 通过，继续 Phase 5 success 流程
-   - 退出码非 0 → CI 失败，执行 ci-failed 处理（见 Phase 5）
-</instructions>
-
-<constraints>
-- 不 force-push
-- 不修改 base branch
-- 不添加无关改动
-- 超时 60 分钟
-- 禁止使用 gh CLI，统一使用 clawflow 命令
-</constraints>
-```
 
 ---
 

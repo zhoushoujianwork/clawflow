@@ -106,3 +106,54 @@ clawflow update --from-source  # 从本地 repo 重新构建（开发用）
 | `/config/` | 用户配置（现存于 `~/.clawflow/config/`，不进 repo） |
 | `clawflow` | 构建产物根目录二进制（通过 release asset 分发） |
 | `clawflow_*` | 各平台构建产物 |
+
+---
+
+## Skills 构建规范
+
+### 目录结构
+
+```
+skills/<skill-name>/
+├── SKILL.md           # 必须，主流程入口
+├── evaluation.md      # 详细评估策略、评论模板等
+├── subagent-prompt.md # Sub-agent Task Prompt 模板
+└── scripts/           # 可执行脚本（如有）
+```
+
+### SKILL.md 规范
+
+- **控制在 500 行以内**，超出部分拆到独立文件
+- 详细内容（评论模板、prompt 模板、评估维度）放到独立 `.md` 文件
+- 在 SKILL.md 里用 Markdown 链接引用，说明文件内容和何时加载：
+  ```markdown
+  详见 [evaluation.md](evaluation.md)，包含：
+  - Bug / Feature / 通用三种评估维度
+  - 高/低置信度评论模板
+  ```
+
+### Frontmatter 关键字段
+
+```yaml
+---
+name: skill-name
+description: "触发条件描述，Claude 用此判断何时自动加载"
+metadata:
+  openclaw:
+    requires:
+      bins: ["git", "clawflow"]
+    primaryEnv: "GH_TOKEN"
+---
+```
+
+- `description` 前置核心触发词，总长度不超过 1536 字符
+- `disable-model-invocation: true` — 只允许用户手动 `/skill-name` 触发（适合有副作用的操作）
+- `allowed-tools` — 预授权工具，避免每次询问用户
+
+### 拆分原则
+
+| 放 SKILL.md | 放独立文件 |
+|------------|-----------|
+| 流程步骤、CLI 命令 | 评论/prompt 模板 |
+| 安全约束、标签流程图 | 评估维度表格 |
+| 文件引用说明 | 详细示例、参考文档 |

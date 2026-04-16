@@ -66,9 +66,21 @@ fi
 
 if [[ -n "$SKILL_DEST" ]]; then
   mkdir -p "$SKILL_DEST"
-  fetch "https://raw.githubusercontent.com/${REPO}/main/skills/clawflow/SKILL.md" \
-        "$SKILL_DEST/SKILL.md"
-  echo "  [ok] SKILL.md → $SKILL_DEST/SKILL.md"
+  echo "  [dl] fetching skill file list..."
+  API_URL="https://api.github.com/repos/${REPO}/contents/skills/clawflow"
+  if command -v curl &>/dev/null; then
+    LISTING=$(curl -fsSL "$API_URL")
+  else
+    LISTING=$(wget -qO- "$API_URL")
+  fi
+  # 从 Contents API 响应中提取 download_url（每行一个）
+  DOWNLOAD_URLS=$(echo "$LISTING" | grep '"download_url"' | grep -o 'https://[^"]*')
+  while IFS= read -r url; do
+    [[ -z "$url" ]] && continue
+    filename="${url##*/}"
+    fetch "$url" "$SKILL_DEST/$filename"
+    echo "  [ok] $filename → $SKILL_DEST/$filename"
+  done <<< "$DOWNLOAD_URLS"
 else
   echo "  [skip] no agent detected — install Claude Code or OpenClaw first, then re-run"
 fi
