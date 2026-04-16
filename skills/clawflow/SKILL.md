@@ -62,6 +62,11 @@ clawflow issue create --repo owner/repo \
 clawflow issue comment --repo owner/repo --issue 7 \
   --body "comment text"                                        # 发表评论
 clawflow issue close --repo owner/repo --issue 7               # 关闭 issue
+clawflow issue comment-list --repo owner/repo --issue 7        # 列出评论（含 ID、作者）
+clawflow issue comment-delete --repo owner/repo --issue 7 \
+  --comment-id 123456                                          # 删除指定评论
+clawflow issue comment-delete --repo owner/repo --issue 7 \
+  --author bot-user                                            # 批量删除某用户的所有评论
 clawflow retry --repo owner/repo --issue 7                     # 重新触发流水线
 clawflow issue unblock --repo owner/repo --issue 7             # 手动检查并解锁单个 blocked issue
 clawflow unblock-scan --repo owner/repo                        # 扫描所有 blocked issue，自动解锁依赖已满足的
