@@ -223,6 +223,23 @@ New Issue
 
 Smoke test failures trigger automatic retry (max 2×). On repeated failure, the issue is marked `agent-failed` and the owner is notified.
 
+### Auto-fix
+
+When `auto_fix: true` is set on a repo, ClawFlow automatically adds `ready-for-agent` after evaluation — no owner approval needed — if:
+- confidence score >= 7.0
+- no split suggestion in the evaluation
+
+Default is `false`. Enable per repo in `~/.clawflow/config/repos.yaml`:
+
+```yaml
+repos:
+  owner/repo:
+    enabled: true
+    base_branch: main
+    auto_fix: false    # true = skip owner approval when score >= 7.0
+    auto_merge: false  # true = auto-merge after CI passes
+```
+
 ### Language Support
 
 | Language | Detected by | Build | Scoped test |
