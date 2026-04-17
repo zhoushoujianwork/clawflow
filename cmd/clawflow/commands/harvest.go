@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -64,157 +65,202 @@ func NewHarvestCmd() *cobra.Command {
 				maxConcurrent = 3
 			}
 
+			var mu sync.Mutex
+			var wg sync.WaitGroup
 			inProgressCount := 0
 			clients := make(map[string]vcs.Client)
 			allIssuesByRepo := make(map[string][]vcs.Issue)
-			for repoName, repoCfg := range repos {
-				client, err := newVCSClient(repoCfg)
-				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot create client for %s: %v\n", repoName, err)
-					continue
-				}
-				clients[repoName] = client
-				issues, err := client.ListOpenIssues(repoName)
-				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list issues for %s: %v\n", repoName, err)
-					continue
-				}
-				allIssuesByRepo[repoName] = issues
-				for _, issue := range issues {
-					if issue.HasLabel("in-progress") {
-						inProgressCount++
-					}
-				}
-			}
 
-			// Unlock blocked issues before scanning so newly unblocked issues
-			// are picked up in this same harvest run.
+			// Phase 1: create clients and fetch open issues concurrently.
+			for repoName, repoCfg := range repos {
+				wg.Add(1)
+				go func(name string, cfg config.Repo) {
+					defer wg.Done()
+					client, err := newVCSClient(cfg)
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot create client for %s: %v\n", name, err)
+						return
+					}
+					issues, err := client.ListOpenIssues(name)
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list issues for %s: %v\n", name, err)
+						return
+					}
+					count := 0
+					for _, issue := range issues {
+						if issue.HasLabel("in-progress") {
+							count++
+						}
+					}
+					mu.Lock()
+					clients[name] = client
+					allIssuesByRepo[name] = issues
+					inProgressCount += count
+					mu.Unlock()
+				}(repoName, repoCfg)
+			}
+			wg.Wait()
+
+			// Phase 2: unlock blocked issues concurrently.
 			sw := &stderrWriter{cmd}
 			for repoName, client := range clients {
-				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnMerge, sw)
-				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnPR, sw)
+				wg.Add(1)
+				go func(name string, c vcs.Client) {
+					defer wg.Done()
+					TryUnlockDownstream(c, name, 0, vcs.DependsOnMerge, sw)
+					TryUnlockDownstream(c, name, 0, vcs.DependsOnPR, sw)
+				}(repoName, client)
 			}
+			wg.Wait()
 
-			// Re-fetch issues after unlock so newly unblocked issues are included.
+			// Phase 3: re-fetch issues after unlock concurrently.
 			for repoName, client := range clients {
-				issues, err := client.ListOpenIssues(repoName)
-				if err != nil {
-					continue
-				}
-				allIssuesByRepo[repoName] = issues
-			}
-
-			for repoName, issues := range allIssuesByRepo {
-				client := clients[repoName]
-				for _, issue := range issues {
-					// Skip issues that are waiting on dependencies.
-					if issue.HasLabel("blocked") {
-						continue
+				wg.Add(1)
+				go func(name string, c vcs.Client) {
+					defer wg.Done()
+					issues, err := c.ListOpenIssues(name)
+					if err != nil {
+						return
 					}
+					mu.Lock()
+					allIssuesByRepo[name] = issues
+					mu.Unlock()
+				}(repoName, client)
+			}
+			wg.Wait()
 
-					evaluated := issue.HasLabel("agent-evaluated")
-					inProgress := issue.HasLabel("in-progress")
-					skipped := issue.HasLabel("agent-skipped")
-					failed := issue.HasLabel("agent-failed")
-					readyForAgent := issue.HasLabel("ready-for-agent")
-					queued := issue.HasLabel("agent-queued")
-
-					switch {
-					case !evaluated && !inProgress && !skipped && !failed && !readyForAgent && !queued:
-						comments, err := client.ListIssueComments(repoName, issue.Number)
-						if err != nil {
-							fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list comments for %s#%d: %v\n", repoName, issue.Number, err)
-						}
-						result.ToEvaluate = append(result.ToEvaluate, HarvestIssue{
-							Repo:     repoName,
-							Number:   issue.Number,
-							Title:    issue.Title,
-							Body:     issue.Body,
-							Labels:   issue.Labels,
-							Comments: comments,
-						})
-
-					case readyForAgent && evaluated && !inProgress:
-						hasPR, err := client.PRExistsForIssue(repoName, issue.Number)
-						if err != nil {
-							fmt.Fprintf(cmd.ErrOrStderr(), "warn: PR check failed for %s#%d: %v\n", repoName, issue.Number, err)
-						}
-						if hasPR {
+			// Phase 4: classify issues concurrently; protect result and inProgressCount with mu.
+			for repoName, issues := range allIssuesByRepo {
+				wg.Add(1)
+				go func(name string, issueList []vcs.Issue) {
+					defer wg.Done()
+					client := clients[name]
+					for _, issue := range issueList {
+						if issue.HasLabel("blocked") {
 							continue
 						}
-						item := HarvestIssue{
-							Repo:         repoName,
-							Number:       issue.Number,
-							Title:        issue.Title,
-							Body:         issue.Body,
-							Labels:       issue.Labels,
-							WorktreePath: config.WorktreePath(repoName, issue.Number),
-						}
-						if inProgressCount < maxConcurrent {
-							result.ToExecute = append(result.ToExecute, item)
-							inProgressCount++
-						} else {
-							result.ToQueue = append(result.ToQueue, item)
-						}
 
-					case evaluated && !inProgress && !readyForAgent:
-						hasPR, err := client.PRExistsForIssue(repoName, issue.Number)
-						if err != nil {
-							fmt.Fprintf(cmd.ErrOrStderr(), "warn: PR check failed for %s#%d: %v\n", repoName, issue.Number, err)
+						evaluated := issue.HasLabel("agent-evaluated")
+						inProgress := issue.HasLabel("in-progress")
+						skipped := issue.HasLabel("agent-skipped")
+						failed := issue.HasLabel("agent-failed")
+						readyForAgent := issue.HasLabel("ready-for-agent")
+						queued := issue.HasLabel("agent-queued")
+
+						switch {
+						case !evaluated && !inProgress && !skipped && !failed && !readyForAgent && !queued:
+							comments, err := client.ListIssueComments(name, issue.Number)
+							if err != nil {
+								fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list comments for %s#%d: %v\n", name, issue.Number, err)
+							}
+							mu.Lock()
+							result.ToEvaluate = append(result.ToEvaluate, HarvestIssue{
+								Repo:     name,
+								Number:   issue.Number,
+								Title:    issue.Title,
+								Body:     issue.Body,
+								Labels:   issue.Labels,
+								Comments: comments,
+							})
+							mu.Unlock()
+
+						case readyForAgent && evaluated && !inProgress:
+							hasPR, err := client.PRExistsForIssue(name, issue.Number)
+							if err != nil {
+								fmt.Fprintf(cmd.ErrOrStderr(), "warn: PR check failed for %s#%d: %v\n", name, issue.Number, err)
+							}
+							if hasPR {
+								continue
+							}
+							item := HarvestIssue{
+								Repo:         name,
+								Number:       issue.Number,
+								Title:        issue.Title,
+								Body:         issue.Body,
+								Labels:       issue.Labels,
+								WorktreePath: config.WorktreePath(name, issue.Number),
+							}
+							mu.Lock()
+							if inProgressCount < maxConcurrent {
+								result.ToExecute = append(result.ToExecute, item)
+								inProgressCount++
+							} else {
+								result.ToQueue = append(result.ToQueue, item)
+							}
+							mu.Unlock()
+
+						case evaluated && !inProgress && !readyForAgent:
+							hasPR, err := client.PRExistsForIssue(name, issue.Number)
+							if err != nil {
+								fmt.Fprintf(cmd.ErrOrStderr(), "warn: PR check failed for %s#%d: %v\n", name, issue.Number, err)
+							}
+							if !hasPR && HasMergedPRInMemory(name, issue.Number) {
+								mu.Lock()
+								result.RetryEligible = append(result.RetryEligible, HarvestIssue{
+									Repo:   name,
+									Number: issue.Number,
+									Title:  issue.Title,
+									Body:   issue.Body,
+									Labels: issue.Labels,
+								})
+								mu.Unlock()
+							}
 						}
-						if !hasPR && HasMergedPRInMemory(repoName, issue.Number) {
-							result.RetryEligible = append(result.RetryEligible, HarvestIssue{
-								Repo:   repoName,
-								Number: issue.Number,
-								Title:  issue.Title,
-								Body:   issue.Body,
-								Labels: issue.Labels,
+					}
+				}(repoName, issues)
+			}
+			wg.Wait()
+
+			// Phase 5: check agent-split main issues concurrently.
+			for repoName, client := range clients {
+				wg.Add(1)
+				go func(name string, c vcs.Client) {
+					defer wg.Done()
+					splitIssues, err := c.ListIssues(name, "open", []string{"agent-split"})
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list agent-split issues for %s: %v\n", name, err)
+						return
+					}
+					if len(splitIssues) == 0 {
+						return
+					}
+					closedIssues, err := c.ListIssues(name, "closed", nil)
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list closed issues for %s: %v\n", name, err)
+						return
+					}
+					var done []HarvestIssue
+					for _, mainIssue := range splitIssues {
+						keyword := fmt.Sprintf("Parent Issue: #%d", mainIssue.Number)
+						subIssues, err := c.ListIssuesByBodyKeyword(name, keyword)
+						if err != nil {
+							fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot search sub-issues for %s#%d: %v\n", name, mainIssue.Number, err)
+							continue
+						}
+						totalSubs := len(subIssues)
+						for _, ci := range closedIssues {
+							if strings.Contains(ci.Body, keyword) {
+								totalSubs++
+							}
+						}
+						if totalSubs > 0 && len(subIssues) == 0 {
+							done = append(done, HarvestIssue{
+								Repo:   name,
+								Number: mainIssue.Number,
+								Title:  mainIssue.Title,
+								Body:   mainIssue.Body,
+								Labels: mainIssue.Labels,
 							})
 						}
 					}
-				}
+					if len(done) > 0 {
+						mu.Lock()
+						result.SplitDone = append(result.SplitDone, done...)
+						mu.Unlock()
+					}
+				}(repoName, client)
 			}
-
-			// Check agent-split main issues: if all sub-issues are closed, add to split_done.
-			for repoName, client := range clients {
-				splitIssues, err := client.ListIssues(repoName, "open", []string{"agent-split"})
-				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list agent-split issues for %s: %v\n", repoName, err)
-					continue
-				}
-				if len(splitIssues) == 0 {
-					continue
-				}
-				closedIssues, err := client.ListIssues(repoName, "closed", nil)
-				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list closed issues for %s: %v\n", repoName, err)
-					continue
-				}
-				for _, mainIssue := range splitIssues {
-					keyword := fmt.Sprintf("Parent Issue: #%d", mainIssue.Number)
-					subIssues, err := client.ListIssuesByBodyKeyword(repoName, keyword)
-					if err != nil {
-						fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot search sub-issues for %s#%d: %v\n", repoName, mainIssue.Number, err)
-						continue
-					}
-					totalSubs := len(subIssues)
-					for _, ci := range closedIssues {
-						if strings.Contains(ci.Body, keyword) {
-							totalSubs++
-						}
-					}
-					// If there are sub-issues and all are closed (none open), mark for closing
-					if totalSubs > 0 && len(subIssues) == 0 {
-						result.SplitDone = append(result.SplitDone, HarvestIssue{
-							Repo:   repoName,
-							Number: mainIssue.Number,
-							Title:  mainIssue.Title,
-							Body:   mainIssue.Body,
-							Labels: mainIssue.Labels,
-						})
-					}
-				}
-			}
+			wg.Wait()
 
 			out, _ := json.MarshalIndent(result, "", "  ")
 			fmt.Println(string(out))
