@@ -1,11 +1,5 @@
 # CLAUDE.md
 
-## 语言偏好
-
-始终用中文回复用户。用户正在学习中文。
-
----
-
 ## 工具规范
 
 **禁止使用 `gh` CLI**，所有 VCS 操作（issue、PR、label、comment）统一使用 `clawflow` 命令：
