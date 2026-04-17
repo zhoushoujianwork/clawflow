@@ -561,6 +561,51 @@ func (c *Client) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.Iss
 	return out, nil
 }
 
+func (c *Client) MergePR(repo string, prNumber int) error {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", owner, name, prNumber)
+	_, status, err := c.do("PUT", path, map[string]string{"merge_method": "merge"})
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return fmt.Errorf("github merge PR: HTTP %d", status)
+	}
+	return nil
+}
+
+func (c *Client) GetPRMergeability(repo string, prNumber int) (vcs.MergeStatus, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return vcs.MergeStatusUnknown, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, name, prNumber)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return vcs.MergeStatusUnknown, err
+	}
+	if status != 200 {
+		return vcs.MergeStatusUnknown, fmt.Errorf("github get PR: HTTP %d", status)
+	}
+	var raw struct {
+		Mergeable      *bool  `json:"mergeable"`
+		MergeableState string `json:"mergeable_state"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.MergeStatusUnknown, err
+	}
+	if raw.Mergeable == nil {
+		return vcs.MergeStatusPending, nil
+	}
+	if !*raw.Mergeable {
+		return vcs.MergeStatusConflict, nil
+	}
+	return vcs.MergeStatusClean, nil
+}
+
 func splitRepo(repo string) (owner, name string, err error) {
 	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) != 2 {

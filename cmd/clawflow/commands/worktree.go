@@ -107,6 +107,15 @@ func newWorktreeRemoveCmd() *cobra.Command {
 				}
 			}
 
+			// Delete the branch that was created for this issue
+			branch := config.BranchName(issue)
+			if err := runGit(localPath, "branch", "-D", branch); err != nil {
+				// Not an error if branch doesn't exist
+				if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "error: branch") {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warn: git branch -D %s: %v\n", branch, err)
+				}
+			}
+
 			// Remove directory if still present
 			if _, statErr := os.Stat(worktreePath); statErr == nil {
 				if removeErr := os.RemoveAll(worktreePath); removeErr != nil {

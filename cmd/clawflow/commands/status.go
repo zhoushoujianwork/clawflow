@@ -52,7 +52,7 @@ func NewStatusCmd() *cobra.Command {
 						failed++
 					case issue.HasLabel("agent-skipped"):
 						skipped++
-					case issue.HasLabel("ready-for-agent") && issue.HasLabel("agent-evaluated"):
+					case issue.HasLabel("ready-for-agent") && issue.HasLabel("agent-evaluated") && !issue.HasLabel("in-progress"):
 						toExecute++
 					case !issue.HasLabel("agent-evaluated"):
 						toEvaluate++

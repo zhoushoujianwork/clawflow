@@ -97,7 +97,21 @@ type Client interface {
 
 	// CI
 	GetCIStatus(repo string, prNumber int) (CIStatus, error)
+
+	// Merge
+	MergePR(repo string, prNumber int) error
+	GetPRMergeability(repo string, prNumber int) (MergeStatus, error)
 }
+
+// MergeStatus represents whether a PR can be merged.
+type MergeStatus string
+
+const (
+	MergeStatusClean      MergeStatus = "clean"      // ready to merge
+	MergeStatusConflict   MergeStatus = "conflict"   // has conflicts
+	MergeStatusPending    MergeStatus = "pending"    // mergeability not yet computed
+	MergeStatusUnknown    MergeStatus = "unknown"
+)
 
 // ClawFlowLabels are the standard labels ClawFlow requires on every monitored repo.
 var ClawFlowLabels = []Label{

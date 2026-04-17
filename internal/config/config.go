@@ -34,6 +34,7 @@ type Repo struct {
 	TestCommand       string            `yaml:"test_command,omitempty"`
 	CIRequired        bool              `yaml:"ci_required,omitempty"`
 	CITimeout         int               `yaml:"ci_timeout,omitempty"`
+	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
 }
 
 // Settings holds global ClawFlow settings.

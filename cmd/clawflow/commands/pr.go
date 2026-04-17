@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -18,6 +19,8 @@ func NewPRCmd() *cobra.Command {
 	cmd.AddCommand(newPRListCmd())
 	cmd.AddCommand(newPRCommentCmd())
 	cmd.AddCommand(newPRCIWaitCmd())
+	cmd.AddCommand(newPRMergeCmd())
+	cmd.AddCommand(newPRRebaseCmd())
 	return cmd
 }
 
@@ -204,5 +207,87 @@ func newPRCIWaitCmd() *cobra.Command {
 	cmd.Flags().IntVar(&timeout, "timeout", 600, "max wait time in seconds")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("pr")
+	return cmd
+}
+
+func newPRMergeCmd() *cobra.Command {
+	var repo string
+	var number int
+
+	cmd := &cobra.Command{
+		Use:     "merge",
+		Short:   "Merge a pull request via the VCS API",
+		Example: "  clawflow pr merge --repo owner/repo --pr 7",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			if err := client.MergePR(repo, number); err != nil {
+				return err
+			}
+			fmt.Printf("merged %s PR #%d\n", repo, number)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&number, "pr", 0, "PR number (required)")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("pr")
+	return cmd
+}
+
+func newPRRebaseCmd() *cobra.Command {
+	var repo string
+	var issue int
+
+	cmd := &cobra.Command{
+		Use:     "rebase",
+		Short:   "Rebase the issue branch onto base branch and force-push",
+		Example: "  clawflow pr rebase --repo owner/repo --issue 7",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			repoCfg, ok := cfg.Repos[repo]
+			if !ok {
+				return fmt.Errorf("repo %q not found in config", repo)
+			}
+			localPath, err := resolveLocalPath(repo, repoCfg.LocalPath)
+			if err != nil {
+				return err
+			}
+			base := repoCfg.BaseBranch
+			if base == "" {
+				base = "main"
+			}
+			branch := config.BranchName(issue)
+
+			// Fetch latest base
+			if err := runGit(localPath, "fetch", "origin", base); err != nil {
+				return fmt.Errorf("fetch failed: %w", err)
+			}
+
+			// Rebase branch onto origin/base
+			worktreePath := config.WorktreePath(repo, issue)
+			if err := runGit(worktreePath, "rebase", "origin/"+base); err != nil {
+				// Abort rebase on failure so worktree is clean
+				_ = runGit(worktreePath, "rebase", "--abort")
+				return fmt.Errorf("rebase failed (conflicts): %w", err)
+			}
+
+			// Force-push
+			if err := runGit(worktreePath, "push", "origin", branch, "--force-with-lease"); err != nil {
+				return fmt.Errorf("force-push failed: %w", err)
+			}
+			fmt.Printf("rebased and pushed %s onto %s\n", branch, base)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("issue")
 	return cmd
 }

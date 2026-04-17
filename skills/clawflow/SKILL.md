@@ -399,18 +399,113 @@ clawflow issue close --repo {owner}/{repo} --issue {number}
 
 ### 成功处理
 
+sub-agent 返回 PR URL 后，进入自动化后处理流程（Phase 5.5-5.8），**不要直接清理**。
+
+---
+
+## Phase 5.5 — 冒烟测试
+
+> ClawFlow 只做冒烟测试：编译通过 + 改动影响范围内的单元测试。
+> E2E / 集成 / 真实场景测试需要 owner 人工验证。
+
 ```bash
-# 1. 写入 memory
+# 1. 检测语言和测试命令
+LANG_INFO=$(clawflow lang detect --repo {owner}/{repo} --issue {number})
+BUILD_CMD=$(echo "$LANG_INFO" | jq -r '.build_cmd')
+TEST_CMD=$(echo "$LANG_INFO" | jq -r '.test_cmd')
+
+# 2. 在 worktree 中执行编译
+cd {worktree_path}
+eval "$BUILD_CMD"
+```
+
+**编译失败**：sub-agent 在 worktree 内修复，最多重试 2 次，超过则走失败处理。
+
+```bash
+# 3. 执行影响范围测试
+eval "$TEST_CMD"
+```
+
+**测试失败**：sub-agent 在 worktree 内修复，最多重试 2 次，超过则走失败处理。
+
+冒烟通过后继续 Phase 5.6。
+
+---
+
+## Phase 5.6 — 冲突检测与 Rebase
+
+```bash
+# 检查 PR 是否有冲突
+MERGE_STATUS=$(clawflow pr view --repo {owner}/{repo} --pr {pr_number} | grep mergeable || echo "unknown")
+```
+
+**有冲突时**（最多重试 2 次）：
+
+```bash
+clawflow pr rebase --repo {owner}/{repo} --issue {number}
+```
+
+rebase 成功后重新触发冒烟测试（回到 Phase 5.5）。
+
+rebase 失败超过 2 次：
+
+```bash
+clawflow pr comment --repo {owner}/{repo} --pr {pr_number} \
+  --body "⚠️ 自动 rebase 失败，存在复杂冲突，请 owner 手动处理。"
+```
+
+然后走失败处理流程（不删 PR）。
+
+---
+
+## Phase 5.7 — CI 等待
+
+```bash
+clawflow pr ci-wait --repo {owner}/{repo} --pr {pr_number} --timeout 600
+```
+
+| CI 结果 | 处理方式 |
+|---------|---------|
+| 通过 | 继续 Phase 5.8 |
+| 失败 | 走 CI 失败处理（见下方） |
+| 无 CI 配置 | 直接继续 Phase 5.8 |
+
+---
+
+## Phase 5.8 — 自动 Merge
+
+仅当仓库配置 `auto_merge: true` 时执行：
+
+```bash
+clawflow pr merge --repo {owner}/{repo} --pr {pr_number}
+```
+
+merge 成功后：
+
+```bash
+# 写入 memory
 clawflow memory write --repo {owner}/{repo} --issue {number} --status success --pr-url {pr_url}
 
-# 2. 移除工作流标签
+# 移除工作流标签
 clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
 clawflow label remove --repo {owner}/{repo} --issue {number} --label ready-for-agent
 clawflow label remove --repo {owner}/{repo} --issue {number} --label agent-queued
 
-# 3. 清理 worktree（必须执行）
+# 清理 worktree
 clawflow worktree remove --repo {owner}/{repo} --issue {number}
 ```
+
+`auto_merge: false`（默认）时，跳过 merge，只做清理：
+
+```bash
+clawflow memory write --repo {owner}/{repo} --issue {number} --status success --pr-url {pr_url}
+clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
+clawflow label remove --repo {owner}/{repo} --issue {number} --label ready-for-agent
+clawflow label remove --repo {owner}/{repo} --issue {number} --label agent-queued
+clawflow worktree remove --repo {owner}/{repo} --issue {number}
+```
+
+> PR 等待 owner review 后手动 merge。
 
 ### 失败处理
 
@@ -499,10 +594,16 @@ clawflow worktree remove --repo {owner}/{repo} --issue {number}
 │ 并发已满     → to_queue  → agent-queued（等待下轮）               │
 └──────────────────────────────────────────────────────────────────┘
     ↓
-[Phase 5] 成功：移除 in-progress / ready-for-agent / agent-queued
-          失败：添加 agent-failed，移除 in-progress
-          split_done：所有子 issue 关闭 → 关闭主 issue
-          均需：clawflow worktree remove（非拆分分支）
+[Phase 5.5] 冒烟测试（编译 + 影响范围单元测试，最多重试 2 次）
+    ↓ 通过
+[Phase 5.6] 冲突检测 → 有冲突则 pr rebase（最多重试 2 次）
+    ↓ 无冲突
+[Phase 5.7] CI 等待（ci-wait）
+    ↓ 通过 / 无 CI
+[Phase 5.8] auto_merge=true → pr merge → 关闭 issue
+            auto_merge=false → 等待 owner review
+    ↓
+清理：移除 in-progress / ready-for-agent / agent-queued + worktree remove
 ```
 
 ---

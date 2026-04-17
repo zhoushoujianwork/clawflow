@@ -112,6 +112,16 @@ Pipeline:
   harvest            Scan repos and output pending issues as JSON
   status             Show current state of all monitored repos
   retry              Re-trigger pipeline for a previously processed issue
+  lang detect        Detect language and output build/test commands for changed files
+
+PRs:
+  pr create          Create a pull request / merge request
+  pr list            List pull requests
+  pr view            View a pull request
+  pr comment         Post a comment on a pull request
+  pr ci-wait         Wait for CI checks to complete
+  pr merge           Merge a pull request via the VCS API
+  pr rebase          Rebase issue branch onto base branch and force-push
 
 Repo management:
   repo list          List all configured repos
@@ -184,10 +194,44 @@ New Issue
     ↓
 [sub-agent implements fix] — in the worktree
     ↓
-[PR opened] → [clawflow worktree remove] — cleanup always runs
+[PR opened]
+    ↓
+[Phase 5.5] Smoke test — build + unit tests for changed packages (max 2 retries)
+    ↓ pass
+[Phase 5.6] Conflict check — auto rebase if needed (max 2 retries)
+    ↓ clean
+[Phase 5.7] CI wait — clawflow pr ci-wait
+    ↓ pass / no CI
+[Phase 5.8] auto_merge=true → clawflow pr merge → close issue
+            auto_merge=false → wait for owner review
+    ↓
+[clawflow worktree remove] — cleanup always runs
 ```
 
 **ClawFlow never adds `ready-for-agent` itself — owner approval is always required.**
+
+### Testing Boundary
+
+> ⚠️ ClawFlow only runs smoke tests — it does not replace human verification
+
+| Test type | Owner |
+|-----------|-------|
+| Build passes | ClawFlow (automatic) |
+| Unit tests for changed packages | ClawFlow (automatic) |
+| E2E / integration tests | Owner (manual) |
+| Real-world scenario validation | Owner (manual) |
+
+Smoke test failures trigger automatic retry (max 2×). On repeated failure, the issue is marked `agent-failed` and the owner is notified.
+
+### Language Support
+
+| Language | Detected by | Build | Scoped test |
+|----------|------------|-------|-------------|
+| Go | `go.mod` | `go build ./...` | `go test ./changed/pkg/...` |
+| Node.js | `package.json` | `npm run build` | `jest --testPathPattern=...` |
+| Python | `pyproject.toml` / `requirements.txt` | `py_compile` | `pytest tests/changed/` |
+| Rust | `Cargo.toml` | `cargo build` | `cargo test` |
+| Java | `pom.xml` | `mvn compile -q` | `mvn test -Dtest=ChangedTest` |
 
 ---
 

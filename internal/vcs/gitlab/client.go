@@ -531,6 +531,43 @@ func (c *Client) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.Iss
 	return out, nil
 }
 
+func (c *Client) MergePR(repo string, prNumber int) error {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/merge", projectID(repo), prNumber)
+	data, status, err := c.doJSON("PUT", path, map[string]string{"merge_when_pipeline_succeeds": "false"})
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return fmt.Errorf("gitlab merge MR: HTTP %d: %s", status, data)
+	}
+	return nil
+}
+
+func (c *Client) GetPRMergeability(repo string, prNumber int) (vcs.MergeStatus, error) {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d", projectID(repo), prNumber)
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return vcs.MergeStatusUnknown, err
+	}
+	if status != 200 {
+		return vcs.MergeStatusUnknown, fmt.Errorf("gitlab get MR: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		MergeStatus string `json:"merge_status"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.MergeStatusUnknown, err
+	}
+	switch raw.MergeStatus {
+	case "can_be_merged":
+		return vcs.MergeStatusClean, nil
+	case "cannot_be_merged":
+		return vcs.MergeStatusConflict, nil
+	default:
+		return vcs.MergeStatusPending, nil
+	}
+}
+
 func (c *Client) InitLabels(repo string, labels []vcs.Label) error {
 	path := fmt.Sprintf("/projects/%s/labels?per_page=100", projectID(repo))
 	data, status, err := c.doJSON("GET", path, nil)

@@ -85,6 +85,31 @@ func NewHarvestCmd() *cobra.Command {
 				}
 			}
 
+			// Unlock blocked issues before scanning so newly unblocked issues
+			// are picked up in this same harvest run.
+			sw := &stderrWriter{cmd}
+			for repoName, repoCfg := range repos {
+				client, err := newVCSClient(repoCfg)
+				if err != nil {
+					continue
+				}
+				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnMerge, sw)
+				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnPR, sw)
+			}
+
+			// Re-fetch issues after unlock so newly unblocked issues are included.
+			for repoName, repoCfg := range repos {
+				client, err := newVCSClient(repoCfg)
+				if err != nil {
+					continue
+				}
+				issues, err := client.ListOpenIssues(repoName)
+				if err != nil {
+					continue
+				}
+				allIssuesByRepo[repoName] = issues
+			}
+
 			for repoName, issues := range allIssuesByRepo {
 				repoCfg := repos[repoName]
 				client, err := newVCSClient(repoCfg)
@@ -158,17 +183,6 @@ func NewHarvestCmd() *cobra.Command {
 						}
 					}
 				}
-			}
-
-			// After scanning, unlock any blocked issues whose deps are now satisfied.
-			sw := &stderrWriter{cmd}
-			for repoName, repoCfg := range repos {
-				client, err := newVCSClient(repoCfg)
-				if err != nil {
-					continue
-				}
-				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnMerge, sw)
-				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnPR, sw)
 			}
 
 			// Check agent-split main issues: if all sub-issues are closed, add to split_done.
