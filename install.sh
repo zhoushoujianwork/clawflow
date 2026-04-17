@@ -81,7 +81,7 @@ mkdir -p "$CLAWFLOW_HOME/bin"
 mkdir -p "$CLAWFLOW_HOME/config"
 mkdir -p "$CLAWFLOW_HOME/memory/repos"
 
-for f in repos.yaml labels.yaml; do
+for f in config.yaml labels.yaml; do
   DST="$CLAWFLOW_HOME/config/$f"
   if [[ -f "$DST" ]]; then
     echo "  [skip] ~/.clawflow/config/$f already exists — keeping your version"
@@ -146,7 +146,7 @@ echo ""
 echo "Done! ClawFlow is ready."
 echo ""
 echo "Next steps:"
-echo "  1. Edit ~/.clawflow/config/repos.yaml — add repos to monitor"
+echo "  1. Edit ~/.clawflow/config/config.yaml — add repos to monitor"
 echo "  2. Authenticate GitHub CLI: gh auth login"
 if [[ -z "$CREATE_LABELS_REPO" ]]; then
   echo "  3. Create GitHub labels: ./install.sh --create-labels <owner/repo>"

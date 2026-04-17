@@ -68,13 +68,42 @@ func setToken(apply func(*config.Credentials, string), token, platform string) e
 }
 
 func newConfigShowCmd() *cobra.Command {
-	return &cobra.Command{
+	var repoFlag, fieldFlag string
+
+	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Show current ClawFlow configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
 				return err
+			}
+
+			// --repo + --field: print a single repo field value (for scripting)
+			if repoFlag != "" && fieldFlag != "" {
+				r, ok := cfg.Repos[repoFlag]
+				if !ok {
+					return fmt.Errorf("repo %q not found", repoFlag)
+				}
+				switch fieldFlag {
+				case "auto_fix":
+					fmt.Println(r.AutoFix)
+				case "auto_merge":
+					fmt.Println(r.AutoMerge)
+				case "enabled":
+					fmt.Println(r.Enabled)
+				case "base_branch":
+					fmt.Println(r.BaseBranch)
+				case "platform":
+					fmt.Println(r.Platform)
+				case "local_path":
+					fmt.Println(r.LocalPath)
+				case "ci_required":
+					fmt.Println(r.CIRequired)
+				default:
+					return fmt.Errorf("unknown field %q", fieldFlag)
+				}
+				return nil
 			}
 
 			creds, _ := config.LoadCredentials()
@@ -113,6 +142,10 @@ func newConfigShowCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&repoFlag, "repo", "", "Repo to query (owner/repo)")
+	cmd.Flags().StringVar(&fieldFlag, "field", "", "Single field to print (auto_fix, auto_merge, enabled, ...)")
+	return cmd
 }
 
 func max(a, b int) int {

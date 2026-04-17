@@ -62,7 +62,7 @@ Override platform or instance URL manually:
 clawflow repo add ns/repo --platform gitlab --base-url https://gitlab.company.com
 ```
 
-For GitLab self-hosted, you can also register the host in `~/.clawflow/config/repos.yaml` so short-form inputs are recognized:
+For GitLab self-hosted, you can also register the host in `~/.clawflow/config/config.yaml` so short-form inputs are recognized:
 ```yaml
 settings:
   gitlab_hosts:
@@ -229,7 +229,7 @@ When `auto_fix: true` is set on a repo, ClawFlow automatically adds `ready-for-a
 - confidence score >= 7.0
 - no split suggestion in the evaluation
 
-Default is `false`. Enable per repo in `~/.clawflow/config/repos.yaml`:
+Default is `false`. Enable per repo in `~/.clawflow/config/config.yaml`:
 
 ```yaml
 repos:
@@ -259,7 +259,7 @@ repos:
 ├── bin/
 │   └── clawflow                    ← CLI binary
 ├── config/
-│   ├── repos.yaml                  ← repos to monitor (platform, base_url per repo)
+│   ├── config.yaml                  ← repos to monitor (platform, base_url per repo)
 │   ├── credentials.yaml            ← GH + GitLab tokens (0600, not committed)
 │   └── install.yaml                ← install location record
 └── memory/

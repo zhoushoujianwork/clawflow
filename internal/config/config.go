@@ -1,4 +1,4 @@
-// Package config loads and parses ~/.clawflow/config/repos.yaml.
+// Package config loads and parses ~/.clawflow/config/config.yaml.
 package config
 
 import (
@@ -85,7 +85,7 @@ func LoadCredentials() (*Credentials, error) {
 	return c, nil
 }
 
-// Save writes the config back to ~/.clawflow/config/repos.yaml.
+// Save writes the config back to ~/.clawflow/config/config.yaml.
 func (c *Config) Save() error {
 	if c.Repos == nil {
 		c.Repos = make(map[string]Repo)
@@ -114,10 +114,28 @@ func SaveCredentials(c *Credentials) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-// Load reads the config from ~/.clawflow/config/repos.yaml.
+// Load reads the config from ~/.clawflow/config/config.yaml.
+// If config.yaml does not exist but the legacy repos.yaml does, it migrates automatically.
 func Load() (*Config, error) {
 	path := ConfigPath()
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		// migrate from legacy repos.yaml
+		legacyPath := filepath.Join(filepath.Dir(path), "repos.yaml")
+		data, err = os.ReadFile(legacyPath)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read config %s: %w", path, err)
+		}
+		var cfg Config
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("cannot parse config: %w", err)
+		}
+		if err := cfg.Save(); err != nil {
+			return nil, fmt.Errorf("cannot migrate config to %s: %w", path, err)
+		}
+		_ = os.Rename(legacyPath, legacyPath+".bak")
+		return &cfg, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cannot read config %s: %w", path, err)
 	}
@@ -131,7 +149,7 @@ func Load() (*Config, error) {
 // ConfigPath returns the canonical config file path.
 func ConfigPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "config", "repos.yaml")
+	return filepath.Join(home, ".clawflow", "config", "config.yaml")
 }
 
 // MemoryDir returns the memory directory for a repo.
