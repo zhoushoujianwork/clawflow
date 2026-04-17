@@ -1,189 +1,189 @@
-# Phase 3 — 评估策略与评论模板
+# Phase 3 — Evaluation Strategy and Comment Templates
 
-## 评估策略（按类型区分）
+## Evaluation Strategy (by Issue Type)
 
-根据 issue 的 `labels` 字段，采用不同的评估策略：
+Based on the issue's `labels` field, apply the corresponding evaluation strategy:
 
-**类型判断规则（按优先级）：**
-1. labels 包含 `bug` → Bug 类型评估
-2. labels 包含 `enhancement` 或 `feat` → Feature 类型评估
-3. 以上均不包含 → 通用评估（fallback）
-
----
-
-### Bug 类型评估
-
-对于带有 `bug` 标签的 issue，评估**复现情况**：
-
-| 维度 | 标准 | 分数 (1-10) |
-|------|------|-------------|
-| **复现性** | 能否根据描述复现问题？有明确的复现步骤？ | 复现清晰=高分，无法复现=低分 |
-| **根因定位** | 能否定位到具体代码位置？根因是否明确？ | 已定位=高分，模糊=低分 |
-| **修复难度** | 修复是否简单直接？是否涉及核心逻辑？ | 单点修复=高分，系统性改动=低分 |
-
-**Bug 评估输出内容：**
-- **复现步骤**：如何复现这个 bug？
-- **根因分析**：问题出在哪里？哪个文件/函数？
-- **修复建议**：如何修复？改动范围多大？
-
-### Feature 类型评估
-
-对于带有 `enhancement` 或 `feat` 标签的 issue，评估**实现方案与架构对齐**：
-
-| 维度 | 标准 | 分数 (1-10) |
-|------|------|-------------|
-| **需求清晰度** | 功能需求是否明确？有清晰的输入输出定义？ | 明确=高分，模糊=低分 |
-| **设计合理性** | 提出的设计方案是否合理？是否与整体项目架构一致？ | 符合架构=高分，架构偏离=低分 |
-| **确认必要性** | 该实现是否涉及重大设计决策，需要 owner 额外确认？ | 无需确认=高分，需确认=低分 |
-
-**Feature 评估输出内容：**
-- **实现方案**：如何实现这个功能？具体步骤？
-- **技术选型**：用什么技术/库/API？
-- **改动范围**：需要改动哪些文件/模块？
-- **架构对齐分析**：设计方案是否遵循项目的整体架构原则？是否存在架构偏离风险？
-- **Owner 确认标记**：是否需要 owner 在设计层面进一步确认？（是/否）
-
-### 通用评估（无类型标签 fallback）
-
-对于没有 `bug`、`enhancement`、`feat` 标签的 issue，先推断类型再评估：
-
-1. **类型推断**：根据 title 和 body 判断是 bug（描述异常行为/错误）还是 feature（描述新功能/改进），并在评估报告中注明推断结果
-2. **评估维度**：按推断类型套用对应的 Bug 或 Feature 评估维度
-3. **标签建议**：在评估评论中建议 owner 补充对应类型标签（`bug` 或 `enhancement`）
-
-**置信度 = (维度1 + 维度2 + 维度3) / 3**
+**Type determination rules (by priority):**
+1. Labels contain `bug` → Bug type evaluation
+2. Labels contain `enhancement` or `feat` → Feature type evaluation
+3. Neither of the above → General evaluation (fallback)
 
 ---
 
-## 拆分建议评估
+### Bug Type Evaluation
 
-在完成置信度评估后，判断是否需要拆分（满足任意一条即建议拆分）：
+For issues labeled `bug`, evaluate **reproducibility**:
 
-| 触发条件 | 说明 |
-|---------|------|
-| 涉及 2 个以上独立模块/功能点 | 各功能点可独立实现、独立测试 |
-| 预计改动文件超过 5 个 | 改动范围过大，PR 难以 review |
-| issue body 中包含多个独立的 TODO 项 | 每个 TODO 可单独成为一个 issue |
+| Dimension | Criteria | Score (1-10) |
+|-----------|----------|--------------|
+| **Reproducibility** | Can the issue be reproduced from the description? Are there clear reproduction steps? | Clear repro = high, cannot reproduce = low |
+| **Root Cause** | Can the problem be traced to specific code? Is the root cause clear? | Located = high, vague = low |
+| **Fix Complexity** | Is the fix simple and straightforward? Does it touch core logic? | Single-point fix = high, systemic changes = low |
 
-**注意：子 issue 不再触发拆分（拆分深度限制为 1 层）。**
-判断方法：检查 issue body 是否包含 `Parent Issue: #` 字样，有则为子 issue，跳过拆分建议。
+**Bug evaluation output:**
+- **Reproduction steps**: How to reproduce this bug?
+- **Root cause analysis**: Where is the problem? Which file/function?
+- **Fix suggestion**: How to fix it? What is the change scope?
 
-### 拆分建议评论模板（追加到评估报告末尾）
+### Feature Type Evaluation
 
-当满足拆分条件时，在评估评论末尾追加：
+For issues labeled `enhancement` or `feat`, evaluate **implementation plan and architecture alignment**:
+
+| Dimension | Criteria | Score (1-10) |
+|-----------|----------|--------------|
+| **Requirements Clarity** | Are the feature requirements clear? Are inputs and outputs well defined? | Clear = high, vague = low |
+| **Design Soundness** | Is the proposed design reasonable? Does it align with the overall project architecture? | Aligned = high, diverged = low |
+| **Confirmation Necessity** | Does this implementation involve significant design decisions requiring owner confirmation? | No confirmation needed = high, needs confirmation = low |
+
+**Feature evaluation output:**
+- **Implementation plan**: How to implement this feature? Specific steps?
+- **Technology choices**: What tech/libraries/APIs to use?
+- **Change scope**: Which files/modules need to be modified?
+- **Architecture alignment analysis**: Does the design follow the project's overall architecture principles? Are there architecture divergence risks?
+- **Owner confirmation flag**: Does the owner need to confirm at the design level? (Yes/No)
+
+### General Evaluation (No Type Label Fallback)
+
+For issues without `bug`, `enhancement`, or `feat` labels, infer the type first then evaluate:
+
+1. **Type inference**: Based on title and body, determine if it's a bug (describes abnormal behavior/errors) or a feature (describes new functionality/improvements), and note the inferred type in the evaluation report
+2. **Evaluation dimensions**: Apply the corresponding Bug or Feature evaluation dimensions based on the inferred type
+3. **Label suggestion**: In the evaluation comment, suggest the owner add the appropriate type label (`bug` or `enhancement`)
+
+**Confidence Score = (Dimension1 + Dimension2 + Dimension3) / 3**
+
+---
+
+## Split Suggestion Evaluation
+
+After completing the confidence evaluation, determine whether a split is recommended (any one condition triggers the suggestion):
+
+| Trigger Condition | Description |
+|-------------------|-------------|
+| Involves 2+ independent modules/features | Each feature can be implemented and tested independently |
+| Estimated changes exceed 5 files | Change scope is too large for a reviewable PR |
+| Issue body contains multiple independent TODO items | Each TODO can stand alone as a separate issue |
+
+**Note: Sub-issues do not trigger split suggestions (split depth is limited to 1 level).**
+Detection: check if the issue body contains `Parent Issue: #` — if so, it's a sub-issue; skip split suggestion.
+
+### Split Suggestion Comment Template (appended to evaluation report)
+
+When split conditions are met, append to the end of the evaluation comment:
 
 ```
 ---
 
-### 🔀 拆分建议
+### 🔀 Split Suggestion
 
-此 issue 建议拆分为以下子任务：
+This issue is recommended to be split into the following sub-tasks:
 
-1. **子任务 1**：{标题} — {一句话说明}
-2. **子任务 2**：{标题} — {一句话说明}
+1. **Sub-task 1**: {title} — {one-line description}
+2. **Sub-task 2**: {title} — {one-line description}
 
-**拆分原因：** {触发条件说明}
+**Reason for split:** {trigger condition description}
 
-如同意拆分，请添加 `ready-for-agent` 标签触发自动创建子 issue。
-如不需要拆分，请在评论中说明后再添加 `ready-for-agent`。
+If you agree to split, add the `ready-for-agent` label to trigger automatic sub-issue creation.
+If you prefer not to split, please leave a comment explaining and then add `ready-for-agent`.
 ```
 
 ---
 
-## 高置信度处理（推荐修复）
+## High Confidence Handling (Fix Recommended)
 
-对于置信度 >= threshold 的 issue：
+For issues with confidence >= threshold:
 
 ```bash
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
 clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluation_body>"
 ```
 
-### Bug 类型评论模板
+### Bug Type Comment Template
 
 ```
-## 🔍 ClawFlow 评估报告
+## 🔍 ClawFlow Evaluation Report
 
-**Issue 类型:** Bug
-**置信度:** {score}/10 ✅ (高于阈值 {threshold})
+**Issue Type:** Bug
+**Confidence:** {score}/10 ✅ (above threshold {threshold})
 
 ---
 
-### 复现情况分析
+### Reproducibility Analysis
 
-**复现性:** {reproducibility}/10 — {repro_reason}
-**根因定位:** {root_cause}/10 — {root_reason}
-**修复难度:** {fix_difficulty}/10 — {fix_reason}
+**Reproducibility:** {reproducibility}/10 — {repro_reason}
+**Root Cause:** {root_cause}/10 — {root_reason}
+**Fix Complexity:** {fix_difficulty}/10 — {fix_reason}
 
-**复现步骤：**
+**Reproduction Steps:**
 {repro_steps}
 
-**⚠️ 复现验证状态:** {reproduction_verified} ⚠️
-- **验证结果：** {verify_result}
-- **验证详情：** {verify_details}
+**⚠️ Reproduction Verification Status:** {reproduction_verified} ⚠️
+- **Verification Result:** {verify_result}
+- **Verification Details:** {verify_details}
 
-**根因分析:**
+**Root Cause Analysis:**
 {root_cause_analysis}
 
-**修复建议:**
+**Fix Suggestion:**
 {fix_suggestion}
 
 ---
 
-👉 **如果您同意此方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**
+👉 **If you agree with this plan, please manually add the `ready-for-agent` label to trigger auto-fix.**
 
-⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
+⚠️ Note: The agent will not add this label automatically — it requires owner confirmation.
 
-> 如果仓库开启了 `auto_fix: true`，且置信度 >= 7.0，ClawFlow 已自动添加 `ready-for-agent`，无需手动操作。
+> If the repo has `auto_fix: true` enabled and confidence >= 7.0, ClawFlow has already added `ready-for-agent` automatically — no manual action needed.
 
 ---
 🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
 ```
 
-### Feature 类型评论模板
+### Feature Type Comment Template
 
 ```
-## 🔍 ClawFlow 评估报告
+## 🔍 ClawFlow Evaluation Report
 
-**Issue 类型:** Feature
-**置信度:** {score}/10 ✅ (高于阈值 {threshold})
+**Issue Type:** Feature
+**Confidence:** {score}/10 ✅ (above threshold {threshold})
 
 ---
 
-### 实现方案分析
+### Implementation Plan Analysis
 
-**需求清晰度:** {clarity}/10 — {clarity_reason}
-**设计合理性:** {design}/10 — {design_reason}
-**确认必要性:** {confirmation}/10 — {confirm_reason}
+**Requirements Clarity:** {clarity}/10 — {clarity_reason}
+**Design Soundness:** {design}/10 — {design_reason}
+**Confirmation Necessity:** {confirmation}/10 — {confirm_reason}
 
-**实现方案:**
+**Implementation Plan:**
 {implementation_plan}
 
-**技术选型:**
+**Technology Choices:**
 {tech_choice}
 
-**改动范围:**
+**Change Scope:**
 {change_scope}
 
 ---
 
-### 🏗️ 架构对齐分析
+### 🏗️ Architecture Alignment Analysis
 
-**架构一致性:** {arch_alignment} — {arch_reason}
+**Architecture Consistency:** {arch_alignment} — {arch_reason}
 
 > {architecture_notes}
 
-**Owner 确认标记：** {owner_confirmation_flag} ⚠️
-- **是否需要确认：** {need_owner_confirmation}
-- **确认理由：** {confirmation_reason}
+**Owner Confirmation Flag:** {owner_confirmation_flag} ⚠️
+- **Confirmation Required:** {need_owner_confirmation}
+- **Reason:** {confirmation_reason}
 
 ---
 
-👉 **如果您同意此方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**
+👉 **If you agree with this plan, please manually add the `ready-for-agent` label to trigger auto-fix.**
 
-⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
+⚠️ Note: The agent will not add this label automatically — it requires owner confirmation.
 
-> 如果仓库开启了 `auto_fix: true`，且置信度 >= 7.0，ClawFlow 已自动添加 `ready-for-agent`，无需手动操作。
+> If the repo has `auto_fix: true` enabled and confidence >= 7.0, ClawFlow has already added `ready-for-agent` automatically — no manual action needed.
 
 ---
 🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
@@ -191,9 +191,9 @@ clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluatio
 
 ---
 
-## 低置信度处理（需要补充信息）
+## Low Confidence Handling (Additional Information Required)
 
-对于置信度 < threshold 的 issue：
+For issues with confidence < threshold:
 
 ```bash
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
@@ -201,26 +201,26 @@ clawflow label add --repo {owner}/{repo} --issue {number} --label agent-skipped
 clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<missing_info_body>"
 ```
 
-### 低置信度评论模板
+### Low Confidence Comment Template
 
 ```
-## 🔍 ClawFlow 评估报告
+## 🔍 ClawFlow Evaluation Report
 
-**Issue 类型:** {type}
-**置信度:** {score}/10 ⚠️ (低于阈值 {threshold})
+**Issue Type:** {type}
+**Confidence:** {score}/10 ⚠️ (below threshold {threshold})
 
 ---
 
-### 评估详情
+### Evaluation Details
 
 {evaluation_details}
 
-**需要补充的信息:**
+**Information needed:**
 {missing_info}
 
 ---
 
-💡 请补充以上信息后，移除 `agent-skipped` 标签并添加 `ready-for-agent` 以重新触发评估。
+💡 Please provide the above information, then remove the `agent-skipped` label and add `ready-for-agent` to re-trigger evaluation.
 
 ---
 🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
