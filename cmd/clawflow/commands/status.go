@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -28,6 +29,16 @@ func NewStatusCmd() *cobra.Command {
 
 			for repoName, repoCfg := range repos {
 				fmt.Printf("  %s\n", repoName)
+				flags := []string{}
+				if repoCfg.AutoFix {
+					flags = append(flags, "auto_fix:on")
+				}
+				if repoCfg.AutoMerge {
+					flags = append(flags, "auto_merge:on")
+				}
+				if len(flags) > 0 {
+					fmt.Printf("    [%s]\n", strings.Join(flags, "  "))
+				}
 
 				client, err := newVCSClient(repoCfg)
 				if err != nil {

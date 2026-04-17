@@ -134,6 +134,8 @@ clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluatio
 
 ⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
 
+> 如果仓库开启了 `auto_fix: true`，且置信度 >= 7.0，ClawFlow 已自动添加 `ready-for-agent`，无需手动操作。
+
 ---
 🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
 ```
@@ -180,6 +182,8 @@ clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluatio
 👉 **如果您同意此方案，请手动添加 `ready-for-agent` 标签以触发自动修复。**
 
 ⚠️ 注意：Agent 不会自动添加此标签，需要 owner 确认后手动操作。
+
+> 如果仓库开启了 `auto_fix: true`，且置信度 >= 7.0，ClawFlow 已自动添加 `ready-for-agent`，无需手动操作。
 
 ---
 🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline

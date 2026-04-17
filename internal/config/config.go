@@ -35,6 +35,7 @@ type Repo struct {
 	CIRequired        bool              `yaml:"ci_required,omitempty"`
 	CITimeout         int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
+	AutoFix           bool              `yaml:"auto_fix,omitempty"`
 }
 
 // Settings holds global ClawFlow settings.

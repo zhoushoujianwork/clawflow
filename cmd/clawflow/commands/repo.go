@@ -20,6 +20,7 @@ func NewRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoRemoveCmd())
 	cmd.AddCommand(newRepoEnableCmd())
 	cmd.AddCommand(newRepoDisableCmd())
+	cmd.AddCommand(newRepoSetCmd())
 	return cmd
 }
 
@@ -38,14 +39,22 @@ func newRepoListCmd() *cobra.Command {
 				fmt.Println("Add one with: clawflow repo add <owner/repo>")
 				return nil
 			}
-			fmt.Printf("%-40s %-10s %-12s %s\n", "REPO", "STATUS", "BASE", "DESCRIPTION")
-			fmt.Println(strings.Repeat("─", 80))
+			fmt.Printf("%-40s %-10s %-12s %-10s %-10s %s\n", "REPO", "STATUS", "BASE", "AUTO_FIX", "AUTO_MERGE", "DESCRIPTION")
+			fmt.Println(strings.Repeat("─", 100))
 			for name, r := range cfg.Repos {
 				status := "disabled"
 				if r.Enabled {
 					status = "enabled"
 				}
-				fmt.Printf("%-40s %-10s %-12s %s\n", name, status, r.BaseBranch, r.Description)
+				autoFix := "off"
+				if r.AutoFix {
+					autoFix = "on"
+				}
+				autoMerge := "off"
+				if r.AutoMerge {
+					autoMerge = "on"
+				}
+				fmt.Printf("%-40s %-10s %-12s %-10s %-10s %s\n", name, status, r.BaseBranch, autoFix, autoMerge, r.Description)
 			}
 			return nil
 		},
@@ -215,6 +224,60 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 	}
 	fmt.Printf("repo %q %s\n", ownerRepo, state)
 	return nil
+}
+
+func newRepoSetCmd() *cobra.Command {
+	var autoFix string
+	var autoMerge string
+
+	cmd := &cobra.Command{
+		Use:     "set <owner/repo>",
+		Short:   "Set configuration flags for a repository",
+		Args:    cobra.ExactArgs(1),
+		Example: "  clawflow repo set owner/repo --auto-fix on\n  clawflow repo set owner/repo --auto-merge on",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ownerRepo := args[0]
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			r, exists := cfg.Repos[ownerRepo]
+			if !exists {
+				return fmt.Errorf("repo %q not found", ownerRepo)
+			}
+			if autoFix != "" {
+				switch autoFix {
+				case "on", "true", "1":
+					r.AutoFix = true
+				case "off", "false", "0":
+					r.AutoFix = false
+				default:
+					return fmt.Errorf("--auto-fix must be on or off")
+				}
+			}
+			if autoMerge != "" {
+				switch autoMerge {
+				case "on", "true", "1":
+					r.AutoMerge = true
+				case "off", "false", "0":
+					r.AutoMerge = false
+				default:
+					return fmt.Errorf("--auto-merge must be on or off")
+				}
+			}
+			cfg.Repos[ownerRepo] = r
+			if err := cfg.Save(); err != nil {
+				return err
+			}
+			fmt.Printf("repo %q updated\n", ownerRepo)
+			fmt.Printf("  auto_fix:   %v\n", r.AutoFix)
+			fmt.Printf("  auto_merge: %v\n", r.AutoMerge)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&autoFix, "auto-fix", "", "enable/disable auto-fix: on or off")
+	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
+	return cmd
 }
 
 // loadOrNewConfig loads existing config or creates an empty one.

@@ -249,10 +249,32 @@ clawflow issue close --repo {owner}/{repo} --issue {number}
 执行命令：
 
 ```bash
-# 高置信度
+# 高置信度（score >= threshold）
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
 clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluation_body>"
+```
 
+**auto_fix 开关逻辑（评估完成后立即判断）：**
+
+读取仓库配置中的 `auto_fix` 字段：
+
+```bash
+AUTO_FIX=$(clawflow config show --repo {owner}/{repo} --field auto_fix 2>/dev/null || echo "false")
+```
+
+| 条件 | 行为 |
+|------|------|
+| `auto_fix=true` 且 `score >= 7.0` 且**无拆分建议** | 直接添加 `ready-for-agent`，跳过 owner 审批，进入 Phase 4 |
+| `auto_fix=true` 且 `score >= 7.0` 且**有拆分建议** | 不自动触发，等待 owner 确认拆分方案 |
+| `auto_fix=false`（默认） | 等待 owner 手动添加 `ready-for-agent` |
+| `score < 7.0` | 无论 `auto_fix` 如何，走低置信度流程 |
+
+```bash
+# auto_fix=true 且 score >= 7.0 且无拆分建议时，自动触发
+clawflow label add --repo {owner}/{repo} --issue {number} --label ready-for-agent
+```
+
+```bash
 # 低置信度
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-skipped
