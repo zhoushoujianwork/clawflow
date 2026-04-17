@@ -65,6 +65,7 @@ func NewHarvestCmd() *cobra.Command {
 			}
 
 			inProgressCount := 0
+			clients := make(map[string]vcs.Client)
 			allIssuesByRepo := make(map[string][]vcs.Issue)
 			for repoName, repoCfg := range repos {
 				client, err := newVCSClient(repoCfg)
@@ -72,6 +73,7 @@ func NewHarvestCmd() *cobra.Command {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot create client for %s: %v\n", repoName, err)
 					continue
 				}
+				clients[repoName] = client
 				issues, err := client.ListOpenIssues(repoName)
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list issues for %s: %v\n", repoName, err)
@@ -88,21 +90,13 @@ func NewHarvestCmd() *cobra.Command {
 			// Unlock blocked issues before scanning so newly unblocked issues
 			// are picked up in this same harvest run.
 			sw := &stderrWriter{cmd}
-			for repoName, repoCfg := range repos {
-				client, err := newVCSClient(repoCfg)
-				if err != nil {
-					continue
-				}
+			for repoName, client := range clients {
 				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnMerge, sw)
 				TryUnlockDownstream(client, repoName, 0, vcs.DependsOnPR, sw)
 			}
 
 			// Re-fetch issues after unlock so newly unblocked issues are included.
-			for repoName, repoCfg := range repos {
-				client, err := newVCSClient(repoCfg)
-				if err != nil {
-					continue
-				}
+			for repoName, client := range clients {
 				issues, err := client.ListOpenIssues(repoName)
 				if err != nil {
 					continue
@@ -111,11 +105,7 @@ func NewHarvestCmd() *cobra.Command {
 			}
 
 			for repoName, issues := range allIssuesByRepo {
-				repoCfg := repos[repoName]
-				client, err := newVCSClient(repoCfg)
-				if err != nil {
-					continue
-				}
+				client := clients[repoName]
 				for _, issue := range issues {
 					// Skip issues that are waiting on dependencies.
 					if issue.HasLabel("blocked") {
@@ -186,14 +176,18 @@ func NewHarvestCmd() *cobra.Command {
 			}
 
 			// Check agent-split main issues: if all sub-issues are closed, add to split_done.
-			for repoName, repoCfg := range repos {
-				client, err := newVCSClient(repoCfg)
-				if err != nil {
-					continue
-				}
+			for repoName, client := range clients {
 				splitIssues, err := client.ListIssues(repoName, "open", []string{"agent-split"})
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list agent-split issues for %s: %v\n", repoName, err)
+					continue
+				}
+				if len(splitIssues) == 0 {
+					continue
+				}
+				closedIssues, err := client.ListIssues(repoName, "closed", nil)
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list closed issues for %s: %v\n", repoName, err)
 					continue
 				}
 				for _, mainIssue := range splitIssues {
@@ -203,14 +197,8 @@ func NewHarvestCmd() *cobra.Command {
 						fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot search sub-issues for %s#%d: %v\n", repoName, mainIssue.Number, err)
 						continue
 					}
-					// Also check closed sub-issues to count total
-					closedSubs, err := client.ListIssues(repoName, "closed", nil)
-					if err != nil {
-						fmt.Fprintf(cmd.ErrOrStderr(), "warn: cannot list closed issues for %s: %v\n", repoName, err)
-						continue
-					}
 					totalSubs := len(subIssues)
-					for _, ci := range closedSubs {
+					for _, ci := range closedIssues {
 						if strings.Contains(ci.Body, keyword) {
 							totalSubs++
 						}
