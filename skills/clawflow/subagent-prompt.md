@@ -31,13 +31,16 @@ Issue: #{number}
 1. 在 worktree 路径中工作（不要 clone，已有代码）
 2. ANALYZE — 阅读代码，理解问题
 3. IMPLEMENT — 实现修复（最小化改动）
-4. TEST_LOCAL — 强制运行本地测试（失败则停止，不上传）
-   - go.mod 存在 → `go test ./...`
-   - package.json 存在 → `npm test`
-   - pytest.ini / setup.py 存在 → `pytest`
+4. TEST_LOCAL — 强制运行本地检查（失败则停止，不上传）
+   - go.mod 存在 → `go build ./...` 然后 `go test ./...`
+   - package.json 存在 →
+     1. 有 `build` script → `npm run build`（捕获 TS 类型错误、import 错误）
+     2. 有 `lint` script → `npm run lint`
+     3. 有 `test` script → `npm test`
+   - pytest.ini / setup.py / pyproject.toml 存在 → `pytest`
    - Makefile 含 test 目标 → `make test`
    - 以上均无 → 跳过（项目无测试）
-   - 测试失败 → 停止流程，报告失败原因
+   - 任意步骤失败 → 停止流程，修复后重试，最多 2 次；仍失败则报告原因并终止
 5. COMMIT — git commit（包含测试改动）
 6. PUSH — git push origin fix/issue-{number}
 7. PR — 创建 PR：
