@@ -114,7 +114,7 @@ func detectLanguage(dir string, changedFiles []string, overrideTestCmd string) L
 		{
 			marker:   "package.json",
 			lang:     "node",
-			buildCmd: "npm run build --if-present",
+			buildCmd: "npm run build --if-present && npm run lint --if-present",
 			testFn:   nodeTestCmd,
 		},
 		{
