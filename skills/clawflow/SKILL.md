@@ -569,6 +569,32 @@ clawflow worktree remove --repo {owner}/{repo} --issue {number}
 
 > PR 保留不关闭，owner 可查看 CI 日志后决定是否手动修复。
 
+### LLM 额度耗尽处理
+
+**检测条件（满足任意一条即触发）：**
+- API 返回 `overloaded_error` / `rate_limit_error` / `quota_exceeded`
+- 输出包含 `Credit balance is too low` / `Usage limit reached` / `insufficient_quota`
+
+**处理流程（对当前正在处理的 issue）：**
+
+```bash
+# 1. 写入 memory
+clawflow memory write --repo {owner}/{repo} --issue {number} --status failed --reason "LLM quota exhausted"
+
+# 2. 移除 in-progress，添加 agent-failed
+clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
+clawflow label add    --repo {owner}/{repo} --issue {number} --label agent-failed
+
+# 3. 评论通知 owner
+clawflow issue comment --repo {owner}/{repo} --issue {number} \
+  --body "⚠️ ClawFlow 暂停：LLM API 额度已耗尽，请补充额度后执行 \`clawflow retry --repo {owner}/{repo} --issue {number}\` 重新触发。"
+
+# 4. 清理 worktree
+clawflow worktree remove --repo {owner}/{repo} --issue {number}
+```
+
+**关键**：检测到额度问题后立即终止整轮 harvest，不继续处理队列中其他 issue，避免发起注定失败的 LLM 调用。
+
 ---
 
 ## Phase 6 — 安全约束
