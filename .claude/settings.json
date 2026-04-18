@@ -12,5 +12,17 @@
       "Bash(make:*)",
       "Bash(clawflow:*)"
     ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "clawflow billing-hook"
+          }
+        ]
+      }
+    ]
   }
 }
