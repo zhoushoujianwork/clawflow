@@ -45,6 +45,7 @@ func newPRCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			FinishRunIfConfigured("success", pr.URL, pr.Number)
 			fmt.Printf("created PR #%d: %s\n%s\n", pr.Number, pr.Title, pr.URL)
 			return nil
 		},

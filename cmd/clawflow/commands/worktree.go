@@ -61,6 +61,12 @@ func newWorktreeCreateCmd() *cobra.Command {
 				return fmt.Errorf("git worktree add failed: %w", err)
 			}
 
+			platform := repoCfg.Platform
+			if platform == "" {
+				platform = "github"
+			}
+			StartRunIfConfigured(platform, repo, issue, "")
+
 			fmt.Println(worktreePath)
 			return nil
 		},

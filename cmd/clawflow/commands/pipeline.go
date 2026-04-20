@@ -87,9 +87,7 @@ and POSTs status=running to SaaS. Subsequent 'clawflow pipeline finish' or
 			if title != "" {
 				body["issue_title"] = title
 			}
-			if err := pushRun(body); err != nil {
-				fmt.Fprintf(os.Stderr, "warn: pipeline start push failed: %v\n", err)
-			}
+			_ = pushRun(body)
 			fmt.Println(id)
 			return nil
 		},
@@ -138,9 +136,7 @@ func newPipelineFinishCmd() *cobra.Command {
 				body["confidence"] = confidence
 			}
 
-			if err := pushRun(body); err != nil {
-				fmt.Fprintf(os.Stderr, "warn: pipeline finish push failed: %v\n", err)
-			}
+			_ = pushRun(body)
 			_ = os.Remove(runContextPath())
 			_ = os.Remove(currentRunIDPath())
 			return nil
@@ -153,31 +149,104 @@ func newPipelineFinishCmd() *cobra.Command {
 	return cmd
 }
 
+// pushRun is a best-effort reporter: if SaaS isn't configured it silently
+// no-ops so the CLI stays usable offline/solo. Network errors are logged
+// to stderr at debug level but never propagated — telemetry must never
+// break the agent flow.
 func pushRun(body map[string]any) error {
 	wc, err := config.LoadWorkerConfig()
-	if err != nil {
-		return err
-	}
-	if wc.SaasURL == "" || wc.WorkerToken == "" {
-		return fmt.Errorf("worker not configured — run: clawflow login")
+	if err != nil || wc.SaasURL == "" || wc.WorkerToken == "" {
+		return nil
 	}
 	data, _ := json.Marshal(body)
 	req, err := http.NewRequest("POST", wc.SaasURL+"/api/v1/worker/pipelines", bytes.NewReader(data))
 	if err != nil {
-		return err
+		return nil
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+wc.WorkerToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		fmt.Fprintf(os.Stderr, "debug: pipeline push network error: %v\n", err)
+		return nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("status %d: %s", resp.StatusCode, b)
+		fmt.Fprintf(os.Stderr, "debug: pipeline push status %d: %s\n", resp.StatusCode, b)
 	}
 	return nil
+}
+
+// StartRunIfConfigured is an ambient hook called from user-facing commands
+// (worktree create, harvest, etc.) at the natural start of a pipeline run.
+// Generates a run_id, caches context to ~/.clawflow/current_run.json, and
+// fires status=running to SaaS. No-op when SaaS is not configured.
+func StartRunIfConfigured(platform, repo string, issue int, title string) {
+	if !saasConfigured() {
+		return
+	}
+	id, err := newUUIDv4()
+	if err != nil {
+		return
+	}
+	ctx := runContext{
+		ID: id, Platform: platform, FullName: repo,
+		IssueNumber: issue, IssueTitle: title,
+	}
+	_ = saveRunContext(ctx)
+	_ = os.WriteFile(currentRunIDPath(), []byte(id), 0o600)
+
+	body := map[string]any{
+		"id":           id,
+		"platform":     platform,
+		"full_name":    repo,
+		"issue_number": issue,
+		"status":       "running",
+		"started_at":   time.Now().UTC().Format(time.RFC3339),
+	}
+	if title != "" {
+		body["issue_title"] = title
+	}
+	_ = pushRun(body)
+}
+
+// FinishRunIfConfigured is an ambient hook called at the natural success
+// boundary (pr create). Reports final status and clears the cached context.
+// No-op when SaaS is not configured or no active run is cached.
+func FinishRunIfConfigured(status, prURL string, prNumber int) {
+	if !saasConfigured() {
+		return
+	}
+	ctx, err := loadRunContext()
+	if err != nil {
+		return
+	}
+	body := map[string]any{
+		"id":           ctx.ID,
+		"platform":     ctx.Platform,
+		"full_name":    ctx.FullName,
+		"issue_number": ctx.IssueNumber,
+		"status":       status,
+		"finished_at":  time.Now().UTC().Format(time.RFC3339),
+	}
+	if ctx.IssueTitle != "" {
+		body["issue_title"] = ctx.IssueTitle
+	}
+	if prURL != "" {
+		body["pr_url"] = prURL
+	}
+	if prNumber != 0 {
+		body["pr_number"] = prNumber
+	}
+	_ = pushRun(body)
+	_ = os.Remove(runContextPath())
+	_ = os.Remove(currentRunIDPath())
+}
+
+func saasConfigured() bool {
+	wc, err := config.LoadWorkerConfig()
+	return err == nil && wc.SaasURL != "" && wc.WorkerToken != ""
 }
 
 func saveRunContext(ctx runContext) error {
