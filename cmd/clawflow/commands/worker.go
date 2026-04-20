@@ -154,12 +154,29 @@ func cliVersionString() string {
 	return ""
 }
 
+// agentIDHeader returns the agent_id saved by `clawflow connect run`, if any.
+// Empty string = legacy client (server returns all bound-repo tasks).
+func agentIDHeader() string {
+	saas, err := config.LoadSaasConfig()
+	if err != nil || saas == nil {
+		return ""
+	}
+	return saas.AgentID
+}
+
+func setWorkerHeaders(req *http.Request, wc *config.WorkerConfig) {
+	req.Header.Set("Authorization", "Bearer "+wc.WorkerToken)
+	if id := agentIDHeader(); id != "" {
+		req.Header.Set("X-Agent-Id", id)
+	}
+}
+
 func fetchTasks(wc *config.WorkerConfig) ([]workerTask, error) {
 	req, err := http.NewRequest("GET", wc.SaasURL+"/api/v1/worker/tasks", nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+wc.WorkerToken)
+	setWorkerHeaders(req, wc)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -187,7 +204,7 @@ func claimTask(wc *config.WorkerConfig, taskID string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+wc.WorkerToken)
+	setWorkerHeaders(req, wc)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -208,7 +225,7 @@ func reportComplete(wc *config.WorkerConfig, taskID, prURL string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+wc.WorkerToken)
+	setWorkerHeaders(req, wc)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -225,7 +242,7 @@ func reportFail(wc *config.WorkerConfig, taskID, reason string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+wc.WorkerToken)
+	setWorkerHeaders(req, wc)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
