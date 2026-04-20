@@ -14,6 +14,7 @@ type SaasConfig struct {
 	OrgID     string `json:"org_id"`
 	AgentID   string `json:"agent_id"`
 	SyncToken string `json:"sync_token"`
+	LastSync  string `json:"last_sync,omitempty"`
 }
 
 func SaasConfigPath() string {

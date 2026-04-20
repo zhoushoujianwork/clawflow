@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"runtime/debug"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -98,7 +100,18 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	fmt.Printf("Worker started — polling %s every %ds\n", wc.SaasURL, pollSecs)
 	fmt.Println("Press Ctrl+C to stop.")
 
+	// Send initial heartbeat, then every 60 s regardless of poll interval.
+	sendHeartbeat(wc)
+	heartbeatTicker := time.NewTicker(60 * time.Second)
+	defer heartbeatTicker.Stop()
+
 	for {
+		select {
+		case <-heartbeatTicker.C:
+			sendHeartbeat(wc)
+		default:
+		}
+
 		tasks, err := fetchTasks(wc)
 		if err != nil {
 			fmt.Printf("[warn] fetch tasks: %v\n", err)
@@ -111,6 +124,34 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 		}
 		time.Sleep(time.Duration(pollSecs) * time.Second)
 	}
+}
+
+func sendHeartbeat(wc *config.WorkerConfig) {
+	hostname, _ := os.Hostname()
+	cliVersion := cliVersionString()
+	body, _ := json.Marshal(map[string]string{
+		"hostname":    hostname,
+		"cli_version": cliVersion,
+	})
+	req, err := http.NewRequest("POST", wc.SaasURL+"/api/v1/worker/heartbeat", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+wc.WorkerToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("[warn] heartbeat: %v\n", err)
+		return
+	}
+	resp.Body.Close()
+}
+
+func cliVersionString() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		return info.Main.Version
+	}
+	return ""
 }
 
 func fetchTasks(wc *config.WorkerConfig) ([]workerTask, error) {

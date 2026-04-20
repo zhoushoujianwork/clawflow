@@ -137,9 +137,13 @@ func pushConfig(saas *config.SaasConfig) error {
 	}
 
 	type repoPayload struct {
-		FullName   string `json:"full_name"`
-		Platform   string `json:"platform"`
-		BaseBranch string `json:"base_branch"`
+		FullName    string  `json:"full_name"`
+		Platform    string  `json:"platform"`
+		BaseBranch  string  `json:"base_branch"`
+		TestCommand *string `json:"test_command,omitempty"`
+		CIRequired  *bool   `json:"ci_required,omitempty"`
+		Enabled     *bool   `json:"enabled,omitempty"`
+		LocalPath   *string `json:"local_path,omitempty"`
 	}
 	var repos []repoPayload
 	for name, r := range cfg.Repos {
@@ -147,11 +151,20 @@ func pushConfig(saas *config.SaasConfig) error {
 		if platform == "" {
 			platform = "github"
 		}
-		repos = append(repos, repoPayload{
+		p := repoPayload{
 			FullName:   name,
 			Platform:   platform,
 			BaseBranch: r.BaseBranch,
-		})
+			Enabled:    &r.Enabled,
+			CIRequired: &r.CIRequired,
+		}
+		if r.TestCommand != "" {
+			p.TestCommand = &r.TestCommand
+		}
+		if r.LocalPath != "" {
+			p.LocalPath = &r.LocalPath
+		}
+		repos = append(repos, p)
 	}
 
 	body, _ := json.Marshal(map[string]any{"repos": repos})
@@ -178,8 +191,11 @@ func pushConfig(saas *config.SaasConfig) error {
 }
 
 func pullConfig(saas *config.SaasConfig) error {
-	url := saas.URL + "/api/v1/sync/config"
-	req, _ := http.NewRequest("GET", url, nil)
+	pullURL := saas.URL + "/api/v1/sync/config"
+	if saas.LastSync != "" {
+		pullURL += "?since=" + saas.LastSync
+	}
+	req, _ := http.NewRequest("GET", pullURL, nil)
 	req.Header.Set("x-sync-token", saas.SyncToken)
 
 	resp, err := http.DefaultClient.Do(req)
@@ -194,11 +210,14 @@ func pullConfig(saas *config.SaasConfig) error {
 
 	var result struct {
 		Repos []struct {
-			FullName   string    `json:"full_name"`
-			Platform   string    `json:"platform"`
-			BaseBranch string    `json:"base_branch"`
-			Enabled    bool      `json:"enabled"`
-			UpdatedAt  time.Time `json:"updated_at"`
+			FullName    string    `json:"full_name"`
+			Platform    string    `json:"platform"`
+			BaseBranch  string    `json:"base_branch"`
+			Enabled     bool      `json:"enabled"`
+			TestCommand *string   `json:"test_command"`
+			CIRequired  bool      `json:"ci_required"`
+			LocalPath   *string   `json:"local_path"`
+			UpdatedAt   time.Time `json:"updated_at"`
 		} `json:"repos"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -223,12 +242,24 @@ func pullConfig(saas *config.SaasConfig) error {
 		existing.Enabled = r.Enabled
 		existing.BaseBranch = r.BaseBranch
 		existing.Platform = r.Platform
+		existing.CIRequired = r.CIRequired
+		if r.TestCommand != nil {
+			existing.TestCommand = *r.TestCommand
+		}
+		if r.LocalPath != nil {
+			existing.LocalPath = *r.LocalPath
+		}
 		cfg.Repos[r.FullName] = existing
 	}
 
 	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("save local config: %w", err)
 	}
+
+	last := result.Repos[len(result.Repos)-1].UpdatedAt
+	saas.LastSync = last.Format(time.RFC3339Nano)
+	_ = saas.Save()
+
 	fmt.Printf("Pulled %d repo updates from SaaS.\n", len(result.Repos))
 	return nil
 }
