@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -26,18 +27,26 @@ func NewConnectCmd() *cobra.Command {
 
 // clawflow connect --url https://app.clawflow.io --token <api-key> --org-id <uuid>
 func newConnectRunCmd() *cobra.Command {
-	var url, token, orgID string
+	var url, token, orgID, tagsCSV string
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Register this machine with ClawFlow SaaS",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hostname, _ := os.Hostname()
 
+			tags := []string{}
+			for _, t := range strings.Split(tagsCSV, ",") {
+				if trimmed := strings.TrimSpace(t); trimmed != "" {
+					tags = append(tags, trimmed)
+				}
+			}
+
 			// Register agent
 			body, _ := json.Marshal(map[string]any{
 				"hostname":    hostname,
 				"cli_version": Version,
 				"org_id":      orgID,
+				"tags":        tags,
 			})
 			req, _ := http.NewRequest("POST", url+"/api/v1/agents/register", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
@@ -79,6 +88,7 @@ func newConnectRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&url, "url", "", "SaaS base URL (required)")
 	cmd.Flags().StringVar(&token, "token", "", "API token (required)")
 	cmd.Flags().StringVar(&orgID, "org-id", "", "Organization UUID (required)")
+	cmd.Flags().StringVar(&tagsCSV, "tags", "", "Comma-separated capability tags (e.g. docker,gpu,vpn)")
 	_ = cmd.MarkFlagRequired("url")
 	_ = cmd.MarkFlagRequired("token")
 	_ = cmd.MarkFlagRequired("org-id")
