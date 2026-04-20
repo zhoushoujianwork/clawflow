@@ -30,8 +30,7 @@ saas_url + worker_token to ~/.clawflow/config/worker.yaml.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&saasURL, "saas-url", "", "ClawFlow SaaS base URL (required)")
-	_ = cmd.MarkFlagRequired("saas-url")
+	cmd.Flags().StringVar(&saasURL, "saas-url", "https://clawflow.daboluo.cc", "ClawFlow SaaS base URL")
 	return cmd
 }
 
