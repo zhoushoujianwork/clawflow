@@ -19,7 +19,49 @@ func NewWorkerCmd() *cobra.Command {
 		Short: "Manage ClawFlow SaaS worker",
 	}
 	cmd.AddCommand(newWorkerStartCmd())
+	cmd.AddCommand(newWorkerStatusCmd())
 	return cmd
+}
+
+func newWorkerStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show worker configuration and verify SaaS connectivity",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			wc, err := config.LoadWorkerConfig()
+			if err != nil {
+				return fmt.Errorf("load worker config: %w", err)
+			}
+			if wc.SaasURL == "" || wc.WorkerToken == "" {
+				fmt.Println("Worker not configured — run: clawflow login")
+				return nil
+			}
+
+			masked := wc.WorkerToken[:min(8, len(wc.WorkerToken))] + "***"
+			fmt.Printf("saas_url:     %s\n", wc.SaasURL)
+			fmt.Printf("worker_token: %s\n", masked)
+			fmt.Printf("config:       ~/.clawflow/config/worker.yaml\n\n")
+
+			// Verify token by fetching tasks.
+			req, err := http.NewRequest("GET", wc.SaasURL+"/api/v1/worker/tasks", nil)
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Authorization", "Bearer "+wc.WorkerToken)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				fmt.Printf("connectivity: FAILED (%v)\n", err)
+				return nil
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				fmt.Printf("connectivity: FAILED (token rejected, status %d)\n", resp.StatusCode)
+				return nil
+			}
+			fmt.Printf("connectivity: OK (status %d)\n", resp.StatusCode)
+			return nil
+		},
+	}
 }
 
 func newWorkerStartCmd() *cobra.Command {
