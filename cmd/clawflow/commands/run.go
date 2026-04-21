@@ -1,12 +1,15 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -48,8 +51,14 @@ On success, prints 'PR_URL=<url>' on its own line so callers can parse it.`,
 				return fmt.Errorf("marshal payload: %w", err)
 			}
 
+			// Load ~/.clawflow/config/env so ANTHROPIC_BASE_URL / AUTH_TOKEN are
+			// available to claude — mirrors cron-run.sh's `source $ENV_FILE`
+			// so operators have one canonical place to configure the runtime.
+			loadEnvFile()
+
 			claudeCmd := exec.Command("claude", "-p", "ClawFlow run")
 			claudeCmd.Stdin = bytes.NewReader(body)
+			claudeCmd.Env = os.Environ()
 
 			// Tee stdout so we can stream to the caller (systemd/SaaS) AND scan
 			// for the PR URL at the end. stderr inherits directly.
@@ -75,4 +84,40 @@ On success, prints 'PR_URL=<url>' on its own line so callers can parse it.`,
 	cmd.Flags().StringVar(&base, "base", "main", "Base branch for the PR")
 
 	return cmd
+}
+
+// loadEnvFile reads ~/.clawflow/config/env and sets each `export KEY=VALUE`
+// line into the current process environment. Silently skips if the file is
+// missing. Strips surrounding quotes and a leading `export ` so the format
+// matches what cron-run.sh sources with bash.
+func loadEnvFile() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(home, ".clawflow", "config", "env")
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		val = strings.Trim(val, `"'`)
+		if key != "" {
+			_ = os.Setenv(key, val)
+		}
+	}
 }
