@@ -251,6 +251,15 @@ func sendHeartbeat(wc *config.WorkerConfig) {
 }
 
 func cliVersionString() string {
+	// Prefer the ldflags-injected Version (what `clawflow version` prints):
+	// it's the git describe output like "v0.18.1-5-ge342551", matching what
+	// the user sees locally. Fall back to debug.ReadBuildInfo() for builds
+	// without ldflags (raw `go run` / `go install`), which emits the Go
+	// module pseudo-version format and would otherwise disagree with the
+	// local CLI output on the SaaS dashboard.
+	if Version != "" && Version != "dev" {
+		return Version
+	}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		return info.Main.Version
 	}
