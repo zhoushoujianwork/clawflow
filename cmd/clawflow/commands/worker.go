@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime/debug"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -22,8 +24,26 @@ func NewWorkerCmd() *cobra.Command {
 		Short: "Manage ClawFlow SaaS worker",
 	}
 	cmd.AddCommand(newWorkerStartCmd())
+	cmd.AddCommand(newWorkerStopCmd())
 	cmd.AddCommand(newWorkerStatusCmd())
 	return cmd
+}
+
+func newWorkerStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop the local worker process",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			stopped, err := stopWorkerProcess()
+			if err != nil {
+				return err
+			}
+			if !stopped {
+				fmt.Println("no worker running on this host.")
+			}
+			return nil
+		},
+	}
 }
 
 func newWorkerStatusCmd() *cobra.Command {
@@ -43,7 +63,13 @@ func newWorkerStatusCmd() *cobra.Command {
 			masked := wc.WorkerToken[:min(8, len(wc.WorkerToken))] + "***"
 			fmt.Printf("saas_url:     %s\n", wc.SaasURL)
 			fmt.Printf("worker_token: %s\n", masked)
-			fmt.Printf("config:       ~/.clawflow/config/worker.yaml\n\n")
+			fmt.Printf("config:       ~/.clawflow/config/worker.yaml\n")
+			if pid, ok := readWorkerPID(); ok {
+				fmt.Printf("local_worker: running (pid=%d)\n", pid)
+			} else {
+				fmt.Printf("local_worker: not running\n")
+			}
+			fmt.Println()
 
 			// Verify token by fetching tasks.
 			req, err := http.NewRequest("GET", wc.SaasURL+"/api/v1/worker/tasks", nil)
@@ -98,12 +124,26 @@ type workerTask struct {
 }
 
 func runWorker(wc *config.WorkerConfig, pollSecs int) error {
+	// Single-instance guard: refuse to start if another worker is already
+	// running on this host. Prevents double-polling and wasted token quota.
+	if err := acquireWorkerLock(); err != nil {
+		return err
+	}
+	defer releaseWorkerLock()
+
 	agentID := agentIDHeader()
 	fmt.Printf("Worker started\n")
 	fmt.Printf("  saas:     %s\n", wc.SaasURL)
 	fmt.Printf("  agent_id: %s\n", orDash(agentID))
 	fmt.Printf("  poll:     every %ds\n", pollSecs)
+	fmt.Printf("  pid:      %d  (~/.clawflow/worker.pid)\n", os.Getpid())
 	fmt.Println("Press Ctrl+C to stop.")
+
+	// Catch Ctrl+C / TERM so the defer above runs and the pidfile is cleared
+	// — otherwise `clawflow worker start` next time sees a stale lock.
+	stopCh := make(chan os.Signal, 1)
+	signal.Notify(stopCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(stopCh)
 
 	// Send initial heartbeat, then every 60 s regardless of poll interval.
 	sendHeartbeat(wc)
@@ -113,6 +153,9 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	pollCount := 0
 	for {
 		select {
+		case <-stopCh:
+			fmt.Println("\nshutting down…")
+			return nil
 		case <-heartbeatTicker.C:
 			sendHeartbeat(wc)
 		default:
@@ -137,7 +180,14 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 				}
 			}
 		}
-		time.Sleep(time.Duration(pollSecs) * time.Second)
+
+		// Signal-aware sleep so Ctrl+C during idle polls exits promptly.
+		select {
+		case <-stopCh:
+			fmt.Println("\nshutting down…")
+			return nil
+		case <-time.After(time.Duration(pollSecs) * time.Second):
+		}
 	}
 }
 

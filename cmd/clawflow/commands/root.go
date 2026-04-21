@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -44,9 +45,12 @@ The AI skill (SKILL.md) handles evaluation and sub-agent orchestration.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(Version)
 			latest := FetchLatestTag()
-			if latest != "" && latest != Version {
-				fmt.Printf("  → new version available: %s  (run: clawflow update)\n", latest)
+			// git describe on a dev build emits "vX.Y.Z-<N>-g<sha>" — treat
+			// that as ahead of the release tag, not behind it.
+			if latest == "" || latest == Version || strings.HasPrefix(Version, latest+"-") {
+				return
 			}
+			fmt.Printf("  → new version available: %s  (run: clawflow update)\n", latest)
 		},
 	})
 
