@@ -26,7 +26,25 @@ func NewWorkerCmd() *cobra.Command {
 	cmd.AddCommand(newWorkerStartCmd())
 	cmd.AddCommand(newWorkerStopCmd())
 	cmd.AddCommand(newWorkerStatusCmd())
+	cmd.AddCommand(newWorkerLogsCmd())
 	return cmd
+}
+
+func newWorkerLogsCmd() *cobra.Command {
+	var (
+		follow bool
+		nLines int
+	)
+	c := &cobra.Command{
+		Use:   "logs",
+		Short: "Show the background worker log (stdout + stderr)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return tailWorkerLog(nLines, follow)
+		},
+	}
+	c.Flags().BoolVarP(&follow, "follow", "f", false, "Stream new lines until Ctrl+C")
+	c.Flags().IntVarP(&nLines, "lines", "n", 200, "Number of trailing lines to show first")
+	return c
 }
 
 func newWorkerStopCmd() *cobra.Command {
@@ -94,13 +112,20 @@ func newWorkerStatusCmd() *cobra.Command {
 }
 
 func newWorkerStartCmd() *cobra.Command {
-	var pollInterval int
+	var (
+		pollInterval int
+		foreground   bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Start polling the SaaS task queue and executing pipelines locally",
+		Short: "Start the background worker (polls SaaS task queue)",
 		Long: `Polls {saas-url}/api/v1/worker/tasks, claims pending tasks, runs the local
-ClawFlow pipeline via 'claude -p "ClawFlow run"', then reports success or failure.`,
+ClawFlow pipeline via 'claude -p "ClawFlow run"', then reports success or failure.
+
+By default the worker is re-exec'd as a detached background process with
+stdout+stderr redirected to ~/.clawflow/worker.log. Use --foreground to
+run inline instead (useful for systemd / docker / interactive debugging).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wc, err := config.LoadWorkerConfig()
 			if err != nil {
@@ -109,11 +134,17 @@ ClawFlow pipeline via 'claude -p "ClawFlow run"', then reports success or failur
 			if wc.SaasURL == "" || wc.WorkerToken == "" {
 				return fmt.Errorf("worker not configured — run: clawflow login --saas-url <url>\n  or: clawflow config set --saas-url <url> --token <cfw_xxx>")
 			}
-			return runWorker(wc, pollInterval)
+			// Foreground mode, or we're already the re-exec'd daemon child:
+			// just run the loop in-process.
+			if foreground || isDaemonChild() {
+				return runWorker(wc, pollInterval)
+			}
+			return spawnWorkerDaemon()
 		},
 	}
 
 	cmd.Flags().IntVar(&pollInterval, "poll-interval", 30, "Seconds between task polls")
+	cmd.Flags().BoolVarP(&foreground, "foreground", "F", false, "Run inline instead of detaching")
 	return cmd
 }
 
