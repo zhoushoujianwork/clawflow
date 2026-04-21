@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -177,7 +178,12 @@ func rebuildFromSource(repoDir string) error {
 	repoDir = expandHomeStr(repoDir)
 	fmt.Printf("  [build] rebuilding from %s...\n", repoDir)
 
-	c := exec.Command("go", "build", "-o", binaryPath(), "./cmd/clawflow/")
+	version := "dev"
+	if tagOut, err := exec.Command("git", "-C", repoDir, "describe", "--tags", "--abbrev=0").Output(); err == nil {
+		version = strings.TrimSpace(string(tagOut))
+	}
+	ldflags := fmt.Sprintf("-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=%s", version)
+	c := exec.Command("go", "build", "-ldflags", ldflags, "-o", binaryPath(), "./cmd/clawflow/")
 	c.Dir = repoDir
 	out, err := c.CombinedOutput()
 	if err != nil {
