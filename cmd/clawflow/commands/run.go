@@ -56,7 +56,7 @@ On success, prints 'PR_URL=<url>' on its own line so callers can parse it.`,
 			// so operators have one canonical place to configure the runtime.
 			loadEnvFile()
 
-			claudeCmd := exec.Command("claude", "-p", "ClawFlow run")
+			claudeCmd := exec.Command("claude", "-p", "--dangerously-skip-permissions", "ClawFlow run")
 			claudeCmd.Stdin = bytes.NewReader(body)
 			claudeCmd.Env = os.Environ()
 

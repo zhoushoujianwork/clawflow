@@ -307,7 +307,7 @@ func processTask(wc *config.WorkerConfig, t workerTask) error {
 // stdin. Streams child stdout/stderr to the worker's own stdout so the user
 // can watch Claude's progress live.
 func runPipeline(payload json.RawMessage) ([]byte, error) {
-	cmd := exec.Command("claude", "-p", "ClawFlow run")
+	cmd := exec.Command("claude", "-p", "--dangerously-skip-permissions", "ClawFlow run")
 	cmd.Stdin = bytes.NewReader(payload)
 
 	var buf bytes.Buffer
