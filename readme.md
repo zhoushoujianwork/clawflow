@@ -286,6 +286,35 @@ clawflow/ (this repo)
 
 ---
 
+## SaaS Worker
+
+The worker connects your local machine to a ClawFlow SaaS backend, polling for tasks and running the pipeline automatically.
+
+### Setup
+
+```bash
+clawflow login --saas-url https://your-saas-instance.com
+```
+
+This saves `saas_url` and `worker_token` to `~/.clawflow/config/worker.yaml`.
+
+### Commands
+
+```bash
+clawflow worker start            # start background worker (detaches by default)
+clawflow worker start --foreground  # run inline (useful for systemd / Docker)
+clawflow worker stop             # stop the background worker
+clawflow worker status           # show config + verify SaaS connectivity
+clawflow worker logs             # show last 200 lines of worker log
+clawflow worker logs -f          # follow live output
+```
+
+The worker polls `{saas-url}/api/v1/worker/tasks` every 30 seconds (configurable via `--poll-interval`), claims pending tasks, runs `claude -p "ClawFlow run"`, and reports results (PR URL, logs, token usage) back to the SaaS.
+
+A single-instance lock (`~/.clawflow/worker.pid`) prevents duplicate workers on the same host.
+
+---
+
 ## Updating
 
 ```bash
