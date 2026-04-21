@@ -97,7 +97,11 @@ type workerTask struct {
 }
 
 func runWorker(wc *config.WorkerConfig, pollSecs int) error {
-	fmt.Printf("Worker started — polling %s every %ds\n", wc.SaasURL, pollSecs)
+	agentID := agentIDHeader()
+	fmt.Printf("Worker started\n")
+	fmt.Printf("  saas:     %s\n", wc.SaasURL)
+	fmt.Printf("  agent_id: %s\n", orDash(agentID))
+	fmt.Printf("  poll:     every %ds\n", pollSecs)
 	fmt.Println("Press Ctrl+C to stop.")
 
 	// Send initial heartbeat, then every 60 s regardless of poll interval.
@@ -105,6 +109,7 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	heartbeatTicker := time.NewTicker(60 * time.Second)
 	defer heartbeatTicker.Stop()
 
+	pollCount := 0
 	for {
 		select {
 		case <-heartbeatTicker.C:
@@ -112,10 +117,19 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 		default:
 		}
 
+		pollCount++
 		tasks, err := fetchTasks(wc)
-		if err != nil {
-			fmt.Printf("[warn] fetch tasks: %v\n", err)
-		} else {
+		now := time.Now().Format("15:04:05")
+		switch {
+		case err != nil:
+			fmt.Printf("[%s] poll #%d: fetch failed — %v\n", now, pollCount, err)
+		case len(tasks) == 0:
+			// Quiet heartbeat: one line every 10 polls so idle logs don't drown.
+			if pollCount%10 == 1 {
+				fmt.Printf("[%s] poll #%d: idle (no pending tasks)\n", now, pollCount)
+			}
+		default:
+			fmt.Printf("[%s] poll #%d: got %d task(s)\n", now, pollCount, len(tasks))
 			for _, t := range tasks {
 				if err := processTask(wc, t); err != nil {
 					fmt.Printf("[error] task %s: %v\n", t.ID, err)
@@ -124,6 +138,13 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 		}
 		time.Sleep(time.Duration(pollSecs) * time.Second)
 	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "— (legacy client, no X-Agent-Id sent)"
+	}
+	return s
 }
 
 func sendHeartbeat(wc *config.WorkerConfig) {
@@ -254,33 +275,46 @@ func reportFail(wc *config.WorkerConfig, taskID, reason string) error {
 }
 
 func processTask(wc *config.WorkerConfig, t workerTask) error {
-	fmt.Printf("[task %s] claiming...\n", t.ID)
+	start := time.Now()
+	fmt.Printf("[task %s] claim ...\n", t.ID)
 	if err := claimTask(wc, t.ID); err != nil {
 		return fmt.Errorf("claim: %w", err)
 	}
 
-	fmt.Printf("[task %s] running pipeline...\n", t.ID)
+	fmt.Printf("[task %s] run 'claude -p \"ClawFlow run\"' ...\n", t.ID)
 	out, err := runPipeline(t.Payload)
+	dur := time.Since(start).Round(time.Second)
 	if err != nil {
 		reason := err.Error()
 		if len(out) > 0 {
 			reason = string(out)
 		}
+		fmt.Printf("[task %s] FAILED in %s — %v\n", t.ID, dur, err)
 		_ = reportFail(wc, t.ID, reason)
 		return fmt.Errorf("pipeline: %w", err)
 	}
 
-	// Extract PR URL from output if present (best-effort).
 	prURL := extractPRURL(string(out))
-	fmt.Printf("[task %s] complete, pr=%s\n", t.ID, prURL)
+	if prURL == "" {
+		fmt.Printf("[task %s] OK in %s (no PR URL parsed from output)\n", t.ID, dur)
+	} else {
+		fmt.Printf("[task %s] OK in %s — PR: %s\n", t.ID, dur, prURL)
+	}
 	return reportComplete(wc, t.ID, prURL)
 }
 
-// runPipeline invokes `claude -p "ClawFlow run"` with the task payload as stdin.
+// runPipeline invokes `claude -p "ClawFlow run"` with the task payload as
+// stdin. Streams child stdout/stderr to the worker's own stdout so the user
+// can watch Claude's progress live.
 func runPipeline(payload json.RawMessage) ([]byte, error) {
 	cmd := exec.Command("claude", "-p", "ClawFlow run")
 	cmd.Stdin = bytes.NewReader(payload)
-	return cmd.CombinedOutput()
+
+	var buf bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &buf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &buf)
+	err := cmd.Run()
+	return buf.Bytes(), err
 }
 
 // extractPRURL does a simple scan for a GitHub/GitLab PR URL in the output.
