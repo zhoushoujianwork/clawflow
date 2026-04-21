@@ -283,20 +283,34 @@ func processTask(wc *config.WorkerConfig, t workerTask) error {
 	}
 
 	fmt.Printf("[task %s] run 'claude -p \"ClawFlow run\"' ...\n", t.ID)
-	result, err := runPipeline(t.Payload)
+	stream := dialLogStream(wc, t.ID)
+	defer stream.Close()
+	result, err := runPipeline(t.Payload, stream)
 	dur := time.Since(start).Round(time.Second)
+
+	fmt.Printf("[task %s] stream summary: events=%d raw_stderr=%dB cost=%v in=%d out=%d pr=%q\n",
+		t.ID, len(result.Logs), len(result.RawTail), result.Usage.TotalCostUSD,
+		result.Usage.InputTokens, result.Usage.OutputTokens, result.PRURL)
 
 	// Push logs + usage to SaaS regardless of success/failure so the UI has a
 	// record even when the pipeline crashes halfway.
 	if len(result.Logs) > 0 {
 		if lerr := reportLogs(wc, t.ID, result.Logs); lerr != nil {
 			fmt.Printf("[warn] upload logs for %s: %v\n", t.ID, lerr)
+		} else {
+			fmt.Printf("[task %s] uploaded %d log entries\n", t.ID, len(result.Logs))
 		}
+	} else {
+		fmt.Printf("[task %s] no logs to upload\n", t.ID)
 	}
 	if result.Usage.HasCost() {
 		if uerr := reportTaskUsage(wc, t.ID, result.Usage); uerr != nil {
 			fmt.Printf("[warn] report usage for %s: %v\n", t.ID, uerr)
+		} else {
+			fmt.Printf("[task %s] reported usage\n", t.ID)
 		}
+	} else {
+		fmt.Printf("[task %s] no usage data to report\n", t.ID)
 	}
 
 	if err != nil {
@@ -356,15 +370,26 @@ type PipelineResult struct {
 //   - scrape the PR URL out of assistant messages
 //
 // Falls back gracefully for non-JSON lines (treated as plain log messages).
-func runPipeline(payload json.RawMessage) (PipelineResult, error) {
+func runPipeline(payload json.RawMessage, stream *logStreamer) (PipelineResult, error) {
 	cmd := exec.Command("claude", "-p",
 		"--output-format", "stream-json", "--verbose",
 		"--dangerously-skip-permissions", "ClawFlow run")
 	cmd.Stdin = bytes.NewReader(payload)
 
-	stdout, err := cmd.StdoutPipe()
+	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return PipelineResult{}, err
+	}
+	// Diagnostic: tee the raw NDJSON to /tmp/claude-stream.log so we can
+	// inspect what claude actually emitted when parsing produces 0 events.
+	var stdoutDump *os.File
+	if f, ferr := os.Create("/tmp/claude-stream.log"); ferr == nil {
+		stdoutDump = f
+		defer stdoutDump.Close()
+	}
+	var stdout io.Reader = stdoutPipe
+	if stdoutDump != nil {
+		stdout = io.TeeReader(stdoutPipe, stdoutDump)
 	}
 	// Stderr we still tee to our own stderr so operators see crashes.
 	var errBuf bytes.Buffer
@@ -397,25 +422,52 @@ func runPipeline(payload json.RawMessage) (PipelineResult, error) {
 	}
 
 	for sc.Scan() {
-		line := sc.Bytes()
-		// Track raw tail for failure reason fallback.
-		if rawTail.Len()+len(line)+1 > rawLimit {
-			// Keep only the most recent chunk.
-			excess := rawTail.Len() + len(line) + 1 - rawLimit
-			rem := rawTail.Bytes()[excess:]
+		// sc.Bytes() points into an internal buffer that gets reused, so copy
+		// before holding onto the slice.
+		line := append([]byte(nil), sc.Bytes()...)
+		// Track raw tail for failure reason fallback. Keep only the last
+		// rawLimit bytes overall; a single oversize line just overwrites.
+		if len(line)+1 >= rawLimit {
 			rawTail.Reset()
-			rawTail.Write(rem)
+			tail := line
+			if len(tail) > rawLimit-1 {
+				tail = tail[len(tail)-(rawLimit-1):]
+			}
+			rawTail.Write(tail)
+			rawTail.WriteByte('\n')
+		} else {
+			if rawTail.Len()+len(line)+1 > rawLimit {
+				excess := rawTail.Len() + len(line) + 1 - rawLimit
+				if excess > rawTail.Len() {
+					excess = rawTail.Len()
+				}
+				rem := append([]byte(nil), rawTail.Bytes()[excess:]...)
+				rawTail.Reset()
+				rawTail.Write(rem)
+			}
+			rawTail.Write(line)
+			rawTail.WriteByte('\n')
 		}
-		rawTail.Write(line)
-		rawTail.WriteByte('\n')
 
 		var evt map[string]interface{}
 		if err := json.Unmarshal(line, &evt); err != nil {
 			// Non-JSON line — treat as plain info log.
 			appendLog("info", string(line))
+			stream.Send("info", string(line), nil)
 			continue
 		}
+
+		// Capture the first summary handleStreamEvent emits so it rides with
+		// the raw JSON event in a single WS frame — one stdout line = one
+		// stream message, preserving perfect ordering for replay.
+		startLen := len(logs)
 		handleStreamEvent(evt, &logs, &usage, &prURL, appendLog)
+		level, msg := "info", ""
+		if len(logs) > startLen {
+			level = logs[startLen].Level
+			msg = logs[startLen].Message
+		}
+		stream.Send(level, msg, line)
 	}
 
 	waitErr := cmd.Wait()
