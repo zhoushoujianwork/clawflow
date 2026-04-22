@@ -21,6 +21,7 @@ func NewRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoEnableCmd())
 	cmd.AddCommand(newRepoDisableCmd())
 	cmd.AddCommand(newRepoSetCmd())
+	cmd.AddCommand(newRepoEnsureLocalCmd())
 	return cmd
 }
 
@@ -305,4 +306,33 @@ func normalizeRepo(input string) string {
 		}
 	}
 	return s
+}
+
+func newRepoEnsureLocalCmd() *cobra.Command {
+	var repo string
+
+	cmd := &cobra.Command{
+		Use:     "ensure-local",
+		Short:   "Ensure a repo has a local clone, auto-cloning if needed",
+		Example: "  clawflow repo ensure-local --repo owner/repo",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			repoCfg, ok := cfg.Repos[repo]
+			if !ok {
+				return fmt.Errorf("repo %q not found in config", repo)
+			}
+			localPath, err := resolveLocalPath(cfg, repo, repoCfg)
+			if err != nil {
+				return err
+			}
+			fmt.Println(localPath)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	_ = cmd.MarkFlagRequired("repo")
+	return cmd
 }

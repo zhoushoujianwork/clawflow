@@ -45,7 +45,35 @@ type Settings struct {
 	AgentTimeout        int      `yaml:"agent_timeout"`
 	MaxConcurrentAgents int      `yaml:"max_concurrent_agents"`
 	NotificationChannel string   `yaml:"notification_channel"`
-	GitLabHosts         []string `yaml:"gitlab_hosts"` // e.g. ["gitlab.company.com"]
+	GitLabHosts         []string `yaml:"gitlab_hosts"`                       // e.g. ["gitlab.company.com"]
+	GithubCloneDir      string   `yaml:"github_clone_dir,omitempty"`         // default: ~/github
+	GitlabCloneDir      string   `yaml:"gitlab_clone_dir,omitempty"`         // default: ~/gitlab
+}
+
+// ResolveGithubCloneDir returns the configured GitHub clone directory, defaulting to ~/github.
+func (s *Settings) ResolveGithubCloneDir() string {
+	if s.GithubCloneDir != "" {
+		return expandHome(s.GithubCloneDir)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "github")
+}
+
+// ResolveGitlabCloneDir returns the configured GitLab clone directory, defaulting to ~/gitlab.
+func (s *Settings) ResolveGitlabCloneDir() string {
+	if s.GitlabCloneDir != "" {
+		return expandHome(s.GitlabCloneDir)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "gitlab")
+}
+
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
 
 // Config is the top-level config file structure.

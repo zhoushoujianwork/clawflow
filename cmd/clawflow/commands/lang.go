@@ -47,7 +47,7 @@ func newLangDetectCmd() *cobra.Command {
 				return fmt.Errorf("repo %q not found in config", repo)
 			}
 
-			localPath, err := resolveLocalPath(repo, repoCfg.LocalPath)
+			localPath, err := resolveLocalPath(cfg, repo, repoCfg)
 			if err != nil {
 				return err
 			}

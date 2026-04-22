@@ -5,8 +5,8 @@
 Before evaluating any issue, the orchestrator **must** load the target repo's project context:
 
 ```bash
-# Get the repo's local path
-LOCAL_PATH=$(clawflow config show --repo {owner}/{repo} --field local_path)
+# Ensure local clone exists (auto-clones if needed), get path
+LOCAL_PATH=$(clawflow repo ensure-local --repo {owner}/{repo})
 
 # If CLAUDE.md doesn't exist, generate it first
 if [ ! -f "$LOCAL_PATH/CLAUDE.md" ]; then

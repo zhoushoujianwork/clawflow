@@ -301,15 +301,14 @@ clawflow label add --repo {owner}/{repo} --issue {number} --label in-progress
 
 ### Step 4.4 — Ensure Project Context (CLAUDE.md)
 
-Before creating the worktree, check if the target repo has a `CLAUDE.md` at its root. If not, generate one via `/init` so the sub-agent has full project context when it starts.
+Before creating the worktree, ensure the repo has a local clone and CLAUDE.md:
 
 ```bash
-# Get the repo's local path from config
-LOCAL_PATH=$(clawflow config show --repo {owner}/{repo} --field local_path)
+# Ensure local clone exists (auto-clones if needed)
+LOCAL_PATH=$(clawflow repo ensure-local --repo {owner}/{repo})
 
-# Check if CLAUDE.md exists
+# If CLAUDE.md doesn't exist, generate it
 if [ ! -f "$LOCAL_PATH/CLAUDE.md" ]; then
-  # Run /init in the target repo directory to generate CLAUDE.md
   cd "$LOCAL_PATH"
   # Execute Claude Code /init to generate project context
 fi
