@@ -179,6 +179,15 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	} else {
 		defer stopProxy()
 	}
+
+	// Fallback issue-discovery loop: polls each configured self-hosted GitLab
+	// for labeled issues and pushes them to SaaS as pipeline_runs. Needed when
+	// the corp network blocks inbound webhooks to clawflow.daboluo.cc.
+	discoverStop := make(chan struct{})
+	go discoverLoop(wc, discoverStop)
+	defer close(discoverStop)
+	fmt.Printf("  discover: every %s (self-hosted GitLab polling)\n", discoverInterval)
+
 	fmt.Println("Press Ctrl+C to stop.")
 
 	// Catch Ctrl+C / TERM so the defer above runs and the pidfile is cleared

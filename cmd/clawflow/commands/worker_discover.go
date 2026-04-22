@@ -1,0 +1,187 @@
+// Fallback issue-discovery loop for private VCS instances whose webhook
+// deliveries don't reach our SaaS (corp firewalls, self-hosted GitLab on an
+// intranet, etc.). The worker periodically polls each configured repo for
+// issues carrying the trigger label and forwards any fresh matches to
+// `POST {saas_url}/api/v1/worker/discover` — SaaS then creates a pending
+// pipeline_run exactly like the webhook path does, and the existing
+// task-fetch loop picks it up on its next poll.
+//
+// This runs in the same worker daemon as the fetch/heartbeat loops; no extra
+// process, no extra configuration beyond what the user already has
+// (`~/.clawflow/config/config.yaml` + `credentials.yaml`).
+package commands
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+)
+
+// discoverInterval bounds how often we hit each GitLab instance for issue
+// updates. 90s is fast enough that users feel the trigger is "fairly quick"
+// without hammering self-hosted GitLab instances that might be on modest
+// hardware. The fetch-tasks loop still runs at its own cadence underneath.
+const discoverInterval = 90 * time.Second
+
+// Default trigger label if the repo config omits `labels.trigger`. Must match
+// the SaaS-side webhook handler's filter (ready-for-agent).
+const defaultTriggerLabel = "ready-for-agent"
+
+type gitlabIssue struct {
+	IID   int64  `json:"iid"`
+	Title string `json:"title"`
+}
+
+// discoverLoop runs for the lifetime of the worker. Single goroutine, no
+// parallelism across repos — the per-repo GitLab fetch is short, and
+// serializing keeps token rate-limit pressure predictable.
+func discoverLoop(wc *config.WorkerConfig, stopCh <-chan struct{}) {
+	t := time.NewTicker(discoverInterval)
+	defer t.Stop()
+	// First pass happens a few seconds after boot so users see their
+	// already-labeled issues picked up without waiting a full interval.
+	initial := time.After(10 * time.Second)
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-initial:
+			runDiscoverPass(wc)
+			initial = nil // one-shot
+		case <-t.C:
+			runDiscoverPass(wc)
+		}
+	}
+}
+
+func runDiscoverPass(wc *config.WorkerConfig) {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Printf("[discover] config load failed: %v\n", err)
+		return
+	}
+	creds, _ := config.LoadCredentials()
+
+	for fullName, repo := range cfg.EnabledRepos() {
+		if repo.Platform != "gitlab" {
+			continue // GitHub path stays on webhooks — no private-network story there
+		}
+		if repo.BaseURL == "" {
+			continue // gitlab.com has reliable webhook delivery; skip polling
+		}
+		tok := creds.GitLabToken
+		if tok == "" {
+			// No token configured: we can't call the GitLab API. Log once per
+			// pass and move on — CLI user will see the hint in worker.log.
+			fmt.Println("[discover] skipped: no GitLab PAT in credentials.yaml")
+			return
+		}
+		label := defaultTriggerLabel
+		if repo.Labels != nil {
+			if v, ok := repo.Labels["trigger"]; ok && v != "" {
+				label = v
+			}
+		}
+		issues, err := fetchOpenLabeledIssues(repo.BaseURL, tok, fullName, label)
+		if err != nil {
+			fmt.Printf("[discover] %s: %v\n", fullName, err)
+			continue
+		}
+		if len(issues) == 0 {
+			continue
+		}
+		for _, is := range issues {
+			if err := pushDiscoveredIssue(wc, "gitlab", fullName, is.IID, is.Title); err != nil {
+				fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
+			}
+		}
+	}
+}
+
+// fetchOpenLabeledIssues lists open issues on the given GitLab project that
+// carry the trigger label. Project path is URL-encoded to the `%2F` form
+// GitLab expects; the label query is comma-separated (single label here).
+func fetchOpenLabeledIssues(baseURL, token, fullName, label string) ([]gitlabIssue, error) {
+	host := strings.TrimRight(baseURL, "/")
+	encoded := url.PathEscape(fullName) // converts / to %2F
+	target := fmt.Sprintf(
+		"%s/api/v4/projects/%s/issues?labels=%s&state=opened&per_page=50",
+		host, encoded, url.QueryEscape(label),
+	)
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("PRIVATE-TOKEN", token)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gitlab returned %d", resp.StatusCode)
+	}
+	var out []gitlabIssue
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return out, nil
+}
+
+// pushDiscoveredIssue hands an issue to SaaS via the worker discover
+// endpoint. Idempotent on the server side — safe to call every pass.
+func pushDiscoveredIssue(wc *config.WorkerConfig, platform, fullName string, issueNumber int64, title string) error {
+	body, _ := json.Marshal(map[string]any{
+		"platform":     platform,
+		"full_name":    fullName,
+		"issue_number": issueNumber,
+		"issue_title":  title,
+	})
+	req, _ := http.NewRequest(http.MethodPost, wc.SaasURL+"/api/v1/worker/discover", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	setWorkerHeaders(req, wc)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := readAll(resp.Body)
+		return fmt.Errorf("saas returned %d: %s", resp.StatusCode, string(b))
+	}
+	// Parse just enough to log created vs duplicate — full body goes to stderr
+	// on non-2xx above.
+	var ack struct {
+		RunID   string `json:"run_id"`
+		Created bool   `json:"created"`
+		Skipped bool   `json:"skipped"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&ack)
+	if ack.Created {
+		fmt.Printf("[discover] %s #%d → enqueued run %s\n", fullName, issueNumber, ack.RunID)
+	}
+	return nil
+}
+
+// readAll reads up to 4 KiB of a response body for error-context logging.
+// Avoids pulling in io.ReadAll to preserve the tight import set.
+func readAll(r interface{ Read(p []byte) (int, error) }) ([]byte, error) {
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 512)
+	for len(buf) < 4096 {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
+		if err != nil {
+			return buf, nil
+		}
+	}
+	return buf, nil
+}
