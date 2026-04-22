@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -150,11 +152,12 @@ func newIssueCloseCmd() *cobra.Command {
 func newIssueCommentListCmd() *cobra.Command {
 	var repo string
 	var issue int
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:     "comment-list",
 		Short:   "List comments on an issue with IDs and authors",
-		Example: "  clawflow issue comment-list --repo owner/repo --issue 7",
+		Example: "  clawflow issue comment-list --repo owner/repo --issue 7\n  clawflow issue comment-list --repo owner/repo --issue 7 --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, _, err := newVCSClientForRepo(repo)
 			if err != nil {
@@ -165,8 +168,17 @@ func newIssueCommentListCmd() *cobra.Command {
 				return err
 			}
 			if len(comments) == 0 {
-				fmt.Printf("no comments on %s#%d\n", repo, issue)
+				if jsonOutput {
+					fmt.Println("[]")
+				} else {
+					fmt.Printf("no comments on %s#%d\n", repo, issue)
+				}
 				return nil
+			}
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(comments)
 			}
 			fmt.Printf("%-12s  %-20s  %s\n", "ID", "AUTHOR", "BODY")
 			for _, c := range comments {
@@ -181,6 +193,7 @@ func newIssueCommentListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output full comments as JSON")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("issue")
 	return cmd
