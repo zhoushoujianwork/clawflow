@@ -34,8 +34,40 @@ const discoverInterval = 90 * time.Second
 const defaultTriggerLabel = "ready-for-agent"
 
 type gitlabIssue struct {
-	IID   int64  `json:"iid"`
-	Title string `json:"title"`
+	IID    int64    `json:"iid"`
+	Title  string   `json:"title"`
+	Labels []string `json:"labels"`
+}
+
+// evaluateLookbackDays bounds how far back we'll auto-evaluate unlabeled
+// issues. Keeps the first pass on a fresh install from enqueueing 500 old
+// issues and blowing through credits.
+const evaluateLookbackDays = 7
+
+// evaluateMaxPerPass caps how many fresh (unlabeled) issues we push per
+// repo per pass. Hard stop against runaway cost; next pass (90s later)
+// will pick up the rest.
+const evaluateMaxPerPass = 10
+
+// Terminal labels — a repo already carrying any of these is considered
+// already handled by an agent run and shouldn't auto-evaluate again.
+// Mirrors SKILL.md's `to_evaluate` filter ("no agent labels").
+var terminalLabels = []string{
+	"agent-evaluated",
+	"agent-failed",
+	"agent-skipped",
+	"blocked",
+}
+
+func hasAnyLabel(labels []string, needles []string) bool {
+	for _, l := range labels {
+		for _, n := range needles {
+			if l == n {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // discoverLoop runs for the lifetime of the worker. Single goroutine, no
@@ -88,20 +120,74 @@ func runDiscoverPass(wc *config.WorkerConfig) {
 				label = v
 			}
 		}
-		issues, err := fetchOpenLabeledIssues(repo.BaseURL, tok, fullName, label)
-		if err != nil {
-			fmt.Printf("[discover] %s: %v\n", fullName, err)
-			continue
+		// Channel A (execute): issues the user labeled `ready-for-agent`.
+		// Pushed unconditionally — agent runs evaluation first if needed,
+		// execution after. SaaS enqueue is idempotent on (repo, issue).
+		if issues, err := fetchOpenLabeledIssues(repo.BaseURL, tok, fullName, label); err != nil {
+			fmt.Printf("[discover] %s (execute): %v\n", fullName, err)
+		} else {
+			for _, is := range issues {
+				if err := pushDiscoveredIssue(wc, "gitlab", fullName, is.IID, is.Title); err != nil {
+					fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
+				}
+			}
 		}
-		if len(issues) == 0 {
-			continue
-		}
-		for _, is := range issues {
-			if err := pushDiscoveredIssue(wc, "gitlab", fullName, is.IID, is.Title); err != nil {
-				fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
+
+		// Channel B (evaluate): fresh issues the user hasn't touched yet.
+		// SKILL's harvest normally does this by hand; auto-picking recent
+		// ones gets us closer to "label-free" UX. Guarded by lookback
+		// window + per-pass cap + client-side terminal-label filter so a
+		// stale repo can't burn credits on ancient backlog.
+		if fresh, err := fetchUnlabeledRecentIssues(repo.BaseURL, tok, fullName, evaluateLookbackDays); err != nil {
+			fmt.Printf("[discover] %s (evaluate): %v\n", fullName, err)
+		} else {
+			pushed := 0
+			for _, is := range fresh {
+				if pushed >= evaluateMaxPerPass {
+					break
+				}
+				if hasAnyLabel(is.Labels, terminalLabels) {
+					continue // already processed — SKILL harvest would skip it too
+				}
+				if err := pushDiscoveredIssue(wc, "gitlab", fullName, is.IID, is.Title); err != nil {
+					fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
+					continue
+				}
+				pushed++
 			}
 		}
 	}
+}
+
+// fetchUnlabeledRecentIssues lists opened issues created within the last
+// `lookbackDays`. Client-side filter to terminal-label-free comes afterwards
+// — GitLab 11 doesn't support `not[labels]=…` query arg cleanly.
+func fetchUnlabeledRecentIssues(baseURL, token, fullName string, lookbackDays int) ([]gitlabIssue, error) {
+	host := strings.TrimRight(baseURL, "/")
+	encoded := url.PathEscape(fullName)
+	createdAfter := time.Now().AddDate(0, 0, -lookbackDays).Format("2006-01-02")
+	target := fmt.Sprintf(
+		"%s/api/v4/projects/%s/issues?state=opened&created_after=%s&per_page=50",
+		host, encoded, createdAfter,
+	)
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("PRIVATE-TOKEN", token)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gitlab returned %d", resp.StatusCode)
+	}
+	var out []gitlabIssue
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return out, nil
 }
 
 // fetchOpenLabeledIssues lists open issues on the given GitLab project that
