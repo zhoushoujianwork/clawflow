@@ -164,7 +164,8 @@ See [evaluation.md](evaluation.md) for the complete evaluation flow:
 - Step 0: Load project context (CLAUDE.md)
 - Step 1: Prompt injection detection
 - Step 2: Duplicate issue check
-- Step 3: Type-based evaluation (Bug / Feature / General)
+- Step 3: Historical issue context (related fixes, prior attempts, recent changes)
+- Step 4: Type-based evaluation (Bug / Feature / General)
 - Split suggestion evaluation
 - High/low confidence comment templates
 
@@ -221,16 +222,16 @@ For each issue in `ISSUES_TO_EXECUTE`:
 
 ### Step 4.1 — Check Historical PR Status
 
-Before adding labels, read memory to check for prior history:
+Before adding labels, check if there's already a PR for this issue:
 
 ```bash
-PREV_ATTEMPTS=$(clawflow memory read --repo {owner}/{repo} --issue {number} 2>/dev/null || echo "")
+# Search for existing PRs linked to this issue
+clawflow pr list --repo {owner}/{repo} --state all | grep "fix/issue-{number}"
 ```
 
-If `PREV_ATTEMPTS` contains `status: success` and a `pr_url`, **verify the actual PR status**:
+If a PR exists, check its status:
 
 ```bash
-# Extract PR number from pr_url, then query its status
 clawflow pr view --repo {owner}/{repo} --pr {pr_number}
 ```
 
@@ -238,7 +239,7 @@ clawflow pr view --repo {owner}/{repo} --pr {pr_number}
 |-----------|--------|
 | `merged` | PR already merged — run Phase 5 success cleanup, **do not reprocess** |
 | `open` | PR still in review — skip this round, **do not reprocess** |
-| `closed` (not merged) | PR was rejected — clear old memory record, **continue with fix** |
+| `closed` (not merged) | PR was rejected — **continue with fix** |
 
 **When PR was rejected**, comment on the issue before continuing:
 
@@ -337,7 +338,6 @@ EVAL_COMMENT=$(clawflow issue comment-list --repo {owner}/{repo} --issue {number
 
 Template variables:
 - `{evaluation_comment}`: the evaluation report comment body (the one containing `🔍`). If not found, use `(no evaluation available)`
-- `{previous_attempts_context}`: if `PREV_ATTEMPTS` is non-empty, include its content; otherwise use `(no previous attempts)`
 
 ---
 
@@ -428,5 +428,4 @@ Cleanup: remove in-progress / ready-for-agent / agent-queued + worktree remove
 
 - Repo config: `~/.clawflow/config/repos.yaml`
 - Label definitions: `~/.clawflow/config/labels.yaml`
-- Processing records: `~/.clawflow/memory/repos/{owner}-{repo}/`
 - CLI binary: `~/.clawflow/bin/clawflow`

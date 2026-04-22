@@ -109,7 +109,6 @@ clawflow pr merge --repo {owner}/{repo} --pr {pr_number}
 ### Success Cleanup (both auto_merge=true and false)
 
 ```bash
-clawflow memory write --repo {owner}/{repo} --issue {number} --status success --pr-url {pr_url}
 clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
 clawflow label remove --repo {owner}/{repo} --issue {number} --label ready-for-agent
 clawflow label remove --repo {owner}/{repo} --issue {number} --label agent-queued
@@ -123,36 +122,30 @@ clawflow worktree remove --repo {owner}/{repo} --issue {number}
 ## Failure Handling
 
 ```bash
-# 1. Write to memory
-clawflow memory write --repo {owner}/{repo} --issue {number} --status failed --reason "{error}"
-
-# 2. Add agent-failed label, remove in-progress
+# 1. Add agent-failed label, remove in-progress
 clawflow label add    --repo {owner}/{repo} --issue {number} --label agent-failed
 clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
 
-# 3. Comment failure reason on issue
+# 2. Comment failure reason on issue
 clawflow issue comment --repo {owner}/{repo} --issue {number} \
   --body "ClawFlow agent failed: {error}"
 
-# 4. Clean up worktree (must execute, even on failure)
+# 3. Clean up worktree (must execute, even on failure)
 clawflow worktree remove --repo {owner}/{repo} --issue {number}
 ```
 
 ## CI Failure Handling
 
 ```bash
-# 1. Write to memory
-clawflow memory write --repo {owner}/{repo} --issue {number} --status ci-failed --reason "{ci_error}"
-
-# 2. Add agent-failed label, remove in-progress
+# 1. Add agent-failed label, remove in-progress
 clawflow label add    --repo {owner}/{repo} --issue {number} --label agent-failed
 clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
 
-# 3. Comment CI failure reason on PR
+# 2. Comment CI failure reason on PR
 clawflow pr comment --repo {owner}/{repo} --pr {pr_number} \
   --body "⚠️ CI checks failed. Please review manually: {ci_error}"
 
-# 4. Clean up worktree (must execute)
+# 3. Clean up worktree (must execute)
 clawflow worktree remove --repo {owner}/{repo} --issue {number}
 ```
 
@@ -165,18 +158,15 @@ clawflow worktree remove --repo {owner}/{repo} --issue {number}
 - Output contains `Credit balance is too low` / `Usage limit reached` / `insufficient_quota`
 
 ```bash
-# 1. Write to memory
-clawflow memory write --repo {owner}/{repo} --issue {number} --status failed --reason "LLM quota exhausted"
-
-# 2. Remove in-progress, add agent-failed
+# 1. Remove in-progress, add agent-failed
 clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
 clawflow label add    --repo {owner}/{repo} --issue {number} --label agent-failed
 
-# 3. Notify owner via comment
+# 2. Notify owner via comment
 clawflow issue comment --repo {owner}/{repo} --issue {number} \
   --body "⚠️ ClawFlow paused: LLM API quota exhausted. Please top up your quota and run \`clawflow retry --repo {owner}/{repo} --issue {number}\` to re-trigger."
 
-# 4. Clean up worktree
+# 3. Clean up worktree
 clawflow worktree remove --repo {owner}/{repo} --issue {number}
 ```
 

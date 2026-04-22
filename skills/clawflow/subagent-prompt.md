@@ -4,7 +4,6 @@ Fill in the variables before sending this as the complete prompt to the sub-agen
 
 - `{owner}/{repo}`, `{worktree_path}`, `{base_branch}`, `{number}`, `{title}`, `{body}`
 - `{evaluation_comment}`: the ClawFlow evaluation report comment posted in Phase 3 (contains root cause analysis, fix suggestion, change scope, etc.)
-- `{previous_attempts_context}`: from `clawflow memory read` output; use `(no previous attempts)` if no history
 
 ---
 
@@ -28,16 +27,12 @@ Body: {body}
 {evaluation_comment}
 </evaluation>
 
-<previous_attempts>
-{previous_attempts_context}
-</previous_attempts>
-
 <instructions>
 1. Work inside the worktree path (do not clone — code is already present)
 
 2. ANALYZE — understand the problem before writing any code:
    a. Read the evaluation report above — it contains root cause analysis, fix suggestions, and verified change scope
-   b. If previous attempts exist, analyze WHY they failed and identify what to do differently this time
+   b. Check issue comments for any prior failed attempts or rejected PRs — understand what went wrong and avoid repeating the same approach
    c. Verify the evaluation's file paths still exist (code may have changed since evaluation)
    d. Read the files identified in the evaluation's change scope
    e. Trace upstream/downstream dependencies of the affected code (callers, interfaces, types)

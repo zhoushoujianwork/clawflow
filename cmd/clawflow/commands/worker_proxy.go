@@ -122,7 +122,10 @@ func (d *proxyDeps) corsMiddleware(next http.Handler) http.Handler {
 		origin := r.Header.Get("Origin")
 		if origin != "" && origin == d.saasOrigin {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			// `PRIVATE-TOKEN` is here because browsers send it during preflight
+			// when the GitLab-listing fetch passes an optional PAT override —
+			// without it, the preflight succeeds but the real request is blocked.
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, PRIVATE-TOKEN")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Max-Age", "600")
 		}

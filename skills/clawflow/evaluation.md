@@ -94,11 +94,50 @@ clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluate
 clawflow issue close --repo {owner}/{repo} --issue {number}
 ```
 
-**When no duplicate**: proceed to Step 3 (evaluation strategy).
+**When no duplicate**: proceed to Step 3 (historical context).
 
 ---
 
-## Step 3 — Evaluation Strategy (by Issue Type)
+## Step 3 — Historical Issue Context
+
+Before scoring, gather development context from the repo's issue and PR history to understand prior work related to this issue:
+
+```bash
+# 1. List recently closed issues with agent-evaluated label (recent fixes)
+clawflow issue list --repo {owner}/{repo} --state closed --label agent-evaluated
+
+# 2. List recently merged PRs (recent changes)
+clawflow pr list --repo {owner}/{repo} --state merged
+
+# 3. Check if this issue has prior failed attempts (rejected PRs, agent-failed label history)
+clawflow pr list --repo {owner}/{repo} --state closed | grep "fix/issue-{number}"
+```
+
+From the results, identify:
+- **Related fixes**: closed issues or merged PRs that touched the same module/files as the current issue
+- **Prior attempts**: any rejected PRs for this exact issue — read their review comments to understand why they failed
+- **Recent changes**: merged PRs that may have introduced the bug or affect the feature area
+
+If related items are found, read their details:
+
+```bash
+# Read a related PR's changes and review comments
+clawflow pr view --repo {owner}/{repo} --pr {related_pr_number}
+
+# Read a related issue's evaluation and discussion
+clawflow issue comment-list --repo {owner}/{repo} --issue {related_issue_number} --json
+```
+
+Incorporate findings into the evaluation:
+- Bug evaluation: reference related PRs that may have introduced the regression
+- Feature evaluation: reference existing implementations in the same module to ensure consistency
+- If a prior attempt for this issue was rejected, factor the rejection reason into the fix suggestion
+
+> This step is best-effort. If no related history is found, proceed directly to Step 4.
+
+---
+
+## Step 4 — Evaluation Strategy (by Issue Type)
 
 Based on the issue's `labels` field, apply the corresponding evaluation strategy:
 
