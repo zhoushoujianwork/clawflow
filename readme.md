@@ -92,6 +92,12 @@ clawflow label init owner/repo
 | `in-progress` | `#FFA500` Orange | Agent is actively working on it |
 | `agent-skipped` | `#BDBDBD` Gray | Low confidence — needs more info |
 | `agent-failed` | `#FF0000` Red | Agent attempted but failed |
+| `blocked` | `#E4E669` Yellow | Waiting on dependency issues |
+| `agent-split` | `#8B5CF6` Purple | Issue split into sub-issues |
+| `type:bug` | `#D73A4A` Red | Issue classified as a bug report |
+| `type:feature` | `#0E8A16` Green | Issue classified as a feature request |
+| `type:refactor` | `#1D76DB` Blue | Issue classified as a refactoring task |
+| `type:docs` | `#5319E7` Purple | Issue classified as a documentation task |
 
 ### 4. Run
 
@@ -186,7 +192,7 @@ New Issue
 [clawflow harvest] — scan all repos, filter + PR dedup
     ↓
 [AI evaluates] — confidence score, posts proposal as comment
-                → adds agent-evaluated label
+                → adds type:* label + agent-evaluated label
     ↓
 [owner adds ready-for-agent]        [low confidence → agent-skipped]
     ↓
