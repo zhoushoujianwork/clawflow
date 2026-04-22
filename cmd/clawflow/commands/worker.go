@@ -168,6 +168,17 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	fmt.Printf("  agent_id: %s\n", orDash(agentID))
 	fmt.Printf("  poll:     every %ds\n", pollSecs)
 	fmt.Printf("  pid:      %d  (~/.clawflow/worker.pid)\n", os.Getpid())
+
+	// Boot the local HTTP proxy that the SaaS browser UI uses to reach
+	// private-network GitLab / run "Test connection" for repos bound to this
+	// worker. A bind failure isn't fatal — poll loop still runs — but we
+	// surface it so users notice if the port is taken.
+	stopProxy, err := startLocalProxy(wc)
+	if err != nil {
+		fmt.Printf("  proxy:    DISABLED — %v\n", err)
+	} else {
+		defer stopProxy()
+	}
 	fmt.Println("Press Ctrl+C to stop.")
 
 	// Catch Ctrl+C / TERM so the defer above runs and the pidfile is cleared
