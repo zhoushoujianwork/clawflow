@@ -139,18 +139,42 @@ Incorporate findings into the evaluation:
 
 ## Step 4 — Evaluation Strategy (by Issue Type)
 
-Based on the issue's `labels` field, apply the corresponding evaluation strategy:
+Based on the issue's `labels` field, apply the corresponding evaluation strategy.
+
+### Step 4.0 — Type Classification and Labeling
+
+Before scoring, determine the issue type and **add the corresponding `type:*` label** to standardize classification:
 
 **Type determination rules (by priority):**
-1. Labels contain `bug` → Bug type evaluation
-2. Labels contain `enhancement` or `feat` → Feature type evaluation
-3. Neither of the above → General evaluation (fallback)
+1. Labels already contain `type:bug` / `type:feature` / `type:refactor` / `type:docs` → use as-is, skip inference
+2. Labels contain `bug` → Bug type → add `type:bug`
+3. Labels contain `enhancement` or `feat` → Feature type → add `type:feature`
+4. Neither of the above → infer from title and body:
+   - Describes abnormal behavior, errors, crashes, regressions → Bug → add `type:bug`
+   - Describes new functionality, improvements, additions → Feature → add `type:feature`
+   - Describes code cleanup, restructuring, performance optimization without behavior change → Refactor → add `type:refactor`
+   - Describes documentation updates, README, comments, guides → Docs → add `type:docs`
+
+```bash
+# Add the inferred type label
+clawflow label add --repo {owner}/{repo} --issue {number} --label {type_label}
+```
+
+> The `type:*` label is always added during evaluation — this is not optional. It standardizes issue classification across all monitored repos.
+
+**Evaluation routing by type:**
+| Type Label | Evaluation Strategy |
+|------------|-------------------|
+| `type:bug` | Bug type evaluation (reproducibility focus) |
+| `type:feature` | Feature type evaluation (implementation plan focus) |
+| `type:refactor` | Feature type evaluation (design soundness focus, skip confirmation necessity) |
+| `type:docs` | High confidence auto-pass (score = 8.0), minimal evaluation |
 
 ---
 
 ### Bug Type Evaluation
 
-For issues labeled `bug`, evaluate **reproducibility**:
+For issues classified as `type:bug`, evaluate **reproducibility**:
 
 | Dimension | Criteria | Score (1-10) |
 |-----------|----------|--------------|
@@ -170,7 +194,7 @@ For issues labeled `bug`, evaluate **reproducibility**:
 
 ### Feature Type Evaluation
 
-For issues labeled `enhancement` or `feat`, evaluate **implementation plan and architecture alignment**:
+For issues classified as `type:feature`, evaluate **implementation plan and architecture alignment**:
 
 | Dimension | Criteria | Score (1-10) |
 |-----------|----------|--------------|
@@ -191,16 +215,36 @@ For issues labeled `enhancement` or `feat`, evaluate **implementation plan and a
 - **Architecture alignment analysis**: Does the design follow the project's conventions per CLAUDE.md?
 - **Owner confirmation flag**: Does the owner need to confirm at the design level? (Yes/No)
 
-### General Evaluation (No Type Label Fallback)
+### Refactor Type Evaluation
 
-For issues without `bug`, `enhancement`, or `feat` labels, infer the type first then evaluate:
+For issues classified as `type:refactor`, evaluate using Feature dimensions with adjustments:
 
-1. **Type inference**: Based on title and body, determine if it's a bug (describes abnormal behavior/errors) or a feature (describes new functionality/improvements), and note the inferred type in the evaluation report
-2. **Project context verification**: Same as Bug/Feature — grep the repo to verify relevant files exist before referencing them
-3. **Evaluation dimensions**: Apply the corresponding Bug or Feature evaluation dimensions based on the inferred type
-4. **Label suggestion**: In the evaluation comment, suggest the owner add the appropriate type label (`bug` or `enhancement`)
+| Dimension | Criteria | Score (1-10) |
+|-----------|----------|--------------|
+| **Requirements Clarity** | Is the refactoring scope clearly defined? Are before/after expectations clear? | Clear = high, vague = low |
+| **Design Soundness** | Does the refactoring improve code quality without changing behavior? Is it aligned with project conventions? | Aligned = high, diverged = low |
+| **Risk Assessment** | How likely is the refactoring to introduce regressions? Is the affected area well-tested? | Low risk = high, high risk = low |
 
-**Confidence Score = (Dimension1 + Dimension2 + Dimension3) / 3**
+**Refactor evaluation output:**
+- **Refactoring plan**: What to change and why?
+- **Change scope**: Which files/modules need to be modified? (must be verified paths)
+- **Behavior preservation**: How to verify no behavior changes? (existing tests, manual checks)
+
+**Confidence Score = (Clarity + Design + Risk) / 3**
+
+### Docs Type Evaluation
+
+For issues classified as `type:docs`, apply minimal evaluation:
+
+- Verify the documentation target exists (file path, feature, API)
+- Auto-assign confidence score = 8.0 (docs changes are low-risk)
+- No dimensional scoring needed
+
+**Docs evaluation output:**
+- **Target**: Which documentation to update/create?
+- **Change scope**: Which files need modification?
+
+**Confidence Score = 8.0** (fixed)
 
 ---
 
@@ -244,6 +288,7 @@ If you prefer not to split, please leave a comment explaining and then add `read
 For issues with confidence >= threshold:
 
 ```bash
+# Type label is already added in Step 4.0
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
 clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluation_body>"
 ```
@@ -253,7 +298,7 @@ clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluatio
 ```
 ## 🔍 ClawFlow Evaluation Report
 
-**Issue Type:** Bug
+**Issue Type:** Bug (`type:bug`)
 **Confidence:** {score}/10 ✅ (above threshold {threshold})
 
 ---
@@ -294,7 +339,7 @@ clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluatio
 ```
 ## 🔍 ClawFlow Evaluation Report
 
-**Issue Type:** Feature
+**Issue Type:** Feature (`type:feature`)
 **Confidence:** {score}/10 ✅ (above threshold {threshold})
 
 ---
@@ -338,6 +383,70 @@ clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluatio
 🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
 ```
 
+### Refactor Type Comment Template
+
+```
+## 🔍 ClawFlow Evaluation Report
+
+**Issue Type:** Refactor (`type:refactor`)
+**Confidence:** {score}/10 ✅ (above threshold {threshold})
+
+---
+
+### Refactoring Analysis
+
+**Requirements Clarity:** {clarity}/10 — {clarity_reason}
+**Design Soundness:** {design}/10 — {design_reason}
+**Risk Assessment:** {risk}/10 — {risk_reason}
+
+**Refactoring Plan:**
+{refactor_plan}
+
+**Change Scope:**
+{change_scope}
+
+**Behavior Preservation:**
+{behavior_preservation}
+
+---
+
+👉 **If you agree with this plan, please manually add the `ready-for-agent` label to trigger auto-fix.**
+
+⚠️ Note: The agent will not add this label automatically — it requires owner confirmation.
+
+> If the repo has `auto_fix: true` enabled and confidence >= 7.0, ClawFlow has already added `ready-for-agent` automatically — no manual action needed.
+
+---
+🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
+```
+
+### Docs Type Comment Template
+
+```
+## 🔍 ClawFlow Evaluation Report
+
+**Issue Type:** Docs (`type:docs`)
+**Confidence:** 8.0/10 ✅ (auto-pass for documentation tasks)
+
+---
+
+### Documentation Analysis
+
+**Target:** {doc_target}
+**Change Scope:** {change_scope}
+
+---
+
+👉 **If you agree with this plan, please manually add the `ready-for-agent` label to trigger auto-fix.**
+
+⚠️ Note: The agent will not add this label automatically — it requires owner confirmation.
+
+> If the repo has `auto_fix: true` enabled and confidence >= 7.0, ClawFlow has already added `ready-for-agent` automatically — no manual action needed.
+
+---
+🤖 Powered by [ClawFlow](https://github.com/zhoushoujianwork/clawflow) — automated issue → fix → PR pipeline
+```
+
 ---
 
 ## Low Confidence Handling (Additional Information Required)
@@ -345,6 +454,7 @@ clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluatio
 For issues with confidence < threshold:
 
 ```bash
+# Type label is already added in Step 4.0
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-skipped
 clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<missing_info_body>"
@@ -355,7 +465,7 @@ clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<missing_i
 ```
 ## 🔍 ClawFlow Evaluation Report
 
-**Issue Type:** {type}
+**Issue Type:** {type} (`{type_label}`)
 **Confidence:** {score}/10 ⚠️ (below threshold {threshold})
 
 ---

@@ -122,4 +122,8 @@ var ClawFlowLabels = []Label{
 	{"agent-failed", "FF0000", "Agent attempted but failed"},
 	{"blocked", "E4E669", "Waiting on dependency issues to be resolved"},
 	{"agent-split", "8B5CF6", "Issue split into sub-issues; main issue closed when all sub-issues close"},
+	{"type:bug", "D73A4A", "Issue classified as a bug report"},
+	{"type:feature", "0E8A16", "Issue classified as a feature request"},
+	{"type:refactor", "1D76DB", "Issue classified as a refactoring task"},
+	{"type:docs", "5319E7", "Issue classified as a documentation task"},
 }

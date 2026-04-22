@@ -165,13 +165,16 @@ See [evaluation.md](evaluation.md) for the complete evaluation flow:
 - Step 1: Prompt injection detection
 - Step 2: Duplicate issue check
 - Step 3: Historical issue context (related fixes, prior attempts, recent changes)
-- Step 4: Type-based evaluation (Bug / Feature / General)
+- Step 4: Type classification (`type:bug` / `type:feature` / `type:refactor` / `type:docs`) and type-based evaluation
 - Split suggestion evaluation
 - High/low confidence comment templates
 
 Execution commands:
 
 ```bash
+# Step 4.0: Add type classification label (always, before evaluation scoring)
+clawflow label add --repo {owner}/{repo} --issue {number} --label {type:bug|type:feature|type:refactor|type:docs}
+
 # High confidence (score >= threshold)
 clawflow label add --repo {owner}/{repo} --issue {number} --label agent-evaluated
 clawflow issue comment --repo {owner}/{repo} --issue {number} --body "<evaluation_body>"
@@ -380,7 +383,7 @@ New Issue
 │ Has blocked label → skip, wait for dependency unblock │
 └─────────────────────────────────────────────────────┘
     ↓ (no blocked)
-[Phase 3] Evaluate → agent-evaluated + comment
+[Phase 3] Evaluate → type:* label + agent-evaluated + comment
     ↓
 ┌──────────────────────────────────────────────────────────────┐
 │ High confidence (with split): wait for owner to add ready-for-agent │
