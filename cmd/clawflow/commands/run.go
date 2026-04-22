@@ -56,9 +56,9 @@ On success, prints 'PR_URL=<url>' on its own line so callers can parse it.`,
 			// so operators have one canonical place to configure the runtime.
 			loadEnvFile()
 
-			claudeCmd := exec.Command("claude", "-p", "--dangerously-skip-permissions", "ClawFlow run")
+			claudeCmd := exec.Command(resolveClaudeBinary(), "-p", "--dangerously-skip-permissions", "ClawFlow run")
 			claudeCmd.Stdin = bytes.NewReader(body)
-			claudeCmd.Env = os.Environ()
+			claudeCmd.Env = cleanClaudeEnv(os.Environ())
 
 			// Tee stdout so we can stream to the caller (systemd/SaaS) AND scan
 			// for the PR URL at the end. stderr inherits directly.

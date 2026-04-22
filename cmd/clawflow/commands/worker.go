@@ -488,9 +488,10 @@ type PipelineResult struct {
 //
 // Falls back gracefully for non-JSON lines (treated as plain log messages).
 func runPipeline(payload json.RawMessage, stream *logStreamer) (PipelineResult, error) {
-	cmd := exec.Command("claude", "-p",
+	cmd := exec.Command(resolveClaudeBinary(), "-p",
 		"--output-format", "stream-json", "--verbose",
 		"--dangerously-skip-permissions", "ClawFlow run")
+	cmd.Env = cleanClaudeEnv(os.Environ())
 	cmd.Stdin = bytes.NewReader(payload)
 
 	stdoutPipe, err := cmd.StdoutPipe()
