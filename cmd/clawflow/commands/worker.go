@@ -188,6 +188,13 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	defer close(discoverStop)
 	fmt.Printf("  discover: every %s (self-hosted GitLab polling)\n", discoverInterval)
 
+	// Health-check loop: probes each configured repo and posts the result to
+	// SaaS so the repo-list UI can show a reachability badge.
+	hcStop := make(chan struct{})
+	go healthCheckLoop(wc, hcStop)
+	defer close(hcStop)
+	fmt.Printf("  hc:       every %s (push connection status to repo list)\n", healthCheckInterval)
+
 	fmt.Println("Press Ctrl+C to stop.")
 
 	// Catch Ctrl+C / TERM so the defer above runs and the pidfile is cleared
