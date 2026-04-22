@@ -334,7 +334,18 @@ func (d *proxyDeps) handleTestRepo(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": "no GitLab PAT configured on CLI (~/.clawflow/config/credentials.yaml)"})
 			return
 		}
+		// Resolve base_url: browser-supplied → local config.yaml by full_name
+		// → gitlab.com default. The browser can't know the per-repo host
+		// (it's not stored on SaaS), so falling through to the CLI's
+		// config.yaml is how self-hosted instances actually get probed.
 		host := body.BaseURL
+		if host == "" {
+			if cfg, err := config.Load(); err == nil {
+				if r, ok := cfg.Repos[body.FullName]; ok && r.BaseURL != "" {
+					host = r.BaseURL
+				}
+			}
+		}
 		if host == "" {
 			host = "https://gitlab.com"
 		}
