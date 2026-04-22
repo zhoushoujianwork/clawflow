@@ -83,6 +83,7 @@ func startLocalProxy(wc *config.WorkerConfig) (shutdown func(), err error) {
 	mux.HandleFunc("/local/health", deps.handleHealth)
 	mux.HandleFunc("/local/gitlab/projects", deps.handleGitLabProjects)
 	mux.HandleFunc("/local/test-repo", deps.handleTestRepo)
+	mux.HandleFunc("/local/test-integration", deps.handleTestIntegration)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", ProxyPort)
 	srv := &http.Server{
@@ -341,6 +342,114 @@ func (d *proxyDeps) handleTestRepo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "message": msg})
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown platform"})
+	}
+}
+
+// POST /local/test-integration {platform, base_url}
+// Auth required. Validates that the CLI's stored PAT works against the given
+// instance — same need as /local/test-repo but scoped to the org-level
+// integration (no specific repo). Hits `/api/v4/user` for GitLab, `/user` for
+// GitHub, which only need read-user scope and are the cheapest "am I
+// authenticated" check. Returns {ok, message}.
+func (d *proxyDeps) handleTestIntegration(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST only"})
+		return
+	}
+	if _, status, err := d.authenticate(r); err != nil {
+		writeJSON(w, status, map[string]any{"error": err.Error()})
+		return
+	}
+	var body struct {
+		Platform string `json:"platform"`
+		BaseURL  string `json:"base_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad json"})
+		return
+	}
+	creds, _ := config.LoadCredentials()
+	switch body.Platform {
+	case "gitlab":
+		tok := creds.GitLabToken
+		if tok == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": "no GitLab PAT configured on CLI"})
+			return
+		}
+		host := body.BaseURL
+		if host == "" {
+			host = "https://gitlab.com"
+		}
+		ok, msg := testGitLabHost(d.httpClient, host, tok)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "message": msg})
+	case "github":
+		tok := creds.GHToken
+		if tok == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": "no GitHub PAT configured on CLI"})
+			return
+		}
+		ok, msg := testGitHubHost(d.httpClient, body.BaseURL, tok)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "message": msg})
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown platform"})
+	}
+}
+
+func testGitLabHost(h *http.Client, baseURL, token string) (bool, string) {
+	target := strings.TrimRight(baseURL, "/") + "/api/v4/user"
+	req, _ := http.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("PRIVATE-TOKEN", token)
+	resp, err := h.Do(req)
+	if err != nil {
+		return false, fmt.Sprintf("gitlab unreachable: %v", err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case 200:
+		var u struct {
+			Username string `json:"username"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&u)
+		if u.Username != "" {
+			return true, fmt.Sprintf("OK — authenticated as %s on %s", u.Username, baseURL)
+		}
+		return true, fmt.Sprintf("OK — token valid on %s", baseURL)
+	case 401:
+		return false, "token rejected by GitLab (401)"
+	default:
+		return false, fmt.Sprintf("gitlab returned %d", resp.StatusCode)
+	}
+}
+
+func testGitHubHost(h *http.Client, baseURL, token string) (bool, string) {
+	host := baseURL
+	if host == "" || host == "https://github.com" {
+		host = "https://api.github.com"
+	} else {
+		host = strings.TrimRight(host, "/") + "/api/v3"
+	}
+	req, _ := http.NewRequest(http.MethodGet, host+"/user", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := h.Do(req)
+	if err != nil {
+		return false, fmt.Sprintf("github unreachable: %v", err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case 200:
+		var u struct {
+			Login string `json:"login"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&u)
+		if u.Login != "" {
+			return true, fmt.Sprintf("OK — authenticated as %s", u.Login)
+		}
+		return true, "OK — token valid"
+	case 401:
+		return false, "token rejected by GitHub (401)"
+	default:
+		return false, fmt.Sprintf("github returned %d", resp.StatusCode)
 	}
 }
 
