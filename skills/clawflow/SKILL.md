@@ -376,14 +376,32 @@ clawflow label remove --repo {owner}/{repo} --issue {number} --label in-progress
 clawflow label add --repo {owner}/{repo} --issue {number} --label in-progress
 ```
 
-### Step 4.3 — Create Git Worktree
+### Step 4.4 — Ensure Project Context (CLAUDE.md)
+
+Before creating the worktree, check if the target repo has a `CLAUDE.md` at its root. If not, generate one via `/init` so the sub-agent has full project context when it starts.
+
+```bash
+# Get the repo's local path from config
+LOCAL_PATH=$(clawflow config show --repo {owner}/{repo} --field local_path)
+
+# Check if CLAUDE.md exists
+if [ ! -f "$LOCAL_PATH/CLAUDE.md" ]; then
+  # Run /init in the target repo directory to generate CLAUDE.md
+  cd "$LOCAL_PATH"
+  # Execute Claude Code /init to generate project context
+fi
+```
+
+> The sub-agent automatically loads `CLAUDE.md` from the worktree root — no manual injection needed.
+
+### Step 4.5 — Create Git Worktree
 
 ```bash
 WORKTREE_PATH=$(clawflow worktree create --repo {owner}/{repo} --issue {number})
 # Example output: /tmp/clawflow-fix/owner-repo-issue-7
 ```
 
-### Step 4.4 — Spawn Sub-agent
+### Step 4.6 — Spawn Sub-agent
 
 Launch the fix agent with its working directory pointing to the worktree. See the full Task Prompt in [subagent-prompt.md](subagent-prompt.md).
 

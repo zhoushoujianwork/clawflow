@@ -1,5 +1,33 @@
 # Phase 3 — Evaluation Strategy and Comment Templates
 
+## Step 0 — Load Project Context
+
+Before evaluating any issue, the orchestrator **must** load the target repo's project context:
+
+```bash
+# Get the repo's local path
+LOCAL_PATH=$(clawflow config show --repo {owner}/{repo} --field local_path)
+
+# If CLAUDE.md doesn't exist, generate it first
+if [ ! -f "$LOCAL_PATH/CLAUDE.md" ]; then
+  cd "$LOCAL_PATH"
+  # Execute Claude Code /init to generate CLAUDE.md
+fi
+
+# Read CLAUDE.md as project context for evaluation
+cat "$LOCAL_PATH/CLAUDE.md"
+```
+
+This gives the evaluator:
+- Project directory structure and module responsibilities
+- Architecture conventions and design patterns
+- Key dependencies and constraints
+- Test strategy and coverage information
+
+> All subsequent evaluation steps must reference this context. Do not guess file paths or architecture — verify against the actual project structure.
+
+---
+
 ## Evaluation Strategy (by Issue Type)
 
 Based on the issue's `labels` field, apply the corresponding evaluation strategy:
@@ -21,9 +49,14 @@ For issues labeled `bug`, evaluate **reproducibility**:
 | **Root Cause** | Can the problem be traced to specific code? Is the root cause clear? | Located = high, vague = low |
 | **Fix Complexity** | Is the fix simple and straightforward? Does it touch core logic? | Single-point fix = high, systemic changes = low |
 
+**Bug evaluation requires code verification:**
+- Root cause analysis must reference actual file paths and function names found via grep/read in the repo
+- Do not guess file locations — verify they exist in the project structure
+- Cross-reference with CLAUDE.md to understand which module the bug belongs to
+
 **Bug evaluation output:**
 - **Reproduction steps**: How to reproduce this bug?
-- **Root cause analysis**: Where is the problem? Which file/function?
+- **Root cause analysis**: Where is the problem? Which file/function? (must be verified paths)
 - **Fix suggestion**: How to fix it? What is the change scope?
 
 ### Feature Type Evaluation
@@ -36,11 +69,17 @@ For issues labeled `enhancement` or `feat`, evaluate **implementation plan and a
 | **Design Soundness** | Is the proposed design reasonable? Does it align with the overall project architecture? | Aligned = high, diverged = low |
 | **Confirmation Necessity** | Does this implementation involve significant design decisions requiring owner confirmation? | No confirmation needed = high, needs confirmation = low |
 
+**Feature evaluation requires project structure verification:**
+- Change scope must be based on actual project structure (grep/glob the repo to find relevant files)
+- Architecture alignment must reference conventions from CLAUDE.md, not generic assumptions
+- If the feature introduces new files, specify which existing directory they belong to and why (based on project conventions)
+- Technology choices must be consistent with existing dependencies (check go.mod / package.json / etc.)
+
 **Feature evaluation output:**
 - **Implementation plan**: How to implement this feature? Specific steps?
-- **Technology choices**: What tech/libraries/APIs to use?
-- **Change scope**: Which files/modules need to be modified?
-- **Architecture alignment analysis**: Does the design follow the project's overall architecture principles? Are there architecture divergence risks?
+- **Technology choices**: What tech/libraries/APIs to use? (must be consistent with existing deps)
+- **Change scope**: Which files/modules need to be modified? (must be verified paths from the repo)
+- **Architecture alignment analysis**: Does the design follow the project's conventions per CLAUDE.md?
 - **Owner confirmation flag**: Does the owner need to confirm at the design level? (Yes/No)
 
 ### General Evaluation (No Type Label Fallback)
@@ -48,8 +87,9 @@ For issues labeled `enhancement` or `feat`, evaluate **implementation plan and a
 For issues without `bug`, `enhancement`, or `feat` labels, infer the type first then evaluate:
 
 1. **Type inference**: Based on title and body, determine if it's a bug (describes abnormal behavior/errors) or a feature (describes new functionality/improvements), and note the inferred type in the evaluation report
-2. **Evaluation dimensions**: Apply the corresponding Bug or Feature evaluation dimensions based on the inferred type
-3. **Label suggestion**: In the evaluation comment, suggest the owner add the appropriate type label (`bug` or `enhancement`)
+2. **Project context verification**: Same as Bug/Feature — grep the repo to verify relevant files exist before referencing them
+3. **Evaluation dimensions**: Apply the corresponding Bug or Feature evaluation dimensions based on the inferred type
+4. **Label suggestion**: In the evaluation comment, suggest the owner add the appropriate type label (`bug` or `enhancement`)
 
 **Confidence Score = (Dimension1 + Dimension2 + Dimension3) / 3**
 
