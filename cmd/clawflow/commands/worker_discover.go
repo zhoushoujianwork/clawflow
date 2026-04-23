@@ -74,6 +74,10 @@ func hasAnyLabel(labels []string, needles []string) bool {
 // parallelism across repos — the per-repo GitLab fetch is short, and
 // serializing keeps token rate-limit pressure predictable.
 func discoverLoop(wc *config.WorkerConfig, stopCh <-chan struct{}) {
+	discoverLoopWithWS(wc, nil, stopCh)
+}
+
+func discoverLoopWithWS(wc *config.WorkerConfig, ws *wsChannel, stopCh <-chan struct{}) {
 	t := time.NewTicker(discoverInterval)
 	defer t.Stop()
 	// First pass happens a few seconds after boot so users see their
@@ -84,15 +88,15 @@ func discoverLoop(wc *config.WorkerConfig, stopCh <-chan struct{}) {
 		case <-stopCh:
 			return
 		case <-initial:
-			runDiscoverPass(wc)
+			runDiscoverPass(wc, ws)
 			initial = nil // one-shot
 		case <-t.C:
-			runDiscoverPass(wc)
+			runDiscoverPass(wc, ws)
 		}
 	}
 }
 
-func runDiscoverPass(wc *config.WorkerConfig) {
+func runDiscoverPass(wc *config.WorkerConfig, ws *wsChannel) {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Printf("[discover] config load failed: %v\n", err)
@@ -127,7 +131,7 @@ func runDiscoverPass(wc *config.WorkerConfig) {
 			fmt.Printf("[discover] %s (execute): %v\n", fullName, err)
 		} else {
 			for _, is := range issues {
-				if err := pushDiscoveredIssue(wc, "gitlab", fullName, is.IID, is.Title); err != nil {
+				if err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title); err != nil {
 					fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
 				}
 			}
@@ -149,7 +153,7 @@ func runDiscoverPass(wc *config.WorkerConfig) {
 				if hasAnyLabel(is.Labels, terminalLabels) {
 					continue // already processed — SKILL harvest would skip it too
 				}
-				if err := pushDiscoveredIssue(wc, "gitlab", fullName, is.IID, is.Title); err != nil {
+				if err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title); err != nil {
 					fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
 					continue
 				}
@@ -220,9 +224,12 @@ func fetchOpenLabeledIssues(baseURL, token, fullName, label string) ([]gitlabIss
 	return out, nil
 }
 
-// pushDiscoveredIssue hands an issue to SaaS via the worker discover
-// endpoint. Idempotent on the server side — safe to call every pass.
-func pushDiscoveredIssue(wc *config.WorkerConfig, platform, fullName string, issueNumber int64, title string) error {
+// pushDiscoveredIssue hands an issue to SaaS via WS (preferred) or HTTP fallback.
+// Idempotent on the server side — safe to call every pass.
+func pushDiscoveredIssue(wc *config.WorkerConfig, ws *wsChannel, platform, fullName string, issueNumber int64, title string) error {
+	if ws != nil && ws.SendDiscover(platform, fullName, issueNumber, title) {
+		return nil
+	}
 	body, _ := json.Marshal(map[string]any{
 		"platform":     platform,
 		"full_name":    fullName,

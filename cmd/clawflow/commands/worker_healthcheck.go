@@ -27,25 +27,27 @@ import (
 const healthCheckInterval = 5 * time.Minute
 
 func healthCheckLoop(wc *config.WorkerConfig, stopCh <-chan struct{}) {
+	healthCheckLoopWithWS(wc, nil, stopCh)
+}
+
+func healthCheckLoopWithWS(wc *config.WorkerConfig, ws *wsChannel, stopCh <-chan struct{}) {
 	t := time.NewTicker(healthCheckInterval)
 	defer t.Stop()
-	// First pass 20s after boot so new users see fresh statuses without waiting
-	// a full cycle.
 	initial := time.After(20 * time.Second)
 	for {
 		select {
 		case <-stopCh:
 			return
 		case <-initial:
-			runHealthCheckPass(wc)
+			runHealthCheckPass(wc, ws)
 			initial = nil
 		case <-t.C:
-			runHealthCheckPass(wc)
+			runHealthCheckPass(wc, ws)
 		}
 	}
 }
 
-func runHealthCheckPass(wc *config.WorkerConfig) {
+func runHealthCheckPass(wc *config.WorkerConfig, ws *wsChannel) {
 	cfg, err := config.Load()
 	if err != nil {
 		return
@@ -61,8 +63,7 @@ func runHealthCheckPass(wc *config.WorkerConfig) {
 			continue
 		}
 		ok, msg := probeGitLabRepo(client, repo.BaseURL, creds.GitLabToken, fullName)
-		// Push asynchronously would parallelize; serialize keeps logs linear.
-		if err := pushHealthReport(wc, "gitlab", fullName, ok, msg); err != nil {
+		if err := pushHealthReport(wc, ws, "gitlab", fullName, ok, msg); err != nil {
 			fmt.Printf("[hc] push for %s failed: %v\n", fullName, err)
 		}
 	}
@@ -93,7 +94,10 @@ func probeGitLabRepo(client *http.Client, baseURL, token, fullName string) (bool
 	}
 }
 
-func pushHealthReport(wc *config.WorkerConfig, platform, fullName string, ok bool, message string) error {
+func pushHealthReport(wc *config.WorkerConfig, ws *wsChannel, platform, fullName string, ok bool, message string) error {
+	if ws != nil && ws.SendHealthReport(platform, fullName, ok, message) {
+		return nil
+	}
 	body, _ := json.Marshal(map[string]any{
 		"platform":  platform,
 		"full_name": fullName,

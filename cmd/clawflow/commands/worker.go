@@ -166,7 +166,7 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	fmt.Printf("Worker started\n")
 	fmt.Printf("  saas:     %s\n", wc.SaasURL)
 	fmt.Printf("  agent_id: %s\n", orDash(agentID))
-	fmt.Printf("  poll:     every %ds\n", pollSecs)
+	fmt.Printf("  poll:     every %ds (fallback when WS disconnected)\n", pollSecs)
 	fmt.Printf("  pid:      %d  (~/.clawflow/worker.pid)\n", os.Getpid())
 
 	// Boot the local HTTP proxy that the SaaS browser UI uses to reach
@@ -180,33 +180,48 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 		defer stopProxy()
 	}
 
+	// Start persistent WS control channel (primary communication path).
+	ws := newWSChannel(wc)
+	go ws.Run()
+	defer ws.Stop()
+	fmt.Printf("  ws:       connecting to %s/api/ws/worker/channel\n", wc.SaasURL)
+
 	// Fallback issue-discovery loop: polls each configured self-hosted GitLab
-	// for labeled issues and pushes them to SaaS as pipeline_runs. Needed when
-	// the corp network blocks inbound webhooks to clawflow.daboluo.cc.
+	// for labeled issues and pushes them to SaaS as pipeline_runs.
 	discoverStop := make(chan struct{})
-	go discoverLoop(wc, discoverStop)
+	go discoverLoopWithWS(wc, ws, discoverStop)
 	defer close(discoverStop)
 	fmt.Printf("  discover: every %s (self-hosted GitLab polling)\n", discoverInterval)
 
 	// Health-check loop: probes each configured repo and posts the result to
 	// SaaS so the repo-list UI can show a reachability badge.
 	hcStop := make(chan struct{})
-	go healthCheckLoop(wc, hcStop)
+	go healthCheckLoopWithWS(wc, ws, hcStop)
 	defer close(hcStop)
 	fmt.Printf("  hc:       every %s (push connection status to repo list)\n", healthCheckInterval)
 
 	fmt.Println("Press Ctrl+C to stop.")
 
-	// Catch Ctrl+C / TERM so the defer above runs and the pidfile is cleared
-	// — otherwise `clawflow worker start` next time sees a stale lock.
+	// Catch Ctrl+C / TERM so the defer above runs and the pidfile is cleared.
 	stopCh := make(chan os.Signal, 1)
 	signal.Notify(stopCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(stopCh)
 
-	// Send initial heartbeat, then every 60 s regardless of poll interval.
-	sendHeartbeat(wc)
+	// Heartbeat: send via WS when connected, fall back to HTTP.
+	hostname, _ := os.Hostname()
+	cliVersion := cliVersionString()
+	doHeartbeat := func() {
+		if !ws.SendHeartbeat(hostname, cliVersion) {
+			sendHeartbeat(wc)
+		}
+	}
+	doHeartbeat()
 	heartbeatTicker := time.NewTicker(60 * time.Second)
 	defer heartbeatTicker.Stop()
+
+	// HTTP poll ticker — only used as fallback when WS is disconnected.
+	pollTicker := time.NewTicker(time.Duration(pollSecs) * time.Second)
+	defer pollTicker.Stop()
 
 	pollCount := 0
 	for {
@@ -214,37 +229,43 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 		case <-stopCh:
 			fmt.Println("\nshutting down…")
 			return nil
-		case <-heartbeatTicker.C:
-			sendHeartbeat(wc)
-		default:
-		}
 
-		pollCount++
-		tasks, err := fetchTasks(wc)
-		now := time.Now().Format("15:04:05")
-		switch {
-		case err != nil:
-			fmt.Printf("[%s] poll #%d: fetch failed — %v\n", now, pollCount, err)
-		case len(tasks) == 0:
-			// Quiet heartbeat: one line every 10 polls so idle logs don't drown.
-			if pollCount%10 == 1 {
-				fmt.Printf("[%s] poll #%d: idle (no pending tasks)\n", now, pollCount)
-			}
-		default:
-			fmt.Printf("[%s] poll #%d: got %d task(s)\n", now, pollCount, len(tasks))
+		case <-heartbeatTicker.C:
+			doHeartbeat()
+
+		case tasks := <-ws.TaskCh():
+			// Real-time task push from WS channel.
+			now := time.Now().Format("15:04:05")
+			fmt.Printf("[%s] ws: got %d task(s)\n", now, len(tasks))
 			for _, t := range tasks {
 				if err := processTask(wc, t); err != nil {
 					fmt.Printf("[error] task %s: %v\n", t.ID, err)
 				}
 			}
-		}
 
-		// Signal-aware sleep so Ctrl+C during idle polls exits promptly.
-		select {
-		case <-stopCh:
-			fmt.Println("\nshutting down…")
-			return nil
-		case <-time.After(time.Duration(pollSecs) * time.Second):
+		case <-pollTicker.C:
+			// HTTP fallback: only poll when WS is disconnected.
+			if ws.IsConnected() {
+				continue
+			}
+			pollCount++
+			tasks, err := fetchTasks(wc)
+			now := time.Now().Format("15:04:05")
+			switch {
+			case err != nil:
+				fmt.Printf("[%s] poll #%d: fetch failed — %v\n", now, pollCount, err)
+			case len(tasks) == 0:
+				if pollCount%10 == 1 {
+					fmt.Printf("[%s] poll #%d: idle (no pending tasks, WS disconnected)\n", now, pollCount)
+				}
+			default:
+				fmt.Printf("[%s] poll #%d: got %d task(s)\n", now, pollCount, len(tasks))
+				for _, t := range tasks {
+					if err := processTask(wc, t); err != nil {
+						fmt.Printf("[error] task %s: %v\n", t.ID, err)
+					}
+				}
+			}
 		}
 	}
 }
