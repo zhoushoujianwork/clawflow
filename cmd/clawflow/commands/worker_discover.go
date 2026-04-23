@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -39,24 +40,51 @@ type gitlabIssue struct {
 	Labels []string `json:"labels"`
 }
 
-// evaluateLookbackDays bounds how far back we'll auto-evaluate unlabeled
-// issues. Keeps the first pass on a fresh install from enqueueing 500 old
-// issues and blowing through credits.
-const evaluateLookbackDays = 7
-
-// evaluateMaxPerPass caps how many fresh (unlabeled) issues we push per
-// repo per pass. Hard stop against runaway cost; next pass (90s later)
-// will pick up the rest.
+// evaluateMaxPerPass caps how many issues we push to SaaS per repo per pass
+// when `auto_evaluate_all_issues=true`. Hard stop against runaway cost on a
+// fresh install where a repo might have hundreds of open issues; next pass
+// (90s later) drains another batch, and the session dedup cache keeps us
+// from re-POSTing ones SaaS already acknowledged.
 const evaluateMaxPerPass = 10
 
 // Terminal labels — a repo already carrying any of these is considered
 // already handled by an agent run and shouldn't auto-evaluate again.
-// Mirrors SKILL.md's `to_evaluate` filter ("no agent labels").
+// Mirrors SKILL.md's `to_evaluate` filter ("no agent labels"). Note: post
+// issue #28, SaaS no longer writes `agent-skipped` to the VCS for
+// low-confidence runs — but legacy labels from older versions still live
+// on the issues, so the filter stays useful.
 var terminalLabels = []string{
 	"agent-evaluated",
 	"agent-failed",
 	"agent-skipped",
 	"blocked",
+}
+
+// discoverSeen is a session-scoped set of (platform, fullName, issue#) tuples
+// the CLI has already POSTed to /worker/discover in this worker process. It
+// prevents re-POSTing every 90s for issues SaaS has already acknowledged.
+// Advisory only: SaaS remains the source of truth for dedup — a miss costs
+// at most one idempotent duplicate POST (SaaS returns created=false, the
+// scorer then skips). Session-scoped because we trust SaaS's persistent
+// dedup to survive worker restarts.
+var discoverSeen sync.Map // map[string]struct{}
+
+func discoverSeenKey(platform, fullName string, issueNumber int64) string {
+	return fmt.Sprintf("%s:%s#%d", platform, fullName, issueNumber)
+}
+
+// markDiscoverSeen records a (repo, issue) as already POSTed this session.
+// Call it regardless of whether SaaS reported `created=true` — either way
+// the CLI has done its part and doesn't need to POST again.
+func markDiscoverSeen(platform, fullName string, issueNumber int64) {
+	discoverSeen.Store(discoverSeenKey(platform, fullName, issueNumber), struct{}{})
+}
+
+// alreadyDiscovered reports whether we've POSTed this (repo, issue) in the
+// current worker session.
+func alreadyDiscovered(platform, fullName string, issueNumber int64) bool {
+	_, ok := discoverSeen.Load(discoverSeenKey(platform, fullName, issueNumber))
+	return ok
 }
 
 func hasAnyLabel(labels []string, needles []string) bool {
@@ -124,46 +152,64 @@ func runDiscoverPass(wc *config.WorkerConfig, ws *wsChannel) {
 				label = v
 			}
 		}
-		// Channel A (execute): issues the user labeled `ready-for-agent`.
-		// Pushed unconditionally — agent runs evaluation first if needed,
-		// execution after. SaaS enqueue is idempotent on (repo, issue).
+		// Channel A (execute): issues the user explicitly labeled.
+		// Always runs regardless of auto_evaluate_all_issues — an explicit
+		// label is the strongest signal of intent and should never be
+		// filtered out. SaaS enqueue is idempotent on (repo, issue).
 		if issues, err := fetchOpenLabeledIssues(repo.BaseURL, tok, fullName, label); err != nil {
 			fmt.Printf("[discover] %s (execute): %v\n", fullName, err)
 		} else {
 			for _, is := range issues {
+				if alreadyDiscovered("gitlab", fullName, is.IID) {
+					continue
+				}
 				ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title)
 				if err != nil {
 					fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
 					continue
 				}
+				markDiscoverSeen("gitlab", fullName, is.IID)
 				maybeScoreAfterDiscover(wc, ack, repo, "gitlab", fullName, is.IID, is.Title)
 			}
 		}
 
-		// Channel B (evaluate): fresh issues the user hasn't touched yet.
-		// SKILL's harvest normally does this by hand; auto-picking recent
-		// ones gets us closer to "label-free" UX. Guarded by lookback
-		// window + per-pass cap + client-side terminal-label filter so a
-		// stale repo can't burn credits on ancient backlog.
-		if fresh, err := fetchUnlabeledRecentIssues(repo.BaseURL, tok, fullName, evaluateLookbackDays); err != nil {
-			fmt.Printf("[discover] %s (evaluate): %v\n", fullName, err)
-		} else {
-			pushed := 0
-			for _, is := range fresh {
-				if pushed >= evaluateMaxPerPass {
-					break
-				}
-				if hasAnyLabel(is.Labels, terminalLabels) {
-					continue // already processed — SKILL harvest would skip it too
-				}
-				ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title)
-				if err != nil {
-					fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
-					continue
-				}
-				maybeScoreAfterDiscover(wc, ack, repo, "gitlab", fullName, is.IID, is.Title)
-				pushed++
+		// Channel B (evaluate-all): issue #28 — when the repo opts in via
+		// the SaaS toggle `auto_evaluate_all_issues`, we fetch every open
+		// issue (no label filter, no lookback window) and hand each one to
+		// local Claude scoring. SaaS applies its confidence threshold to
+		// skip low-score runs rather than relying on user labelling
+		// discipline. Still bounded by evaluateMaxPerPass per repo per
+		// tick so a fresh install on a 500-issue repo doesn't burn credits
+		// in one pass; session dedup prevents the next tick from
+		// re-submitting the same ones.
+		if !repo.AutoEvaluateAllIssues {
+			continue
+		}
+		fresh, err := fetchAllOpenIssues(repo.BaseURL, tok, fullName)
+		if err != nil {
+			fmt.Printf("[discover] %s (evaluate-all): %v\n", fullName, err)
+			continue
+		}
+		pushed := 0
+		for _, is := range fresh {
+			if pushed >= evaluateMaxPerPass {
+				break
 			}
+			if alreadyDiscovered("gitlab", fullName, is.IID) {
+				continue
+			}
+			if hasAnyLabel(is.Labels, terminalLabels) {
+				markDiscoverSeen("gitlab", fullName, is.IID)
+				continue // pre-existing legacy label → already processed on some prior install
+			}
+			ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title)
+			if err != nil {
+				fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
+				continue
+			}
+			markDiscoverSeen("gitlab", fullName, is.IID)
+			maybeScoreAfterDiscover(wc, ack, repo, "gitlab", fullName, is.IID, is.Title)
+			pushed++
 		}
 	}
 }
@@ -196,16 +242,18 @@ func maybeScoreAfterDiscover(
 	})
 }
 
-// fetchUnlabeledRecentIssues lists opened issues created within the last
-// `lookbackDays`. Client-side filter to terminal-label-free comes afterwards
-// — GitLab 11 doesn't support `not[labels]=…` query arg cleanly.
-func fetchUnlabeledRecentIssues(baseURL, token, fullName string, lookbackDays int) ([]gitlabIssue, error) {
+// fetchAllOpenIssues lists every opened issue on the project, with no label
+// filter and no lookback window. Page size is capped at 50 so a giant
+// backlog doesn't arrive as a single 500-entry response — the discover loop
+// caps how many it POSTs per pass anyway (evaluateMaxPerPass), and the
+// session dedup cache keeps the next tick from re-examining the same ones.
+// Only called when `auto_evaluate_all_issues=true` for the repo (issue #28).
+func fetchAllOpenIssues(baseURL, token, fullName string) ([]gitlabIssue, error) {
 	host := strings.TrimRight(baseURL, "/")
 	encoded := url.PathEscape(fullName)
-	createdAfter := time.Now().AddDate(0, 0, -lookbackDays).Format("2006-01-02")
 	target := fmt.Sprintf(
-		"%s/api/v4/projects/%s/issues?state=opened&created_after=%s&per_page=50",
-		host, encoded, createdAfter,
+		"%s/api/v4/projects/%s/issues?state=opened&per_page=50",
+		host, encoded,
 	)
 	req, err := http.NewRequest(http.MethodGet, target, nil)
 	if err != nil {

@@ -36,6 +36,13 @@ type Repo struct {
 	CITimeout         int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
 	AutoFix           bool              `yaml:"auto_fix,omitempty"`
+	// AutoEvaluateAllIssues, when true, makes the discover loop fetch every
+	// open issue on the repo (not just those carrying the trigger label) and
+	// hand each one to local Claude scoring. Low-score runs get filtered by
+	// SaaS threshold rather than by the user's labelling discipline. Default
+	// false preserves the original "label is gatekeeper" behaviour. Pushed
+	// from SaaS via /sync/config (issue #28).
+	AutoEvaluateAllIssues bool `yaml:"auto_evaluate_all_issues,omitempty"`
 }
 
 // Settings holds global ClawFlow settings.

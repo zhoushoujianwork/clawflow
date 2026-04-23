@@ -220,14 +220,15 @@ func pullConfig(saas *config.SaasConfig) error {
 
 	var result struct {
 		Repos []struct {
-			FullName    string    `json:"full_name"`
-			Platform    string    `json:"platform"`
-			BaseBranch  string    `json:"base_branch"`
-			Enabled     bool      `json:"enabled"`
-			TestCommand *string   `json:"test_command"`
-			CIRequired  bool      `json:"ci_required"`
-			LocalPath   *string   `json:"local_path"`
-			UpdatedAt   time.Time `json:"updated_at"`
+			FullName              string    `json:"full_name"`
+			Platform              string    `json:"platform"`
+			BaseBranch            string    `json:"base_branch"`
+			Enabled               bool      `json:"enabled"`
+			TestCommand           *string   `json:"test_command"`
+			CIRequired            bool      `json:"ci_required"`
+			LocalPath             *string   `json:"local_path"`
+			AutoEvaluateAllIssues bool      `json:"auto_evaluate_all_issues"`
+			UpdatedAt             time.Time `json:"updated_at"`
 		} `json:"repos"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -253,6 +254,7 @@ func pullConfig(saas *config.SaasConfig) error {
 		existing.BaseBranch = r.BaseBranch
 		existing.Platform = r.Platform
 		existing.CIRequired = r.CIRequired
+		existing.AutoEvaluateAllIssues = r.AutoEvaluateAllIssues
 		if r.TestCommand != nil {
 			existing.TestCommand = *r.TestCommand
 		}
