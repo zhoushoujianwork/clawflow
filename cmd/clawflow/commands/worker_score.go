@@ -94,7 +94,13 @@ func scoreNewlyCreatedRun(wc *config.WorkerConfig, ctx scoreContext) {
 	stream := dialLogStream(wc, ctx.RunID)
 	defer stream.Close()
 
-	res, rerr := runClaude(prompt, nil, workdir, stream, tracePath)
+	// Scoring is a cheap rubric-based decision; don't let Claude fan out
+	// into codebase exploration. --tools "" disables all built-in tools
+	// (grep/read/etc.), forcing the model to answer from the issue body
+	// alone; --effort low drops expensive reasoning. Measured impact on
+	// one run before vs after: ~$0.36 @ 3m51s → target <$0.01 @ <30s.
+	res, rerr := runClaude(prompt, nil, workdir, stream, tracePath,
+		"--tools", "", "--effort", "low")
 	if rerr != nil {
 		fmt.Printf("[score %s] claude exit: %v\n", ctx.RunID, rerr)
 	}
@@ -129,6 +135,22 @@ func scoreNewlyCreatedRun(wc *config.WorkerConfig, ctx scoreContext) {
 		verdict = fmt.Sprintf("skipped (below %d)", thr)
 	}
 	fmt.Printf("[score %s] score=%d %s in %s\n", ctx.RunID, confidence, verdict, dur)
+
+	// Commit to the scored-runs audit log FIRST. This is the ground-truth
+	// record used by auditScoredAtBoot to rescue runs whose comment didn't
+	// land for any reason. Once this line is written, we consider the
+	// comment side-effect our responsibility forever, even across restarts.
+	appendScoredLog(scoredRec{
+		RunID:       ctx.RunID,
+		Platform:    ctx.Platform,
+		FullName:    ctx.FullName,
+		IssueNumber: ctx.IssueNumber,
+		IssueTitle:  ctx.IssueTitle,
+		Confidence:  confidence,
+		Reason:      reasoning,
+		Skipped:     resp.Skipped,
+		Threshold:   resp.Threshold,
+	})
 
 	// Durable queue for the VCS-comment side effect. Stash BEFORE posting
 	// so a crash or network failure between here and the post leaves a
@@ -281,26 +303,25 @@ func postScore(wc *config.WorkerConfig, runID string, confidence int, reasoning 
 }
 
 func buildScoringPrompt(ctx scoreContext) string {
+	// Deliberately terse: scoring runs with --tools "" so Claude has no
+	// way to explore anyway; spending tokens inviting it to is wasteful.
+	// The model decides from the title + body + repo name alone.
 	var b strings.Builder
-	b.WriteString("You are the ClawFlow feasibility scorer. Decide how confidently an autonomous ")
-	b.WriteString("agent can fix this issue end-to-end without human judgment. Consult README, ")
-	b.WriteString("CLAUDE.md, recent commits, and any code the issue references.\n\n")
+	b.WriteString("Feasibility scoring for an autonomous coding agent. ")
+	b.WriteString("Rate 0-100 how confidently the agent can fix this issue end-to-end without human judgment.\n\n")
 	b.WriteString("Rubric:\n")
-	b.WriteString("  70-100 — clear bug reproduction, simple feature, dependency bump, small-scope change\n")
+	b.WriteString("  70-100 — clear bug/repro, simple feature, dep bump, small-scope change\n")
 	b.WriteString("  40-69  — vague description, moderate complexity, multiple files\n")
-	b.WriteString("   0-39  — architecture refactor, multi-repo change, needs product judgment\n\n")
-	fmt.Fprintf(&b, "Repo: %s (platform=%s, base=%s)\n", ctx.FullName, ctx.Platform, ctx.BaseBranch)
-	if ctx.IssueURL != "" {
-		fmt.Fprintf(&b, "Issue URL: %s\n", ctx.IssueURL)
-	}
-	fmt.Fprintf(&b, "Issue #%d: %s\n\n", ctx.IssueNumber, ctx.IssueTitle)
+	b.WriteString("   0-39  — architecture refactor, multi-repo, needs product judgment\n\n")
+	fmt.Fprintf(&b, "Repo: %s\n", ctx.FullName)
+	fmt.Fprintf(&b, "Issue #%d: %s\n", ctx.IssueNumber, ctx.IssueTitle)
 	if strings.TrimSpace(ctx.IssueBody) != "" {
-		b.WriteString("--- issue body ---\n")
+		b.WriteString("\n")
 		b.WriteString(ctx.IssueBody)
-		b.WriteString("\n--- end body ---\n\n")
+		b.WriteString("\n")
 	}
-	b.WriteString("Finish your reply with a single line in EXACTLY this format (nothing else on that line):\n")
-	b.WriteString("SCORE: <integer 0-100> | <one-sentence reasoning>\n")
+	b.WriteString("\nOutput exactly one line, nothing else on that line:\n")
+	b.WriteString("SCORE: <int 0-100> | <one-sentence reasoning>\n")
 	return b.String()
 }
 

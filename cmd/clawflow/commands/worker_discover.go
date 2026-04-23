@@ -12,11 +12,14 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -62,29 +65,91 @@ var terminalLabels = []string{
 	"blocked",
 }
 
-// discoverSeen is a session-scoped set of (platform, fullName, issue#) tuples
-// the CLI has already POSTed to /worker/discover in this worker process. It
-// prevents re-POSTing every 90s for issues SaaS has already acknowledged.
-// Advisory only: SaaS remains the source of truth for dedup — a miss costs
-// at most one idempotent duplicate POST (SaaS returns created=false, the
-// scorer then skips). Session-scoped because we trust SaaS's persistent
-// dedup to survive worker restarts.
-var discoverSeen sync.Map // map[string]struct{}
+// discoverSeen is the in-memory index of (platform, fullName, issue#) tuples
+// the CLI has already POSTed to /worker/discover. Advisory only: SaaS remains
+// the source of truth for dedup — a miss costs at most one idempotent
+// duplicate POST (SaaS returns created=false, the scorer then skips).
+//
+// Backed by an append-only log at ~/.clawflow/state/discovered.log so the
+// dedup survives worker restarts. Without persistence, every restart
+// re-POSTs everything to /worker/discover — which normally is harmless
+// (SaaS dedups) but combined with SaaS side's own imperfect dedup can
+// spawn duplicate evaluate-only runs and therefore duplicate scoring
+// comments (observed 2026-04-24 with issue #51-#54 scored twice).
+var (
+	discoverSeen       sync.Map // map[string]struct{}
+	discoverSeenLoaded sync.Once
+	discoverSeenWrite  sync.Mutex
+)
 
 func discoverSeenKey(platform, fullName string, issueNumber int64) string {
 	return fmt.Sprintf("%s:%s#%d", platform, fullName, issueNumber)
 }
 
-// markDiscoverSeen records a (repo, issue) as already POSTed this session.
-// Call it regardless of whether SaaS reported `created=true` — either way
-// the CLI has done its part and doesn't need to POST again.
-func markDiscoverSeen(platform, fullName string, issueNumber int64) {
-	discoverSeen.Store(discoverSeenKey(platform, fullName, issueNumber), struct{}{})
+func discoverSeenPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".clawflow", "state", "discovered.log")
 }
 
-// alreadyDiscovered reports whether we've POSTed this (repo, issue) in the
-// current worker session.
+// ensureDiscoverSeenLoaded reads the on-disk log once per process and
+// hydrates the in-memory sync.Map. Safe to call from any goroutine.
+func ensureDiscoverSeenLoaded() {
+	discoverSeenLoaded.Do(func() {
+		f, err := os.Open(discoverSeenPath())
+		if err != nil {
+			return // missing file = fresh worker, fine
+		}
+		defer f.Close()
+		s := bufio.NewScanner(f)
+		s.Buffer(make([]byte, 64*1024), 1024*1024)
+		count := 0
+		for s.Scan() {
+			key := strings.TrimSpace(s.Text())
+			if key == "" {
+				continue
+			}
+			discoverSeen.Store(key, struct{}{})
+			count++
+		}
+		if count > 0 {
+			fmt.Printf("[discover] restored %d seen (repo, issue) pairs from %s\n", count, discoverSeenPath())
+		}
+	})
+}
+
+// persistDiscoverSeen appends one key to the on-disk log. Append-only
+// keeps writes O(1) and survives a mid-write crash (at worst the
+// partial line is silently dropped on next boot by bufio.Scanner).
+func persistDiscoverSeen(key string) {
+	discoverSeenWrite.Lock()
+	defer discoverSeenWrite.Unlock()
+	path := discoverSeenPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(key + "\n")
+}
+
+// markDiscoverSeen records a (repo, issue) as already POSTed. Persists to
+// disk so restarts don't re-trigger scoring on the same (repo, issue).
+func markDiscoverSeen(platform, fullName string, issueNumber int64) {
+	ensureDiscoverSeenLoaded()
+	key := discoverSeenKey(platform, fullName, issueNumber)
+	if _, already := discoverSeen.LoadOrStore(key, struct{}{}); already {
+		return // no need to re-persist a key we already have on disk
+	}
+	persistDiscoverSeen(key)
+}
+
+// alreadyDiscovered reports whether we've POSTed this (repo, issue) in a
+// past or current worker session.
 func alreadyDiscovered(platform, fullName string, issueNumber int64) bool {
+	ensureDiscoverSeenLoaded()
 	_, ok := discoverSeen.Load(discoverSeenKey(platform, fullName, issueNumber))
 	return ok
 }

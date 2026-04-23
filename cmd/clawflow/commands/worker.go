@@ -225,6 +225,14 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	defer close(backfillStop)
 	fmt.Printf("  score/bf: every %s (rescue pending runs missed by inline scoring)\n", pendingScoreInterval)
 
+	// One-shot audit at boot: replay scored.jsonl and re-stash any run
+	// that doesn't have its scoring-comment marker on the VCS. Catches
+	// orphans from prior worker generations whose pending-comment stash
+	// didn't survive (pre-v0.33.0 runs, or queue file deleted manually).
+	// Synchronous so the comment/bf loop below starts with a reconciled
+	// queue state.
+	auditScoredAtBoot(wc)
+
 	// Pending-comment backfill: the other half of scoring durability.
 	// Inline post can still fail after /score lands (VCS 5xx, token
 	// expiry, worker crashed between POST /score and comment post).
@@ -569,13 +577,20 @@ func runPipeline(payload json.RawMessage, stream *logStreamer) (PipelineResult, 
 	return runClaude("ClawFlow run", bytes.NewReader(payload), "", stream, "/tmp/claude-stream.log")
 }
 
-// runClaude is the shared stream-json runner used by both the main pipeline
-// and the reconcile flow. Pass stdinR=nil when no stdin is needed, workdir=""
+// runClaude is the shared stream-json runner used by the main pipeline,
+// reconcile, and scoring. Pass stdinR=nil when no stdin is needed, workdir=""
 // to inherit cwd, tracePath="" to skip diagnostic tee.
-func runClaude(prompt string, stdinR io.Reader, workdir string, stream *logStreamer, tracePath string) (PipelineResult, error) {
-	cmd := exec.Command(resolveClaudeBinary(), "-p",
+//
+// extraArgs are inserted between the fixed flags and the final prompt
+// argument — used by scoring to pass --tools "" / --effort low without
+// disturbing the pipeline/reconcile call sites.
+func runClaude(prompt string, stdinR io.Reader, workdir string, stream *logStreamer, tracePath string, extraArgs ...string) (PipelineResult, error) {
+	args := []string{"-p",
 		"--output-format", "stream-json", "--verbose",
-		"--dangerously-skip-permissions", prompt)
+		"--dangerously-skip-permissions"}
+	args = append(args, extraArgs...)
+	args = append(args, prompt) // prompt must be last
+	cmd := exec.Command(resolveClaudeBinary(), args...)
 	cmd.Env = cleanClaudeEnv(os.Environ())
 	if stdinR != nil {
 		cmd.Stdin = stdinR
