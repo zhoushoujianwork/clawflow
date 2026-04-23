@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -127,10 +128,19 @@ func storeGHToken(fullName string, e ghTokenEntry) {
 // expiry on 200, or an error describing the non-200 (caller logs it so
 // operators can distinguish "no App config" from "transient GitHub hiccup").
 func fetchInstallationToken(wc *config.WorkerConfig, fullName string) (string, time.Time, error) {
-	// url.PathEscape turns "owner/repo" into "owner%2Frepo" — single path
-	// segment, matching the endpoint's `{repo_id}` placeholder (SaaS
-	// accepts the full_name slug per issue #30's Recommendation B).
-	u := wc.SaasURL + "/api/v1/worker/repos/" + url.PathEscape(fullName) + "/installation-token"
+	// The endpoint is two-segment — `/worker/repos/{owner}/{repo}/installation-token`
+	// — per issue #31. v0.28 built a single %2F-encoded segment, but
+	// production nginx normalises %2F back to a literal slash before the
+	// request reaches Axum, which then sees four extra path components
+	// instead of one and returns 404. Split on the first `/` and escape
+	// each side independently so both halves survive proxy hops intact.
+	owner, repoName, ok := strings.Cut(fullName, "/")
+	if !ok || owner == "" || repoName == "" {
+		return "", time.Time{}, fmt.Errorf("full_name %q missing '/'", fullName)
+	}
+	u := wc.SaasURL + "/api/v1/worker/repos/" +
+		url.PathEscape(owner) + "/" + url.PathEscape(repoName) +
+		"/installation-token"
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return "", time.Time{}, err
