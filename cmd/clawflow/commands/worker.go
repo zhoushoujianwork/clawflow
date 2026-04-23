@@ -207,6 +207,15 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	defer close(hcStop)
 	fmt.Printf("  hc:       every %s (push connection status to repo list)\n", healthCheckInterval)
 
+	// Config sync loop: pulls /sync/config from SaaS so dashboard-side
+	// toggles (auto_evaluate_all_issues, enabled, etc.) reach this worker
+	// without the user having to run `clawflow connect sync pull` by hand.
+	// One immediate pass at boot + ticker afterwards.
+	syncStop := make(chan struct{})
+	go configSyncLoop(syncStop)
+	defer close(syncStop)
+	fmt.Printf("  sync:     every %s (pull SaaS config updates)\n", configSyncInterval)
+
 	// Feasibility scoring (issue #27) is inline inside the discover loop —
 	// scoreNewlyCreatedRun is called from pushDiscoveredIssue right after
 	// SaaS confirms a run was freshly created. No separate goroutine: the

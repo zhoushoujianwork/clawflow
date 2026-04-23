@@ -114,7 +114,16 @@ func newSyncCmd() *cobra.Command {
 			case "push":
 				return pushConfig(saas)
 			case "pull":
-				return pullConfig(saas)
+				n, err := pullConfig(saas)
+				if err != nil {
+					return err
+				}
+				if n == 0 {
+					fmt.Println("No changes from SaaS.")
+				} else {
+					fmt.Printf("Pulled %d repo updates from SaaS.\n", n)
+				}
+				return nil
 			default:
 				return fmt.Errorf("unknown direction %q, use push or pull", direction)
 			}
@@ -200,7 +209,13 @@ func pushConfig(saas *config.SaasConfig) error {
 	return nil
 }
 
-func pullConfig(saas *config.SaasConfig) error {
+// pullConfig runs one incremental `/sync/config?since=` pull and merges the
+// results into the local config file. Returns the number of repos that
+// changed (0 = nothing new from SaaS). Logging is the caller's job —
+// interactive `connect sync pull` prints a user-facing summary, while the
+// worker's periodic sync loop (issue-31 follow-up) only wants a line when
+// there's actually something to report.
+func pullConfig(saas *config.SaasConfig) (int, error) {
 	pullURL := saas.URL + "/api/v1/sync/config"
 	if saas.LastSync != "" {
 		pullURL += "?since=" + saas.LastSync
@@ -210,12 +225,12 @@ func pullConfig(saas *config.SaasConfig) error {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("pull failed: %w", err)
+		return 0, fmt.Errorf("pull failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("pull failed (%d): %s", resp.StatusCode, b)
+		return 0, fmt.Errorf("pull failed (%d): %s", resp.StatusCode, b)
 	}
 
 	var result struct {
@@ -232,12 +247,11 @@ func pullConfig(saas *config.SaasConfig) error {
 		} `json:"repos"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+		return 0, fmt.Errorf("decode response: %w", err)
 	}
 
 	if len(result.Repos) == 0 {
-		fmt.Println("No changes from SaaS.")
-		return nil
+		return 0, nil
 	}
 
 	cfg, err := config.Load()
@@ -265,13 +279,12 @@ func pullConfig(saas *config.SaasConfig) error {
 	}
 
 	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("save local config: %w", err)
+		return 0, fmt.Errorf("save local config: %w", err)
 	}
 
 	last := result.Repos[len(result.Repos)-1].UpdatedAt
 	saas.LastSync = last.Format(time.RFC3339Nano)
 	_ = saas.Save()
 
-	fmt.Printf("Pulled %d repo updates from SaaS.\n", len(result.Repos))
-	return nil
+	return len(result.Repos), nil
 }
