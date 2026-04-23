@@ -32,6 +32,9 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
 )
 
 // scoringThresholdDefault mirrors the SaaS-side default of 50 — used only
@@ -126,6 +129,105 @@ func scoreNewlyCreatedRun(wc *config.WorkerConfig, ctx scoreContext) {
 		verdict = fmt.Sprintf("skipped (below %d)", thr)
 	}
 	fmt.Printf("[score %s] score=%d %s in %s\n", ctx.RunID, confidence, verdict, dur)
+
+	// Post a VCS comment summarising the verdict so the issue's watchers
+	// see "ClawFlow looked at this, here's what it thought" without having
+	// to open the SaaS dashboard. Best-effort — a failed comment post
+	// doesn't roll back the score.
+	postScoringComment(wc, ctx, confidence, reasoning, resp)
+}
+
+// postScoringComment writes the scoring verdict back to the VCS issue as
+// a comment. Posted on BOTH accepted and skipped outcomes so users see a
+// clear signal either way:
+//
+//   - accepted → "confidence NN/100, add ready-for-agent to execute"
+//   - skipped  → "confidence NN/100 below threshold T, needs human judgement"
+//
+// Silent on:
+//   - network / permission failure (best-effort; log only)
+//   - unknown platform (future VCS)
+//   - empty reasoning (shouldn't happen but guard anyway)
+//
+// The opening HTML comment marker lets future revisions detect "already
+// commented" via ListIssueComments and avoid duplicates; current version
+// just posts unconditionally per successful score.
+func postScoringComment(wc *config.WorkerConfig, ctx scoreContext, confidence int, reasoning string, resp scoreResponse) {
+	body := buildScoringCommentBody(ctx, confidence, reasoning, resp)
+	client, err := vcsClientForScoring(wc, ctx)
+	if err != nil {
+		fmt.Printf("[score %s] comment skipped: %v\n", ctx.RunID, err)
+		return
+	}
+	if err := client.PostIssueComment(ctx.FullName, int(ctx.IssueNumber), body); err != nil {
+		fmt.Printf("[score %s] comment post failed: %v\n", ctx.RunID, err)
+		return
+	}
+	fmt.Printf("[score %s] posted verdict comment on %s#%d\n", ctx.RunID, ctx.FullName, ctx.IssueNumber)
+}
+
+// vcsClientForScoring picks the right VCS client for a scored run. GitHub
+// uses getGitHubToken so App-backed repos use SaaS-minted installation
+// tokens; GitLab uses the locally-configured PAT (no App story there).
+func vcsClientForScoring(wc *config.WorkerConfig, ctx scoreContext) (vcs.Client, error) {
+	switch ctx.Platform {
+	case "github", "":
+		tok, _, err := getGitHubToken(wc, ctx.FullName)
+		if err != nil {
+			return nil, fmt.Errorf("no github token: %w", err)
+		}
+		return github.New(tok, ""), nil
+	case "gitlab":
+		creds, _ := config.LoadCredentials()
+		if creds == nil || creds.GitLabToken == "" {
+			return nil, fmt.Errorf("no gitlab token in credentials.yaml")
+		}
+		// BaseURL needs to come from the repo config — scoring context
+		// doesn't carry it today. Fall back to Load+lookup so GitLab
+		// self-hosted instances route to the right host.
+		baseURL := ""
+		if cfg, err := config.Load(); err == nil {
+			if r, ok := cfg.Repos[ctx.FullName]; ok {
+				baseURL = r.BaseURL
+			}
+		}
+		return gitlab.New(creds.GitLabToken, baseURL), nil
+	default:
+		return nil, fmt.Errorf("unknown platform %q", ctx.Platform)
+	}
+}
+
+// buildScoringCommentBody renders the markdown the bot posts back on the
+// issue. Includes a machine-readable HTML comment marker up top so a
+// future "skip if already scored this run" check has something to grep.
+func buildScoringCommentBody(ctx scoreContext, confidence int, reasoning string, resp scoreResponse) string {
+	reasoning = strings.TrimSpace(reasoning)
+	if reasoning == "" {
+		reasoning = "_(scorer produced no reasoning line)_"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "<!-- clawflow-scoring v1 run=%s -->\n", ctx.RunID)
+	b.WriteString("🤖 **ClawFlow feasibility scoring**\n\n")
+
+	if resp.Skipped {
+		thr := resp.Threshold
+		if thr == 0 {
+			thr = scoringThresholdDefault
+		}
+		fmt.Fprintf(&b, "Confidence: **%d / 100** — below threshold `%d`, skipped.\n\n", confidence, thr)
+		b.WriteString("> ")
+		b.WriteString(reasoning)
+		b.WriteString("\n\n")
+		b.WriteString("_This issue likely needs human judgement before an automated fix can be attempted. Adding `ready-for-agent` anyway will queue it, but low-confidence runs often stall._\n")
+	} else {
+		fmt.Fprintf(&b, "Confidence: **%d / 100** — accepted.\n\n", confidence)
+		b.WriteString("> ")
+		b.WriteString(reasoning)
+		b.WriteString("\n\n")
+		b.WriteString("_To have ClawFlow attempt a fix, add the `ready-for-agent` label to this issue. The worker will then claim it and open a pull/merge request._\n")
+	}
+	return b.String()
 }
 
 // postScore fires the final POST /worker/tasks/:run_id/score with the
