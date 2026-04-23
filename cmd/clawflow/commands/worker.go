@@ -27,8 +27,15 @@ func NewWorkerCmd() *cobra.Command {
 	cmd.AddCommand(newWorkerStopCmd())
 	cmd.AddCommand(newWorkerStatusCmd())
 	cmd.AddCommand(newWorkerLogsCmd())
+	cmd.AddCommand(newWorkerReconcileCmd())
 	return cmd
 }
+
+// reconcileInterval bounds how often the background worker polls SaaS for
+// stale PRs. 15 min is the coordinated cadence with the SaaS side: long
+// enough to not thrash the queue, short enough that a freshly-staled PR
+// gets a first reconcile pass within the same work session.
+const reconcileInterval = 15 * time.Minute
 
 func newWorkerLogsCmd() *cobra.Command {
 	var (
@@ -223,6 +230,12 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	pollTicker := time.NewTicker(time.Duration(pollSecs) * time.Second)
 	defer pollTicker.Stop()
 
+	// Stale-PR reconciliation ticker — independent of task polling so a busy
+	// task queue can't starve reconciles, and vice-versa.
+	reconcileTicker := time.NewTicker(reconcileInterval)
+	defer reconcileTicker.Stop()
+	fmt.Printf("  reconcile: every %s (stale-PR review pass)\n", reconcileInterval)
+
 	pollCount := 0
 	for {
 		select {
@@ -242,6 +255,15 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 					fmt.Printf("[error] task %s: %v\n", t.ID, err)
 				}
 			}
+
+		case <-reconcileTicker.C:
+			// Fire-and-log: a slow reconcile pass would otherwise block the
+			// main select and stall heartbeats / task pushes.
+			go func() {
+				if err := reconcileOnce(wc, 0, ""); err != nil {
+					fmt.Printf("[warn] reconcile tick: %v\n", err)
+				}
+			}()
 
 		case <-pollTicker.C:
 			// HTTP fallback: only poll when WS is disconnected.
@@ -510,22 +532,36 @@ type PipelineResult struct {
 //
 // Falls back gracefully for non-JSON lines (treated as plain log messages).
 func runPipeline(payload json.RawMessage, stream *logStreamer) (PipelineResult, error) {
+	return runClaude("ClawFlow run", bytes.NewReader(payload), "", stream, "/tmp/claude-stream.log")
+}
+
+// runClaude is the shared stream-json runner used by both the main pipeline
+// and the reconcile flow. Pass stdinR=nil when no stdin is needed, workdir=""
+// to inherit cwd, tracePath="" to skip diagnostic tee.
+func runClaude(prompt string, stdinR io.Reader, workdir string, stream *logStreamer, tracePath string) (PipelineResult, error) {
 	cmd := exec.Command(resolveClaudeBinary(), "-p",
 		"--output-format", "stream-json", "--verbose",
-		"--dangerously-skip-permissions", "ClawFlow run")
+		"--dangerously-skip-permissions", prompt)
 	cmd.Env = cleanClaudeEnv(os.Environ())
-	cmd.Stdin = bytes.NewReader(payload)
+	if stdinR != nil {
+		cmd.Stdin = stdinR
+	}
+	if workdir != "" {
+		cmd.Dir = workdir
+	}
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return PipelineResult{}, err
 	}
-	// Diagnostic: tee the raw NDJSON to /tmp/claude-stream.log so we can
-	// inspect what claude actually emitted when parsing produces 0 events.
+	// Diagnostic: tee the raw NDJSON to a local file so we can inspect what
+	// claude actually emitted when parsing produces 0 events.
 	var stdoutDump *os.File
-	if f, ferr := os.Create("/tmp/claude-stream.log"); ferr == nil {
-		stdoutDump = f
-		defer stdoutDump.Close()
+	if tracePath != "" {
+		if f, ferr := os.Create(tracePath); ferr == nil {
+			stdoutDump = f
+			defer stdoutDump.Close()
+		}
 	}
 	var stdout io.Reader = stdoutPipe
 	if stdoutDump != nil {

@@ -14,6 +14,110 @@ clawflow label add/remove
 
 ---
 
+## Cross-Repo API Contract
+
+**This section is mirrored in `/Users/mikas/github/clawflow-saas/CLAUDE.md`. Keep them in sync — if you edit one, edit the other in the same change.**
+
+Two repos, one protocol. The open-source CLI (this repo, Go) and the commercial SaaS (`clawflow-saas`, Rust) talk to each other over the endpoints below. The contract lives in **both** CLAUDE.md files so whichever repo a session is opened in, it sees the same source of truth.
+
+### Ownership
+
+- **CLI dev** (this session, if you're in `clawflow`): owns the Go client code that calls these endpoints, stream-json parsing, worker loop, config sync logic on the local side.
+- **SaaS dev** (session in `/Users/mikas/github/clawflow-saas`): owns the HTTP/WS handlers, DB schema for shared tables (`pipeline_runs`, `pipeline_logs`, `billing_usage`, `agents`, `org_repos`), and all auth/rate-limit/credit logic.
+
+Neither session should edit the other's code. Changes that span both = draft the contract diff in one session, paste it into the other.
+
+### Endpoints (CLI ↔ SaaS)
+
+Base: `https://clawflow.daboluo.cc/api/v1` (prod) · local dev: `http://localhost:3000/api/v1`
+
+Auth on all worker endpoints: `Authorization: Bearer <worker_token>` header. Token obtained at `POST /agents/register`.
+
+| Method | Path | Direction | Purpose |
+|---|---|---|---|
+| `POST` | `/agents/register` | CLI → SaaS | Register a worker, returns `worker_token` + `sync_token` |
+| `POST` | `/worker/heartbeat` | CLI → SaaS | Keep-alive, advertises capacity |
+| `GET` | `/worker/tasks` | CLI → SaaS | List claimable `pending` pipeline_runs for this worker |
+| `POST` | `/worker/tasks/:id/claim` | CLI → SaaS | Atomically claim a run (status → `running`, sets `started_at`) |
+| `POST` | `/worker/tasks/:id/logs` | CLI → SaaS | **Batch** upload of buffered log entries (see `LogEntry` below) |
+| `POST` | `/worker/tasks/:id/usage` | CLI → SaaS | Report `UsageReport` (token counts + cost) for billing |
+| `POST` | `/worker/tasks/:id/complete` | CLI → SaaS | Mark run `success` + optional `pr_url` |
+| `POST` | `/worker/tasks/:id/fail` | CLI → SaaS | Mark run `failed` with error message |
+| `GET` | `/worker/tasks/stale-prs` | CLI → SaaS | **v0.24.0+** — list PRs whose run is `reconciling` and claimable |
+| `POST` | `/worker/tasks/:run_id/reconcile/claim` | CLI → SaaS | Lock one stale-PR for a ~30 min reconcile pass |
+| `POST` | `/worker/tasks/:run_id/reconcile/report` | CLI → SaaS | Report reconcile verdict (`merge`/`close`/`defer` + rebase/test/review results) |
+| `POST` | `/worker/pipelines` | CLI → SaaS | Push a pipeline_run CLI discovered locally (private VCS) |
+| `POST` | `/worker/discover` | CLI → SaaS | Fallback issue-discovery push (no webhook) |
+| `POST` | `/worker/health-report` | CLI → SaaS | Per-repo health (for the repo-list badge) |
+| `POST` | `/sync/config` | CLI → SaaS | Push local repo config (upsert by `org_id+platform+full_name`) |
+| `GET` | `/sync/config?since=<ts>` | CLI ← SaaS | Pull incremental repo config changes |
+| WS | `/ws/worker/tasks/:run_id/stream` | CLI → SaaS | Live per-line log stream during `claude -p` execution |
+| WS | `/ws/worker/channel` | CLI ↔ SaaS | Bidirectional control channel (dispatch, cancel) |
+
+### Shared payload shapes
+
+**`LogEntry`** — used by both the WS stream and the `/logs` batch upload. Both paths MUST send `raw_event` when the source line parses as JSON:
+
+```json
+{
+  "level": "info | warn | error",
+  "message": "string (human-readable summary)",
+  "timestamp": "RFC3339",
+  "raw_event": { /* original claude stream-json event, or null */ }
+}
+```
+
+- SaaS stores `raw_event` in `pipeline_logs.raw_event` (jsonb). The frontend renders it as rich cards (`frontend/src/components/PipelineEventCard.tsx`).
+- **Known past bug**: CLI v0.21.0 and earlier dropped `raw_event` on the batch HTTP path — fixed in v0.21.1. SaaS side has always accepted it.
+
+**`UsageReport`**:
+
+```json
+{
+  "model": "claude-opus-4-6",
+  "input_tokens":  0,
+  "output_tokens": 0,
+  "cache_creation_tokens": 0,
+  "cache_read_tokens":     0,
+  "total_cost_usd": 0.0
+}
+```
+
+Cost metering rule: `agent_id IS NULL` → SaaS-hosted run, charges credits (see `clawflow-saas/CLAUDE.md` "Billing: Executor Isolation"). `agent_id IS NOT NULL` → user's own worker, usage recorded but no credit deduction.
+
+**`ReconcileReport`** (v0.24.0+) — body of `/worker/tasks/:run_id/reconcile/report`:
+
+```json
+{
+  "action": "merge | close | defer",
+  "reason": "<= 500 chars, required",
+  "current_base_sha": "abc123…",
+  "rebase_result":  "clean | conflicts_resolved | conflicts_unresolvable | not_attempted",
+  "test_result":    "passed | failed | skipped | not_attempted",
+  "review_state":   "approved | changes_requested | no_review | comments_only",
+  "usage":      { /* UsageReport, optional */ },
+  "vcs_action": { "type": "merged|closed|none", "performed_at": "RFC3339", "commit_sha": "…" }
+}
+```
+
+- SaaS Phase 1 hard-downgrades `action=merge` to `defer` in its DB, but the CLI has already performed the real merge via the repo's GitHub token by the time this fires — the CLI owns the VCS side.
+- SaaS returns `400` if `reason` > 500 chars, or if `action=close` with `test_result ∈ {skipped, not_attempted}` (close requires a real test outcome).
+- SaaS returns `409` if the run isn't in `reconciling` state.
+- Phase 1 is GitHub-only; GitLab stale-PRs are filtered out server-side.
+
+### Evolving the contract
+
+1. **Only add backward-compatible fields.** New optional fields OK. Renaming or removing a field = coordinated release on both sides, with the CLI bump going out first.
+2. **Never break an older CLI** without bumping the CLI's minimum version check. Real users may be on v0.19 for weeks.
+3. **When the change spans both repos**:
+   - SaaS dev drafts the contract change in the shared section + in `api-types` crate.
+   - Paste the new shape into the CLI session.
+   - CLI dev mirrors the change in its Go structs, cuts a new CLI tag.
+   - SaaS dev merges + deploys.
+4. **Mention the cross-cutting change in both commits** so `git log` shows it on both sides (e.g., `feat(worker/contract): add RawEvent to batch LogEntry — matches SaaS 0abc123`).
+
+---
+
 
 
 每次新版本发布只需两步：

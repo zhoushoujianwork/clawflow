@@ -562,19 +562,75 @@ func (c *Client) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.Iss
 }
 
 func (c *Client) MergePR(repo string, prNumber int) error {
+	_, err := c.MergePRDetailed(repo, prNumber)
+	return err
+}
+
+// MergePRDetailed merges a PR and returns the resulting merge commit SHA.
+// GitHub's PUT /pulls/:n/merge returns { sha, merged, message } on 200.
+func (c *Client) MergePRDetailed(repo string, prNumber int) (string, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
-		return err
+		return "", err
 	}
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", owner, name, prNumber)
-	_, status, err := c.do("PUT", path, map[string]string{"merge_method": "merge"})
+	data, status, err := c.do("PUT", path, map[string]string{"merge_method": "merge"})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if status != 200 {
-		return fmt.Errorf("github merge PR: HTTP %d", status)
+		return "", fmt.Errorf("github merge PR: HTTP %d: %s", status, data)
 	}
-	return nil
+	var raw struct {
+		SHA    string `json:"sha"`
+		Merged bool   `json:"merged"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return "", err
+	}
+	return raw.SHA, nil
+}
+
+// PRReview is a single review on a pull request, as returned by
+// GET /repos/:owner/:repo/pulls/:number/reviews.
+type PRReview struct {
+	ID          int64  `json:"id"`
+	User        string `json:"user"`        // login
+	State       string `json:"state"`       // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+	SubmittedAt string `json:"submitted_at"` // RFC3339, empty for PENDING
+}
+
+// ListPRReviews fetches all review events on a PR. The caller is responsible
+// for state-folding (latest-per-reviewer, dismissed handling, etc.).
+func (c *Client) ListPRReviews(repo string, prNumber int) ([]PRReview, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100", owner, name, prNumber)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github list PR reviews: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		ID   int64 `json:"id"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		State       string `json:"state"`
+		SubmittedAt string `json:"submitted_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]PRReview, len(raw))
+	for i, r := range raw {
+		out[i] = PRReview{ID: r.ID, User: r.User.Login, State: r.State, SubmittedAt: r.SubmittedAt}
+	}
+	return out, nil
 }
 
 func (c *Client) GetPRMergeability(repo string, prNumber int) (vcs.MergeStatus, error) {
