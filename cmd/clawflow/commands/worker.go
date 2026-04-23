@@ -225,6 +225,16 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	defer close(backfillStop)
 	fmt.Printf("  score/bf: every %s (rescue pending runs missed by inline scoring)\n", pendingScoreInterval)
 
+	// Pending-comment backfill: the other half of scoring durability.
+	// Inline post can still fail after /score lands (VCS 5xx, token
+	// expiry, worker crashed between POST /score and comment post).
+	// A persistent queue under ~/.clawflow/state/pending-comments.json
+	// survives restarts; this loop drains it every 10 minutes.
+	commentStop := make(chan struct{})
+	go pendingCommentBackfillLoop(wc, commentStop)
+	defer close(commentStop)
+	fmt.Printf("  comment/bf: every %s (retry VCS comment posts missed by inline path)\n", pendingCommentInterval)
+
 	// Feasibility scoring (issue #27) is inline inside the discover loop —
 	// scoreNewlyCreatedRun is called from pushDiscoveredIssue right after
 	// SaaS confirms a run was freshly created. No separate goroutine: the

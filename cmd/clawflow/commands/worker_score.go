@@ -130,10 +130,21 @@ func scoreNewlyCreatedRun(wc *config.WorkerConfig, ctx scoreContext) {
 	}
 	fmt.Printf("[score %s] score=%d %s in %s\n", ctx.RunID, confidence, verdict, dur)
 
-	// Post a VCS comment summarising the verdict so the issue's watchers
-	// see "ClawFlow looked at this, here's what it thought" without having
-	// to open the SaaS dashboard. Best-effort — a failed comment post
-	// doesn't roll back the score.
+	// Durable queue for the VCS-comment side effect. Stash BEFORE posting
+	// so a crash or network failure between here and the post leaves a
+	// record the backfill loop can rescue on the next tick. On successful
+	// post, postScoringComment clears the record.
+	stashPendingComment(pendingCommentRec{
+		RunID:       ctx.RunID,
+		Platform:    ctx.Platform,
+		FullName:    ctx.FullName,
+		IssueNumber: ctx.IssueNumber,
+		IssueTitle:  ctx.IssueTitle,
+		Confidence:  confidence,
+		Reason:      reasoning,
+		Skipped:     resp.Skipped,
+		Threshold:   resp.Threshold,
+	})
 	postScoringComment(wc, ctx, confidence, reasoning, resp)
 }
 
@@ -156,14 +167,18 @@ func postScoringComment(wc *config.WorkerConfig, ctx scoreContext, confidence in
 	body := buildScoringCommentBody(ctx, confidence, reasoning, resp)
 	client, err := vcsClientForScoring(wc, ctx)
 	if err != nil {
-		fmt.Printf("[score %s] comment skipped: %v\n", ctx.RunID, err)
+		fmt.Printf("[score %s] comment skipped: %v — queued for backfill\n", ctx.RunID, err)
+		// Intentionally leave the stashed pending-comment record in
+		// place; the backfill loop retries every 10 min.
 		return
 	}
 	if err := client.PostIssueComment(ctx.FullName, int(ctx.IssueNumber), body); err != nil {
-		fmt.Printf("[score %s] comment post failed: %v\n", ctx.RunID, err)
+		fmt.Printf("[score %s] comment post failed: %v — queued for backfill\n", ctx.RunID, err)
 		return
 	}
 	fmt.Printf("[score %s] posted verdict comment on %s#%d\n", ctx.RunID, ctx.FullName, ctx.IssueNumber)
+	// Success → drop the stash entry so the backfill ignores this run.
+	clearPendingComment(ctx.RunID)
 }
 
 // vcsClientForScoring picks the right VCS client for a scored run. GitHub
