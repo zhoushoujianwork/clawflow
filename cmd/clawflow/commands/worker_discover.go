@@ -131,9 +131,12 @@ func runDiscoverPass(wc *config.WorkerConfig, ws *wsChannel) {
 			fmt.Printf("[discover] %s (execute): %v\n", fullName, err)
 		} else {
 			for _, is := range issues {
-				if err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title); err != nil {
+				ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title)
+				if err != nil {
 					fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
+					continue
 				}
+				maybeScoreAfterDiscover(wc, ack, repo, "gitlab", fullName, is.IID, is.Title)
 			}
 		}
 
@@ -153,14 +156,44 @@ func runDiscoverPass(wc *config.WorkerConfig, ws *wsChannel) {
 				if hasAnyLabel(is.Labels, terminalLabels) {
 					continue // already processed — SKILL harvest would skip it too
 				}
-				if err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title); err != nil {
+				ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title)
+				if err != nil {
 					fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
 					continue
 				}
+				maybeScoreAfterDiscover(wc, ack, repo, "gitlab", fullName, is.IID, is.Title)
 				pushed++
 			}
 		}
 	}
+}
+
+// maybeScoreAfterDiscover fires the inline feasibility-scoring pass
+// for the run that pushDiscoveredIssue just enqueued — but only when SaaS
+// confirms a fresh run was created. On duplicates (`Created=false`) we
+// stay silent: the run was scored on a previous pass, or is already in
+// flight. Synchronous so the per-pass budget (evaluateMaxPerPass) caps
+// how many Claude invocations one discover tick can trigger.
+func maybeScoreAfterDiscover(
+	wc *config.WorkerConfig,
+	ack discoverAck,
+	repo config.Repo,
+	platform, fullName string,
+	issueNumber int64,
+	issueTitle string,
+) {
+	if !ack.Created || ack.RunID == "" {
+		return
+	}
+	scoreNewlyCreatedRun(wc, scoreContext{
+		RunID:       ack.RunID,
+		Platform:    platform,
+		FullName:    fullName,
+		BaseBranch:  repo.BaseBranch,
+		LocalPath:   repo.LocalPath,
+		IssueNumber: issueNumber,
+		IssueTitle:  issueTitle,
+	})
 }
 
 // fetchUnlabeledRecentIssues lists opened issues created within the last
@@ -224,12 +257,23 @@ func fetchOpenLabeledIssues(baseURL, token, fullName, label string) ([]gitlabIss
 	return out, nil
 }
 
-// pushDiscoveredIssue hands an issue to SaaS via WS (preferred) or HTTP fallback.
-// Idempotent on the server side — safe to call every pass.
-func pushDiscoveredIssue(wc *config.WorkerConfig, ws *wsChannel, platform, fullName string, issueNumber int64, title string) error {
-	if ws != nil && ws.SendDiscover(platform, fullName, issueNumber, title) {
-		return nil
-	}
+// discoverAck is the shape returned by POST /worker/discover. `Created`
+// tells us whether this POST was the one that actually enqueued a new
+// pipeline_run (vs. a dedupe on an existing one) — the scorer keys off
+// this to fire exactly once per issue rather than once per discover pass.
+type discoverAck struct {
+	RunID   string `json:"run_id"`
+	Created bool   `json:"created"`
+	Skipped bool   `json:"skipped"`
+}
+
+// pushDiscoveredIssue hands an issue to SaaS via HTTP and returns the ack
+// so the caller can decide whether to kick off inline scoring. Idempotent
+// on the server side — safe to call every pass; duplicates come back with
+// `Created=false`. We intentionally bypass the WS fast-path here because
+// WS send is fire-and-forget and we need the ack to know when to score.
+func pushDiscoveredIssue(wc *config.WorkerConfig, ws *wsChannel, platform, fullName string, issueNumber int64, title string) (discoverAck, error) {
+	_ = ws // reserved for future use; see comment above re: needing the ack
 	body, _ := json.Marshal(map[string]any{
 		"platform":     platform,
 		"full_name":    fullName,
@@ -241,25 +285,19 @@ func pushDiscoveredIssue(wc *config.WorkerConfig, ws *wsChannel, platform, fullN
 	setWorkerHeaders(req, wc)
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
-		return err
+		return discoverAck{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := readAll(resp.Body)
-		return fmt.Errorf("saas returned %d: %s", resp.StatusCode, string(b))
+		return discoverAck{}, fmt.Errorf("saas returned %d: %s", resp.StatusCode, string(b))
 	}
-	// Parse just enough to log created vs duplicate — full body goes to stderr
-	// on non-2xx above.
-	var ack struct {
-		RunID   string `json:"run_id"`
-		Created bool   `json:"created"`
-		Skipped bool   `json:"skipped"`
-	}
+	var ack discoverAck
 	_ = json.NewDecoder(resp.Body).Decode(&ack)
 	if ack.Created {
 		fmt.Printf("[discover] %s #%d → enqueued run %s\n", fullName, issueNumber, ack.RunID)
 	}
-	return nil
+	return ack, nil
 }
 
 // readAll reads up to 4 KiB of a response body for error-context logging.

@@ -207,6 +207,12 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	defer close(hcStop)
 	fmt.Printf("  hc:       every %s (push connection status to repo list)\n", healthCheckInterval)
 
+	// Feasibility scoring (issue #27) is inline inside the discover loop —
+	// scoreNewlyCreatedRun is called from pushDiscoveredIssue right after
+	// SaaS confirms a run was freshly created. No separate goroutine: the
+	// CLI is the one creating the run, so it already knows when to score,
+	// and avoids a standalone /pending-score polling round-trip.
+
 	fmt.Println("Press Ctrl+C to stop.")
 
 	// Catch Ctrl+C / TERM so the defer above runs and the pidfile is cleared.
