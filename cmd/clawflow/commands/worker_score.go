@@ -132,9 +132,12 @@ func scoreNewlyCreatedRun(wc *config.WorkerConfig, ctx scoreContext) {
 // CLI's verdict. Usage is attached so SaaS can bill the scoring pass
 // against the same run as the eventual execution.
 func postScore(wc *config.WorkerConfig, runID string, confidence int, reasoning string, usage *UsageReport) (scoreResponse, error) {
+	// SaaS deployed schema uses `reason` (see 422 "missing field `reason`"
+	// from end-to-end test on 2026-04-24). Issue #27 prose said "reasoning",
+	// but the deployed contract is `reason` — this is the wire field.
 	payload := map[string]interface{}{
 		"confidence": confidence,
-		"reasoning":  reasoning,
+		"reason":     reasoning,
 	}
 	if usage != nil && usage.HasCost() {
 		payload["usage"] = usage
