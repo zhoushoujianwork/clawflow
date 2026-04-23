@@ -452,9 +452,10 @@ func processTask(wc *config.WorkerConfig, t workerTask) error {
 
 // LogEntry matches the SaaS /worker/tasks/:id/logs payload.
 type LogEntry struct {
-	Level     string `json:"level"`
-	Message   string `json:"message"`
-	Timestamp string `json:"timestamp,omitempty"`
+	Level     string      `json:"level"`
+	Message   string      `json:"message"`
+	Timestamp string      `json:"timestamp,omitempty"`
+	RawEvent  interface{} `json:"raw_event,omitempty"`
 }
 
 // UsageReport matches /worker/tasks/:id/usage.
@@ -584,6 +585,9 @@ func runPipeline(payload json.RawMessage, stream *logStreamer) (PipelineResult, 
 		if len(logs) > startLen {
 			level = logs[startLen].Level
 			msg = logs[startLen].Message
+			// Attach the parsed event so the end-of-run batch upload carries
+			// raw_event too (the WS path already sends it via stream.Send).
+			logs[startLen].RawEvent = evt
 		}
 		stream.Send(level, msg, line)
 	}
