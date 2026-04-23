@@ -273,7 +273,7 @@ func handleReconcileTask(wc *config.WorkerConfig, t reconcileTask) {
 	stream := dialLogStream(wc, t.RunID)
 	defer stream.Close()
 
-	report := runReconcileFlow(t, stream)
+	report := runReconcileFlow(wc, t, stream)
 	report.Reason = clampReason(report.Reason)
 
 	// Apply the close/merge contract guards locally before sending — it saves
@@ -296,8 +296,9 @@ func handleReconcileTask(wc *config.WorkerConfig, t reconcileTask) {
 }
 
 // runReconcileFlow is the pure decision logic; returns a report ready to send.
-// It never calls `report` itself — that's the caller's job.
-func runReconcileFlow(t reconcileTask, stream *logStreamer) reconcileReport {
+// It never calls `report` itself — that's the caller's job. `wc` is needed
+// only to mint/fetch the GitHub token via getGitHubToken (issue #30).
+func runReconcileFlow(wc *config.WorkerConfig, t reconcileTask, stream *logStreamer) reconcileReport {
 	rep := reconcileReport{
 		Action:       actionDefer,
 		RebaseResult: rebaseNotAttempted,
@@ -305,13 +306,15 @@ func runReconcileFlow(t reconcileTask, stream *logStreamer) reconcileReport {
 		ReviewState:  reviewNone,
 	}
 
-	// --- 1. GitHub client (uses local repo credentials) -------------------
-	creds, err := config.LoadCredentials()
-	if err != nil || creds.GHToken == "" {
-		rep.Reason = "no github token configured locally"
+	// --- 1. GitHub client — prefer SaaS-minted App installation token
+	// (issue #30), fall back to local PAT. `wc` is intentionally visible
+	// here because reconcile is always called from worker context.
+	tok, _, terr := getGitHubToken(wc, t.Repo.FullName)
+	if terr != nil {
+		rep.Reason = fmt.Sprintf("no github token: %v", terr)
 		return rep
 	}
-	gh := github.New(creds.GHToken, "")
+	gh := github.New(tok, "")
 
 	// --- 2. fetch current PR state + head branch --------------------------
 	pr, err := gh.GetPR(t.Repo.FullName, t.PRNumber)

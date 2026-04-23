@@ -235,13 +235,16 @@ func discoverGitLabRepo(wc *config.WorkerConfig, ws *wsChannel, creds *config.Cr
 }
 
 // discoverGitHubRepo is the GitHub equivalent of discoverGitLabRepo (issue
-// #29). Before this, GitHub was entirely webhook-driven — which left pre-
-// existing issues and private-network GitHub Enterprise users without a
-// backfill path. Now the worker polls via PAT.
+// #29). Before v0.28 this required a local PAT; now the token is resolved
+// via getGitHubToken which prefers a SaaS-minted App installation token
+// and falls back to the PAT only when the repo isn't App-backed (issue
+// #30). `creds` is accepted for signature symmetry with the GitLab variant
+// and kept available in case a future change reads non-GitHub creds here.
 func discoverGitHubRepo(wc *config.WorkerConfig, ws *wsChannel, creds *config.Credentials, fullName string, repo config.Repo) {
-	tok := creds.GHToken
-	if tok == "" {
-		fmt.Printf("[discover] %s: no GitHub PAT — skipping repo\n", fullName)
+	_ = creds // see comment above
+	tok, _, err := getGitHubToken(wc, fullName)
+	if err != nil {
+		fmt.Printf("[discover] %s: %v — skipping repo\n", fullName, err)
 		return
 	}
 	gh := github.New(tok, repo.BaseURL) // empty baseURL defaults to api.github.com
