@@ -216,6 +216,15 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	defer close(syncStop)
 	fmt.Printf("  sync:     every %s (pull SaaS config updates)\n", configSyncInterval)
 
+	// Pending-score backfill: safety net that catches any run that
+	// slipped through inline scoring (worker crashed mid-score, transient
+	// /score POST failure, SaaS-side hiccup). 10-minute cadence, capped
+	// per-pass so a broken queue can't blow the credits budget.
+	backfillStop := make(chan struct{})
+	go pendingScoreBackfillLoop(wc, backfillStop)
+	defer close(backfillStop)
+	fmt.Printf("  score/bf: every %s (rescue pending runs missed by inline scoring)\n", pendingScoreInterval)
+
 	// Feasibility scoring (issue #27) is inline inside the discover loop —
 	// scoreNewlyCreatedRun is called from pushDiscoveredIssue right after
 	// SaaS confirms a run was freshly created. No separate goroutine: the
