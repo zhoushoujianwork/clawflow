@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // discoverInterval bounds how often we hit each GitLab instance for issue
@@ -133,85 +135,182 @@ func runDiscoverPass(wc *config.WorkerConfig, ws *wsChannel) {
 	creds, _ := config.LoadCredentials()
 
 	for fullName, repo := range cfg.EnabledRepos() {
-		if repo.Platform != "gitlab" {
-			continue // GitHub path stays on webhooks — no private-network story there
+		switch repo.Platform {
+		case "gitlab":
+			discoverGitLabRepo(wc, ws, creds, fullName, repo)
+		case "github", "":
+			// "" defaults to github for configs predating the Platform field.
+			discoverGitHubRepo(wc, ws, creds, fullName, repo)
+		default:
+			fmt.Printf("[discover] %s: unknown platform %q — skipping\n", fullName, repo.Platform)
 		}
-		if repo.BaseURL == "" {
-			continue // gitlab.com has reliable webhook delivery; skip polling
-		}
-		tok := creds.GitLabToken
-		if tok == "" {
-			// No token configured: we can't call the GitLab API. Log once per
-			// pass and move on — CLI user will see the hint in worker.log.
-			fmt.Println("[discover] skipped: no GitLab PAT in credentials.yaml")
-			return
-		}
-		label := defaultTriggerLabel
-		if repo.Labels != nil {
-			if v, ok := repo.Labels["trigger"]; ok && v != "" {
-				label = v
-			}
-		}
-		// Channel A (execute): issues the user explicitly labeled.
-		// Always runs regardless of auto_evaluate_all_issues — an explicit
-		// label is the strongest signal of intent and should never be
-		// filtered out. SaaS enqueue is idempotent on (repo, issue).
-		if issues, err := fetchOpenLabeledIssues(repo.BaseURL, tok, fullName, label); err != nil {
-			fmt.Printf("[discover] %s (execute): %v\n", fullName, err)
-		} else {
-			for _, is := range issues {
-				if alreadyDiscovered("gitlab", fullName, is.IID) {
-					continue
-				}
-				ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title)
-				if err != nil {
-					fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
-					continue
-				}
-				markDiscoverSeen("gitlab", fullName, is.IID)
-				maybeScoreAfterDiscover(wc, ack, repo, "gitlab", fullName, is.IID, is.Title)
-			}
-		}
+	}
+}
 
-		// Channel B (evaluate-all): issue #28 — when the repo opts in via
-		// the SaaS toggle `auto_evaluate_all_issues`, we fetch every open
-		// issue (no label filter, no lookback window) and hand each one to
-		// local Claude scoring. SaaS applies its confidence threshold to
-		// skip low-score runs rather than relying on user labelling
-		// discipline. Still bounded by evaluateMaxPerPass per repo per
-		// tick so a fresh install on a 500-issue repo doesn't burn credits
-		// in one pass; session dedup prevents the next tick from
-		// re-submitting the same ones.
-		if !repo.AutoEvaluateAllIssues {
-			continue
+// triggerLabel returns the configured "please fix this" label for a repo,
+// falling back to the package default. Used to decide execution_requested.
+func triggerLabel(repo config.Repo) string {
+	if repo.Labels != nil {
+		if v, ok := repo.Labels["trigger"]; ok && v != "" {
+			return v
 		}
-		fresh, err := fetchAllOpenIssues(repo.BaseURL, tok, fullName)
-		if err != nil {
-			fmt.Printf("[discover] %s (evaluate-all): %v\n", fullName, err)
-			continue
-		}
-		pushed := 0
-		for _, is := range fresh {
-			if pushed >= evaluateMaxPerPass {
-				break
-			}
+	}
+	return defaultTriggerLabel
+}
+
+// discoverGitLabRepo polls one self-hosted GitLab project and pushes both
+// labeled (execute) and unlabeled (evaluate-only) issues per issue #29's
+// split. Callers filter by `repo.Platform == "gitlab"`.
+func discoverGitLabRepo(wc *config.WorkerConfig, ws *wsChannel, creds *config.Credentials, fullName string, repo config.Repo) {
+	if repo.BaseURL == "" {
+		return // gitlab.com has reliable webhook delivery; only poll self-hosted instances
+	}
+	tok := creds.GitLabToken
+	if tok == "" {
+		// Per-repo skip rather than per-pass abort: a user with mixed
+		// GitLab + GitHub repos should still get GitHub discovery even if
+		// the GitLab PAT is missing.
+		fmt.Printf("[discover] %s: no GitLab PAT — skipping repo\n", fullName)
+		return
+	}
+	label := triggerLabel(repo)
+
+	// Channel A (execute): labeled issues → execution_requested=true.
+	// Always runs regardless of auto_evaluate_all_issues — an explicit
+	// label is the strongest signal of intent.
+	if issues, err := fetchOpenLabeledIssues(repo.BaseURL, tok, fullName, label); err != nil {
+		fmt.Printf("[discover] %s (execute): %v\n", fullName, err)
+	} else {
+		for _, is := range issues {
 			if alreadyDiscovered("gitlab", fullName, is.IID) {
 				continue
 			}
-			if hasAnyLabel(is.Labels, terminalLabels) {
-				markDiscoverSeen("gitlab", fullName, is.IID)
-				continue // pre-existing legacy label → already processed on some prior install
-			}
-			ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title)
+			ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title, true)
 			if err != nil {
 				fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
 				continue
 			}
 			markDiscoverSeen("gitlab", fullName, is.IID)
 			maybeScoreAfterDiscover(wc, ack, repo, "gitlab", fullName, is.IID, is.Title)
-			pushed++
 		}
 	}
+
+	// Channel B (evaluate-only): when the repo opts in, fetch every open
+	// issue and enqueue with execution_requested=false. SaaS scores them
+	// but won't claim them for a fix run until the user adds the trigger
+	// label (which flips execution_requested to true on that run).
+	if !repo.AutoEvaluateAllIssues {
+		return
+	}
+	fresh, err := fetchAllOpenIssues(repo.BaseURL, tok, fullName)
+	if err != nil {
+		fmt.Printf("[discover] %s (evaluate-all): %v\n", fullName, err)
+		return
+	}
+	pushed := 0
+	for _, is := range fresh {
+		if pushed >= evaluateMaxPerPass {
+			break
+		}
+		if alreadyDiscovered("gitlab", fullName, is.IID) {
+			continue
+		}
+		if hasAnyLabel(is.Labels, terminalLabels) {
+			markDiscoverSeen("gitlab", fullName, is.IID)
+			continue // pre-existing legacy label → already processed
+		}
+		// Carries the trigger label? Channel A already handled it with
+		// execution_requested=true and marked it seen. We wouldn't reach
+		// here, but belt-and-suspenders in case the labeled fetch raced.
+		execReq := hasAnyLabel(is.Labels, []string{label})
+		ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title, execReq)
+		if err != nil {
+			fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
+			continue
+		}
+		markDiscoverSeen("gitlab", fullName, is.IID)
+		maybeScoreAfterDiscover(wc, ack, repo, "gitlab", fullName, is.IID, is.Title)
+		pushed++
+	}
+}
+
+// discoverGitHubRepo is the GitHub equivalent of discoverGitLabRepo (issue
+// #29). Before this, GitHub was entirely webhook-driven — which left pre-
+// existing issues and private-network GitHub Enterprise users without a
+// backfill path. Now the worker polls via PAT.
+func discoverGitHubRepo(wc *config.WorkerConfig, ws *wsChannel, creds *config.Credentials, fullName string, repo config.Repo) {
+	tok := creds.GHToken
+	if tok == "" {
+		fmt.Printf("[discover] %s: no GitHub PAT — skipping repo\n", fullName)
+		return
+	}
+	gh := github.New(tok, repo.BaseURL) // empty baseURL defaults to api.github.com
+	label := triggerLabel(repo)
+
+	// Channel A: labeled for execution.
+	if issues, err := gh.ListIssues(fullName, "open", []string{label}); err != nil {
+		fmt.Printf("[discover] %s (execute): %v\n", fullName, err)
+	} else {
+		for _, is := range issues {
+			n := int64(is.Number)
+			if alreadyDiscovered("github", fullName, n) {
+				continue
+			}
+			ack, err := pushDiscoveredIssue(wc, ws, "github", fullName, n, is.Title, true)
+			if err != nil {
+				fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, n, err)
+				continue
+			}
+			markDiscoverSeen("github", fullName, n)
+			maybeScoreAfterDiscover(wc, ack, repo, "github", fullName, n, is.Title)
+		}
+	}
+
+	if !repo.AutoEvaluateAllIssues {
+		return
+	}
+
+	// Channel B: every open issue (PRs filtered out by the github client).
+	fresh, err := gh.ListOpenIssues(fullName)
+	if err != nil {
+		fmt.Printf("[discover] %s (evaluate-all): %v\n", fullName, err)
+		return
+	}
+	pushed := 0
+	for _, is := range fresh {
+		if pushed >= evaluateMaxPerPass {
+			break
+		}
+		n := int64(is.Number)
+		if alreadyDiscovered("github", fullName, n) {
+			continue
+		}
+		if vcsHasAnyLabel(is, terminalLabels) {
+			markDiscoverSeen("github", fullName, n)
+			continue
+		}
+		execReq := is.HasLabel(label)
+		ack, err := pushDiscoveredIssue(wc, ws, "github", fullName, n, is.Title, execReq)
+		if err != nil {
+			fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, n, err)
+			continue
+		}
+		markDiscoverSeen("github", fullName, n)
+		maybeScoreAfterDiscover(wc, ack, repo, "github", fullName, n, is.Title)
+		pushed++
+	}
+}
+
+// vcsHasAnyLabel is the vcs.Issue-shaped counterpart to hasAnyLabel (which
+// operates on raw []string from the GitLab API). Kept small and local so
+// the two discover branches stay symmetric.
+func vcsHasAnyLabel(is vcs.Issue, needles []string) bool {
+	for _, n := range needles {
+		if is.HasLabel(n) {
+			return true
+		}
+	}
+	return false
 }
 
 // maybeScoreAfterDiscover fires the inline feasibility-scoring pass
@@ -320,13 +419,24 @@ type discoverAck struct {
 // on the server side — safe to call every pass; duplicates come back with
 // `Created=false`. We intentionally bypass the WS fast-path here because
 // WS send is fire-and-forget and we need the ack to know when to score.
-func pushDiscoveredIssue(wc *config.WorkerConfig, ws *wsChannel, platform, fullName string, issueNumber int64, title string) (discoverAck, error) {
+//
+// executionRequested (issue #29) splits the two roles the `ready-for-agent`
+// label used to conflate:
+//   - true  — the user explicitly labeled this issue for execution; SaaS
+//             enqueues it for a fix run once scoring clears the threshold.
+//   - false — evaluate-only discovery (repo has auto_evaluate_all_issues
+//             on and the issue carries no trigger label). SaaS records the
+//             confidence score but won't claim it into a worker until the
+//             user later adds the label, which flips execution_requested
+//             on that run to true.
+func pushDiscoveredIssue(wc *config.WorkerConfig, ws *wsChannel, platform, fullName string, issueNumber int64, title string, executionRequested bool) (discoverAck, error) {
 	_ = ws // reserved for future use; see comment above re: needing the ack
 	body, _ := json.Marshal(map[string]any{
-		"platform":     platform,
-		"full_name":    fullName,
-		"issue_number": issueNumber,
-		"issue_title":  title,
+		"platform":            platform,
+		"full_name":           fullName,
+		"issue_number":        issueNumber,
+		"issue_title":         title,
+		"execution_requested": executionRequested,
 	})
 	req, _ := http.NewRequest(http.MethodPost, wc.SaasURL+"/api/v1/worker/discover", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
