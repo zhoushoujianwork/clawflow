@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -45,9 +44,14 @@ The AI skill (SKILL.md) handles evaluation and sub-agent orchestration.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(Version)
 			latest := FetchLatestTag()
-			// git describe on a dev build emits "vX.Y.Z-<N>-g<sha>" — treat
-			// that as ahead of the release tag, not behind it.
-			if latest == "" || latest == Version || strings.HasPrefix(Version, latest+"-") {
+			// Only announce an update when the remote tag is strictly newer.
+			// Guards against two otherwise-noisy cases:
+			//   1. Local is a just-tagged release whose GitHub Actions
+			//      build hasn't published to /releases/latest yet, so the
+			//      API still reports an older tag.
+			//   2. Local is a dev build ahead of the release tag (git
+			//      describe emits "vX.Y.Z-<N>-g<sha>").
+			if latest == "" || !IsNewerVersion(Version, latest) {
 				return
 			}
 			fmt.Printf("  → new version available: %s  (run: clawflow update)\n", latest)

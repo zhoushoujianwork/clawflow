@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -302,6 +303,37 @@ func atomicReplace(dest string, src io.Reader) error {
 	}
 	fmt.Printf("  [ok] binary updated → %s\n", dest)
 	return nil
+}
+
+// IsNewerVersion reports whether `latest` is strictly newer than `current`,
+// comparing major.minor.patch triples only. Leading "v" is optional; any
+// pre-release or git-describe suffix (e.g. "-5-g1234abc", "-rc1") is
+// stripped before comparison, so a dev build ahead of the tag is treated
+// as equal to that tag rather than older. An unparseable input counts as
+// zero, i.e. never newer — we'd rather stay silent than nag the user with
+// bogus "new version available" hints.
+func IsNewerVersion(current, latest string) bool {
+	c := parseSemverTriple(current)
+	l := parseSemverTriple(latest)
+	for i := range 3 {
+		if l[i] != c[i] {
+			return l[i] > c[i]
+		}
+	}
+	return false
+}
+
+func parseSemverTriple(s string) [3]int {
+	s = strings.TrimPrefix(s, "v")
+	if dash := strings.Index(s, "-"); dash >= 0 {
+		s = s[:dash]
+	}
+	parts := strings.SplitN(s, ".", 3)
+	var out [3]int
+	for i := 0; i < 3 && i < len(parts); i++ {
+		out[i], _ = strconv.Atoi(parts[i])
+	}
+	return out
 }
 
 // FetchLatestTag queries GitHub for the latest release tag.
