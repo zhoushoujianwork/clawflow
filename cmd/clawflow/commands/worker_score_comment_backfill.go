@@ -107,8 +107,18 @@ func savePendingCommentsLocked(m map[string]pendingCommentRec) error {
 // just-scored run. Called from scoreNewlyCreatedRun BEFORE the inline
 // comment attempt so even a crash between /score and the comment post
 // is recoverable.
+//
+// Empty platform/full_name is treated as programmer-error and refused:
+// stashing a record we can't address later would only put a permanent
+// undeliverable entry in the queue (exactly what v0.33.0 shipped
+// against prod pending-score's flat JSON shape). Log + skip so the
+// underlying upstream data bug is visible in the log.
 func stashPendingComment(rec pendingCommentRec) {
 	if rec.RunID == "" {
+		return
+	}
+	if rec.Platform == "" || rec.FullName == "" {
+		fmt.Printf("[comment/bf] refusing to stash %s: empty platform/full_name (scoring source didn't populate them)\n", rec.RunID)
 		return
 	}
 	if rec.StashedAt.IsZero() {

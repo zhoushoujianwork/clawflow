@@ -47,20 +47,38 @@ const pendingScoreInitialDelay = 45 * time.Second
 const pendingScoreMaxPerPass = 3
 
 // pendingScoreTask matches the SaaS /pending-score response entry.
-// Mirrors scoreContext's fields so we can feed it straight into
-// scoreNewlyCreatedRun without translation.
+// Fields are flat at the top level — confirmed against prod on
+// 2026-04-24. The initial v0.31.0 implementation guessed a nested
+// `repo: {}` shape and silently produced empty platform/full_name
+// values in the comment-backfill queue. Shape verified via:
+//
+//   curl -H "Authorization: Bearer $TOKEN" \
+//     https://clawflow.daboluo.cc/api/v1/worker/tasks/pending-score
+//
+// Response:
+//   {"tasks":[{"run_id":"...","platform":"github","full_name":"...",
+//              "issue_number":N,"issue_title":"...",
+//              "base_branch":"main","local_path":null,
+//              "created_at":"..."}]}
 type pendingScoreTask struct {
-	RunID string `json:"run_id"`
-	Repo  struct {
-		Platform   string `json:"platform"`
-		FullName   string `json:"full_name"`
-		BaseBranch string `json:"base_branch"`
-		LocalPath  string `json:"local_path"`
-	} `json:"repo"`
-	IssueNumber int64  `json:"issue_number"`
-	IssueTitle  string `json:"issue_title"`
-	IssueBody   string `json:"issue_body,omitempty"`
-	IssueURL    string `json:"issue_url,omitempty"`
+	RunID       string  `json:"run_id"`
+	RepoID      string  `json:"repo_id,omitempty"`
+	Platform    string  `json:"platform"`
+	FullName    string  `json:"full_name"`
+	BaseBranch  string  `json:"base_branch,omitempty"`
+	LocalPath   *string `json:"local_path,omitempty"`
+	IssueNumber int64   `json:"issue_number"`
+	IssueTitle  string  `json:"issue_title"`
+	IssueBody   string  `json:"issue_body,omitempty"`
+	IssueURL    string  `json:"issue_url,omitempty"`
+}
+
+// localPath handles the nullable field safely.
+func (t pendingScoreTask) localPath() string {
+	if t.LocalPath == nil {
+		return ""
+	}
+	return *t.LocalPath
 }
 
 // pendingScoreEnvelope accepts both `{tasks: [...]}` and a bare array
@@ -121,12 +139,19 @@ func pendingScoreBackfillPass(wc *config.WorkerConfig) {
 			// previous attempt fail.
 			continue
 		}
+		// Defense: SaaS shape regression (see the v0.31.0 bug that this
+		// block originally hit) would produce empty identifiers; skip
+		// loudly rather than silently stash a broken comment record.
+		if t.Platform == "" || t.FullName == "" {
+			fmt.Printf("[score/backfill] skip run %s: empty platform/full_name in SaaS response\n", t.RunID)
+			continue
+		}
 		scoreNewlyCreatedRun(wc, scoreContext{
 			RunID:       t.RunID,
-			Platform:    t.Repo.Platform,
-			FullName:    t.Repo.FullName,
-			BaseBranch:  t.Repo.BaseBranch,
-			LocalPath:   t.Repo.LocalPath,
+			Platform:    t.Platform,
+			FullName:    t.FullName,
+			BaseBranch:  t.BaseBranch,
+			LocalPath:   t.localPath(),
 			IssueNumber: t.IssueNumber,
 			IssueTitle:  t.IssueTitle,
 			IssueBody:   t.IssueBody,
