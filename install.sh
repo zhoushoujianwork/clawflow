@@ -1,155 +1,120 @@
 #!/usr/bin/env bash
-# ClawFlow Skill Installer
-# Usage: ./install.sh [--agent claude|openclaw|custom] [--dir <path>] [--create-labels <owner/repo>]
+# ClawFlow source installer — for users cloning the repo to build/modify.
+#
+# For most users: use the one-liner from get.sh instead
+#   curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/clawflow/main/get.sh | bash
+#
+# This script does four things:
+#   1. builds the clawflow binary from source into ~/.clawflow/bin/
+#   2. seeds ~/.clawflow/config/config.yaml from the template (only if absent)
+#   3. writes ~/.clawflow/config/install.yaml so `clawflow update --from-source`
+#      knows where this checkout lives for future rebuilds
+#   4. optionally creates the ClawFlow label set in a repo (--create-labels)
+#
+# Built-in operators ship inside the binary (go:embed), so there is no skill
+# directory to install — unlike older releases that wrote SKILL.md files
+# into ~/.claude/skills/.
 
 set -e
 
-SKILL_NAME="clawflow"
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 CLAWFLOW_HOME="$HOME/.clawflow"
-
-# ---------- argument parsing ----------
-AGENT=""
-CUSTOM_DIR=""
 CREATE_LABELS_REPO=""
 
+# ---------- argument parsing ----------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --agent)         AGENT="$2"; shift 2 ;;
-    --dir)           CUSTOM_DIR="$2"; shift 2 ;;
     --create-labels) CREATE_LABELS_REPO="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: ./install.sh [OPTIONS]"
-      echo ""
-      echo "Options:"
-      echo "  --agent claude              Install into Claude Code (~/.claude/skills/)"
-      echo "  --agent openclaw            Install into OpenClaw (~/.openclaw/skills/)"
-      echo "  --agent custom --dir <path> Install into a custom skills directory"
-      echo "  --create-labels <owner/repo> Create required GitHub labels in a repo"
-      echo ""
-      echo "Examples:"
-      echo "  ./install.sh"
-      echo "  ./install.sh --agent claude --create-labels my-org/my-repo"
+      cat <<'USAGE'
+Usage: ./install.sh [--create-labels <owner/repo>]
+
+Options:
+  --create-labels <owner/repo>   After install, run `clawflow label init`
+                                 to create the standard label set on that repo.
+
+Examples:
+  ./install.sh
+  ./install.sh --create-labels my-org/my-repo
+USAGE
       exit 0 ;;
-    *) echo "Unknown option: $1"; exit 1 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
-# ---------- auto-detect agent ----------
-if [[ -z "$AGENT" ]]; then
-  if [[ -d "$HOME/.claude/skills" ]]; then
-    AGENT="claude"
-  elif [[ -d "$HOME/.openclaw" ]]; then
-    AGENT="openclaw"
-  else
-    echo "Could not auto-detect agent type."
-    echo "Please specify: ./install.sh --agent claude|openclaw|custom [--dir <path>]"
-    exit 1
-  fi
-fi
-
-# ---------- resolve skill target directory ----------
-case "$AGENT" in
-  claude)   SKILLS_DIR="$HOME/.claude/skills" ;;
-  openclaw) SKILLS_DIR="$HOME/.openclaw/skills" ;;
-  custom)
-    if [[ -z "$CUSTOM_DIR" ]]; then
-      echo "Error: --agent custom requires --dir <path>"
-      exit 1
-    fi
-    SKILLS_DIR="$CUSTOM_DIR"
-    ;;
-  *)
-    echo "Unknown agent: $AGENT. Use claude, openclaw, or custom."
-    exit 1 ;;
-esac
-
-SKILL_DEST="$SKILLS_DIR/$SKILL_NAME"
-
-echo "Installing ClawFlow..."
-echo "  Agent skills dir : $SKILL_DEST"
-echo "  User data dir    : $CLAWFLOW_HOME"
+echo "Installing ClawFlow from source..."
+echo "  Repo     : $REPO_ROOT"
+echo "  Data dir : $CLAWFLOW_HOME"
 echo ""
 
-# ---------- 1. install skill definition ----------
-mkdir -p "$SKILL_DEST"
-cp -r "$REPO_ROOT/skills/clawflow/." "$SKILL_DEST/"
-echo "  [ok] skill files installed → $SKILL_DEST/"
+# ---------- 1. seed user data directory ----------
+mkdir -p "$CLAWFLOW_HOME/bin" "$CLAWFLOW_HOME/config"
 
-# ---------- 2. init user data directory ----------
-mkdir -p "$CLAWFLOW_HOME/bin"
-mkdir -p "$CLAWFLOW_HOME/config"
-mkdir -p "$CLAWFLOW_HOME/memory/repos"
-
-for f in config.yaml labels.yaml; do
-  DST="$CLAWFLOW_HOME/config/$f"
-  if [[ -f "$DST" ]]; then
-    echo "  [skip] ~/.clawflow/config/$f already exists — keeping your version"
-  else
-    cp "$REPO_ROOT/config/$f" "$DST"
-    echo "  [ok] ~/.clawflow/config/$f created from template"
-  fi
-done
-
-# ---------- 3. build and install clawflow CLI ----------
-if command -v go &>/dev/null; then
-  echo ""
-  echo "Building clawflow CLI..."
-  if go build -o "$CLAWFLOW_HOME/bin/clawflow" "$REPO_ROOT/cmd/clawflow/" 2>/dev/null; then
-    echo "  [ok] clawflow binary installed to ~/.clawflow/bin/clawflow"
-    echo "  [tip] Add to PATH: export PATH=\"\$HOME/.clawflow/bin:\$PATH\""
-  else
-    echo "  [warn] go build failed — CLI not installed (SKILL.md will use gh/git directly)"
-  fi
+CFG_DST="$CLAWFLOW_HOME/config/config.yaml"
+if [[ -f "$CFG_DST" ]]; then
+  echo "  [skip] $CFG_DST already exists — keeping your version"
 else
-  echo "  [skip] Go not found — clawflow CLI not built (install Go to enable)"
+  cp "$REPO_ROOT/config/config.yaml" "$CFG_DST"
+  echo "  [ok]   $CFG_DST created from template"
 fi
 
-# ---------- 4. create GitHub labels (optional) ----------
-if [[ -n "$CREATE_LABELS_REPO" ]]; then
-  echo ""
-  echo "Creating GitHub labels in $CREATE_LABELS_REPO ..."
-
-  if ! command -v gh &>/dev/null; then
-    echo "  [error] GitHub CLI (gh) not found. Install from https://cli.github.com/"
-    exit 1
-  fi
-
-  create_label() {
-    local name="$1" color="$2" desc="$3"
-    if gh label list -R "$CREATE_LABELS_REPO" --json name -q '.[].name' | grep -qx "$name"; then
-      echo "  [skip] label '$name' already exists"
-    else
-      gh label create "$name" --color "$color" --description "$desc" -R "$CREATE_LABELS_REPO"
-      echo "  [ok] label '$name' created"
-    fi
-  }
-
-  create_label "ready-for-agent" "00FF00" "Owner approved — triggers ClawFlow fix pipeline"
-  create_label "agent-evaluated"  "0075CA" "ClawFlow has assessed this issue and posted a proposal"
-  create_label "in-progress"      "FFA500" "Agent is actively working on this issue"
-  create_label "agent-skipped"    "BDBDBD" "Low confidence — needs more information"
-  create_label "agent-failed"     "FF0000" "Agent attempted but failed"
+# ---------- 2. build the binary ----------
+if ! command -v go &>/dev/null; then
+  echo "  [err]  Go toolchain not found — install Go first" >&2
+  exit 1
 fi
 
-# ---------- 5. write install record ----------
+VERSION="dev"
+if command -v git &>/dev/null; then
+  # `git describe --tags` gives us a meaningful Version on source builds.
+  TAG="$(git -C "$REPO_ROOT" describe --tags --dirty --always 2>/dev/null || true)"
+  [[ -n "$TAG" ]] && VERSION="$TAG"
+fi
+
+echo ""
+echo "Building clawflow (version=$VERSION)..."
+LDFLAGS="-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$VERSION"
+if go build -ldflags "$LDFLAGS" -o "$CLAWFLOW_HOME/bin/clawflow" "$REPO_ROOT/cmd/clawflow/"; then
+  echo "  [ok]   binary installed → $CLAWFLOW_HOME/bin/clawflow"
+else
+  echo "  [err]  go build failed" >&2
+  exit 1
+fi
+
+CLAWFLOW_BIN="$CLAWFLOW_HOME/bin/clawflow"
+
+# ---------- 3. write install record (for `clawflow update --from-source`) ----------
 cat > "$CLAWFLOW_HOME/config/install.yaml" <<YAML
-agent: $AGENT
-skill_dir: $SKILL_DEST
 repo_dir: $REPO_ROOT
 installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 YAML
-echo "  [ok] install record saved to ~/.clawflow/config/install.yaml"
+echo "  [ok]   install record → $CLAWFLOW_HOME/config/install.yaml"
+
+# ---------- 4. optional: create ClawFlow labels on a repo ----------
+if [[ -n "$CREATE_LABELS_REPO" ]]; then
+  echo ""
+  echo "Creating ClawFlow labels on $CREATE_LABELS_REPO..."
+  if ! "$CLAWFLOW_BIN" label init "$CREATE_LABELS_REPO"; then
+    echo "  [warn] label init failed — run \`clawflow label init $CREATE_LABELS_REPO\` manually after setting up tokens" >&2
+  fi
+fi
 
 # ---------- done ----------
-echo ""
-echo "Done! ClawFlow is ready."
-echo ""
-echo "Next steps:"
-echo "  1. Edit ~/.clawflow/config/config.yaml — add repos to monitor"
-echo "  2. Authenticate GitHub CLI: gh auth login"
-if [[ -z "$CREATE_LABELS_REPO" ]]; then
-  echo "  3. Create GitHub labels: ./install.sh --create-labels <owner/repo>"
-fi
-echo "  4. Add CLI to PATH: export PATH=\"\$HOME/.clawflow/bin:\$PATH\""
-echo "  5. Tell your agent: ClawFlow run"
+cat <<MSG
+
+Done. ClawFlow is installed.
+
+Next steps:
+  1. Add CLI to PATH (bash/zsh):
+       export PATH="\$HOME/.clawflow/bin:\$PATH"
+  2. Store a VCS token:
+       clawflow config set-token <ghp_...>         # GitHub
+       clawflow config set-gitlab-token <glpat_..> # GitLab
+  3. Register a repo to monitor:
+       clawflow repo add <owner/repo | URL | local path>
+  4. Run the operator loop:
+       clawflow run
+
+Built-in operators:
+       clawflow operators list
+MSG

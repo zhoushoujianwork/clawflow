@@ -31,7 +31,13 @@ sudo ln -sf $(which node) /usr/local/bin/node
 ```bash
 git clone https://github.com/zhoushoujianwork/clawflow
 cd clawflow
-./install.sh
+./install.sh              # 从源码编译 + 装到 ~/.clawflow/bin/clawflow
+```
+
+或者直接下载预编译二进制(不需要 Go 工具链):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/clawflow/main/get.sh | bash
 ```
 
 安装完成后验证:
@@ -41,7 +47,7 @@ clawflow --help
 clawflow operators list     # 确认内置算子已加载
 ```
 
-> 内置算子(`evaluate-bug`、`implement`、`reply-comment` 等)随 binary 一起分发,不需要单独安装到 agent 目录。
+> 内置算子(`evaluate-bug`、`evaluate-feat`、`implement`、`reply-comment`)随 binary 一起分发(embed.FS),不需要单独安装到 agent 目录。
 
 ---
 
