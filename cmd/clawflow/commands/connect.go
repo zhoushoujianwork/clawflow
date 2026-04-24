@@ -82,7 +82,12 @@ func newConnectRunCmd() *cobra.Command {
 
 			fmt.Printf("Connected! agent_id=%s\n", reg.AgentID)
 			fmt.Println("Syncing local repos to SaaS...")
-			return pushConfig(saas)
+			n, err := pushConfig(saas)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Pushed %d repos to SaaS.\n", n)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&url, "url", "", "SaaS base URL (required)")
@@ -112,7 +117,12 @@ func newSyncCmd() *cobra.Command {
 			}
 			switch direction {
 			case "push":
-				return pushConfig(saas)
+				n, err := pushConfig(saas)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("Pushed %d repos to SaaS.\n", n)
+				return nil
 			case "pull":
 				n, err := pullConfig(saas)
 				if err != nil {
@@ -149,10 +159,16 @@ func newDisconnectCmd() *cobra.Command {
 
 // ── sync helpers ──────────────────────────────────────────────────────────────
 
-func pushConfig(saas *config.SaasConfig) error {
+// pushConfig uploads the local repo config to SaaS. Returns the number
+// of repos the server acknowledged syncing plus any error. The caller
+// owns stdout — interactive entry points (`connect run`, the manual
+// `sync push` fallback) print a summary, while the worker's periodic
+// sync pass and the mutation-time best-effort push stay silent on
+// success so they don't flood logs.
+func pushConfig(saas *config.SaasConfig) (int, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("load local config: %w", err)
+		return 0, fmt.Errorf("load local config: %w", err)
 	}
 
 	type repoPayload struct {
@@ -193,20 +209,35 @@ func pushConfig(saas *config.SaasConfig) error {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("push failed: %w", err)
+		return 0, fmt.Errorf("push failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("push failed (%d): %s", resp.StatusCode, b)
+		return 0, fmt.Errorf("push failed (%d): %s", resp.StatusCode, b)
 	}
 
 	var result struct {
 		Synced int `json:"synced"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&result)
-	fmt.Printf("Pushed %d repos to SaaS.\n", result.Synced)
-	return nil
+	return result.Synced, nil
+}
+
+// bestEffortPushConfig pushes local repo config to SaaS after a local
+// mutation (`repo add/remove/enable/disable/set`). Fails open: if the
+// user never ran `clawflow connect`, we silently skip — the legacy
+// local-only mode is still a first-class path. If the user is connected
+// but SaaS is unreachable, we print one warning and carry on: the
+// worker's periodic sync loop will reconcile on its next pass.
+func bestEffortPushConfig() {
+	saas, err := config.LoadSaasConfig()
+	if err != nil || saas == nil || saas.URL == "" || saas.SyncToken == "" {
+		return
+	}
+	if _, err := pushConfig(saas); err != nil {
+		fmt.Printf("[sync] warn: could not push to SaaS (%v) — worker loop will retry.\n", err)
+	}
 }
 
 // pullConfig runs one incremental `/sync/config?since=` pull and merges the

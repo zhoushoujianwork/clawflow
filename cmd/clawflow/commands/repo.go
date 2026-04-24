@@ -146,6 +146,7 @@ func newRepoAddCmd() *cobra.Command {
 			} else if err := client.InitLabels(ownerRepo, vcs.ClawFlowLabels); err != nil {
 				fmt.Printf("  [warn] label init failed: %v\n", err)
 			}
+			bestEffortPushConfig()
 			return nil
 		},
 	}
@@ -178,6 +179,7 @@ func newRepoRemoveCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("repo %q removed\n", ownerRepo)
+			bestEffortPushConfig()
 			return nil
 		},
 	}
@@ -224,6 +226,7 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 		state = "disabled"
 	}
 	fmt.Printf("repo %q %s\n", ownerRepo, state)
+	bestEffortPushConfig()
 	return nil
 }
 
@@ -273,6 +276,7 @@ func newRepoSetCmd() *cobra.Command {
 			fmt.Printf("repo %q updated\n", ownerRepo)
 			fmt.Printf("  auto_fix:   %v\n", r.AutoFix)
 			fmt.Printf("  auto_merge: %v\n", r.AutoMerge)
+			bestEffortPushConfig()
 			return nil
 		},
 	}
