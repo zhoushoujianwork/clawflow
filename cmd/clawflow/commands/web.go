@@ -42,8 +42,26 @@ here — run 'clawflow run' first if you want fresh data.`,
 			addr := fmt.Sprintf("%s:%d", host, port)
 			url := fmt.Sprintf("http://%s/", addr)
 
+			root := snapshot.DashboardRoot()
+			fsrv := http.FileServer(http.Dir(root))
 			mux := http.NewServeMux()
-			mux.Handle("/", http.FileServer(http.Dir(snapshot.DashboardRoot())))
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				// SPA fallback: if the requested path maps to a real file
+				// (or lives under /data/ or /assets/ which tanstack-router
+				// wouldn't own anyway), serve it. Otherwise hand back
+				// index.html so the client-side router can resolve
+				// /dashboard, /repos, /runs/… on hard-refresh.
+				reqPath := strings.TrimPrefix(r.URL.Path, "/")
+				if reqPath == "" {
+					fsrv.ServeHTTP(w, r)
+					return
+				}
+				if _, err := os.Stat(filepath.Join(root, reqPath)); err == nil {
+					fsrv.ServeHTTP(w, r)
+					return
+				}
+				http.ServeFile(w, r, filepath.Join(root, "index.html"))
+			})
 
 			srv := &http.Server{
 				Addr:              addr,
@@ -76,12 +94,12 @@ func ensureDashboardExtracted() error {
 		return err
 	}
 
-	return fs.WalkDir(rootmod.EmbeddedDashboard, "web/dashboard", func(path string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(rootmod.EmbeddedDashboard, "web/dist", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		// Strip the "web/dashboard/" prefix so files land at the root of ~/.clawflow/dashboard/.
-		rel := strings.TrimPrefix(path, "web/dashboard")
+		// Strip the "web/dist/" prefix so files land at the root of ~/.clawflow/dashboard/.
+		rel := strings.TrimPrefix(path, "web/dist")
 		rel = strings.TrimPrefix(rel, "/")
 		dest := filepath.Join(root, rel)
 
@@ -92,11 +110,10 @@ func ensureDashboardExtracted() error {
 		if err != nil {
 			return err
 		}
-		// Don't trample a user-edited file. If it already exists with the
-		// same content, skip; if it differs, also skip and trust the user.
-		if _, err := os.Stat(dest); err == nil {
-			return nil
-		}
+		// Overwrite unconditionally. Upgrades need fresh dashboard bundles;
+		// if a user wants to hand-edit they should fork the repo's web/
+		// directory and build their own rather than patching the extracted
+		// copy.
 		return os.WriteFile(dest, data, 0o644)
 	})
 }

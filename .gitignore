@@ -1,3 +1,9 @@
 /config/
 /clawflow
 /clawflow_*
+
+# Frontend tool caches. web/dist/ is intentionally tracked so the release
+# pipeline doesn't need a Node toolchain.
+/web/node_modules/
+/web/.vite/
+/web/.cache/

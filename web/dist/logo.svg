@@ -1,0 +1,27 @@
+<svg viewBox="0 0 220 48" xmlns="http://www.w3.org/2000/svg">
+  <!-- Icon mark -->
+  <rect width="48" height="48" rx="10" fill="#111111"/>
+  <defs>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="1.2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- Three claw marks (scaled to 48x48) -->
+  <g stroke="#e8792a" stroke-linecap="round" fill="none" filter="url(#glow)" transform="scale(1.5) translate(0, 0)">
+    <path d="M6,26 Q8,16 12,6" stroke-width="2.4"/>
+    <path d="M13,26 Q15,16 19,6" stroke-width="2.4"/>
+    <path d="M20,26 Q22,16 26,6" stroke-width="2.4"/>
+  </g>
+  <!-- Wordmark -->
+  <text
+    x="62"
+    y="33"
+    font-family="'IBM Plex Sans', 'Inter', system-ui, sans-serif"
+    font-size="26"
+    font-weight="700"
+    letter-spacing="-0.5"
+  >
+    <tspan fill="#e8792a">Claw</tspan><tspan fill="#f0f0f0">Flow</tspan>
+  </text>
+</svg>

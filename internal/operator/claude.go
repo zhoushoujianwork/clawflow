@@ -67,7 +67,12 @@ type streamEnvelope struct {
 	Type   string `json:"type"`
 	Result string `json:"result"` // present on terminal "result" events
 	Event  struct {
-		Type  string `json:"type"`
+		Type         string `json:"type"`
+		ContentBlock struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+			Text string `json:"text"`
+		} `json:"content_block"`
 		Delta struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
@@ -112,6 +117,16 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 			env.Event.Delta.Type == "text_delta":
 			fmt.Fprint(os.Stderr, env.Event.Delta.Text)
 			printedAnyDelta = true
+		case env.Type == "stream_event" &&
+			env.Event.Type == "content_block_start" &&
+			env.Event.ContentBlock.Type == "tool_use":
+			// End any in-flight text line before the tool banner, then print
+			// a one-liner so the user sees the operator actually doing work.
+			if printedAnyDelta {
+				fmt.Fprintln(os.Stderr)
+				printedAnyDelta = false
+			}
+			fmt.Fprintf(os.Stderr, "  [tool] %s\n", env.Event.ContentBlock.Name)
 		}
 	}
 	if err := sc.Err(); err != nil {

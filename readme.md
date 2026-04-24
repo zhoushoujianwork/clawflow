@@ -204,15 +204,22 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 
 ## Local dashboard (optional)
 
-Every `clawflow run` writes JSON snapshots and per-run event logs to `~/.clawflow/dashboard/`. Launch a local viewer with:
+Every `clawflow run` writes JSON snapshots and per-run event logs to `~/.clawflow/dashboard/`. Launch the web UI with:
 
 ```bash
-clawflow web --open          # serves localhost:8080 and opens your browser
+clawflow web --open          # serves http://127.0.0.1:8080 and opens your browser
 ```
 
-The dashboard is a static site — no backend, no DB. It reads `data/repos.json`, `data/operators.json`, `data/runs.json`, and per-run `events.jsonl` files directly. You can also point any static file server (`python3 -m http.server`, nginx, …) at `~/.clawflow/dashboard/` if you prefer not to use `clawflow web`.
+What it shows:
 
-Runs capture claude's full stream-json event log, so you can replay what an operator did on any past issue.
+- **Dashboard** — filterable timeline of recent operator runs across every monitored repo, with status, duration, and PR links
+- **Run detail** — replay of the full `claude -p` stream-json event log (tool calls, assistant messages, final result) for any past run
+- **Repos** — read-only view of every repo in `config.yaml` with per-repo run history
+- **Operators** — all built-in and user operators with triggers, lock labels, and descriptions
+
+The dashboard is a static SPA (React + Vite + Tailwind) read-only view — it does not call the GitHub/GitLab API itself. All state comes from files the CLI wrote. To refresh, run `clawflow run` and reload the page. The bundle is shipped inside the binary via `embed.FS`, so there is no Node toolchain required at install time.
+
+If you prefer not to use `clawflow web`, point any static file server (`python3 -m http.server`, nginx, …) at `~/.clawflow/dashboard/` — it's self-contained.
 
 ---
 

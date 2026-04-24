@@ -1,0 +1,14 @@
+<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+  <rect width="32" height="32" rx="7" fill="#111111"/>
+  <defs>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="1" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <g stroke="#e8792a" stroke-linecap="round" fill="none" filter="url(#glow)">
+    <path d="M6,26 Q8,16 12,6" stroke-width="2.6"/>
+    <path d="M13,26 Q15,16 19,6" stroke-width="2.6"/>
+    <path d="M20,26 Q22,16 26,6" stroke-width="2.6"/>
+  </g>
+</svg>
