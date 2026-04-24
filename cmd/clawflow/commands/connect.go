@@ -174,6 +174,7 @@ func pushConfig(saas *config.SaasConfig) (int, error) {
 	type repoPayload struct {
 		FullName    string  `json:"full_name"`
 		Platform    string  `json:"platform"`
+		BaseURL     *string `json:"base_url,omitempty"`
 		BaseBranch  string  `json:"base_branch"`
 		TestCommand *string `json:"test_command,omitempty"`
 		CIRequired  *bool   `json:"ci_required,omitempty"`
@@ -192,6 +193,13 @@ func pushConfig(saas *config.SaasConfig) (int, error) {
 			BaseBranch: r.BaseBranch,
 			Enabled:    &r.Enabled,
 			CIRequired: &r.CIRequired,
+		}
+		// For self-hosted gitlab, push base_url up so SaaS can hand it
+		// back to any other worker on /sync/config pull. github.com
+		// leaves it empty — server defaults to api.github.com.
+		if r.BaseURL != "" {
+			bu := r.BaseURL
+			p.BaseURL = &bu
 		}
 		if r.TestCommand != "" {
 			p.TestCommand = &r.TestCommand
@@ -268,6 +276,7 @@ func pullConfig(saas *config.SaasConfig) (int, error) {
 		Repos []struct {
 			FullName              string    `json:"full_name"`
 			Platform              string    `json:"platform"`
+			BaseURL               *string   `json:"base_url"`
 			BaseBranch            string    `json:"base_branch"`
 			Enabled               bool      `json:"enabled"`
 			TestCommand           *string   `json:"test_command"`
@@ -300,6 +309,12 @@ func pullConfig(saas *config.SaasConfig) (int, error) {
 		existing.Platform = r.Platform
 		existing.CIRequired = r.CIRequired
 		existing.AutoEvaluateAllIssues = r.AutoEvaluateAllIssues
+		// Only overwrite base_url when SaaS actually has one — a null on
+		// the wire shouldn't wipe a value the user set locally via
+		// `clawflow repo add` before the server knew about it.
+		if r.BaseURL != nil && *r.BaseURL != "" {
+			existing.BaseURL = *r.BaseURL
+		}
 		if r.TestCommand != nil {
 			existing.TestCommand = *r.TestCommand
 		}
