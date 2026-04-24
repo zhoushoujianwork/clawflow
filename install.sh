@@ -20,22 +20,30 @@ set -e
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 CLAWFLOW_HOME="$HOME/.clawflow"
 CREATE_LABELS_REPO=""
+INSTALL_CLAUDE_SKILL=""
 
 # ---------- argument parsing ----------
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --create-labels) CREATE_LABELS_REPO="$2"; shift 2 ;;
+    --claude-skill)  INSTALL_CLAUDE_SKILL=1; shift ;;
     -h|--help)
       cat <<'USAGE'
-Usage: ./install.sh [--create-labels <owner/repo>]
+Usage: ./install.sh [--create-labels <owner/repo>] [--claude-skill]
 
 Options:
   --create-labels <owner/repo>   After install, run `clawflow label init`
                                  to create the standard label set on that repo.
+  --claude-skill                 Also install the Claude Code skill into
+                                 ~/.claude/skills/clawflow/ so Claude Code
+                                 loads clawflow context when you mention
+                                 issues, PRs, evaluation, or the operator
+                                 pipeline.
 
 Examples:
   ./install.sh
-  ./install.sh --create-labels my-org/my-repo
+  ./install.sh --claude-skill
+  ./install.sh --claude-skill --create-labels my-org/my-repo
 USAGE
       exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -90,7 +98,24 @@ installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 YAML
 echo "  [ok]   install record → $CLAWFLOW_HOME/config/install.yaml"
 
-# ---------- 4. optional: create ClawFlow labels on a repo ----------
+# ---------- 4. optional: install Claude Code skill ----------
+if [[ -n "$INSTALL_CLAUDE_SKILL" ]]; then
+  echo ""
+  CLAUDE_SKILL_DIR="$HOME/.claude/skills/clawflow"
+  mkdir -p "$CLAUDE_SKILL_DIR"
+  cp "$REPO_ROOT/agent-skills/clawflow/SKILL.md" "$CLAUDE_SKILL_DIR/SKILL.md"
+  echo "  [ok]   Claude Code skill → $CLAUDE_SKILL_DIR/SKILL.md"
+  # Scrub leftover orchestrator-era sidecar files from pre-v0.38 installs so
+  # Claude Code doesn't pick them up as stale context.
+  for old in evaluation.md post-processing.md subagent-prompt.md; do
+    if [[ -f "$CLAUDE_SKILL_DIR/$old" ]]; then
+      rm "$CLAUDE_SKILL_DIR/$old"
+      echo "  [rm]   removed stale $old from $CLAUDE_SKILL_DIR"
+    fi
+  done
+fi
+
+# ---------- 5. optional: create ClawFlow labels on a repo ----------
 if [[ -n "$CREATE_LABELS_REPO" ]]; then
   echo ""
   echo "Creating ClawFlow labels on $CREATE_LABELS_REPO..."

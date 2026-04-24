@@ -202,6 +202,18 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 
 ---
 
+## Claude Code integration (optional)
+
+If you use [Claude Code](https://claude.ai/code), you can install a small skill that teaches Claude about the ClawFlow surface — so mentioning "evaluate this issue", "run the agent on issue 7", or anything about the operator pipeline triggers Claude to reach for `clawflow` commands:
+
+```bash
+./install.sh --claude-skill
+```
+
+This drops a single `SKILL.md` in `~/.claude/skills/clawflow/`. Skip the flag if you just want the CLI.
+
+---
+
 ## Supported Platforms
 
 | Platform | Status | Notes |
