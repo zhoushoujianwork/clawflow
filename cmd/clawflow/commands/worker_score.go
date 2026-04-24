@@ -199,8 +199,38 @@ func postScoringComment(wc *config.WorkerConfig, ctx scoreContext, confidence in
 		return
 	}
 	fmt.Printf("[score %s] posted verdict comment on %s#%d\n", ctx.RunID, ctx.FullName, ctx.IssueNumber)
+	// Tag the issue with its scoring verdict so the next discover pass
+	// (and terminalLabels filter inside Channel B) recognises it as
+	// already-processed — primary dedup for "no duplicate scoring
+	// comments even across unrelated worker restarts".
+	applyScoringLabel(client, ctx.FullName, int(ctx.IssueNumber), resp.Skipped)
 	// Success → drop the stash entry so the backfill ignores this run.
 	clearPendingComment(ctx.RunID)
+}
+
+// applyScoringLabel tags an issue with its scoring verdict label. Best-
+// effort: a failed label add (missing label def on the repo, permission
+// denied, transient 5xx) logs once but doesn't roll back the comment or
+// affect return path. The `<!-- clawflow-scoring -->` HTML marker is
+// still written by the comment body, so dedup still works if label
+// addition silently fails.
+//
+//   accepted (skipped=false) → agent-evaluated
+//   skipped  (skipped=true)  → agent-skipped
+//
+// Both labels are pre-declared in internal/vcs/interface.go's
+// ClawFlowLabels and sit inside the terminalLabels filter the discover
+// loop already consults, so adding them here closes the loop that was
+// previously a producer-side gap.
+func applyScoringLabel(client vcs.Client, repo string, issueNumber int, skipped bool) {
+	label := "agent-evaluated"
+	if skipped {
+		label = "agent-skipped"
+	}
+	if err := client.AddLabel(repo, issueNumber, label); err != nil {
+		fmt.Printf("[score] add %s on %s#%d: %v (dedup still covered by HTML marker)\n",
+			label, repo, issueNumber, err)
+	}
 }
 
 // vcsClientForScoring picks the right VCS client for a scored run. GitHub

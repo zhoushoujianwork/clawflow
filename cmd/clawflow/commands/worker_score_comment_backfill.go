@@ -239,15 +239,19 @@ func tryPostPendingComment(wc *config.WorkerConfig, rec pendingCommentRec) {
 	}
 
 	// Defensive marker check — avoids double-posting if a prior worker
-	// successfully commented but couldn't persist the clear.
+	// successfully commented but couldn't persist the clear. Also checks
+	// for the verdict LABEL (agent-evaluated / agent-skipped), which
+	// covers the case where a comment was posted by an even older
+	// worker version (different marker text or no marker at all).
 	if existing, lerr := client.ListIssueComments(ctx.FullName, int(ctx.IssueNumber)); lerr == nil {
-		marker := pendingCommentMarker(rec.RunID)
-		for _, body := range existing {
-			if strings.Contains(body, marker) {
-				fmt.Printf("[comment/bf %s] marker already present — clearing stash\n", rec.RunID)
-				clearPendingComment(rec.RunID)
-				return
-			}
+		if commentAlreadyScored(existing, rec.RunID) {
+			fmt.Printf("[comment/bf %s] marker already present — clearing stash\n", rec.RunID)
+			// Still ensure the label is there — an older worker might
+			// have commented without labelling. Idempotent re-add is
+			// fine; GitHub/GitLab ignore duplicate labels silently.
+			applyScoringLabel(client, ctx.FullName, int(ctx.IssueNumber), rec.Skipped)
+			clearPendingComment(rec.RunID)
+			return
 		}
 	}
 	// Listing failed (token issue, rate limit, etc.): fall through and
@@ -264,7 +268,29 @@ func tryPostPendingComment(wc *config.WorkerConfig, rec pendingCommentRec) {
 	}
 	fmt.Printf("[comment/bf %s] posted on %s#%d (backfill after %d earlier attempt(s))\n",
 		rec.RunID, rec.FullName, rec.IssueNumber, rec.Attempts)
+	applyScoringLabel(client, ctx.FullName, int(ctx.IssueNumber), rec.Skipped)
 	clearPendingComment(rec.RunID)
+}
+
+// commentAlreadyScored returns true if any of the existing comment
+// bodies is a ClawFlow scoring comment. Matches both the current
+// per-run marker (`<!-- clawflow-scoring v1 run=<uuid> -->`) and the
+// generic prefix (`<!-- clawflow-scoring `) so that a comment posted by
+// a DIFFERENT run_id for the same issue still blocks duplication —
+// this is the label-like dedup the operator asked for on 2026-04-24,
+// achieved without a VCS round-trip to fetch issue labels.
+func commentAlreadyScored(bodies []string, runID string) bool {
+	exactMarker := pendingCommentMarker(runID)
+	const genericPrefix = "<!-- clawflow-scoring "
+	for _, b := range bodies {
+		if strings.Contains(b, exactMarker) {
+			return true
+		}
+		if strings.Contains(b, genericPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // scoreContextFromRec rehydrates a scoreContext from the stashed record.
