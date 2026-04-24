@@ -15,7 +15,6 @@ func NewConfigCmd() *cobra.Command {
 	cmd.AddCommand(newConfigSetTokenCmd())
 	cmd.AddCommand(newConfigSetGitLabTokenCmd())
 	cmd.AddCommand(newConfigShowCmd())
-	cmd.AddCommand(newConfigSetCmd())
 	return cmd
 }
 
@@ -149,52 +148,3 @@ func newConfigShowCmd() *cobra.Command {
 	return cmd
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func newConfigSetCmd() *cobra.Command {
-	var saasURL, token string
-
-	cmd := &cobra.Command{
-		Use:   "set",
-		Short: "Manually configure SaaS URL and worker token",
-		Long: `Writes saas_url and worker_token to ~/.clawflow/config/worker.yaml.
-Use this instead of 'clawflow login' when you already have a worker token.`,
-		Example: "  clawflow config set --saas-url https://clawflow.daboluo.cc --token cfw_xxx",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if saasURL == "" && token == "" {
-				return fmt.Errorf("at least one of --saas-url or --token is required")
-			}
-			wc, err := config.LoadWorkerConfig()
-			if err != nil {
-				return fmt.Errorf("load worker config: %w", err)
-			}
-			if saasURL != "" {
-				wc.SaasURL = saasURL
-			}
-			if token != "" {
-				wc.WorkerToken = token
-			}
-			if err := wc.Save(); err != nil {
-				return fmt.Errorf("save worker config: %w", err)
-			}
-			fmt.Printf("Worker config saved to ~/.clawflow/config/worker.yaml\n")
-			if wc.SaasURL != "" {
-				fmt.Printf("  saas_url:     %s\n", wc.SaasURL)
-			}
-			if wc.WorkerToken != "" {
-				n := len(wc.WorkerToken)
-				fmt.Printf("  worker_token: %s***\n", wc.WorkerToken[:max(0, n-4)])
-			}
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&saasURL, "saas-url", "", "ClawFlow SaaS base URL")
-	cmd.Flags().StringVar(&token, "token", "", "Worker token (cfw_xxx)")
-	return cmd
-}

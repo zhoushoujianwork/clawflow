@@ -1,123 +1,182 @@
 package commands
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+	rootmod "github.com/zhoushoujianwork/clawflow"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
 )
 
-// NewRunCmd wraps `claude -p "ClawFlow run"` with a task payload piped on
-// stdin, so the SaaS WorkerLoop can shell out to a stable clawflow interface
-// instead of re-implementing the Claude invocation itself. Same entrypoint the
-// CLI worker loop and the old cron-run.sh script used.
+// NewRunCmd wires `clawflow run`: one pass of the operator loop over every
+// enabled repo (or a single repo / issue if flags are set). Schedule via cron
+// or invoke ad-hoc; the CLI holds no long-running state.
 func NewRunCmd() *cobra.Command {
 	var (
-		repo   string
-		issue  int
-		token  string
-		branch string
-		base   string
+		onlyRepo  string
+		onlyIssue int
+		timeout   time.Duration
 	)
-
 	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Execute the ClawFlow pipeline for a single issue (invokes Claude)",
-		Long: `Invokes 'claude -p "ClawFlow run"' with a task payload on stdin.
-Used by the SaaS WorkerLoop; not typically run by hand.
+		Short: "Scan configured repos and run matching operators",
+		Long: `Execute one pass of the operator loop:
+  - for each enabled repo, list open issues
+  - for each issue, match against registered operators
+  - on first match: add lock label, run claude -p, post result as a comment, remove lock
 
-On success, prints 'PR_URL=<url>' on its own line so callers can parse it.`,
+At most one operator runs per issue per invocation. Pass --repo and/or --issue
+to narrow the scan.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if repo == "" || issue == 0 || token == "" {
-				return fmt.Errorf("--repo, --issue and --token are required")
+			if onlyIssue != 0 && onlyRepo == "" {
+				return fmt.Errorf("--issue requires --repo")
 			}
-
-			payload := map[string]interface{}{
-				"repo":         repo,
-				"issue_number": issue,
-				"token":        token,
-				"branch":       branch,
-				"base_branch":  base,
-			}
-			body, err := json.Marshal(payload)
-			if err != nil {
-				return fmt.Errorf("marshal payload: %w", err)
-			}
-
-			// Load ~/.clawflow/config/env so ANTHROPIC_BASE_URL / AUTH_TOKEN are
-			// available to claude — mirrors cron-run.sh's `source $ENV_FILE`
-			// so operators have one canonical place to configure the runtime.
-			loadEnvFile()
-
-			claudeCmd := exec.Command(resolveClaudeBinary(), "-p", "--dangerously-skip-permissions", "ClawFlow run")
-			claudeCmd.Stdin = bytes.NewReader(body)
-			claudeCmd.Env = cleanClaudeEnv(os.Environ())
-
-			// Tee stdout so we can stream to the caller (systemd/SaaS) AND scan
-			// for the PR URL at the end. stderr inherits directly.
-			var stdoutBuf bytes.Buffer
-			claudeCmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
-			claudeCmd.Stderr = os.Stderr
-
-			if err := claudeCmd.Run(); err != nil {
-				return fmt.Errorf("claude: %w", err)
-			}
-
-			if url := extractPRURL(stdoutBuf.String()); url != "" {
-				fmt.Printf("PR_URL=%s\n", url)
-			}
-			return nil
+			return runOnce(cmd.Context(), onlyRepo, onlyIssue, timeout)
 		},
 	}
-
-	cmd.Flags().StringVar(&repo, "repo", "", "Repository full_name (e.g. owner/repo)")
-	cmd.Flags().IntVar(&issue, "issue", 0, "Issue number to process")
-	cmd.Flags().StringVar(&token, "token", "", "VCS access token (GitHub/GitLab)")
-	cmd.Flags().StringVar(&branch, "branch", "", "Feature branch name (e.g. fix/issue-42)")
-	cmd.Flags().StringVar(&base, "base", "main", "Base branch for the PR")
-
+	cmd.Flags().StringVar(&onlyRepo, "repo", "", "Restrict to a single repo (owner/repo); default: all enabled repos")
+	cmd.Flags().IntVar(&onlyIssue, "issue", 0, "Restrict to a single issue number (requires --repo)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator claude subprocess timeout")
 	return cmd
 }
 
-// loadEnvFile reads ~/.clawflow/config/env and sets each `export KEY=VALUE`
-// line into the current process environment. Silently skips if the file is
-// missing. Strips surrounding quotes and a leading `export ` so the format
-// matches what cron-run.sh sources with bash.
-func loadEnvFile() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
+// loadRegistry builds a Registry from the embedded skills + the user's
+// ~/.clawflow/skills directory. User operators override built-ins with the
+// same name.
+func loadRegistry() (*operator.Registry, error) {
+	reg := operator.NewRegistry()
+	if err := reg.LoadEmbedded(rootmod.EmbeddedSkills, "skills"); err != nil {
+		return nil, fmt.Errorf("load embedded operators: %w", err)
 	}
-	path := filepath.Join(home, ".clawflow", "config", "env")
-	f, err := os.Open(path)
-	if err != nil {
-		return
+	home, _ := os.UserHomeDir()
+	userDir := filepath.Join(home, ".clawflow", "skills")
+	if err := reg.LoadUserDir(userDir); err != nil {
+		return nil, fmt.Errorf("load user operators from %s: %w", userDir, err)
 	}
-	defer f.Close()
+	return reg, nil
+}
 
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	reg, err := loadRegistry()
+	if err != nil {
+		return err
+	}
+	if len(reg.All()) == 0 {
+		return fmt.Errorf("no operators registered (embed missing? user dir empty?)")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	repos := cfg.EnabledRepos()
+	if onlyRepo != "" {
+		r, ok := repos[onlyRepo]
+		if !ok {
+			return fmt.Errorf("repo %q not found or not enabled", onlyRepo)
 		}
-		line = strings.TrimPrefix(line, "export ")
-		eq := strings.IndexByte(line, '=')
-		if eq <= 0 {
-			continue
-		}
-		key := strings.TrimSpace(line[:eq])
-		val := strings.TrimSpace(line[eq+1:])
-		val = strings.Trim(val, `"'`)
-		if key != "" {
-			_ = os.Setenv(key, val)
+		repos = map[string]config.Repo{onlyRepo: r}
+	}
+	if len(repos) == 0 {
+		fmt.Println("no enabled repos to scan")
+		return nil
+	}
+
+	for fullName, repoCfg := range repos {
+		if err := runRepoOnce(ctx, reg, fullName, repoCfg, onlyIssue, timeout); err != nil {
+			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
 		}
 	}
+	return nil
+}
+
+func runRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, repoCfg config.Repo, onlyIssue int, timeout time.Duration) error {
+	client, err := newVCSClient(repoCfg)
+	if err != nil {
+		return fmt.Errorf("vcs client: %w", err)
+	}
+
+	issues, err := client.ListOpenIssues(fullName)
+	if err != nil {
+		return fmt.Errorf("list open issues: %w", err)
+	}
+
+	for _, iss := range issues {
+		if onlyIssue != 0 && iss.Number != onlyIssue {
+			continue
+		}
+		sub := &operator.Subject{
+			Number: iss.Number,
+			Title:  iss.Title,
+			Body:   iss.Body,
+			Labels: iss.Labels,
+			IsPR:   false,
+		}
+		for _, op := range reg.All() {
+			if !operator.Matches(sub, op) {
+				continue
+			}
+			fmt.Printf("[%s] #%d → operator %s\n", fullName, sub.Number, op.Name)
+
+			workdir, cleanup, err := resolveWorkdir(op, repoCfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  workdir: %v\n", err)
+				continue
+			}
+
+			// Best-effort comment fetch for prompt context; ignore failures.
+			comments, _ := client.ListIssueComments(fullName, sub.Number)
+
+			err = operator.Run(ctx, op, sub, client, operator.RunOptions{
+				Repo:     fullName,
+				Workdir:  workdir,
+				Timeout:  timeout,
+				Comments: comments,
+			})
+			cleanup()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ %v\n", err)
+				continue
+			}
+			fmt.Println("  ✓ done")
+			// One operator per issue per run — avoid compound state changes
+			// where two ops race on the same labels.
+			break
+		}
+	}
+
+	// MVP: skip PRs. All 3 built-in operators target issues. When a
+	// pr-target operator appears we'll add the same loop over ListOpenPRs.
+	return nil
+}
+
+// resolveWorkdir picks the cwd for the claude subprocess and returns a
+// cleanup callback. For operators that write code (implement), the workdir
+// must be the repo's local clone. For read-only operators, a tempdir is
+// fine and gets RemoveAll'd on cleanup.
+func resolveWorkdir(op *operator.Operator, repoCfg config.Repo) (string, func(), error) {
+	// Pragmatic heuristic: "implement" and any pr-target operator need the
+	// repo. Everything else gets an ephemeral tempdir. A future schema field
+	// (e.g. operator.requires_workdir: true) can replace this.
+	needsRepo := op.Name == "implement" || op.Trigger.Target == "pr"
+	if needsRepo {
+		if repoCfg.LocalPath == "" {
+			return "", func() {}, fmt.Errorf("operator %q needs repo local_path but it's empty in config", op.Name)
+		}
+		return repoCfg.LocalPath, func() {}, nil
+	}
+	dir, err := os.MkdirTemp("", "clawflow-op-")
+	if err != nil {
+		return "", func() {}, err
+	}
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }

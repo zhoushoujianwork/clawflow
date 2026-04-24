@@ -11,33 +11,30 @@ var Version = "dev"
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "clawflow",
-		Short: "Coding as a Service — automated issue → fix → PR pipeline",
-		Long: `ClawFlow CLI handles the deterministic parts of the pipeline:
-harvesting issues, managing labels, creating worktrees, and writing memory records.
-The AI skill (SKILL.md) handles evaluation and sub-agent orchestration.`,
+		Short: "Label-driven automation that turns issues into PRs on GitHub and GitLab",
+		Long: `ClawFlow matches each open issue/PR against a set of operators (self-contained
+SKILL.md files) and runs the matching operator through 'claude -p'. State lives
+entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 		Version: Version,
 	}
 
-	root.AddCommand(NewConnectCmd())
-	root.AddCommand(NewHarvestCmd())
+	root.AddCommand(NewRunCmd())
+	root.AddCommand(NewOperatorsCmd())
+	root.AddCommand(NewRepoCmd())
+	root.AddCommand(NewIssueCmd())
+	root.AddCommand(NewPRCmd())
 	root.AddCommand(NewLabelCmd())
+	root.AddCommand(NewConfigCmd())
+	root.AddCommand(NewUpdateCmd())
+	// Helpers retained for operator use (invoked from SKILL.md bodies):
+	root.AddCommand(NewHarvestCmd())
 	root.AddCommand(NewWorktreeCmd())
 	root.AddCommand(NewMemoryCmd())
 	root.AddCommand(NewStatusCmd())
 	root.AddCommand(NewPRCheckCmd())
-	root.AddCommand(NewUpdateCmd())
-	root.AddCommand(NewRepoCmd())
-	root.AddCommand(NewConfigCmd())
 	root.AddCommand(NewRetryCmd())
-	root.AddCommand(NewIssueCmd())
-	root.AddCommand(NewPRCmd())
 	root.AddCommand(NewUnblockScanCmd())
-	root.AddCommand(NewBillingHookCmd())
 	root.AddCommand(NewLangCmd())
-	root.AddCommand(NewLoginCmd())
-	root.AddCommand(NewWorkerCmd())
-	root.AddCommand(NewPipelineCmd())
-	root.AddCommand(NewRunCmd())
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print version",
