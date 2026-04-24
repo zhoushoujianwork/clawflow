@@ -49,6 +49,10 @@ Auth on all worker endpoints: `Authorization: Bearer <worker_token>` header. Tok
 | `POST` | `/worker/pipelines` | CLI → SaaS | Push a pipeline_run CLI discovered locally (private VCS) |
 | `POST` | `/worker/discover` | CLI → SaaS | Fallback issue-discovery push (no webhook) |
 | `POST` | `/worker/health-report` | CLI → SaaS | Per-repo health (for the repo-list badge) |
+| `GET` | `/worker/repo-jobs` | CLI → SaaS | List pending repo-level jobs SaaS enqueued (kind=`label_init`, …) |
+| `POST` | `/worker/repo-jobs/:id/claim` | CLI → SaaS | Atomically claim a repo job (pending → running) |
+| `POST` | `/worker/repo-jobs/:id/complete` | CLI → SaaS | Mark repo job done |
+| `POST` | `/worker/repo-jobs/:id/fail` | CLI → SaaS | Mark repo job failed with `{reason}` (truncated to 500 chars server-side) |
 | `POST` | `/sync/config` | CLI → SaaS | Push local repo config (upsert by `org_id+platform+full_name`) |
 | `GET` | `/sync/config?since=<ts>` | CLI ← SaaS | Pull incremental repo config changes |
 | WS | `/ws/worker/tasks/:run_id/stream` | CLI → SaaS | Live per-line log stream during `claude -p` execution |
@@ -84,6 +88,25 @@ Auth on all worker endpoints: `Authorization: Bearer <worker_token>` header. Tok
 ```
 
 Cost metering rule: `agent_id IS NULL` → SaaS-hosted run, charges credits (see `clawflow-saas/CLAUDE.md` "Billing: Executor Isolation"). `agent_id IS NOT NULL` → user's own worker, usage recorded but no credit deduction.
+
+**`RepoJob`** — per-repo background work SaaS needs the CLI worker to execute locally. First use case: `label_init` (when a user adds a repo through the SaaS UI, SaaS has no creds for the user's VCS — especially for private-network GitLab — so it enqueues this and the CLI runs `InitLabels` on the next tick). CLI-side implementation lives in `cmd/clawflow/commands/worker_repo_jobs.go`.
+
+```json
+{
+  "id": "uuid",
+  "repo_id": "uuid",
+  "kind": "label_init",
+  "platform": "github | gitlab",
+  "full_name": "owner/repo",
+  "attempts": 0,
+  "created_at": "RFC3339"
+}
+```
+
+- SaaS enqueues idempotently on `(repo_id, kind)` while status ∈ `pending|running`. Re-adding an already-initialised repo is a safe no-op.
+- CLI reports unsupported kinds via `/fail` so a SaaS-side rollout of a new kind can't strand the queue on older CLIs.
+- `GET /worker/repo-jobs` returns `{"jobs": [RepoJob, ...]}`.
+- Loop cadence: 60s (see `repoJobsInterval`).
 
 **`ReconcileReport`** (v0.24.0+) — body of `/worker/tasks/:run_id/reconcile/report`:
 

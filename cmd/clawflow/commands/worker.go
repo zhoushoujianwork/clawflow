@@ -243,6 +243,15 @@ func runWorker(wc *config.WorkerConfig, pollSecs int) error {
 	defer close(commentStop)
 	fmt.Printf("  comment/bf: every %s (retry VCS comment posts missed by inline path)\n", pendingCommentInterval)
 
+	// Repo-level jobs (label_init, …). SaaS enqueues one when a user
+	// adds a repo through the dashboard; this loop runs the work using
+	// the CLI's local VCS creds, which is the only path that works for
+	// private-network GitLab.
+	repoJobsStop := make(chan struct{})
+	go repoJobsLoop(wc, repoJobsStop)
+	defer close(repoJobsStop)
+	fmt.Printf("  repo-jobs: every %s (run SaaS-enqueued per-repo jobs, e.g. label_init)\n", repoJobsInterval)
+
 	// Feasibility scoring (issue #27) is inline inside the discover loop —
 	// scoreNewlyCreatedRun is called from pushDiscoveredIssue right after
 	// SaaS confirms a run was freshly created. No separate goroutine: the
