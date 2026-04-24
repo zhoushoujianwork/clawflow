@@ -6,9 +6,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
-	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
+// NewStatusCmd shows a per-repo health summary using the operator-era labels.
+// For deeper inspection, users can run `clawflow issue list --repo X --label Y`.
 func NewStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
@@ -21,7 +22,7 @@ func NewStatusCmd() *cobra.Command {
 
 			repos := cfg.EnabledRepos()
 			if len(repos) == 0 {
-				fmt.Println("No repos configured. Edit ~/.clawflow/config/repos.yaml")
+				fmt.Println("No repos configured. Edit ~/.clawflow/config/config.yaml")
 				return nil
 			}
 
@@ -52,45 +53,35 @@ func NewStatusCmd() *cobra.Command {
 					continue
 				}
 
-				var toEvaluate, toExecute, inProgress, skipped, failed, retryEligible int
-				var retryIssues []vcs.Issue
-
+				// Tallies use the current operator label scheme. An issue can
+				// occupy multiple buckets (e.g. `bug` + `agent-evaluated`);
+				// the switch picks the most "advanced" state first.
+				var awaitingEval, readyToImplement, running, implemented, failed, skipped int
 				for _, issue := range issues {
 					switch {
-					case issue.HasLabel("in-progress"):
-						inProgress++
+					case issue.HasLabel("agent-running"):
+						running++
 					case issue.HasLabel("agent-failed"):
 						failed++
 					case issue.HasLabel("agent-skipped"):
 						skipped++
-					case issue.HasLabel("ready-for-agent") && issue.HasLabel("agent-evaluated") && !issue.HasLabel("in-progress"):
-						toExecute++
-					case !issue.HasLabel("agent-evaluated"):
-						toEvaluate++
-					case issue.HasLabel("agent-evaluated") && !issue.HasLabel("in-progress") && !issue.HasLabel("ready-for-agent"):
-						hasPR, _ := client.PRExistsForIssue(repoName, issue.Number)
-						if !hasPR && HasMergedPRInMemory(repoName, issue.Number) {
-							retryEligible++
-							retryIssues = append(retryIssues, issue)
-						}
+					case issue.HasLabel("agent-implemented"):
+						implemented++
+					case issue.HasLabel("ready-for-agent"):
+						readyToImplement++
+					case (issue.HasLabel("bug") || issue.HasLabel("feat")) && !issue.HasLabel("agent-evaluated"):
+						awaitingEval++
 					}
 				}
 
-				fmt.Printf("    待评估:  %d\n", toEvaluate)
-				fmt.Printf("    待执行:  %d\n", toExecute)
-				fmt.Printf("    处理中:  %d\n", inProgress)
-				fmt.Printf("    已跳过:  %d\n", skipped)
-				fmt.Printf("    已失败:  %d\n", failed)
-				if retryEligible > 0 {
-					fmt.Printf("    可重试:  %d\n", retryEligible)
-					for _, issue := range retryIssues {
-						fmt.Printf("      #%d %s  (run: clawflow retry --repo %s --issue %d)\n",
-							issue.Number, issue.Title, repoName, issue.Number)
-					}
-				}
+				fmt.Printf("    awaiting eval:     %d\n", awaitingEval)
+				fmt.Printf("    ready to implement: %d\n", readyToImplement)
+				fmt.Printf("    running:           %d\n", running)
+				fmt.Printf("    implemented:       %d\n", implemented)
+				fmt.Printf("    skipped:           %d\n", skipped)
+				fmt.Printf("    failed:            %d\n", failed)
 				fmt.Println()
 			}
-
 			return nil
 		},
 	}

@@ -187,12 +187,6 @@ func ConfigPath() string {
 	return filepath.Join(home, ".clawflow", "config", "config.yaml")
 }
 
-// MemoryDir returns the memory directory for a repo.
-func MemoryDir(repoSlug string) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "memory", "repos", repoSlug)
-}
-
 // EnabledRepos returns only the repos with enabled: true.
 func (c *Config) EnabledRepos() map[string]Repo {
 	out := make(map[string]Repo)

@@ -192,10 +192,11 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 | **Operators** | `clawflow operators list` — show which operators are registered (built-in + user) |
 | **Repos** | `clawflow repo add / remove / list / enable / disable` |
 | **Labels** | `clawflow label add / remove / init` |
-| **Issues** | `clawflow issue create / list / comment` |
+| **Issues** | `clawflow issue create / list / comment / close` |
 | **PRs** | `clawflow pr create / list / view / comment / merge` |
 | **Config** | `clawflow config set-token / set-gitlab-token / show` |
 | **Update** | `clawflow update` — fetch the latest binary |
+| **Operator helpers** *(invoked from SKILL.md bodies)* | `clawflow worktree` — create/remove per-issue git worktrees · `clawflow pr-check` — has an open PR for this issue? · `clawflow lang` — detect build/test commands for changed files · `clawflow status` — per-repo health summary |
 
 > **Tool discipline:** inside operators, always use `clawflow` commands for VCS actions, never `gh` — see `CLAUDE.md` for the rationale.
 

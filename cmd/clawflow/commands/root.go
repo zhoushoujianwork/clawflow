@@ -27,13 +27,9 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewConfigCmd())
 	root.AddCommand(NewUpdateCmd())
 	// Helpers retained for operator use (invoked from SKILL.md bodies):
-	root.AddCommand(NewHarvestCmd())
 	root.AddCommand(NewWorktreeCmd())
-	root.AddCommand(NewMemoryCmd())
 	root.AddCommand(NewStatusCmd())
 	root.AddCommand(NewPRCheckCmd())
-	root.AddCommand(NewRetryCmd())
-	root.AddCommand(NewUnblockScanCmd())
 	root.AddCommand(NewLangCmd())
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
