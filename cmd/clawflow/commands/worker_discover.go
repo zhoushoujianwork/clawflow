@@ -243,13 +243,19 @@ func discoverGitLabRepo(wc *config.WorkerConfig, ws *wsChannel, creds *config.Cr
 	// Channel A (execute): labeled issues → execution_requested=true.
 	// Always runs regardless of auto_evaluate_all_issues — an explicit
 	// label is the strongest signal of intent.
+	//
+	// Intentionally does NOT consult alreadyDiscovered: an issue that
+	// Channel B previously pushed with execution_requested=false needs
+	// a fresh POST when the user later adds the label, otherwise the
+	// user's "please execute this" intent never reaches SaaS. Observed
+	// 2026-04-24 on daboluocc/clawflow-saas#54 — run stuck indefinitely
+	// because the Channel A post was suppressed as "already discovered".
+	// Duplicate POST is cheap: SaaS returns created=false, maybeScore
+	// is a no-op when !ack.Created.
 	if issues, err := fetchOpenLabeledIssues(repo.BaseURL, tok, fullName, label); err != nil {
 		fmt.Printf("[discover] %s (execute): %v\n", fullName, err)
 	} else {
 		for _, is := range issues {
-			if alreadyDiscovered("gitlab", fullName, is.IID) {
-				continue
-			}
 			ack, err := pushDiscoveredIssue(wc, ws, "gitlab", fullName, is.IID, is.Title, true)
 			if err != nil {
 				fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, is.IID, err)
@@ -315,15 +321,14 @@ func discoverGitHubRepo(wc *config.WorkerConfig, ws *wsChannel, creds *config.Cr
 	gh := github.New(tok, repo.BaseURL) // empty baseURL defaults to api.github.com
 	label := triggerLabel(repo)
 
-	// Channel A: labeled for execution.
+	// Channel A: labeled for execution. Intentionally does NOT consult
+	// alreadyDiscovered — see the GitLab branch's note on the same
+	// pattern (2026-04-24 clawflow-saas#54 regression).
 	if issues, err := gh.ListIssues(fullName, "open", []string{label}); err != nil {
 		fmt.Printf("[discover] %s (execute): %v\n", fullName, err)
 	} else {
 		for _, is := range issues {
 			n := int64(is.Number)
-			if alreadyDiscovered("github", fullName, n) {
-				continue
-			}
 			ack, err := pushDiscoveredIssue(wc, ws, "github", fullName, n, is.Title, true)
 			if err != nil {
 				fmt.Printf("[discover] %s #%d: push failed: %v\n", fullName, n, err)
