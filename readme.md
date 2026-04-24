@@ -1,7 +1,8 @@
 # ClawFlow
 
-> **Coding as a Service.**  
-> ClawFlow watches your GitHub and GitLab repositories, picks up issues tagged `ready-for-agent`, and autonomously attempts to fix them — then opens a Pull Request.
+> **Label-driven automation that turns issues into PRs on GitHub and GitLab.**
+>
+> ClawFlow polls the repositories you configure, matches each open issue/PR against a set of **operators** (self-contained `SKILL.md` files), and runs the matching operator through `claude -p`. State lives entirely in VCS labels and comments — there is no database, no SaaS backend, and no orchestrator service. Run it once, run it on cron, run it from your editor — it's the same binary either way.
 
 ---
 
@@ -11,11 +12,13 @@
 curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/clawflow/main/get.sh | bash
 ```
 
-Supports macOS (Apple Silicon & Intel) and Linux (x86_64 & arm64). The script:
-- Downloads the correct binary for your platform
-- Auto-detects your agent (`~/.claude/skills/` or `~/.openclaw/skills/`) and installs SKILL.md
-- Initializes `~/.clawflow/config/` with template config
-- Adds `~/.clawflow/bin` to your shell PATH
+Supports macOS (Apple Silicon & Intel) and Linux (x86_64 & arm64). The installer:
+
+- Downloads the right binary for your platform into `~/.clawflow/bin/clawflow`
+- Initializes `~/.clawflow/config/` with a template config
+- Adds `~/.clawflow/bin` to your shell `PATH`
+
+You also need the [Claude Code CLI](https://claude.ai/code) on `PATH` — ClawFlow shells out to `claude -p` to run operators.
 
 ---
 
@@ -35,8 +38,7 @@ clawflow config set-gitlab-token glpat-xxxxxxxxxxxx
 ```
 Required scopes: `api`.
 
-Tokens are saved to `~/.clawflow/config/credentials.yaml` (mode 0600).  
-Environment variables take priority over the file: `GH_TOKEN`, `GITLAB_TOKEN`.
+Tokens are saved to `~/.clawflow/config/credentials.yaml` (mode 0600). Environment variables take priority: `GH_TOKEN`, `GITLAB_TOKEN`.
 
 ### 2. Add repositories to monitor
 
@@ -50,7 +52,6 @@ clawflow repo add owner/repo
 
 # GitLab self-hosted — full URL (nested namespaces supported)
 clawflow repo add https://gitlab.company.com/ns/group/repo
-clawflow repo add git@gitlab.company.com:ns/group/repo.git
 
 # Local directory — reads .git/config origin automatically
 clawflow repo add .
@@ -60,13 +61,6 @@ clawflow repo add ~/github/my-repo
 Override platform or instance URL manually:
 ```bash
 clawflow repo add ns/repo --platform gitlab --base-url https://gitlab.company.com
-```
-
-For GitLab self-hosted, you can also register the host in `~/.clawflow/config/config.yaml` so short-form inputs are recognized:
-```yaml
-settings:
-  gitlab_hosts:
-    - gitlab.company.com
 ```
 
 Manage repos:
@@ -79,89 +73,131 @@ clawflow repo remove  owner/repo
 
 ### 3. Initialize labels
 
-Labels are created automatically on `repo add`. To create them manually:
+Labels are created automatically on `repo add`. To (re)create them manually:
 
 ```bash
 clawflow label init owner/repo
 ```
 
-| Label | Color | Meaning |
-|---|---|---|
-| `ready-for-agent` | `#00FF00` Green | Owner approved — triggers fix pipeline |
-| `agent-evaluated` | `#0075CA` Blue | ClawFlow has assessed this issue |
-| `in-progress` | `#FFA500` Orange | Agent is actively working on it |
-| `agent-skipped` | `#BDBDBD` Gray | Low confidence — needs more info |
-| `agent-failed` | `#FF0000` Red | Agent attempted but failed |
-| `blocked` | `#E4E669` Yellow | Waiting on dependency issues |
-| `agent-split` | `#8B5CF6` Purple | Issue split into sub-issues |
-| `type:bug` | `#D73A4A` Red | Issue classified as a bug report |
-| `type:feature` | `#0E8A16` Green | Issue classified as a feature request |
-| `type:refactor` | `#1D76DB` Blue | Issue classified as a refactoring task |
-| `type:docs` | `#5319E7` Purple | Issue classified as a documentation task |
+**Trigger labels** — gate which operator fires on an issue:
+
+| Label | Fires operator |
+|---|---|
+| `bug` | `evaluate-bug` |
+| `feat` | `evaluate-feat` *(planned, post-MVP)* |
+| `ready-for-agent` | `implement` — you add this manually after reviewing the evaluation |
+| `agent-mentioned` | `reply-comment` |
+
+**State labels** — written back by operators:
+
+| Label | Meaning |
+|---|---|
+| `agent-running` | Universal execution lock. Added before an operator runs, removed after (success or fail). |
+| `agent-evaluated` | An `evaluate-*` operator has posted its assessment. Stops re-evaluation. |
+| `agent-skipped` | Confidence too low — operator declined to proceed. |
+| `agent-implemented` | `implement` finished — PR is open. |
+| `agent-failed` | An operator errored; see the failure comment on the issue. |
+| `agent-replied` | `reply-comment` has replied to the latest mention. |
+
+ClawFlow never adds `ready-for-agent` itself — owner approval is always required to cross from evaluation to implementation.
 
 ### 4. Run
 
-Tell your AI agent:
+```bash
+clawflow run
+```
+
+Scans every enabled repo once, runs any matching operators, exits. Schedule it with cron, launchd, or your editor's agent — ClawFlow holds no long-running state.
+
+---
+
+## How It Works
 
 ```
-ClawFlow run
+clawflow run
+  └─ for each configured repo
+       └─ list open issues and PRs
+            └─ for each one, match its labels against every registered operator
+                 └─ on first match:
+                      1. add the operator's lock label (concurrency guard)
+                      2. invoke `claude -p` with the operator's SKILL.md + issue context
+                      3. the operator posts its comment / label / PR
+                      4. remove the lock label
+```
+
+No orchestrator, no sub-agents, no DAG. Operators only coordinate through the labels and comments they read and write — one operator's output becomes the next operator's trigger, implicitly.
+
+Example end-to-end flow for a bug:
+
+1. Someone opens an issue and labels it `bug`.
+2. Next `clawflow run` — `evaluate-bug` matches, writes an evaluation comment, adds `agent-evaluated`.
+3. Owner reads the evaluation, adds `ready-for-agent`.
+4. Next `clawflow run` — `implement` matches, creates a branch, writes code, opens a PR, adds `agent-implemented`.
+
+---
+
+## Architecture: Operators
+
+An **operator** is a single `SKILL.md` file — frontmatter plus a prompt — that declares:
+
+- **Trigger**: which issues/PRs it runs on (target type + required labels + excluded labels)
+- **Lock label**: the label used as a per-run mutex
+- **Body**: the prompt that `claude -p` receives, with issue context injected
+
+Operators live in two places:
+
+- **Built-in**: `skills/<name>/SKILL.md` inside this repo — embedded into the binary at build time.
+- **User overrides**: `~/.clawflow/skills/<name>/SKILL.md` — same name overrides the built-in.
+
+That's the whole extension model. To add a new operator, drop a `SKILL.md` in one of those directories. No plugin API, no registration step.
+
+See [`CLAUDE.md`](CLAUDE.md) for the frontmatter schema and operator design principles.
+
+---
+
+## Directory Layout
+
+```
+~/.clawflow/                          ← user data
+├── bin/clawflow                      ← CLI binary
+├── config/
+│   ├── config.yaml                   ← repos to monitor
+│   ├── credentials.yaml              ← tokens (0600)
+│   └── install.yaml                  ← install record
+└── skills/                           ← user-custom operators (override built-ins by name)
+    └── my-operator/
+        └── SKILL.md
+
+clawflow/ (this repo)
+├── cmd/clawflow/                     ← Go CLI source
+├── internal/
+│   ├── config/                       ← config parsing + write
+│   ├── operator/                     ← operator loader + runner
+│   └── vcs/                          ← platform-agnostic VCS client (GitHub + GitLab)
+└── skills/                           ← built-in operators (embedded at build time)
+    ├── evaluate-bug/SKILL.md
+    ├── implement/SKILL.md
+    └── reply-comment/SKILL.md
 ```
 
 ---
 
 ## CLI Reference
 
-```
-clawflow [command]
+Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 
-Pipeline:
-  harvest            Scan repos and output pending issues as JSON
-  status             Show current state of all monitored repos
-  retry              Re-trigger pipeline for a previously processed issue
-  lang detect        Detect language and output build/test commands for changed files
+| Category | Commands |
+|---|---|
+| **Core loop** | `clawflow run` — scan and execute matching operators once |
+| **Operators** | `clawflow operators list` — show which operators are registered (built-in + user) |
+| **Repos** | `clawflow repo add / remove / list / enable / disable` |
+| **Labels** | `clawflow label add / remove / init` |
+| **Issues** | `clawflow issue create / list / comment` |
+| **PRs** | `clawflow pr create / list / view / comment / merge` |
+| **Config** | `clawflow config set-token / set-gitlab-token / show` |
+| **Update** | `clawflow update` — fetch the latest binary |
 
-PRs:
-  pr create          Create a pull request / merge request
-  pr list            List pull requests
-  pr view            View a pull request
-  pr comment         Post a comment on a pull request
-  pr ci-wait         Wait for CI checks to complete
-  pr merge           Merge a pull request via the VCS API
-  pr rebase          Rebase issue branch onto base branch and force-push
-
-Repo management:
-  repo list          List all configured repos
-  repo add           Add a repo (URL / SSH / local path / owner/repo)
-  repo remove        Remove a repo from config
-  repo enable        Enable a repo
-  repo disable       Disable a repo (pause without removing)
-
-Issues:
-  issue create       Create an issue (useful for testing the pipeline)
-  issue list         List open issues in a repo
-
-Labels:
-  label add          Add a label to an issue
-  label remove       Remove a label from an issue
-  label init         Create standard ClawFlow labels in a repo
-
-Worktrees:
-  worktree create    Create an isolated git worktree for an issue
-  worktree remove    Remove worktree after fix (success or failure)
-
-Records:
-  memory write       Write an issue processing record
-  pr-check           Check if an open PR already exists for an issue
-
-Config:
-  config set-token         Store GitHub token
-  config set-gitlab-token  Store GitLab token
-  config show              Show current config and token status
-
-Updates:
-  update             Download latest binary + update SKILL.md
-  update --from-source  Rebuild from local source
-```
+> **Tool discipline:** inside operators, always use `clawflow` commands for VCS actions, never `gh` — see `CLAUDE.md` for the rationale.
 
 ---
 
@@ -169,188 +205,32 @@ Updates:
 
 | Platform | Status | Notes |
 |---|---|---|
-| **GitHub** | ✅ Supported | REST API v3 |
-| **GitLab** | ✅ Supported | REST API v4, compatible with self-hosted v11.11+ |
-
-## Supported Agents
-
-| Agent | Status | Notes |
-|---|---|---|
-| **Claude Code** | ✅ Recommended | Best code capability |
-| **OpenClaw** | ✅ Supported | Lightweight local agent |
-| Custom agent | 🔧 Configurable | `--agent custom --dir /path` |
+| **GitHub** | ✅ | REST API v3 |
+| **GitLab** | ✅ | REST API v4, self-hosted v11.11+ |
 
 > Local quickstart: [Getting started with Claude Code](docs/quickstart-claude-code.md)
-
----
-
-## How It Works
-
-```
-New Issue
-    ↓
-[clawflow harvest] — scan all repos, filter + PR dedup
-    ↓
-[AI evaluates] — confidence score, posts proposal as comment
-                → adds type:* label + agent-evaluated label
-    ↓
-[owner adds ready-for-agent]        [low confidence → agent-skipped]
-    ↓
-[clawflow worktree create] — isolated branch per issue
-    ↓
-[sub-agent implements fix] — in the worktree
-    ↓
-[PR opened]
-    ↓
-[Phase 5.5] Smoke test — build + unit tests for changed packages (max 2 retries)
-    ↓ pass
-[Phase 5.6] Conflict check — auto rebase if needed (max 2 retries)
-    ↓ clean
-[Phase 5.7] CI wait — clawflow pr ci-wait
-    ↓ pass / no CI
-[Phase 5.8] auto_merge=true → clawflow pr merge → close issue
-            auto_merge=false → wait for owner review
-    ↓
-[clawflow worktree remove] — cleanup always runs
-```
-
-**ClawFlow never adds `ready-for-agent` itself — owner approval is always required.**
-
-### Testing Boundary
-
-> ⚠️ ClawFlow only runs smoke tests — it does not replace human verification
-
-| Test type | Owner |
-|-----------|-------|
-| Build passes | ClawFlow (automatic) |
-| Unit tests for changed packages | ClawFlow (automatic) |
-| E2E / integration tests | Owner (manual) |
-| Real-world scenario validation | Owner (manual) |
-
-Smoke test failures trigger automatic retry (max 2×). On repeated failure, the issue is marked `agent-failed` and the owner is notified.
-
-### Auto-fix
-
-When `auto_fix: true` is set on a repo, ClawFlow automatically adds `ready-for-agent` after evaluation — no owner approval needed — if:
-- confidence score >= 7.0
-- no split suggestion in the evaluation
-
-Default is `false`. Enable per repo in `~/.clawflow/config/config.yaml`:
-
-```yaml
-repos:
-  owner/repo:
-    enabled: true
-    base_branch: main
-    auto_fix: false    # true = skip owner approval when score >= 7.0
-    auto_merge: false  # true = auto-merge after CI passes
-```
-
-### Language Support
-
-| Language | Detected by | Build | Scoped test |
-|----------|------------|-------|-------------|
-| Go | `go.mod` | `go build ./...` | `go test ./changed/pkg/...` |
-| Node.js | `package.json` | `npm run build` | `jest --testPathPattern=...` |
-| Python | `pyproject.toml` / `requirements.txt` | `py_compile` | `pytest tests/changed/` |
-| Rust | `Cargo.toml` | `cargo build` | `cargo test` |
-| Java | `pom.xml` | `mvn compile -q` | `mvn test -Dtest=ChangedTest` |
-
----
-
-## Directory Layout
-
-```
-~/.clawflow/                        ← user data (created by install.sh)
-├── bin/
-│   └── clawflow                    ← CLI binary
-├── config/
-│   ├── config.yaml                  ← repos to monitor (platform, base_url per repo)
-│   ├── credentials.yaml            ← GH + GitLab tokens (0600, not committed)
-│   └── install.yaml                ← install location record
-└── memory/
-    └── repos/
-        └── owner-repo/
-            └── issue-7.md          ← per-issue processing records
-
-~/.claude/skills/clawflow/          ← skill definition (agent brain)
-├── SKILL.md                        ← main pipeline instructions
-├── evaluation.md                   ← evaluation strategy + comment templates
-└── subagent-prompt.md              ← sub-agent task prompt template
-
-clawflow/ (this repo)
-├── cmd/clawflow/                   ← Go CLI source
-├── internal/
-│   ├── config/                     ← config parsing + write
-│   └── vcs/                        ← platform-agnostic VCS interface
-│       ├── interface.go            ← Client interface + shared types
-│       ├── github/                 ← GitHub REST API v3 client
-│       └── gitlab/                 ← GitLab REST API v4 client
-├── skills/clawflow/SKILL.md        ← source for SKILL.md
-└── install.sh                      ← installer
-```
-
----
-
-## SaaS Worker
-
-The worker connects your local machine to a ClawFlow SaaS backend, polling for tasks and running the pipeline automatically.
-
-### Setup
-
-```bash
-clawflow login --saas-url https://your-saas-instance.com
-```
-
-This saves `saas_url` and `worker_token` to `~/.clawflow/config/worker.yaml`.
-
-### Commands
-
-```bash
-clawflow worker start            # start background worker (detaches by default)
-clawflow worker start --foreground  # run inline (useful for systemd / Docker)
-clawflow worker stop             # stop the background worker
-clawflow worker status           # show config + verify SaaS connectivity
-clawflow worker logs             # show last 200 lines of worker log
-clawflow worker logs -f          # follow live output
-```
-
-The worker polls `{saas-url}/api/v1/worker/tasks` every 30 seconds (configurable via `--poll-interval`), claims pending tasks, runs `claude -p "ClawFlow run"`, and reports results (PR URL, logs, token usage) back to the SaaS.
-
-A single-instance lock (`~/.clawflow/worker.pid`) prevents duplicate workers on the same host.
 
 ---
 
 ## Updating
 
 ```bash
-clawflow update                  # download latest binary + update SKILL.md
-clawflow update --from-source    # rebuild from cloned repo
+clawflow update                    # fetch the latest binary
+clawflow update --from-source      # rebuild from cloned repo (dev)
 ```
 
 ---
 
-## Roadmap
+## Contributing / Extending
 
-- [x] Go CLI for deterministic pipeline operations
-- [x] Worktree isolation per issue
-- [x] PR deduplication check
-- [x] `clawflow update` for self-updating
-- [x] GitLab support (REST API, self-hosted v11.11+)
-- [x] Auto-detect platform from URL / SSH / local `.git/config`
-- [x] `issue create/list` for pipeline testing
-- [ ] Smarter feasibility scoring — historical issue matching
-- [ ] Parallel processing — concurrent sub-agents
-- [ ] Webhook-first triggering — real-time instead of cron polling
+The project is deliberately small. To change behavior, you almost always want to edit or add an operator, not Go code:
 
----
+1. Create `skills/<operator-name>/SKILL.md` (built-in) or `~/.clawflow/skills/<operator-name>/SKILL.md` (user).
+2. Declare the frontmatter: `name`, `description`, `operator.trigger`, `operator.lock_label`.
+3. Write the prompt body.
+4. Run `clawflow operators list` to confirm it's registered, then `clawflow run` to exercise it on a test issue.
 
-## Contributing
-
-1. Fork this repository
-2. Edit `skills/clawflow/SKILL.md` to improve agent logic
-3. Edit `cmd/clawflow/` to add CLI features
-4. Submit a PR
+Go CLI work goes under `cmd/clawflow/commands/` and `internal/`. The tight spot to touch for extending the loop itself is `internal/operator/`.
 
 ---
 

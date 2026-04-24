@@ -113,17 +113,20 @@ const (
 	MergeStatusUnknown    MergeStatus = "unknown"
 )
 
-// ClawFlowLabels are the standard labels ClawFlow requires on every monitored repo.
+// ClawFlowLabels are the standard labels ClawFlow requires on every monitored
+// repo. Two buckets: trigger labels gate which operator fires; state labels
+// are written back by operators to record progress.
 var ClawFlowLabels = []Label{
-	{"ready-for-agent", "00FF00", "Owner approved — triggers ClawFlow fix pipeline"},
-	{"agent-evaluated", "0075CA", "ClawFlow has assessed this issue and posted a proposal"},
-	{"in-progress", "FFA500", "Agent is actively working on this issue"},
-	{"agent-skipped", "BDBDBD", "Low confidence — needs more information"},
-	{"agent-failed", "FF0000", "Agent attempted but failed"},
-	{"blocked", "E4E669", "Waiting on dependency issues to be resolved"},
-	{"agent-split", "8B5CF6", "Issue split into sub-issues; main issue closed when all sub-issues close"},
-	{"type:bug", "D73A4A", "Issue classified as a bug report"},
-	{"type:feature", "0E8A16", "Issue classified as a feature request"},
-	{"type:refactor", "1D76DB", "Issue classified as a refactoring task"},
-	{"type:docs", "5319E7", "Issue classified as a documentation task"},
+	// Trigger labels
+	{"bug", "D73A4A", "Bug report — triggers evaluate-bug operator"},
+	{"feat", "0E8A16", "Feature request — triggers evaluate-feat operator (planned)"},
+	{"ready-for-agent", "00FF00", "Owner approved — triggers implement operator"},
+	{"agent-mentioned", "BFD4F2", "Issue mentioned @agent — triggers reply-comment operator"},
+	// State labels
+	{"agent-running", "FFA500", "An operator is running on this subject (concurrency lock)"},
+	{"agent-evaluated", "0075CA", "An evaluate-* operator has posted its assessment"},
+	{"agent-skipped", "BDBDBD", "Operator declined — confidence too low or info missing"},
+	{"agent-implemented", "6E7681", "implement operator finished — PR opened"},
+	{"agent-failed", "FF0000", "An operator errored; see failure comment"},
+	{"agent-replied", "E99695", "reply-comment operator has responded to a mention"},
 }

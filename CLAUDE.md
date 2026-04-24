@@ -14,136 +14,84 @@ clawflow label add/remove
 
 ---
 
-## Cross-Repo API Contract
+## 算子规范
 
-**This section is mirrored in `/Users/mikas/github/clawflow-saas/CLAUDE.md`. Keep them in sync — if you edit one, edit the other in the same change.**
+ClawFlow 的核心设计:**一切可扩展单元都是算子 (operator)**。要改变行为,通常是写一个算子,不是改 Go 代码。
 
-Two repos, one protocol. The open-source CLI (this repo, Go) and the commercial SaaS (`clawflow-saas`, Rust) talk to each other over the endpoints below. The contract lives in **both** CLAUDE.md files so whichever repo a session is opened in, it sees the same source of truth.
+### 什么是算子
 
-### Ownership
+算子 = 一次有明确输入输出的 `claude -p` 调用,表现为一个 SKILL.md 文件:
 
-- **CLI dev** (this session, if you're in `clawflow`): owns the Go client code that calls these endpoints, stream-json parsing, worker loop, config sync logic on the local side.
-- **SaaS dev** (session in `/Users/mikas/github/clawflow-saas`): owns the HTTP/WS handlers, DB schema for shared tables (`pipeline_runs`, `pipeline_logs`, `billing_usage`, `agents`, `org_repos`), and all auth/rate-limit/credit logic.
+- **输入** = issue/PR 当前状态(label + body + comments)
+- **输出** = label 变更 + comment + 可选 PR
+- **不直接跟其他算子通信**,只通过 VCS(label/comment)交接 —— 算子 A 写出的 label 正是算子 B 的触发 label
 
-Neither session should edit the other's code. Changes that span both = draft the contract diff in one session, paste it into the other.
+### 目录约定
 
-### Endpoints (CLI ↔ SaaS)
+| 位置 | 用途 | 优先级 |
+|---|---|---|
+| `skills/<name>/SKILL.md`(repo 内) | 内置算子,通过 `embed.FS` 打进二进制 | 低 |
+| `~/.clawflow/skills/<name>/SKILL.md` | 用户自定义算子 | 高(同名覆盖内置) |
 
-Base: `https://clawflow.daboluo.cc/api/v1` (prod) · local dev: `http://localhost:3000/api/v1`
+### Frontmatter schema
 
-Auth on all worker endpoints: `Authorization: Bearer <worker_token>` header. Token obtained at `POST /agents/register`.
+每个算子的 SKILL.md 顶部:
 
-| Method | Path | Direction | Purpose |
-|---|---|---|---|
-| `POST` | `/agents/register` | CLI → SaaS | Register a worker, returns `worker_token` + `sync_token` |
-| `POST` | `/worker/heartbeat` | CLI → SaaS | Keep-alive, advertises capacity |
-| `GET` | `/worker/tasks` | CLI → SaaS | List claimable `pending` pipeline_runs for this worker |
-| `POST` | `/worker/tasks/:id/claim` | CLI → SaaS | Atomically claim a run (status → `running`, sets `started_at`) |
-| `POST` | `/worker/tasks/:id/logs` | CLI → SaaS | **Batch** upload of buffered log entries (see `LogEntry` below) |
-| `POST` | `/worker/tasks/:id/usage` | CLI → SaaS | Report `UsageReport` (token counts + cost) for billing |
-| `POST` | `/worker/tasks/:id/complete` | CLI → SaaS | Mark run `success` + optional `pr_url` |
-| `POST` | `/worker/tasks/:id/fail` | CLI → SaaS | Mark run `failed` with error message |
-| `GET` | `/worker/tasks/stale-prs` | CLI → SaaS | **v0.24.0+** — list PRs whose run is `reconciling` and claimable |
-| `POST` | `/worker/tasks/:run_id/reconcile/claim` | CLI → SaaS | Lock one stale-PR for a ~30 min reconcile pass |
-| `POST` | `/worker/tasks/:run_id/reconcile/report` | CLI → SaaS | Report reconcile verdict (`merge`/`close`/`defer` + rebase/test/review results) |
-| `POST` | `/worker/pipelines` | CLI → SaaS | Push a pipeline_run CLI discovered locally (private VCS) |
-| `POST` | `/worker/discover` | CLI → SaaS | Fallback issue-discovery push (no webhook) |
-| `POST` | `/worker/health-report` | CLI → SaaS | Per-repo health (for the repo-list badge) |
-| `GET` | `/worker/repo-jobs` | CLI → SaaS | List pending repo-level jobs SaaS enqueued (kind=`label_init`, …) |
-| `POST` | `/worker/repo-jobs/:id/claim` | CLI → SaaS | Atomically claim a repo job (pending → running) |
-| `POST` | `/worker/repo-jobs/:id/complete` | CLI → SaaS | Mark repo job done |
-| `POST` | `/worker/repo-jobs/:id/fail` | CLI → SaaS | Mark repo job failed with `{reason}` (truncated to 500 chars server-side) |
-| `POST` | `/sync/config` | CLI → SaaS | Push local repo config (upsert by `org_id+platform+full_name`) |
-| `GET` | `/sync/config?since=<ts>` | CLI ← SaaS | Pull incremental repo config changes |
-| WS | `/ws/worker/tasks/:run_id/stream` | CLI → SaaS | Live per-line log stream during `claude -p` execution |
-| WS | `/ws/worker/channel` | CLI ↔ SaaS | Bidirectional control channel (dispatch, cancel) |
+```yaml
+---
+name: evaluate-bug
+description: "一句话说明算子做什么、何时会被触发"
+operator:
+  trigger:
+    target: "issue"                                           # "issue" | "pr"
+    labels_required: ["bug"]                                  # 必须全部存在(AND)
+    labels_excluded: ["agent-evaluated", "agent-skipped", "agent-running"]  # 任一存在即跳过(OR NOT)
+  lock_label: "agent-running"                                 # 执行前加、完成/失败后删,并发锁
+---
 
-### Shared payload shapes
-
-**`LogEntry`** — used by both the WS stream and the `/logs` batch upload. Both paths MUST send `raw_event` when the source line parses as JSON:
-
-```json
-{
-  "level": "info | warn | error",
-  "message": "string (human-readable summary)",
-  "timestamp": "RFC3339",
-  "raw_event": { /* original claude stream-json event, or null */ }
-}
+# (frontmatter 后是喂给 claude 的 prompt 正文)
 ```
 
-- SaaS stores `raw_event` in `pipeline_logs.raw_event` (jsonb). The frontend renders it as rich cards (`frontend/src/components/PipelineEventCard.tsx`).
-- **Known past bug**: CLI v0.21.0 and earlier dropped `raw_event` on the batch HTTP path — fixed in v0.21.1. SaaS side has always accepted it.
+**字段说明**:
 
-**`UsageReport`**:
+| 字段 | 含义 |
+|---|---|
+| `name` | 唯一标识,必须与目录名一致 |
+| `description` | 人读说明,也用于 `clawflow operators list` |
+| `operator.trigger.target` | 扫哪类对象。`issue` 或 `pr` |
+| `operator.trigger.labels_required` | 必须**全部**存在才触发(AND) |
+| `operator.trigger.labels_excluded` | 有任意一个就跳过(OR NOT) |
+| `operator.lock_label` | 并发锁,执行前加、完成后删 |
 
-```json
-{
-  "model": "claude-opus-4-6",
-  "input_tokens":  0,
-  "output_tokens": 0,
-  "cache_creation_tokens": 0,
-  "cache_read_tokens":     0,
-  "total_cost_usd": 0.0
-}
-```
+**故意不做的事**(第一版 schema 的边界):
 
-Cost metering rule: `agent_id IS NULL` → SaaS-hosted run, charges credits (see `clawflow-saas/CLAUDE.md` "Billing: Executor Isolation"). `agent_id IS NOT NULL` → user's own worker, usage recorded but no credit deduction.
+- 不声明 output(不枚举"加哪些 label / 发哪些 comment")—— 算子自己用工具做,声明式反而限制表达力
+- 不支持 `timeout` 字段 —— 由 CLI 全局配置(默认 60 分钟)
+- 不支持多平台过滤 —— 一个算子对 GitHub/GitLab 都适用
+- 不支持 body 正则匹配 —— label 匹配已足够
 
-**`RepoJob`** — per-repo background work SaaS needs the CLI worker to execute locally. First use case: `label_init` (when a user adds a repo through the SaaS UI, SaaS has no creds for the user's VCS — especially for private-network GitLab — so it enqueues this and the CLI runs `InitLabels` on the next tick). CLI-side implementation lives in `cmd/clawflow/commands/worker_repo_jobs.go`.
+### 如何新增算子
 
-```json
-{
-  "id": "uuid",
-  "repo_id": "uuid",
-  "kind": "label_init",
-  "platform": "github | gitlab",
-  "full_name": "owner/repo",
-  "attempts": 0,
-  "created_at": "RFC3339"
-}
-```
+1. 在 `skills/<name>/SKILL.md` 创建目录和文件
+2. 写 frontmatter(name / description / trigger / lock_label)
+3. 正文写给 Claude 的指令(自然语言 prompt)
+4. `go build` 重新编译二进制(内置算子嵌入在 binary 里)
+5. 本地 `clawflow run` 在测试仓库上验证
 
-- SaaS enqueues idempotently on `(repo_id, kind)` while status ∈ `pending|running`. Re-adding an already-initialised repo is a safe no-op.
-- CLI reports unsupported kinds via `/fail` so a SaaS-side rollout of a new kind can't strand the queue on older CLIs.
-- `GET /worker/repo-jobs` returns `{"jobs": [RepoJob, ...]}`.
-- Loop cadence: 60s (see `repoJobsInterval`).
+用户算子不需要 `go build` —— 直接放在 `~/.clawflow/skills/` 下,下次 `clawflow run` 自动加载。
 
-**`ReconcileReport`** (v0.24.0+) — body of `/worker/tasks/:run_id/reconcile/report`:
+### 算子设计原则
 
-```json
-{
-  "action": "merge | close | defer",
-  "reason": "<= 500 chars, required",
-  "current_base_sha": "abc123…",
-  "rebase_result":  "clean | conflicts_resolved | conflicts_unresolvable | not_attempted",
-  "test_result":    "passed | failed | skipped | not_attempted",
-  "review_state":   "approved | changes_requested | no_review | comments_only",
-  "usage":      { /* UsageReport, optional */ },
-  "vcs_action": { "type": "merged|closed|none", "performed_at": "RFC3339", "commit_sha": "…" }
-}
-```
-
-- SaaS Phase 1 hard-downgrades `action=merge` to `defer` in its DB, but the CLI has already performed the real merge via the repo's GitHub token by the time this fires — the CLI owns the VCS side.
-- SaaS returns `400` if `reason` > 500 chars, or if `action=close` with `test_result ∈ {skipped, not_attempted}` (close requires a real test outcome).
-- SaaS returns `409` if the run isn't in `reconciling` state.
-- Phase 1 is GitHub-only; GitLab stale-PRs are filtered out server-side.
-
-### Evolving the contract
-
-1. **Only add backward-compatible fields.** New optional fields OK. Renaming or removing a field = coordinated release on both sides, with the CLI bump going out first.
-2. **Never break an older CLI** without bumping the CLI's minimum version check. Real users may be on v0.19 for weeks.
-3. **When the change spans both repos**:
-   - SaaS dev drafts the contract change in the shared section + in `api-types` crate.
-   - Paste the new shape into the CLI session.
-   - CLI dev mirrors the change in its Go structs, cuts a new CLI tag.
-   - SaaS dev merges + deploys.
-4. **Mention the cross-cutting change in both commits** so `git log` shows it on both sides (e.g., `feat(worker/contract): add RawEvent to batch LogEntry — matches SaaS 0abc123`).
+- **幂等** —— 多次运行结果应一致。靠 `labels_excluded` 跳过已处理对象
+- **自包含** —— 一个算子只做一件事。拆细不拆粗
+- **通过 label 协同** —— 不要让算子 A 假设算子 B 存在;隐式串联靠 label 流转
+- **失败写 comment** —— 算子失败时应在 issue 留一条 comment 说明原因,runner 负责加 `agent-failed`
 
 ---
 
+## Release 流程
 
-
-每次新版本发布只需两步：
+每次新版本发布只需两步:
 
 ### 1. 打 Tag 并推送
 
@@ -179,44 +127,29 @@ Tag message 即 GitHub Release 的标题和正文，格式：
 - {变更说明}：{迁移方式}
 ```
 
-示例：
-
-```
-feat: GitLab 支持 + 自动克隆缺失仓库
-
-## What's New
-- GitLab 支持（v11.11+）：可监控 GitLab 仓库的 issue，自动评估并提 MR
-- 自动克隆：repos.yaml 中配置的仓库本地路径不存在时自动 clone，无需手动操作
-- 标签自动初始化：`clawflow repo add` 时自动在目标仓库创建所需标签
-
-## Bug Fixes
-- 修复 GitHub URL 格式化问题（normalize 处理 https/ssh 混用场景）
-```
-
 ### 2. 验证用户可以自动更新
 
 ```bash
 gh release view v{x.y.z}
-# 确认 assets 列表有各平台文件（Actions 完成后）
+# 确认 assets 列表有各平台文件(Actions 完成后)
 
 # 模拟用户更新
 clawflow update
-# 应输出：binary updated + SKILL.md updated
+# 应输出:binary updated
 ```
 
 ---
 
 ## 用户更新流程
 
-用户安装后，后续版本只需运行：
+用户安装后,后续版本只需运行:
 
 ```bash
-clawflow update           # 从 GitHub 下载最新 binary + 更新 SKILL.md
-clawflow update --from-source  # 从本地 repo 重新构建（开发用）
+clawflow update                   # 从 GitHub 下载最新 binary
+clawflow update --from-source     # 从本地 repo 重新构建(开发用)
 ```
 
-`clawflow update` 自动读取 `~/.clawflow/config/install.yaml`（由 install.sh 写入），
-知道 SKILL.md 装在哪个 agent 目录里，并自动更新。
+内置算子随 binary 一起分发（通过 `embed.FS`），binary 更新即算子更新。用户放在 `~/.clawflow/skills/` 下的自定义算子不会被 update 覆盖。
 
 ---
 
@@ -232,49 +165,40 @@ clawflow update --from-source  # 从本地 repo 重新构建（开发用）
 
 ## Skills 构建规范
 
+算子的 schema 见上方"算子规范"。本节是跨算子通用的写作规范。
+
 ### 目录结构
 
+每个算子一个目录:
+
 ```
-skills/<skill-name>/
-├── SKILL.md           # 必须，主流程入口
-├── evaluation.md      # 详细评估策略、评论模板等
-├── subagent-prompt.md # Sub-agent Task Prompt 模板
-└── scripts/           # 可执行脚本（如有）
+skills/<operator-name>/
+├── SKILL.md           # 必须,frontmatter + prompt 正文
+├── <extras>.md        # 可选:评估模板、维度表等,SKILL.md 过长时拆出来
+└── scripts/           # 可选:算子调用的辅助脚本
 ```
 
-### SKILL.md 规范
+### SKILL.md 规模
 
-- **控制在 500 行以内**，超出部分拆到独立文件
-- 详细内容（评论模板、prompt 模板、评估维度）放到独立 `.md` 文件
-- 在 SKILL.md 里用 Markdown 链接引用，说明文件内容和何时加载：
+- **控制在 500 行以内**,超出部分拆到独立文件
+- 详细内容(评论模板、prompt 模板、评估维度)放到独立 `.md` 文件
+- SKILL.md 里用 Markdown 链接引用,并说明何时加载:
   ```markdown
-  详见 [evaluation.md](evaluation.md)，包含：
-  - Bug / Feature / 通用三种评估维度
-  - 高/低置信度评论模板
+  详见 [evaluation.md](evaluation.md),包含 Bug/Feature 评估维度与评论模板
   ```
-
-### Frontmatter 关键字段
-
-```yaml
----
-name: skill-name
-description: "触发条件描述，Claude 用此判断何时自动加载"
-metadata:
-  openclaw:
-    requires:
-      bins: ["git", "clawflow"]
-    primaryEnv: "GH_TOKEN"
----
-```
-
-- `description` 前置核心触发词，总长度不超过 1536 字符
-- `disable-model-invocation: true` — 只允许用户手动 `/skill-name` 触发（适合有副作用的操作）
-- `allowed-tools` — 预授权工具，避免每次询问用户
 
 ### 拆分原则
 
 | 放 SKILL.md | 放独立文件 |
 |------------|-----------|
-| 流程步骤、CLI 命令 | 评论/prompt 模板 |
-| 安全约束、标签流程图 | 评估维度表格 |
-| 文件引用说明 | 详细示例、参考文档 |
+| 算子 frontmatter、触发说明 | 评论/prompt 模板 |
+| 流程步骤、CLI 命令 | 评估维度表格 |
+| 安全约束、核心指令 | 详细示例、参考文档 |
+
+---
+
+## 商业版
+
+此 repo 曾配套过一个闭源的 SaaS 协同方向(`clawflow-saas`,Rust):CLI 作为 worker 连 SaaS 后端拉任务、上报 token 用量、走计费。该方向已废弃,本仓库完全独立,不再依赖任何后端。
+
+如果半年后翻 git log 发现一堆 `worker_*.go`、`/api/v1/worker/...`、`pipeline_run` 字样的历史提交,那就是这段。`clawflow-saas` 代码保留在另一个目录里仅供参考,不再活跃维护。
