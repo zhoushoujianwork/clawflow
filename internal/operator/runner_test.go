@@ -1,8 +1,10 @@
 package operator
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -12,7 +14,7 @@ import (
 // fakeVCS records label and comment operations so tests can assert on them
 // without spinning up a real GitHub/GitLab client.
 type fakeVCS struct {
-	labels          map[int][]string // per-issue label list (append on add, remove on remove)
+	labels          map[int][]string
 	comments        []postedComment
 	errOnAdd        bool
 	errOnRemove     bool
@@ -74,11 +76,11 @@ func TestRun_HappyPath(t *testing.T) {
 	sub := &Subject{Number: 42, Labels: []string{"bug"}}
 	v := newFakeVCS()
 
-	err := Run(context.Background(), op, sub, v, RunOptions{
+	output, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo:    "acme/webapp",
 		Workdir: t.TempDir(),
 		Timeout: time.Second,
-		RunFunc: func(_ context.Context, prompt, _ string, _ time.Duration) (string, error) {
+		RunFunc: func(_ context.Context, prompt, _ string, _ time.Duration, _ io.Writer) (string, error) {
 			// Sanity: prompt should carry the operator body and context.
 			if !strings.Contains(prompt, "do the thing") {
 				t.Errorf("fake claude did not receive op prompt; got: %q", prompt)
@@ -92,19 +94,19 @@ func TestRun_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if output != "evaluation posted" {
+		t.Errorf("Run returned output %q, want %q", output, "evaluation posted")
+	}
 
-	// Lock added once and removed once.
 	if v.addLabelCalls != 1 {
 		t.Errorf("AddLabel called %d times, want 1", v.addLabelCalls)
 	}
 	if v.removeLabelCals != 1 {
 		t.Errorf("RemoveLabel called %d times, want 1", v.removeLabelCals)
 	}
-	// Final label set should NOT contain the lock.
 	if slices.Contains(v.labels[42], "agent-running") {
 		t.Errorf("lock label still present after run: %v", v.labels[42])
 	}
-	// Result comment posted.
 	if len(v.comments) != 1 {
 		t.Fatalf("want 1 comment, got %d", len(v.comments))
 	}
@@ -119,12 +121,18 @@ func TestRun_AlreadyLocked_NoOp(t *testing.T) {
 	v := newFakeVCS()
 	called := false
 
-	err := Run(context.Background(), op, sub, v, RunOptions{
-		Repo:    "r",
-		RunFunc: func(context.Context, string, string, time.Duration) (string, error) { called = true; return "", nil },
+	out, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+			called = true
+			return "", nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("want nil error (skip), got %v", err)
+	}
+	if out != "" {
+		t.Errorf("skip should return empty output; got %q", out)
 	}
 	if called {
 		t.Error("claude should NOT be invoked when lock already held")
@@ -143,9 +151,9 @@ func TestRun_ClaudeFails_PostsFailureComment(t *testing.T) {
 	v := newFakeVCS()
 
 	claudeErr := errors.New("model refused")
-	err := Run(context.Background(), op, sub, v, RunOptions{
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
 			return "", claudeErr
 		},
 	})
@@ -153,11 +161,9 @@ func TestRun_ClaudeFails_PostsFailureComment(t *testing.T) {
 		t.Fatal("want error when claude fails, got nil")
 	}
 
-	// Lock should be added AND removed.
 	if v.addLabelCalls != 1 || v.removeLabelCals != 1 {
 		t.Errorf("add=%d remove=%d, want 1/1", v.addLabelCalls, v.removeLabelCals)
 	}
-	// Failure comment should mention the op name.
 	if len(v.comments) != 1 {
 		t.Fatalf("want 1 failure comment, got %d", len(v.comments))
 	}
@@ -177,9 +183,9 @@ func TestRun_AddLabelFails_StopsEarly(t *testing.T) {
 	v.errOnAdd = true
 
 	claudeCalled := false
-	err := Run(context.Background(), op, sub, v, RunOptions{
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
 			claudeCalled = true
 			return "result", nil
 		},
@@ -200,10 +206,10 @@ func TestRun_EmptyClaudeOutput_NoComment(t *testing.T) {
 	sub := &Subject{Number: 1, Labels: []string{"bug"}}
 	v := newFakeVCS()
 
-	err := Run(context.Background(), op, sub, v, RunOptions{
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration) (string, error) {
-			return "   \n\t  ", nil // whitespace only
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+			return "   \n\t  ", nil
 		},
 	})
 	if err != nil {
@@ -212,16 +218,38 @@ func TestRun_EmptyClaudeOutput_NoComment(t *testing.T) {
 	if len(v.comments) != 0 {
 		t.Errorf("empty/whitespace output should produce no comment; got %v", v.comments)
 	}
-	// But the lock still cycled on/off.
 	if v.addLabelCalls != 1 || v.removeLabelCals != 1 {
 		t.Errorf("lock not cycled: add=%d remove=%d", v.addLabelCalls, v.removeLabelCals)
 	}
 }
 
+func TestRun_EventWriterReceivesRunFuncInput(t *testing.T) {
+	// The RunFunc is invoked with whatever io.Writer the caller put in
+	// RunOptions.EventWriter. Confirm the wiring so the dashboard's
+	// events.jsonl sink actually gets passed through.
+	op := &Operator{Name: "x", LockLabel: "l", Prompt: "p"}
+	sub := &Subject{Number: 1, Labels: []string{"bug"}}
+	v := newFakeVCS()
+	var captured io.Writer
+	sink := &bytes.Buffer{}
+
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo:        "r",
+		EventWriter: sink,
+		RunFunc: func(_ context.Context, _, _ string, _ time.Duration, events io.Writer) (string, error) {
+			captured = events
+			return "ok", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if captured != sink {
+		t.Errorf("RunFunc received %v, want the EventWriter sink", captured)
+	}
+}
+
 func TestRun_DefaultRunFuncIsNil(t *testing.T) {
-	// Zero-value RunOptions must leave RunFunc nil; Run() resolves nil to the
-	// real RunClaude at call time. Guards against accidental default that
-	// would mask missing DI.
 	var opts RunOptions
 	if opts.RunFunc != nil {
 		t.Error("default RunOptions.RunFunc should be nil (resolved at Run time)")

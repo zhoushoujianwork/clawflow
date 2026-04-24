@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClawFlow Dashboard</title>
+  <style>
+    :root {
+      --bg: #0e1116;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --success: #3fb950;
+      --failure: #f85149;
+      --skipped: #8b949e;
+      --running: #d29922;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #ffffff;
+        --surface: #f6f8fa;
+        --border: #d0d7de;
+        --text: #1f2328;
+        --muted: #656d76;
+        --accent: #0969da;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+    header h1 { margin: 0; font-size: 18px; display: flex; align-items: center; gap: 12px; }
+    header .meta { margin-top: 4px; font-size: 12px; color: var(--muted); }
+    main { padding: 16px 24px 40px; max-width: 1100px; margin: 0 auto; }
+    section { margin-top: 32px; }
+    h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; background: var(--surface); border-radius: 6px; overflow: hidden; }
+    th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
+    th { font-weight: 600; color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; }
+    tr:last-child td { border-bottom: none; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .status { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+    .status-success { background: rgba(63,185,80,0.15); color: var(--success); }
+    .status-failed { background: rgba(248,81,73,0.15); color: var(--failure); }
+    .status-skipped { background: rgba(139,148,158,0.15); color: var(--skipped); }
+    .status-running { background: rgba(210,153,34,0.15); color: var(--running); }
+    .run-row { cursor: pointer; }
+    .run-row:hover { background: rgba(88,166,255,0.08); }
+    .event-pane {
+      display: none;
+      background: var(--surface);
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-top: 12px;
+      max-height: 600px;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .event-pane.open { display: block; }
+    .event-line { padding: 4px 0; border-bottom: 1px dashed var(--border); }
+    .event-line:last-child { border-bottom: none; }
+    .event-type { color: var(--accent); font-weight: 600; }
+    .summary { background: var(--surface); padding: 12px; border-radius: 6px; border-left: 3px solid var(--accent); margin-top: 8px; font-size: 13px; white-space: pre-wrap; }
+    .empty { color: var(--muted); font-style: italic; padding: 20px; text-align: center; }
+    code.label { background: rgba(88,166,255,0.12); color: var(--accent); padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-right: 4px; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+<header>
+  <h1>🐾 ClawFlow <span class="meta" id="version"></span></h1>
+  <div class="meta" id="meta-line">Loading…</div>
+</header>
+
+<main>
+  <section>
+    <h2>Recent runs</h2>
+    <div id="runs-table"></div>
+  </section>
+
+  <section>
+    <h2>Monitored repos</h2>
+    <div id="repos-table"></div>
+  </section>
+
+  <section>
+    <h2>Registered operators</h2>
+    <div id="ops-table"></div>
+  </section>
+</main>
+
+<script>
+const fmt = (iso) => iso ? new Date(iso).toLocaleString() : "";
+const el = (tag, attrs={}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const k in attrs) n[k] = attrs[k];
+  kids.forEach(c => n.appendChild(typeof c === "string" ? document.createTextNode(c) : c));
+  return n;
+};
+const fetchJSON = async (path) => {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  return r.json();
+};
+
+async function renderMeta() {
+  try {
+    const m = await fetchJSON("./data/meta.json");
+    document.getElementById("version").textContent = m.clawflow_version || "";
+    document.getElementById("meta-line").textContent = `last refresh: ${fmt(m.last_refresh)}`;
+  } catch { /* meta.json may not exist yet on first boot */ }
+}
+
+async function renderRuns() {
+  const host = document.getElementById("runs-table");
+  let runs = [];
+  try { runs = await fetchJSON("./data/runs.json"); } catch {}
+  if (!runs.length) {
+    host.appendChild(el("div", { className: "empty" }, "No runs yet — execute `clawflow run` and refresh."));
+    return;
+  }
+  const table = el("table");
+  table.appendChild(el("thead", {}, el("tr", {},
+    el("th", {}, "When"), el("th", {}, "Operator"), el("th", {}, "Repo"),
+    el("th", {}, "Issue"), el("th", {}, "Status"), el("th", {}, "Duration"))));
+  const tbody = el("tbody");
+  runs.forEach(r => {
+    const dur = r.ended_at && r.started_at ?
+      Math.round((new Date(r.ended_at) - new Date(r.started_at)) / 1000) + "s" : "";
+    const row = el("tr", { className: "run-row" },
+      el("td", { className: "mono" }, fmt(r.started_at)),
+      el("td", {}, r.operator || ""),
+      el("td", { className: "mono" }, r.repo || ""),
+      el("td", {}, r.issue_title ? `#${r.issue_number} — ${r.issue_title}` : `#${r.issue_number}`),
+      el("td", {}, statusBadge(r.status)),
+      el("td", { className: "mono" }, dur));
+    const pane = el("div", { className: "event-pane" });
+    const wrapper = el("tr");
+    const wrapperCell = el("td"); wrapperCell.colSpan = 6;
+    wrapperCell.appendChild(pane);
+    wrapper.appendChild(wrapperCell);
+    row.onclick = async () => {
+      pane.classList.toggle("open");
+      if (pane.dataset.loaded) return;
+      pane.dataset.loaded = "1";
+      await loadEvents(r, pane);
+    };
+    tbody.appendChild(row);
+    tbody.appendChild(wrapper);
+  });
+  table.appendChild(tbody);
+  host.appendChild(table);
+}
+
+function statusBadge(status) {
+  const span = el("span", { className: "status status-" + (status || "skipped") }, status || "-");
+  return span;
+}
+
+async function loadEvents(run, pane) {
+  // Summary first (the final comment body).
+  if (run.summary) {
+    pane.appendChild(el("div", { className: "summary" }, run.summary));
+  }
+  if (run.error) {
+    pane.appendChild(el("div", { className: "summary", style: "border-left-color: var(--failure); color: var(--failure);" }, run.error));
+  }
+  // Then the raw event stream.
+  try {
+    const res = await fetch(run.path + "events.jsonl", { cache: "no-store" });
+    if (!res.ok) {
+      pane.appendChild(el("div", { className: "empty" }, "no events.jsonl"));
+      return;
+    }
+    const text = await res.text();
+    const lines = text.split("\n").filter(Boolean);
+    lines.forEach(line => {
+      try {
+        const ev = JSON.parse(line);
+        renderEvent(ev, pane);
+      } catch {
+        pane.appendChild(el("div", { className: "event-line" }, line));
+      }
+    });
+  } catch (e) {
+    pane.appendChild(el("div", { className: "empty" }, "events.jsonl fetch failed: " + e.message));
+  }
+}
+
+function renderEvent(ev, pane) {
+  // Extract just the interesting bits for a first-pass render. The SaaS
+  // frontend has a richer PipelineEventCard; this is placeholder UI.
+  let label = ev.type;
+  if (ev.type === "stream_event" && ev.event) label = "stream_event." + ev.event.type;
+  if (ev.type === "result") label = `result (${ev.subtype || "?"})`;
+  let body = "";
+  if (ev.type === "result") {
+    body = ev.result || "";
+  } else if (ev.type === "stream_event" && ev.event?.delta?.text) {
+    body = ev.event.delta.text;
+  } else if (ev.type === "assistant" && ev.message?.content) {
+    body = ev.message.content.map(c => c.type === "text" ? c.text : `[${c.type}]`).join(" ");
+  } else {
+    body = JSON.stringify(ev, null, 0).slice(0, 180) + (JSON.stringify(ev).length > 180 ? "…" : "");
+  }
+  pane.appendChild(el("div", { className: "event-line" },
+    el("span", { className: "event-type" }, label + "  "),
+    body));
+}
+
+async function renderRepos() {
+  const host = document.getElementById("repos-table");
+  let repos = [];
+  try { repos = await fetchJSON("./data/repos.json"); } catch {}
+  if (!repos.length) {
+    host.appendChild(el("div", { className: "empty" }, "No repos configured."));
+    return;
+  }
+  const table = el("table");
+  table.appendChild(el("thead", {}, el("tr", {},
+    el("th", {}, "Repo"), el("th", {}, "Platform"), el("th", {}, "Base"),
+    el("th", {}, "Enabled"), el("th", {}, "Auto-fix"), el("th", {}, "Auto-merge"))));
+  const tbody = el("tbody");
+  repos.forEach(r => tbody.appendChild(el("tr", {},
+    el("td", { className: "mono" }, r.full_name),
+    el("td", {}, r.platform),
+    el("td", { className: "mono" }, r.base_branch || ""),
+    el("td", {}, r.enabled ? "✓" : "—"),
+    el("td", {}, r.auto_fix ? "on" : "off"),
+    el("td", {}, r.auto_merge ? "on" : "off"))));
+  table.appendChild(tbody);
+  host.appendChild(table);
+}
+
+async function renderOperators() {
+  const host = document.getElementById("ops-table");
+  let ops = [];
+  try { ops = await fetchJSON("./data/operators.json"); } catch {}
+  if (!ops.length) {
+    host.appendChild(el("div", { className: "empty" }, "No operators loaded."));
+    return;
+  }
+  const table = el("table");
+  table.appendChild(el("thead", {}, el("tr", {},
+    el("th", {}, "Name"), el("th", {}, "Target"),
+    el("th", {}, "Triggers"), el("th", {}, "Excludes"), el("th", {}, "Description"))));
+  const tbody = el("tbody");
+  ops.forEach(op => {
+    const triggers = el("td");
+    (op.labels_required || []).forEach(l => triggers.appendChild(el("code", { className: "label" }, l)));
+    const excludes = el("td");
+    (op.labels_excluded || []).forEach(l => excludes.appendChild(el("code", { className: "label" }, l)));
+    tbody.appendChild(el("tr", {},
+      el("td", { className: "mono" }, op.name),
+      el("td", {}, op.target),
+      triggers, excludes,
+      el("td", {}, op.description || "")));
+  });
+  table.appendChild(tbody);
+  host.appendChild(table);
+}
+
+(async function main() {
+  await Promise.all([renderMeta(), renderRuns(), renderRepos(), renderOperators()]);
+})();
+</script>
+</body>
+</html>

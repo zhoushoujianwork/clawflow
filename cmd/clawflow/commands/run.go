@@ -11,6 +11,7 @@ import (
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
 // NewRunCmd wires `clawflow run`: one pass of the operator loop over every
@@ -91,10 +92,27 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		return nil
 	}
 
+	// Snapshot the static state so the dashboard can render it even if no
+	// operator fires this run. Failures are best-effort logged, not fatal.
+	if err := snapshot.WriteRepos(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot repos: %v\n", err)
+	}
+	if err := snapshot.WriteOperators(reg); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot operators: %v\n", err)
+	}
+	if err := snapshot.WriteMeta(Version); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot meta: %v\n", err)
+	}
+
 	for fullName, repoCfg := range repos {
 		if err := runRepoOnce(ctx, reg, fullName, repoCfg, onlyIssue, timeout); err != nil {
 			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
 		}
+	}
+
+	// Refresh the runs index so the dashboard shows this run at the top.
+	if err := snapshot.WriteRunsIndex(50); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot runs index: %v\n", err)
 	}
 	return nil
 }
@@ -136,15 +154,52 @@ func runRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, r
 			// Best-effort comment fetch for prompt context; ignore failures.
 			comments, _ := client.ListIssueComments(fullName, sub.Number)
 
-			err = operator.Run(ctx, op, sub, client, operator.RunOptions{
-				Repo:     fullName,
-				Workdir:  workdir,
-				Timeout:  timeout,
-				Comments: comments,
+			// Persist per-run events.jsonl + meta.json under the dashboard
+			// data dir so `clawflow web` can replay this run later.
+			startedAt := time.Now()
+			runDir := snapshot.RunDir(fullName, sub.Number, startedAt)
+			_ = os.MkdirAll(runDir, 0o755)
+			eventsFile, eventsErr := os.Create(filepath.Join(runDir, "events.jsonl"))
+			if eventsErr != nil {
+				fmt.Fprintf(os.Stderr, "  events sink: %v\n", eventsErr)
+			}
+
+			output, runErr := operator.Run(ctx, op, sub, client, operator.RunOptions{
+				Repo:        fullName,
+				Workdir:     workdir,
+				Timeout:     timeout,
+				Comments:    comments,
+				EventWriter: eventsFile,
 			})
+			if eventsFile != nil {
+				_ = eventsFile.Close()
+			}
 			cleanup()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  ✗ %v\n", err)
+
+			// Write the run's meta.json regardless of outcome.
+			rm := snapshot.RunMeta{
+				Operator:    op.Name,
+				Repo:        fullName,
+				IssueNumber: sub.Number,
+				IssueTitle:  sub.Title,
+				StartedAt:   startedAt.UTC(),
+				EndedAt:     time.Now().UTC(),
+				Summary:     output,
+			}
+			if runErr != nil {
+				rm.Status = "failed"
+				rm.Error = runErr.Error()
+			} else if output == "" {
+				rm.Status = "skipped"
+			} else {
+				rm.Status = "success"
+			}
+			if err := snapshot.WriteRunMeta(runDir, rm); err != nil {
+				fmt.Fprintf(os.Stderr, "  run meta: %v\n", err)
+			}
+
+			if runErr != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ %v\n", runErr)
 				continue
 			}
 			fmt.Println("  ✓ done")

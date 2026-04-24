@@ -3,6 +3,7 @@ package operator
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -21,35 +22,41 @@ type RunOptions struct {
 	Workdir  string        // cwd for the claude subprocess
 	Timeout  time.Duration // claude subprocess timeout; 0 disables
 	Comments []string      // optional comment thread to include in the prompt
+
+	// EventWriter, if non-nil, receives raw stream-json event lines from
+	// claude so the dashboard can replay runs post-mortem. Callers typically
+	// set it to a file writer pointing at `<run-dir>/events.jsonl`; tests
+	// leave it nil.
+	EventWriter io.Writer
+
 	// RunFunc executes the claude subprocess. Leave nil to use the real
 	// RunClaude; tests inject a fake that returns canned output without
 	// spawning a process.
-	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration) (string, error)
+	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer) (string, error)
 }
 
-// Run executes one operator against one subject.
+// Run executes one operator against one subject and returns the operator's
+// final stdout text (or the empty string when the run was skipped).
 //
 // Flow:
-//  1. Skip if the subject already has the lock label (defensive against a
-//     previous crash or concurrent runner).
+//  1. Skip if the subject already has the lock label.
 //  2. Add lock label.
-//  3. Build prompt and invoke claude.
-//  4. On success: post claude's output as a comment.
+//  3. Build prompt and invoke claude; events are teed to opts.EventWriter.
+//  4. On success: post output as a comment.
 //     On failure: post a failure summary as a comment.
 //  5. Always remove the lock label (best-effort).
 //
-// Note on concurrency: label operations on GitHub/GitLab are atomic on the
-// server side, but "check-then-add" is not. Two concurrent runners can both
-// see "no lock" and both add the same label (AddLabel is idempotent) and
-// proceed in parallel. For a single-user self-hosted workflow this is
-// acceptable; if multi-machine concurrency matters, layer a stronger lock
-// (etag / updated_at optimistic check) on top of this.
-func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) error {
+// Label operations on GitHub/GitLab are atomic server-side, but
+// check-then-add is not — two concurrent runners can both see "no lock"
+// and proceed in parallel. For a single-user self-hosted workflow this is
+// acceptable; multi-machine concurrency needs a stronger lock layered
+// on top.
+func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, error) {
 	if sub.HasLabel(op.LockLabel) {
-		return nil
+		return "", nil
 	}
 	if err := v.AddLabel(opts.Repo, sub.Number, op.LockLabel); err != nil {
-		return fmt.Errorf("add lock label: %w", err)
+		return "", fmt.Errorf("add lock label: %w", err)
 	}
 	defer func() { _ = v.RemoveLabel(opts.Repo, sub.Number, op.LockLabel) }()
 
@@ -58,21 +65,18 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	if runFunc == nil {
 		runFunc = RunClaude
 	}
-	output, err := runFunc(ctx, prompt, opts.Workdir, opts.Timeout)
+	output, err := runFunc(ctx, prompt, opts.Workdir, opts.Timeout, opts.EventWriter)
 	if err != nil {
 		msg := fmt.Sprintf("⚠️ Operator `%s` failed:\n\n```\n%v\n```", op.Name, err)
 		_ = v.PostIssueComment(opts.Repo, sub.Number, msg)
-		return err
+		return output, err
 	}
 
-	// The operator's stdout becomes the comment body. Ops that want richer
-	// side effects (create PRs, add specific labels) do them inside the
-	// claude subprocess via `clawflow pr create` / `clawflow label add`; the
-	// stdout is the final human-readable summary.
-	if trimmed := strings.TrimSpace(output); trimmed != "" {
+	trimmed := strings.TrimSpace(output)
+	if trimmed != "" {
 		if err := v.PostIssueComment(opts.Repo, sub.Number, trimmed); err != nil {
-			return fmt.Errorf("post result comment: %w", err)
+			return trimmed, fmt.Errorf("post result comment: %w", err)
 		}
 	}
-	return nil
+	return trimmed, nil
 }

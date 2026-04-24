@@ -202,6 +202,20 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 
 ---
 
+## Local dashboard (optional)
+
+Every `clawflow run` writes JSON snapshots and per-run event logs to `~/.clawflow/dashboard/`. Launch a local viewer with:
+
+```bash
+clawflow web --open          # serves localhost:8080 and opens your browser
+```
+
+The dashboard is a static site — no backend, no DB. It reads `data/repos.json`, `data/operators.json`, `data/runs.json`, and per-run `events.jsonl` files directly. You can also point any static file server (`python3 -m http.server`, nginx, …) at `~/.clawflow/dashboard/` if you prefer not to use `clawflow web`.
+
+Runs capture claude's full stream-json event log, so you can replay what an operator did on any past issue.
+
+---
+
 ## Claude Code integration (optional)
 
 If you use [Claude Code](https://claude.ai/code), you can install a small skill that teaches Claude about the ClawFlow surface — so mentioning "evaluate this issue", "run the agent on issue 7", or anything about the operator pipeline triggers Claude to reach for `clawflow` commands:
