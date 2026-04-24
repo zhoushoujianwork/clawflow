@@ -21,6 +21,10 @@ type RunOptions struct {
 	Workdir  string        // cwd for the claude subprocess
 	Timeout  time.Duration // claude subprocess timeout; 0 disables
 	Comments []string      // optional comment thread to include in the prompt
+	// RunFunc executes the claude subprocess. Leave nil to use the real
+	// RunClaude; tests inject a fake that returns canned output without
+	// spawning a process.
+	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration) (string, error)
 }
 
 // Run executes one operator against one subject.
@@ -50,7 +54,11 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	defer func() { _ = v.RemoveLabel(opts.Repo, sub.Number, op.LockLabel) }()
 
 	prompt := BuildPrompt(op, sub, opts.Repo, opts.Comments)
-	output, err := RunClaude(ctx, prompt, opts.Workdir, opts.Timeout)
+	runFunc := opts.RunFunc
+	if runFunc == nil {
+		runFunc = RunClaude
+	}
+	output, err := runFunc(ctx, prompt, opts.Workdir, opts.Timeout)
 	if err != nil {
 		msg := fmt.Sprintf("⚠️ Operator `%s` failed:\n\n```\n%v\n```", op.Name, err)
 		_ = v.PostIssueComment(opts.Repo, sub.Number, msg)

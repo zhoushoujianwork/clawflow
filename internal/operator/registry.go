@@ -1,7 +1,6 @@
 package operator
 
 import (
-	"embed"
 	"fmt"
 	"io/fs"
 	"os"
@@ -22,17 +21,18 @@ func NewRegistry() *Registry {
 	return &Registry{ops: make(map[string]*Operator)}
 }
 
-// LoadEmbedded walks embedFS at `root` and parses every <name>/SKILL.md.
-// Used for the binary's built-in operators.
-func (r *Registry) LoadEmbedded(embedFS embed.FS, root string) error {
-	return fs.WalkDir(embedFS, root, func(path string, d fs.DirEntry, err error) error {
+// LoadEmbedded walks `sys` at `root` and parses every <name>/SKILL.md. Used
+// for the binary's built-in operators (production passes an embed.FS, which
+// satisfies fs.FS), and for tests (pass fstest.MapFS).
+func (r *Registry) LoadEmbedded(sys fs.FS, root string) error {
+	return fs.WalkDir(sys, root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() || !strings.HasSuffix(path, "/SKILL.md") {
 			return nil
 		}
-		data, rerr := embedFS.ReadFile(path)
+		data, rerr := fs.ReadFile(sys, path)
 		if rerr != nil {
 			return fmt.Errorf("read embedded %s: %w", path, rerr)
 		}
