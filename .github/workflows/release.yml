@@ -27,14 +27,17 @@ jobs:
           go build -o clawflow ./cmd/clawflow/
           ./clawflow --help
           ./clawflow version
+          ./clawflow run --help
+          ./clawflow operators list
           ./clawflow repo --help
           ./clawflow issue --help
           ./clawflow label --help
-          ./clawflow harvest --help
+          ./clawflow pr --help
           ./clawflow config --help
           ./clawflow status --help
-          ./clawflow retry --help
+          ./clawflow worktree --help
           ./clawflow pr-check --help
+          ./clawflow update --help
 
   build:
     name: Build

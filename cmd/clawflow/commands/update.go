@@ -89,6 +89,17 @@ func downloadLatestBinary() error {
 	if err != nil {
 		return err
 	}
+
+	// Short-circuit when the installed binary is already at (or ahead of) the
+	// published release. A dev build (Version == "dev") parses to 0.0.0 and
+	// therefore never matches — `clawflow update` on a dev build always
+	// downloads, which is the intended way to swap a local build for the
+	// released one.
+	if !IsNewerVersion(Version, tag) {
+		fmt.Printf("  [ok] already at %s — nothing to do\n", Version)
+		return nil
+	}
+
 	fmt.Printf("  [dl] downloading %s (%s)...\n", tag, assetURL)
 
 	resp, err := http.Get(assetURL) //nolint:gosec
