@@ -24,5 +24,8 @@
         ]
       }
     ]
-  }
+  },
+  "additionalDirectories": [
+    "/Users/mikas/github/clawflow-saas"
+  ]
 }
