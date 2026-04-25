@@ -42,8 +42,8 @@ function RepoDetail() {
 
   useEffect(() => {
     Promise.all([
-      fetch('./data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-      fetch('./data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
     ]).then(([repos, allRuns]) => {
       const match = (Array.isArray(repos) ? repos : []).find((x: Repo) => x.full_name === fullName) || null
       setRepo(match)

@@ -3,14 +3,15 @@ import react from '@vitejs/plugin-react'
 import { TanStackRouterVite } from '@tanstack/router-plugin/vite'
 
 /**
- * The built-in CLI serves the dashboard from arbitrary roots
- * (http://127.0.0.1:PORT/) and the bundle's data fetches use relative
- * URLs ("./data/repos.json"), so `base: './'` keeps the absolute-URL
- * asset references in index.html working when the bundle is loaded
- * from a path other than `/`.
+ * `clawflow web` serves the dashboard at http://HOST:PORT/ with an
+ * SPA-fallback that returns index.html for any unknown path. That makes
+ * absolute asset references (`base: '/'`) the right choice — a relative
+ * `./assets/...` reference in index.html breaks at nested routes like
+ * /runs/<slug>/<issue>/<ts> because the browser resolves it against the
+ * current URL path instead of the server root.
  */
 export default defineConfig({
-  base: './',
+  base: '/',
   plugins: [
     TanStackRouterVite(),
     react(),

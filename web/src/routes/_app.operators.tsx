@@ -21,7 +21,7 @@ function OperatorsList() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('./data/operators.json', { cache: 'no-store' })
+    fetch('/data/operators.json', { cache: 'no-store' })
       .then(r => (r.ok ? r.json() : []))
       .then(d => setOps(Array.isArray(d) ? d : []))
       .catch(() => setOps([]))

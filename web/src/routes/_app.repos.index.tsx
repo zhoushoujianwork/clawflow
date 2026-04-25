@@ -22,7 +22,7 @@ function RepoList() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('./data/repos.json', { cache: 'no-store' })
+    fetch('/data/repos.json', { cache: 'no-store' })
       .then(r => (r.ok ? r.json() : []))
       .then(r => setRepos(Array.isArray(r) ? r : []))
       .catch(() => setRepos([]))

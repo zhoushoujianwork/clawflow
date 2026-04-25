@@ -107,9 +107,9 @@ function Dashboard() {
   useEffect(() => {
     setLoading(true)
     Promise.all([
-      fetch('./data/runs.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch('./data/meta.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('./data/repos.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : []).catch(() => []),
+      fetch('/data/runs.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : []).catch(() => []),
+      fetch('/data/meta.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/data/repos.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : []).catch(() => []),
     ]).then(([r, m, rp]) => {
       setRuns(Array.isArray(r) ? r : [])
       setMeta(m)

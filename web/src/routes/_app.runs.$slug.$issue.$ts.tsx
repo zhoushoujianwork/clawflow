@@ -60,7 +60,10 @@ export const Route = createFileRoute('/_app/runs/$slug/$issue/$ts')({
 
 function RunDetail() {
   const { slug, issue, ts } = Route.useParams()
-  const basePath = `./data/runs/${slug}/${issue}/${ts}`
+  // Absolute path from the server root. `./data/...` would break here
+  // because the current URL is /runs/slug/issue/ts and the dashboard
+  // would try to fetch /runs/slug/issue/data/... instead of /data/...
+  const basePath = `/data/runs/${slug}/${issue}/${ts}`
 
   const [meta, setMeta] = useState<RunMeta | null>(null)
   const [events, setEvents] = useState<RawEvent[]>([])
@@ -154,7 +157,9 @@ function RunDetail() {
 
       <section>
         <h2 className="text-sm font-semibold text-foreground mb-2">
-          Event timeline <span className="text-muted-foreground font-normal">({events.length} events)</span>
+          Event timeline <span className="text-muted-foreground font-normal">
+            ({visibleEvents(events).length} of {events.length} events)
+          </span>
         </h2>
         {rawLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
@@ -162,7 +167,7 @@ function RunDetail() {
           <p className="text-sm text-muted-foreground">No events found.</p>
         ) : (
           <div className="space-y-2">
-            {events.map((ev, i) => (
+            {visibleEvents(events).map((ev, i) => (
               <EventCard key={i} ev={ev} />
             ))}
           </div>
@@ -198,11 +203,26 @@ function durationStr(start: string, end: string) {
 }
 
 /**
+ * visibleEvents filters out the noisy incremental stream_event deltas
+ * (every text keystroke and input_json fragment) because the aggregated
+ * `assistant` and `result` events already carry the full content. Keeping
+ * them would be 200+ redundant rows. Also drops transient status pings.
+ */
+function visibleEvents(events: RawEvent[]): RawEvent[] {
+  return events.filter(ev => {
+    if (ev.type === 'stream_event') return false
+    if (ev.type === 'system' && ev.subtype === 'status') return false
+    if (ev.type === 'rate_limit_event') return false
+    return true
+  })
+}
+
+/**
  * EventCard: the richer per-event renderer. Handles the most common
  * stream-json shapes we see in practice:
  *   - system/init: the session bootstrap with tool list
  *   - assistant message with text content: rendered as a chat-style block
- *   - content_block_start with tool_use: tool invocation banner
+ *   - user message with tool_result: tool response back to the model
  *   - result: the final answer + usage summary
  * Everything else falls back to a truncated JSON snippet so nothing is
  * ever hidden.
@@ -247,18 +267,26 @@ function EventCard({ ev }: { ev: RawEvent }) {
     )
   }
 
-  // 3) Tool use start (from stream_event / content_block_start).
-  if (
-    ev.type === 'stream_event' &&
-    ev.event?.type === 'content_block_start' &&
-    ev.event.content_block?.type === 'tool_use'
-  ) {
+  // 3) User message — tool_result coming back to the model.
+  if (ev.type === 'user' && ev.message?.content) {
+    const results = ev.message.content.filter(c => c.type === 'tool_result')
     return (
-      <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2 text-xs">
-        <div className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400 font-mono">
+      <div className="bg-amber-50/40 dark:bg-amber-950/10 border border-amber-200 dark:border-amber-900/50 rounded-lg p-3 text-xs">
+        <div className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400 font-mono mb-1">
           <Wrench className="w-3 h-3" />
-          <span>tool: {ev.event.content_block.name}</span>
+          <span>tool result ({results.length})</span>
         </div>
+        {results.map((r, i) => {
+          // tool_result.content is often a string or an array of text blocks;
+          // render conservatively so we don't crash on shape surprises.
+          const raw = typeof r.text === 'string' ? r.text : JSON.stringify((r as { content?: unknown }).content ?? r, null, 0)
+          const shown = raw.length > 400 ? raw.slice(0, 400) + '…' : raw
+          return (
+            <pre key={i} className="text-[11px] font-mono whitespace-pre-wrap text-muted-foreground mt-1">
+              {shown}
+            </pre>
+          )
+        })}
       </div>
     )
   }
