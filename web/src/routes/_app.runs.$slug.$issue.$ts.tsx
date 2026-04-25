@@ -70,26 +70,41 @@ function RunDetail() {
   const [rawLoading, setRawLoading] = useState(true)
 
   useEffect(() => {
-    fetch(`${basePath}/meta.json`, { cache: 'no-store' })
-      .then(r => (r.ok ? r.json() : null))
-      .then(setMeta)
-      .catch(() => setMeta(null))
+    let cancelled = false
 
-    fetch(`${basePath}/events.jsonl`, { cache: 'no-store' })
-      .then(r => (r.ok ? r.text() : ''))
-      .then(text => {
-        const lines = text.split('\n').filter(Boolean)
-        const parsed: RawEvent[] = []
-        for (const line of lines) {
-          try {
-            parsed.push(JSON.parse(line))
-          } catch {
-            // skip malformed lines
-          }
+    const refetch = async () => {
+      const [metaRes, evRes] = await Promise.all([
+        fetch(`${basePath}/meta.json`, { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
+        fetch(`${basePath}/events.jsonl`, { cache: 'no-store' }).then(r => (r.ok ? r.text() : '')).catch(() => ''),
+      ])
+      if (cancelled) return
+
+      const lines = evRes.split('\n').filter(Boolean)
+      const parsed: RawEvent[] = []
+      for (const line of lines) {
+        try {
+          parsed.push(JSON.parse(line))
+        } catch {
+          // skip malformed lines
         }
-        setEvents(parsed)
-      })
-      .finally(() => setRawLoading(false))
+      }
+      setMeta(metaRes)
+      setEvents(parsed)
+      setRawLoading(false)
+
+      // While the run is in flight (no meta.json yet, or status === 'running'),
+      // poll for updates. Stops automatically once the runner finalizes
+      // meta.json with a terminal status.
+      const stillRunning = !metaRes || metaRes.status === 'running'
+      if (stillRunning && !cancelled) {
+        setTimeout(refetch, 1500)
+      }
+    }
+
+    refetch()
+    return () => {
+      cancelled = true
+    }
   }, [basePath])
 
   const repo = slug.replace(/__/g, '/')
