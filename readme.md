@@ -195,6 +195,7 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 | **Issues** | `clawflow issue create / list / comment / close` |
 | **PRs** | `clawflow pr create / list / view / comment / merge` |
 | **Config** | `clawflow config set-token / set-gitlab-token / show` |
+| **Dashboard** | `clawflow web` — serve the local dashboard at http://127.0.0.1:8080 |
 | **Update** | `clawflow update` — fetch the latest binary |
 | **Operator helpers** *(invoked from SKILL.md bodies)* | `clawflow worktree` — create/remove per-issue git worktrees · `clawflow pr-check` — has an open PR for this issue? · `clawflow lang` — detect build/test commands for changed files · `clawflow status` — per-repo health summary |
 
