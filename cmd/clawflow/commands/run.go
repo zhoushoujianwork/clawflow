@@ -79,15 +79,13 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	repos := cfg.EnabledRepos()
+	allRepos := cfg.EnabledRepos()
 	if onlyRepo != "" {
-		r, ok := repos[onlyRepo]
-		if !ok {
+		if _, ok := allRepos[onlyRepo]; !ok {
 			return fmt.Errorf("repo %q not found or not enabled", onlyRepo)
 		}
-		repos = map[string]config.Repo{onlyRepo: r}
 	}
-	if len(repos) == 0 {
+	if len(allRepos) == 0 {
 		fmt.Println("no enabled repos to scan")
 		return nil
 	}
@@ -104,40 +102,84 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		fmt.Fprintf(os.Stderr, "snapshot meta: %v\n", err)
 	}
 
-	for fullName, repoCfg := range repos {
-		if err := runRepoOnce(ctx, reg, fullName, repoCfg, onlyIssue, timeout); err != nil {
+	// Two-axis scan:
+	//   - Pending snapshot covers every enabled repo, every open issue.
+	//     Narrowing flags (--repo / --issue) must NOT shrink the queue view,
+	//     otherwise the dashboard loses sight of work outside the current run.
+	//   - Operator execution is restricted to the requested scope so an
+	//     ad-hoc "rerun for issue 7" doesn't accidentally fire across the
+	//     whole org.
+	var pending []snapshot.PendingEntry
+	for fullName, repoCfg := range allRepos {
+		executeHere := onlyRepo == "" || onlyRepo == fullName
+		repoPending, err := scanRepoOnce(ctx, reg, fullName, repoCfg, executeHere, onlyIssue, timeout)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
 		}
+		pending = append(pending, repoPending...)
 	}
 
 	// Refresh the runs index so the dashboard shows this run at the top.
 	if err := snapshot.WriteRunsIndex(50); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot runs index: %v\n", err)
 	}
+	if err := snapshot.WritePending(pending); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot pending: %v\n", err)
+	}
 	return nil
 }
 
-func runRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, repoCfg config.Repo, onlyIssue int, timeout time.Duration) error {
+// scanRepoOnce always lists every open issue in the repo and returns the full
+// set of (issue × matching-operator) pending entries. Operator execution is
+// gated on `executeHere` (whole-repo opt-in) and `onlyIssue` (single-issue
+// opt-in within that repo) — pending collection ignores both.
+func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, repoCfg config.Repo, executeHere bool, onlyIssue int, timeout time.Duration) ([]snapshot.PendingEntry, error) {
 	client, err := newVCSClient(repoCfg)
 	if err != nil {
-		return fmt.Errorf("vcs client: %w", err)
+		return nil, fmt.Errorf("vcs client: %w", err)
 	}
 
 	issues, err := client.ListOpenIssues(fullName)
 	if err != nil {
-		return fmt.Errorf("list open issues: %w", err)
+		return nil, fmt.Errorf("list open issues: %w", err)
 	}
 
+	var pending []snapshot.PendingEntry
+	capturedAt := time.Now().UTC()
 	for _, iss := range issues {
-		if onlyIssue != 0 && iss.Number != onlyIssue {
-			continue
-		}
 		sub := &operator.Subject{
 			Number: iss.Number,
 			Title:  iss.Title,
 			Body:   iss.Body,
 			Labels: iss.Labels,
 			IsPR:   false,
+		}
+		// Snapshot every operator that would match this issue's CURRENT
+		// label state. The runner below will fire at most one of them and
+		// mutate labels, but pending.json captures the queue as it looked
+		// at the start of this run — the next refresh will show the
+		// post-run state.
+		for _, op := range reg.All() {
+			if !operator.Matches(sub, op) {
+				continue
+			}
+			pending = append(pending, snapshot.PendingEntry{
+				Repo:        fullName,
+				IssueNumber: sub.Number,
+				IssueTitle:  sub.Title,
+				Operator:    op.Name,
+				Labels:      append([]string(nil), sub.Labels...),
+				CapturedAt:  capturedAt,
+			})
+		}
+		// Execution scope: skip running operators on this issue when the
+		// caller restricted the run to a different repo or different issue.
+		// Pending collection above already happened.
+		if !executeHere {
+			continue
+		}
+		if onlyIssue != 0 && iss.Number != onlyIssue {
+			continue
 		}
 		for _, op := range reg.All() {
 			if !operator.Matches(sub, op) {
@@ -211,7 +253,7 @@ func runRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, r
 
 	// MVP: skip PRs. All 3 built-in operators target issues. When a
 	// pr-target operator appears we'll add the same loop over ListOpenPRs.
-	return nil
+	return pending, nil
 }
 
 // resolveWorkdir picks the cwd for the claude subprocess and returns a

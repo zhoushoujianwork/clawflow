@@ -152,6 +152,40 @@ type RunIndexEntry struct {
 	Path string `json:"path"`
 }
 
+// PendingEntry is one (issue, operator) pair that matched the operator's
+// trigger rules but had not yet been processed when the snapshot was taken.
+// One issue can produce multiple entries if it matches multiple operators;
+// the dashboard renders each as its own row so the user sees every queued
+// action.
+type PendingEntry struct {
+	Repo        string    `json:"repo"`
+	IssueNumber int       `json:"issue_number"`
+	IssueTitle  string    `json:"issue_title,omitempty"`
+	Operator    string    `json:"operator"`
+	Labels      []string  `json:"labels,omitempty"`
+	CapturedAt  time.Time `json:"captured_at"`
+}
+
+// WritePending writes data/pending.json with the supplied entries. The list
+// is replaced wholesale on every refresh so stale entries (issues that just
+// got processed) drop off automatically.
+func WritePending(entries []PendingEntry) error {
+	if entries == nil {
+		// JSON [] over null so the dashboard skips a nullability check.
+		entries = []PendingEntry{}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Repo != entries[j].Repo {
+			return entries[i].Repo < entries[j].Repo
+		}
+		if entries[i].IssueNumber != entries[j].IssueNumber {
+			return entries[i].IssueNumber < entries[j].IssueNumber
+		}
+		return entries[i].Operator < entries[j].Operator
+	})
+	return writeJSON(filepath.Join(DataDir(), "pending.json"), entries)
+}
+
 // WriteRunsIndex walks data/runs/* and writes data/runs.json containing the
 // most recent `limit` runs sorted by StartedAt desc. Used by the dashboard
 // to render its home page without having to crawl the filesystem over

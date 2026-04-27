@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
+import { VcsIcon } from '../components/VcsIcon'
 
 interface Repo {
   full_name: string
@@ -82,6 +83,11 @@ function RepoList() {
                 <tr key={r.full_name} className="hover:bg-secondary/20">
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2">
+                      <VcsIcon
+                        repo={r.full_name}
+                        map={repoMap}
+                        className="w-3.5 h-3.5 text-muted-foreground shrink-0"
+                      />
                       <Link
                         to="/repos/$repoName"
                         params={{ repoName: encodeURIComponent(r.full_name) }}

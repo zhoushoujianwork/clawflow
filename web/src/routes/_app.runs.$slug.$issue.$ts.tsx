@@ -1,8 +1,9 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { ChevronLeft, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, Terminal, Wrench, MessageSquare } from 'lucide-react'
+import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, Wrench, MessageSquare, Brain } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
+import { VcsIcon } from '../components/VcsIcon'
 
 interface RunMeta {
   operator: string
@@ -18,38 +19,40 @@ interface RunMeta {
 }
 
 /**
- * Raw claude stream-json event. Shape is whatever the model's -p output
- * gave us; we only pattern-match a few types for nice rendering and fall
- * back to a truncated JSON preview for the rest.
+ * Content block inside an assistant or user message. The shapes we care about:
+ *   - { type: "thinking", thinking: "…" }   — model's chain-of-thought
+ *   - { type: "text", text: "…" }           — model's reply text
+ *   - { type: "tool_use", id, name, input } — tool call from the model
+ *   - { type: "tool_result", tool_use_id, content, is_error } — runner's reply
+ * Anything else is ignored at render time.
+ */
+interface ContentBlock {
+  type: string
+  text?: string
+  thinking?: string
+  name?: string
+  id?: string
+  input?: unknown
+  tool_use_id?: string
+  content?: unknown
+  is_error?: boolean
+}
+
+/**
+ * Raw claude stream-json event. We only render a handful of shapes — the
+ * incremental stream_event deltas are dropped entirely because the
+ * aggregated `assistant` and `result` events carry the full content.
  */
 interface RawEvent {
   type: string
   subtype?: string
   result?: string
   session_id?: string
-  event?: {
-    type: string
-    content_block?: {
-      type: string
-      name?: string
-      id?: string
-      input?: unknown
-      text?: string
-    }
-    delta?: {
-      type: string
-      text?: string
-      partial_json?: string
-    }
-    index?: number
-    message?: unknown
-  }
   message?: {
     role?: string
-    content?: Array<{ type: string; text?: string; name?: string; input?: unknown }>
+    content?: ContentBlock[]
   }
   uuid?: string
-  tools?: string[]
   is_error?: boolean
   duration_ms?: number
   total_cost_usd?: number
@@ -131,6 +134,7 @@ function RunDetail() {
             #{meta.issue_number} · {meta.issue_title || '(no title)'}
           </h1>
           <p className="text-xs text-muted-foreground mt-1 font-mono flex items-center gap-1 flex-wrap">
+            <VcsIcon repo={meta.repo} map={repoMap} className="w-3.5 h-3.5 shrink-0" />
             <a
               href={repoUrl(meta.repo, repoMap)}
               target="_blank"
@@ -174,6 +178,7 @@ function RunDetail() {
             #{issueNum} · {repo}
           </h1>
           <p className="text-xs text-muted-foreground mt-1 font-mono flex items-center gap-1 flex-wrap">
+            <VcsIcon repo={repo} map={repoMap} className="w-3.5 h-3.5 shrink-0" />
             <a
               href={repoUrl(repo, repoMap)}
               target="_blank"
@@ -197,44 +202,101 @@ function RunDetail() {
         </div>
       )}
 
-      {meta?.summary && (
-        <section className="mb-6">
-          <h2 className="text-sm font-semibold text-foreground mb-2">Summary</h2>
-          <div className="bg-card border border-border rounded-lg p-4 text-sm whitespace-pre-wrap font-mono">
-            {meta.summary}
-          </div>
-        </section>
-      )}
+      <ConclusionPanel meta={meta} />
 
-      {meta?.error && (
-        <section className="mb-6">
-          <h2 className="text-sm font-semibold text-red-600 mb-2">Error</h2>
-          <div className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg p-4 text-sm whitespace-pre-wrap font-mono text-red-700 dark:text-red-400">
-            {meta.error}
-          </div>
-        </section>
-      )}
-
-      <section>
-        <h2 className="text-sm font-semibold text-foreground mb-2">
-          Event timeline <span className="text-muted-foreground font-normal">
-            ({visibleEvents(events).length} of {events.length} events)
-          </span>
-        </h2>
-        {rawLoading ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : events.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No events found.</p>
-        ) : (
-          <div className="space-y-2">
-            {visibleEvents(events).map((ev, i) => (
-              <EventCard key={i} ev={ev} />
-            ))}
-          </div>
-        )}
-      </section>
+      {(() => {
+        const visible = visibleEvents(events)
+        const toolNames = collectToolNames(events)
+        // While the operator is still running there's no conclusion yet, so
+        // open the trace by default — the user is actively waiting on it.
+        // Terminal runs get a collapsed trace so the conclusion stays the
+        // first thing on screen.
+        const openByDefault = !meta || meta.status === 'running'
+        return (
+          <details open={openByDefault} className="group">
+            <summary className="cursor-pointer select-none flex items-center gap-2 text-sm font-semibold text-foreground hover:text-foreground/80">
+              <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90" />
+              Trace
+              <span className="font-normal text-muted-foreground">({visible.length} steps)</span>
+            </summary>
+            <div className="mt-3">
+              {rawLoading ? (
+                <p className="text-sm text-muted-foreground">Loading…</p>
+              ) : visible.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No trace yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {visible.map((ev, i) => (
+                    <EventCard key={i} ev={ev} toolNames={toolNames} />
+                  ))}
+                </div>
+              )}
+            </div>
+          </details>
+        )
+      })()}
     </div>
   )
+}
+
+/**
+ * ConclusionPanel surfaces the run's outcome above the trace so the reader
+ * doesn't have to scroll. Four shapes, picked in priority order:
+ *   - error    → red panel with the runner's error message
+ *   - summary  → the operator's stdout (== the comment posted on the issue)
+ *   - skipped  → muted "skipped, no output" hint
+ *   - running  → blue "in progress" hint
+ * If meta hasn't loaded yet we skip the panel entirely; the trace below is
+ * still useful while we wait.
+ */
+function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
+  if (!meta) return null
+
+  if (meta.error) {
+    return (
+      <section className="mb-6">
+        <h2 className="text-sm font-semibold text-red-600 mb-2">Conclusion · error</h2>
+        <div className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg p-4 text-sm whitespace-pre-wrap font-mono text-red-700 dark:text-red-400">
+          {meta.error}
+        </div>
+      </section>
+    )
+  }
+
+  if (meta.summary) {
+    return (
+      <section className="mb-6">
+        <h2 className="text-sm font-semibold text-foreground mb-2">Conclusion</h2>
+        <div className="bg-green-50/70 dark:bg-green-950/20 border border-green-200 dark:border-green-900/60 rounded-lg p-4 text-sm whitespace-pre-wrap font-mono text-foreground">
+          {meta.summary}
+        </div>
+      </section>
+    )
+  }
+
+  if (meta.status === 'skipped') {
+    return (
+      <section className="mb-6">
+        <h2 className="text-sm font-semibold text-foreground mb-2">Conclusion · skipped</h2>
+        <div className="bg-muted/40 border border-border rounded-lg p-4 text-sm text-muted-foreground">
+          Operator returned no stdout, so no comment was posted on the issue. Expand the trace below to see what the model did.
+        </div>
+      </section>
+    )
+  }
+
+  if (meta.status === 'running') {
+    return (
+      <section className="mb-6">
+        <h2 className="text-sm font-semibold text-foreground mb-2">Conclusion</h2>
+        <div className="bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/60 rounded-lg p-4 text-sm text-muted-foreground inline-flex items-center gap-2">
+          <Loader2 className="w-4 h-4 animate-spin" /> In progress — trace is updating live below.
+        </div>
+      </section>
+    )
+  }
+
+  return null
 }
 
 function StatusBadge({ status }: { status: RunMeta['status'] }) {
@@ -263,119 +325,193 @@ function durationStr(start: string, end: string) {
 }
 
 /**
- * visibleEvents filters out the noisy incremental stream_event deltas
- * (every text keystroke and input_json fragment) because the aggregated
- * `assistant` and `result` events already carry the full content. Keeping
- * them would be 200+ redundant rows. Also drops transient status pings.
+ * visibleEvents narrows the raw stream-json log to the events that carry
+ * semantic content — thinking, replies, tool calls/results, and the final
+ * result. Everything else (token-level deltas, system init, status pings,
+ * rate-limit notices) is metadata for the runtime and adds no signal for
+ * a human reading the trace.
  */
 function visibleEvents(events: RawEvent[]): RawEvent[] {
   return events.filter(ev => {
-    if (ev.type === 'stream_event') return false
-    if (ev.type === 'system' && ev.subtype === 'status') return false
-    if (ev.type === 'rate_limit_event') return false
-    return true
+    if (ev.type === 'assistant') {
+      return (ev.message?.content || []).some(c =>
+        c.type === 'thinking' || c.type === 'text' || c.type === 'tool_use'
+      )
+    }
+    if (ev.type === 'user') {
+      return (ev.message?.content || []).some(c => c.type === 'tool_result')
+    }
+    if (ev.type === 'result') return true
+    return false
   })
 }
 
 /**
- * EventCard: the richer per-event renderer. Handles the most common
- * stream-json shapes we see in practice:
- *   - system/init: the session bootstrap with tool list
- *   - assistant message with text content: rendered as a chat-style block
- *   - user message with tool_result: tool response back to the model
- *   - result: the final answer + usage summary
- * Everything else falls back to a truncated JSON snippet so nothing is
- * ever hidden.
+ * Build a tool_use_id → tool name map by scanning every assistant tool_use.
+ * tool_result events only carry the id back, so we look up the name here to
+ * label the result block with something meaningful instead of a UUID.
  */
-function EventCard({ ev }: { ev: RawEvent }) {
-  // 1) System init — show once at the top, collapsed.
-  if (ev.type === 'system' && ev.subtype === 'init') {
-    return (
-      <div className="bg-secondary/40 border border-border rounded-lg px-3 py-2 text-xs">
-        <div className="flex items-center gap-1.5 text-muted-foreground">
-          <Terminal className="w-3 h-3" />
-          <span>session init</span>
-          {ev.tools && <span className="font-mono">· {ev.tools.length} tools</span>}
-          {ev.session_id && <span className="font-mono">· {ev.session_id.slice(0, 8)}</span>}
-        </div>
-      </div>
-    )
+function collectToolNames(events: RawEvent[]): Record<string, string> {
+  const m: Record<string, string> = {}
+  for (const ev of events) {
+    if (ev.type !== 'assistant' || !ev.message?.content) continue
+    for (const c of ev.message.content) {
+      if (c.type === 'tool_use' && c.id && c.name) {
+        m[c.id] = c.name
+      }
+    }
   }
+  return m
+}
 
-  // 2) Assistant message with text content.
+/**
+ * Pretty-print a value that may already be a string. Falls back to JSON
+ * with 2-space indent so deeply nested tool inputs/outputs stay readable.
+ */
+function prettyValue(v: unknown): string {
+  if (typeof v === 'string') return v
+  try {
+    return JSON.stringify(v, null, 2)
+  } catch {
+    return String(v)
+  }
+}
+
+/**
+ * Wrap long content in <details> so the overview stays compact. Short
+ * content renders directly without the expand toggle.
+ */
+function CollapsibleBlock({ text, threshold = 280 }: { text: string; threshold?: number }) {
+  if (text.length <= threshold) {
+    return <pre className="text-[11px] font-mono whitespace-pre-wrap text-muted-foreground">{text}</pre>
+  }
+  return (
+    <details className="text-[11px] font-mono">
+      <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
+        {text.slice(0, threshold).replace(/\s+/g, ' ').trim()}… <span className="text-primary/70">show more</span>
+      </summary>
+      <pre className="whitespace-pre-wrap text-muted-foreground mt-1">{text}</pre>
+    </details>
+  )
+}
+
+/**
+ * EventCard renders one logical step of the trace. Three flavors:
+ *   - assistant: thinking / reply / tool_use blocks
+ *   - user:     tool_result blocks (collapsible)
+ *   - result:   the final summary line + body
+ * Anything visibleEvents doesn't filter is one of these by construction,
+ * so there is no JSON-dump fallback — that was the noise the user
+ * complained about.
+ */
+function EventCard({ ev, toolNames }: { ev: RawEvent; toolNames: Record<string, string> }) {
   if (ev.type === 'assistant' && ev.message?.content) {
-    const texts = ev.message.content.filter(c => c.type === 'text' && c.text).map(c => c.text as string)
-    const toolUses = ev.message.content.filter(c => c.type === 'tool_use')
     return (
-      <div className="bg-card border border-border rounded-lg p-3">
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-2">
-          <MessageSquare className="w-3 h-3" />
-          <span>assistant</span>
-        </div>
-        {texts.length > 0 && (
-          <div className="text-sm whitespace-pre-wrap mb-2 font-mono text-foreground">{texts.join('\n\n')}</div>
-        )}
-        {toolUses.map((t, i) => (
-          <div key={i} className="text-xs text-muted-foreground font-mono flex items-center gap-1 mt-1">
-            <Wrench className="w-3 h-3" /> {t.name}
-            {t.input != null && (
-              <span className="truncate">{JSON.stringify(t.input).slice(0, 100)}</span>
-            )}
-          </div>
-        ))}
+      <div className="space-y-2">
+        {ev.message.content.map((c, i) => {
+          if (c.type === 'thinking' && c.thinking) {
+            return (
+              <div key={i} className="bg-purple-50/50 dark:bg-purple-950/10 border border-purple-200/60 dark:border-purple-900/40 rounded-lg p-3">
+                <div className="flex items-center gap-1.5 text-xs text-purple-700 dark:text-purple-400 mb-1">
+                  <Brain className="w-3 h-3" />
+                  <span>thinking</span>
+                </div>
+                <div className="text-sm whitespace-pre-wrap text-foreground/80 italic leading-relaxed">{c.thinking.trim()}</div>
+              </div>
+            )
+          }
+          if (c.type === 'text' && c.text) {
+            return (
+              <div key={i} className="bg-card border border-border rounded-lg p-3">
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+                  <MessageSquare className="w-3 h-3" />
+                  <span>reply</span>
+                </div>
+                <div className="text-sm whitespace-pre-wrap text-foreground">{c.text}</div>
+              </div>
+            )
+          }
+          if (c.type === 'tool_use') {
+            const inputStr = prettyValue(c.input ?? {})
+            return (
+              <div key={i} className="bg-secondary/40 border border-border rounded-lg p-3">
+                <div className="flex items-center gap-1.5 text-xs font-mono mb-1">
+                  <Wrench className="w-3 h-3 text-blue-600" />
+                  <span className="text-blue-700 dark:text-blue-400">{c.name || 'tool'}</span>
+                  <span className="text-muted-foreground">→</span>
+                </div>
+                <CollapsibleBlock text={inputStr} threshold={200} />
+              </div>
+            )
+          }
+          return null
+        })}
       </div>
     )
   }
 
-  // 3) User message — tool_result coming back to the model.
   if (ev.type === 'user' && ev.message?.content) {
     const results = ev.message.content.filter(c => c.type === 'tool_result')
+    if (results.length === 0) return null
     return (
-      <div className="bg-amber-50/40 dark:bg-amber-950/10 border border-amber-200 dark:border-amber-900/50 rounded-lg p-3 text-xs">
-        <div className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400 font-mono mb-1">
-          <Wrench className="w-3 h-3" />
-          <span>tool result ({results.length})</span>
-        </div>
+      <div className="space-y-2">
         {results.map((r, i) => {
-          // tool_result.content is often a string or an array of text blocks;
-          // render conservatively so we don't crash on shape surprises.
-          const raw = typeof r.text === 'string' ? r.text : JSON.stringify((r as { content?: unknown }).content ?? r, null, 0)
-          const shown = raw.length > 400 ? raw.slice(0, 400) + '…' : raw
+          const name = (r.tool_use_id && toolNames[r.tool_use_id]) || 'tool'
+          // tool_result.content is sometimes a string, sometimes an array of
+          // text blocks. Normalize to a single string.
+          let body: string
+          if (typeof r.content === 'string') {
+            body = r.content
+          } else if (Array.isArray(r.content)) {
+            body = r.content
+              .map(p => (p && typeof p === 'object' && 'text' in p ? String((p as { text: unknown }).text) : prettyValue(p)))
+              .join('\n')
+          } else {
+            body = prettyValue(r.content)
+          }
           return (
-            <pre key={i} className="text-[11px] font-mono whitespace-pre-wrap text-muted-foreground mt-1">
-              {shown}
-            </pre>
+            <div
+              key={i}
+              className={cn(
+                'border rounded-lg p-3',
+                r.is_error
+                  ? 'bg-red-50/60 dark:bg-red-950/20 border-red-200 dark:border-red-900/50'
+                  : 'bg-amber-50/40 dark:bg-amber-950/10 border-amber-200 dark:border-amber-900/50',
+              )}
+            >
+              <div className={cn(
+                'flex items-center gap-1.5 text-xs font-mono mb-1',
+                r.is_error ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400',
+              )}>
+                <Wrench className="w-3 h-3" />
+                <span>← {name}{r.is_error ? ' (error)' : ''}</span>
+              </div>
+              <CollapsibleBlock text={body} />
+            </div>
           )
         })}
       </div>
     )
   }
 
-  // 4) Final result.
   if (ev.type === 'result') {
     return (
       <div className={cn(
-        'border rounded-lg p-3 text-sm font-mono whitespace-pre-wrap',
+        'border rounded-lg p-3 text-sm whitespace-pre-wrap',
         ev.is_error
           ? 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900 text-red-700 dark:text-red-400'
-          : 'bg-green-50 dark:bg-green-950/20 border-green-200 dark:border-green-900 text-foreground'
+          : 'bg-green-50 dark:bg-green-950/20 border-green-200 dark:border-green-900 text-foreground',
       )}>
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-2 font-sans">
           <CheckCircle2 className="w-3 h-3" />
           <span>result {ev.subtype || ''}</span>
-          {ev.duration_ms != null && <span>· {Math.round(ev.duration_ms)}ms</span>}
+          {ev.duration_ms != null && <span>· {Math.round(ev.duration_ms / 1000)}s</span>}
           {ev.total_cost_usd != null && <span>· ${ev.total_cost_usd.toFixed(4)}</span>}
         </div>
-        {ev.result}
+        {ev.result || <span className="text-muted-foreground italic">(empty — operator returned no stdout, so no comment was posted)</span>}
       </div>
     )
   }
 
-  // 5) Fallback — truncated JSON preview.
-  return (
-    <div className="bg-card border border-border rounded-lg px-3 py-1.5 text-[11px] font-mono text-muted-foreground flex items-center gap-2">
-      <span className="shrink-0 text-primary/60">{ev.type}{ev.event?.type ? `.${ev.event.type}` : ''}</span>
-      <span className="truncate">{JSON.stringify(ev).slice(0, 200)}</span>
-    </div>
-  )
+  return null
 }

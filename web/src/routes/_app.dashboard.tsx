@@ -9,9 +9,11 @@ import {
   XCircle,
   SkipForward,
   Activity,
+  Clock,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
+import { VcsIcon } from '../components/VcsIcon'
 
 /**
  * Shape of one entry in /data/runs.json. Mirrors snapshot.RunIndexEntry on
@@ -43,6 +45,20 @@ interface Repo {
   platform?: Platform
   base_url?: string
   enabled: boolean
+}
+
+/**
+ * Mirror of snapshot.PendingEntry on the Go side. One (issue × matching
+ * operator) pair waiting to be processed. Many of these can stack up if the
+ * runner only fires one operator per issue per pass.
+ */
+interface Pending {
+  repo: string
+  issue_number: number
+  issue_title?: string
+  operator: string
+  labels?: string[]
+  captured_at: string
 }
 
 type StatusFilter = 'all' | 'success' | 'failed' | 'skipped' | 'running'
@@ -101,6 +117,7 @@ function Dashboard() {
   const [runs, setRuns] = useState<Run[]>([])
   const [meta, setMeta] = useState<Meta | null>(null)
   const [repos, setRepos] = useState<Repo[]>([])
+  const [pending, setPending] = useState<Pending[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [query, setQuery] = useState('')
@@ -111,15 +128,20 @@ function Dashboard() {
 
     const refetch = async (initial: boolean) => {
       if (initial) setLoading(true)
-      const [r, m, rp] = await Promise.all([
+      const [r, m, rp, pd] = await Promise.all([
         fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
         fetch('/data/meta.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
         fetch('/data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+        // pending.json is only written by clawflow versions that snapshot the
+        // queue; missing file is normal on older installs and renders as no
+        // pending section.
+        fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
       ])
       if (cancelled) return
       setRuns(Array.isArray(r) ? r : [])
       setMeta(m)
       setRepos(Array.isArray(rp) ? rp : [])
+      setPending(Array.isArray(pd) ? pd : [])
       setLoading(false)
     }
 
@@ -154,6 +176,17 @@ function Dashboard() {
       return true
     })
   }, [runs, statusFilter, repoFilter, query])
+
+  // Pending ignores statusFilter (queued items have no run status yet) but
+  // honors repo + search filters so the user can drill into one repo's queue.
+  const filteredPending = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return pending.filter(p => {
+      if (repoFilter !== 'all' && p.repo !== repoFilter) return false
+      if (q && !(p.issue_title || '').toLowerCase().includes(q) && !String(p.issue_number).includes(q) && !p.operator.toLowerCase().includes(q)) return false
+      return true
+    })
+  }, [pending, repoFilter, query])
 
   // Build the per-repo URL map from the same repos.json the dashboard already
   // pulls — no extra fetch needed.
@@ -217,6 +250,22 @@ function Dashboard() {
         )}
       </div>
 
+      {filteredPending.length > 0 && (
+        <section className="mb-4">
+          <h2 className="text-sm font-semibold text-foreground mb-2 flex items-center gap-2">
+            <Clock className="w-3.5 h-3.5 text-muted-foreground" />
+            Pending
+            <span className="font-normal text-muted-foreground">({filteredPending.length})</span>
+            <span className="font-normal text-xs text-muted-foreground ml-1">— queued for the next <code className="px-1 py-0.5 bg-secondary rounded text-[10px]">clawflow run</code></span>
+          </h2>
+          <div className="bg-card border border-border rounded-xl shadow-sm divide-y divide-border overflow-hidden">
+            {filteredPending.map(p => (
+              <PendingRow key={`${p.repo}#${p.issue_number}/${p.operator}`} p={p} repoMap={repoMap} />
+            ))}
+          </div>
+        </section>
+      )}
+
       {loading ? (
         <p className="text-sm text-muted-foreground text-center py-8">Loading…</p>
       ) : runs.length === 0 ? (
@@ -236,6 +285,41 @@ function Dashboard() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function PendingRow({ p, repoMap }: { p: Pending; repoMap: RepoInfoMap }) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-2.5">
+      <span className="inline-flex items-center gap-1 border px-1.5 py-0.5 rounded text-[11px] font-semibold bg-amber-100 text-amber-800 border-amber-200 shrink-0">
+        <Clock className="w-3 h-3" />
+        queued
+      </span>
+      <VcsIcon repo={p.repo} map={repoMap} className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+      <a
+        href={issueUrl(p.repo, p.issue_number, repoMap)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0"
+      >
+        #{p.issue_number}
+      </a>
+      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono bg-secondary text-foreground border border-border shrink-0">
+        {p.operator}
+      </span>
+      <span className="text-sm text-foreground truncate flex-1">
+        {p.issue_title || '(no title)'}
+      </span>
+      <a
+        href={repoUrl(p.repo, repoMap)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 hidden sm:inline"
+      >
+        {p.repo}
+      </a>
+      <span className="text-xs text-muted-foreground shrink-0 w-16 text-right">{timeAgo(p.captured_at)}</span>
     </div>
   )
 }
@@ -285,6 +369,7 @@ function Row({ r, repoMap }: { r: Run; repoMap: RepoInfoMap }) {
       className="flex items-center gap-3 px-4 py-2.5 hover:bg-secondary/50 transition-colors group"
     >
       <StatusChip status={r.status} />
+      <VcsIcon repo={r.repo} map={repoMap} className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
       <a
         href={issueUrl(r.repo, r.issue_number, repoMap)}
         target="_blank"

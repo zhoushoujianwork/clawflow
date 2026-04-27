@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, ExternalLink } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
+import { VcsIcon } from '../components/VcsIcon'
 
 interface Repo {
   full_name: string
@@ -87,7 +88,10 @@ function RepoDetail() {
           <div className="mb-6">
             <h1 className="text-2xl font-bold text-foreground font-mono">{repo.full_name}</h1>
             <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-              <span>{repo.platform || 'github'}</span>
+              <span className="inline-flex items-center gap-1">
+                <VcsIcon repo={repo.full_name} map={repoMap} className="w-3.5 h-3.5 shrink-0" />
+                {repo.platform || 'github'}
+              </span>
               <span>·</span>
               <span className="font-mono">base: {repo.base_branch}</span>
               {repoVcsUrl && (
@@ -131,6 +135,7 @@ function RepoDetail() {
                     params={{ slug, issue: `issue-${r.issue_number}`, ts: r.path.replace(/\/$/, '').split('/').pop() || '' }}
                     className="flex items-center gap-3 px-4 py-2 hover:bg-secondary/30"
                   >
+                    <VcsIcon repo={r.repo} map={repoMap} className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                     <a
                       href={issueUrl(r.repo, r.issue_number, repoMap)}
                       target="_blank"
