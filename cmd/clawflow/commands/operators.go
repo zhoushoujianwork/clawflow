@@ -16,7 +16,41 @@ func NewOperatorsCmd() *cobra.Command {
 		Short: "Inspect registered operators",
 	}
 	cmd.AddCommand(newOperatorsListCmd())
+	cmd.AddCommand(newOperatorsValidateCmd())
 	return cmd
+}
+
+// newOperatorsValidateCmd parses every embedded + user SKILL.md and exits
+// non-zero on any frontmatter error. Wire it into CI so a corrupted
+// SKILL.md never ships in a release binary — the runtime would fail
+// silently otherwise (the registry would simply not load that operator).
+func newOperatorsValidateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "validate",
+		Short: "Parse every operator SKILL.md and report frontmatter errors",
+		Long: `Walks the embedded skills/ tree and ~/.clawflow/skills/, parsing each
+SKILL.md. Exits with status 0 if every operator's frontmatter is valid,
+or status 1 with a per-file diagnostic if any fail to parse. Useful in
+CI to catch broken operators before they ship.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := loadRegistry()
+			if err != nil {
+				// loadRegistry returns the first parse error it sees from
+				// either the embedded set or the user dir, which is what
+				// validation cares about.
+				return fmt.Errorf("operator validation failed: %w", err)
+			}
+			ops := reg.All()
+			if len(ops) == 0 {
+				return fmt.Errorf("no operators registered (embed.FS empty?)")
+			}
+			fmt.Printf("✓ %d operator(s) parsed cleanly\n", len(ops))
+			for _, op := range ops {
+				fmt.Printf("  %s  %s\n", op.Name, op.Source)
+			}
+			return nil
+		},
+	}
 }
 
 func newOperatorsListCmd() *cobra.Command {

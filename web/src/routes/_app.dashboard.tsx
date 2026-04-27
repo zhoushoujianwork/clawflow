@@ -105,17 +105,31 @@ function Dashboard() {
   const [repoFilter, setRepoFilter] = useState<string>('all')
 
   useEffect(() => {
-    setLoading(true)
-    Promise.all([
-      fetch('/data/runs.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch('/data/meta.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/data/repos.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : []).catch(() => []),
-    ]).then(([r, m, rp]) => {
+    let cancelled = false
+
+    const refetch = async (initial: boolean) => {
+      if (initial) setLoading(true)
+      const [r, m, rp] = await Promise.all([
+        fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+        fetch('/data/meta.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
+        fetch('/data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      ])
+      if (cancelled) return
       setRuns(Array.isArray(r) ? r : [])
       setMeta(m)
       setRepos(Array.isArray(rp) ? rp : [])
       setLoading(false)
-    })
+    }
+
+    refetch(true)
+    // Periodically refresh so a `clawflow run` triggered from another shell
+    // (or cron) shows up without a manual reload. 5s is unobtrusive and
+    // matches the cadence the user is realistically waiting at.
+    const id = setInterval(() => refetch(false), 5000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
   }, [])
 
   const counts = useMemo(() => {

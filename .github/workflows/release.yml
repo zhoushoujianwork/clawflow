@@ -29,6 +29,8 @@ jobs:
           ./clawflow version
           ./clawflow run --help
           ./clawflow operators list
+          # Hard fail if any embedded SKILL.md has bad frontmatter.
+          ./clawflow operators validate
           ./clawflow repo --help
           ./clawflow issue --help
           ./clawflow label --help
@@ -38,6 +40,7 @@ jobs:
           ./clawflow worktree --help
           ./clawflow pr-check --help
           ./clawflow update --help
+          ./clawflow web --help
 
   build:
     name: Build
