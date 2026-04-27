@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, ExternalLink, MessageSquare } from 'lucide-r
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
+import { useChatDrawer } from '../lib/chatContext'
 
 interface Repo {
   full_name: string
@@ -53,6 +54,7 @@ export const Route = createFileRoute('/_app/repos/$repoName')({
 function RepoDetail() {
   const { repoName } = Route.useParams()
   const fullName = decodeURIComponent(repoName)
+  const chatDrawer = useChatDrawer()
 
   const [repo, setRepo] = useState<Repo | null>(null)
   const [runs, setRuns] = useState<Run[]>([])
@@ -177,13 +179,12 @@ function RepoDetail() {
                 </>
               )}
               <span>·</span>
-              <Link
-                to="/chat"
-                search={{ repo: fullName }}
+              <button
+                onClick={() => chatDrawer.open({ repo: fullName })}
                 className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline"
               >
                 <MessageSquare className="w-3 h-3" /> chat
-              </Link>
+              </button>
             </div>
           </div>
 
@@ -281,6 +282,7 @@ function IssueRow({
   expanded: boolean
   onToggle: (n: number) => void
 }) {
+  const chatDrawer = useChatDrawer()
   const latest = group.runs[0]
   return (
     <div>
@@ -309,15 +311,13 @@ function IssueRow({
         <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-16 text-right">
           {group.runs.length} {group.runs.length === 1 ? 'run' : 'runs'}
         </span>
-        <Link
-          to="/chat"
-          search={{ repo, issue: String(group.issue_number) }}
-          onClick={e => e.stopPropagation()}
+        <button
+          onClick={e => { e.stopPropagation(); chatDrawer.open({ repo, issue: group.issue_number }) }}
           className="shrink-0 text-muted-foreground hover:text-foreground"
           title="Chat about this issue"
         >
           <MessageSquare className="w-3.5 h-3.5" />
-        </Link>
+        </button>
       </button>
       {expanded && <Timeline group={group} slug={slug} />}
     </div>

@@ -14,7 +14,6 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AppUsageRouteImport } from './routes/_app.usage'
 import { Route as AppOperatorsRouteImport } from './routes/_app.operators'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
-import { Route as AppChatRouteImport } from './routes/_app.chat'
 import { Route as AppReposIndexRouteImport } from './routes/_app.repos.index'
 import { Route as AppReposRepoNameRouteImport } from './routes/_app.repos.$repoName'
 import { Route as AppRunsSlugIssueTsRouteImport } from './routes/_app.runs.$slug.$issue.$ts'
@@ -43,11 +42,6 @@ const AppDashboardRoute = AppDashboardRouteImport.update({
   path: '/dashboard',
   getParentRoute: () => AppRoute,
 } as any)
-const AppChatRoute = AppChatRouteImport.update({
-  id: '/chat',
-  path: '/chat',
-  getParentRoute: () => AppRoute,
-} as any)
 const AppReposIndexRoute = AppReposIndexRouteImport.update({
   id: '/repos/',
   path: '/repos/',
@@ -66,7 +60,6 @@ const AppRunsSlugIssueTsRoute = AppRunsSlugIssueTsRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/chat': typeof AppChatRoute
   '/dashboard': typeof AppDashboardRoute
   '/operators': typeof AppOperatorsRoute
   '/usage': typeof AppUsageRoute
@@ -76,7 +69,6 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/chat': typeof AppChatRoute
   '/dashboard': typeof AppDashboardRoute
   '/operators': typeof AppOperatorsRoute
   '/usage': typeof AppUsageRoute
@@ -88,7 +80,6 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_app': typeof AppRouteWithChildren
-  '/_app/chat': typeof AppChatRoute
   '/_app/dashboard': typeof AppDashboardRoute
   '/_app/operators': typeof AppOperatorsRoute
   '/_app/usage': typeof AppUsageRoute
@@ -100,7 +91,6 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/chat'
     | '/dashboard'
     | '/operators'
     | '/usage'
@@ -110,7 +100,6 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/chat'
     | '/dashboard'
     | '/operators'
     | '/usage'
@@ -121,7 +110,6 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/_app'
-    | '/_app/chat'
     | '/_app/dashboard'
     | '/_app/operators'
     | '/_app/usage'
@@ -172,13 +160,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppDashboardRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/chat': {
-      id: '/_app/chat'
-      path: '/chat'
-      fullPath: '/chat'
-      preLoaderRoute: typeof AppChatRouteImport
-      parentRoute: typeof AppRoute
-    }
     '/_app/repos/': {
       id: '/_app/repos/'
       path: '/repos'
@@ -204,7 +185,6 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
-  AppChatRoute: typeof AppChatRoute
   AppDashboardRoute: typeof AppDashboardRoute
   AppOperatorsRoute: typeof AppOperatorsRoute
   AppUsageRoute: typeof AppUsageRoute
@@ -214,7 +194,6 @@ interface AppRouteChildren {
 }
 
 const AppRouteChildren: AppRouteChildren = {
-  AppChatRoute: AppChatRoute,
   AppDashboardRoute: AppDashboardRoute,
   AppOperatorsRoute: AppOperatorsRoute,
   AppUsageRoute: AppUsageRoute,

@@ -4,10 +4,15 @@ SRC     := ./cmd/clawflow/
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$(VERSION)"
 
-.PHONY: install build release clean test fmt vet tidy dev
+.PHONY: install build release clean test fmt vet tidy dev web
 
-# 构建并替换本地二进制
-install:
+# 构建前端
+web:
+	@cd web && pnpm build
+	@echo "web built"
+
+# 构建并替换本地二进制（含前端）
+install: web
 	@mkdir -p $(BIN_DIR)
 	go build $(LDFLAGS) -o $(BINARY) $(SRC)
 	@echo "installed → $(BINARY) ($(VERSION))"
