@@ -13,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
+	"github.com/zhoushoujianwork/clawflow/internal/api"
+	ptyserver "github.com/zhoushoujianwork/clawflow/internal/pty"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
@@ -45,6 +47,9 @@ here — run 'clawflow run' first if you want fresh data.`,
 			root := snapshot.DashboardRoot()
 			fsrv := http.FileServer(http.Dir(root))
 			mux := http.NewServeMux()
+			mux.HandleFunc("/ws/pty", ptyserver.HandlePTY)
+			mux.HandleFunc("/api/labels/add", api.HandleAddLabel)
+			mux.HandleFunc("/api/labels/remove", api.HandleRemoveLabel)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				// SPA fallback: if the requested path maps to a real file
 				// (or lives under /data/ or /assets/ which tanstack-router

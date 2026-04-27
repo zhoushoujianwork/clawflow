@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ExternalLink, MessageSquare } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -176,6 +176,14 @@ function RepoDetail() {
                   </a>
                 </>
               )}
+              <span>·</span>
+              <Link
+                to="/chat"
+                search={{ repo: fullName }}
+                className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline"
+              >
+                <MessageSquare className="w-3 h-3" /> chat
+              </Link>
             </div>
           </div>
 
@@ -301,6 +309,15 @@ function IssueRow({
         <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-16 text-right">
           {group.runs.length} {group.runs.length === 1 ? 'run' : 'runs'}
         </span>
+        <Link
+          to="/chat"
+          search={{ repo, issue: String(group.issue_number) }}
+          onClick={e => e.stopPropagation()}
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+          title="Chat about this issue"
+        >
+          <MessageSquare className="w-3.5 h-3.5" />
+        </Link>
       </button>
       {expanded && <Timeline group={group} slug={slug} />}
     </div>

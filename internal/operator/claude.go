@@ -8,8 +8,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/claude"
 )
 
 // RunClaude executes `claude -p --output-format stream-json` in a subprocess
@@ -29,7 +30,7 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 	}
 
 	cmd := exec.CommandContext(ctx,
-		resolveClaude(),
+		claude.Resolve(),
 		"-p",
 		"--dangerously-skip-permissions",
 		"--output-format", "stream-json",
@@ -38,7 +39,7 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 		prompt,
 	)
 	cmd.Dir = workdir
-	cmd.Env = cleanedEnv(os.Environ())
+	cmd.Env = claude.CleanedEnv(os.Environ())
 	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()
@@ -173,33 +174,3 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	return finalResult, nil
 }
 
-// resolveClaude finds the claude binary, tolerating the common case where
-// `~/.claude/local/claude` is installed but PATH is inherited from a
-// non-interactive shell that doesn't source the user's aliases.
-func resolveClaude() string {
-	if p, err := exec.LookPath("claude"); err == nil {
-		return p
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		alt := filepath.Join(home, ".claude", "local", "claude")
-		if st, err := os.Stat(alt); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
-			return alt
-		}
-	}
-	return "claude"
-}
-
-// cleanedEnv strips ANTHROPIC_API_KEY when set to an empty string. Nested
-// Claude Code sessions export the key as "" which the claude subprocess
-// treats as a malformed key and short-circuits to 401 instead of falling
-// back to OAuth/keychain.
-func cleanedEnv(env []string) []string {
-	out := env[:0:len(env)]
-	for _, kv := range env {
-		if kv == "ANTHROPIC_API_KEY=" {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
-}
