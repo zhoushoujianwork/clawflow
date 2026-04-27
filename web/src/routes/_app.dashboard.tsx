@@ -11,6 +11,7 @@ import {
   Activity,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 
 /**
  * Shape of one entry in /data/runs.json. Mirrors snapshot.RunIndexEntry on
@@ -39,7 +40,8 @@ interface Meta {
 
 interface Repo {
   full_name: string
-  platform?: string
+  platform?: Platform
+  base_url?: string
   enabled: boolean
 }
 
@@ -153,6 +155,21 @@ function Dashboard() {
     })
   }, [runs, statusFilter, repoFilter, query])
 
+  // Build the per-repo URL map from the same repos.json the dashboard already
+  // pulls — no extra fetch needed.
+  const repoMap = useMemo<RepoInfoMap>(() => {
+    const m: RepoInfoMap = {}
+    for (const r of repos) {
+      const platform: Platform = r.platform || 'github'
+      const defaultHost = platform === 'gitlab' ? 'https://gitlab.com' : 'https://github.com'
+      m[r.full_name] = {
+        platform,
+        host: (r.base_url || defaultHost).replace(/\/$/, ''),
+      }
+    }
+    return m
+  }, [repos])
+
   const enabledRepos = repos.filter(r => r.enabled).length
 
   return (
@@ -215,7 +232,7 @@ function Dashboard() {
           {filtered.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-6">No runs match the current filters.</p>
           ) : (
-            filtered.map(r => <Row key={r.path} r={r} />)
+            filtered.map(r => <Row key={r.path} r={r} repoMap={repoMap} />)
           )}
         </div>
       )}
@@ -259,7 +276,7 @@ function StatCard({
   )
 }
 
-function Row({ r }: { r: Run }) {
+function Row({ r, repoMap }: { r: Run; repoMap: RepoInfoMap }) {
   const dur = durationStr(r.started_at, r.ended_at)
   return (
     <Link
@@ -268,11 +285,27 @@ function Row({ r }: { r: Run }) {
       className="flex items-center gap-3 px-4 py-2.5 hover:bg-secondary/50 transition-colors group"
     >
       <StatusChip status={r.status} />
-      <span className="font-mono text-xs text-muted-foreground shrink-0">#{r.issue_number}</span>
+      <a
+        href={issueUrl(r.repo, r.issue_number, repoMap)}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={e => e.stopPropagation()}
+        className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0"
+      >
+        #{r.issue_number}
+      </a>
       <span className="text-sm text-foreground truncate flex-1">
         {r.operator} · {r.issue_title || '(no title)'}
       </span>
-      <span className="text-xs text-muted-foreground shrink-0 hidden sm:inline">{r.repo}</span>
+      <a
+        href={repoUrl(r.repo, repoMap)}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={e => e.stopPropagation()}
+        className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 hidden sm:inline"
+      >
+        {r.repo}
+      </a>
       {dur && <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-14 text-right">{dur}</span>}
       {r.pr_url && (
         <a

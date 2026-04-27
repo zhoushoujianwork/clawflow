@@ -2,6 +2,7 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { ChevronLeft, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, Terminal, Wrench, MessageSquare } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
 
 interface RunMeta {
   operator: string
@@ -68,6 +69,7 @@ function RunDetail() {
   const [meta, setMeta] = useState<RunMeta | null>(null)
   const [events, setEvents] = useState<RawEvent[]>([])
   const [rawLoading, setRawLoading] = useState(true)
+  const repoMap = useRepoInfoMap()
 
   useEffect(() => {
     let cancelled = false
@@ -128,9 +130,32 @@ function RunDetail() {
           <h1 className="text-xl font-bold text-foreground">
             #{meta.issue_number} · {meta.issue_title || '(no title)'}
           </h1>
-          <p className="text-xs text-muted-foreground mt-1 font-mono">
-            {meta.repo} · {new Date(meta.started_at).toLocaleString()}
-            {meta.ended_at && ` · ${durationStr(meta.started_at, meta.ended_at)}`}
+          <p className="text-xs text-muted-foreground mt-1 font-mono flex items-center gap-1 flex-wrap">
+            <a
+              href={repoUrl(meta.repo, repoMap)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline"
+            >
+              {meta.repo} <ExternalLink className="w-3 h-3" />
+            </a>
+            <span>·</span>
+            <a
+              href={issueUrl(meta.repo, meta.issue_number, repoMap)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline"
+            >
+              #{meta.issue_number} <ExternalLink className="w-3 h-3" />
+            </a>
+            <span>·</span>
+            <span>{new Date(meta.started_at).toLocaleString()}</span>
+            {meta.ended_at && (
+              <>
+                <span>·</span>
+                <span>{durationStr(meta.started_at, meta.ended_at)}</span>
+              </>
+            )}
           </p>
           {meta.pr_url && (
             <a
@@ -148,7 +173,27 @@ function RunDetail() {
           <h1 className="text-xl font-bold text-foreground">
             #{issueNum} · {repo}
           </h1>
-          <p className="text-xs text-muted-foreground mt-1">meta.json not found — raw events below</p>
+          <p className="text-xs text-muted-foreground mt-1 font-mono flex items-center gap-1 flex-wrap">
+            <a
+              href={repoUrl(repo, repoMap)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline"
+            >
+              {repo} <ExternalLink className="w-3 h-3" />
+            </a>
+            <span>·</span>
+            <a
+              href={issueUrl(repo, Number(issueNum), repoMap)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline"
+            >
+              #{issueNum} <ExternalLink className="w-3 h-3" />
+            </a>
+            <span>·</span>
+            <span>meta.json not found — raw events below</span>
+          </p>
         </div>
       )}
 

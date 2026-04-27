@@ -2,10 +2,11 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, ExternalLink } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 
 interface Repo {
   full_name: string
-  platform?: string
+  platform?: Platform
   base_url?: string
   base_branch: string
   local_path?: string
@@ -52,11 +53,19 @@ function RepoDetail() {
     })
   }, [fullName])
 
-  const repoUrl = useMemo(() => {
-    if (!repo) return null
-    if (repo.platform === 'gitlab' && repo.base_url) return `${repo.base_url.replace(/\/$/, '')}/${repo.full_name}`
-    return `https://github.com/${repo.full_name}`
+  const repoMap = useMemo<RepoInfoMap>(() => {
+    if (!repo) return {}
+    const platform: Platform = repo.platform || 'github'
+    const defaultHost = platform === 'gitlab' ? 'https://gitlab.com' : 'https://github.com'
+    return {
+      [repo.full_name]: {
+        platform,
+        host: (repo.base_url || defaultHost).replace(/\/$/, ''),
+      },
+    }
   }, [repo])
+
+  const repoVcsUrl = repo ? repoUrl(repo.full_name, repoMap) : null
 
   const slug = fullName.replace(/\//g, '__')
 
@@ -81,10 +90,10 @@ function RepoDetail() {
               <span>{repo.platform || 'github'}</span>
               <span>·</span>
               <span className="font-mono">base: {repo.base_branch}</span>
-              {repoUrl && (
+              {repoVcsUrl && (
                 <>
                   <span>·</span>
-                  <a href={repoUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline">
+                  <a href={repoVcsUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline">
                     view <ExternalLink className="w-3 h-3" />
                   </a>
                 </>
@@ -122,7 +131,15 @@ function RepoDetail() {
                     params={{ slug, issue: `issue-${r.issue_number}`, ts: r.path.replace(/\/$/, '').split('/').pop() || '' }}
                     className="flex items-center gap-3 px-4 py-2 hover:bg-secondary/30"
                   >
-                    <span className="font-mono text-xs text-muted-foreground shrink-0 w-12">#{r.issue_number}</span>
+                    <a
+                      href={issueUrl(r.repo, r.issue_number, repoMap)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={e => e.stopPropagation()}
+                      className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 w-12"
+                    >
+                      #{r.issue_number}
+                    </a>
                     <span className={cn(
                       'inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border shrink-0',
                       r.status === 'success' && 'bg-green-100 text-green-700 border-green-200',

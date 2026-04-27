@@ -1,10 +1,12 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { ExternalLink } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 
 interface Repo {
   full_name: string
-  platform?: string
+  platform?: Platform
   base_url?: string
   base_branch: string
   local_path?: string
@@ -28,6 +30,19 @@ function RepoList() {
       .catch(() => setRepos([]))
       .finally(() => setLoading(false))
   }, [])
+
+  const repoMap = useMemo<RepoInfoMap>(() => {
+    const m: RepoInfoMap = {}
+    for (const r of repos) {
+      const platform: Platform = r.platform || 'github'
+      const defaultHost = platform === 'gitlab' ? 'https://gitlab.com' : 'https://github.com'
+      m[r.full_name] = {
+        platform,
+        host: (r.base_url || defaultHost).replace(/\/$/, ''),
+      }
+    }
+    return m
+  }, [repos])
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
@@ -66,13 +81,24 @@ function RepoList() {
               {repos.map(r => (
                 <tr key={r.full_name} className="hover:bg-secondary/20">
                   <td className="px-4 py-2">
-                    <Link
-                      to="/repos/$repoName"
-                      params={{ repoName: encodeURIComponent(r.full_name) }}
-                      className="font-mono text-foreground hover:underline"
-                    >
-                      {r.full_name}
-                    </Link>
+                    <div className="flex items-center gap-2">
+                      <Link
+                        to="/repos/$repoName"
+                        params={{ repoName: encodeURIComponent(r.full_name) }}
+                        className="font-mono text-foreground hover:underline"
+                      >
+                        {r.full_name}
+                      </Link>
+                      <a
+                        href={repoUrl(r.full_name, repoMap)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open in VCS"
+                        className="inline-flex items-center text-muted-foreground hover:text-foreground"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
                   </td>
                   <td className="px-4 py-2 text-muted-foreground">{r.platform || 'github'}</td>
                   <td className="px-4 py-2 text-muted-foreground font-mono text-xs">{r.base_branch}</td>
