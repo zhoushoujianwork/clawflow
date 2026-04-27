@@ -387,6 +387,127 @@ func WritePending(entries []PendingEntry) error {
 	return writeJSON(filepath.Join(DataDir(), "pending.json"), entries)
 }
 
+// ReconcileStaleRuns walks data/runs/* and patches up runs whose on-disk
+// state is inconsistent with reality:
+//
+//   - meta.json with status="running" whose started_at is older than
+//     `staleAfter`: rewrite to "failed". The runner exited (crash, kill,
+//     SIGTERM) before finalizing the meta. Without this, the dashboard
+//     would show a frozen "running" row forever.
+//   - run dir that contains events.jsonl but no meta.json: synthesize a
+//     "failed" meta from the dir layout (repo / issue / timestamp) and
+//     events.jsonl mtime. Possible when WriteRunMeta itself failed for
+//     the initial running placeholder.
+//
+// Idempotent. Safe (and intended) to call at the top of every clawflow run.
+// Returns the number of runs reconciled so the caller can log it.
+//
+// Does NOT touch any VCS state — the lock label on the corresponding issue
+// is left alone. Removing it would silently re-enable the operator to
+// trigger again, which is a recovery decision the user should make
+// explicitly (by deleting the lock label themselves once they've
+// investigated the stuck run).
+func ReconcileStaleRuns(staleAfter time.Duration) (int, error) {
+	return reconcileStaleRunsAt(filepath.Join(DataDir(), "runs"), staleAfter)
+}
+
+// reconcileStaleRunsAt is the testable core of ReconcileStaleRuns. Tests
+// pass an arbitrary runsRoot pointing at a tempdir layout so they don't
+// mutate the user's actual ~/.clawflow tree.
+func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error) {
+	if _, err := os.Stat(runsRoot); os.IsNotExist(err) {
+		return 0, nil
+	}
+	cutoff := time.Now().UTC().Add(-staleAfter)
+	var fixed int
+
+	_ = filepath.WalkDir(runsRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		// A "run dir" is a leaf directory containing meta.json and/or
+		// events.jsonl. Skip the intermediate runs/<repo>/issue-<N> tree.
+		metaPath := filepath.Join(path, "meta.json")
+		eventsPath := filepath.Join(path, "events.jsonl")
+		_, metaErr := os.Stat(metaPath)
+		_, eventsErr := os.Stat(eventsPath)
+		hasMeta := metaErr == nil
+		hasEvents := eventsErr == nil
+		if !hasMeta && !hasEvents {
+			return nil
+		}
+
+		if hasMeta {
+			data, err := os.ReadFile(metaPath)
+			if err != nil {
+				return nil
+			}
+			var m RunMeta
+			if err := json.Unmarshal(data, &m); err != nil {
+				return nil
+			}
+			if m.Status != "running" || m.StartedAt.After(cutoff) {
+				return nil
+			}
+			m.Status = "failed"
+			m.Error = fmt.Sprintf(
+				"reconciled: stuck in running for >%s; runner exited without finalizing this run",
+				staleAfter,
+			)
+			if m.EndedAt.IsZero() {
+				if st, err := os.Stat(eventsPath); err == nil {
+					m.EndedAt = st.ModTime().UTC()
+				} else {
+					m.EndedAt = time.Now().UTC()
+				}
+			}
+			if err := WriteRunMeta(path, m); err == nil {
+				fixed++
+			}
+			return nil
+		}
+
+		// hasEvents && !hasMeta — synthesize a meta from the dir layout.
+		// Layout: <runsRoot>/<repo-slug>/issue-<N>/<ts>/
+		rel, err := filepath.Rel(runsRoot, path)
+		if err != nil {
+			return nil
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if len(parts) != 3 {
+			return nil
+		}
+		repoSlug, issueDir, ts := parts[0], parts[1], parts[2]
+		repo := strings.ReplaceAll(repoSlug, "__", "/")
+		var issueNum int
+		if _, err := fmt.Sscanf(issueDir, "issue-%d", &issueNum); err != nil {
+			return nil
+		}
+		startedAt, err := time.Parse("2006-01-02T15-04-05Z", ts)
+		if err != nil {
+			return nil
+		}
+		endedAt := startedAt
+		if st, err := os.Stat(eventsPath); err == nil {
+			endedAt = st.ModTime().UTC()
+		}
+		m := RunMeta{
+			Operator:    "(unknown)",
+			Repo:        repo,
+			IssueNumber: issueNum,
+			StartedAt:   startedAt,
+			EndedAt:     endedAt,
+			Status:      "failed",
+			Error:       "reconciled: meta.json missing; runner exited before writing initial state",
+		}
+		if err := WriteRunMeta(path, m); err == nil {
+			fixed++
+		}
+		return nil
+	})
+	return fixed, nil
+}
+
 // WriteRunsIndex walks data/runs/* and writes data/runs.json containing the
 // most recent `limit` runs sorted by StartedAt desc. Used by the dashboard
 // to render its home page without having to crawl the filesystem over

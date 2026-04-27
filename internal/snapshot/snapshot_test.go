@@ -235,3 +235,191 @@ func joinLines(lines []string) string {
 	}
 	return out
 }
+
+// --- Reconciliation tests ---
+
+// makeRunDir creates a runs/<repo>/issue-<N>/<ts>/ directory and writes the
+// supplied meta + optional events.jsonl. Returns the run dir path.
+func makeRunDir(t *testing.T, root, repoSlug string, issueNum int, ts time.Time, m *RunMeta, events string) string {
+	t.Helper()
+	dir := filepath.Join(root, repoSlug, "issue-"+itoa(issueNum), ts.UTC().Format("2006-01-02T15-04-05Z"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if m != nil {
+		if err := WriteRunMeta(dir, *m); err != nil {
+			t.Fatalf("write meta: %v", err)
+		}
+	}
+	if events != "" {
+		if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(events), 0o644); err != nil {
+			t.Fatalf("write events: %v", err)
+		}
+	}
+	return dir
+}
+
+func itoa(n int) string {
+	// Avoid pulling strconv just for one call site.
+	if n == 0 {
+		return "0"
+	}
+	digits := []byte{}
+	negative := n < 0
+	if negative {
+		n = -n
+	}
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	if negative {
+		digits = append([]byte{'-'}, digits...)
+	}
+	return string(digits)
+}
+
+func TestReconcileStaleRuns_StuckRunning_RewrittenToFailed(t *testing.T) {
+	root := t.TempDir()
+	stuckStart := time.Now().UTC().Add(-3 * time.Hour) // well past the 1h cutoff
+	stuck := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 7,
+		StartedAt:   stuckStart,
+		Status:      "running",
+	}
+	dir := makeRunDir(t, root, "owner__repo", 7, stuckStart, stuck, `{"type":"system","subtype":"init"}`+"\n")
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("fixed=%d, want 1", n)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
+	var got RunMeta
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("read patched meta: %v", err)
+	}
+	if got.Status != "failed" {
+		t.Errorf("status=%q, want failed", got.Status)
+	}
+	if got.Error == "" {
+		t.Error("Error field should describe the reconciliation reason")
+	}
+	if got.EndedAt.IsZero() {
+		t.Error("EndedAt should be populated after reconciliation")
+	}
+}
+
+func TestReconcileStaleRuns_RecentRunning_Untouched(t *testing.T) {
+	root := t.TempDir()
+	recentStart := time.Now().UTC().Add(-5 * time.Minute) // well within the 1h cutoff
+	recent := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 8,
+		StartedAt:   recentStart,
+		Status:      "running",
+	}
+	makeRunDir(t, root, "owner__repo", 8, recentStart, recent, "")
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("fixed=%d, want 0 (recent running should be left alone)", n)
+	}
+}
+
+func TestReconcileStaleRuns_TerminalStatus_Untouched(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().UTC().Add(-3 * time.Hour)
+	for _, status := range []string{"success", "failed", "skipped"} {
+		m := &RunMeta{
+			Operator:    "x",
+			Repo:        "owner/repo",
+			IssueNumber: 1,
+			StartedAt:   old,
+			EndedAt:     old.Add(time.Minute),
+			Status:      status,
+		}
+		// Distinct dir per status so they don't collide.
+		ts := old.Add(time.Duration(len(status)) * time.Second)
+		makeRunDir(t, root, "owner__repo", 1, ts, m, "")
+	}
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("fixed=%d, want 0 (terminal statuses should not be reconciled)", n)
+	}
+}
+
+func TestReconcileStaleRuns_MissingMeta_Synthesized(t *testing.T) {
+	root := t.TempDir()
+	ts := time.Now().UTC().Add(-30 * time.Minute)
+	// No meta.json, but events.jsonl present.
+	makeRunDir(t, root, "owner__repo", 9, ts, nil, `{"type":"system","subtype":"init"}`+"\n")
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("fixed=%d, want 1", n)
+	}
+	dir := filepath.Join(root, "owner__repo", "issue-9", ts.Format("2006-01-02T15-04-05Z"))
+	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatalf("synthetic meta missing: %v", err)
+	}
+	var got RunMeta
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal synthetic meta: %v", err)
+	}
+	if got.Status != "failed" {
+		t.Errorf("status=%q, want failed", got.Status)
+	}
+	if got.Repo != "owner/repo" {
+		t.Errorf("repo=%q, want owner/repo (slug should be un-mangled)", got.Repo)
+	}
+	if got.IssueNumber != 9 {
+		t.Errorf("issue=%d, want 9", got.IssueNumber)
+	}
+}
+
+func TestReconcileStaleRuns_NothingToFix(t *testing.T) {
+	root := t.TempDir()
+	// Nonexistent runsRoot is a normal cold-start case.
+	if n, err := reconcileStaleRunsAt(filepath.Join(root, "does-not-exist"), time.Hour); err != nil || n != 0 {
+		t.Errorf("nonexistent root: n=%d err=%v, want 0/nil", n, err)
+	}
+}
+
+func TestReconcileStaleRuns_Idempotent(t *testing.T) {
+	root := t.TempDir()
+	stuckStart := time.Now().UTC().Add(-3 * time.Hour)
+	stuck := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 7,
+		StartedAt:   stuckStart,
+		Status:      "running",
+	}
+	makeRunDir(t, root, "owner__repo", 7, stuckStart, stuck, "")
+
+	if n, _ := reconcileStaleRunsAt(root, time.Hour); n != 1 {
+		t.Errorf("first pass fixed=%d, want 1", n)
+	}
+	// Second pass should find the run already terminal and do nothing.
+	if n, _ := reconcileStaleRunsAt(root, time.Hour); n != 0 {
+		t.Errorf("second pass fixed=%d, want 0 (idempotent)", n)
+	}
+}

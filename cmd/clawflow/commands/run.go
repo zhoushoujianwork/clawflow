@@ -93,6 +93,17 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		return nil
 	}
 
+	// Reconcile any runs whose on-disk state is inconsistent (stuck
+	// "running", missing meta.json) BEFORE we touch anything else, so the
+	// dashboard's first refresh of this run picks up the fixed state. The
+	// staleAfter threshold matches the per-operator default timeout — any
+	// run still showing "running" past that is definitively dead.
+	if n, err := snapshot.ReconcileStaleRuns(timeout); err == nil && n > 0 {
+		fmt.Fprintf(os.Stderr, "✓ reconciled %d stale run(s) on disk\n", n)
+	} else if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ reconcile stale runs: %v\n", err)
+	}
+
 	// Snapshot the static state so the dashboard can render it even if no
 	// operator fires this run. Failures are best-effort logged, not fatal.
 	if err := snapshot.WriteRepos(cfg); err != nil {
