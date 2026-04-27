@@ -4,9 +4,35 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
+
+// outcomeRE matches a "<!-- clawflow:outcome=<label> --> " line. The runner
+// parses these from the operator's stdout to learn which terminal label to
+// add. Word chars + hyphens cover the conventions GitHub/GitLab labels use.
+// We eat the trailing newline so stripping the marker doesn't leave a blank
+// line at the end of the comment.
+var outcomeRE = regexp.MustCompile(`[ \t]*<!--\s*clawflow:outcome=([\w./:-]+)\s*-->[ \t]*\n?`)
+
+// parseOutcome scans `body` for outcome markers, returning the label of the
+// LAST marker (so a model that emits multiple drafts has its final pick
+// honored) and a copy of `body` with every marker line removed.
+//
+// Returns ("", body) when no marker is found — preserves back-compat for
+// older skills that don't use the marker contract.
+func parseOutcome(body string) (label, cleaned string) {
+	matches := outcomeRE.FindAllStringSubmatch(body, -1)
+	if len(matches) == 0 {
+		return "", body
+	}
+	label = matches[len(matches)-1][1]
+	cleaned = outcomeRE.ReplaceAllString(body, "")
+	return label, strings.TrimSpace(cleaned)
+}
 
 // VCS is the subset of vcs.Client the runner needs. Kept intentionally
 // small so the operator package stays testable in isolation.
@@ -73,10 +99,43 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	}
 
 	trimmed := strings.TrimSpace(output)
-	if trimmed != "" {
-		if err := v.PostIssueComment(opts.Repo, sub.Number, trimmed); err != nil {
-			return trimmed, fmt.Errorf("post result comment: %w", err)
+	if trimmed == "" {
+		return trimmed, nil
+	}
+
+	// Pull any outcome label declared by the operator, then strip the
+	// marker(s) from the comment body so it doesn't leak into the rendered
+	// issue thread.
+	outcome, body := parseOutcome(trimmed)
+
+	if body != "" {
+		if err := v.PostIssueComment(opts.Repo, sub.Number, body); err != nil {
+			return body, fmt.Errorf("post result comment: %w", err)
 		}
 	}
-	return trimmed, nil
+
+	if outcome != "" {
+		if !outcomeAllowed(op, outcome) {
+			// Operator emitted a label it didn't declare. Skip the add
+			// rather than silently mutate state in unexpected ways. Logged
+			// to stderr so the run output surfaces the misuse.
+			fmt.Fprintf(os.Stderr,
+				"operator %q produced disallowed outcome %q (allowed: %v); skipping label add\n",
+				op.Name, outcome, op.Outcomes)
+		} else if err := v.AddLabel(opts.Repo, sub.Number, outcome); err != nil {
+			return body, fmt.Errorf("add outcome label %q: %w", outcome, err)
+		}
+	}
+
+	return body, nil
+}
+
+// outcomeAllowed reports whether `label` is in the operator's declared
+// Outcomes whitelist. An empty whitelist is treated as "anything goes" for
+// back-compat with older skills that don't enumerate outcomes.
+func outcomeAllowed(op *Operator, label string) bool {
+	if len(op.Outcomes) == 0 {
+		return true
+	}
+	return slices.Contains(op.Outcomes, label)
 }

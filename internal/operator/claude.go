@@ -64,9 +64,15 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 // streamEnvelope is the minimal shape we peek at inside each stream-json
 // line. Unknown events still pass through verbatim to the events writer.
 type streamEnvelope struct {
-	Type   string `json:"type"`
-	Result string `json:"result"` // present on terminal "result" events
-	Event  struct {
+	Type    string `json:"type"`
+	Result  string `json:"result"` // present on terminal "result" events
+	Message struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"message"`
+	Event struct {
 		Type         string `json:"type"`
 		ContentBlock struct {
 			Type string `json:"type"`
@@ -84,7 +90,13 @@ type streamEnvelope struct {
 //   - every raw line is written to events (when non-nil)
 //   - text_delta events are streamed to os.Stderr for live user feedback
 //
-// Returns the final result.result text from the terminating "result" event.
+// Returns the operator's final stdout. Prefers the terminating "result"
+// event's `result` field, but falls back to the last assistant turn that
+// carried text content. The fallback exists because claude-cli sets
+// `result.result == ""` whenever the very last assistant turn is a pure
+// tool_use (e.g. the model emits its answer, then calls one more tool to
+// touch labels and ends). Without the fallback, a trailing tool call
+// silently wipes out the operator's output.
 func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	sc := bufio.NewScanner(r)
 	// Claude stream-json lines can carry full assistant messages; bump the
@@ -92,6 +104,7 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	var finalResult string
+	var lastAssistantText string // last assistant turn that emitted any text
 	printedAnyDelta := false
 
 	for sc.Scan() {
@@ -112,6 +125,23 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 		switch {
 		case env.Type == "result":
 			finalResult = env.Result
+		case env.Type == "assistant":
+			// Concatenate every text block in this assistant turn. Skip
+			// thinking/tool_use blocks — those are not part of the user-
+			// facing answer. If the turn carried any text at all, treat it
+			// as the most recent candidate answer.
+			var turn string
+			for _, c := range env.Message.Content {
+				if c.Type == "text" && c.Text != "" {
+					if turn != "" {
+						turn += "\n\n"
+					}
+					turn += c.Text
+				}
+			}
+			if turn != "" {
+				lastAssistantText = turn
+			}
 		case env.Type == "stream_event" &&
 			env.Event.Type == "content_block_delta" &&
 			env.Event.Delta.Type == "text_delta":
@@ -136,6 +166,9 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 		// Cap the live-delta stream with a newline so the runner's next log
 		// line isn't glued to the last chunk of claude text.
 		fmt.Fprintln(os.Stderr)
+	}
+	if finalResult == "" {
+		finalResult = lastAssistantText
 	}
 	return finalResult, nil
 }

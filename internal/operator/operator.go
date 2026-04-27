@@ -19,6 +19,12 @@ type Operator struct {
 	Description string
 	Trigger     Trigger
 	LockLabel   string
+	// Outcomes is the allow-list of labels the operator may declare via the
+	// `<!-- clawflow:outcome=<label> -->` marker in its stdout. The runner
+	// adds the outcome label after posting the comment. An empty list means
+	// "accept any label the operator emits" — back-compat for older skills
+	// that don't declare an explicit outcome set.
+	Outcomes []string
 	// Prompt is the SKILL.md body (everything after the frontmatter).
 	// The runner prepends runtime context before handing it to `claude -p`.
 	Prompt string
@@ -44,7 +50,8 @@ type frontmatter struct {
 			LabelsRequired []string `yaml:"labels_required"`
 			LabelsExcluded []string `yaml:"labels_excluded"`
 		} `yaml:"trigger"`
-		LockLabel string `yaml:"lock_label"`
+		LockLabel string   `yaml:"lock_label"`
+		Outcomes  []string `yaml:"outcomes"`
 	} `yaml:"operator"`
 }
 
@@ -88,6 +95,7 @@ func Parse(data []byte, source string) (*Operator, error) {
 			LabelsExcluded: fm.Operator.Trigger.LabelsExcluded,
 		},
 		LockLabel: fm.Operator.LockLabel,
+		Outcomes:  fm.Operator.Outcomes,
 		Prompt:    body,
 		Source:    source,
 	}, nil

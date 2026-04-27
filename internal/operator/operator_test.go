@@ -121,6 +121,39 @@ func TestParse_CRLF(t *testing.T) {
 	}
 }
 
+func TestParse_Outcomes(t *testing.T) {
+	const skillWithOutcomes = `---
+name: evaluate-bug
+description: Evaluate a bug
+operator:
+  trigger:
+    target: issue
+    labels_required: [bug]
+  lock_label: agent-running
+  outcomes: [agent-evaluated, agent-skipped]
+---
+
+Body.`
+
+	op, err := Parse([]byte(skillWithOutcomes), "evaluate-bug/SKILL.md")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !slices.Equal(op.Outcomes, []string{"agent-evaluated", "agent-skipped"}) {
+		t.Errorf("Outcomes = %v, want [agent-evaluated agent-skipped]", op.Outcomes)
+	}
+}
+
+func TestParse_OutcomesOmitted_DefaultsToEmpty(t *testing.T) {
+	op, err := Parse([]byte(validSkill), "test.md")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(op.Outcomes) != 0 {
+		t.Errorf("Outcomes should default to empty slice when omitted; got %v", op.Outcomes)
+	}
+}
+
 func TestParse_PRTarget(t *testing.T) {
 	input := `---
 name: review-pr

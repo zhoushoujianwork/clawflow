@@ -47,6 +47,7 @@ operator:
     labels_required: ["bug"]                                  # 必须全部存在(AND)
     labels_excluded: ["agent-evaluated", "agent-skipped", "agent-running"]  # 任一存在即跳过(OR NOT)
   lock_label: "agent-running"                                 # 执行前加、完成/失败后删,并发锁
+  outcomes: ["agent-evaluated", "agent-skipped"]              # 算子可声明的结束态 label 白名单
 ---
 
 # (frontmatter 后是喂给 claude 的 prompt 正文)
@@ -62,13 +63,33 @@ operator:
 | `operator.trigger.labels_required` | 必须**全部**存在才触发(AND) |
 | `operator.trigger.labels_excluded` | 有任意一个就跳过(OR NOT) |
 | `operator.lock_label` | 并发锁,执行前加、完成后删 |
+| `operator.outcomes` | 可选。允许通过 outcome marker 声明的结束 label 白名单。空/未填 = 接受任意 label(向后兼容) |
+
+### Outcome marker 协议
+
+**算子(claude agent)只输出文本,所有 VCS 副作用由 runner 负责。** 算子**禁止**调用任何会写 VCS 状态的工具(`clawflow label / issue comment / pr ...`、`gh ...`)。算子要做的:
+
+1. 把回应正文写到 stdout
+2. 在 stdout 末尾留一行结束 marker:`<!-- clawflow:outcome=<label> --> `
+
+runner 拿到 stdout 后:
+
+1. 自动 fallback 到最后一个有 text 的 assistant turn,所以即使模型最后一 turn 是 tool_use 也不会丢答案
+2. 解析 marker(出现多次取**最后一个**),拿到 outcome label
+3. 把 marker 行从 body 中剥掉
+4. `PostIssueComment(repo, issue, cleanedBody)`
+5. 校验 label 在 `outcomes` 白名单内(白名单为空则放行)
+6. `AddLabel(repo, issue, outcome)`
+7. 删除 `lock_label`
+
+这样算子作者只关心"分析什么 / 怎么组织文本",不需要管 VCS API、不会因 turn 顺序丢答案、也不会有重复 comment。
 
 **故意不做的事**(第一版 schema 的边界):
 
-- 不声明 output(不枚举"加哪些 label / 发哪些 comment")—— 算子自己用工具做,声明式反而限制表达力
 - 不支持 `timeout` 字段 —— 由 CLI 全局配置(默认 60 分钟)
 - 不支持多平台过滤 —— 一个算子对 GitHub/GitLab 都适用
 - 不支持 body 正则匹配 —— label 匹配已足够
+- marker 只支持"加单一 label",不支持复杂状态机(remove/swap)。需要 swap 的算子目前仍自己用 tool 处理(implement 是个例)
 
 ### 如何新增算子
 

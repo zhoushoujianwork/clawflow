@@ -255,3 +255,172 @@ func TestRun_DefaultRunFuncIsNil(t *testing.T) {
 		t.Error("default RunOptions.RunFunc should be nil (resolved at Run time)")
 	}
 }
+
+// --- outcome marker tests ---
+
+func TestRun_OutcomeMarker_StripsAndAddsLabel(t *testing.T) {
+	op := &Operator{
+		Name:      "evaluate-bug",
+		LockLabel: "agent-running",
+		Outcomes:  []string{"agent-evaluated", "agent-skipped"},
+	}
+	sub := &Subject{Number: 7, Labels: []string{"bug"}}
+	v := newFakeVCS()
+
+	body := "## Eval\n\nRepro: 8/10\n\n<!-- clawflow:outcome=agent-evaluated -->\n"
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(v.comments) != 1 {
+		t.Fatalf("want 1 comment, got %d", len(v.comments))
+	}
+	if strings.Contains(v.comments[0].body, "clawflow:outcome") {
+		t.Errorf("marker should be stripped from posted comment; got %q", v.comments[0].body)
+	}
+	if !slices.Contains(v.labels[7], "agent-evaluated") {
+		t.Errorf("agent-evaluated should be added; labels = %v", v.labels[7])
+	}
+}
+
+func TestRun_OutcomeMarker_NotInWhitelist_SkipsLabel(t *testing.T) {
+	op := &Operator{
+		Name:      "evaluate-bug",
+		LockLabel: "lock",
+		Outcomes:  []string{"agent-evaluated", "agent-skipped"},
+	}
+	sub := &Subject{Number: 1}
+	v := newFakeVCS()
+
+	body := "## Eval\n\nstuff\n\n<!-- clawflow:outcome=type:bug -->\n"
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(v.comments) != 1 {
+		t.Fatalf("want comment posted even on disallowed outcome, got %d", len(v.comments))
+	}
+	// AddLabel was called once for the lock label only — the disallowed
+	// outcome must not have triggered another add.
+	if v.addLabelCalls != 1 {
+		t.Errorf("AddLabel calls = %d, want 1 (lock only)", v.addLabelCalls)
+	}
+	if slices.Contains(v.labels[1], "type:bug") {
+		t.Errorf("disallowed outcome label was applied: %v", v.labels[1])
+	}
+}
+
+func TestRun_OutcomeMarker_LastWins(t *testing.T) {
+	op := &Operator{
+		Name:      "x",
+		LockLabel: "lock",
+		Outcomes:  []string{"agent-evaluated", "agent-skipped"},
+	}
+	sub := &Subject{Number: 2}
+	v := newFakeVCS()
+
+	body := "draft 1\n<!-- clawflow:outcome=agent-skipped -->\nfinal\n<!-- clawflow:outcome=agent-evaluated -->\n"
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if !slices.Contains(v.labels[2], "agent-evaluated") {
+		t.Errorf("last marker wins; labels = %v, want agent-evaluated", v.labels[2])
+	}
+	if slices.Contains(v.labels[2], "agent-skipped") {
+		t.Errorf("earlier marker should be ignored; labels = %v", v.labels[2])
+	}
+}
+
+func TestRun_OutcomeMarker_NoOutcomesSet_AcceptsAny(t *testing.T) {
+	op := &Operator{
+		Name:      "x",
+		LockLabel: "lock",
+		// No Outcomes set — runner accepts whatever the operator emits.
+	}
+	sub := &Subject{Number: 3}
+	v := newFakeVCS()
+
+	body := "answer\n<!-- clawflow:outcome=ready-for-agent -->\n"
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if !slices.Contains(v.labels[3], "ready-for-agent") {
+		t.Errorf("empty whitelist should accept any label; got %v", v.labels[3])
+	}
+}
+
+func TestRun_OutcomeMarker_None_BackCompat(t *testing.T) {
+	op := &Operator{
+		Name:      "legacy-skill",
+		LockLabel: "lock",
+		Outcomes:  []string{"agent-evaluated"},
+	}
+	sub := &Subject{Number: 4}
+	v := newFakeVCS()
+
+	body := "old-style operator output, no marker"
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(v.comments) != 1 || v.comments[0].body != body {
+		t.Errorf("comment should be posted unchanged when no marker present; got %v", v.comments)
+	}
+	// Only the lock label, no outcome label added.
+	if v.addLabelCalls != 1 {
+		t.Errorf("AddLabel calls = %d, want 1", v.addLabelCalls)
+	}
+}
+
+func TestParseOutcome_Direct(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		wantLbl  string
+		wantBody string
+	}{
+		{"none", "just text", "", "just text"},
+		{"single", "body\n<!-- clawflow:outcome=agent-evaluated -->\n", "agent-evaluated", "body"},
+		{"label with hyphens and dots", "x\n<!-- clawflow:outcome=v1.2-rc -->\n", "v1.2-rc", "x"},
+		{"trailing whitespace tolerant", "x\n<!-- clawflow:outcome=agent-skipped --> \n", "agent-skipped", "x"},
+		{"multiple — last wins", "<!-- clawflow:outcome=a -->\nfoo\n<!-- clawflow:outcome=b -->\n", "b", "foo"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotLbl, gotBody := parseOutcome(c.in)
+			if gotLbl != c.wantLbl {
+				t.Errorf("label = %q, want %q", gotLbl, c.wantLbl)
+			}
+			if gotBody != c.wantBody {
+				t.Errorf("body = %q, want %q", gotBody, c.wantBody)
+			}
+		})
+	}
+}

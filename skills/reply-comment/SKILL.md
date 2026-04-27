@@ -7,16 +7,18 @@ operator:
     labels_required: ["agent-mentioned"]
     labels_excluded: ["agent-running", "agent-replied"]
   lock_label: "agent-running"
+  outcomes: ["agent-replied"]
 ---
 
 Someone mentioned you in the issue above. Read the thread, find the latest comment that addresses you, and reply.
 
 ## Output contract (MUST follow)
 
-Your stdout IS the reply comment. The runner posts it verbatim. Two rules that are easy to break:
+Your stdout IS the reply comment. ClawFlow posts it verbatim, then applies the outcome label declared by the marker line at the end. Three hard rules:
 
-1. **Do NOT call `clawflow issue comment`** to post the reply yourself. The runner already posts your stdout as a comment — calling it produces a duplicate.
-2. **Do NOT add a meta status line to stdout** like "Reply posted, labels swapped". Stdout is the reply only — anything else becomes a second visible comment on the issue.
+1. **No tool calls that mutate VCS state.** Do NOT run `clawflow label`, `clawflow issue comment`, `gh`, or any other command that changes labels / comments. ClawFlow owns those side-effects — your job is to produce text only.
+2. **End with exactly one outcome marker line:** `<!-- clawflow:outcome=agent-replied -->`. ClawFlow strips this line before posting and uses it to add the `agent-replied` label.
+3. **Do NOT add a meta status line** like "Reply posted, labels swapped". Stdout is the reply only — anything else becomes a second visible comment on the issue.
 
 ## Task
 
@@ -33,15 +35,8 @@ Output the reply directly. No preamble, no code fences.
 
 ---
 _ClawFlow auto-reply_
-```
 
-## After replying
-
-Swap the labels so this comment isn't processed again:
-
-```
-clawflow label remove --repo {repo} --issue {N} --label agent-mentioned
-clawflow label add    --repo {repo} --issue {N} --label agent-replied
+<!-- clawflow:outcome=agent-replied -->
 ```
 
 ## Constraints
@@ -49,3 +44,4 @@ clawflow label add    --repo {repo} --issue {N} --label agent-replied
 - **Don't restate the issue.** The other person already knows what they wrote.
 - **Don't propose code changes.** That's the `implement` operator's job. If the ask is a fix, say "I can look at this if you add `ready-for-agent`."
 - **If the question is beyond what you can answer from the thread alone, say so** and ask the human for more info — don't hallucinate.
+- The marker MUST be the last non-empty line of stdout. Do not run any tools after emitting the reply.
