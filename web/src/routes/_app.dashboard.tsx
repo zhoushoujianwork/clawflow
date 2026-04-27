@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
 import {
   Search,
@@ -380,10 +380,12 @@ function StatCard({
 
 function Row({ r, repoMap }: { r: Run; repoMap: RepoInfoMap }) {
   const dur = durationStr(r.started_at, r.ended_at)
+  const runHref = `/runs/${repoSlug(r.repo)}/issue-${r.issue_number}/${runIdFromPath(r.path)}`
   return (
-    <Link
-      to="/runs/$slug/$issue/$ts"
-      params={{ slug: repoSlug(r.repo), issue: `issue-${r.issue_number}`, ts: runIdFromPath(r.path) }}
+    <a
+      href={runHref}
+      target="_blank"
+      rel="noopener noreferrer"
       className="flex items-center gap-3 px-4 py-2.5 hover:bg-secondary/50 transition-colors group"
     >
       <StatusChip status={r.status} />
@@ -423,6 +425,6 @@ function Row({ r, repoMap }: { r: Run; repoMap: RepoInfoMap }) {
       )}
       <span className="text-xs text-muted-foreground shrink-0 w-16 text-right">{timeAgo(r.started_at)}</span>
       <ChevronRight className="w-4 h-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
-    </Link>
+    </a>
   )
 }
