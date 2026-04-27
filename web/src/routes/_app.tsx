@@ -1,5 +1,5 @@
 import { createFileRoute, Outlet, Link } from '@tanstack/react-router'
-import { BookOpen } from 'lucide-react'
+import { BookOpen, Receipt } from 'lucide-react'
 import { useTheme } from '../lib/useTheme'
 
 export const Route = createFileRoute('/_app')({
@@ -59,6 +59,15 @@ function AppLayout() {
               activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
             >
               Operators
+            </Link>
+            <Link
+              to="/usage"
+              className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors inline-flex items-center gap-1"
+              style={{ color: 'hsl(var(--text-low))' }}
+              activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+            >
+              <Receipt className="w-3.5 h-3.5" />
+              Usage
             </Link>
           </nav>
         </div>

@@ -5,6 +5,25 @@ import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 
+interface ModelUsage {
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  cost_usd: number
+}
+
+interface Usage {
+  duration_ms: number
+  num_turns: number
+  total_cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  model_usage?: Record<string, ModelUsage>
+}
+
 interface RunMeta {
   operator: string
   repo: string
@@ -16,6 +35,7 @@ interface RunMeta {
   summary?: string
   pr_url?: string
   error?: string
+  usage?: Usage
 }
 
 /**
@@ -204,6 +224,8 @@ function RunDetail() {
 
       <ConclusionPanel meta={meta} />
 
+      <UsagePanel meta={meta} />
+
       {(() => {
         const visible = visibleEvents(events)
         const toolNames = collectToolNames(events)
@@ -297,6 +319,88 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
   }
 
   return null
+}
+
+/**
+ * UsagePanel renders a compact "what did this run cost" sidecar between the
+ * Conclusion and Trace sections. Hidden entirely when meta.usage is absent
+ * (run still in flight, or pre-feature data on disk that hasn't been
+ * backfilled yet).
+ */
+function UsagePanel({ meta }: { meta: RunMeta | null }) {
+  if (!meta || !meta.usage) return null
+  const u = meta.usage
+
+  const models = u.model_usage
+    ? Object.entries(u.model_usage).sort((a, b) => b[1].cost_usd - a[1].cost_usd)
+    : []
+
+  return (
+    <section className="mb-6">
+      <h2 className="text-sm font-semibold text-foreground mb-2">Usage</h2>
+      <div className="bg-card border border-border rounded-lg p-4">
+        <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm tabular-nums">
+          <Stat label="cost" value={`$${u.total_cost_usd.toFixed(4)}`} highlight />
+          <Stat label="duration" value={msToShort(u.duration_ms)} />
+          <Stat label="turns" value={String(u.num_turns)} />
+          <Stat label="input" value={u.input_tokens.toLocaleString()} />
+          <Stat label="output" value={u.output_tokens.toLocaleString()} />
+          {u.cache_read_input_tokens > 0 && (
+            <Stat label="cache read" value={u.cache_read_input_tokens.toLocaleString()} />
+          )}
+        </div>
+        {models.length > 0 && (
+          <div className="mt-3 border-t border-border pt-3">
+            <table className="w-full text-xs tabular-nums">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th className="text-left font-semibold pb-1">model</th>
+                  <th className="text-right font-semibold pb-1">cost</th>
+                  <th className="text-right font-semibold pb-1">input</th>
+                  <th className="text-right font-semibold pb-1">output</th>
+                </tr>
+              </thead>
+              <tbody>
+                {models.map(([name, m]) => (
+                  <tr key={name} className="text-foreground">
+                    <td className="py-0.5 font-mono">{name}</td>
+                    <td className="py-0.5 text-right">${m.cost_usd.toFixed(4)}</td>
+                    <td className="py-0.5 text-right text-muted-foreground">
+                      {m.input_tokens.toLocaleString()}
+                    </td>
+                    <td className="py-0.5 text-right text-muted-foreground">
+                      {m.output_tokens.toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div className="flex items-baseline gap-1.5">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className={cn('font-medium', highlight ? 'text-primary' : 'text-foreground')}>
+        {value}
+      </span>
+    </div>
+  )
+}
+
+function msToShort(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m${s % 60}s`
+  const h = Math.floor(m / 60)
+  return `${h}h${m % 60}m`
 }
 
 function StatusBadge({ status }: { status: RunMeta['status'] }) {

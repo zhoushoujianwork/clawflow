@@ -120,8 +120,14 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	}
 
 	// Refresh the runs index so the dashboard shows this run at the top.
-	if err := snapshot.WriteRunsIndex(50); err != nil {
+	// WriteRunsIndex returns the FULL entry set so we can hand it to
+	// WriteUsageSummary without re-walking the runs tree.
+	allEntries, err := snapshot.WriteRunsIndex(50)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot runs index: %v\n", err)
+	}
+	if err := snapshot.WriteUsageSummary(allEntries); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot usage summary: %v\n", err)
 	}
 	if err := snapshot.WritePending(pending); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot pending: %v\n", err)
@@ -235,6 +241,13 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 				rm.Status = "skipped"
 			} else {
 				rm.Status = "success"
+			}
+			// Best-effort usage extraction. The events file has been closed
+			// at this point so the terminal "result" line (if any) is fully
+			// flushed to disk. Failures fall back to nil — the index walker
+			// will retry on the next refresh.
+			if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil {
+				rm.Usage = u
 			}
 			if err := snapshot.WriteRunMeta(runDir, rm); err != nil {
 				fmt.Fprintf(os.Stderr, "  run meta: %v\n", err)
