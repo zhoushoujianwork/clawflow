@@ -198,7 +198,36 @@ func atomicReplace(dest string, src io.Reader) error {
 		os.Remove(tmp)
 		return err
 	}
+	if err := codesignIfDarwin(dest); err != nil {
+		// Don't fail the update for a signing miss — user can still run the
+		// binary if Gatekeeper happens to accept it as-is, and they always
+		// have the manual `codesign --force --sign - <path>` escape hatch.
+		fmt.Printf("  [warn] codesign step skipped: %v\n", err)
+	}
 	fmt.Printf("  [ok] binary updated → %s\n", dest)
+	return nil
+}
+
+// codesignIfDarwin ad-hoc signs `path` on macOS so Gatekeeper doesn't
+// SIGKILL the freshly-downloaded binary on first launch. The
+// com.apple.provenance attribute that downloads pick up causes
+// `spctl --assess` to reject unsigned executables. An ad-hoc signature
+// (`codesign --force --sign -`) marks the binary as locally trusted —
+// good enough for personal-use binaries that aren't notarized.
+//
+// No-op on non-Darwin or when the codesign tool isn't on PATH (typical
+// on Linux). A failed sign is not fatal — caller logs and moves on.
+func codesignIfDarwin(path string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	if _, err := exec.LookPath("codesign"); err != nil {
+		return nil // codesign missing (e.g. CLT not installed); nothing to do
+	}
+	out, err := exec.Command("codesign", "--force", "--sign", "-", path).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("codesign: %w\n%s", err, out)
+	}
 	return nil
 }
 
