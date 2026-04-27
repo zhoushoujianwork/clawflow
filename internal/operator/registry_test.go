@@ -135,3 +135,122 @@ func TestRegistry_Get(t *testing.T) {
 		t.Error("Get on empty registry should return ok=false")
 	}
 }
+
+func makeSkillFull(name, desc, target, lock string, required, excluded, outcomes []string) string {
+	var b strings.Builder
+	b.WriteString("---\nname: ")
+	b.WriteString(name)
+	if desc != "" {
+		b.WriteString("\ndescription: ")
+		b.WriteString(desc)
+	}
+	b.WriteString("\noperator:\n  trigger:\n    target: ")
+	b.WriteString(target)
+	b.WriteString("\n    labels_required: [")
+	b.WriteString(strings.Join(required, ","))
+	b.WriteString("]\n    labels_excluded: [")
+	b.WriteString(strings.Join(excluded, ","))
+	b.WriteString("]\n  lock_label: ")
+	b.WriteString(lock)
+	if len(outcomes) > 0 {
+		b.WriteString("\n  outcomes: [")
+		b.WriteString(strings.Join(outcomes, ","))
+		b.WriteString("]")
+	}
+	b.WriteString("\n---\n\nprompt for ")
+	b.WriteString(name)
+	return b.String()
+}
+
+func TestDiagnose_Clean(t *testing.T) {
+	sys := fstest.MapFS{
+		"skills/a/SKILL.md": {Data: []byte(makeSkillFull("a", "does A", "issue", "lock-a", []string{"bug"}, nil, []string{"done"}))},
+		"skills/b/SKILL.md": {Data: []byte(makeSkillFull("b", "does B", "pr", "lock-b", []string{"review"}, nil, []string{"reviewed"}))},
+	}
+	reg := NewRegistry()
+	if err := reg.LoadEmbedded(sys, "skills"); err != nil {
+		t.Fatal(err)
+	}
+	diags := reg.Diagnose()
+	if len(diags) != 0 {
+		t.Errorf("expected 0 diagnostics, got %d: %+v", len(diags), diags)
+	}
+}
+
+func TestDiagnose_EmptyDescription(t *testing.T) {
+	sys := fstest.MapFS{
+		"skills/a/SKILL.md": {Data: []byte(makeSkillFull("a", "", "issue", "lock", []string{"bug"}, nil, []string{"done"}))},
+	}
+	reg := NewRegistry()
+	if err := reg.LoadEmbedded(sys, "skills"); err != nil {
+		t.Fatal(err)
+	}
+	diags := reg.Diagnose()
+	found := false
+	for _, d := range diags {
+		if d.Operator == "a" && d.Severity == SeverityWarning && strings.Contains(d.Message, "empty description") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about empty description; got %+v", diags)
+	}
+}
+
+func TestDiagnose_NoOutcomes(t *testing.T) {
+	sys := fstest.MapFS{
+		"skills/a/SKILL.md": {Data: []byte(makeSkillFull("a", "desc", "issue", "lock", []string{"bug"}, nil, nil))},
+	}
+	reg := NewRegistry()
+	if err := reg.LoadEmbedded(sys, "skills"); err != nil {
+		t.Fatal(err)
+	}
+	diags := reg.Diagnose()
+	found := false
+	for _, d := range diags {
+		if d.Operator == "a" && strings.Contains(d.Message, "no outcomes") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about no outcomes; got %+v", diags)
+	}
+}
+
+func TestDiagnose_OverlappingTriggers(t *testing.T) {
+	sys := fstest.MapFS{
+		"skills/a/SKILL.md": {Data: []byte(makeSkillFull("a", "desc", "issue", "lock-a", []string{"bug", "urgent"}, nil, []string{"done"}))},
+		"skills/b/SKILL.md": {Data: []byte(makeSkillFull("b", "desc", "issue", "lock-b", []string{"urgent", "bug"}, nil, []string{"done"}))},
+	}
+	reg := NewRegistry()
+	if err := reg.LoadEmbedded(sys, "skills"); err != nil {
+		t.Fatal(err)
+	}
+	diags := reg.Diagnose()
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "overlapping trigger") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected error about overlapping triggers; got %+v", diags)
+	}
+}
+
+func TestDiagnose_DifferentTargetNoOverlap(t *testing.T) {
+	sys := fstest.MapFS{
+		"skills/a/SKILL.md": {Data: []byte(makeSkillFull("a", "desc", "issue", "lock-a", []string{"bug"}, nil, []string{"done"}))},
+		"skills/b/SKILL.md": {Data: []byte(makeSkillFull("b", "desc", "pr", "lock-b", []string{"bug"}, nil, []string{"done"}))},
+	}
+	reg := NewRegistry()
+	if err := reg.LoadEmbedded(sys, "skills"); err != nil {
+		t.Fatal(err)
+	}
+	diags := reg.Diagnose()
+	for _, d := range diags {
+		if d.Severity == SeverityError {
+			t.Errorf("same labels on different targets should not conflict; got %+v", d)
+		}
+	}
+}

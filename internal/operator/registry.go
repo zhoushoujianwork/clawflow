@@ -92,3 +92,71 @@ func (r *Registry) Get(name string) (*Operator, bool) {
 	op, ok := r.ops[name]
 	return op, ok
 }
+
+// Severity classifies a diagnostic finding.
+type Severity int
+
+const (
+	SeverityError   Severity = iota
+	SeverityWarning
+)
+
+func (s Severity) String() string {
+	if s == SeverityError {
+		return "ERROR"
+	}
+	return "WARN"
+}
+
+// Diagnostic is a single finding from Diagnose().
+type Diagnostic struct {
+	Operator string
+	Severity Severity
+	Message  string
+}
+
+// Diagnose runs cross-operator validation and returns all findings.
+func (r *Registry) Diagnose() []Diagnostic {
+	var diags []Diagnostic
+	ops := r.All()
+
+	for _, op := range ops {
+		if op.Description == "" {
+			diags = append(diags, Diagnostic{
+				Operator: op.Name,
+				Severity: SeverityWarning,
+				Message:  "empty description",
+			})
+		}
+		if len(op.Outcomes) == 0 {
+			diags = append(diags, Diagnostic{
+				Operator: op.Name,
+				Severity: SeverityWarning,
+				Message:  "no outcomes declared (any label accepted)",
+			})
+		}
+	}
+
+	type triggerKey struct {
+		target string
+		labels string
+	}
+	seen := make(map[triggerKey]string)
+	for _, op := range ops {
+		sorted := make([]string, len(op.Trigger.LabelsRequired))
+		copy(sorted, op.Trigger.LabelsRequired)
+		sort.Strings(sorted)
+		k := triggerKey{target: op.Trigger.Target, labels: strings.Join(sorted, ",")}
+		if first, ok := seen[k]; ok {
+			diags = append(diags, Diagnostic{
+				Operator: op.Name,
+				Severity: SeverityError,
+				Message:  fmt.Sprintf("overlapping trigger with %q (target=%s, labels_required=[%s])", first, k.target, k.labels),
+			})
+		} else {
+			seen[k] = op.Name
+		}
+	}
+
+	return diags
+}
