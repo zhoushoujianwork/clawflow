@@ -11,6 +11,13 @@ operator:
 
 Someone mentioned you in the issue above. Read the thread, find the latest comment that addresses you, and reply.
 
+## Output contract (MUST follow)
+
+Your stdout IS the reply comment. The runner posts it verbatim. Two rules that are easy to break:
+
+1. **Do NOT call `clawflow issue comment`** to post the reply yourself. The runner already posts your stdout as a comment — calling it produces a duplicate.
+2. **Do NOT add a meta status line to stdout** like "Reply posted, labels swapped". Stdout is the reply only — anything else becomes a second visible comment on the issue.
+
 ## Task
 
 1. Read the issue body + all comments in the Context block.
