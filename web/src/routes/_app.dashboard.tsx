@@ -179,14 +179,32 @@ function Dashboard() {
 
   // Pending ignores statusFilter (queued items have no run status yet) but
   // honors repo + search filters so the user can drill into one repo's queue.
+  //
+  // Dedup against running runs: pending.json is captured at the start of
+  // the scan and shows every (issue × matching-operator) combination,
+  // including the one the runner just kicked off. Once that operator's
+  // meta.json appears in runs.json with status=running we should hide
+  // the matching pending row so the user doesn't see "queued" and
+  // "running" for the same job.
+  const runningKeys = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of runs) {
+      if (r.status === 'running') {
+        s.add(`${r.repo}#${r.issue_number}/${r.operator}`)
+      }
+    }
+    return s
+  }, [runs])
+
   const filteredPending = useMemo(() => {
     const q = query.trim().toLowerCase()
     return pending.filter(p => {
+      if (runningKeys.has(`${p.repo}#${p.issue_number}/${p.operator}`)) return false
       if (repoFilter !== 'all' && p.repo !== repoFilter) return false
       if (q && !(p.issue_title || '').toLowerCase().includes(q) && !String(p.issue_number).includes(q) && !p.operator.toLowerCase().includes(q)) return false
       return true
     })
-  }, [pending, repoFilter, query])
+  }, [pending, repoFilter, query, runningKeys])
 
   // Build the per-repo URL map from the same repos.json the dashboard already
   // pulls — no extra fetch needed.

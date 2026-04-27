@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -187,31 +190,72 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		if onlyIssue != 0 && iss.Number != onlyIssue {
 			continue
 		}
+		// Track the operator that fired (and reached "done") for this issue
+		// so we can drop its pending entry below. Failed runs leave firedOp
+		// empty so the entry stays — the user wants to see "still queued"
+		// and retry on the next clawflow run.
+		var firedOp string
 		for _, op := range reg.All() {
 			if !operator.Matches(sub, op) {
 				continue
 			}
 			fmt.Printf("[%s] #%d → operator %s\n", fullName, sub.Number, op.Name)
 
-			workdir, cleanup, err := resolveWorkdir(op, repoCfg)
+			// Persist per-run events.jsonl + meta.json under the dashboard
+			// data dir so `clawflow web` can replay this run later. The
+			// dirs and the placeholder meta are created BEFORE the workdir
+			// setup so that even an early failure (e.g. worktree creation)
+			// gets recorded as a real run on disk.
+			startedAt := time.Now()
+			runDir := snapshot.RunDir(fullName, sub.Number, startedAt)
+			_ = os.MkdirAll(runDir, 0o755)
+
+			// Write a placeholder meta.json with status="running" so the
+			// dashboard's polling refresh sees this run as in-flight,
+			// rather than waiting for the operator to terminate before any
+			// row appears. The final meta is written below after Run()
+			// returns and overwrites this stub.
+			runningMeta := snapshot.RunMeta{
+				Operator:    op.Name,
+				Repo:        fullName,
+				IssueNumber: sub.Number,
+				IssueTitle:  sub.Title,
+				StartedAt:   startedAt.UTC(),
+				Status:      "running",
+			}
+			if err := snapshot.WriteRunMeta(runDir, runningMeta); err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ initial run meta: %v\n", err)
+			}
+			// Refresh runs.json now so the dashboard shows the running
+			// row immediately. Discard the entries — the post-run refresh
+			// at the top of runOnce rewrites the index with final state.
+			if _, err := snapshot.WriteRunsIndex(50); err != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠ snapshot runs index (running): %v\n", err)
+			}
+
+			workdir, cleanup, err := resolveWorkdir(op, repoCfg, fullName, sub.Number, startedAt)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  workdir: %v\n", err)
+				fmt.Fprintf(os.Stderr, "  ✗ workdir: %v\n", err)
+				// Record the failure so the running-row doesn't get
+				// orphaned in the index.
+				runningMeta.Status = "failed"
+				runningMeta.Error = err.Error()
+				runningMeta.EndedAt = time.Now().UTC()
+				_ = snapshot.WriteRunMeta(runDir, runningMeta)
 				continue
 			}
+			fmt.Fprintf(os.Stderr, "  ✓ workdir ready: %s\n", workdir)
 
 			// Best-effort comment fetch for prompt context; ignore failures.
 			comments, _ := client.ListIssueComments(fullName, sub.Number)
 
-			// Persist per-run events.jsonl + meta.json under the dashboard
-			// data dir so `clawflow web` can replay this run later.
-			startedAt := time.Now()
-			runDir := snapshot.RunDir(fullName, sub.Number, startedAt)
-			_ = os.MkdirAll(runDir, 0o755)
 			eventsFile, eventsErr := os.Create(filepath.Join(runDir, "events.jsonl"))
 			if eventsErr != nil {
-				fmt.Fprintf(os.Stderr, "  events sink: %v\n", eventsErr)
+				fmt.Fprintf(os.Stderr, "  ⚠ events sink: %v\n", eventsErr)
 			}
 
+			fmt.Fprintf(os.Stderr, "  → running claude (timeout %s)\n", timeout)
+			runStart := time.Now()
 			output, runErr := operator.Run(ctx, op, sub, client, operator.RunOptions{
 				Repo:        fullName,
 				Workdir:     workdir,
@@ -219,8 +263,14 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 				Comments:    comments,
 				EventWriter: eventsFile,
 			})
+			runDur := time.Since(runStart).Round(time.Second)
 			if eventsFile != nil {
 				_ = eventsFile.Close()
+			}
+			if runErr != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ claude failed: %v\n", runErr)
+			} else {
+				fmt.Fprintf(os.Stderr, "  ✓ claude finished in %s\n", runDur)
 			}
 			cleanup()
 
@@ -250,17 +300,28 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 				rm.Usage = u
 			}
 			if err := snapshot.WriteRunMeta(runDir, rm); err != nil {
-				fmt.Fprintf(os.Stderr, "  run meta: %v\n", err)
+				fmt.Fprintf(os.Stderr, "  ⚠ run meta: %v\n", err)
 			}
 
 			if runErr != nil {
-				fmt.Fprintf(os.Stderr, "  ✗ %v\n", runErr)
 				continue
 			}
 			fmt.Println("  ✓ done")
+			firedOp = op.Name
 			// One operator per issue per run — avoid compound state changes
 			// where two ops race on the same labels.
 			break
+		}
+		// Drop the pending entry for the operator that just completed so the
+		// dashboard's "Pending" section reflects post-run state. Without this
+		// the row resurfaces as `queued` once status flips from running →
+		// success and the running-vs-pending dedup on the frontend stops
+		// hiding it.
+		if firedOp != "" {
+			issueNum := iss.Number
+			pending = slices.DeleteFunc(pending, func(p snapshot.PendingEntry) bool {
+				return p.IssueNumber == issueNum && p.Operator == firedOp
+			})
 		}
 	}
 
@@ -270,10 +331,12 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 }
 
 // resolveWorkdir picks the cwd for the claude subprocess and returns a
-// cleanup callback. For operators that write code (implement), the workdir
-// must be the repo's local clone. For read-only operators, a tempdir is
-// fine and gets RemoveAll'd on cleanup.
-func resolveWorkdir(op *operator.Operator, repoCfg config.Repo) (string, func(), error) {
+// cleanup callback. For operators that write code (implement) or target
+// PRs, the workdir must be a fresh git worktree backed by the repo's
+// local clone — that way the operator's branch/commit/checkout commands
+// don't stomp on whatever the user has open in their primary clone. For
+// read-only operators, a tempdir is fine and gets RemoveAll'd on cleanup.
+func resolveWorkdir(op *operator.Operator, repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time) (string, func(), error) {
 	// Pragmatic heuristic: "implement" and any pr-target operator need the
 	// repo. Everything else gets an ephemeral tempdir. A future schema field
 	// (e.g. operator.requires_workdir: true) can replace this.
@@ -282,11 +345,80 @@ func resolveWorkdir(op *operator.Operator, repoCfg config.Repo) (string, func(),
 		if repoCfg.LocalPath == "" {
 			return "", func() {}, fmt.Errorf("operator %q needs repo local_path but it's empty in config", op.Name)
 		}
-		return repoCfg.LocalPath, func() {}, nil
+		return setupWorktree(repoCfg, fullName, issueNum, startedAt)
 	}
 	dir, err := os.MkdirTemp("", "clawflow-op-")
 	if err != nil {
 		return "", func() {}, err
 	}
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// setupWorktree provisions a fresh git worktree at
+// ~/.clawflow/worktrees/<repo-slug>/issue-<N>-<ts> backed by the user's
+// local clone. The worktree starts on detached HEAD at the latest
+// origin/<base_branch> so the operator can `git checkout -b fix/issue-N`
+// without ever touching the user's checked-out branch. Cleanup removes
+// the worktree (force) but leaves any branches the operator created
+// alone — pushed branches stay locally for the user to inspect/delete.
+func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time) (string, func(), error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", func() {}, fmt.Errorf("home dir: %w", err)
+	}
+	slug := strings.ReplaceAll(fullName, "/", "__")
+	ts := startedAt.UTC().Format("2006-01-02T15-04-05Z")
+	parent := filepath.Join(home, ".clawflow", "worktrees", slug)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", func() {}, fmt.Errorf("mkdir worktree parent: %w", err)
+	}
+	wtPath := filepath.Join(parent, fmt.Sprintf("issue-%d-%s", issueNum, ts))
+
+	base := repoCfg.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	localPath := repoCfg.LocalPath
+
+	// Best-effort fetch to align origin/<base> with the remote. A repo
+	// without network reachability (offline dev, private bastion) should
+	// still be able to spin up a worktree at the local origin/<base>.
+	fmt.Fprintf(os.Stderr, "  → setup: fetching origin/%s\n", base)
+	fetchCmd := exec.Command("git", "-C", localPath, "fetch", "origin", base)
+	fetchCmd.Stdout = os.Stderr
+	fetchCmd.Stderr = os.Stderr
+	if err := fetchCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ fetch failed (continuing): %v\n", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "  → setup: creating worktree at %s\n", wtPath)
+	addCmd := exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
+	addCmd.Stdout = os.Stderr
+	addCmd.Stderr = os.Stderr
+	if err := addCmd.Run(); err != nil {
+		// Fall back to the local base branch ref. Brand-new clones may
+		// not have origin/<base> yet (e.g. the user just `git init`'d
+		// and added a remote without pushing anything).
+		fmt.Fprintf(os.Stderr, "  ⚠ worktree add origin/%s failed, falling back to local %s\n", base, base)
+		addLocal := exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
+		addLocal.Stdout = os.Stderr
+		addLocal.Stderr = os.Stderr
+		if err2 := addLocal.Run(); err2 != nil {
+			return "", func() {}, fmt.Errorf("git worktree add failed (origin/%s: %v; %s: %w)", base, err, base, err2)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "  ✓ worktree ready (detached HEAD at origin/%s)\n", base)
+
+	cleanup := func() {
+		fmt.Fprintln(os.Stderr, "  → cleanup: removing worktree")
+		rm := exec.Command("git", "-C", localPath, "worktree", "remove", "--force", wtPath)
+		rm.Stdout = os.Stderr
+		rm.Stderr = os.Stderr
+		if err := rm.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ worktree remove failed: %v\n", err)
+			return
+		}
+		fmt.Fprintln(os.Stderr, "  ✓ worktree removed")
+	}
+	return wtPath, cleanup, nil
 }

@@ -84,7 +84,14 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	if err := v.AddLabel(opts.Repo, sub.Number, op.LockLabel); err != nil {
 		return "", fmt.Errorf("add lock label: %w", err)
 	}
-	defer func() { _ = v.RemoveLabel(opts.Repo, sub.Number, op.LockLabel) }()
+	fmt.Fprintf(os.Stderr, "  ✓ lock label %q added\n", op.LockLabel)
+	defer func() {
+		if err := v.RemoveLabel(opts.Repo, sub.Number, op.LockLabel); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ lock label %q remove failed: %v\n", op.LockLabel, err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "  ✓ lock label %q removed\n", op.LockLabel)
+	}()
 
 	prompt := BuildPrompt(op, sub, opts.Repo, opts.Comments)
 	runFunc := opts.RunFunc
@@ -112,6 +119,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		if err := v.PostIssueComment(opts.Repo, sub.Number, body); err != nil {
 			return body, fmt.Errorf("post result comment: %w", err)
 		}
+		fmt.Fprintf(os.Stderr, "  ✓ comment posted (%d chars)\n", len(body))
 	}
 
 	if outcome != "" {
@@ -120,10 +128,12 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 			// rather than silently mutate state in unexpected ways. Logged
 			// to stderr so the run output surfaces the misuse.
 			fmt.Fprintf(os.Stderr,
-				"operator %q produced disallowed outcome %q (allowed: %v); skipping label add\n",
+				"  ⚠ operator %q produced disallowed outcome %q (allowed: %v); skipping label add\n",
 				op.Name, outcome, op.Outcomes)
 		} else if err := v.AddLabel(opts.Repo, sub.Number, outcome); err != nil {
 			return body, fmt.Errorf("add outcome label %q: %w", outcome, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  ✓ outcome label %q added\n", outcome)
 		}
 	}
 
