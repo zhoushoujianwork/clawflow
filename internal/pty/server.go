@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
+	"time"
 
 	creackpty "github.com/creack/pty"
 	"github.com/gorilla/websocket"
@@ -58,12 +60,18 @@ func HandlePTY(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ptmx.Close()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	// `done` fires the moment either io goroutine returns — i.e. the
+	// browser closed the WebSocket. Without an explicit teardown the
+	// `claude` subprocess keeps running and holds its `--session-id`
+	// lock; the next reconnect for the same repo+issue then fails with
+	// "Session ID … is already in use".
+	done := make(chan struct{})
+	var doneOnce sync.Once
+	signalDone := func() { doneOnce.Do(func() { close(done) }) }
 
-	// PTY stdout → WebSocket
+	// PTY → WebSocket
 	go func() {
-		defer wg.Done()
+		defer signalDone()
 		buf := make([]byte, 4096)
 		for {
 			n, err := ptmx.Read(buf)
@@ -78,9 +86,9 @@ func HandlePTY(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// WebSocket → PTY stdin
+	// WebSocket → PTY
 	go func() {
-		defer wg.Done()
+		defer signalDone()
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
@@ -92,7 +100,26 @@ func HandlePTY(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Wait for the subprocess to exit, then close connections.
-	_ = cmd.Wait()
-	wg.Wait()
+	<-done
+
+	// SIGTERM lets claude release its session-id lock cleanly. If it
+	// doesn't exit within the grace window (rare; usually it's
+	// effectively instant on a stdin-blocking REPL), SIGKILL guarantees
+	// the next connection isn't blocked behind a stale subprocess.
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	if cmd.Process != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+	}
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-exited
+	}
 }

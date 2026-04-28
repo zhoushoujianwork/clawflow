@@ -63,11 +63,20 @@ export function XTerminal({ wsUrl }: TerminalProps) {
       }
     })
 
-    const onResize = () => fitAddon.fit()
+    const safeFit = () => {
+      try { fitAddon.fit() } catch { /* container detached, ignore */ }
+    }
+    const onResize = () => safeFit()
     window.addEventListener('resize', onResize)
+
+    // Drawer width is user-resizable, so window resize alone isn't
+    // enough — the container changes size while the window doesn't.
+    const ro = new ResizeObserver(() => safeFit())
+    ro.observe(containerRef.current)
 
     return () => {
       window.removeEventListener('resize', onResize)
+      ro.disconnect()
       ws.close()
       term.dispose()
     }

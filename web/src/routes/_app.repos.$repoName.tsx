@@ -212,14 +212,13 @@ function RepoDetail() {
             <ToggleCard label="Status" enabled={repo.enabled} onToggle={() => toggleConfig('enabled')} disabled={saving} />
             <ToggleCard label="Auto-fix" enabled={repo.auto_fix} onToggle={() => toggleConfig('auto_fix')} disabled={saving} />
             <ToggleCard label="Auto-merge" enabled={repo.auto_merge} onToggle={() => toggleConfig('auto_merge')} disabled={saving} />
-            <StatusCard label="Local path" value={repo.local_path ? '✓' : '—'} tone={repo.local_path ? 'neutral' : 'muted'} />
-          </div>
-
-          {repo.local_path && (
-            <div className="bg-card border border-border rounded-xl p-3 mb-6 text-xs font-mono text-muted-foreground">
-              {repo.local_path}
+            <div className="bg-card border border-border rounded-xl p-3">
+              <div className="text-xs text-muted-foreground">Local path</div>
+              <div className="text-xs font-mono mt-1.5 text-foreground truncate" title={repo.local_path || ''}>
+                {repo.local_path || '—'}
+              </div>
             </div>
-          )}
+          </div>
 
           <section>
             <div className="flex items-baseline gap-2 mb-2">
@@ -429,20 +428,6 @@ function formatDuration(start: string, end: string): string {
   if (m < 60) return m + 'm ' + (s % 60) + 's'
   const h = Math.floor(m / 60)
   return h + 'h ' + (m % 60) + 'm'
-}
-
-function StatusCard({ label, value, tone }: { label: string; value: string; tone: 'green' | 'muted' | 'neutral' }) {
-  const toneCls = {
-    green: 'text-green-600',
-    muted: 'text-muted-foreground',
-    neutral: 'text-foreground',
-  }[tone]
-  return (
-    <div className="bg-card border border-border rounded-xl p-3">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={cn('text-base font-semibold mt-0.5', toneCls)}>{value}</div>
-    </div>
-  )
 }
 
 function ToggleCard({ label, enabled, onToggle, disabled }: {
