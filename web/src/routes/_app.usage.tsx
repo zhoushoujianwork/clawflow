@@ -291,7 +291,7 @@ function StatCard({
   value: string
   tone?: 'neutral' | 'brand'
 }) {
-  const valueCls = tone === 'brand' ? 'text-primary' : 'text-foreground'
+  const valueCls = tone === 'brand' ? 'text-brand' : 'text-foreground'
   return (
     <div className="bg-card border border-border rounded-xl p-3">
       <div className="text-xs text-muted-foreground">{label}</div>
