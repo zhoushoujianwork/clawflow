@@ -75,7 +75,17 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 		name = fmt.Sprintf("clawflow: %s #%d", repo, issueNum)
 	}
 
-	args := []string{"--model", model, "--name", name}
+	// Hard-block file mutations and notebook edits. The chat is
+	// strictly an analysis / planning assistant — code changes go
+	// through `clawflow run` (the implement operator) on a labeled
+	// issue, not from this REPL. Read/Bash/Grep/Glob/etc. stay
+	// allowed so claude can still inspect the repo to inform its
+	// analysis.
+	args := []string{
+		"--model", model,
+		"--name", name,
+		"--disallowedTools", "Edit,Write,NotebookEdit",
+	}
 
 	if resuming {
 		// Resume the existing transcript. Don't re-inject the system
