@@ -5,17 +5,28 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	creackpty "github.com/creack/pty"
 	"github.com/gorilla/websocket"
+	"github.com/zhoushoujianwork/clawflow/internal/chat"
 )
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
+
+// WebSocket close codes the browser sends to express user intent. The
+// browser-reserved range starts at 4000; pick anything in 4000–4999 and
+// keep both ends in sync.
+const (
+	wsCloseDestroy  = 4001 // X button: end the chat for good (delete transcript)
+	wsCloseCollapse = 4000 // outside-click / Escape: hide drawer, keep transcript
+)
 
 // HandlePTY upgrades an HTTP request to a WebSocket and bridges it to a
 // `clawflow chat` subprocess running in a PTY. Query params:
@@ -23,12 +34,19 @@ var upgrader = websocket.Upgrader{
 //	repo  — required, e.g. "owner/repo"
 //	issue — optional issue number
 //	model — optional model name (default: haiku)
+//
+// On WS close the browser tags its intent via a 4xxx close code:
+//   - wsCloseDestroy: delete the session transcript so the next open
+//     starts fresh
+//   - wsCloseCollapse (or any other code): keep the transcript so the
+//     next open --resumes mid-conversation
 func HandlePTY(w http.ResponseWriter, r *http.Request) {
 	repo := r.URL.Query().Get("repo")
 	if repo == "" {
 		http.Error(w, "repo query param required", http.StatusBadRequest)
 		return
 	}
+	issueNum, _ := strconv.Atoi(r.URL.Query().Get("issue"))
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -69,6 +87,11 @@ func HandlePTY(w http.ResponseWriter, r *http.Request) {
 	var doneOnce sync.Once
 	signalDone := func() { doneOnce.Do(func() { close(done) }) }
 
+	// destroy is set when the WS→PTY goroutine sees a close frame with
+	// code wsCloseDestroy. After the subprocess exits we use this to
+	// decide whether to wipe the session transcript on disk.
+	var destroy atomic.Bool
+
 	// PTY → WebSocket
 	go func() {
 		defer signalDone()
@@ -92,6 +115,12 @@ func HandlePTY(w http.ResponseWriter, r *http.Request) {
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
+				// Inspect the close frame for the user's intent. Gorilla
+				// surfaces it as a *websocket.CloseError whose Code we
+				// can read directly.
+				if ce, ok := err.(*websocket.CloseError); ok && ce.Code == wsCloseDestroy {
+					destroy.Store(true)
+				}
 				return
 			}
 			if _, err := ptmx.Write(msg); err != nil {
@@ -121,5 +150,13 @@ func HandlePTY(w http.ResponseWriter, r *http.Request) {
 			_ = cmd.Process.Kill()
 		}
 		<-exited
+	}
+
+	if destroy.Load() {
+		// Subprocess is fully gone; safe to delete the on-disk transcript.
+		// Glob across all project dirs because session files for the same
+		// (repo, issue) can have accumulated across cwd evolutions.
+		sid := chat.SessionID(repo, issueNum)
+		_, _ = chat.DeleteSessions(sid)
 	}
 }

@@ -2,12 +2,9 @@ package commands
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
@@ -52,12 +49,17 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	}
 
 	// Deterministic session ID so same repo+issue always resumes
-	sessionID := chatSessionID(repo, issueNum)
+	sessionID := chat.SessionID(repo, issueNum)
 
-	// Resolve working directory to repo's local_path
+	// Working directory: prefer the repo's local clone so claude can
+	// read code in-place. When no local_path is configured we fall
+	// back to a clean temp dir — NOT os.Getwd(), because the chat is
+	// usually launched from `clawflow web`'s cwd (the clawflow source
+	// tree itself), which would let claude read THAT repo's CLAUDE.md
+	// and mistake it for the chat target.
 	workdir := repoCfg.LocalPath
 	if workdir == "" {
-		workdir, _ = os.Getwd()
+		workdir = os.TempDir()
 	}
 
 	// Claude rejects --session-id <X> when the session already exists on
@@ -65,7 +67,7 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	// ~/.claude/projects/<encoded-cwd>/<id>.jsonl where encoded-cwd is
 	// the workdir with "/" → "-". If the file is there from a prior
 	// chat, --resume the existing session instead of trying to recreate.
-	resuming := chatSessionExists(workdir, sessionID)
+	resuming := chat.SessionExists(workdir, sessionID)
 
 	// Session display name
 	name := fmt.Sprintf("clawflow: %s", repo)
@@ -117,30 +119,6 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
-}
-
-// chatSessionID generates a deterministic UUID for a repo+issue pair so
-// the same chat always resumes the same Claude session.
-func chatSessionID(repo string, issue int) string {
-	h := sha256.Sum256([]byte(fmt.Sprintf("clawflow-chat:%s:%d", repo, issue)))
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		h[0:4], h[4:6], h[6:8], h[8:10], h[10:16])
-}
-
-// chatSessionExists reports whether claude already has a stored session
-// transcript for `sessionID` under `cwd`. Claude lays out sessions as
-// ~/.claude/projects/<cwd-with-slashes-as-dashes>/<id>.jsonl — when this
-// file exists, --session-id refuses with "already in use" and the caller
-// must --resume instead.
-func chatSessionExists(cwd, sessionID string) bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	encoded := strings.ReplaceAll(cwd, "/", "-")
-	path := filepath.Join(home, ".claude", "projects", encoded, sessionID+".jsonl")
-	_, err = os.Stat(path)
-	return err == nil
 }
 
 func buildIssueChatContext(client vcs.Client, repo string, issueNum int) (string, error) {

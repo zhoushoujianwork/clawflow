@@ -1,14 +1,20 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type MutableRefObject } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
+import { WS_CLOSE_DESTROY, WS_CLOSE_COLLAPSE, type CloseIntent } from './ChatDrawer'
 
 interface TerminalProps {
   wsUrl: string
+  // Optional: if provided, the WS close on unmount uses a 4xxx code
+  // matching the ref's current value. The server reads this to decide
+  // whether to delete the session transcript (destroy) or keep it for
+  // the next --resume (collapse).
+  closeIntentRef?: MutableRefObject<CloseIntent>
 }
 
-export function XTerminal({ wsUrl }: TerminalProps) {
+export function XTerminal({ wsUrl, closeIntentRef }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
 
@@ -77,7 +83,18 @@ export function XTerminal({ wsUrl }: TerminalProps) {
     return () => {
       window.removeEventListener('resize', onResize)
       ro.disconnect()
-      ws.close()
+      // Tag the close with the user's intent so the server knows
+      // whether to wipe the session transcript. Default to collapse
+      // when no ref is wired (preserves session — safer default).
+      const intent = closeIntentRef?.current ?? 'collapse'
+      const code = intent === 'destroy' ? WS_CLOSE_DESTROY : WS_CLOSE_COLLAPSE
+      try {
+        ws.close(code, intent)
+      } catch {
+        // If the WS rejects our custom code (rare; not all browsers
+        // accept 4xxx codes via close()), fall back to a default close.
+        ws.close()
+      }
       term.dispose()
     }
   }, [wsUrl])
