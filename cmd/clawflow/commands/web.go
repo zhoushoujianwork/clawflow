@@ -50,6 +50,8 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/ws/pty", ptyserver.HandlePTY)
 			mux.HandleFunc("/api/labels/add", api.HandleAddLabel)
 			mux.HandleFunc("/api/labels/remove", api.HandleRemoveLabel)
+			mux.HandleFunc("/api/run", api.HandleRun)
+			mux.HandleFunc("/api/run/status", api.HandleRunStatus)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				// SPA fallback: if the requested path maps to a real file
 				// (or lives under /data/ or /assets/ which tanstack-router

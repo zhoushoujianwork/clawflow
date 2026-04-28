@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Search,
   ExternalLink,
@@ -10,6 +10,7 @@ import {
   SkipForward,
   Activity,
   Clock,
+  Play,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
@@ -119,6 +120,7 @@ function Dashboard() {
   const [repos, setRepos] = useState<Repo[]>([])
   const [pending, setPending] = useState<Pending[]>([])
   const [loading, setLoading] = useState(true)
+  const [runBusy, setRunBusy] = useState(false)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [query, setQuery] = useState('')
   const [repoFilter, setRepoFilter] = useState<string>('all')
@@ -154,6 +156,27 @@ function Dashboard() {
       cancelled = true
       clearInterval(id)
     }
+  }, [])
+
+  // Poll run status
+  useEffect(() => {
+    const poll = () => {
+      fetch('/api/run/status', { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d) setRunBusy(d.status === 'running') })
+        .catch(() => {})
+    }
+    poll()
+    const id = setInterval(poll, 3000)
+    return () => clearInterval(id)
+  }, [])
+
+  const triggerRun = useCallback(() => {
+    setRunBusy(true)
+    fetch('/api/run', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => { if (d.status === 'busy') setRunBusy(true) })
+      .catch(() => setRunBusy(false))
   }, [])
 
   const counts = useMemo(() => {
@@ -234,6 +257,22 @@ function Dashboard() {
             </p>
           )}
         </div>
+        <button
+          onClick={triggerRun}
+          disabled={runBusy}
+          className={cn(
+            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+            runBusy
+              ? 'bg-muted text-muted-foreground cursor-not-allowed'
+              : 'bg-brand text-on-brand hover:bg-brand-hover',
+          )}
+        >
+          {runBusy ? (
+            <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Running…</>
+          ) : (
+            <><Play className="w-3.5 h-3.5" /> Run</>
+          )}
+        </button>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-4">
