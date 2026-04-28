@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight, ExternalLink, MessageSquare } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
@@ -61,6 +61,26 @@ function RepoDetail() {
   const [pending, setPending] = useState<PendingEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  const [saving, setSaving] = useState(false)
+
+  const toggleConfig = useCallback((field: 'enabled' | 'auto_fix' | 'auto_merge') => {
+    if (!repo || saving) return
+    const newVal = !(repo as any)[field]
+    setSaving(true)
+    fetch('/api/repo/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: fullName, [field]: newVal }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d && d.status === 'ok') {
+          setRepo(prev => prev ? { ...prev, [field]: newVal } : prev)
+        }
+      })
+      .catch(() => {})
+      .finally(() => setSaving(false))
+  }, [repo, fullName, saving])
 
   useEffect(() => {
     Promise.all([
@@ -189,9 +209,9 @@ function RepoDetail() {
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-6">
-            <StatusCard label="Status" value={repo.enabled ? 'enabled' : 'disabled'} tone={repo.enabled ? 'green' : 'muted'} />
-            <StatusCard label="Auto-fix" value={repo.auto_fix ? 'on' : 'off'} tone={repo.auto_fix ? 'green' : 'muted'} />
-            <StatusCard label="Auto-merge" value={repo.auto_merge ? 'on' : 'off'} tone={repo.auto_merge ? 'green' : 'muted'} />
+            <ToggleCard label="Status" enabled={repo.enabled} onToggle={() => toggleConfig('enabled')} disabled={saving} />
+            <ToggleCard label="Auto-fix" enabled={repo.auto_fix} onToggle={() => toggleConfig('auto_fix')} disabled={saving} />
+            <ToggleCard label="Auto-merge" enabled={repo.auto_merge} onToggle={() => toggleConfig('auto_merge')} disabled={saving} />
             <StatusCard label="Local path" value={repo.local_path ? '✓' : '—'} tone={repo.local_path ? 'neutral' : 'muted'} />
           </div>
 
@@ -422,5 +442,44 @@ function StatusCard({ label, value, tone }: { label: string; value: string; tone
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className={cn('text-base font-semibold mt-0.5', toneCls)}>{value}</div>
     </div>
+  )
+}
+
+function ToggleCard({ label, enabled, onToggle, disabled }: {
+  label: string
+  enabled: boolean
+  onToggle: () => void
+  disabled?: boolean
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      disabled={disabled}
+      className={cn(
+        'bg-card border rounded-xl p-3 text-left transition-all',
+        enabled ? 'border-green-300' : 'border-border',
+        disabled ? 'opacity-60 cursor-not-allowed' : 'hover:shadow-sm cursor-pointer',
+      )}
+    >
+      <div className="flex items-center justify-between">
+        <div className="text-xs text-muted-foreground">{label}</div>
+        <div
+          className={cn(
+            'w-8 h-[18px] rounded-full transition-colors relative',
+            enabled ? 'bg-green-500' : 'bg-muted-foreground/30',
+          )}
+        >
+          <div
+            className={cn(
+              'absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-transform shadow-sm',
+              enabled ? 'translate-x-[16px]' : 'translate-x-[2px]',
+            )}
+          />
+        </div>
+      </div>
+      <div className={cn('text-base font-semibold mt-0.5', enabled ? 'text-green-600' : 'text-muted-foreground')}>
+        {enabled ? (label === 'Status' ? 'enabled' : 'on') : (label === 'Status' ? 'disabled' : 'off')}
+      </div>
+    </button>
   )
 }

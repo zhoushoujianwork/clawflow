@@ -1,0 +1,75 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+)
+
+type repoConfigRequest struct {
+	Repo      string `json:"repo"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+	AutoFix   *bool  `json:"auto_fix,omitempty"`
+	AutoMerge *bool  `json:"auto_merge,omitempty"`
+}
+
+type repoConfigResponse struct {
+	Status    string `json:"status"`
+	Enabled   bool   `json:"enabled"`
+	AutoFix   bool   `json:"auto_fix"`
+	AutoMerge bool   `json:"auto_merge"`
+}
+
+// HandleRepoConfig handles POST /api/repo/config — updates repo toggles.
+func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req repoConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if req.Repo == "" {
+		writeJSON(w, 400, map[string]string{"error": "repo is required"})
+		return
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	repo, ok := cfg.Repos[req.Repo]
+	if !ok {
+		writeJSON(w, 404, map[string]string{"error": "repo not found in config"})
+		return
+	}
+
+	if req.Enabled != nil {
+		repo.Enabled = *req.Enabled
+	}
+	if req.AutoFix != nil {
+		repo.AutoFix = *req.AutoFix
+	}
+	if req.AutoMerge != nil {
+		repo.AutoMerge = *req.AutoMerge
+	}
+
+	cfg.Repos[req.Repo] = repo
+	if err := cfg.Save(); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeJSON(w, 200, repoConfigResponse{
+		Status:    "ok",
+		Enabled:   repo.Enabled,
+		AutoFix:   repo.AutoFix,
+		AutoMerge: repo.AutoMerge,
+	})
+}
