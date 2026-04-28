@@ -11,6 +11,7 @@ import {
   Activity,
   Clock,
   Play,
+  ArrowUpCircle,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
@@ -121,6 +122,9 @@ function Dashboard() {
   const [pending, setPending] = useState<Pending[]>([])
   const [loading, setLoading] = useState(true)
   const [runBusy, setRunBusy] = useState(false)
+  const [latestVersion, setLatestVersion] = useState<string | null>(null)
+  const [updateAvailable, setUpdateAvailable] = useState(false)
+  const [updating, setUpdating] = useState(false)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [query, setQuery] = useState('')
   const [repoFilter, setRepoFilter] = useState<string>('all')
@@ -177,6 +181,33 @@ function Dashboard() {
       .then(r => r.json())
       .then(d => { if (d.status === 'busy') setRunBusy(true) })
       .catch(() => setRunBusy(false))
+  }, [])
+
+  // Check version once on mount
+  useEffect(() => {
+    fetch('/api/version', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d) {
+          setLatestVersion(d.latest || null)
+          setUpdateAvailable(!!d.update_available)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  const triggerUpdate = useCallback(() => {
+    setUpdating(true)
+    fetch('/api/update', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => {
+        setUpdating(false)
+        if (d.status === 'ok') {
+          setUpdateAvailable(false)
+          setLatestVersion(null)
+        }
+      })
+      .catch(() => setUpdating(false))
   }, [])
 
   const counts = useMemo(() => {
@@ -274,6 +305,34 @@ function Dashboard() {
           )}
         </button>
       </div>
+
+      {updateAvailable && latestVersion && (
+        <div
+          className="flex items-center gap-3 px-4 py-2.5 rounded-xl mb-4 border"
+          style={{ background: 'hsl(var(--brand) / 0.06)', borderColor: 'hsl(var(--brand) / 0.2)' }}
+        >
+          <ArrowUpCircle className="w-4 h-4 shrink-0" style={{ color: 'hsl(var(--brand))' }} />
+          <span className="text-sm flex-1" style={{ color: 'hsl(var(--text-high))' }}>
+            New version available: <span className="font-mono font-medium">{latestVersion}</span>
+          </span>
+          <button
+            onClick={triggerUpdate}
+            disabled={updating}
+            className={cn(
+              'inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-colors',
+              updating
+                ? 'bg-muted text-muted-foreground cursor-not-allowed'
+                : 'bg-brand text-on-brand hover:bg-brand-hover',
+            )}
+          >
+            {updating ? (
+              <><Loader2 className="w-3 h-3 animate-spin" /> Updating…</>
+            ) : (
+              'Upgrade'
+            )}
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-4">
         <StatCard label="Total"   value={counts.total}   filter="all"     active={statusFilter === 'all'}     onClick={setStatusFilter} tone="neutral" />

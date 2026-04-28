@@ -41,6 +41,11 @@ here — run 'clawflow run' first if you want fresh data.`,
 				return fmt.Errorf("extract dashboard assets: %w", err)
 			}
 
+			// Wire version info for the API
+			api.VersionInfo.Current = Version
+			api.VersionInfo.Fetch = FetchLatestTag
+			api.VersionInfo.IsNewer = IsNewerVersion
+
 			addr := fmt.Sprintf("%s:%d", host, port)
 			url := fmt.Sprintf("http://%s/", addr)
 
@@ -52,6 +57,8 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/labels/remove", api.HandleRemoveLabel)
 			mux.HandleFunc("/api/run", api.HandleRun)
 			mux.HandleFunc("/api/run/status", api.HandleRunStatus)
+			mux.HandleFunc("/api/version", api.HandleVersion)
+			mux.HandleFunc("/api/update", api.HandleUpdate)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				// SPA fallback: if the requested path maps to a real file
 				// (or lives under /data/ or /assets/ which tanstack-router
