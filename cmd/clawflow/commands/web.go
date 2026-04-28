@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	ptyserver "github.com/zhoushoujianwork/clawflow/internal/pty"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -46,6 +47,14 @@ here — run 'clawflow run' first if you want fresh data.`,
 			api.VersionInfo.Fetch = FetchLatestTag
 			api.VersionInfo.IsNewer = IsNewerVersion
 
+			// Refresh data/repos.json from the live config on startup
+			// so the dashboard never serves a stale snapshot left over
+			// from the last `clawflow run`. Best-effort; if config fails
+			// to load we let the existing snapshot stand.
+			if cfg, err := config.Load(); err == nil {
+				_ = snapshot.WriteRepos(cfg)
+			}
+
 			addr := fmt.Sprintf("%s:%d", host, port)
 			url := fmt.Sprintf("http://%s/", addr)
 
@@ -60,6 +69,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/version", api.HandleVersion)
 			mux.HandleFunc("/api/update", api.HandleUpdate)
 			mux.HandleFunc("/api/repo/config", api.HandleRepoConfig)
+			mux.HandleFunc("/api/repo/clone", api.HandleClone)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				// SPA fallback: if the requested path maps to a real file
 				// (or lives under /data/ or /assets/ which tanstack-router

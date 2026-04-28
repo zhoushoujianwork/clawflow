@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/clone"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
 
@@ -135,79 +135,16 @@ func newWorktreeRemoveCmd() *cobra.Command {
 	return cmd
 }
 
-// resolveLocalPath returns the local repo path from config or auto-discovery.
-// If the path doesn't exist, it clones the repo automatically and saves the path back to config.
+// resolveLocalPath is a thin shim around clone.EnsureLocalClone, kept
+// for backwards compatibility with the rest of the commands package.
+// `git clone` progress is teed to stderr so users running interactive
+// `clawflow run` see the clone happen.
 func resolveLocalPath(cfg *config.Config, ownerRepo string, repoCfg config.Repo) (string, error) {
-	if repoCfg.LocalPath != "" {
-		expanded := expandHomeStr(repoCfg.LocalPath)
-		if _, err := os.Stat(expanded); err == nil {
-			return expanded, nil
-		}
-		fmt.Fprintf(os.Stderr, "local path %q not found, cloning %s ...\n", expanded, ownerRepo)
-		if err := cloneRepo(ownerRepo, expanded, repoCfg); err != nil {
-			return "", fmt.Errorf("auto-clone failed: %w", err)
-		}
-		return expanded, nil
-	}
-
-	// Determine default clone directory based on platform
-	cloneBase := cfg.Settings.ResolveGithubCloneDir()
-	if repoCfg.Platform == "gitlab" {
-		cloneBase = cfg.Settings.ResolveGitlabCloneDir()
-	}
-
-	// Build candidate path: cloneBase/<repo-path>
-	// For "owner/repo" → cloneBase/repo
-	// For "ns/group/repo" (GitLab) → cloneBase/group/repo
-	parts := strings.SplitN(ownerRepo, "/", 2)
-	subPath := parts[len(parts)-1] // everything after first segment (owner)
-	candidate := filepath.Join(cloneBase, subPath)
-
-	if _, err := os.Stat(candidate); err == nil {
-		// Found existing clone — save path back to config
-		saveLocalPath(cfg, ownerRepo, candidate)
-		return candidate, nil
-	}
-
-	// Clone
-	fmt.Fprintf(os.Stderr, "local clone not found, cloning %s to %s ...\n", ownerRepo, candidate)
-	if err := cloneRepo(ownerRepo, candidate, repoCfg); err != nil {
-		return "", fmt.Errorf("auto-clone failed: %w", err)
-	}
-	saveLocalPath(cfg, ownerRepo, candidate)
-	return candidate, nil
-}
-
-func cloneRepo(ownerRepo, dest string, repoCfg config.Repo) error {
-	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		return err
-	}
-	var cloneURL string
-	if repoCfg.Platform == "gitlab" && repoCfg.BaseURL != "" {
-		cloneURL = strings.TrimSuffix(repoCfg.BaseURL, "/") + "/" + ownerRepo + ".git"
-	} else {
-		cloneURL = "https://github.com/" + ownerRepo + ".git"
-	}
-	c := exec.Command("git", "clone", cloneURL, dest)
-	c.Stdout = os.Stderr
-	c.Stderr = os.Stderr
-	return c.Run()
-}
-
-func saveLocalPath(cfg *config.Config, ownerRepo, localPath string) {
-	if r, ok := cfg.Repos[ownerRepo]; ok {
-		r.LocalPath = localPath
-		cfg.Repos[ownerRepo] = r
-		_ = cfg.Save()
-	}
+	return clone.EnsureLocalClone(cfg, ownerRepo, repoCfg, os.Stderr)
 }
 
 func expandHomeStr(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, path[2:])
-	}
-	return path
+	return clone.ExpandHome(path)
 }
 
 func runGit(dir string, args ...string) error {

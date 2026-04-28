@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ChevronRight, ExternalLink, MessageSquare } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ExternalLink, MessageSquare, Download, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -62,6 +62,33 @@ function RepoDetail() {
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [saving, setSaving] = useState(false)
+  const [cloning, setCloning] = useState(false)
+  const [cloneError, setCloneError] = useState<string | null>(null)
+
+  const cloneNow = useCallback(() => {
+    if (!repo || cloning) return
+    setCloning(true)
+    setCloneError(null)
+    fetch('/api/repo/clone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: fullName }),
+    })
+      .then(async r => {
+        const data = await r.json().catch(() => null)
+        if (!r.ok || !data) {
+          throw new Error((data && data.error) || `HTTP ${r.status}`)
+        }
+        return data
+      })
+      .then(d => {
+        if (d.status === 'ok' && d.local_path) {
+          setRepo(prev => prev ? { ...prev, local_path: d.local_path } : prev)
+        }
+      })
+      .catch(err => setCloneError(String(err.message || err)))
+      .finally(() => setCloning(false))
+  }, [repo, fullName, cloning])
 
   const toggleConfig = useCallback((field: 'enabled' | 'auto_fix' | 'auto_merge') => {
     if (!repo || saving) return
@@ -212,11 +239,45 @@ function RepoDetail() {
             <ToggleCard label="Status" enabled={repo.enabled} onToggle={() => toggleConfig('enabled')} disabled={saving} />
             <ToggleCard label="Auto-fix" enabled={repo.auto_fix} onToggle={() => toggleConfig('auto_fix')} disabled={saving} />
             <ToggleCard label="Auto-merge" enabled={repo.auto_merge} onToggle={() => toggleConfig('auto_merge')} disabled={saving} />
-            <div className="bg-card border border-border rounded-xl p-3">
+            <div className="bg-card border border-border rounded-xl p-3 min-w-0">
               <div className="text-xs text-muted-foreground">Local path</div>
-              <div className="text-xs font-mono mt-1.5 text-foreground truncate" title={repo.local_path || ''}>
-                {repo.local_path || '—'}
-              </div>
+              {repo.local_path ? (
+                <div className="text-xs font-mono mt-1.5 text-foreground truncate" title={repo.local_path}>
+                  {repo.local_path}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={cloneNow}
+                  disabled={cloning}
+                  title={cloneError ?? 'git clone into the default location and save the path'}
+                  className={cn(
+                    'mt-1 inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border transition-colors',
+                    cloning
+                      ? 'border-border text-muted-foreground bg-secondary/30'
+                      : cloneError
+                        ? 'border-red-200 text-red-700 bg-red-50 hover:bg-red-100'
+                        : 'border-border text-foreground hover:bg-secondary/50',
+                  )}
+                >
+                  {cloning ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin" /> cloning…
+                    </>
+                  ) : cloneError ? (
+                    <>retry clone</>
+                  ) : (
+                    <>
+                      <Download className="w-3 h-3" /> Clone now
+                    </>
+                  )}
+                </button>
+              )}
+              {cloneError && !cloning && (
+                <div className="mt-1 text-[11px] text-red-600 truncate" title={cloneError}>
+                  {cloneError}
+                </div>
+              )}
             </div>
           </div>
 

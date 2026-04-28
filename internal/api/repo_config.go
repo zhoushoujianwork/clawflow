@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
 type repoConfigRequest struct {
@@ -62,6 +63,13 @@ func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
 
 	cfg.Repos[req.Repo] = repo
 	if err := cfg.Save(); err != nil {
+		writeErr(w, err)
+		return
+	}
+	// Refresh data/repos.json so the frontend's next /data/repos.json
+	// fetch sees the new toggle states. Without this, a hard refresh
+	// shows the pre-edit values from the last `clawflow run` snapshot.
+	if err := snapshot.WriteRepos(cfg); err != nil {
 		writeErr(w, err)
 		return
 	}
