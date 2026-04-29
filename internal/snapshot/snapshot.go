@@ -395,6 +395,16 @@ func WritePending(entries []PendingEntry) error {
 	return writeJSON(filepath.Join(DataDir(), "pending.json"), entries)
 }
 
+// quietWindow is how long events.jsonl can sit untouched before a
+// status="running" meta is considered orphaned. Live runs flush
+// stream-json events every few hundred ms; if nothing has hit the
+// file for a couple of minutes the runner process is gone (kill,
+// SIGTERM, crash, lid close). Tuned to be longer than any normal
+// inter-event gap (claude can pause ~30 s mid-tool-use) and shorter
+// than the default per-operator timeout (60 min) so dashboard
+// reflects reality long before the timeout-based path triggers.
+const quietWindow = 2 * time.Minute
+
 // ReconcileStaleRuns walks data/runs/* and patches up runs whose on-disk
 // state is inconsistent with reality:
 //
@@ -402,13 +412,18 @@ func WritePending(entries []PendingEntry) error {
 //     `staleAfter`: rewrite to "failed". The runner exited (crash, kill,
 //     SIGTERM) before finalizing the meta. Without this, the dashboard
 //     would show a frozen "running" row forever.
+//   - meta.json with status="running" whose events.jsonl hasn't been
+//     written to in `quietWindow`: also rewrite to "failed" (interrupted
+//     process). Catches an interrupt within 2 min instead of waiting
+//     out the full per-operator timeout.
 //   - run dir that contains events.jsonl but no meta.json: synthesize a
 //     "failed" meta from the dir layout (repo / issue / timestamp) and
 //     events.jsonl mtime. Possible when WriteRunMeta itself failed for
 //     the initial running placeholder.
 //
-// Idempotent. Safe (and intended) to call at the top of every clawflow run.
-// Returns the number of runs reconciled so the caller can log it.
+// Idempotent. Safe (and intended) to call at the top of every clawflow run
+// AND at clawflow web startup. Returns the number of runs reconciled so
+// the caller can log it.
 //
 // Does NOT touch any VCS state — the lock label on the corresponding issue
 // is left alone. Removing it would silently re-enable the operator to
@@ -454,17 +469,52 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 			if err := json.Unmarshal(data, &m); err != nil {
 				return nil
 			}
-			if m.Status != "running" || m.StartedAt.After(cutoff) {
+			if m.Status != "running" {
+				return nil
+			}
+			// A run is orphaned if EITHER it's been "running" longer than
+			// the per-operator timeout OR its events.jsonl has gone quiet.
+			// The events-quiet check fires much faster (2 min vs 60 min)
+			// and matches the actual failure mode users hit — they Ctrl-C
+			// or kill the process and want the dashboard to reflect that
+			// without waiting an hour.
+			tooOld := !m.StartedAt.After(cutoff)
+			eventsQuiet := false
+			var lastTouch time.Time
+			if st, err := os.Stat(eventsPath); err == nil {
+				lastTouch = st.ModTime().UTC()
+				eventsQuiet = time.Since(lastTouch) > quietWindow
+			} else {
+				// No events.jsonl at all: only flag this if the run is
+				// also old enough for the timeout-based check to apply,
+				// because a run that just started genuinely has no
+				// events for the first second or two.
+				eventsQuiet = tooOld
+			}
+			if !tooOld && !eventsQuiet {
 				return nil
 			}
 			m.Status = "failed"
-			m.Error = fmt.Sprintf(
-				"reconciled: stuck in running for >%s; runner exited without finalizing this run",
-				staleAfter,
-			)
+			switch {
+			case tooOld && eventsQuiet:
+				m.Error = fmt.Sprintf(
+					"reconciled: stuck in running for >%s and events.jsonl quiet for >%s; runner is gone",
+					staleAfter, quietWindow,
+				)
+			case tooOld:
+				m.Error = fmt.Sprintf(
+					"reconciled: stuck in running for >%s; runner exited without finalizing this run",
+					staleAfter,
+				)
+			default:
+				m.Error = fmt.Sprintf(
+					"reconciled: events.jsonl quiet for >%s while status=running; runner process is gone (interrupted/killed)",
+					quietWindow,
+				)
+			}
 			if m.EndedAt.IsZero() {
-				if st, err := os.Stat(eventsPath); err == nil {
-					m.EndedAt = st.ModTime().UTC()
+				if !lastTouch.IsZero() {
+					m.EndedAt = lastTouch
 				} else {
 					m.EndedAt = time.Now().UTC()
 				}

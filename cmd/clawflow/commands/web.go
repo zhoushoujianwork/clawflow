@@ -55,6 +55,47 @@ here — run 'clawflow run' first if you want fresh data.`,
 				_ = snapshot.WriteRepos(cfg)
 			}
 
+			// Reconcile any "running" entries left over from an
+			// interrupted `clawflow run` (Ctrl-C, SIGTERM, machine
+			// sleep), then regenerate runs.json from the cleaned tree.
+			// Without this, restarting the dashboard would still show a
+			// frozen "running" row pointing at a long-dead process —
+			// and any deleted run dirs would linger in the index until
+			// the next `clawflow run` rewrote it. Both cases are common
+			// during local dev; doing it on startup means a restart is
+			// the obvious fix the user already reaches for.
+			//
+			// 60 min staleAfter mirrors the default per-operator
+			// timeout — anything older than that is definitively dead
+			// regardless of events.jsonl activity.
+			if n, err := snapshot.ReconcileStaleRuns(60 * time.Minute); err == nil && n > 0 {
+				fmt.Fprintf(os.Stderr, "✓ reconciled %d stale run(s) on startup\n", n)
+			}
+			if _, err := snapshot.WriteRunsIndex(50); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠ snapshot runs index on startup: %v\n", err)
+			}
+
+			// Background reconcile: every minute, sweep for orphaned
+			// running entries (events.jsonl gone quiet for >2 min) and
+			// regenerate runs.json so the dashboard's poll picks up the
+			// flip. Without this loop, an interrupt taken AFTER web
+			// starts wouldn't be reflected until the next `clawflow run`
+			// or web restart.
+			go func() {
+				tick := time.NewTicker(time.Minute)
+				defer tick.Stop()
+				for range tick.C {
+					n, err := snapshot.ReconcileStaleRuns(60 * time.Minute)
+					if err != nil {
+						continue
+					}
+					if n > 0 {
+						fmt.Fprintf(os.Stderr, "✓ reconciled %d orphaned run(s)\n", n)
+						_, _ = snapshot.WriteRunsIndex(50)
+					}
+				}
+			}()
+
 			addr := fmt.Sprintf("%s:%d", host, port)
 			url := fmt.Sprintf("http://%s/", addr)
 
