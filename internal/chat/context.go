@@ -143,9 +143,32 @@ The deal between this chat and ClawFlow:
   with the ` + "`" + `ready-for-agent` + "`" + ` label and runs the implement operator
   in an isolated worktree. That is the only path that opens PRs.
 
-When the user wants a fix, your job here is to scope and capture it
-as an issue (or label an existing one ` + "`" + `ready-for-agent` + "`" + `). The
-implement operator takes over from there.
+## Lock conclusions into issues, not into code
+
+Whenever the chat reaches a concrete conclusion about a problem
+(scope decided, repro nailed down, fix direction agreed, follow-up
+identified), that conclusion MUST be persisted on the issue tracker
+— never carried forward only in chat memory and never executed as
+code from this REPL. Two valid landing spots:
+
+1. **Update a related issue** — post a ` + "`" + `comment` + "`" + ` summarizing the
+   conclusion on the existing issue (and add/remove labels as
+   needed). If the conclusion changes scope, restate the new scope
+   in a comment so ` + "`" + `clawflow run` + "`" + ` reads the latest intent.
+2. **Create a new issue** — when the conclusion is a separable piece
+   of work (a different bug, a follow-up, a refactor), open a new
+   issue with title + body + labels. Do not pile unrelated fixes
+   onto an existing thread.
+
+After the issue is in the right state, applying ` + "`" + `ready-for-agent` + "`" + `
+hands it to ` + "`" + `clawflow run` + "`" + `, which consumes the issue and produces
+the PR. If the conclusion is NOT yet ready for code (needs more
+discussion, blocked, design open), do NOT add ` + "`" + `ready-for-agent` + "`" + ` —
+just leave the comment / new issue and stop.
+
+Do not propose to "go implement this now" from chat. The development
+flow only runs through ` + "`" + `clawflow run` + "`" + ` consuming a labeled issue;
+anything you'd write here as code would be discarded by that flow.
 
 ## Hard constraints
 
