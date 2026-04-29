@@ -149,6 +149,49 @@ func HandleUpdateClaudeSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
+// revealRequest names which secret the caller wants in plaintext.
+// Single-secret resolution (rather than dumping all three at once)
+// keeps the surface tight: the network tab only ever logs the value
+// the user explicitly clicked the eye on. Always POST — never GET —
+// so the secret never lands in URL bars or shell history.
+type revealRequest struct {
+	Which string `json:"which"` // "claude_api_key" | "gh_token" | "gitlab_token"
+}
+
+// HandleRevealSecret handles POST /api/settings/reveal. Returns the
+// raw saved value for the requested credential. The dashboard is
+// localhost-only and the user just clicked the eye icon, so the
+// disclosure is intentional. Unknown `which` returns 400.
+func HandleRevealSecret(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req revealRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var v string
+	switch req.Which {
+	case "claude_api_key":
+		v = creds.ClaudeAPIKey
+	case "gh_token":
+		v = creds.GHToken
+	case "gitlab_token":
+		v = creds.GitLabToken
+	default:
+		writeJSON(w, 400, map[string]string{"error": "unknown secret: " + req.Which})
+		return
+	}
+	writeJSON(w, 200, map[string]string{"value": v})
+}
+
 type tokensUpdate struct {
 	GHToken     *string `json:"gh_token,omitempty"`
 	GitlabToken *string `json:"gitlab_token,omitempty"`

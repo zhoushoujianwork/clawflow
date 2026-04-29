@@ -30,6 +30,26 @@ export const Route = createFileRoute('/_app/settings')({
   component: SettingsPage,
 })
 
+// revealSecret asks the backend for the raw saved value of a single
+// credential so the eye-icon toggle can show what's currently
+// configured rather than just the typed-but-unsaved input. Returns ''
+// if the secret isn't set or the request fails — callers should fall
+// back to whatever placeholder they already had.
+async function revealSecret(which: 'claude_api_key' | 'gh_token' | 'gitlab_token'): Promise<string> {
+  try {
+    const r = await fetch('/api/settings/reveal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ which }),
+    })
+    if (!r.ok) return ''
+    const d = await r.json()
+    return typeof d.value === 'string' ? d.value : ''
+  } catch {
+    return ''
+  }
+}
+
 function SettingsPage() {
   const [data, setData] = useState<SettingsView | null>(null)
   const [loading, setLoading] = useState(true)
@@ -175,9 +195,20 @@ function ClaudeSection({
           />
           <button
             type="button"
-            onClick={() => setShowKey(s => !s)}
+            onClick={async () => {
+              // Switching from hidden→visible while the input is empty
+              // means "show me what's actually saved" — fetch the raw
+              // value into the field so the user can see it (and edit
+              // it from there if needed). Once they type something the
+              // input owns the value and we just toggle visibility.
+              if (!showKey && apiKey === '' && view.api_key_set) {
+                const v = await revealSecret('claude_api_key')
+                if (v) setApiKey(v)
+              }
+              setShowKey(s => !s)
+            }}
             className="text-muted-foreground hover:text-foreground"
-            title={showKey ? 'Hide' : 'Show'}
+            title={showKey ? 'Hide' : 'Show saved value'}
           >
             {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
           </button>
@@ -302,6 +333,7 @@ function TokensSection({
           show={showGh}
           onToggleShow={() => setShowGh(s => !s)}
           placeholder={view.gh_set ? `configured · ${view.gh_hint ?? ''}` : 'ghp_…'}
+          onReveal={view.gh_set ? () => revealSecret('gh_token') : undefined}
         />
       </Row>
       <Row label="GitLab">
@@ -311,6 +343,7 @@ function TokensSection({
           show={showGitlab}
           onToggleShow={() => setShowGitlab(s => !s)}
           placeholder={view.gitlab_set ? `configured · ${view.gitlab_hint ?? ''}` : 'glpat-…'}
+          onReveal={view.gitlab_set ? () => revealSecret('gitlab_token') : undefined}
         />
       </Row>
 
@@ -488,13 +521,19 @@ function NumInput({ value, onChange, min, max }: { value: number; onChange: (n: 
 }
 
 function PasswordInput({
-  value, onChange, show, onToggleShow, placeholder,
+  value, onChange, show, onToggleShow, placeholder, onReveal,
 }: {
   value: string
   onChange: (v: string) => void
   show: boolean
   onToggleShow: () => void
   placeholder?: string
+  // onReveal, when provided, is invoked the moment the user toggles
+  // visibility ON while the field is empty — the typical case of
+  // "I want to see what's already saved". Returning a non-empty
+  // string populates the input; returning '' means "no saved value
+  // to reveal", in which case we just flip visibility.
+  onReveal?: () => Promise<string>
 }) {
   return (
     <div className="flex-1 flex gap-2 items-center">
@@ -507,9 +546,15 @@ function PasswordInput({
       />
       <button
         type="button"
-        onClick={onToggleShow}
+        onClick={async () => {
+          if (!show && value === '' && onReveal) {
+            const v = await onReveal()
+            if (v) onChange(v)
+          }
+          onToggleShow()
+        }}
         className="text-muted-foreground hover:text-foreground"
-        title={show ? 'Hide' : 'Show'}
+        title={show ? 'Hide' : 'Show saved value'}
       >
         {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
       </button>
