@@ -399,6 +399,45 @@ func TestRun_OutcomeMarker_None_BackCompat(t *testing.T) {
 	}
 }
 
+func TestRun_OutcomeMarker_RemovesTriggerLabels(t *testing.T) {
+	op := &Operator{
+		Name:      "implement",
+		LockLabel: "agent-running",
+		Trigger: Trigger{
+			LabelsRequired: []string{"ready-for-agent"},
+		},
+		Outcomes: []string{"agent-implemented", "agent-failed", "agent-skipped"},
+	}
+	sub := &Subject{Number: 10, Labels: []string{"ready-for-agent"}}
+	v := newFakeVCS()
+
+	body := "## ✅ ClawFlow fix complete\n\nPR opened\n\n<!-- clawflow:outcome=agent-implemented -->\n"
+	_, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+
+	// Outcome label should be added
+	if !slices.Contains(v.labels[10], "agent-implemented") {
+		t.Errorf("agent-implemented should be added; labels = %v", v.labels[10])
+	}
+
+	// Trigger label should be removed
+	if slices.Contains(v.labels[10], "ready-for-agent") {
+		t.Errorf("ready-for-agent trigger label should be removed; labels = %v", v.labels[10])
+	}
+
+	// Should have called RemoveLabel twice: once for lock, once for trigger labels
+	if v.removeLabelCals != 2 {
+		t.Errorf("RemoveLabel called %d times, want 2 (lock + trigger)", v.removeLabelCals)
+	}
+}
+
 func TestParseOutcome_Direct(t *testing.T) {
 	cases := []struct {
 		name     string

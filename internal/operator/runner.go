@@ -142,6 +142,16 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 			return body, fmt.Errorf("add outcome label %q: %w", outcome, err)
 		} else {
 			fmt.Fprintf(os.Stderr, "  ✓ outcome label %q added\n", outcome)
+			// Remove trigger labels now that the operator has completed with an outcome.
+			// This prevents trigger labels like "ready-for-agent" from lingering after
+			// the operator finishes.
+			if len(op.Trigger.LabelsRequired) > 0 {
+				if err := v.RemoveLabel(opts.Repo, sub.Number, op.Trigger.LabelsRequired...); err != nil {
+					fmt.Fprintf(os.Stderr, "  ⚠ trigger label cleanup failed: %v\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "  ✓ trigger labels removed: %v\n", op.Trigger.LabelsRequired)
+				}
+			}
 		}
 	}
 
