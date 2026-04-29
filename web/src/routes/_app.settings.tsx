@@ -21,6 +21,7 @@ interface SettingsView {
     confidence_threshold: number
     agent_timeout: number
     max_concurrent_agents: number
+    run_interval_minutes: number
     github_clone_dir?: string
     gitlab_clone_dir?: string
   }
@@ -379,6 +380,7 @@ function GlobalSection({
   const [confidence, setConfidence] = useState(view.confidence_threshold)
   const [timeout, setTimeoutVal] = useState(view.agent_timeout)
   const [maxConcurrent, setMaxConcurrent] = useState(view.max_concurrent_agents)
+  const [runInterval, setRunInterval] = useState(view.run_interval_minutes)
   const [ghDir, setGhDir] = useState(view.github_clone_dir ?? '')
   const [glDir, setGlDir] = useState(view.gitlab_clone_dir ?? '')
   const [busy, setBusy] = useState(false)
@@ -390,6 +392,7 @@ function GlobalSection({
     setConfidence(view.confidence_threshold)
     setTimeoutVal(view.agent_timeout)
     setMaxConcurrent(view.max_concurrent_agents)
+    setRunInterval(view.run_interval_minutes)
     setGhDir(view.github_clone_dir ?? '')
     setGlDir(view.gitlab_clone_dir ?? '')
   }, [view])
@@ -399,6 +402,7 @@ function GlobalSection({
     confidence !== view.confidence_threshold ||
     timeout !== view.agent_timeout ||
     maxConcurrent !== view.max_concurrent_agents ||
+    runInterval !== view.run_interval_minutes ||
     ghDir !== (view.github_clone_dir ?? '') ||
     glDir !== (view.gitlab_clone_dir ?? '')
 
@@ -412,6 +416,7 @@ function GlobalSection({
         confidence_threshold: confidence,
         agent_timeout: timeout,
         max_concurrent_agents: maxConcurrent,
+        run_interval_minutes: runInterval,
         github_clone_dir: ghDir,
         gitlab_clone_dir: glDir,
       }),
@@ -438,6 +443,9 @@ function GlobalSection({
       </Row>
       <Row label="Max concurrent agents">
         <NumInput value={maxConcurrent} onChange={setMaxConcurrent} min={1} max={32} />
+      </Row>
+      <Row label="Auto-run interval (min)" hint="0 disables periodic auto-run; only the manual Run button works.">
+        <NumInput value={runInterval} onChange={setRunInterval} min={0} max={1440} />
       </Row>
       <Row label="GitHub clone dir">
         <input
@@ -495,11 +503,14 @@ function Card({ title, hint, children }: { title: string; hint?: string; childre
   )
 }
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
+function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-3">
-      <label className="text-xs text-muted-foreground w-40 shrink-0">{label}</label>
-      <div className="flex-1 flex items-center gap-2">{children}</div>
+    <div className="flex items-start gap-3">
+      <label className="text-xs text-muted-foreground w-40 shrink-0 pt-1.5">{label}</label>
+      <div className="flex-1 flex flex-col gap-1">
+        <div className="flex items-center gap-2">{children}</div>
+        {hint && <div className="text-[11px] text-muted-foreground/80">{hint}</div>}
+      </div>
     </div>
   )
 }

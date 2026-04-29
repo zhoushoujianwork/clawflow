@@ -55,6 +55,20 @@ type Settings struct {
 	GitLabHosts         []string `yaml:"gitlab_hosts"`               // e.g. ["gitlab.company.com"]
 	GithubCloneDir      string   `yaml:"github_clone_dir,omitempty"` // default: ~/github
 	GitlabCloneDir      string   `yaml:"gitlab_clone_dir,omitempty"` // default: ~/gitlab
+
+	// RunIntervalMinutes drives the optional periodic auto-runner that
+	// `clawflow web` embeds. 0 disables it (manual Run button only).
+	// Any positive integer N = fire `clawflow run` every N minutes,
+	// gated by the same in-process mutex the manual button uses so
+	// they can never overlap.
+	RunIntervalMinutes int `yaml:"run_interval_minutes,omitempty"`
+
+	// RunPaused, when true, suppresses periodic ticks while leaving
+	// `RunIntervalMinutes` unchanged. The dashboard's Pause/Resume
+	// button toggles this. Persisted so a paused state survives a web
+	// restart — losing it on restart would silently re-enable runs the
+	// user explicitly stopped.
+	RunPaused bool `yaml:"run_paused,omitempty"`
 }
 
 // ResolveGithubCloneDir returns the configured GitHub clone directory, defaulting to ~/github.

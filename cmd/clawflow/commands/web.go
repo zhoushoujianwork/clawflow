@@ -96,6 +96,15 @@ here — run 'clawflow run' first if you want fresh data.`,
 				}
 			}()
 
+			// Periodic auto-runner: when settings.run_interval_minutes > 0,
+			// fire `clawflow run` on a recurring tick. The ticker shares
+			// the runActive mutex with the manual Run button (via
+			// api.TriggerRun), so the two can never overlap. settings
+			// are re-read every tick — bumping run_interval_minutes or
+			// flipping run_paused via the dashboard takes effect on the
+			// next tick without restarting web.
+			go runPeriodicScheduler()
+
 			addr := fmt.Sprintf("%s:%d", host, port)
 			url := fmt.Sprintf("http://%s/", addr)
 
@@ -107,6 +116,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/labels/remove", api.HandleRemoveLabel)
 			mux.HandleFunc("/api/run", api.HandleRun)
 			mux.HandleFunc("/api/run/status", api.HandleRunStatus)
+			mux.HandleFunc("/api/run/pause", api.HandleRunPause)
 			mux.HandleFunc("/api/version", api.HandleVersion)
 			mux.HandleFunc("/api/update", api.HandleUpdate)
 			mux.HandleFunc("/api/repo/config", api.HandleRepoConfig)
@@ -189,6 +199,76 @@ func ensureDashboardExtracted() error {
 		// copy.
 		return os.WriteFile(dest, data, 0o644)
 	})
+}
+
+// runPeriodicScheduler is the goroutine that fires `clawflow run` on a
+// recurring interval set in settings.run_interval_minutes. It re-reads
+// the config at the start of every tick so the user can change the
+// interval / pause state from the dashboard without restarting web.
+//
+// The actual run is dispatched through api.TriggerRun, which shares
+// the same in-memory mutex with the manual Run button — periodic and
+// manual triggers can never overlap, and a long-running operator
+// passes through quietly because TriggerRun returns false until the
+// previous subprocess exits.
+//
+// Tick cadence: we drive a 30s coarse ticker and check elapsed time
+// against the configured interval each tick. This way changes to
+// run_interval_minutes take effect within at most 30s, without any
+// fancy ticker reset logic. 30s is also fine-grained enough that the
+// dashboard countdown (`next in M:SS`) never lags noticeably.
+func runPeriodicScheduler() {
+	const checkEvery = 30 * time.Second
+	tick := time.NewTicker(checkEvery)
+	defer tick.Stop()
+
+	var lastFire time.Time
+	for range tick.C {
+		cfg, err := config.Load()
+		if err != nil {
+			api.SetSchedulerNextFire(time.Time{})
+			continue
+		}
+		interval := cfg.Settings.RunIntervalMinutes
+		if interval <= 0 {
+			// Auto-run disabled — clear the published next-fire time
+			// so the dashboard hides the countdown.
+			api.SetSchedulerNextFire(time.Time{})
+			lastFire = time.Time{}
+			continue
+		}
+		intervalDur := time.Duration(interval) * time.Minute
+
+		// Initialize lastFire on the first iteration after the
+		// scheduler "turns on" so we don't fire immediately on web
+		// startup (the user explicitly clicks Run if they want a kick
+		// right after start).
+		if lastFire.IsZero() {
+			lastFire = time.Now()
+		}
+		nextFire := lastFire.Add(intervalDur)
+		api.SetSchedulerNextFire(nextFire)
+
+		if cfg.Settings.RunPaused {
+			// Paused: keep the published next-fire time as-is so the
+			// dashboard can render "paused · would have fired in 1:23".
+			// Do NOT advance lastFire — once the user resumes, we
+			// pick up exactly where we left off.
+			continue
+		}
+		if time.Now().Before(nextFire) {
+			continue
+		}
+
+		// Time to fire. TriggerRun returns false if the previous run
+		// is still going — that's fine, we just skip and try again
+		// next tick.
+		if api.TriggerRun("", 0) {
+			lastFire = time.Now()
+			fmt.Fprintf(os.Stderr, "[scheduler] auto-fire at %s (next in %s)\n",
+				lastFire.Format("15:04:05"), intervalDur)
+		}
+	}
 }
 
 // openBrowser opens url in the user's default browser. Silent on failure;

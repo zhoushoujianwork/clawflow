@@ -55,6 +55,7 @@ type settingsView struct {
 		ConfidenceThreshold int    `json:"confidence_threshold"`
 		AgentTimeout        int    `json:"agent_timeout"`
 		MaxConcurrentAgents int    `json:"max_concurrent_agents"`
+		RunIntervalMinutes  int    `json:"run_interval_minutes"`
 		GithubCloneDir      string `json:"github_clone_dir,omitempty"`
 		GitlabCloneDir      string `json:"gitlab_clone_dir,omitempty"`
 	} `json:"global"`
@@ -95,6 +96,7 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	v.Global.ConfidenceThreshold = cfg.Settings.ConfidenceThreshold
 	v.Global.AgentTimeout = cfg.Settings.AgentTimeout
 	v.Global.MaxConcurrentAgents = cfg.Settings.MaxConcurrentAgents
+	v.Global.RunIntervalMinutes = cfg.Settings.RunIntervalMinutes
 	v.Global.GithubCloneDir = cfg.Settings.GithubCloneDir
 	v.Global.GitlabCloneDir = cfg.Settings.GitlabCloneDir
 
@@ -233,6 +235,7 @@ type globalUpdate struct {
 	ConfidenceThreshold *int    `json:"confidence_threshold,omitempty"`
 	AgentTimeout        *int    `json:"agent_timeout,omitempty"`
 	MaxConcurrentAgents *int    `json:"max_concurrent_agents,omitempty"`
+	RunIntervalMinutes  *int    `json:"run_interval_minutes,omitempty"`
 	GithubCloneDir      *string `json:"github_clone_dir,omitempty"`
 	GitlabCloneDir      *string `json:"gitlab_clone_dir,omitempty"`
 }
@@ -266,6 +269,15 @@ func HandleUpdateGlobalSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MaxConcurrentAgents != nil {
 		cfg.Settings.MaxConcurrentAgents = *req.MaxConcurrentAgents
+	}
+	if req.RunIntervalMinutes != nil {
+		// Clamp negative to 0 (= disabled). Any positive int passes
+		// through; the scheduler re-reads on its next 30s check.
+		v := *req.RunIntervalMinutes
+		if v < 0 {
+			v = 0
+		}
+		cfg.Settings.RunIntervalMinutes = v
 	}
 	if req.GithubCloneDir != nil {
 		cfg.Settings.GithubCloneDir = *req.GithubCloneDir

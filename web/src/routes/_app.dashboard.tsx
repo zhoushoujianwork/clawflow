@@ -11,6 +11,7 @@ import {
   Activity,
   Clock,
   Play,
+  Pause,
   ArrowUpCircle,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
@@ -183,16 +184,38 @@ function Dashboard() {
     }
   }, [])
 
-  // Poll run status
+  // Poll run status — also picks up the auto-run scheduler state
+  // (interval, paused, next fire time) so we render everything in one
+  // banner without a second endpoint.
+  const [intervalMin, setIntervalMin] = useState(0)
+  const [paused, setPaused] = useState(false)
+  const [nextFireMs, setNextFireMs] = useState<number>(0)
+  const [pauseBusy, setPauseBusy] = useState(false)
+
   useEffect(() => {
     const poll = () => {
       fetch('/api/run/status', { cache: 'no-store' })
         .then(r => r.ok ? r.json() : null)
-        .then(d => { if (d) setRunBusy(d.status === 'running') })
+        .then(d => {
+          if (!d) return
+          setRunBusy(d.status === 'running')
+          setIntervalMin(d.interval_minutes || 0)
+          setPaused(!!d.paused)
+          setNextFireMs(d.next_fire_unix_ms || 0)
+        })
         .catch(() => {})
     }
     poll()
     const id = setInterval(poll, 3000)
+    return () => clearInterval(id)
+  }, [])
+
+  // Tick once a second to keep the "next in M:SS" countdown live.
+  // Without this the countdown only refreshes when /api/run/status
+  // polls (every 3s), which feels janky.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [])
 
@@ -203,6 +226,22 @@ function Dashboard() {
       .then(d => { if (d.status === 'busy') setRunBusy(true) })
       .catch(() => setRunBusy(false))
   }, [])
+
+  const togglePause = useCallback(() => {
+    const next = !paused
+    setPauseBusy(true)
+    fetch('/api/run/pause', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused: next }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d) setPaused(!!d.paused)
+        setPauseBusy(false)
+      })
+      .catch(() => setPauseBusy(false))
+  }, [paused])
 
   // Check version once on mount
   useEffect(() => {
@@ -340,6 +379,17 @@ function Dashboard() {
         </button>
       </div>
 
+      {intervalMin > 0 && (
+        <AutoRunBanner
+          intervalMin={intervalMin}
+          paused={paused}
+          nextFireMs={nextFireMs}
+          now={now}
+          busy={pauseBusy}
+          onToggle={togglePause}
+        />
+      )}
+
       {updateAvailable && latestVersion && (
         <div
           className="flex items-center gap-3 px-4 py-2.5 rounded-xl mb-4 border"
@@ -457,6 +507,83 @@ function Dashboard() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function AutoRunBanner({
+  intervalMin,
+  paused,
+  nextFireMs,
+  now,
+  busy,
+  onToggle,
+}: {
+  intervalMin: number
+  paused: boolean
+  nextFireMs: number
+  now: number
+  busy: boolean
+  onToggle: () => void
+}) {
+  // Format the countdown to next tick. When paused we still show what
+  // "would have fired" so the user knows roughly how often this banner
+  // will move when they resume — useful sanity check for the interval
+  // they configured.
+  const countdownLabel = (() => {
+    if (!nextFireMs) return ''
+    const ms = nextFireMs - now
+    if (ms <= 0) return 'now'
+    const totalSec = Math.floor(ms / 1000)
+    const m = Math.floor(totalSec / 60)
+    const s = totalSec % 60
+    return `${m}:${s.toString().padStart(2, '0')}`
+  })()
+
+  const summary = paused
+    ? `Auto-run paused · would fire every ${intervalMin}m`
+    : `Auto-run · every ${intervalMin}m${countdownLabel ? ` · next in ${countdownLabel}` : ''}`
+
+  return (
+    <div
+      className={cn(
+        'flex items-center gap-3 px-4 py-2.5 rounded-xl mb-4 border',
+        paused ? 'bg-amber-50 border-amber-200' : 'bg-blue-50 border-blue-200',
+      )}
+    >
+      {paused ? (
+        <Pause className="w-4 h-4 shrink-0 text-amber-700" />
+      ) : (
+        <Clock className="w-4 h-4 shrink-0 text-blue-700" />
+      )}
+      <span
+        className={cn(
+          'text-sm flex-1 tabular-nums',
+          paused ? 'text-amber-900' : 'text-blue-900',
+        )}
+      >
+        {summary}
+      </span>
+      <button
+        onClick={onToggle}
+        disabled={busy}
+        className={cn(
+          'inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-colors',
+          busy
+            ? 'bg-muted text-muted-foreground cursor-not-allowed'
+            : paused
+              ? 'bg-amber-600 text-white hover:bg-amber-700'
+              : 'bg-blue-600 text-white hover:bg-blue-700',
+        )}
+      >
+        {busy ? (
+          <><Loader2 className="w-3 h-3 animate-spin" /> …</>
+        ) : paused ? (
+          <><Play className="w-3 h-3" /> Resume</>
+        ) : (
+          <><Pause className="w-3 h-3" /> Pause</>
+        )}
+      </button>
     </div>
   )
 }
