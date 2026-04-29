@@ -489,7 +489,13 @@ function StatusBadge({ status }: { status: RunMeta['status'] }) {
 }
 
 function durationStr(start: string, end: string) {
-  const ms = new Date(end).getTime() - new Date(start).getTime()
+  // See dashboard's durationStr — same defense against zero-time
+  // ended_at sneaking in from older snapshots.
+  const tStart = new Date(start).getTime()
+  const tEnd = new Date(end).getTime()
+  if (!isFinite(tStart) || !isFinite(tEnd) || tEnd < 946684800000) return ''
+  const ms = tEnd - tStart
+  if (ms < 0) return ''
   if (ms < 1000) return `${ms}ms`
   const s = Math.floor(ms / 1000)
   if (s < 60) return `${s}s`

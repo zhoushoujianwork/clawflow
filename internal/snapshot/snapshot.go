@@ -88,7 +88,12 @@ type RunMeta struct {
 	IssueNumber int       `json:"issue_number"`
 	IssueTitle  string    `json:"issue_title,omitempty"`
 	StartedAt   time.Time `json:"started_at"`
-	EndedAt     time.Time `json:"ended_at,omitempty"`
+	// EndedAt is a pointer so a nil value omits the JSON key for a still-
+	// running run. With a value type, Go's `omitempty` does NOT skip a zero
+	// time.Time (`omitempty` only skips nil/0/""/empty), so the wire format
+	// would carry "0001-01-01T00:00:00Z" and the dashboard's duration math
+	// would render it as a giant negative offset.
+	EndedAt     *time.Time `json:"ended_at,omitempty"`
 	// Status is one of "running", "success", "failed", "skipped".
 	Status  string `json:"status"`
 	PRUrl   string `json:"pr_url,omitempty"`
@@ -375,6 +380,37 @@ type PendingEntry struct {
 	CapturedAt  time.Time `json:"captured_at"`
 }
 
+
+// IssueEntry represents a single issue from the repository, regardless of
+// whether it has pending operators. Used by the dashboard to show all issues
+// with their current state and labels.
+type IssueEntry struct {
+	Repo        string    `json:"repo"`
+	IssueNumber int       `json:"issue_number"`
+	IssueTitle  string    `json:"issue_title,omitempty"`
+	Labels      []string  `json:"labels,omitempty"`
+	State       string    `json:"state"` // "open" | "closed"
+	CapturedAt  time.Time `json:"captured_at"`
+}
+
+// WriteIssues writes data/issues.json with all issues from monitored repos.
+func WriteIssues(entries []IssueEntry) error {
+	if entries == nil {
+		entries = []IssueEntry{}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Repo != entries[j].Repo {
+			return entries[i].Repo < entries[j].Repo
+		}
+		if entries[i].State != entries[j].State {
+			// open issues first
+			return entries[i].State == "open" && entries[j].State == "closed"
+		}
+		return entries[i].IssueNumber > entries[j].IssueNumber // newest first
+	})
+	return writeJSON(filepath.Join(DataDir(), "issues.json"), entries)
+}
+
 // WritePending writes data/pending.json with the supplied entries. The list
 // is replaced wholesale on every refresh so stale entries (issues that just
 // got processed) drop off automatically.
@@ -485,11 +521,13 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 				lastTouch = st.ModTime().UTC()
 				eventsQuiet = time.Since(lastTouch) > quietWindow
 			} else {
-				// No events.jsonl at all: only flag this if the run is
-				// also old enough for the timeout-based check to apply,
-				// because a run that just started genuinely has no
-				// events for the first second or two.
-				eventsQuiet = tooOld
+				// No events.jsonl at all: a healthy runner opens the
+				// file and writes claude's `system-init` event within
+				// seconds of starting, so anything past quietWindow
+				// (2 min) with no file means the runner died before
+				// launching claude — flag without waiting the full
+				// staleAfter timeout (default 1h) to land here.
+				eventsQuiet = time.Since(m.StartedAt) > quietWindow
 			}
 			if !tooOld && !eventsQuiet {
 				return nil
@@ -512,11 +550,18 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 					quietWindow,
 				)
 			}
-			if m.EndedAt.IsZero() {
+			// Treat both nil and a pointer to Go's zero time as "missing":
+			// older meta.json on disk (pre-pointer-type fix) literally
+			// contains "0001-01-01T00:00:00Z", which unmarshals into a
+			// non-nil zero-value pointer. Reconciliation should still
+			// stamp a real EndedAt in that case.
+			if m.EndedAt == nil || m.EndedAt.IsZero() {
 				if !lastTouch.IsZero() {
-					m.EndedAt = lastTouch
+					t := lastTouch
+					m.EndedAt = &t
 				} else {
-					m.EndedAt = time.Now().UTC()
+					t := time.Now().UTC()
+					m.EndedAt = &t
 				}
 			}
 			if err := WriteRunMeta(path, m); err == nil {
@@ -554,7 +599,7 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 			Repo:        repo,
 			IssueNumber: issueNum,
 			StartedAt:   startedAt,
-			EndedAt:     endedAt,
+			EndedAt:     &endedAt,
 			Status:      "failed",
 			Error:       "reconciled: meta.json missing; runner exited before writing initial state",
 		}

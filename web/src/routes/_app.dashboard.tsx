@@ -102,8 +102,19 @@ function timeAgo(iso: string): string {
 }
 
 function durationStr(start: string, end?: string): string | null {
+  // Defensive: a still-running snapshot used to land on disk with
+  // ended_at="0001-01-01T00:00:00Z" (Go's zero-time, which json
+  // omitempty does NOT skip on a value-typed time.Time). The backend
+  // now omits the field when nil, but older snapshots and any future
+  // regression would render here as "-639130766420870smago". Treat any
+  // pre-2000 end time as "still running" and bail.
   if (!end) return null
-  const ms = new Date(end).getTime() - new Date(start).getTime()
+  const tStart = new Date(start).getTime()
+  const tEnd = new Date(end).getTime()
+  if (!isFinite(tStart) || !isFinite(tEnd)) return null
+  if (tEnd < 946684800000) return null // before 2000-01-01 → bogus
+  const ms = tEnd - tStart
+  if (ms < 0) return null
   if (ms < 1000) return `${ms}ms`
   const s = Math.floor(ms / 1000)
   if (s < 60) return `${s}s`

@@ -310,7 +310,7 @@ func TestReconcileStaleRuns_StuckRunning_RewrittenToFailed(t *testing.T) {
 	if got.Error == "" {
 		t.Error("Error field should describe the reconciliation reason")
 	}
-	if got.EndedAt.IsZero() {
+	if got.EndedAt == nil {
 		t.Error("EndedAt should be populated after reconciliation")
 	}
 }
@@ -325,27 +325,58 @@ func TestReconcileStaleRuns_RecentRunning_Untouched(t *testing.T) {
 		StartedAt:   recentStart,
 		Status:      "running",
 	}
-	makeRunDir(t, root, "owner__repo", 8, recentStart, recent, "")
+	// Live runners write events.jsonl within seconds of starting, so a
+	// healthy "still running" row always has one. Reconciliation should
+	// leave it alone as long as the file's mtime is fresh.
+	makeRunDir(t, root, "owner__repo", 8, recentStart, recent, `{"type":"system","subtype":"init"}`+"\n")
 
 	n, err := reconcileStaleRunsAt(root, time.Hour)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("fixed=%d, want 0 (recent running should be left alone)", n)
+		t.Errorf("fixed=%d, want 0 (recent running with live events should be left alone)", n)
+	}
+}
+
+// A run whose meta.json says "running" but has no events.jsonl AT ALL is
+// reconciled once it's older than quietWindow — RunClaude opens the events
+// file before launching claude, so a missing file past that window means
+// the runner died before getting that far. Without this aggressive sweep
+// the dashboard would carry a frozen "running" row for the full staleAfter
+// timeout (default 1h).
+func TestReconcileStaleRuns_NoEventsBeyondQuietWindow_RewrittenToFailed(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-quietWindow - time.Minute) // safely past 2min
+	stuck := &RunMeta{
+		Operator:    "classify",
+		Repo:        "owner/repo",
+		IssueNumber: 9,
+		StartedAt:   start,
+		Status:      "running",
+	}
+	makeRunDir(t, root, "owner__repo", 9, start, stuck, "") // no events.jsonl
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("fixed=%d, want 1 (no events past quietWindow should reconcile)", n)
 	}
 }
 
 func TestReconcileStaleRuns_TerminalStatus_Untouched(t *testing.T) {
 	root := t.TempDir()
 	old := time.Now().UTC().Add(-3 * time.Hour)
+	endedAt := old.Add(time.Minute)
 	for _, status := range []string{"success", "failed", "skipped"} {
 		m := &RunMeta{
 			Operator:    "x",
 			Repo:        "owner/repo",
 			IssueNumber: 1,
 			StartedAt:   old,
-			EndedAt:     old.Add(time.Minute),
+			EndedAt:     &endedAt,
 			Status:      status,
 		}
 		// Distinct dir per status so they don't collide.
