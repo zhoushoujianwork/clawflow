@@ -383,8 +383,16 @@ function UsagePanel({ meta }: { meta: RunMeta | null }) {
 
   return (
     <section className="mb-6">
-      <h2 className="text-sm font-semibold text-foreground mb-2">Usage</h2>
-      <div className="bg-card border border-border rounded-lg p-4">
+      <h2 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--text-high))' }}>
+        Usage
+      </h2>
+      <div
+        className="rounded-lg p-4"
+        style={{
+          background: 'hsl(var(--bg-secondary))',
+          border: '1px solid hsl(var(--border))',
+        }}
+      >
         <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm tabular-nums">
           <Stat label="cost" value={`$${u.total_cost_usd.toFixed(4)}`} highlight />
           <Stat label="duration" value={msToShort(u.duration_ms)} />
@@ -396,9 +404,12 @@ function UsagePanel({ meta }: { meta: RunMeta | null }) {
           )}
         </div>
         {models.length > 0 && (
-          <div className="mt-3 border-t border-border pt-3">
+          <div
+            className="mt-3 pt-3"
+            style={{ borderTop: '1px solid hsl(var(--border))' }}
+          >
             <table className="w-full text-xs tabular-nums">
-              <thead className="text-muted-foreground">
+              <thead style={{ color: 'hsl(var(--text-low))' }}>
                 <tr>
                   <th className="text-left font-semibold pb-1">model</th>
                   <th className="text-right font-semibold pb-1">cost</th>
@@ -408,13 +419,15 @@ function UsagePanel({ meta }: { meta: RunMeta | null }) {
               </thead>
               <tbody>
                 {models.map(([name, m]) => (
-                  <tr key={name} className="text-foreground">
+                  <tr key={name} style={{ color: 'hsl(var(--text-normal))' }}>
                     <td className="py-0.5 font-mono">{name}</td>
-                    <td className="py-0.5 text-right">${m.cost_usd.toFixed(4)}</td>
-                    <td className="py-0.5 text-right text-muted-foreground">
+                    <td className="py-0.5 text-right" style={{ color: 'hsl(var(--text-high))' }}>
+                      ${m.cost_usd.toFixed(4)}
+                    </td>
+                    <td className="py-0.5 text-right" style={{ color: 'hsl(var(--text-low))' }}>
                       {m.input_tokens.toLocaleString()}
                     </td>
-                    <td className="py-0.5 text-right text-muted-foreground">
+                    <td className="py-0.5 text-right" style={{ color: 'hsl(var(--text-low))' }}>
                       {m.output_tokens.toLocaleString()}
                     </td>
                   </tr>
@@ -431,8 +444,18 @@ function UsagePanel({ meta }: { meta: RunMeta | null }) {
 function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
     <div className="flex items-baseline gap-1.5">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span className={cn('font-medium', highlight ? 'text-primary' : 'text-foreground')}>
+      <span className="text-xs" style={{ color: 'hsl(var(--text-low))' }}>
+        {label}
+      </span>
+      {/* highlight = the cost value, the row's headline number.
+          Use --brand (orange) so it actually pops against the
+          panel's bg-secondary surface. The non-highlighted variant
+          uses --text-high — the regular tailwind `text-foreground`
+          maps to --text-normal which is too soft on this bg. */}
+      <span
+        className="font-medium"
+        style={{ color: highlight ? 'hsl(var(--brand))' : 'hsl(var(--text-high))' }}
+      >
         {value}
       </span>
     </div>
@@ -538,7 +561,8 @@ function CollapsibleBlock({ text, threshold = 280 }: { text: string; threshold?:
   return (
     <details className="text-[11px] font-mono">
       <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
-        {text.slice(0, threshold).replace(/\s+/g, ' ').trim()}… <span className="text-primary/70">show more</span>
+        {text.slice(0, threshold).replace(/\s+/g, ' ').trim()}…{' '}
+        <span style={{ color: 'hsl(var(--brand))' }}>show more</span>
       </summary>
       <pre className="whitespace-pre-wrap text-muted-foreground mt-1">{text}</pre>
     </details>
