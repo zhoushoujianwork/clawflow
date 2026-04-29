@@ -23,6 +23,10 @@ export function XTerminal({ wsUrl, closeIntentRef }: TerminalProps) {
 
     const term = new Terminal({
       cursorBlink: true,
+      // Block cursor matches what claude-CLI's TUI expects; without an
+      // explicit style xterm renders a thin underline that's easy to
+      // miss against the dark background.
+      cursorStyle: 'block',
       fontSize: 13,
       fontFamily: '"IBM Plex Mono", "Fira Code", monospace',
       theme: {
@@ -40,6 +44,16 @@ export function XTerminal({ wsUrl, closeIntentRef }: TerminalProps) {
 
     term.open(containerRef.current)
     fitAddon.fit()
+    // xterm only animates cursorBlink while the terminal element has
+    // focus. Auto-focus on mount so a freshly opened drawer shows a
+    // blinking cursor without the user having to click into it; also
+    // re-focus when the page tab becomes visible again so flipping
+    // between tabs doesn't leave a frozen cursor behind.
+    term.focus()
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') term.focus()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
 
     const ws = new WebSocket(wsUrl)
     ws.binaryType = 'arraybuffer'
@@ -82,6 +96,7 @@ export function XTerminal({ wsUrl, closeIntentRef }: TerminalProps) {
 
     return () => {
       window.removeEventListener('resize', onResize)
+      document.removeEventListener('visibilitychange', onVisibility)
       ro.disconnect()
       // Tag the close with the user's intent so the server knows
       // whether to wipe the session transcript. Default to collapse
