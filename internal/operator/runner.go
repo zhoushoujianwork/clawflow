@@ -42,6 +42,14 @@ type VCS interface {
 	PostIssueComment(repo string, issueNumber int, body string) error
 }
 
+// Concurrency model: the runner does NOT serialize concurrent calls
+// against the same issue. The label-based `agent-running` lock that
+// used to live here was removed when we moved to in-process locking —
+// see cmd/clawflow/commands/run.go for the per-issue mutex that gates
+// dispatch. Callers running operators outside the standard `clawflow
+// run` loop are responsible for not invoking Run twice on the same
+// issue at the same time.
+
 // RunOptions configures a single operator invocation.
 type RunOptions struct {
 	Repo     string        // full_name, e.g. "owner/repo"
@@ -73,34 +81,14 @@ type RunOptions struct {
 // final stdout text (or the empty string when the run was skipped).
 //
 // Flow:
-//  1. Skip if the subject already has the lock label.
-//  2. Add lock label.
-//  3. Build prompt and invoke claude; events are teed to opts.EventWriter.
-//  4. On success: post output as a comment.
+//  1. Build prompt and invoke claude; events are teed to opts.EventWriter.
+//  2. On success: post output as a comment + add outcome label (if declared).
 //     On failure: post a failure summary as a comment.
-//  5. Always remove the lock label (best-effort).
 //
-// Label operations on GitHub/GitLab are atomic server-side, but
-// check-then-add is not — two concurrent runners can both see "no lock"
-// and proceed in parallel. For a single-user self-hosted workflow this is
-// acceptable; multi-machine concurrency needs a stronger lock layered
-// on top.
+// Concurrency: the caller (typically cmd/clawflow/commands/run.go) is
+// responsible for ensuring at most one Run is in flight per issue at a
+// time. The runner itself is stateless and does not serialize.
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, error) {
-	if sub.HasLabel(op.LockLabel) {
-		return "", nil
-	}
-	if err := v.AddLabel(opts.Repo, sub.Number, op.LockLabel); err != nil {
-		return "", fmt.Errorf("add lock label: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "  ✓ lock label %q added\n", op.LockLabel)
-	defer func() {
-		if err := v.RemoveLabel(opts.Repo, sub.Number, op.LockLabel); err != nil {
-			fmt.Fprintf(os.Stderr, "  ⚠ lock label %q remove failed: %v\n", op.LockLabel, err)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "  ✓ lock label %q removed\n", op.LockLabel)
-	}()
-
 	prompt := BuildPrompt(op, sub, opts.Repo, opts.Comments)
 	runFunc := opts.RunFunc
 	if runFunc == nil {

@@ -98,50 +98,20 @@ func TestRun_HappyPath(t *testing.T) {
 		t.Errorf("Run returned output %q, want %q", output, "evaluation posted")
 	}
 
-	if v.addLabelCalls != 1 {
-		t.Errorf("AddLabel called %d times, want 1", v.addLabelCalls)
+	// No outcomes / no triggers in this op, so no AddLabel or RemoveLabel
+	// calls should fire. Lock-label add/remove was removed when the
+	// `agent-running` label model was retired in favor of in-process locks.
+	if v.addLabelCalls != 0 {
+		t.Errorf("AddLabel called %d times, want 0 (no outcomes declared)", v.addLabelCalls)
 	}
-	if v.removeLabelCals != 1 {
-		t.Errorf("RemoveLabel called %d times, want 1", v.removeLabelCals)
-	}
-	if slices.Contains(v.labels[42], "agent-running") {
-		t.Errorf("lock label still present after run: %v", v.labels[42])
+	if v.removeLabelCals != 0 {
+		t.Errorf("RemoveLabel called %d times, want 0", v.removeLabelCals)
 	}
 	if len(v.comments) != 1 {
 		t.Fatalf("want 1 comment, got %d", len(v.comments))
 	}
 	if v.comments[0].body != "evaluation posted" {
 		t.Errorf("comment body = %q", v.comments[0].body)
-	}
-}
-
-func TestRun_AlreadyLocked_NoOp(t *testing.T) {
-	op := &Operator{Name: "x", LockLabel: "running", Prompt: "p"}
-	sub := &Subject{Number: 1, Labels: []string{"bug", "running"}}
-	v := newFakeVCS()
-	called := false
-
-	out, err := Run(context.Background(), op, sub, v, RunOptions{
-		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
-			called = true
-			return "", nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("want nil error (skip), got %v", err)
-	}
-	if out != "" {
-		t.Errorf("skip should return empty output; got %q", out)
-	}
-	if called {
-		t.Error("claude should NOT be invoked when lock already held")
-	}
-	if v.addLabelCalls != 0 {
-		t.Error("AddLabel should not be called when already locked")
-	}
-	if len(v.comments) != 0 {
-		t.Error("no comment should be posted when skipping")
 	}
 }
 
@@ -161,8 +131,8 @@ func TestRun_ClaudeFails_PostsFailureComment(t *testing.T) {
 		t.Fatal("want error when claude fails, got nil")
 	}
 
-	if v.addLabelCalls != 1 || v.removeLabelCals != 1 {
-		t.Errorf("add=%d remove=%d, want 1/1", v.addLabelCalls, v.removeLabelCals)
+	if v.addLabelCalls != 0 || v.removeLabelCals != 0 {
+		t.Errorf("add=%d remove=%d, want 0/0 (no labels touched on failure)", v.addLabelCalls, v.removeLabelCals)
 	}
 	if len(v.comments) != 1 {
 		t.Fatalf("want 1 failure comment, got %d", len(v.comments))
@@ -173,31 +143,6 @@ func TestRun_ClaudeFails_PostsFailureComment(t *testing.T) {
 	}
 	if !strings.Contains(body, "model refused") {
 		t.Errorf("failure comment should include the claude error: %q", body)
-	}
-}
-
-func TestRun_AddLabelFails_StopsEarly(t *testing.T) {
-	op := &Operator{Name: "x", LockLabel: "running", Prompt: "p"}
-	sub := &Subject{Number: 1}
-	v := newFakeVCS()
-	v.errOnAdd = true
-
-	claudeCalled := false
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
-		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
-			claudeCalled = true
-			return "result", nil
-		},
-	})
-	if err == nil {
-		t.Fatal("want error when AddLabel fails")
-	}
-	if claudeCalled {
-		t.Error("claude should not run when lock acquisition fails")
-	}
-	if len(v.comments) != 0 {
-		t.Error("no comment should be posted when lock acquisition fails")
 	}
 }
 
@@ -218,8 +163,8 @@ func TestRun_EmptyClaudeOutput_NoComment(t *testing.T) {
 	if len(v.comments) != 0 {
 		t.Errorf("empty/whitespace output should produce no comment; got %v", v.comments)
 	}
-	if v.addLabelCalls != 1 || v.removeLabelCals != 1 {
-		t.Errorf("lock not cycled: add=%d remove=%d", v.addLabelCalls, v.removeLabelCals)
+	if v.addLabelCalls != 0 || v.removeLabelCals != 0 {
+		t.Errorf("no labels should be touched on empty output: add=%d remove=%d", v.addLabelCalls, v.removeLabelCals)
 	}
 }
 
@@ -310,10 +255,10 @@ func TestRun_OutcomeMarker_NotInWhitelist_SkipsLabel(t *testing.T) {
 	if len(v.comments) != 1 {
 		t.Fatalf("want comment posted even on disallowed outcome, got %d", len(v.comments))
 	}
-	// AddLabel was called once for the lock label only — the disallowed
-	// outcome must not have triggered another add.
-	if v.addLabelCalls != 1 {
-		t.Errorf("AddLabel calls = %d, want 1 (lock only)", v.addLabelCalls)
+	// AddLabel must NOT have been called — the disallowed outcome was
+	// rejected and there's no longer any lock-label to add.
+	if v.addLabelCalls != 0 {
+		t.Errorf("AddLabel calls = %d, want 0 (disallowed outcome rejected)", v.addLabelCalls)
 	}
 	if slices.Contains(v.labels[1], "type:bug") {
 		t.Errorf("disallowed outcome label was applied: %v", v.labels[1])
@@ -393,9 +338,9 @@ func TestRun_OutcomeMarker_None_BackCompat(t *testing.T) {
 	if len(v.comments) != 1 || v.comments[0].body != body {
 		t.Errorf("comment should be posted unchanged when no marker present; got %v", v.comments)
 	}
-	// Only the lock label, no outcome label added.
-	if v.addLabelCalls != 1 {
-		t.Errorf("AddLabel calls = %d, want 1", v.addLabelCalls)
+	// No marker → no outcome label, and no lock label is added either.
+	if v.addLabelCalls != 0 {
+		t.Errorf("AddLabel calls = %d, want 0", v.addLabelCalls)
 	}
 }
 
@@ -432,9 +377,9 @@ func TestRun_OutcomeMarker_RemovesTriggerLabels(t *testing.T) {
 		t.Errorf("ready-for-agent trigger label should be removed; labels = %v", v.labels[10])
 	}
 
-	// Should have called RemoveLabel twice: once for lock, once for trigger labels
-	if v.removeLabelCals != 2 {
-		t.Errorf("RemoveLabel called %d times, want 2 (lock + trigger)", v.removeLabelCals)
+	// Only the trigger label cleanup remains — lock label removal is gone.
+	if v.removeLabelCals != 1 {
+		t.Errorf("RemoveLabel called %d times, want 1 (trigger only)", v.removeLabelCals)
 	}
 }
 

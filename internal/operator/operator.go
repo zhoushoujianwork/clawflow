@@ -18,6 +18,11 @@ type Operator struct {
 	Name        string
 	Description string
 	Trigger     Trigger
+	// LockLabel is parsed but no longer used by the runtime — concurrency
+	// is now gated by an in-process per-issue mutex (see
+	// cmd/clawflow/commands/run.go). The field is kept for back-compat
+	// with SKILL.md files that still declare `lock_label:`; new operators
+	// can safely omit it. Will be removed once all bundled skills drop it.
 	LockLabel   string
 	// Outcomes is the allow-list of labels the operator may declare via the
 	// `<!-- clawflow:outcome=<label> -->` marker in its stdout. The runner
@@ -82,9 +87,10 @@ func Parse(data []byte, source string) (*Operator, error) {
 	if tgt != "issue" && tgt != "pr" {
 		return nil, fmt.Errorf("%s: operator.trigger.target must be \"issue\" or \"pr\", got %q", source, tgt)
 	}
-	if fm.Operator.LockLabel == "" {
-		return nil, fmt.Errorf("%s: operator.lock_label required", source)
-	}
+	// lock_label was previously required as the issue-side concurrency
+	// gate; it is now ignored at runtime (see Operator.LockLabel doc).
+	// Tolerate both presence and absence so old and new SKILL.md files
+	// parse identically.
 
 	return &Operator{
 		Name:        fm.Name,

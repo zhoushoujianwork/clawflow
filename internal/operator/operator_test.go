@@ -90,12 +90,10 @@ func TestParse_Errors(t *testing.T) {
 				"---\nbody",
 			wantSub: `must be "issue" or "pr"`,
 		},
-		"missing lock_label": {
-			input: "---\nname: foo\n" +
-				"operator:\n  trigger:\n    target: issue\n" +
-				"---\nbody",
-			wantSub: "lock_label required",
-		},
+		// `lock_label` was previously required but is now optional —
+		// the in-process per-issue mutex replaced the issue-side label
+		// lock. No error expected for its absence; the field is simply
+		// ignored at runtime.
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

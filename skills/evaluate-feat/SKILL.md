@@ -5,8 +5,7 @@ operator:
   trigger:
     target: "issue"
     labels_required: ["feat"]
-    labels_excluded: ["agent-evaluated", "agent-skipped", "agent-running"]
-  lock_label: "agent-running"
+    labels_excluded: ["agent-evaluated", "agent-skipped"]
   outcomes: ["agent-evaluated", "agent-skipped"]
 ---
 
