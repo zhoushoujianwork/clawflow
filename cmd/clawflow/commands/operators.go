@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
 )
 
 // NewOperatorsCmd wires `clawflow operators …` — registry introspection.
@@ -17,6 +18,7 @@ func NewOperatorsCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newOperatorsListCmd())
 	cmd.AddCommand(newOperatorsValidateCmd())
+	cmd.AddCommand(newOperatorsDoctorCmd())
 	return cmd
 }
 
@@ -48,6 +50,63 @@ CI to catch broken operators before they ship.`,
 			for _, op := range ops {
 				fmt.Printf("  %s  %s\n", op.Name, op.Source)
 			}
+			return nil
+		},
+	}
+}
+
+func newOperatorsDoctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Validate operators and detect cross-operator conflicts",
+		Long: `Loads every operator (built-in + ~/.clawflow/skills/), validates
+frontmatter, and checks for cross-operator conflicts: overlapping triggers
+(same target + labels_required), empty descriptions, and missing outcome
+declarations. Exits non-zero if any ERROR-level diagnostic is found.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := loadRegistry()
+			if err != nil {
+				return fmt.Errorf("operator load failed: %w", err)
+			}
+			ops := reg.All()
+			if len(ops) == 0 {
+				return fmt.Errorf("no operators registered (embed.FS empty?)")
+			}
+
+			home, _ := os.UserHomeDir()
+			w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(w, "NAME\tSOURCE\tSTATUS")
+			for _, op := range ops {
+				src := op.Source
+				if home != "" && strings.HasPrefix(src, home) {
+					src = "~" + strings.TrimPrefix(src, home)
+				}
+				fmt.Fprintf(w, "%s\t%s\tok\n", op.Name, src)
+			}
+			_ = w.Flush()
+
+			diags := reg.Diagnose()
+			if len(diags) == 0 {
+				fmt.Printf("\n✓ %d operator(s), no issues found\n", len(ops))
+				return nil
+			}
+
+			fmt.Println()
+			dw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(dw, "SEVERITY\tOPERATOR\tMESSAGE")
+			hasError := false
+			for _, d := range diags {
+				fmt.Fprintf(dw, "%s\t%s\t%s\n", d.Severity, d.Operator, d.Message)
+				if d.Severity == operator.SeverityError {
+					hasError = true
+				}
+			}
+			_ = dw.Flush()
+
+			if hasError {
+				return fmt.Errorf("%d operator(s) loaded, but conflicts detected", len(ops))
+			}
+			fmt.Printf("\n✓ %d operator(s), %d warning(s)\n", len(ops), len(diags))
 			return nil
 		},
 	}
