@@ -17,6 +17,19 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
+// modelForOperator picks which credentials-configured model an
+// operator should run on. evaluate-* operators read existing context
+// and produce structured analysis, so they get the heavier eval model
+// (Opus by default). Everything else (implement, reply-comment,
+// user-supplied skills) gets the cheaper operator model (Sonnet).
+// `creds` may be nil — the Effective*Model helpers handle that.
+func modelForOperator(creds *config.Credentials, opName string) string {
+	if strings.HasPrefix(opName, "evaluate-") {
+		return creds.EffectiveEvalModel()
+	}
+	return creds.EffectiveOperatorModel()
+}
+
 // NewRunCmd wires `clawflow run`: one pass of the operator loop over every
 // enabled repo (or a single repo / issue if flags are set). Schedule via cron
 // or invoke ad-hoc; the CLI holds no long-running state.
@@ -285,13 +298,17 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 				fmt.Fprintf(os.Stderr, "  ⚠ events sink: %v\n", eventsErr)
 			}
 
-			fmt.Fprintf(os.Stderr, "  → running claude (timeout %s)\n", timeout)
+			creds, _ := config.LoadCredentials()
+			model := modelForOperator(creds, op.Name)
+			fmt.Fprintf(os.Stderr, "  → running claude (model %s, timeout %s)\n", model, timeout)
+			debugf("  using model %q for operator %q", model, op.Name)
 			runStart := time.Now()
 			output, runErr := operator.Run(ctx, op, sub, client, operator.RunOptions{
 				Repo:        fullName,
 				Workdir:     workdir,
 				Timeout:     timeout,
 				Comments:    comments,
+				Model:       model,
 				EventWriter: eventsFile,
 			})
 			runDur := time.Since(runStart).Round(time.Second)

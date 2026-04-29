@@ -4,7 +4,17 @@ import { Check, Loader2, AlertCircle, X, Eye, EyeOff } from 'lucide-react'
 import { cn } from '../lib/utils'
 
 interface SettingsView {
-  claude: { api_key_set: boolean; api_key_hint?: string; base_url?: string }
+  claude: {
+    api_key_set: boolean
+    api_key_hint?: string
+    base_url?: string
+    chat_model: string
+    eval_model: string
+    operator_model: string
+    chat_model_default: string
+    eval_model_default: string
+    operator_model_default: string
+  }
   tokens: { gh_set: boolean; gh_hint?: string; gitlab_set: boolean; gitlab_hint?: string }
   global: {
     poll_interval: number
@@ -74,21 +84,35 @@ function ClaudeSection({
   const [apiKey, setApiKey] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [baseURL, setBaseURL] = useState(view.base_url ?? '')
+  const [chatModel, setChatModel] = useState(view.chat_model ?? '')
+  const [evalModel, setEvalModel] = useState(view.eval_model ?? '')
+  const [operatorModel, setOperatorModel] = useState(view.operator_model ?? '')
   const [busy, setBusy] = useState(false)
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
   const [testing, setTesting] = useState(false)
 
-  // Keep baseURL in sync when the parent reloads.
+  // Keep server-backed fields in sync when the parent reloads.
   useEffect(() => { setBaseURL(view.base_url ?? '') }, [view.base_url])
+  useEffect(() => { setChatModel(view.chat_model ?? '') }, [view.chat_model])
+  useEffect(() => { setEvalModel(view.eval_model ?? '') }, [view.eval_model])
+  useEffect(() => { setOperatorModel(view.operator_model ?? '') }, [view.operator_model])
 
-  const dirty = apiKey !== '' || baseURL !== (view.base_url ?? '')
+  const dirty =
+    apiKey !== '' ||
+    baseURL !== (view.base_url ?? '') ||
+    chatModel !== (view.chat_model ?? '') ||
+    evalModel !== (view.eval_model ?? '') ||
+    operatorModel !== (view.operator_model ?? '')
 
   const save = () => {
     setBusy(true); setSaveMsg(null)
     const body: Record<string, string> = {}
     if (apiKey !== '') body.api_key = apiKey
     if (baseURL !== (view.base_url ?? '')) body.base_url = baseURL
+    if (chatModel !== (view.chat_model ?? '')) body.chat_model = chatModel
+    if (evalModel !== (view.eval_model ?? '')) body.eval_model = evalModel
+    if (operatorModel !== (view.operator_model ?? '')) body.operator_model = operatorModel
     fetch('/api/settings/claude', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -109,6 +133,9 @@ function ClaudeSection({
 
   const testConnection = () => {
     setTesting(true); setTestResult(null)
+    // Connectivity test deliberately ignores the configured models —
+    // it always pings haiku so a misconfigured operator/eval model
+    // can't make the credentials look broken.
     fetch('/api/settings/claude/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -132,7 +159,7 @@ function ClaudeSection({
   }
 
   return (
-    <Card title="Claude API" hint="Override ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL for spawned claude subprocesses. Leave blank to use OAuth/keychain.">
+    <Card title="Claude API" hint="Override ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / --model for spawned claude subprocesses. Leave blank to inherit OAuth/keychain and the claude CLI's default model.">
       <Row label="API key">
         <div className="flex-1 flex gap-2 items-center">
           <input
@@ -161,6 +188,27 @@ function ClaudeSection({
           className="flex-1 text-sm font-mono px-2 py-1 border border-border rounded bg-background"
         />
       </Row>
+      <ModelRow
+        label="Chat model"
+        hint="Used by the dashboard's chat drawer (clawflow chat)."
+        value={chatModel}
+        defaultValue={view.chat_model_default}
+        onChange={setChatModel}
+      />
+      <ModelRow
+        label="Eval model"
+        hint="Used by evaluate-* operators (evaluate-bug, evaluate-feat)."
+        value={evalModel}
+        defaultValue={view.eval_model_default}
+        onChange={setEvalModel}
+      />
+      <ModelRow
+        label="Operator model"
+        hint="Used by every other operator (implement, reply-comment, custom skills)."
+        value={operatorModel}
+        defaultValue={view.operator_model_default}
+        onChange={setOperatorModel}
+      />
 
       <div className="flex items-center gap-2 pt-2">
         <button
@@ -454,6 +502,56 @@ function PasswordInput({
         {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
       </button>
     </div>
+  )
+}
+
+// MODEL_PRESETS is the curated dropdown list. Empty value means
+// "inherit the built-in default exposed by the API"; the hint shows
+// what that default actually is. The list intentionally mixes claude
+// CLI shortcuts ("sonnet") and full versioned names ("claude-opus-4-7")
+// — the CLI accepts both, and a user pinning to a specific version is
+// a real workflow.
+const MODEL_PRESETS = [
+  'haiku',
+  'sonnet',
+  'opus',
+  'claude-haiku-4-5',
+  'claude-sonnet-4-7',
+  'claude-opus-4-7',
+] as const
+
+function ModelRow({
+  label, hint, value, defaultValue, onChange,
+}: {
+  label: string
+  hint: string
+  value: string
+  defaultValue: string
+  onChange: (v: string) => void
+}) {
+  // If the saved value isn't in MODEL_PRESETS, surface it as a custom
+  // option at the top of the dropdown so the user can see what's
+  // currently in effect without us silently dropping their pin.
+  const inPresets = (MODEL_PRESETS as readonly string[]).includes(value)
+  const showCustom = value !== '' && !inPresets
+
+  return (
+    <Row label={label}>
+      <div className="flex-1 flex flex-col gap-0.5">
+        <select
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          className="text-sm font-mono px-2 py-1 border border-border rounded bg-background"
+        >
+          <option value="">(default — {defaultValue})</option>
+          {showCustom && <option value={value}>{value} (custom)</option>}
+          {MODEL_PRESETS.map(m => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+        <span className="text-[11px] text-muted-foreground">{hint}</span>
+      </div>
+    </Row>
   )
 }
 

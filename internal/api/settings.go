@@ -30,6 +30,16 @@ type settingsView struct {
 		APIKeySet  bool   `json:"api_key_set"`
 		APIKeyHint string `json:"api_key_hint,omitempty"`
 		BaseURL    string `json:"base_url,omitempty"`
+		// Three model-override slots; empty means "fall back to the
+		// built-in default exposed via the corresponding *_default
+		// field". Models aren't sensitive so they're returned in
+		// plaintext.
+		ChatModel        string `json:"chat_model"`
+		EvalModel        string `json:"eval_model"`
+		OperatorModel    string `json:"operator_model"`
+		ChatModelDefault string `json:"chat_model_default"`
+		EvalModelDefault string `json:"eval_model_default"`
+		OperatorModelDef string `json:"operator_model_default"`
 	} `json:"claude"`
 	Tokens struct {
 		GHSet      bool   `json:"gh_set"`
@@ -68,6 +78,12 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	v.Claude.APIKeySet = creds.ClaudeAPIKey != ""
 	v.Claude.APIKeyHint = lastFour(creds.ClaudeAPIKey)
 	v.Claude.BaseURL = creds.ClaudeBaseURL
+	v.Claude.ChatModel = creds.ClaudeChatModel
+	v.Claude.EvalModel = creds.ClaudeEvalModel
+	v.Claude.OperatorModel = creds.ClaudeOperatorModel
+	v.Claude.ChatModelDefault = config.DefaultChatModel
+	v.Claude.EvalModelDefault = config.DefaultEvalModel
+	v.Claude.OperatorModelDef = config.DefaultOperatorModel
 	v.Tokens.GHSet = creds.GHToken != ""
 	v.Tokens.GHHint = lastFour(creds.GHToken)
 	v.Tokens.GitlabSet = creds.GitLabToken != ""
@@ -87,8 +103,11 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 //   - field set to ""        → ptr is &"" → clear
 //   - field set to non-empty → update to that value
 type claudeUpdate struct {
-	APIKey  *string `json:"api_key,omitempty"`
-	BaseURL *string `json:"base_url,omitempty"`
+	APIKey        *string `json:"api_key,omitempty"`
+	BaseURL       *string `json:"base_url,omitempty"`
+	ChatModel     *string `json:"chat_model,omitempty"`
+	EvalModel     *string `json:"eval_model,omitempty"`
+	OperatorModel *string `json:"operator_model,omitempty"`
 }
 
 // HandleUpdateClaudeSettings handles POST /api/settings/claude.
@@ -112,6 +131,15 @@ func HandleUpdateClaudeSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.BaseURL != nil {
 		creds.ClaudeBaseURL = *req.BaseURL
+	}
+	if req.ChatModel != nil {
+		creds.ClaudeChatModel = *req.ChatModel
+	}
+	if req.EvalModel != nil {
+		creds.ClaudeEvalModel = *req.EvalModel
+	}
+	if req.OperatorModel != nil {
+		creds.ClaudeOperatorModel = *req.OperatorModel
 	}
 	if err := config.SaveCredentials(creds); err != nil {
 		writeErr(w, err)

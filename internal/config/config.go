@@ -105,6 +105,64 @@ type Credentials struct {
 	// ClaudeBaseURL, when set, is forwarded as ANTHROPIC_BASE_URL.
 	// Typically paired with ClaudeAPIKey when targeting a relay.
 	ClaudeBaseURL string `yaml:"claude_base_url,omitempty"`
+
+	// ClaudeChatModel / ClaudeEvalModel / ClaudeOperatorModel are
+	// the three claude `--model` overrides clawflow uses, scoped by
+	// what the subprocess does. Stored in credentials.yaml because
+	// they ship next to api_key/base_url; values themselves aren't
+	// secret. Empty = fall back to the built-in default returned by
+	// EffectiveChat/Eval/OperatorModel — the user's
+	// ~/.claude/settings.json model is never inherited, because we
+	// always pass `--model` so a broken global default can't break
+	// clawflow.
+	//
+	//	ChatModel     — `clawflow chat` REPL (analysis, fast turns).
+	//	                Default: "haiku".
+	//	EvalModel     — operators whose name starts with "evaluate-"
+	//	                (currently evaluate-bug, evaluate-feat).
+	//	                Default: "claude-opus-4-7".
+	//	OperatorModel — every other operator (implement, reply-comment,
+	//	                user-supplied skills).
+	//	                Default: "sonnet".
+	ClaudeChatModel     string `yaml:"claude_chat_model,omitempty"`
+	ClaudeEvalModel     string `yaml:"claude_eval_model,omitempty"`
+	ClaudeOperatorModel string `yaml:"claude_operator_model,omitempty"`
+}
+
+// Default model identifiers used when the corresponding Credentials
+// field is empty. Centralized here so the API, CLI, and operator
+// runner all return the same answer.
+const (
+	DefaultChatModel     = "haiku"
+	DefaultEvalModel     = "claude-opus-4-7"
+	DefaultOperatorModel = "sonnet"
+)
+
+// EffectiveChatModel returns the configured chat model, or the
+// built-in default if unset.
+func (c *Credentials) EffectiveChatModel() string {
+	if c == nil || c.ClaudeChatModel == "" {
+		return DefaultChatModel
+	}
+	return c.ClaudeChatModel
+}
+
+// EffectiveEvalModel returns the configured evaluation-operator
+// model, or the built-in default if unset.
+func (c *Credentials) EffectiveEvalModel() string {
+	if c == nil || c.ClaudeEvalModel == "" {
+		return DefaultEvalModel
+	}
+	return c.ClaudeEvalModel
+}
+
+// EffectiveOperatorModel returns the configured generic-operator
+// model, or the built-in default if unset.
+func (c *Credentials) EffectiveOperatorModel() string {
+	if c == nil || c.ClaudeOperatorModel == "" {
+		return DefaultOperatorModel
+	}
+	return c.ClaudeOperatorModel
 }
 
 // CredentialsPath returns the path to the credentials file.
@@ -133,6 +191,9 @@ func LoadCredentials() (*Credentials, error) {
 	c.GitLabToken = envOrFile("GITLAB_TOKEN", c.GitLabToken)
 	c.ClaudeAPIKey = envOrFile("CLAWFLOW_CLAUDE_API_KEY", c.ClaudeAPIKey)
 	c.ClaudeBaseURL = envOrFile("CLAWFLOW_CLAUDE_BASE_URL", c.ClaudeBaseURL)
+	c.ClaudeChatModel = envOrFile("CLAWFLOW_CLAUDE_CHAT_MODEL", c.ClaudeChatModel)
+	c.ClaudeEvalModel = envOrFile("CLAWFLOW_CLAUDE_EVAL_MODEL", c.ClaudeEvalModel)
+	c.ClaudeOperatorModel = envOrFile("CLAWFLOW_CLAUDE_OPERATOR_MODEL", c.ClaudeOperatorModel)
 	return c, nil
 }
 

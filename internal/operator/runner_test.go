@@ -80,7 +80,7 @@ func TestRun_HappyPath(t *testing.T) {
 		Repo:    "acme/webapp",
 		Workdir: t.TempDir(),
 		Timeout: time.Second,
-		RunFunc: func(_ context.Context, prompt, _ string, _ time.Duration, _ io.Writer) (string, error) {
+		RunFunc: func(_ context.Context, prompt, _ string, _ time.Duration, _ io.Writer, _ string) (string, error) {
 			// Sanity: prompt should carry the operator body and context.
 			if !strings.Contains(prompt, "do the thing") {
 				t.Errorf("fake claude did not receive op prompt; got: %q", prompt)
@@ -123,7 +123,7 @@ func TestRun_AlreadyLocked_NoOp(t *testing.T) {
 
 	out, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			called = true
 			return "", nil
 		},
@@ -153,7 +153,7 @@ func TestRun_ClaudeFails_PostsFailureComment(t *testing.T) {
 	claudeErr := errors.New("model refused")
 	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return "", claudeErr
 		},
 	})
@@ -185,7 +185,7 @@ func TestRun_AddLabelFails_StopsEarly(t *testing.T) {
 	claudeCalled := false
 	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			claudeCalled = true
 			return "result", nil
 		},
@@ -208,7 +208,7 @@ func TestRun_EmptyClaudeOutput_NoComment(t *testing.T) {
 
 	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return "   \n\t  ", nil
 		},
 	})
@@ -236,7 +236,7 @@ func TestRun_EventWriterReceivesRunFuncInput(t *testing.T) {
 	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo:        "r",
 		EventWriter: sink,
-		RunFunc: func(_ context.Context, _, _ string, _ time.Duration, events io.Writer) (string, error) {
+		RunFunc: func(_ context.Context, _, _ string, _ time.Duration, events io.Writer, _ string) (string, error) {
 			captured = events
 			return "ok", nil
 		},
@@ -270,7 +270,7 @@ func TestRun_OutcomeMarker_StripsAndAddsLabel(t *testing.T) {
 	body := "## Eval\n\nRepro: 8/10\n\n<!-- clawflow:outcome=agent-evaluated -->\n"
 	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
 		},
 	})
@@ -300,7 +300,7 @@ func TestRun_OutcomeMarker_NotInWhitelist_SkipsLabel(t *testing.T) {
 	body := "## Eval\n\nstuff\n\n<!-- clawflow:outcome=type:bug -->\n"
 	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
 		},
 	})
@@ -332,7 +332,7 @@ func TestRun_OutcomeMarker_LastWins(t *testing.T) {
 	body := "draft 1\n<!-- clawflow:outcome=agent-skipped -->\nfinal\n<!-- clawflow:outcome=agent-evaluated -->\n"
 	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
 		},
 	})
@@ -359,7 +359,7 @@ func TestRun_OutcomeMarker_NoOutcomesSet_AcceptsAny(t *testing.T) {
 	body := "answer\n<!-- clawflow:outcome=ready-for-agent -->\n"
 	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
 		},
 	})
@@ -383,7 +383,7 @@ func TestRun_OutcomeMarker_None_BackCompat(t *testing.T) {
 	body := "old-style operator output, no marker"
 	_, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
-		RunFunc: func(context.Context, string, string, time.Duration, io.Writer) (string, error) {
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
 		},
 	})

@@ -49,6 +49,14 @@ type RunOptions struct {
 	Timeout  time.Duration // claude subprocess timeout; 0 disables
 	Comments []string      // optional comment thread to include in the prompt
 
+	// Model is forwarded as `--model <model>` to the claude subprocess.
+	// Empty falls back to claude's own default (the user's
+	// ~/.claude/settings.json), which is rarely what we want for an
+	// operator run — the runner fills this in from credentials.yaml
+	// before invoking RunFunc, picking the eval or operator model
+	// based on the operator name.
+	Model string
+
 	// EventWriter, if non-nil, receives raw stream-json event lines from
 	// claude so the dashboard can replay runs post-mortem. Callers typically
 	// set it to a file writer pointing at `<run-dir>/events.jsonl`; tests
@@ -58,7 +66,7 @@ type RunOptions struct {
 	// RunFunc executes the claude subprocess. Leave nil to use the real
 	// RunClaude; tests inject a fake that returns canned output without
 	// spawning a process.
-	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer) (string, error)
+	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, model string) (string, error)
 }
 
 // Run executes one operator against one subject and returns the operator's
@@ -98,7 +106,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	if runFunc == nil {
 		runFunc = RunClaude
 	}
-	output, err := runFunc(ctx, prompt, opts.Workdir, opts.Timeout, opts.EventWriter)
+	output, err := runFunc(ctx, prompt, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Model)
 	if err != nil {
 		msg := fmt.Sprintf("⚠️ Operator `%s` failed:\n\n```\n%v\n```", op.Name, err)
 		_ = v.PostIssueComment(opts.Repo, sub.Number, msg)

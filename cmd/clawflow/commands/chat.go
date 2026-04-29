@@ -39,7 +39,10 @@ Examples:
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "repository (owner/repo)")
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number for issue-level chat")
-	cmd.Flags().StringVar(&model, "model", "haiku", "claude model to use")
+	// Empty default means "use whatever the settings page configured" —
+	// resolved below via Credentials.EffectiveChatModel(). An explicit
+	// --model on the CLI still wins.
+	cmd.Flags().StringVar(&model, "model", "", "claude model to use (default: settings → chat_model, falls back to haiku)")
 	return cmd
 }
 
@@ -74,6 +77,15 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	name := fmt.Sprintf("clawflow: %s", repo)
 	if issueNum > 0 {
 		name = fmt.Sprintf("clawflow: %s #%d", repo, issueNum)
+	}
+
+	// Resolve the model: explicit --model > settings (chat slot) >
+	// built-in default. We resolve here rather than at flag-parse time
+	// so a settings-page change takes effect on the next chat without
+	// rebuilding the binary.
+	if model == "" {
+		creds, _ := config.LoadCredentials()
+		model = creds.EffectiveChatModel()
 	}
 
 	// Hard-block file mutations and notebook edits. The chat is

@@ -20,35 +20,43 @@ import (
 // post-mortem. Text deltas are also printed live to os.Stderr so the user
 // sees progress during long runs.
 //
+// `model` is forwarded as `--model <model>`; the empty string skips the
+// flag and lets the claude CLI pick whatever ~/.claude/settings.json
+// says. Operator callers should always supply a non-empty model so a
+// broken global default can't silently break clawflow.
+//
 // --dangerously-skip-permissions is used because operators run unattended;
 // the subprocess cwd is `workdir`, so callers must scope that carefully
 // (tempdir for read-only ops, repo clone for code-writing ops).
-func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer) (string, error) {
+func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, model string) (string, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(ctx,
-		claude.Resolve(),
-		"-p",
-		"--dangerously-skip-permissions",
-		"--output-format", "stream-json",
-		"--verbose", // stream-json requires --verbose with -p
-		"--include-partial-messages",
-		prompt,
-	)
-	cmd.Dir = workdir
-	// Apply user-configured ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
-	// overrides if credentials.yaml has them. Lets users route the
-	// implement operator through a relay or pin to a specific
-	// account separate from their interactive Claude Code login.
+	// API key / base URL come from credentials.yaml and flow through
+	// env (ANTHROPIC_*). Model is CLI-only because claude doesn't
+	// honor an env override for it.
 	creds, _ := config.LoadCredentials()
 	apiKey, baseURL := "", ""
 	if creds != nil {
 		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
 	}
+
+	args := []string{
+		"-p",
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"--verbose", // stream-json requires --verbose with -p
+		"--include-partial-messages",
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, prompt)
+	cmd := exec.CommandContext(ctx, claude.Resolve(), args...)
+	cmd.Dir = workdir
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 	cmd.Stderr = os.Stderr
 
