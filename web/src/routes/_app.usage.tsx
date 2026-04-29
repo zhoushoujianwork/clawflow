@@ -46,7 +46,11 @@ export const Route = createFileRoute('/_app/usage')({
 })
 
 function timeAgo(iso: string): string {
-  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  if (!iso) return '—'
+  const t = new Date(iso).getTime()
+  if (!isFinite(t)) return '—'
+  const diff = Math.floor((Date.now() - t) / 1000)
+  if (diff < 0) return 'just now'
   if (diff < 60) return `${diff}s ago`
   if (diff < 3600) return `${Math.floor(diff / 60)}min ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`

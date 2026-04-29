@@ -341,7 +341,15 @@ func WriteMeta(version string) error {
 }
 
 // WriteRunMeta writes meta.json inside an already-created run directory.
+// A zero StartedAt is repaired to time.Now() before serialization — Go's
+// zero time.Time JSON-marshals to "0001-01-01T00:00:00Z" which the
+// dashboard rendered as "-63913033671349s ago". Past callers already
+// pass time.Now(), but a defensive backstop here means a future caller
+// that forgets won't poison the index.
 func WriteRunMeta(runDir string, m RunMeta) error {
+	if m.StartedAt.IsZero() {
+		m.StartedAt = time.Now().UTC()
+	}
 	return writeJSON(filepath.Join(runDir, "meta.json"), m)
 }
 

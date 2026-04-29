@@ -84,7 +84,17 @@ function StatusChip({ status }: { status: Run['status'] }) {
 }
 
 function timeAgo(iso: string): string {
-  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  // Defensive: a missing/invalid ISO must never render as a giant
+  // negative number. Past bug: a `running` placeholder occasionally
+  // landed on disk with a zero or future started_at, which produced
+  // "-63913033671349s ago" in the UI. We now treat anything we can't
+  // parse, and anything claiming the future, as "just now" — the
+  // user sees nothing scary while the bad data ages out.
+  if (!iso) return '—'
+  const t = new Date(iso).getTime()
+  if (!isFinite(t)) return '—'
+  const diff = Math.floor((Date.now() - t) / 1000)
+  if (diff < 0) return 'just now'
   if (diff < 60) return `${diff}s ago`
   if (diff < 3600) return `${Math.floor(diff / 60)}min ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
@@ -221,14 +231,27 @@ function Dashboard() {
     return ['all', ...Array.from(set).sort()]
   }, [runs])
 
-  const filtered = useMemo(() => {
+  // Split filtered runs into "running now" and "everything else (history)".
+  // Running rows render in their own section above; history is the main
+  // scrollable list. When the user explicitly clicks the Running stat
+  // card we keep all running rows in `filteredHistory` and skip the
+  // dedicated section, so the page doesn't show the same row twice.
+  const { filteredRunning, filteredHistory } = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return runs.filter(r => {
+    const passesFilters = (r: Run) => {
       if (statusFilter !== 'all' && r.status !== statusFilter) return false
       if (repoFilter !== 'all' && r.repo !== repoFilter) return false
       if (q && !(r.issue_title || '').toLowerCase().includes(q) && !String(r.issue_number).includes(q)) return false
       return true
-    })
+    }
+    const matched = runs.filter(passesFilters)
+    if (statusFilter === 'running') {
+      return { filteredRunning: [], filteredHistory: matched }
+    }
+    return {
+      filteredRunning: matched.filter(r => r.status === 'running'),
+      filteredHistory: matched.filter(r => r.status !== 'running'),
+    }
   }, [runs, statusFilter, repoFilter, query])
 
   // Pending ignores statusFilter (queued items have no run status yet) but
@@ -382,6 +405,28 @@ function Dashboard() {
         </section>
       )}
 
+      {/* Running runs get their own section above the history. They're
+          live state — a long-running implement op or a stuck claude can
+          stay on screen for minutes — and burying them mid-list among
+          weeks of finished runs makes "what's happening right now"
+          harder to spot. The status filter still applies; an explicit
+          "running" filter just hides this whole section because the
+          history list below already shows the running rows when that
+          filter is active. */}
+      {statusFilter !== 'running' && filteredRunning.length > 0 && (
+        <section className="mb-4">
+          <h2 className="text-sm font-semibold text-foreground mb-2 flex items-center gap-2">
+            <Loader2 className="w-3.5 h-3.5 text-blue-600 animate-spin" />
+            Running
+            <span className="font-normal text-muted-foreground">({filteredRunning.length})</span>
+            <span className="font-normal text-xs text-muted-foreground ml-1">— live</span>
+          </h2>
+          <div className="bg-card border border-blue-200 rounded-xl shadow-sm divide-y divide-border overflow-hidden">
+            {filteredRunning.map(r => <Row key={r.path} r={r} repoMap={repoMap} />)}
+          </div>
+        </section>
+      )}
+
       {loading ? (
         <p className="text-sm text-muted-foreground text-center py-8">Loading…</p>
       ) : runs.length === 0 ? (
@@ -394,10 +439,10 @@ function Dashboard() {
         </div>
       ) : (
         <div className="bg-card border border-border rounded-xl shadow-sm divide-y divide-border overflow-hidden">
-          {filtered.length === 0 ? (
+          {filteredHistory.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-6">No runs match the current filters.</p>
           ) : (
-            filtered.map(r => <Row key={r.path} r={r} repoMap={repoMap} />)
+            filteredHistory.map(r => <Row key={r.path} r={r} repoMap={repoMap} />)
           )}
         </div>
       )}
