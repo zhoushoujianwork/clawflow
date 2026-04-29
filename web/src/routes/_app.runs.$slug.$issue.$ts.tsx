@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, SkipForward, Loader2,
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
+import { Markdown } from '../components/Markdown'
 
 interface ModelUsage {
   input_tokens: number
@@ -290,8 +291,8 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
     return (
       <section className="mb-6">
         <h2 className="text-sm font-semibold text-foreground mb-2">Conclusion</h2>
-        <div className="bg-green-50/70 dark:bg-green-950/20 border border-green-200 dark:border-green-900/60 rounded-lg p-4 text-sm whitespace-pre-wrap font-mono text-foreground">
-          {meta.summary}
+        <div className="bg-green-50/70 dark:bg-green-950/20 border border-green-200 dark:border-green-900/60 rounded-lg p-4">
+          <Markdown>{meta.summary}</Markdown>
         </div>
       </section>
     )
@@ -532,7 +533,7 @@ function EventCard({ ev, toolNames }: { ev: RawEvent; toolNames: Record<string, 
                   <MessageSquare className="w-3 h-3" />
                   <span>reply</span>
                 </div>
-                <div className="text-sm whitespace-pre-wrap text-foreground">{c.text}</div>
+                <Markdown>{c.text}</Markdown>
               </div>
             )
           }
