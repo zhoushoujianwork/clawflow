@@ -117,6 +117,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/settings/global", api.HandleUpdateGlobalSettings)
 			mux.HandleFunc("/api/settings/claude/test", api.HandleTestClaude)
 			mux.HandleFunc("/api/settings/reveal", api.HandleRevealSecret)
+			mux.HandleFunc("/api/chat/spawn", api.HandleChatSpawn)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				// SPA fallback: if the requested path maps to a real file
 				// (or lives under /data/ or /assets/ which tanstack-router
