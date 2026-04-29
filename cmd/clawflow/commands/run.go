@@ -92,6 +92,12 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		fmt.Println("no enabled repos to scan")
 		return nil
 	}
+	debugf("loaded %d operator(s); scanning %d enabled repo(s) (onlyRepo=%q onlyIssue=%d timeout=%s)",
+		len(reg.All()), len(allRepos), onlyRepo, onlyIssue, timeout)
+	for _, op := range reg.All() {
+		debugf("  operator %s target=%s required=%v excluded=%v lock=%s",
+			op.Name, op.Trigger.Target, op.Trigger.LabelsRequired, op.Trigger.LabelsExcluded, op.LockLabel)
+	}
 
 	// Reconcile any runs whose on-disk state is inconsistent (stuck
 	// "running", missing meta.json) BEFORE we touch anything else, so the
@@ -163,6 +169,8 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	if err != nil {
 		return nil, fmt.Errorf("list open issues: %w", err)
 	}
+	debugf("[%s] %d open issue(s) fetched (executeHere=%v onlyIssue=%d)",
+		fullName, len(issues), executeHere, onlyIssue)
 
 	var pending []snapshot.PendingEntry
 	capturedAt := time.Now().UTC()
@@ -174,15 +182,21 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 			Labels: iss.Labels,
 			IsPR:   false,
 		}
+		debugf("[%s] #%d labels=%v title=%q", fullName, sub.Number, sub.Labels, sub.Title)
 		// Snapshot every operator that would match this issue's CURRENT
 		// label state. The runner below will fire at most one of them and
 		// mutate labels, but pending.json captures the queue as it looked
 		// at the start of this run — the next refresh will show the
 		// post-run state.
+		anyMatch := false
 		for _, op := range reg.All() {
-			if !operator.Matches(sub, op) {
+			ok, reason := operator.MatchesWithReason(sub, op)
+			if !ok {
+				debugf("  ✗ %s: %s", op.Name, reason)
 				continue
 			}
+			debugf("  ✓ %s matches", op.Name)
+			anyMatch = true
 			pending = append(pending, snapshot.PendingEntry{
 				Repo:        fullName,
 				IssueNumber: sub.Number,
@@ -192,13 +206,19 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 				CapturedAt:  capturedAt,
 			})
 		}
+		if !anyMatch {
+			debugf("  → no operator matched #%d (label its required trigger to enqueue, e.g. \"clawflow label add --repo %s --issue %d --label feat\")",
+				sub.Number, fullName, sub.Number)
+		}
 		// Execution scope: skip running operators on this issue when the
 		// caller restricted the run to a different repo or different issue.
 		// Pending collection above already happened.
 		if !executeHere {
+			debugf("  · skipping execution on %s#%d (--repo restricts execution to a different repo)", fullName, iss.Number)
 			continue
 		}
 		if onlyIssue != 0 && iss.Number != onlyIssue {
+			debugf("  · skipping execution on #%d (--issue=%d)", iss.Number, onlyIssue)
 			continue
 		}
 		// Track the operator that fired (and reached "done") for this issue

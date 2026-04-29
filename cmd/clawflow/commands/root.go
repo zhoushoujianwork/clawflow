@@ -18,6 +18,12 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 		Version: Version,
 	}
 
+	// --debug is a verbosity switch: when set, commands emit additional
+	// "[debug] ..." trace lines to stderr explaining decisions (operator
+	// matcher results, fetch counts, skip reasons). Off by default so normal
+	// runs stay quiet enough to schedule via cron.
+	root.PersistentFlags().BoolVar(&Debug, "debug", false, "Print debug trace to stderr (matcher decisions, scan counts)")
+
 	root.AddCommand(NewRunCmd())
 	root.AddCommand(NewWebCmd())
 	root.AddCommand(NewChatCmd())
