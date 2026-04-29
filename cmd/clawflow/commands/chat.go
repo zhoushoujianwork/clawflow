@@ -23,8 +23,12 @@ func NewChatCmd() *cobra.Command {
 		Use:   "chat",
 		Short: "Interactive AI chat with repo/issue context",
 		Long: `Start an interactive Claude session with repository or issue context
-automatically injected. Uses Claude's native session persistence — closing
-and reopening the same repo/issue chat resumes the conversation.
+automatically injected. Each invocation creates a FRESH session and
+fetches the latest issue body / labels / comments — close the terminal
+window when you're done. Persistence is intentionally off: chat now
+lives in the user's native terminal (no clawflow-side destroy hook),
+and resuming would either strand stale issue data or have two claude
+processes fighting over the same transcript file.
 
 Examples:
   clawflow chat --repo owner/repo
@@ -52,8 +56,15 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 		return err
 	}
 
-	// Deterministic session ID so same repo+issue always resumes
-	sessionID := chat.SessionID(repo, issueNum)
+	// Per-launch session id (timestamp-seeded). Two reasons we don't
+	// reuse the deterministic SessionID-by-(repo, issue) anymore:
+	//   1. Each spawn now refetches issue data, so resuming an old
+	//      transcript would drag stale labels/comments forward.
+	//   2. Chat runs in the user's native terminal — clawflow web has
+	//      no kill switch — so two clicks while the first window is
+	//      still open would pit two claude processes against the same
+	//      jsonl ("Session ID already in use" or worse).
+	sessionID := chat.NewSessionID(repo, issueNum)
 
 	// Working directory: prefer the repo's local clone so claude can
 	// read code in-place. When no local_path is configured we fall
@@ -65,13 +76,6 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	if workdir == "" {
 		workdir = os.TempDir()
 	}
-
-	// Claude rejects --session-id <X> when the session already exists on
-	// disk ("Session ID … is already in use"). Sessions live at
-	// ~/.claude/projects/<encoded-cwd>/<id>.jsonl where encoded-cwd is
-	// the workdir with "/" → "-". If the file is there from a prior
-	// chat, --resume the existing session instead of trying to recreate.
-	resuming := chat.SessionExists(workdir, sessionID)
 
 	// Session display name
 	name := fmt.Sprintf("clawflow: %s", repo)
@@ -115,38 +119,33 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 		args = append(args, "--bare", "--add-dir", workdir)
 	}
 
-	if resuming {
-		// Resume the existing transcript. Don't re-inject the system
-		// prompt — claude already has it from the original session, and
-		// re-appending would duplicate the issue body on every reopen.
-		args = append(args, "--resume", sessionID)
+	// Always create a brand-new session, seeded with freshly fetched
+	// repo/issue context. The resume branch was removed when chat moved
+	// to the user's native terminal — see the comment on sessionID
+	// above for the full rationale.
+	var systemCtx string
+	if issueNum > 0 {
+		systemCtx, err = buildIssueChatContext(client, repo, issueNum)
 	} else {
-		// First time for this repo+issue: create the session and seed it
-		// with the repo/issue context as an appended system prompt.
-		var systemCtx string
-		if issueNum > 0 {
-			systemCtx, err = buildIssueChatContext(client, repo, issueNum)
-		} else {
-			systemCtx, err = buildRepoChatContext(client, repo, repoCfg.Platform, repoCfg.BaseBranch)
-		}
-		if err != nil {
-			return fmt.Errorf("build context: %w", err)
-		}
-		tmpFile, err := os.CreateTemp("", "clawflow-chat-ctx-*.md")
-		if err != nil {
-			return fmt.Errorf("create temp file: %w", err)
-		}
-		defer os.Remove(tmpFile.Name())
-		if _, err := tmpFile.WriteString(systemCtx); err != nil {
-			tmpFile.Close()
-			return err
-		}
-		tmpFile.Close()
-		args = append(args,
-			"--session-id", sessionID,
-			"--append-system-prompt-file", tmpFile.Name(),
-		)
+		systemCtx, err = buildRepoChatContext(client, repo, repoCfg.Platform, repoCfg.BaseBranch)
 	}
+	if err != nil {
+		return fmt.Errorf("build context: %w", err)
+	}
+	tmpFile, err := os.CreateTemp("", "clawflow-chat-ctx-*.md")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.WriteString(systemCtx); err != nil {
+		tmpFile.Close()
+		return err
+	}
+	tmpFile.Close()
+	args = append(args,
+		"--session-id", sessionID,
+		"--append-system-prompt-file", tmpFile.Name(),
+	)
 
 	bin := claude.Resolve()
 	cmd := exec.Command(bin, args...)
