@@ -279,8 +279,18 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
   if (meta.error) {
     return (
       <section className="mb-6">
-        <h2 className="text-sm font-semibold text-red-600 mb-2">Conclusion · error</h2>
-        <div className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg p-4 text-sm whitespace-pre-wrap font-mono text-red-700 dark:text-red-400">
+        <h2 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--error))' }}>
+          Conclusion · error
+        </h2>
+        <div
+          className="rounded-lg p-4 text-sm whitespace-pre-wrap font-mono"
+          style={{
+            background: 'hsl(var(--bg-secondary))',
+            border: '1px solid hsl(var(--border))',
+            borderLeft: '3px solid hsl(var(--error))',
+            color: 'hsl(var(--text-high))',
+          }}
+        >
           {meta.error}
         </div>
       </section>
@@ -290,8 +300,23 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
   if (meta.summary) {
     return (
       <section className="mb-6">
-        <h2 className="text-sm font-semibold text-foreground mb-2">Conclusion</h2>
-        <div className="bg-green-50/70 dark:bg-green-950/20 border border-green-200 dark:border-green-900/60 rounded-lg p-4">
+        <h2 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--text-high))' }}>
+          Conclusion
+        </h2>
+        {/* Use the project's bg-secondary surface (changes correctly
+            in dark mode) instead of green-50/dark:green-950 — the
+            green tints fight with markdown's own chip colors and
+            produced unreadable contrast in some dark-mode shades. A
+            success-tinted left border keeps the "this run succeeded"
+            visual cue without wrapping the whole content in green. */}
+        <div
+          className="rounded-lg p-4"
+          style={{
+            background: 'hsl(var(--bg-secondary))',
+            border: '1px solid hsl(var(--border))',
+            borderLeft: '3px solid hsl(var(--success))',
+          }}
+        >
           <Markdown>{meta.summary}</Markdown>
         </div>
       </section>
@@ -301,8 +326,17 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
   if (meta.status === 'skipped') {
     return (
       <section className="mb-6">
-        <h2 className="text-sm font-semibold text-foreground mb-2">Conclusion · skipped</h2>
-        <div className="bg-muted/40 border border-border rounded-lg p-4 text-sm text-muted-foreground">
+        <h2 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--text-high))' }}>
+          Conclusion · skipped
+        </h2>
+        <div
+          className="rounded-lg p-4 text-sm"
+          style={{
+            background: 'hsl(var(--bg-secondary))',
+            border: '1px solid hsl(var(--border))',
+            color: 'hsl(var(--text-low))',
+          }}
+        >
           Operator returned no stdout, so no comment was posted on the issue. Expand the trace below to see what the model did.
         </div>
       </section>
@@ -312,8 +346,18 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
   if (meta.status === 'running') {
     return (
       <section className="mb-6">
-        <h2 className="text-sm font-semibold text-foreground mb-2">Conclusion</h2>
-        <div className="bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/60 rounded-lg p-4 text-sm text-muted-foreground inline-flex items-center gap-2">
+        <h2 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--text-high))' }}>
+          Conclusion
+        </h2>
+        <div
+          className="rounded-lg p-4 text-sm inline-flex items-center gap-2"
+          style={{
+            background: 'hsl(var(--bg-secondary))',
+            border: '1px solid hsl(var(--border))',
+            borderLeft: '3px solid hsl(var(--_info))',
+            color: 'hsl(var(--text-normal))',
+          }}
+        >
           <Loader2 className="w-4 h-4 animate-spin" /> In progress — trace is updating live below.
         </div>
       </section>
