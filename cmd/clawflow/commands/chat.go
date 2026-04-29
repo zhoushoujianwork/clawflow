@@ -146,6 +146,24 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
 	}
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
+	// Print a one-line provenance banner before claude takes over the
+	// terminal so the user can confirm which credentials this session
+	// will use. Same hint format the Settings page uses (last 4 chars).
+	// "(none — falling back to OAuth/keychain)" makes the inherit case
+	// obvious instead of silent.
+	keyHint := "(none — falling back to OAuth/keychain)"
+	if apiKey != "" {
+		if n := len(apiKey); n >= 4 {
+			keyHint = "…" + apiKey[n-4:]
+		} else {
+			keyHint = "(set, <4 chars)"
+		}
+	}
+	urlHint := baseURL
+	if urlHint == "" {
+		urlHint = "(default — api.anthropic.com)"
+	}
+	fmt.Fprintf(os.Stderr, "[clawflow] chat → model=%s key=%s base_url=%s\n", model, keyHint, urlHint)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
