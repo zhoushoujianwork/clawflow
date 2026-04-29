@@ -72,6 +72,14 @@ function AppLayout() {
                 <Receipt className="w-3.5 h-3.5" />
                 Usage
               </Link>
+              <Link
+                to="/settings"
+                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+                style={{ color: 'hsl(var(--text-low))' }}
+                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+              >
+                Settings
+              </Link>
             </nav>
           </div>
 

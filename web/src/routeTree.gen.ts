@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AppUsageRouteImport } from './routes/_app.usage'
+import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppOperatorsRouteImport } from './routes/_app.operators'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppReposIndexRouteImport } from './routes/_app.repos.index'
@@ -30,6 +31,11 @@ const IndexRoute = IndexRouteImport.update({
 const AppUsageRoute = AppUsageRouteImport.update({
   id: '/usage',
   path: '/usage',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsRoute = AppSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => AppRoute,
 } as any)
 const AppOperatorsRoute = AppOperatorsRouteImport.update({
@@ -62,6 +68,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dashboard': typeof AppDashboardRoute
   '/operators': typeof AppOperatorsRoute
+  '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
   '/repos/$repoName': typeof AppReposRepoNameRoute
   '/repos/': typeof AppReposIndexRoute
@@ -71,6 +78,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/dashboard': typeof AppDashboardRoute
   '/operators': typeof AppOperatorsRoute
+  '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
   '/repos/$repoName': typeof AppReposRepoNameRoute
   '/repos': typeof AppReposIndexRoute
@@ -82,6 +90,7 @@ export interface FileRoutesById {
   '/_app': typeof AppRouteWithChildren
   '/_app/dashboard': typeof AppDashboardRoute
   '/_app/operators': typeof AppOperatorsRoute
+  '/_app/settings': typeof AppSettingsRoute
   '/_app/usage': typeof AppUsageRoute
   '/_app/repos/$repoName': typeof AppReposRepoNameRoute
   '/_app/repos/': typeof AppReposIndexRoute
@@ -93,6 +102,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/operators'
+    | '/settings'
     | '/usage'
     | '/repos/$repoName'
     | '/repos/'
@@ -102,6 +112,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/operators'
+    | '/settings'
     | '/usage'
     | '/repos/$repoName'
     | '/repos'
@@ -112,6 +123,7 @@ export interface FileRouteTypes {
     | '/_app'
     | '/_app/dashboard'
     | '/_app/operators'
+    | '/_app/settings'
     | '/_app/usage'
     | '/_app/repos/$repoName'
     | '/_app/repos/'
@@ -144,6 +156,13 @@ declare module '@tanstack/react-router' {
       path: '/usage'
       fullPath: '/usage'
       preLoaderRoute: typeof AppUsageRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/settings': {
+      id: '/_app/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof AppSettingsRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/operators': {
@@ -187,6 +206,7 @@ declare module '@tanstack/react-router' {
 interface AppRouteChildren {
   AppDashboardRoute: typeof AppDashboardRoute
   AppOperatorsRoute: typeof AppOperatorsRoute
+  AppSettingsRoute: typeof AppSettingsRoute
   AppUsageRoute: typeof AppUsageRoute
   AppReposRepoNameRoute: typeof AppReposRepoNameRoute
   AppReposIndexRoute: typeof AppReposIndexRoute
@@ -196,6 +216,7 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppDashboardRoute: AppDashboardRoute,
   AppOperatorsRoute: AppOperatorsRoute,
+  AppSettingsRoute: AppSettingsRoute,
   AppUsageRoute: AppUsageRoute,
   AppReposRepoNameRoute: AppReposRepoNameRoute,
   AppReposIndexRoute: AppReposIndexRoute,
