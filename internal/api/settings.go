@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -323,6 +324,22 @@ func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Trace every probe to the server log so the operator can see what
+	// got tried and why. Mask the key down to the same hint format the
+	// UI uses (last 4 chars) — anything more risks logging a token
+	// into a tail-of-stderr dump.
+	keyHint := "(empty)"
+	if n := len(apiKey); n >= 4 {
+		keyHint = "…" + apiKey[n-4:]
+	}
+	urlForLog := baseURL
+	if urlForLog == "" {
+		urlForLog = "(default — api.anthropic.com)"
+	}
+	log.Printf("test-claude: start model=%s base_url=%s key_hint=%s timeout=%s",
+		config.DefaultChatModel, urlForLog, keyHint, testClaudeTimeout)
+	startedAt := time.Now()
+
 	ctx, cancel := context.WithTimeout(r.Context(), testClaudeTimeout)
 	defer cancel()
 
@@ -363,6 +380,9 @@ func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 		if detail != "" {
 			humanErr = detail + " (" + exitMsg + ")"
 		}
+		log.Printf("test-claude: FAIL after %s — %s | stderr=%q stdout=%q",
+			time.Since(startedAt).Round(time.Millisecond), humanErr,
+			truncateMsg(stderr.String(), 200), truncateMsg(stdout.String(), 200))
 		writeJSON(w, 200, map[string]any{
 			"status": "error",
 			"error":  humanErr,
@@ -373,6 +393,8 @@ func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := truncateMsg(stdout.String(), 400)
+	log.Printf("test-claude: OK after %s — reply=%q",
+		time.Since(startedAt).Round(time.Millisecond), out)
 	writeJSON(w, 200, map[string]any{
 		"status": "ok",
 		"reply":  out,
