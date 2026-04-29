@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -287,11 +288,20 @@ type claudeTestRequest struct {
 	BaseURL string `json:"base_url,omitempty"`
 }
 
+// testClaudeTimeout caps how long the connectivity probe waits for
+// claude to reply. Anthropic's direct API answers a haiku ping in
+// 2-4 s, but corporate proxies (cc-proxy, internal LLM gateways)
+// frequently add 10-20 s on first token — the previous 8 s budget
+// flagged perfectly working setups as "timed out". 30 s leaves room
+// for cold-start TLS + first-token latency on a slow relay while
+// still failing fast on a misconfigured base URL.
+const testClaudeTimeout = 30 * time.Second
+
 // HandleTestClaude handles POST /api/settings/claude/test. Spawns a
 // short `claude -p "ping"` with the supplied credentials and reports
-// whether it responded within 8 s. Always tests against the chat
-// model default (haiku) — a connectivity probe shouldn't depend on
-// whichever heavier model the user pinned for evaluations.
+// whether it responded within testClaudeTimeout. Always tests against
+// the chat model default (haiku) — a connectivity probe shouldn't
+// depend on whichever heavier model the user pinned for evaluations.
 func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -313,7 +323,7 @@ func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), testClaudeTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx,
@@ -346,7 +356,7 @@ func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 		// to the raw exit message when both pipes were silent.
 		exitMsg := err.Error()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			exitMsg = "timed out after 8s"
+			exitMsg = fmt.Sprintf("timed out after %s — proxy/relay slow or unreachable", testClaudeTimeout)
 			detail = ""
 		}
 		humanErr := exitMsg
