@@ -22,8 +22,8 @@ func envOrFile(envKey, fileVal string) string {
 // Repo holds per-repository settings.
 type Repo struct {
 	Enabled           bool              `yaml:"enabled"`
-	Platform          string            `yaml:"platform,omitempty"`   // "github" (default) or "gitlab"
-	BaseURL           string            `yaml:"base_url,omitempty"`   // GitLab self-hosted instance URL
+	Platform          string            `yaml:"platform,omitempty"` // "github" (default) or "gitlab"
+	BaseURL           string            `yaml:"base_url,omitempty"` // GitLab self-hosted instance URL
 	BaseBranch        string            `yaml:"base_branch"`
 	LocalPath         string            `yaml:"local_path"`
 	Owner             string            `yaml:"owner"`
@@ -52,9 +52,9 @@ type Settings struct {
 	AgentTimeout        int      `yaml:"agent_timeout"`
 	MaxConcurrentAgents int      `yaml:"max_concurrent_agents"`
 	NotificationChannel string   `yaml:"notification_channel"`
-	GitLabHosts         []string `yaml:"gitlab_hosts"`                       // e.g. ["gitlab.company.com"]
-	GithubCloneDir      string   `yaml:"github_clone_dir,omitempty"`         // default: ~/github
-	GitlabCloneDir      string   `yaml:"gitlab_clone_dir,omitempty"`         // default: ~/gitlab
+	GitLabHosts         []string `yaml:"gitlab_hosts"`               // e.g. ["gitlab.company.com"]
+	GithubCloneDir      string   `yaml:"github_clone_dir,omitempty"` // default: ~/github
+	GitlabCloneDir      string   `yaml:"gitlab_clone_dir,omitempty"` // default: ~/gitlab
 }
 
 // ResolveGithubCloneDir returns the configured GitHub clone directory, defaulting to ~/github.
@@ -132,9 +132,23 @@ type Credentials struct {
 // Default model identifiers used when the corresponding Credentials
 // field is empty. Centralized here so the API, CLI, and operator
 // runner all return the same answer.
+//
+// We use the family aliases (haiku / sonnet / opus) rather than
+// pinned IDs because they're the only form that works across every
+// provider clawflow targets:
+//
+//   - Anthropic native API resolves them to the current latest.
+//   - cc-proxy and most third-party Anthropic-compatible proxies
+//     accept the same aliases.
+//   - Kiro's local proxy doesn't list them in /v1/models but
+//     accepts them anyway via fuzzy fallback.
+//
+// The downside is opacity about the exact pinned version, but a
+// user who needs that pins via the settings dropdown — these
+// constants are just the safe out-of-the-box default.
 const (
 	DefaultChatModel     = "haiku"
-	DefaultEvalModel     = "claude-opus-4-7"
+	DefaultEvalModel     = "opus"
 	DefaultOperatorModel = "sonnet"
 )
 

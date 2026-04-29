@@ -562,19 +562,29 @@ function PasswordInput({
   )
 }
 
-// MODEL_PRESETS is the curated dropdown list. Empty value means
-// "inherit the built-in default exposed by the API"; the hint shows
-// what that default actually is. The list intentionally mixes claude
-// CLI shortcuts ("sonnet") and full versioned names ("claude-opus-4-7")
-// — the CLI accepts both, and a user pinning to a specific version is
-// a real workflow.
+// MODEL_PRESETS is the curated dropdown list. Empty value (the
+// default-marker option) means "inherit whatever DefaultChatModel /
+// DefaultEvalModel / DefaultOperatorModel resolves to". Three groups:
+//
+//   - aliases: most portable (work on Anthropic direct, Kiro, cc-proxy)
+//   - dash form: Anthropic standard, pinned versions
+//   - dot form: Kiro proxy specific (matches its /v1/models verbatim,
+//     including the 1M-context Sonnet 4.6 it ships)
+//
+// A user typing in their own value (e.g. claude-haiku-4-5-20251001 to
+// pin to the dated release) still gets surfaced as a "(custom)" entry.
 const MODEL_PRESETS = [
+  // family aliases — recommended default
   'haiku',
   'sonnet',
   'opus',
+  // Anthropic dashed IDs — pin a specific version
   'claude-haiku-4-5',
-  'claude-sonnet-4-7',
+  'claude-sonnet-4-6',
   'claude-opus-4-7',
+  // Kiro proxy dot IDs — match its /v1/models listing
+  'claude-sonnet-4.6',
+  'claude-opus-4.6',
 ] as const
 
 function ModelRow({
