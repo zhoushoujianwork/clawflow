@@ -99,6 +99,21 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 		"--name", name,
 		"--disallowedTools", "Edit,Write,NotebookEdit",
 	}
+	// When the user has explicitly configured an API key in clawflow's
+	// settings (typically pointing at a corporate proxy via
+	// ANTHROPIC_BASE_URL), claude's default auth path picks the
+	// keychain/OAuth login over the env var and silently ignores both
+	// ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL — sending the OAuth
+	// token to the proxy which then 401s. --bare locks claude to
+	// "ANTHROPIC_API_KEY only" mode so the proxy actually sees the key
+	// the user configured. Trade-off: --bare also disables hooks, LSP,
+	// plugins, auto-memory, and CLAUDE.md auto-discovery — we add
+	// --add-dir for the workdir below to restore CLAUDE.md.
+	preCreds, _ := config.LoadCredentials()
+	useBare := preCreds != nil && preCreds.ClaudeAPIKey != ""
+	if useBare {
+		args = append(args, "--bare", "--add-dir", workdir)
+	}
 
 	if resuming {
 		// Resume the existing transcript. Don't re-inject the system
@@ -163,7 +178,11 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	if urlHint == "" {
 		urlHint = "(default — api.anthropic.com)"
 	}
-	fmt.Fprintf(os.Stderr, "[clawflow] chat → model=%s key=%s base_url=%s\n", model, keyHint, urlHint)
+	bareNote := ""
+	if useBare {
+		bareNote = " --bare (forced, API key takes priority over claude.ai login)"
+	}
+	fmt.Fprintf(os.Stderr, "[clawflow] chat → model=%s key=%s base_url=%s%s\n", model, keyHint, urlHint, bareNote)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

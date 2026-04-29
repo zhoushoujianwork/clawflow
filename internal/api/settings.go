@@ -343,13 +343,20 @@ func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), testClaudeTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx,
-		claude.Resolve(),
+	// --bare so the probe actually exercises the API key path. Without
+	// it, claude defers to keychain/OAuth when both auth sources are
+	// present, the request goes to api.anthropic.com under the user's
+	// claude.ai login, and "Test connection" returns OK while the
+	// configured proxy URL was never touched. Mirrors what `clawflow
+	// chat` and operator runs do when an API key is configured.
+	probeArgs := []string{
 		"-p",
+		"--bare",
 		"--model", config.DefaultChatModel,
 		"--output-format", "text",
 		"say PONG",
-	)
+	}
+	cmd := exec.CommandContext(ctx, claude.Resolve(), probeArgs...)
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 
 	var stdout, stderr bytes.Buffer

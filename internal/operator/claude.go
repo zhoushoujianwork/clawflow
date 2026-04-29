@@ -51,6 +51,15 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 		"--verbose", // stream-json requires --verbose with -p
 		"--include-partial-messages",
 	}
+	// When the user configured an API key (likely pointing at a
+	// corporate proxy), --bare keeps claude from silently preferring
+	// the keychain/OAuth login and ignoring both ANTHROPIC_API_KEY and
+	// ANTHROPIC_BASE_URL. Operators don't need hooks/plugins/auto-memory
+	// — the prompt is fully self-contained from SKILL.md, so --bare's
+	// trade-offs are a net win here.
+	if apiKey != "" {
+		args = append(args, "--bare")
+	}
 	if model != "" {
 		args = append(args, "--model", model)
 	}
