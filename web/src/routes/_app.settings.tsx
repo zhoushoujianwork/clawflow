@@ -151,7 +151,11 @@ function ClaudeSection({
         if (d.status === 'ok') {
           setTestResult({ ok: true, text: `OK${d.reply ? ' — ' + truncate(d.reply, 80) : ''}` })
         } else {
-          setTestResult({ ok: false, text: d.error || 'failed' })
+          // Backend now returns a humanized `error` like
+          // "<stderr/stdout> (exit status N)". Surface the full
+          // text so the user can actually see what went wrong
+          // instead of a bare "exit status 1".
+          setTestResult({ ok: false, text: d.error || d.stderr || d.stdout || 'failed' })
         }
       })
       .catch(e => setTestResult({ ok: false, text: String(e.message || e) }))
@@ -236,8 +240,16 @@ function ClaudeSection({
         </button>
 
         {saveMsg && <Status ok={saveMsg.ok} text={saveMsg.text} />}
-        {testResult && <Status ok={testResult.ok} text={testResult.text} />}
+        {testResult && testResult.ok && <Status ok text={testResult.text} />}
       </div>
+      {/* Failure detail rendered as a full-width block so long
+          claude error messages (auth failures, rate limits) are
+          actually readable instead of being clipped to a badge. */}
+      {testResult && !testResult.ok && (
+        <pre className="mt-2 px-3 py-2 text-xs font-mono whitespace-pre-wrap break-words bg-red-50 border border-red-200 text-red-800 rounded max-h-48 overflow-auto">
+          {testResult.text}
+        </pre>
+      )}
     </Card>
   )
 }

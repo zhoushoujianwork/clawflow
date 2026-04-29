@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/claude"
@@ -245,7 +246,9 @@ type claudeTestRequest struct {
 
 // HandleTestClaude handles POST /api/settings/claude/test. Spawns a
 // short `claude -p "ping"` with the supplied credentials and reports
-// whether it responded within 8 s.
+// whether it responded within 8 s. Always tests against the chat
+// model default (haiku) — a connectivity probe shouldn't depend on
+// whichever heavier model the user pinned for evaluations.
 func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -273,7 +276,7 @@ func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 	cmd := exec.CommandContext(ctx,
 		claude.Resolve(),
 		"-p",
-		"--model", "haiku",
+		"--model", config.DefaultChatModel,
 		"--output-format", "text",
 		"say PONG",
 	)
@@ -284,33 +287,53 @@ func HandleTestClaude(w http.ResponseWriter, r *http.Request) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		// Trim stderr to keep the response readable.
-		msg := stderr.String()
-		const cap = 800
-		if len(msg) > cap {
-			msg = msg[:cap] + "…"
+		// Claude routes auth/model errors to stdout in text-output
+		// mode while reserving stderr for hard crashes — surface
+		// whichever is non-empty so the UI sees the real cause
+		// instead of just "exit status 1". Both are returned so a
+		// caller wanting full detail still has it.
+		stderrMsg := truncateMsg(stderr.String(), 800)
+		stdoutMsg := truncateMsg(stdout.String(), 800)
+		detail := stderrMsg
+		if detail == "" {
+			detail = stdoutMsg
 		}
-		// Differentiate timeout from other failures.
+		// Build the human-facing error: "<detail> (exit status 1)"
+		// so the UI badge actually carries information. Falls back
+		// to the raw exit message when both pipes were silent.
 		exitMsg := err.Error()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			exitMsg = "timed out after 8s"
+			detail = ""
+		}
+		humanErr := exitMsg
+		if detail != "" {
+			humanErr = detail + " (" + exitMsg + ")"
 		}
 		writeJSON(w, 200, map[string]any{
 			"status": "error",
-			"error":  exitMsg,
-			"stderr": msg,
+			"error":  humanErr,
+			"stderr": stderrMsg,
+			"stdout": stdoutMsg,
 		})
 		return
 	}
 
-	out := stdout.String()
-	if len(out) > 400 {
-		out = out[:400] + "…"
-	}
+	out := truncateMsg(stdout.String(), 400)
 	writeJSON(w, 200, map[string]any{
 		"status": "ok",
 		"reply":  out,
 	})
+}
+
+// truncateMsg trims trailing whitespace and caps len at n, appending
+// an ellipsis when truncated. Empty input returns empty string.
+func truncateMsg(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 // lastFour returns "…XYZW" — the last 4 chars of s — for redacted
