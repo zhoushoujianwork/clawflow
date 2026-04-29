@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ChevronRight, ExternalLink, MessageSquare, Download, Loader2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ExternalLink, MessageSquare, Download, Loader2, RotateCw } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -40,13 +40,23 @@ interface PendingEntry {
   captured_at: string
 }
 
+interface IssueEntry {
+  repo: string
+  issue_number: number
+  issue_title?: string
+  labels?: string[]
+  state: string // "open" | "closed"
+  captured_at: string
+}
+
 interface IssueGroup {
   issue_number: number
   issue_title?: string
   runs: Run[]
   pending: PendingEntry[]
+  labels?: string[]
+  state?: string // "open" | "closed"
 }
-
 export const Route = createFileRoute('/_app/repos/$repoName')({
   component: RepoDetail,
 })
@@ -64,6 +74,8 @@ function RepoDetail() {
   const [saving, setSaving] = useState(false)
   const [cloning, setCloning] = useState(false)
   const [cloneError, setCloneError] = useState<string | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [allIssues, setAllIssues] = useState<IssueEntry[]>([])
 
   const cloneNow = useCallback(() => {
     if (!repo || cloning) return
@@ -90,6 +102,40 @@ function RepoDetail() {
       .finally(() => setCloning(false))
   }, [repo, fullName, cloning])
 
+  const refreshData = useCallback(() => {
+    return Promise.all([
+      fetch('/data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+    ]).then(([repos, allRuns, allPending, allIssuesData]) => {
+      const match = (Array.isArray(repos) ? repos : []).find((x: Repo) => x.full_name === fullName) || null
+      setRepo(match)
+      setRuns((Array.isArray(allRuns) ? allRuns : []).filter((r: Run) => r.repo === fullName))
+      setPending((Array.isArray(allPending) ? allPending : []).filter((p: PendingEntry) => p.repo === fullName))
+      setAllIssues((Array.isArray(allIssuesData) ? allIssuesData : []).filter((i: IssueEntry) => i.repo === fullName))
+    })
+  }, [fullName])
+
+  const syncNow = useCallback(() => {
+    if (syncing) return
+    setSyncing(true)
+    fetch('/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: fullName }),
+    })
+      .then(r => r.json().catch(() => null))
+      .catch(() => null)
+      .finally(() => {
+        // Refresh data after a short delay to allow the run to start
+        setTimeout(() => {
+          refreshData().finally(() => setSyncing(false))
+        }, 1000)
+      })
+  }, [fullName, syncing, refreshData])
+
+
   const toggleConfig = useCallback((field: 'enabled' | 'auto_fix' | 'auto_merge') => {
     if (!repo || saving) return
     const newVal = !(repo as any)[field]
@@ -110,18 +156,8 @@ function RepoDetail() {
   }, [repo, fullName, saving])
 
   useEffect(() => {
-    Promise.all([
-      fetch('/data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-      fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-      fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-    ]).then(([repos, allRuns, allPending]) => {
-      const match = (Array.isArray(repos) ? repos : []).find((x: Repo) => x.full_name === fullName) || null
-      setRepo(match)
-      setRuns((Array.isArray(allRuns) ? allRuns : []).filter((r: Run) => r.repo === fullName))
-      setPending((Array.isArray(allPending) ? allPending : []).filter((p: PendingEntry) => p.repo === fullName))
-      setLoading(false)
-    })
-  }, [fullName])
+    refreshData().then(() => setLoading(false))
+  }, [fullName, refreshData])
 
   const repoMap = useMemo<RepoInfoMap>(() => {
     if (!repo) return {}
@@ -141,47 +177,93 @@ function RepoDetail() {
 
   const issues = useMemo<IssueGroup[]>(() => {
     const map = new Map<number, IssueGroup>()
+    
+    // Start with all issues from issues.json
+    for (const issue of allIssues) {
+      let g = map.get(issue.issue_number)
+      if (!g) {
+        g = { 
+          issue_number: issue.issue_number, 
+          issue_title: issue.issue_title, 
+          runs: [], 
+          pending: [], 
+          labels: [...(issue.labels || [])],
+          state: issue.state
+        }
+        map.set(issue.issue_number, g)
+      }
+      // Merge labels from issue data
+      if (issue.labels) {
+        for (const label of issue.labels) {
+          if (!g.labels?.includes(label)) {
+            g.labels?.push(label)
+          }
+        }
+      }
+    }
+    
+    // Add runs data
     for (const r of runs) {
       let g = map.get(r.issue_number)
       if (!g) {
-        g = { issue_number: r.issue_number, issue_title: r.issue_title, runs: [], pending: [] }
+        g = { issue_number: r.issue_number, issue_title: r.issue_title, runs: [], pending: [], labels: [], state: 'open' }
         map.set(r.issue_number, g)
       }
       g.runs.push(r)
       if (!g.issue_title && r.issue_title) g.issue_title = r.issue_title
     }
+    
+    // Add pending data
     for (const p of pending) {
       let g = map.get(p.issue_number)
       if (!g) {
-        g = { issue_number: p.issue_number, issue_title: p.issue_title, runs: [], pending: [] }
+        g = { issue_number: p.issue_number, issue_title: p.issue_title, runs: [], pending: [], labels: [], state: 'open' }
         map.set(p.issue_number, g)
       }
       g.pending.push(p)
       if (!g.issue_title && p.issue_title) g.issue_title = p.issue_title
+      // Collect labels from pending entries
+      if (p.labels && g.labels) {
+        for (const label of p.labels) {
+          if (!g.labels.includes(label)) {
+            g.labels.push(label)
+          }
+        }
+      }
     }
+    
     for (const g of map.values()) {
       g.runs.sort((a, b) => b.started_at.localeCompare(a.started_at))
       g.pending.sort((a, b) => a.operator.localeCompare(b.operator))
+      if (g.labels) g.labels.sort()
     }
     return Array.from(map.values())
-  }, [runs, pending])
+  }, [runs, pending, allIssues])
 
   const sections = useMemo(() => {
     const running: IssueGroup[] = []
     const pendingI: IssueGroup[] = []
     const done: IssueGroup[] = []
+    const closed: IssueGroup[] = []
+    
     for (const g of issues) {
-      const latest = g.runs[0]
-      if (latest?.status === 'running') running.push(g)
-      else if (g.pending.length > 0) pendingI.push(g)
-      else done.push(g)
+      if (g.state === 'closed') {
+        closed.push(g)
+      } else {
+        const latest = g.runs[0]
+        if (latest?.status === 'running') running.push(g)
+        else if (g.pending.length > 0) pendingI.push(g)
+        else done.push(g)
+      }
     }
+    
     const sortKey = (g: IssueGroup) => g.runs[0]?.started_at || g.pending[0]?.captured_at || ''
     const cmp = (a: IssueGroup, b: IssueGroup) => sortKey(b).localeCompare(sortKey(a))
     running.sort(cmp)
     pendingI.sort(cmp)
     done.sort(cmp)
-    return { running, pending: pendingI, done }
+    closed.sort(cmp)
+    return { running, pending: pendingI, done, closed }
   }, [issues])
 
   function toggle(n: number) {
@@ -287,8 +369,29 @@ function RepoDetail() {
                 Issues <span className="font-normal text-muted-foreground">({issues.length})</span>
               </h2>
               <span className="text-xs text-muted-foreground">
-                {sections.running.length} running · {sections.pending.length} pending · {sections.done.length} done
+                {sections.running.length} running · {sections.pending.length} pending · {sections.done.length} done · {sections.closed.length} closed
               </span>
+              <button
+                onClick={syncNow}
+                disabled={syncing}
+                title="Sync all issues including pending"
+                className={cn(
+                  'ml-auto inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border transition-colors',
+                  syncing
+                    ? 'border-border text-muted-foreground bg-secondary/30'
+                    : 'border-border text-foreground hover:bg-secondary/50',
+                )}
+              >
+                {syncing ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" /> syncing…
+                  </>
+                ) : (
+                  <>
+                    <RotateCw className="w-3 h-3" /> Sync
+                  </>
+                )}
+              </button>
             </div>
 
             {issues.length === 0 ? (
@@ -300,6 +403,7 @@ function RepoDetail() {
                 <IssueSection title="Running" tone="blue" groups={sections.running} repo={fullName} repoMap={repoMap} slug={slug} expanded={expanded} onToggle={toggle} />
                 <IssueSection title="Pending" tone="amber" groups={sections.pending} repo={fullName} repoMap={repoMap} slug={slug} expanded={expanded} onToggle={toggle} />
                 <IssueSection title="Done" tone="muted" groups={sections.done} repo={fullName} repoMap={repoMap} slug={slug} expanded={expanded} onToggle={toggle} />
+                <IssueSection title="Closed" tone="gray" groups={sections.closed} repo={fullName} repoMap={repoMap} slug={slug} expanded={expanded} onToggle={toggle} />
               </div>
             )}
           </section>
@@ -313,7 +417,7 @@ function IssueSection({
   title, tone, groups, repo, repoMap, slug, expanded, onToggle,
 }: {
   title: string
-  tone: 'blue' | 'amber' | 'muted'
+  tone: 'blue' | 'amber' | 'muted' | 'gray'
   groups: IssueGroup[]
   repo: string
   repoMap: RepoInfoMap
@@ -326,6 +430,7 @@ function IssueSection({
     blue: 'bg-blue-400',
     amber: 'bg-amber-400',
     muted: 'bg-muted-foreground/40',
+    gray: 'bg-gray-400',
   }[tone]
   return (
     <div>
@@ -347,6 +452,18 @@ function IssueSection({
             onToggle={onToggle}
           />
         ))}
+        {title === 'Closed' && groups.length > 0 && (
+          <div className="px-4 py-3 bg-secondary/20 border-t border-border">
+            <a
+              href={`${repoUrl(repo, repoMap)}/issues?q=is%3Aissue+is%3Aclosed`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground hover:underline"
+            >
+              View more closed issues on GitHub <ExternalLink className="w-3 h-3" />
+            </a>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -369,7 +486,7 @@ function IssueRow({
       <button
         type="button"
         onClick={() => onToggle(group.issue_number)}
-        className="w-full flex items-center gap-3 px-4 py-2 hover:bg-secondary/30 text-left"
+        className="w-full flex items-center gap-3 px-4 py-2 hover:bg-secondary/30 text-left flex-wrap"
       >
         <ChevronRight className={cn('w-3.5 h-3.5 text-muted-foreground transition-transform shrink-0', expanded && 'rotate-90')} />
         <a
@@ -382,7 +499,21 @@ function IssueRow({
           #{group.issue_number}
         </a>
         {latest && <StatusBadge status={latest.status} />}
-        <span className="text-sm truncate flex-1">{group.issue_title || '(no title)'}</span>
+        <span className={cn("text-sm truncate flex-1", group.state === 'closed' && "line-through text-muted-foreground")}>
+          {group.issue_title || '(no title)'}
+        </span>
+        {group.labels && group.labels.length > 0 && (
+          <div className="flex flex-wrap gap-1 shrink-0">
+            {group.labels.map(label => (
+              <span
+                key={label}
+                className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-secondary text-secondary-foreground border border-border"
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+        )}
         {group.pending.length > 0 && (
           <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
             queued: {group.pending.map(p => p.operator).join(', ')}
@@ -417,6 +548,18 @@ function Timeline({ group, slug }: { group: IssueGroup; slug: string }) {
                 queued
               </span>
             </div>
+            {p.labels && p.labels.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1">
+                {p.labels.map(label => (
+                  <span
+                    key={label}
+                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-secondary text-secondary-foreground border border-border"
+                  >
+                    {label}
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="text-xs text-muted-foreground tabular-nums mt-0.5">
               captured {new Date(p.captured_at).toLocaleString()}
             </div>
