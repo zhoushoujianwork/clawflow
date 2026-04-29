@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/claude"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
 
 // RunClaude executes `claude -p --output-format stream-json` in a subprocess
@@ -39,7 +40,16 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 		prompt,
 	)
 	cmd.Dir = workdir
-	cmd.Env = claude.CleanedEnv(os.Environ())
+	// Apply user-configured ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
+	// overrides if credentials.yaml has them. Lets users route the
+	// implement operator through a relay or pin to a specific
+	// account separate from their interactive Claude Code login.
+	creds, _ := config.LoadCredentials()
+	apiKey, baseURL := "", ""
+	if creds != nil {
+		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
+	}
+	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()

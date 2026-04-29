@@ -93,6 +93,18 @@ type Config struct {
 type Credentials struct {
 	GHToken     string `yaml:"gh_token,omitempty"`
 	GitLabToken string `yaml:"gitlab_token,omitempty"`
+
+	// ClaudeAPIKey, when set, overrides whatever auth the user's
+	// system claude would use (OAuth keychain, ~/.claude.json) by
+	// passing ANTHROPIC_API_KEY to every claude subprocess clawflow
+	// spawns. Useful for routing through a proxy / relay or pinning
+	// to a specific account separate from the user's interactive
+	// Claude Code login.
+	ClaudeAPIKey string `yaml:"claude_api_key,omitempty"`
+
+	// ClaudeBaseURL, when set, is forwarded as ANTHROPIC_BASE_URL.
+	// Typically paired with ClaudeAPIKey when targeting a relay.
+	ClaudeBaseURL string `yaml:"claude_base_url,omitempty"`
 }
 
 // CredentialsPath returns the path to the credentials file.
@@ -103,7 +115,9 @@ func CredentialsPath() string {
 
 // LoadCredentials reads ~/.clawflow/config/credentials.yaml and merges env vars.
 // Priority: env > credentials.yaml
-// Supported env vars: GH_TOKEN, GITLAB_TOKEN
+// Supported env vars: GH_TOKEN, GITLAB_TOKEN, CLAWFLOW_CLAUDE_API_KEY,
+// CLAWFLOW_CLAUDE_BASE_URL (the CLAWFLOW_ prefix avoids conflict with
+// a user-set ANTHROPIC_API_KEY meant for their interactive shell).
 func LoadCredentials() (*Credentials, error) {
 	c := &Credentials{}
 	data, err := os.ReadFile(CredentialsPath())
@@ -117,6 +131,8 @@ func LoadCredentials() (*Credentials, error) {
 	}
 	c.GHToken = envOrFile("GH_TOKEN", c.GHToken)
 	c.GitLabToken = envOrFile("GITLAB_TOKEN", c.GitLabToken)
+	c.ClaudeAPIKey = envOrFile("CLAWFLOW_CLAUDE_API_KEY", c.ClaudeAPIKey)
+	c.ClaudeBaseURL = envOrFile("CLAWFLOW_CLAUDE_BASE_URL", c.ClaudeBaseURL)
 	return c, nil
 }
 

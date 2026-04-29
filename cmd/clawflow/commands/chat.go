@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
 	"github.com/zhoushoujianwork/clawflow/internal/claude"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -123,7 +124,16 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	bin := claude.Resolve()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = workdir
-	cmd.Env = claude.CleanedEnv(os.Environ())
+	// LoadCredentials missing/unreadable falls through to empty
+	// strings, which EnvWithCredentials treats as "don't override"
+	// — same behavior as before for users with no custom claude
+	// config.
+	creds, _ := config.LoadCredentials()
+	apiKey, baseURL := "", ""
+	if creds != nil {
+		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
+	}
+	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

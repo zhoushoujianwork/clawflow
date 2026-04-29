@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Resolve finds the claude binary, tolerating the common case where
@@ -33,6 +34,37 @@ func CleanedEnv(env []string) []string {
 			continue
 		}
 		out = append(out, kv)
+	}
+	return out
+}
+
+// EnvWithCredentials extends CleanedEnv with optional ANTHROPIC_*
+// overrides sourced from clawflow's credentials.yaml. When apiKey or
+// baseURL are non-empty, any pre-existing value in `env` for that
+// key is dropped and replaced — so clawflow's config wins over
+// whatever the user's shell inherited (which may be OAuth's empty
+// placeholder, or a key meant for a different account).
+//
+// Empty arguments are a no-op for that field — passing apiKey=""
+// keeps env's existing ANTHROPIC_API_KEY (if any) so users without
+// custom config still go through OAuth/keychain unchanged.
+func EnvWithCredentials(env []string, apiKey, baseURL string) []string {
+	cleaned := CleanedEnv(env)
+	out := make([]string, 0, len(cleaned)+2)
+	for _, kv := range cleaned {
+		if apiKey != "" && strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			continue
+		}
+		if baseURL != "" && strings.HasPrefix(kv, "ANTHROPIC_BASE_URL=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	if apiKey != "" {
+		out = append(out, "ANTHROPIC_API_KEY="+apiKey)
+	}
+	if baseURL != "" {
+		out = append(out, "ANTHROPIC_BASE_URL="+baseURL)
 	}
 	return out
 }
