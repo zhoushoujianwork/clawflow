@@ -6,17 +6,34 @@ interface ChatTarget {
   model?: string
 }
 
+// SpawnError describes a chat-spawn failure. The drawer opens
+// only when this is set; success cases leave the drawer hidden
+// because the user's native terminal app is already in front of
+// them with the chat.
+interface SpawnError {
+  target: ChatTarget
+  error: string
+  command?: string
+  hint?: string
+}
+
 interface ChatContextValue {
+  // True only when a spawn failed and we're showing the fallback
+  // drawer with the manual command. Successful spawns set this to
+  // false and let the OS terminal carry the conversation.
   isOpen: boolean
-  target: ChatTarget | null
-  open: (target: ChatTarget) => void
+  spawnError: SpawnError | null
+  // open() fires /api/chat/spawn directly. The drawer is only
+  // surfaced if the spawn fails. On success: the user sees their
+  // OS terminal pop up running clawflow chat — no drawer at all.
+  open: (target: ChatTarget) => Promise<void>
   close: () => void
 }
 
 const ChatContext = createContext<ChatContextValue>({
   isOpen: false,
-  target: null,
-  open: () => {},
+  spawnError: null,
+  open: async () => {},
   close: () => {},
 })
 
@@ -25,20 +42,42 @@ export function useChatDrawer() {
 }
 
 export function ChatProvider({ children }: { children: ReactNode }) {
-  const [isOpen, setIsOpen] = useState(false)
-  const [target, setTarget] = useState<ChatTarget | null>(null)
+  const [spawnError, setSpawnError] = useState<SpawnError | null>(null)
 
-  const open = useCallback((t: ChatTarget) => {
-    setTarget(t)
-    setIsOpen(true)
+  const open = useCallback(async (t: ChatTarget) => {
+    setSpawnError(null)
+    try {
+      const r = await fetch('/api/chat/spawn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(t),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (r.ok && d.status === 'ok') {
+        // Success — terminal is opening in the user's native app.
+        // Nothing else to do; no drawer to show.
+        return
+      }
+      setSpawnError({
+        target: t,
+        error: d.error || `HTTP ${r.status}`,
+        command: d.command,
+        hint: d.hint,
+      })
+    } catch (e) {
+      setSpawnError({
+        target: t,
+        error: String((e as Error).message || e),
+      })
+    }
   }, [])
 
   const close = useCallback(() => {
-    setIsOpen(false)
+    setSpawnError(null)
   }, [])
 
   return (
-    <ChatContext.Provider value={{ isOpen, target, open, close }}>
+    <ChatContext.Provider value={{ isOpen: spawnError !== null, spawnError, open, close }}>
       {children}
     </ChatContext.Provider>
   )
