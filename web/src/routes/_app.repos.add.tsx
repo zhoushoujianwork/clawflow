@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Search, Loader2, CheckCircle2, XCircle, ExternalLink } from 'lucide-react'
+import { ArrowLeft, Search, Loader2, CheckCircle2, XCircle, ExternalLink, ChevronRight, ChevronDown } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { VcsIcon } from '../components/VcsIcon'
 
@@ -19,6 +19,11 @@ export const Route = createFileRoute('/_app/repos/add')({
   component: AddRemoteRepo,
 })
 
+interface RepoGroup {
+  groupPath: string
+  repos: RemoteRepo[]
+}
+
 function AddRemoteRepo() {
   const [platform, setPlatform] = useState<Platform>('github')
   const [repos, setRepos] = useState<RemoteRepo[]>([])
@@ -28,6 +33,7 @@ function AddRemoteRepo() {
   const [addingRepo, setAddingRepo] = useState<string | null>(null)
   const [addedRepos, setAddedRepos] = useState<Set<string>>(new Set())
   const [addErrors, setAddErrors] = useState<Map<string, string>>(new Map())
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     fetchRepos()
@@ -93,6 +99,45 @@ function AddRemoteRepo() {
     }
   }
 
+  function extractGroupPath(fullName: string): string {
+    const lastSlashIndex = fullName.lastIndexOf('/')
+    if (lastSlashIndex === -1) return '' // Top-level repo (no group)
+    return fullName.substring(0, lastSlashIndex)
+  }
+
+  function groupRepos(repos: RemoteRepo[]): RepoGroup[] {
+    const groupMap = new Map<string, RemoteRepo[]>()
+
+    repos.forEach(repo => {
+      const groupPath = extractGroupPath(repo.full_name)
+      if (!groupMap.has(groupPath)) {
+        groupMap.set(groupPath, [])
+      }
+      groupMap.get(groupPath)!.push(repo)
+    })
+
+    return Array.from(groupMap.entries())
+      .map(([groupPath, repos]) => ({ groupPath, repos }))
+      .sort((a, b) => {
+        // Top-level repos (empty groupPath) come first
+        if (a.groupPath === '' && b.groupPath !== '') return -1
+        if (a.groupPath !== '' && b.groupPath === '') return 1
+        return a.groupPath.localeCompare(b.groupPath)
+      })
+  }
+
+  function toggleGroup(groupPath: string) {
+    setExpandedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(groupPath)) {
+        next.delete(groupPath)
+      } else {
+        next.add(groupPath)
+      }
+      return next
+    })
+  }
+
   const filteredRepos = repos.filter(repo => {
     if (!searchQuery) return true
     const q = searchQuery.toLowerCase()
@@ -101,6 +146,8 @@ function AddRemoteRepo() {
       (repo.description && repo.description.toLowerCase().includes(q))
     )
   })
+
+  const groupedRepos = groupRepos(filteredRepos)
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
@@ -190,92 +237,128 @@ function AddRemoteRepo() {
       {!loading && !error && filteredRepos.length > 0 && (
         <div className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="divide-y divide-border">
-            {filteredRepos.map(repo => {
-              const isAdding = addingRepo === repo.full_name
-              const isAdded = addedRepos.has(repo.full_name)
-              const addError = addErrors.get(repo.full_name)
+            {groupedRepos.map(group => {
+              const isExpanded = expandedGroups.has(group.groupPath)
+              const groupDisplayName = group.groupPath || 'Top-level repositories'
 
               return (
-                <div
-                  key={repo.full_name}
-                  className="p-4 hover:bg-secondary/20 transition-colors"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <VcsIcon
-                          repo={repo.full_name}
-                          map={{
-                            [repo.full_name]: {
-                              platform: repo.platform as 'github' | 'gitlab',
-                              host: repo.platform === 'github' ? 'https://github.com' : 'https://gitlab.com',
-                            },
-                          }}
-                          className="w-4 h-4 text-muted-foreground shrink-0"
-                        />
-                        <h3 className="font-mono text-sm font-semibold text-foreground truncate">
-                          {repo.full_name}
-                        </h3>
-                        <a
-                          href={repo.html_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          title="Open in VCS"
-                          className="inline-flex items-center text-muted-foreground hover:text-foreground"
-                        >
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                        {repo.private && (
-                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-yellow-100 text-yellow-700 border border-yellow-200">
-                            Private
-                          </span>
-                        )}
-                      </div>
-                      {repo.description && (
-                        <p className="text-xs text-muted-foreground line-clamp-2 mb-1">
-                          {repo.description}
-                        </p>
-                      )}
-                      <p className="text-xs text-muted-foreground">
-                        Default branch: <code className="px-1 py-0.5 bg-secondary rounded font-mono">{repo.default_branch}</code>
-                      </p>
-                      {addError && (
-                        <p className="text-xs text-red-600 mt-2 flex items-start gap-1">
-                          <XCircle className="w-3 h-3 shrink-0 mt-0.5" />
-                          <span>{addError}</span>
-                        </p>
-                      )}
+                <div key={group.groupPath}>
+                  {/* Group header */}
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(group.groupPath)}
+                    className="w-full px-4 py-3 flex items-center gap-2 hover:bg-secondary/20 transition-colors text-left"
+                  >
+                    {isExpanded ? (
+                      <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+                    )}
+                    <span className="font-semibold text-sm text-foreground">
+                      {groupDisplayName}
+                    </span>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-secondary text-muted-foreground">
+                      {group.repos.length}
+                    </span>
+                  </button>
+
+                  {/* Repos in group */}
+                  {isExpanded && (
+                    <div className="divide-y divide-border">
+                      {group.repos.map(repo => {
+                        const isAdding = addingRepo === repo.full_name
+                        const isAdded = addedRepos.has(repo.full_name)
+                        const addError = addErrors.get(repo.full_name)
+                        const repoName = group.groupPath
+                          ? repo.full_name.substring(group.groupPath.length + 1)
+                          : repo.full_name
+
+                        return (
+                          <div
+                            key={repo.full_name}
+                            className="pl-10 pr-4 py-4 hover:bg-secondary/20 transition-colors"
+                          >
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <VcsIcon
+                                    repo={repo.full_name}
+                                    map={{
+                                      [repo.full_name]: {
+                                        platform: repo.platform as 'github' | 'gitlab',
+                                        host: repo.platform === 'github' ? 'https://github.com' : 'https://gitlab.com',
+                                      },
+                                    }}
+                                    className="w-4 h-4 text-muted-foreground shrink-0"
+                                  />
+                                  <h3 className="font-mono text-sm font-semibold text-foreground truncate">
+                                    {repoName}
+                                  </h3>
+                                  <a
+                                    href={repo.html_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Open in VCS"
+                                    className="inline-flex items-center text-muted-foreground hover:text-foreground"
+                                  >
+                                    <ExternalLink className="w-3 h-3" />
+                                  </a>
+                                  {repo.private && (
+                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-yellow-100 text-yellow-700 border border-yellow-200">
+                                      Private
+                                    </span>
+                                  )}
+                                </div>
+                                {repo.description && (
+                                  <p className="text-xs text-muted-foreground line-clamp-2 mb-1">
+                                    {repo.description}
+                                  </p>
+                                )}
+                                <p className="text-xs text-muted-foreground">
+                                  Default branch: <code className="px-1 py-0.5 bg-secondary rounded font-mono">{repo.default_branch}</code>
+                                </p>
+                                {addError && (
+                                  <p className="text-xs text-red-600 mt-2 flex items-start gap-1">
+                                    <XCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                                    <span>{addError}</span>
+                                  </p>
+                                )}
+                              </div>
+                              <div className="shrink-0">
+                                {isAdded ? (
+                                  <div className="flex items-center gap-2 text-green-600">
+                                    <CheckCircle2 className="w-4 h-4" />
+                                    <span className="text-sm font-semibold">Added</span>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => addRepo(repo)}
+                                    disabled={isAdding}
+                                    className={cn(
+                                      'px-4 py-2 rounded-lg text-sm font-semibold transition-colors',
+                                      isAdding
+                                        ? 'bg-secondary text-muted-foreground cursor-not-allowed'
+                                        : 'bg-primary text-primary-foreground hover:bg-primary/90',
+                                    )}
+                                  >
+                                    {isAdding ? (
+                                      <span className="flex items-center gap-2">
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                        Cloning...
+                                      </span>
+                                    ) : (
+                                      'Add'
+                                    )}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
                     </div>
-                    <div className="shrink-0">
-                      {isAdded ? (
-                        <div className="flex items-center gap-2 text-green-600">
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span className="text-sm font-semibold">Added</span>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => addRepo(repo)}
-                          disabled={isAdding}
-                          className={cn(
-                            'px-4 py-2 rounded-lg text-sm font-semibold transition-colors',
-                            isAdding
-                              ? 'bg-secondary text-muted-foreground cursor-not-allowed'
-                              : 'bg-primary text-primary-foreground hover:bg-primary/90',
-                          )}
-                        >
-                          {isAdding ? (
-                            <span className="flex items-center gap-2">
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                              Cloning...
-                            </span>
-                          ) : (
-                            'Add'
-                          )}
-                        </button>
-                      )}
-                    </div>
-                  </div>
+                  )}
                 </div>
               )
             })}
