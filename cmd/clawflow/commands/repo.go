@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -129,6 +130,9 @@ func newRepoAddCmd() *cobra.Command {
 			if err := cfg.Save(); err != nil {
 				return err
 			}
+			if err := snapshot.WriteRepos(cfg); err != nil {
+				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
+			}
 			fmt.Printf("repo %q added and enabled\n", ownerRepo)
 			fmt.Printf("  platform:    %s\n", info.Platform)
 			if info.BaseURL != "" {
@@ -177,6 +181,9 @@ func newRepoRemoveCmd() *cobra.Command {
 			if err := cfg.Save(); err != nil {
 				return err
 			}
+			if err := snapshot.WriteRepos(cfg); err != nil {
+				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
+			}
 			fmt.Printf("repo %q removed\n", ownerRepo)
 			return nil
 		},
@@ -218,6 +225,9 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 	cfg.Repos[ownerRepo] = r
 	if err := cfg.Save(); err != nil {
 		return err
+	}
+	if err := snapshot.WriteRepos(cfg); err != nil {
+		fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
 	}
 	state := "enabled"
 	if !enabled {
@@ -270,6 +280,9 @@ func newRepoSetCmd() *cobra.Command {
 			if err := cfg.Save(); err != nil {
 				return err
 			}
+			if err := snapshot.WriteRepos(cfg); err != nil {
+				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
+			}
 			fmt.Printf("repo %q updated\n", ownerRepo)
 			fmt.Printf("  auto_fix:   %v\n", r.AutoFix)
 			fmt.Printf("  auto_merge: %v\n", r.AutoMerge)
@@ -296,17 +309,6 @@ func loadOrNewConfig() (*config.Config, error) {
 	return cfg, nil
 }
 
-// normalizeRepo converts GitHub URLs to owner/repo format.
-// e.g. https://github.com/owner/repo.git → owner/repo
-func normalizeRepo(input string) string {
-	s := strings.TrimSuffix(strings.TrimSpace(input), ".git")
-	for _, prefix := range []string{"https://github.com/", "http://github.com/", "git@github.com:"} {
-		if strings.HasPrefix(s, prefix) {
-			return strings.TrimPrefix(s, prefix)
-		}
-	}
-	return s
-}
 
 func newRepoEnsureLocalCmd() *cobra.Command {
 	var repo string

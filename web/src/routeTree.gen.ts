@@ -16,6 +16,7 @@ import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppOperatorsRouteImport } from './routes/_app.operators'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppReposIndexRouteImport } from './routes/_app.repos.index'
+import { Route as AppReposAddRouteImport } from './routes/_app.repos.add'
 import { Route as AppReposRepoNameRouteImport } from './routes/_app.repos.$repoName'
 import { Route as AppRunsSlugIssueTsRouteImport } from './routes/_app.runs.$slug.$issue.$ts'
 
@@ -53,6 +54,11 @@ const AppReposIndexRoute = AppReposIndexRouteImport.update({
   path: '/repos/',
   getParentRoute: () => AppRoute,
 } as any)
+const AppReposAddRoute = AppReposAddRouteImport.update({
+  id: '/repos/add',
+  path: '/repos/add',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppReposRepoNameRoute = AppReposRepoNameRouteImport.update({
   id: '/repos/$repoName',
   path: '/repos/$repoName',
@@ -71,6 +77,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
   '/repos/$repoName': typeof AppReposRepoNameRoute
+  '/repos/add': typeof AppReposAddRoute
   '/repos/': typeof AppReposIndexRoute
   '/runs/$slug/$issue/$ts': typeof AppRunsSlugIssueTsRoute
 }
@@ -81,6 +88,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
   '/repos/$repoName': typeof AppReposRepoNameRoute
+  '/repos/add': typeof AppReposAddRoute
   '/repos': typeof AppReposIndexRoute
   '/runs/$slug/$issue/$ts': typeof AppRunsSlugIssueTsRoute
 }
@@ -93,6 +101,7 @@ export interface FileRoutesById {
   '/_app/settings': typeof AppSettingsRoute
   '/_app/usage': typeof AppUsageRoute
   '/_app/repos/$repoName': typeof AppReposRepoNameRoute
+  '/_app/repos/add': typeof AppReposAddRoute
   '/_app/repos/': typeof AppReposIndexRoute
   '/_app/runs/$slug/$issue/$ts': typeof AppRunsSlugIssueTsRoute
 }
@@ -105,6 +114,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/usage'
     | '/repos/$repoName'
+    | '/repos/add'
     | '/repos/'
     | '/runs/$slug/$issue/$ts'
   fileRoutesByTo: FileRoutesByTo
@@ -115,6 +125,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/usage'
     | '/repos/$repoName'
+    | '/repos/add'
     | '/repos'
     | '/runs/$slug/$issue/$ts'
   id:
@@ -126,6 +137,7 @@ export interface FileRouteTypes {
     | '/_app/settings'
     | '/_app/usage'
     | '/_app/repos/$repoName'
+    | '/_app/repos/add'
     | '/_app/repos/'
     | '/_app/runs/$slug/$issue/$ts'
   fileRoutesById: FileRoutesById
@@ -186,6 +198,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppReposIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/repos/add': {
+      id: '/_app/repos/add'
+      path: '/repos/add'
+      fullPath: '/repos/add'
+      preLoaderRoute: typeof AppReposAddRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/repos/$repoName': {
       id: '/_app/repos/$repoName'
       path: '/repos/$repoName'
@@ -209,6 +228,7 @@ interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute
   AppUsageRoute: typeof AppUsageRoute
   AppReposRepoNameRoute: typeof AppReposRepoNameRoute
+  AppReposAddRoute: typeof AppReposAddRoute
   AppReposIndexRoute: typeof AppReposIndexRoute
   AppRunsSlugIssueTsRoute: typeof AppRunsSlugIssueTsRoute
 }
@@ -219,6 +239,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
   AppUsageRoute: AppUsageRoute,
   AppReposRepoNameRoute: AppReposRepoNameRoute,
+  AppReposAddRoute: AppReposAddRoute,
   AppReposIndexRoute: AppReposIndexRoute,
   AppRunsSlugIssueTsRoute: AppRunsSlugIssueTsRoute,
 }

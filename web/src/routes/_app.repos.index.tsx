@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
-import { ExternalLink } from 'lucide-react'
+import { ExternalLink, Plus } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -108,6 +108,13 @@ function RepoList() {
             Use <code className="px-1 py-0.5 bg-secondary rounded text-[10px]">clawflow repo add</code> to add more.
           </p>
         </div>
+        <Link
+          to="/repos/add"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          Add from VCS
+        </Link>
       </div>
 
       {showTabs && (

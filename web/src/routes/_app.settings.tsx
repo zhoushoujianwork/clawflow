@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
-import { Check, Loader2, AlertCircle, X, Eye, EyeOff } from 'lucide-react'
+import { Check, Loader2, AlertCircle, X, Eye, EyeOff, Folder, ChevronRight, Home } from 'lucide-react'
 import { cn } from '../lib/utils'
 
 interface SettingsView {
@@ -448,21 +448,17 @@ function GlobalSection({
         <NumInput value={runInterval} onChange={setRunInterval} min={0} max={1440} />
       </Row>
       <Row label="GitHub clone dir">
-        <input
-          type="text"
+        <DirectoryInput
           value={ghDir}
-          onChange={e => setGhDir(e.target.value)}
+          onChange={setGhDir}
           placeholder="~/github (default)"
-          className="flex-1 text-sm font-mono px-2 py-1 border border-border rounded bg-background"
         />
       </Row>
       <Row label="GitLab clone dir">
-        <input
-          type="text"
+        <DirectoryInput
           value={glDir}
-          onChange={e => setGlDir(e.target.value)}
+          onChange={setGlDir}
           placeholder="~/gitlab (default)"
-          className="flex-1 text-sm font-mono px-2 py-1 border border-border rounded bg-background"
         />
       </Row>
 
@@ -649,6 +645,206 @@ function Status({ ok, text }: { ok: boolean; text: string }) {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n) + '…'
+}
+
+// -----------------------------------------------------------------------------
+// Directory Input with Browser
+// -----------------------------------------------------------------------------
+
+interface DirectoryBrowserData {
+  current_path: string
+  parent: string
+  directories: Array<{ name: string; path: string }>
+  error?: string
+}
+
+function DirectoryInput({
+  value, onChange, placeholder,
+}: {
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+}) {
+  const [showBrowser, setShowBrowser] = useState(false)
+
+  return (
+    <>
+      <div className="flex-1 flex gap-2 items-center">
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="flex-1 text-sm font-mono px-2 py-1 border border-border rounded bg-background"
+        />
+        <button
+          type="button"
+          onClick={() => setShowBrowser(true)}
+          className="text-muted-foreground hover:text-foreground"
+          title="Browse directories"
+        >
+          <Folder className="w-4 h-4" />
+        </button>
+      </div>
+      {showBrowser && (
+        <DirectoryBrowser
+          initialPath={value || undefined}
+          onSelect={(path) => {
+            onChange(path)
+            setShowBrowser(false)
+          }}
+          onClose={() => setShowBrowser(false)}
+        />
+      )}
+    </>
+  )
+}
+
+function DirectoryBrowser({
+  initialPath, onSelect, onClose,
+}: {
+  initialPath?: string
+  onSelect: (path: string) => void
+  onClose: () => void
+}) {
+  const [currentPath, setCurrentPath] = useState(initialPath || '')
+  const [data, setData] = useState<DirectoryBrowserData | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const loadPath = useCallback((path: string) => {
+    setLoading(true)
+    setError(null)
+    const url = `/api/browse-directory${path ? `?path=${encodeURIComponent(path)}` : ''}`
+    fetch(url)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then((d: DirectoryBrowserData) => {
+        setData(d)
+        setCurrentPath(d.current_path)
+        if (d.error) {
+          setError(d.error)
+        }
+      })
+      .catch(e => setError(String(e.message || e)))
+      .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    loadPath(initialPath || '')
+  }, [initialPath, loadPath])
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-card border border-border rounded-lg shadow-lg w-full max-w-2xl max-h-[80vh] flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <h3 className="text-sm font-semibold text-foreground">Select Directory</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Current path bar */}
+        <div className="px-4 py-2 border-b border-border bg-secondary/30">
+          <div className="flex items-center gap-2 text-xs font-mono text-foreground">
+            <button
+              type="button"
+              onClick={() => loadPath('')}
+              className="text-muted-foreground hover:text-foreground"
+              title="Go to home directory"
+            >
+              <Home className="w-3.5 h-3.5" />
+            </button>
+            <span className="flex-1 truncate">{currentPath || '(loading...)'}</span>
+          </div>
+        </div>
+
+        {/* Directory list */}
+        <div className="flex-1 overflow-y-auto p-2">
+          {loading && (
+            <div className="flex items-center justify-center py-8 text-muted-foreground">
+              <Loader2 className="w-4 h-4 animate-spin mr-2" />
+              Loading...
+            </div>
+          )}
+          {error && (
+            <div className="px-3 py-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded">
+              {error}
+            </div>
+          )}
+          {data && !loading && (
+            <div className="space-y-0.5">
+              {/* Parent directory */}
+              {data.parent && (
+                <button
+                  type="button"
+                  onClick={() => loadPath(data.parent)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:bg-secondary/50 rounded"
+                >
+                  <Folder className="w-4 h-4 shrink-0" />
+                  <span className="flex-1 text-left">..</span>
+                </button>
+              )}
+              {/* Subdirectories */}
+              {data.directories.map(dir => (
+                <button
+                  key={dir.path}
+                  type="button"
+                  onClick={() => loadPath(dir.path)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-secondary/50 rounded group"
+                >
+                  <Folder className="w-4 h-4 shrink-0 text-muted-foreground" />
+                  <span className="flex-1 text-left">{dir.name}</span>
+                  <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100" />
+                </button>
+              ))}
+              {data.directories.length === 0 && !data.parent && !data.error && (
+                <div className="px-3 py-8 text-center text-xs text-muted-foreground">
+                  No subdirectories
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+          <span className="text-xs text-muted-foreground">
+            {data && !data.error ? `${data.directories.length} subdirectories` : ''}
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-sm px-3 py-1 rounded border border-border hover:bg-secondary/50 text-foreground"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => onSelect(currentPath)}
+              disabled={!currentPath}
+              className={cn(
+                'text-sm px-3 py-1 rounded border',
+                currentPath
+                  ? 'bg-secondary hover:bg-secondary/70 border-border text-foreground'
+                  : 'bg-muted text-muted-foreground border-border cursor-not-allowed',
+              )}
+            >
+              Select
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // Suppress unused-import warning when build-flag-driven dead-code
