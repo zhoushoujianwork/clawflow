@@ -41,6 +41,7 @@ function AddRemoteRepo() {
 
   // Cache: Map<platform, repos[]>
   const [reposCache, setReposCache] = useState<Map<Platform, RemoteRepo[]>>(new Map())
+  const [fetchedPlatforms, setFetchedPlatforms] = useState<Set<Platform>>(new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -52,15 +53,16 @@ function AddRemoteRepo() {
   const repos = reposCache.get(platform) || []
 
   useEffect(() => {
-    // Only fetch if not cached
-    if (!reposCache.has(platform)) {
+    // Only fetch if not already fetched
+    if (!fetchedPlatforms.has(platform)) {
       fetchRepos()
     }
-  }, [platform])
+  }, [platform, fetchedPlatforms])
 
   async function fetchRepos() {
     setLoading(true)
     setError(null)
+    setFetchedPlatforms(prev => new Set(prev).add(platform))
 
     try {
       const response = await fetch(`/api/repos/list-remote?platform=${platform}`)
@@ -78,6 +80,12 @@ function AddRemoteRepo() {
       setReposCache(prev => new Map(prev).set(platform, fetchedRepos))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
+      // On error, remove from fetched set so it can be retried
+      setFetchedPlatforms(prev => {
+        const next = new Set(prev)
+        next.delete(platform)
+        return next
+      })
     } finally {
       setLoading(false)
     }
@@ -88,9 +96,14 @@ function AddRemoteRepo() {
   }
 
   function handleRefresh() {
-    // Clear cache for current platform and re-fetch
+    // Clear cache and fetched flag for current platform, then re-fetch
     setReposCache(prev => {
       const next = new Map(prev)
+      next.delete(platform)
+      return next
+    })
+    setFetchedPlatforms(prev => {
+      const next = new Set(prev)
       next.delete(platform)
       return next
     })
