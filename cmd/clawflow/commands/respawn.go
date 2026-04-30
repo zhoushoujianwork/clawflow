@@ -51,6 +51,6 @@ func NewRespawnCmd() *cobra.Command {
 			return syscall.Exec(self, []string{"clawflow", "web", "--host", host, "--port", portStr}, os.Environ())
 		},
 	}
-	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8080", "host:port the parent web is bound to (and that the new web will rebind)")
+	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8090", "host:port the parent web is bound to (and that the new web will rebind)")
 	return cmd
 }

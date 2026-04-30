@@ -202,7 +202,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&port, "port", 8080, "TCP port to bind")
+	cmd.Flags().IntVar(&port, "port", 8090, "TCP port to bind")
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host/IP to bind — 127.0.0.1 by default so the dashboard stays off the LAN")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the dashboard in your default browser")
 	return cmd
