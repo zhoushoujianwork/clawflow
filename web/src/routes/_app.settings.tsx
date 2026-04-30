@@ -299,6 +299,10 @@ function TokensSection({
   const [showGitlab, setShowGitlab] = useState(false)
   const [busy, setBusy] = useState(false)
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [testingGh, setTestingGh] = useState(false)
+  const [testingGitlab, setTestingGitlab] = useState(false)
+  const [testResultGh, setTestResultGh] = useState<{ ok: boolean; text: string } | null>(null)
+  const [testResultGitlab, setTestResultGitlab] = useState<{ ok: boolean; text: string } | null>(null)
 
   const dirty = gh !== '' || gitlab !== ''
 
@@ -325,27 +329,103 @@ function TokensSection({
       .finally(() => setBusy(false))
   }
 
+  const testGitHub = () => {
+    setTestingGh(true); setTestResultGh(null)
+    fetch('/api/settings/verify-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'github' }),
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.valid) {
+          setTestResultGh({ ok: true, text: d.message || 'Connected' })
+        } else {
+          setTestResultGh({ ok: false, text: d.error || d.message || 'Connection failed' })
+        }
+      })
+      .catch(e => setTestResultGh({ ok: false, text: String(e.message || e) }))
+      .finally(() => setTestingGh(false))
+  }
+
+  const testGitLab = () => {
+    setTestingGitlab(true); setTestResultGitlab(null)
+    fetch('/api/settings/verify-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'gitlab' }),
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.valid) {
+          setTestResultGitlab({ ok: true, text: d.message || 'Connected' })
+        } else {
+          setTestResultGitlab({ ok: false, text: d.error || d.message || 'Connection failed' })
+        }
+      })
+      .catch(e => setTestResultGitlab({ ok: false, text: String(e.message || e) }))
+      .finally(() => setTestingGitlab(false))
+  }
+
   return (
     <Card title="VCS Tokens" hint="GitHub / GitLab personal access tokens. Used for issue + PR API calls.">
       <Row label="GitHub">
-        <PasswordInput
-          value={gh}
-          onChange={setGh}
-          show={showGh}
-          onToggleShow={() => setShowGh(s => !s)}
-          placeholder={view.gh_set ? `configured · ${view.gh_hint ?? ''}` : 'ghp_…'}
-          onReveal={view.gh_set ? () => revealSecret('gh_token') : undefined}
-        />
+        <div className="flex-1 flex flex-col gap-2">
+          <PasswordInput
+            value={gh}
+            onChange={setGh}
+            show={showGh}
+            onToggleShow={() => setShowGh(s => !s)}
+            placeholder={view.gh_set ? `configured · ${view.gh_hint ?? ''}` : 'ghp_…'}
+            onReveal={view.gh_set ? () => revealSecret('gh_token') : undefined}
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={testGitHub}
+              disabled={testingGh || !view.gh_set}
+              className={cn(
+                'text-xs px-2 py-1 rounded border',
+                view.gh_set && !testingGh
+                  ? 'border-border hover:bg-secondary/50 text-foreground'
+                  : 'bg-muted text-muted-foreground border-border cursor-not-allowed',
+              )}
+            >
+              {testingGh ? <Loader2 className="w-3 h-3 animate-spin inline mr-1" /> : null}
+              Test Connection
+            </button>
+            {testResultGh && <Status ok={testResultGh.ok} text={testResultGh.text} />}
+          </div>
+        </div>
       </Row>
       <Row label="GitLab">
-        <PasswordInput
-          value={gitlab}
-          onChange={setGitlab}
-          show={showGitlab}
-          onToggleShow={() => setShowGitlab(s => !s)}
-          placeholder={view.gitlab_set ? `configured · ${view.gitlab_hint ?? ''}` : 'glpat-…'}
-          onReveal={view.gitlab_set ? () => revealSecret('gitlab_token') : undefined}
-        />
+        <div className="flex-1 flex flex-col gap-2">
+          <PasswordInput
+            value={gitlab}
+            onChange={setGitlab}
+            show={showGitlab}
+            onToggleShow={() => setShowGitlab(s => !s)}
+            placeholder={view.gitlab_set ? `configured · ${view.gitlab_hint ?? ''}` : 'glpat-…'}
+            onReveal={view.gitlab_set ? () => revealSecret('gitlab_token') : undefined}
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={testGitLab}
+              disabled={testingGitlab || !view.gitlab_set}
+              className={cn(
+                'text-xs px-2 py-1 rounded border',
+                view.gitlab_set && !testingGitlab
+                  ? 'border-border hover:bg-secondary/50 text-foreground'
+                  : 'bg-muted text-muted-foreground border-border cursor-not-allowed',
+              )}
+            >
+              {testingGitlab ? <Loader2 className="w-3 h-3 animate-spin inline mr-1" /> : null}
+              Test Connection
+            </button>
+            {testResultGitlab && <Status ok={testResultGitlab.ok} text={testResultGitlab.text} />}
+          </div>
+        </div>
       </Row>
 
       <div className="flex items-center gap-2 pt-2">

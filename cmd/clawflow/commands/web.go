@@ -132,6 +132,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/settings/global", api.HandleUpdateGlobalSettings)
 			mux.HandleFunc("/api/settings/claude/test", api.HandleTestClaude)
 			mux.HandleFunc("/api/settings/reveal", api.HandleRevealSecret)
+			mux.HandleFunc("/api/settings/verify-token", api.HandleVerifyToken)
 			mux.HandleFunc("/api/browse-directory", api.HandleBrowseDirectory)
 			mux.HandleFunc("/api/chat/spawn", api.HandleChatSpawn)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -69,7 +70,7 @@ func HandleListRemoteRepos(w http.ResponseWriter, r *http.Request) {
 		repos, err = listGitHubRepos(creds.GHToken)
 	case "gitlab":
 		if creds.GitLabToken == "" {
-			writeJSON(w, 400, listRemoteReposResponse{Error: "GitLab token not configured"})
+			writeJSON(w, 400, listRemoteReposResponse{Error: "GitLab token not configured. Please add your GitLab token in Settings."})
 			return
 		}
 		cfg, err := config.Load()
@@ -254,12 +255,16 @@ func listGitLabRepos(token, baseURL string) ([]RemoteRepo, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to connect to GitLab: %v", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 401 {
+		return nil, fmt.Errorf("GitLab token is invalid or expired. Please update your token in Settings and test the connection.")
+	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GitLab API returned status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GitLab API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var glProjects []glProject
