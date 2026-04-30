@@ -5,13 +5,20 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // VersionInfo is set by the web command at startup.
 var VersionInfo struct {
 	Current string
-	Fetch   func() string            // FetchLatestTag
+	Fetch   func() string              // FetchLatestTag
 	IsNewer func(cur, lat string) bool // IsNewerVersion
+	// Respawn, when non-nil, is invoked after a successful `/api/update`
+	// to restart `clawflow web` — without this, the running process keeps
+	// reporting the pre-update version and the dashboard banner is sticky.
+	// The web command wires this up; tests and callers that don't need
+	// auto-restart can leave it nil.
+	Respawn func()
 }
 
 type versionResponse struct {
@@ -82,8 +89,20 @@ func HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	writeJSON(w, 200, map[string]string{
-		"status":  "ok",
-		"message": string(output),
+	respawning := VersionInfo.Respawn != nil
+	writeJSON(w, 200, map[string]any{
+		"status":     "ok",
+		"message":    string(output),
+		"respawning": respawning,
 	})
+	// Defer the actual restart by a short beat so the response above
+	// has a chance to flush before we tear down the listener. The
+	// frontend uses `respawning: true` to switch into a poll-and-reload
+	// state.
+	if respawning {
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			VersionInfo.Respawn()
+		}()
+	}
 }

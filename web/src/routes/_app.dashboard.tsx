@@ -147,6 +147,7 @@ function Dashboard() {
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const [updating, setUpdating] = useState(false)
+  const [restarting, setRestarting] = useState(false)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [query, setQuery] = useState('')
   const [repoFilter, setRepoFilter] = useState<string>('all')
@@ -261,11 +262,43 @@ function Dashboard() {
     fetch('/api/update', { method: 'POST' })
       .then(r => r.json())
       .then(d => {
-        setUpdating(false)
-        if (d.status === 'ok') {
-          setUpdateAvailable(false)
-          setLatestVersion(null)
+        if (d.status !== 'ok') {
+          setUpdating(false)
+          return
         }
+        // Server is about to respawn itself. Switch into "Restarting…"
+        // and poll /api/version until the new process answers, then
+        // reload so the user lands on the new bundle.
+        if (d.respawning) {
+          setRestarting(true)
+          const started = Date.now()
+          const tick = () => {
+            fetch('/api/version', { cache: 'no-store' })
+              .then(r => r.ok ? r.json() : Promise.reject(new Error('not ok')))
+              .then(() => window.location.reload())
+              .catch(() => {
+                if (Date.now() - started > 30_000) {
+                  // Give up after 30s — leave the banner so the user
+                  // knows to restart manually.
+                  setRestarting(false)
+                  setUpdating(false)
+                  return
+                }
+                setTimeout(tick, 500)
+              })
+          }
+          // Wait a beat for the old process to actually exit before
+          // we start polling, otherwise the first tick succeeds against
+          // the dying server and we reload too early.
+          setTimeout(tick, 800)
+          return
+        }
+        // No respawn wired (e.g. older binary): clear the banner and
+        // hope for the best. User will see the stale version until
+        // they restart `clawflow web`.
+        setUpdating(false)
+        setUpdateAvailable(false)
+        setLatestVersion(null)
       })
       .catch(() => setUpdating(false))
   }, [])
@@ -397,19 +430,25 @@ function Dashboard() {
         >
           <ArrowUpCircle className="w-4 h-4 shrink-0" style={{ color: 'hsl(var(--brand))' }} />
           <span className="text-sm flex-1" style={{ color: 'hsl(var(--text-high))' }}>
-            New version available: <span className="font-mono font-medium">{latestVersion}</span>
+            {restarting ? (
+              <>Restarting <span className="font-mono font-medium">clawflow web</span> at <span className="font-mono font-medium">{latestVersion}</span>… page will reload automatically.</>
+            ) : (
+              <>New version available: <span className="font-mono font-medium">{latestVersion}</span></>
+            )}
           </span>
           <button
             onClick={triggerUpdate}
-            disabled={updating}
+            disabled={updating || restarting}
             className={cn(
               'inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-colors',
-              updating
+              (updating || restarting)
                 ? 'bg-muted text-muted-foreground cursor-not-allowed'
                 : 'bg-brand text-on-brand hover:bg-brand-hover',
             )}
           >
-            {updating ? (
+            {restarting ? (
+              <><Loader2 className="w-3 h-3 animate-spin" /> Restarting…</>
+            ) : updating ? (
               <><Loader2 className="w-3 h-3 animate-spin" /> Updating…</>
             ) : (
               'Upgrade'

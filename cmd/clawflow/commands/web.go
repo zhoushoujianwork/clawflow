@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -152,6 +155,40 @@ here — run 'clawflow run' first if you want fresh data.`,
 				ReadHeaderTimeout: 5 * time.Second,
 			}
 
+			// Wire the dashboard's Upgrade button: after a successful
+			// `clawflow update` the old binary is on disk, but this
+			// running process is still the pre-update one. Respawn
+			// spawns a detached helper that waits for our port to
+			// free, then execs `clawflow web` again — picking up the
+			// new binary. We then gracefully shut ourselves down.
+			//
+			// Helper failures must NOT take down the running web —
+			// fall through silently and let the user restart manually.
+			api.VersionInfo.Respawn = func() {
+				self, err := os.Executable()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "respawn: locate self: %v\n", err)
+					return
+				}
+				helper := exec.Command(self, "__respawn", "--addr", addr) //nolint:gosec
+				helper.Stdin = nil
+				helper.Stdout = os.Stdout
+				helper.Stderr = os.Stderr
+				// Setsid detaches the helper from our process group so
+				// it survives our os.Exit and any SIGINT the user sends
+				// to the terminal.
+				helper.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+				if err := helper.Start(); err != nil {
+					fmt.Fprintf(os.Stderr, "respawn: start helper: %v\n", err)
+					return
+				}
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					defer cancel()
+					_ = srv.Shutdown(ctx)
+				}()
+			}
+
 			fmt.Printf("ClawFlow dashboard → %s\n", url)
 			fmt.Printf("  data dir: %s\n", snapshot.DataDir())
 			fmt.Printf("  Ctrl-C to stop.\n\n")
@@ -159,7 +196,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 			if openFlag {
 				go openBrowser(url)
 			}
-			return srv.ListenAndServe()
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+			return nil
 		},
 	}
 	cmd.Flags().IntVar(&port, "port", 8080, "TCP port to bind")
