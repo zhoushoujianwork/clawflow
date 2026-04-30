@@ -24,6 +24,7 @@ interface SettingsView {
     run_interval_minutes: number
     github_clone_dir?: string
     gitlab_clone_dir?: string
+    gitlab_url?: string
   }
 }
 
@@ -463,6 +464,7 @@ function GlobalSection({
   const [runInterval, setRunInterval] = useState(view.run_interval_minutes)
   const [ghDir, setGhDir] = useState(view.github_clone_dir ?? '')
   const [glDir, setGlDir] = useState(view.gitlab_clone_dir ?? '')
+  const [gitlabURL, setGitlabURL] = useState(view.gitlab_url ?? '')
   const [busy, setBusy] = useState(false)
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
@@ -475,6 +477,7 @@ function GlobalSection({
     setRunInterval(view.run_interval_minutes)
     setGhDir(view.github_clone_dir ?? '')
     setGlDir(view.gitlab_clone_dir ?? '')
+    setGitlabURL(view.gitlab_url ?? '')
   }, [view])
 
   const dirty =
@@ -484,7 +487,8 @@ function GlobalSection({
     maxConcurrent !== view.max_concurrent_agents ||
     runInterval !== view.run_interval_minutes ||
     ghDir !== (view.github_clone_dir ?? '') ||
-    glDir !== (view.gitlab_clone_dir ?? '')
+    glDir !== (view.gitlab_clone_dir ?? '') ||
+    gitlabURL !== (view.gitlab_url ?? '')
 
   const save = () => {
     setBusy(true); setSaveMsg(null)
@@ -499,6 +503,7 @@ function GlobalSection({
         run_interval_minutes: runInterval,
         github_clone_dir: ghDir,
         gitlab_clone_dir: glDir,
+        gitlab_url: gitlabURL,
       }),
     })
       .then(async r => {
@@ -539,6 +544,15 @@ function GlobalSection({
           value={glDir}
           onChange={setGlDir}
           placeholder="~/gitlab (default)"
+        />
+      </Row>
+      <Row label="GitLab Instance URL" hint="Full URL including protocol (http:// or https://) and port if needed">
+        <input
+          type="text"
+          value={gitlabURL}
+          onChange={e => setGitlabURL(e.target.value)}
+          placeholder="https://gitlab.com or http://git.internal.com:8080"
+          className="flex-1 text-sm font-mono px-2 py-1 border border-border rounded bg-background"
         />
       </Row>
 

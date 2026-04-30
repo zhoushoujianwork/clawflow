@@ -51,13 +51,14 @@ type settingsView struct {
 		GitlabHint string `json:"gitlab_hint,omitempty"`
 	} `json:"tokens"`
 	Global struct {
-		PollInterval        int    `json:"poll_interval"`
-		ConfidenceThreshold int    `json:"confidence_threshold"`
-		AgentTimeout        int    `json:"agent_timeout"`
-		MaxConcurrentAgents int    `json:"max_concurrent_agents"`
-		RunIntervalMinutes  int    `json:"run_interval_minutes"`
-		GithubCloneDir      string `json:"github_clone_dir,omitempty"`
-		GitlabCloneDir      string `json:"gitlab_clone_dir,omitempty"`
+		PollInterval        int      `json:"poll_interval"`
+		ConfidenceThreshold int      `json:"confidence_threshold"`
+		AgentTimeout        int      `json:"agent_timeout"`
+		MaxConcurrentAgents int      `json:"max_concurrent_agents"`
+		RunIntervalMinutes  int      `json:"run_interval_minutes"`
+		GithubCloneDir      string   `json:"github_clone_dir,omitempty"`
+		GitlabCloneDir      string   `json:"gitlab_clone_dir,omitempty"`
+		GitLabURL           string   `json:"gitlab_url,omitempty"`
 	} `json:"global"`
 }
 
@@ -99,6 +100,9 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	v.Global.RunIntervalMinutes = cfg.Settings.RunIntervalMinutes
 	v.Global.GithubCloneDir = cfg.Settings.GithubCloneDir
 	v.Global.GitlabCloneDir = cfg.Settings.GitlabCloneDir
+	if len(cfg.Settings.GitLabHosts) > 0 {
+		v.Global.GitLabURL = cfg.Settings.GitLabHosts[0]
+	}
 
 	writeJSON(w, 200, v)
 }
@@ -238,6 +242,7 @@ type globalUpdate struct {
 	RunIntervalMinutes  *int    `json:"run_interval_minutes,omitempty"`
 	GithubCloneDir      *string `json:"github_clone_dir,omitempty"`
 	GitlabCloneDir      *string `json:"gitlab_clone_dir,omitempty"`
+	GitLabURL           *string `json:"gitlab_url,omitempty"`
 }
 
 // HandleUpdateGlobalSettings handles POST /api/settings/global.
@@ -284,6 +289,14 @@ func HandleUpdateGlobalSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.GitlabCloneDir != nil {
 		cfg.Settings.GitlabCloneDir = *req.GitlabCloneDir
+	}
+	if req.GitLabURL != nil {
+		url := strings.TrimSpace(*req.GitLabURL)
+		if url == "" {
+			cfg.Settings.GitLabHosts = nil
+		} else {
+			cfg.Settings.GitLabHosts = []string{url}
+		}
 	}
 	if err := cfg.Save(); err != nil {
 		writeErr(w, err)
