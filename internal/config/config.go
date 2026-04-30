@@ -52,7 +52,7 @@ type Settings struct {
 	AgentTimeout        int      `yaml:"agent_timeout"`
 	MaxConcurrentAgents int      `yaml:"max_concurrent_agents"`
 	NotificationChannel string   `yaml:"notification_channel"`
-	GitLabHosts         []string `yaml:"gitlab_hosts"`               // e.g. ["gitlab.company.com"]
+	GitLabHosts         []string `yaml:"gitlab_hosts"`               // e.g. ["gitlab.company.com"] or ["http://git.internal.com:8080"]
 	GithubCloneDir      string   `yaml:"github_clone_dir,omitempty"` // default: ~/github
 	GitlabCloneDir      string   `yaml:"gitlab_clone_dir,omitempty"` // default: ~/gitlab
 

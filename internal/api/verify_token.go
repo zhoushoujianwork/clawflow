@@ -72,7 +72,7 @@ func HandleVerifyToken(w http.ResponseWriter, r *http.Request) {
 		}
 		baseURL := "https://gitlab.com"
 		if len(cfg.Settings.GitLabHosts) > 0 {
-			baseURL = "https://" + cfg.Settings.GitLabHosts[0]
+			baseURL = normalizeGitLabURL(cfg.Settings.GitLabHosts[0])
 		}
 		valid, message, verifyErr = verifyGitLabToken(creds.GitLabToken, baseURL)
 	}

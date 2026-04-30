@@ -81,7 +81,7 @@ func HandleListRemoteRepos(w http.ResponseWriter, r *http.Request) {
 		// Use first configured GitLab host or default to gitlab.com
 		baseURL := "https://gitlab.com"
 		if len(cfg.Settings.GitLabHosts) > 0 {
-			baseURL = "https://" + cfg.Settings.GitLabHosts[0]
+			baseURL = normalizeGitLabURL(cfg.Settings.GitLabHosts[0])
 		}
 		repos, err = listGitLabRepos(creds.GitLabToken, baseURL)
 	default:
