@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -157,15 +158,15 @@ func HandleAddRemoteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clone the repository
-	var logBuf []byte
-	localPath, err := clone.EnsureLocalClone(cfg, req.FullName, repoCfg, nil)
+	// Clone the repository with output capture
+	var logBuf bytes.Buffer
+	localPath, err := clone.EnsureLocalClone(cfg, req.FullName, repoCfg, &logBuf)
 	if err != nil {
 		// Remove from config on clone failure
 		delete(cfg.Repos, req.FullName)
 		_ = cfg.Save()
 		writeJSON(w, 500, addRemoteRepoResponse{
-			Error: fmt.Sprintf("clone failed: %v\nLog: %s", err, string(logBuf)),
+			Error: fmt.Sprintf("clone failed: %v\nLog:\n%s", err, logBuf.String()),
 		})
 		return
 	}
