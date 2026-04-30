@@ -65,17 +65,28 @@ takes it from here.
   often useful.
 - Do NOT open a PR yourself. PRs come from ` + "`" + `clawflow run` + "`" + `.
 
-## Action markers
+## Performing VCS side effects
 
-When the user wants a VCS-side change, emit one of these on its own
-line. The runner parses them and asks the user for confirmation
-before executing — so the side effect is gated, not silent.
+When the user wants a VCS-side change, run the matching ` + "`" + `clawflow` + "`" + `
+subcommand via Bash. Claude shows each command before executing and
+the user can cancel — side effects are gated, not silent.
 
-  <!-- clawflow:action:add_label label="<name>" -->
-  <!-- clawflow:action:remove_label label="<name>" -->
-  <!-- clawflow:action:comment text="<comment body>" -->
-  <!-- clawflow:action:create_issue title="<title>" body="<body>" labels="<comma-separated>" -->
-  <!-- clawflow:action:close_issue -->`)
+Repo and issue number for this chat are pinned: pass ` + "`" + `--repo` + "`" + ` and
+` + "`" + `--issue` + "`" + ` from the "Chat Context" header above. Available commands:
+
+- Add a label:    ` + "`" + `clawflow label add --repo <repo> --issue <n> --label <name>` + "`" + `
+- Remove a label: ` + "`" + `clawflow label remove --repo <repo> --issue <n> --label <name>` + "`" + `
+- Post a comment: ` + "`" + `clawflow issue comment --repo <repo> --issue <n> --body "<text>"` + "`" + `
+- Create issue:   ` + "`" + `clawflow issue create --repo <repo> --title "<t>" --body "<b>"` + "`" + `
+                  ` + "`" + `issue create` + "`" + ` has no ` + "`" + `--labels` + "`" + ` flag. If labels are
+                  needed, parse the new issue number from stdout and
+                  follow up with ` + "`" + `clawflow label add` + "`" + ` for each.
+- Close issue:    ` + "`" + `clawflow issue close --repo <repo> --issue <n>` + "`" + `
+
+After running, read the real stdout/stderr (issue URL, new label
+state) and report what actually happened. Do NOT claim success
+because you "emitted" anything — there is no marker protocol; the
+command's exit status is the only source of truth.`)
 
 	return b.String()
 }
@@ -178,16 +189,28 @@ anything you'd write here as code would be discarded by that flow.
   inspection (cat, ls, grep, ` + "`" + `git log` + "`" + `, ` + "`" + `git diff` + "`" + `) is fine.
 - Do NOT open a PR yourself. PRs come from ` + "`" + `clawflow run` + "`" + `.
 
-## Action markers
+## Performing VCS side effects
 
-  <!-- clawflow:action:add_label issue="<number>" label="<name>" -->
-  <!-- clawflow:action:remove_label issue="<number>" label="<name>" -->
-  <!-- clawflow:action:comment issue="<number>" text="<comment body>" -->
-  <!-- clawflow:action:create_issue title="<title>" body="<body>" labels="<comma-separated>" -->
-  <!-- clawflow:action:close_issue issue="<number>" -->
+When the user wants a VCS-side change, run the matching ` + "`" + `clawflow` + "`" + `
+subcommand via Bash. Claude shows each command before executing and
+the user can cancel — side effects are gated, not silent.
 
-The runner parses these and asks for user confirmation before
-executing — side effects are gated, not silent.`)
+Use ` + "`" + `--repo <repo>` + "`" + ` from the header above; pass ` + "`" + `--issue <n>` + "`" + ` to
+target a specific issue from the list. Available commands:
+
+- Add a label:    ` + "`" + `clawflow label add --repo <repo> --issue <n> --label <name>` + "`" + `
+- Remove a label: ` + "`" + `clawflow label remove --repo <repo> --issue <n> --label <name>` + "`" + `
+- Post a comment: ` + "`" + `clawflow issue comment --repo <repo> --issue <n> --body "<text>"` + "`" + `
+- Create issue:   ` + "`" + `clawflow issue create --repo <repo> --title "<t>" --body "<b>"` + "`" + `
+                  ` + "`" + `issue create` + "`" + ` has no ` + "`" + `--labels` + "`" + ` flag. If labels are
+                  needed, parse the new issue number from stdout and
+                  follow up with ` + "`" + `clawflow label add` + "`" + ` for each.
+- Close issue:    ` + "`" + `clawflow issue close --repo <repo> --issue <n>` + "`" + `
+
+After running, read the real stdout/stderr (issue URL, new label
+state) and report what actually happened. Do NOT claim success
+because you "emitted" anything — there is no marker protocol; the
+command's exit status is the only source of truth.`)
 
 	return b.String()
 }
