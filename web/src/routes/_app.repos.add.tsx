@@ -1,6 +1,6 @@
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { createFileRoute, Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Search, Loader2, CheckCircle2, XCircle, ExternalLink, ChevronRight, ChevronDown } from 'lucide-react'
+import { ArrowLeft, Search, Loader2, CheckCircle2, XCircle, ExternalLink, ChevronRight, ChevronDown, RefreshCw } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { VcsIcon } from '../components/VcsIcon'
 
@@ -16,8 +16,17 @@ interface RemoteRepo {
 
 type Platform = 'github' | 'gitlab'
 
+type ReposAddSearch = {
+  platform?: Platform
+}
+
 export const Route = createFileRoute('/_app/repos/add')({
   component: AddRemoteRepo,
+  validateSearch: (search: Record<string, unknown>): ReposAddSearch => {
+    return {
+      platform: search.platform === 'gitlab' ? 'gitlab' : 'github',
+    }
+  },
 })
 
 interface RepoGroup {
@@ -26,8 +35,12 @@ interface RepoGroup {
 }
 
 function AddRemoteRepo() {
-  const [platform, setPlatform] = useState<Platform>('github')
-  const [repos, setRepos] = useState<RemoteRepo[]>([])
+  const navigate = useNavigate({ from: Route.fullPath })
+  const search = useSearch({ from: Route.id })
+  const platform = search.platform || 'github'
+
+  // Cache: Map<platform, repos[]>
+  const [reposCache, setReposCache] = useState<Map<Platform, RemoteRepo[]>>(new Map())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -36,14 +49,18 @@ function AddRemoteRepo() {
   const [addErrors, setAddErrors] = useState<Map<string, string>>(new Map())
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
+  const repos = reposCache.get(platform) || []
+
   useEffect(() => {
-    fetchRepos()
+    // Only fetch if not cached
+    if (!reposCache.has(platform)) {
+      fetchRepos()
+    }
   }, [platform])
 
   async function fetchRepos() {
     setLoading(true)
     setError(null)
-    setRepos([])
 
     try {
       const response = await fetch(`/api/repos/list-remote?platform=${platform}`)
@@ -57,12 +74,27 @@ function AddRemoteRepo() {
         throw new Error(data.error)
       }
 
-      setRepos(data.repos || [])
+      const fetchedRepos = data.repos || []
+      setReposCache(prev => new Map(prev).set(platform, fetchedRepos))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
       setLoading(false)
     }
+  }
+
+  function handlePlatformChange(newPlatform: Platform) {
+    navigate({ search: { platform: newPlatform } })
+  }
+
+  function handleRefresh() {
+    // Clear cache for current platform and re-fetch
+    setReposCache(prev => {
+      const next = new Map(prev)
+      next.delete(platform)
+      return next
+    })
+    fetchRepos()
   }
 
   async function addRepo(repo: RemoteRepo) {
@@ -167,20 +199,36 @@ function AddRemoteRepo() {
         </p>
       </div>
 
-      {/* Platform selector */}
-      <div className="inline-flex bg-card border border-border rounded-xl overflow-hidden mb-4">
-        <PlatformButton
-          active={platform === 'github'}
-          onClick={() => setPlatform('github')}
+      {/* Platform selector with refresh button */}
+      <div className="flex items-center gap-3 mb-4">
+        <div className="inline-flex bg-card border border-border rounded-xl overflow-hidden">
+          <PlatformButton
+            active={platform === 'github'}
+            onClick={() => handlePlatformChange('github')}
+          >
+            GitHub
+          </PlatformButton>
+          <PlatformButton
+            active={platform === 'gitlab'}
+            onClick={() => handlePlatformChange('gitlab')}
+          >
+            GitLab
+          </PlatformButton>
+        </div>
+        <button
+          type="button"
+          onClick={handleRefresh}
+          disabled={loading}
+          className={cn(
+            'p-2 rounded-lg border border-border bg-card transition-colors',
+            loading
+              ? 'text-muted-foreground cursor-not-allowed'
+              : 'text-foreground hover:bg-secondary/50'
+          )}
+          title="Refresh repositories"
         >
-          GitHub
-        </PlatformButton>
-        <PlatformButton
-          active={platform === 'gitlab'}
-          onClick={() => setPlatform('gitlab')}
-        >
-          GitLab
-        </PlatformButton>
+          <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />
+        </button>
       </div>
 
       {/* Search bar */}
