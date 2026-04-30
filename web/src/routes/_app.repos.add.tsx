@@ -11,6 +11,7 @@ interface RemoteRepo {
   default_branch: string
   private: boolean
   html_url: string
+  base_url?: string
 }
 
 type Platform = 'github' | 'gitlab'
@@ -81,6 +82,7 @@ function AddRemoteRepo() {
           platform: repo.platform,
           default_branch: repo.default_branch,
           description: repo.description,
+          base_url: repo.base_url,
         }),
       })
 

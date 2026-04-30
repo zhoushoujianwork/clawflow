@@ -21,6 +21,7 @@ type RemoteRepo struct {
 	DefaultBranch string `json:"default_branch"`
 	Private       bool   `json:"private"`
 	HTMLURL       string `json:"html_url"`
+	BaseURL       string `json:"base_url,omitempty"` // GitLab instance URL
 }
 
 type listRemoteReposResponse struct {
@@ -282,6 +283,7 @@ func listGitLabRepos(token, baseURL string) ([]RemoteRepo, error) {
 			DefaultBranch: p.DefaultBranch,
 			Private:       p.Visibility == "private",
 			HTMLURL:       p.WebURL,
+			BaseURL:       baseURL,
 		}
 	}
 
