@@ -1,5 +1,5 @@
 import { createFileRoute, Outlet, Link } from '@tanstack/react-router'
-import { BookOpen, Receipt } from 'lucide-react'
+import { BookOpen, Receipt, FolderKanban } from 'lucide-react'
 import { useTheme } from '../lib/useTheme'
 import { ChatProvider } from '../lib/chatContext'
 import { ChatDrawer } from '../components/ChatDrawer'
@@ -54,6 +54,15 @@ function AppLayout() {
                 activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
               >
                 Repos
+              </Link>
+              <Link
+                to="/projects"
+                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors inline-flex items-center gap-1"
+                style={{ color: 'hsl(var(--text-low))' }}
+                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+              >
+                <FolderKanban className="w-3.5 h-3.5" />
+                Projects
               </Link>
               <Link
                 to="/operators"
