@@ -1,9 +1,11 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from 'react'
 
 interface ChatTarget {
-  repo: string
+  repo?: string
   issue?: number
   model?: string
+  project?: string
+  action?: 'generate' | 'chat'
 }
 
 // SpawnError describes a chat-spawn failure. The drawer opens

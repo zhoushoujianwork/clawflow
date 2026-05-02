@@ -20,10 +20,16 @@ import (
 // chatSpawnRequest names the issue (or whole repo) the user wants
 // to chat about. Issue=0 means "chat at repo level"; the CLI handles
 // both shapes via clawflow chat --repo <r> [--issue <n>].
+//
+// Project-scoped spawns use the Project + Action fields instead of
+// Repo/Issue. Action is "chat" or "generate"; the spawned command is
+// `clawflow project <action> <name>`.
 type chatSpawnRequest struct {
-	Repo  string `json:"repo"`
-	Issue int    `json:"issue,omitempty"`
-	Model string `json:"model,omitempty"`
+	Repo    string `json:"repo,omitempty"`
+	Issue   int    `json:"issue,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Project string `json:"project,omitempty"`
+	Action  string `json:"action,omitempty"` // "generate" or "chat" (project-scoped)
 }
 
 // HandleChatSpawn POSTs spawn a clawflow-chat session in the user's
@@ -46,8 +52,12 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if strings.TrimSpace(req.Repo) == "" {
-		writeJSON(w, 400, map[string]string{"error": "repo is required"})
+
+	// Require either a repo or a project target.
+	hasRepo := strings.TrimSpace(req.Repo) != ""
+	hasProject := strings.TrimSpace(req.Project) != ""
+	if !hasRepo && !hasProject {
+		writeJSON(w, 400, map[string]string{"error": "repo or project is required"})
 		return
 	}
 
@@ -60,12 +70,20 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 		self = "clawflow"
 	}
 
-	// Build the shell command the terminal will run. Quoted via
-	// shell-escape so a repo name containing odd chars (it shouldn't,
-	// but defense in depth) doesn't break the script.
-	parts := []string{shellEscape(self), "chat", "--repo", shellEscape(req.Repo)}
-	if req.Issue > 0 {
-		parts = append(parts, "--issue", strconv.Itoa(req.Issue))
+	var parts []string
+	if hasProject {
+		// Project-scoped spawn: `clawflow project <action> <name>`
+		action := req.Action
+		if action != "generate" {
+			action = "chat" // default to chat
+		}
+		parts = []string{shellEscape(self), "project", action, shellEscape(req.Project)}
+	} else {
+		// Repo-scoped spawn: `clawflow chat --repo <r> [--issue <n>]`
+		parts = []string{shellEscape(self), "chat", "--repo", shellEscape(req.Repo)}
+		if req.Issue > 0 {
+			parts = append(parts, "--issue", strconv.Itoa(req.Issue))
+		}
 	}
 	if req.Model != "" {
 		parts = append(parts, "--model", shellEscape(req.Model))
