@@ -35,6 +35,7 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewConfigCmd())
 	root.AddCommand(NewUpdateCmd())
 	root.AddCommand(NewInstallSkillCmd())
+	root.AddCommand(NewProjectCmd())
 	root.AddCommand(NewRespawnCmd())
 	// Helpers retained for operator use (invoked from SKILL.md bodies):
 	root.AddCommand(NewWorktreeCmd())
