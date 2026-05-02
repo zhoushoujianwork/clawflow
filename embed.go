@@ -14,6 +14,13 @@ import "embed"
 //go:embed all:skills
 var EmbeddedSkills embed.FS
 
+// EmbeddedAgentSkills holds the agent skill files (SKILL.md) that teach
+// AI coding assistants how to use the clawflow CLI. Installed to each
+// tool's global skills directory via `clawflow install-skill`.
+//
+//go:embed all:agent-skills
+var EmbeddedAgentSkills embed.FS
+
 // EmbeddedDashboard holds the static dashboard assets produced by
 // `pnpm build` under web/dist/. `clawflow web` extracts this into
 // ~/.clawflow/dashboard/ on first launch, then serves the directory via
