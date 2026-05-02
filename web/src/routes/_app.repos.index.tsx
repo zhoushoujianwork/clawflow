@@ -14,7 +14,6 @@ interface Repo {
   enabled: boolean
   auto_approve: boolean
   auto_merge: boolean
-  auto_merge_fix: boolean
 }
 
 interface RunEntry {

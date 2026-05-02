@@ -9,19 +9,17 @@ import (
 )
 
 type repoConfigRequest struct {
-	Repo         string `json:"repo"`
-	Enabled      *bool  `json:"enabled,omitempty"`
-	AutoApprove  *bool  `json:"auto_approve,omitempty"`
-	AutoMerge    *bool  `json:"auto_merge,omitempty"`
-	AutoMergeFix *bool  `json:"auto_merge_fix,omitempty"`
+	Repo        string `json:"repo"`
+	Enabled     *bool  `json:"enabled,omitempty"`
+	AutoApprove *bool  `json:"auto_approve,omitempty"`
+	AutoMerge   *bool  `json:"auto_merge,omitempty"`
 }
 
 type repoConfigResponse struct {
-	Status       string `json:"status"`
-	Enabled      bool   `json:"enabled"`
-	AutoApprove  bool   `json:"auto_approve"`
-	AutoMerge    bool   `json:"auto_merge"`
-	AutoMergeFix bool   `json:"auto_merge_fix"`
+	Status      string `json:"status"`
+	Enabled     bool   `json:"enabled"`
+	AutoApprove bool   `json:"auto_approve"`
+	AutoMerge   bool   `json:"auto_merge"`
 }
 
 // HandleRepoConfig handles POST /api/repo/config — updates repo toggles.
@@ -62,9 +60,6 @@ func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
 	if req.AutoMerge != nil {
 		repo.AutoMerge = *req.AutoMerge
 	}
-	if req.AutoMergeFix != nil {
-		repo.AutoMergeFix = *req.AutoMergeFix
-	}
 
 	cfg.Repos[req.Repo] = repo
 	if err := cfg.Save(); err != nil {
@@ -80,10 +75,9 @@ func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, repoConfigResponse{
-		Status:       "ok",
-		Enabled:      repo.Enabled,
-		AutoApprove:  repo.AutoApprove,
-		AutoMerge:    repo.AutoMerge,
-		AutoMergeFix: repo.AutoMergeFix,
+		Status:      "ok",
+		Enabled:     repo.Enabled,
+		AutoApprove: repo.AutoApprove,
+		AutoMerge:   repo.AutoMerge,
 	})
 }

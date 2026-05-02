@@ -607,13 +607,8 @@ func runPostAutomation(j *runJob, outcome, output, prefix string) {
 			case vcs.CIStatusSuccess, vcs.CIStatusNone:
 				// proceed to merge
 			case vcs.CIStatusFailure:
-				msg := "🤖 CI failed on PR #" + strconv.Itoa(prNum) + ". "
-				if j.repoCfg.AutoMergeFix {
-					msg += "Auto-merge-fix is enabled but not yet implemented. Skipping auto-merge."
-				} else {
-					msg += "Skipping auto-merge."
-				}
-				_ = j.client.PostIssueComment(j.repo, j.sub.Number, msg)
+				_ = j.client.PostIssueComment(j.repo, j.sub.Number,
+					"🤖 CI failed on PR #"+strconv.Itoa(prNum)+". Skipping auto-merge.")
 				fmt.Fprintf(os.Stderr, "%s ✗ CI failed, skipping auto-merge\n", prefix)
 				return
 			default:

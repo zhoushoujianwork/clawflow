@@ -240,7 +240,6 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 func newRepoSetCmd() *cobra.Command {
 	var autoApprove string
 	var autoMerge string
-	var autoMergeFix string
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
@@ -277,16 +276,6 @@ func newRepoSetCmd() *cobra.Command {
 					return fmt.Errorf("--auto-merge must be on or off")
 				}
 			}
-			if autoMergeFix != "" {
-				switch autoMergeFix {
-				case "on", "true", "1":
-					r.AutoMergeFix = true
-				case "off", "false", "0":
-					r.AutoMergeFix = false
-				default:
-					return fmt.Errorf("--auto-merge-fix must be on or off")
-				}
-			}
 			cfg.Repos[ownerRepo] = r
 			if err := cfg.Save(); err != nil {
 				return err
@@ -295,15 +284,13 @@ func newRepoSetCmd() *cobra.Command {
 				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
 			}
 			fmt.Printf("repo %q updated\n", ownerRepo)
-			fmt.Printf("  auto_approve:   %v\n", r.AutoApprove)
-			fmt.Printf("  auto_merge:     %v\n", r.AutoMerge)
-			fmt.Printf("  auto_merge_fix: %v\n", r.AutoMergeFix)
+			fmt.Printf("  auto_approve: %v\n", r.AutoApprove)
+			fmt.Printf("  auto_merge:   %v\n", r.AutoMerge)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&autoApprove, "auto-approve", "", "enable/disable auto-approve: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
-	cmd.Flags().StringVar(&autoMergeFix, "auto-merge-fix", "", "enable/disable auto-merge-fix: on or off")
 	return cmd
 }
 

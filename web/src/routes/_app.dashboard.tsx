@@ -151,6 +151,7 @@ function Dashboard() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [query, setQuery] = useState('')
   const [repoFilter, setRepoFilter] = useState<string>('all')
+  const [visibleCount, setVisibleCount] = useState(20)
 
   useEffect(() => {
     let cancelled = false
@@ -319,6 +320,9 @@ function Dashboard() {
   // scrollable list. When the user explicitly clicks the Running stat
   // card we keep all running rows in `filteredHistory` and skip the
   // dedicated section, so the page doesn't show the same row twice.
+  // Reset pagination when filters change
+  useEffect(() => { setVisibleCount(20) }, [statusFilter, repoFilter, query])
+
   const { filteredRunning, filteredHistory } = useMemo(() => {
     const q = query.trim().toLowerCase()
     const passesFilters = (r: Run) => {
@@ -542,7 +546,17 @@ function Dashboard() {
           {filteredHistory.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-6">No runs match the current filters.</p>
           ) : (
-            filteredHistory.map(r => <Row key={r.path} r={r} repoMap={repoMap} />)
+            <>
+              {filteredHistory.slice(0, visibleCount).map(r => <Row key={r.path} r={r} repoMap={repoMap} />)}
+              {visibleCount < filteredHistory.length && (
+                <button
+                  onClick={() => setVisibleCount(c => c + 20)}
+                  className="w-full py-3 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+                >
+                  Load more ({filteredHistory.length - visibleCount} remaining)
+                </button>
+              )}
+            </>
           )}
         </div>
       )}

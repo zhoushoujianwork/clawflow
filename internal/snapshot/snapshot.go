@@ -61,7 +61,6 @@ type RepoView struct {
 	Enabled    bool   `json:"enabled"`
 	AutoApprove  bool   `json:"auto_approve"`
 	AutoMerge    bool   `json:"auto_merge"`
-	AutoMergeFix bool   `json:"auto_merge_fix"`
 }
 
 // OperatorView is the dashboard-facing view of one loaded operator.
@@ -460,7 +459,6 @@ func WriteRepos(cfg *config.Config) error {
 			Enabled:    r.Enabled,
 			AutoApprove:  r.AutoApprove,
 			AutoMerge:    r.AutoMerge,
-			AutoMergeFix: r.AutoMergeFix,
 		})
 	}
 	return writeJSON(filepath.Join(DataDir(), "repos.json"), views)
