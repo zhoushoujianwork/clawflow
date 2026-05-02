@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
 	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -131,6 +133,16 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("build context: %w", err)
+	}
+
+	// Auto-inject project context: if this repo belongs to a project,
+	// prepend the project's context.md so the AI has cross-repo awareness.
+	if proj, err := project.FindProjectByRepo(repo); err == nil && proj != nil {
+		if projCtx, err := project.ReadContext(proj.Name); err == nil && projCtx != "" {
+			projectHeader := fmt.Sprintf("# Project Context: %s\n\nThis repo is part of the %q project (members: %s).\n\n%s\n\n---\n\n",
+				proj.Name, proj.Name, strings.Join(proj.Repos, ", "), projCtx)
+			systemCtx = projectHeader + systemCtx
+		}
 	}
 	tmpFile, err := os.CreateTemp("", "clawflow-chat-ctx-*.md")
 	if err != nil {
