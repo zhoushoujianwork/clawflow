@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -202,7 +204,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot runs index: %v\n", err)
 	}
-	if err := snapshot.WriteUsageSummary(allEntries); err != nil {
+	if err := snapshot.WriteUsageSummary(allEntries, cfg.Settings.BillingCycleDay); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot usage summary: %v\n", err)
 	}
 	if err := snapshot.WritePending(pending); err != nil {
@@ -504,7 +506,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	fmt.Fprintf(os.Stderr, "%s → claude (model %s, timeout %s)\n", prefix, model, timeout)
 	debugf("%s using model %q", prefix, model)
 	runStart := time.Now()
-	output, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
+	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
 		Repo:        j.repo,
 		Workdir:     workdir,
 		Timeout:     timeout,
@@ -549,6 +551,11 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		fmt.Fprintf(os.Stderr, "%s ⚠ run meta: %v\n", prefix, err)
 	}
 
+	// Post-run automation: auto-approve and auto-merge
+	if rm.Status == "success" {
+		runPostAutomation(j, outcome, output, prefix)
+	}
+
 	switch rm.Status {
 	case "success":
 		fmt.Printf("%s ✓ done\n", prefix)
@@ -563,6 +570,109 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		// can retry once the user has investigated.
 		return false
 	}
+}
+
+var prURLRE = regexp.MustCompile(`(?:pull|merge_requests)/(\d+)`)
+
+// runPostAutomation handles auto-approve and auto-merge after an operator completes.
+func runPostAutomation(j *runJob, outcome, output, prefix string) {
+	// Auto-approve: after evaluate produces agent-evaluated, auto-add ready-for-agent
+	if outcome == "agent-evaluated" && j.repoCfg.AutoApprove {
+		fmt.Fprintf(os.Stderr, "%s → auto-approve: adding ready-for-agent\n", prefix)
+		if err := j.client.AddLabel(j.repo, j.sub.Number, "ready-for-agent"); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ auto-approve failed: %v\n", prefix, err)
+			return
+		}
+		_ = j.client.PostIssueComment(j.repo, j.sub.Number,
+			"🤖 Auto-approved by ClawFlow (`auto_approve` enabled). The `implement` operator will run on the next pass.")
+		fmt.Fprintf(os.Stderr, "%s ✓ auto-approved\n", prefix)
+	}
+
+	// Auto-merge: after implement produces agent-implemented, wait CI then merge
+	if outcome == "agent-implemented" && j.repoCfg.AutoMerge {
+		prNum := extractPRNumber(output)
+		if prNum == 0 {
+			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge: could not extract PR number from output\n", prefix)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "%s → auto-merge: PR #%d\n", prefix, prNum)
+
+		if j.repoCfg.CIRequired {
+			ciTimeout := j.repoCfg.CITimeout
+			if ciTimeout <= 0 {
+				ciTimeout = 600
+			}
+			status := waitForCI(j.client, j.repo, prNum, ciTimeout, prefix)
+			switch status {
+			case vcs.CIStatusSuccess, vcs.CIStatusNone:
+				// proceed to merge
+			case vcs.CIStatusFailure:
+				msg := "🤖 CI failed on PR #" + strconv.Itoa(prNum) + ". "
+				if j.repoCfg.AutoMergeFix {
+					msg += "Auto-merge-fix is enabled but not yet implemented. Skipping auto-merge."
+				} else {
+					msg += "Skipping auto-merge."
+				}
+				_ = j.client.PostIssueComment(j.repo, j.sub.Number, msg)
+				fmt.Fprintf(os.Stderr, "%s ✗ CI failed, skipping auto-merge\n", prefix)
+				return
+			default:
+				_ = j.client.PostIssueComment(j.repo, j.sub.Number,
+					"🤖 CI did not pass within timeout for PR #"+strconv.Itoa(prNum)+". Skipping auto-merge.")
+				fmt.Fprintf(os.Stderr, "%s ✗ CI timeout, skipping auto-merge\n", prefix)
+				return
+			}
+		}
+
+		mergeStatus, err := j.client.GetPRMergeability(j.repo, prNum)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge: mergeability check failed: %v\n", prefix, err)
+			return
+		}
+		if mergeStatus != vcs.MergeStatusClean {
+			_ = j.client.PostIssueComment(j.repo, j.sub.Number,
+				"🤖 PR #"+strconv.Itoa(prNum)+" is not mergeable (status: "+string(mergeStatus)+"). Skipping auto-merge.")
+			fmt.Fprintf(os.Stderr, "%s ✗ PR not mergeable (%s)\n", prefix, mergeStatus)
+			return
+		}
+
+		if err := j.client.MergePR(j.repo, prNum); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge failed: %v\n", prefix, err)
+			_ = j.client.PostIssueComment(j.repo, j.sub.Number,
+				"🤖 Auto-merge failed for PR #"+strconv.Itoa(prNum)+": "+err.Error())
+			return
+		}
+		_ = j.client.PostIssueComment(j.repo, j.sub.Number,
+			"🤖 Auto-merged PR #"+strconv.Itoa(prNum)+" (`auto_merge` enabled).")
+		fmt.Fprintf(os.Stderr, "%s ✓ auto-merged PR #%d\n", prefix, prNum)
+	}
+}
+
+func extractPRNumber(output string) int {
+	m := prURLRE.FindStringSubmatch(output)
+	if len(m) < 2 {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+func waitForCI(client vcs.Client, repo string, prNum int, timeoutSec int, prefix string) vcs.CIStatus {
+	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := client.GetCIStatus(repo, prNum)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ CI status check: %v\n", prefix, err)
+			time.Sleep(30 * time.Second)
+			continue
+		}
+		if status != vcs.CIStatusPending {
+			return status
+		}
+		fmt.Fprintf(os.Stderr, "%s ⏳ CI pending, waiting...\n", prefix)
+		time.Sleep(30 * time.Second)
+	}
+	return vcs.CIStatusPending
 }
 
 // resolveWorkdir picks the cwd for the claude subprocess and returns a

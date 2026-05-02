@@ -78,17 +78,8 @@ type RunOptions struct {
 }
 
 // Run executes one operator against one subject and returns the operator's
-// final stdout text (or the empty string when the run was skipped).
-//
-// Flow:
-//  1. Build prompt and invoke claude; events are teed to opts.EventWriter.
-//  2. On success: post output as a comment + add outcome label (if declared).
-//     On failure: post a failure summary as a comment.
-//
-// Concurrency: the caller (typically cmd/clawflow/commands/run.go) is
-// responsible for ensuring at most one Run is in flight per issue at a
-// time. The runner itself is stateless and does not serialize.
-func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, error) {
+// final stdout text, the outcome label (empty if none), or an error.
+func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
 	prompt := BuildPrompt(op, sub, opts.Repo, opts.Comments)
 	runFunc := opts.RunFunc
 	if runFunc == nil {
@@ -98,41 +89,32 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	if err != nil {
 		msg := fmt.Sprintf("⚠️ Operator `%s` failed:\n\n```\n%v\n```", op.Name, err)
 		_ = v.PostIssueComment(opts.Repo, sub.Number, msg)
-		return output, err
+		return output, "", err
 	}
 
 	trimmed := strings.TrimSpace(output)
 	if trimmed == "" {
-		return trimmed, nil
+		return trimmed, "", nil
 	}
 
-	// Pull any outcome label declared by the operator, then strip the
-	// marker(s) from the comment body so it doesn't leak into the rendered
-	// issue thread.
 	outcome, body := parseOutcome(trimmed)
 
 	if body != "" {
 		if err := v.PostIssueComment(opts.Repo, sub.Number, body); err != nil {
-			return body, fmt.Errorf("post result comment: %w", err)
+			return body, outcome, fmt.Errorf("post result comment: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "  ✓ comment posted (%d chars)\n", len(body))
 	}
 
 	if outcome != "" {
 		if !outcomeAllowed(op, outcome) {
-			// Operator emitted a label it didn't declare. Skip the add
-			// rather than silently mutate state in unexpected ways. Logged
-			// to stderr so the run output surfaces the misuse.
 			fmt.Fprintf(os.Stderr,
 				"  ⚠ operator %q produced disallowed outcome %q (allowed: %v); skipping label add\n",
 				op.Name, outcome, op.Outcomes)
 		} else if err := v.AddLabel(opts.Repo, sub.Number, outcome); err != nil {
-			return body, fmt.Errorf("add outcome label %q: %w", outcome, err)
+			return body, outcome, fmt.Errorf("add outcome label %q: %w", outcome, err)
 		} else {
 			fmt.Fprintf(os.Stderr, "  ✓ outcome label %q added\n", outcome)
-			// Remove trigger labels now that the operator has completed with an outcome.
-			// This prevents trigger labels like "ready-for-agent" from lingering after
-			// the operator finishes.
 			if len(op.Trigger.LabelsRequired) > 0 {
 				if err := v.RemoveLabel(opts.Repo, sub.Number, op.Trigger.LabelsRequired...); err != nil {
 					fmt.Fprintf(os.Stderr, "  ⚠ trigger label cleanup failed: %v\n", err)
@@ -143,7 +125,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		}
 	}
 
-	return body, nil
+	return body, outcome, nil
 }
 
 // outcomeAllowed reports whether `label` is in the operator's declared

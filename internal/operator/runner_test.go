@@ -76,7 +76,7 @@ func TestRun_HappyPath(t *testing.T) {
 	sub := &Subject{Number: 42, Labels: []string{"bug"}}
 	v := newFakeVCS()
 
-	output, err := Run(context.Background(), op, sub, v, RunOptions{
+	output, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo:    "acme/webapp",
 		Workdir: t.TempDir(),
 		Timeout: time.Second,
@@ -121,7 +121,7 @@ func TestRun_ClaudeFails_PostsFailureComment(t *testing.T) {
 	v := newFakeVCS()
 
 	claudeErr := errors.New("model refused")
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
 		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return "", claudeErr
@@ -151,7 +151,7 @@ func TestRun_EmptyClaudeOutput_NoComment(t *testing.T) {
 	sub := &Subject{Number: 1, Labels: []string{"bug"}}
 	v := newFakeVCS()
 
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
 		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return "   \n\t  ", nil
@@ -178,7 +178,7 @@ func TestRun_EventWriterReceivesRunFuncInput(t *testing.T) {
 	var captured io.Writer
 	sink := &bytes.Buffer{}
 
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo:        "r",
 		EventWriter: sink,
 		RunFunc: func(_ context.Context, _, _ string, _ time.Duration, events io.Writer, _ string) (string, error) {
@@ -213,7 +213,7 @@ func TestRun_OutcomeMarker_StripsAndAddsLabel(t *testing.T) {
 	v := newFakeVCS()
 
 	body := "## Eval\n\nRepro: 8/10\n\n<!-- clawflow:outcome=agent-evaluated -->\n"
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
 		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
@@ -243,7 +243,7 @@ func TestRun_OutcomeMarker_NotInWhitelist_SkipsLabel(t *testing.T) {
 	v := newFakeVCS()
 
 	body := "## Eval\n\nstuff\n\n<!-- clawflow:outcome=type:bug -->\n"
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
 		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
@@ -275,7 +275,7 @@ func TestRun_OutcomeMarker_LastWins(t *testing.T) {
 	v := newFakeVCS()
 
 	body := "draft 1\n<!-- clawflow:outcome=agent-skipped -->\nfinal\n<!-- clawflow:outcome=agent-evaluated -->\n"
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
 		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
@@ -302,7 +302,7 @@ func TestRun_OutcomeMarker_NoOutcomesSet_AcceptsAny(t *testing.T) {
 	v := newFakeVCS()
 
 	body := "answer\n<!-- clawflow:outcome=ready-for-agent -->\n"
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
 		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
@@ -326,7 +326,7 @@ func TestRun_OutcomeMarker_None_BackCompat(t *testing.T) {
 	v := newFakeVCS()
 
 	body := "old-style operator output, no marker"
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
 		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil
@@ -357,7 +357,7 @@ func TestRun_OutcomeMarker_RemovesTriggerLabels(t *testing.T) {
 	v := newFakeVCS()
 
 	body := "## ✅ ClawFlow fix complete\n\nPR opened\n\n<!-- clawflow:outcome=agent-implemented -->\n"
-	_, err := Run(context.Background(), op, sub, v, RunOptions{
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
 		Repo: "r",
 		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string) (string, error) {
 			return body, nil

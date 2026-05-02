@@ -31,8 +31,8 @@ func NewStatusCmd() *cobra.Command {
 			for repoName, repoCfg := range repos {
 				fmt.Printf("  %s\n", repoName)
 				flags := []string{}
-				if repoCfg.AutoFix {
-					flags = append(flags, "auto_fix:on")
+				if repoCfg.AutoApprove {
+					flags = append(flags, "auto_approve:on")
 				}
 				if repoCfg.AutoMerge {
 					flags = append(flags, "auto_merge:on")

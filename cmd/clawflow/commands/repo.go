@@ -48,15 +48,15 @@ func newRepoListCmd() *cobra.Command {
 				if r.Enabled {
 					status = "enabled"
 				}
-				autoFix := "off"
-				if r.AutoFix {
-					autoFix = "on"
+				autoApprove := "off"
+				if r.AutoApprove {
+					autoApprove = "on"
 				}
 				autoMerge := "off"
 				if r.AutoMerge {
 					autoMerge = "on"
 				}
-				fmt.Printf("%-40s %-10s %-12s %-10s %-10s %s\n", name, status, r.BaseBranch, autoFix, autoMerge, r.Description)
+				fmt.Printf("%-40s %-10s %-12s %-10s %-10s %s\n", name, status, r.BaseBranch, autoApprove, autoMerge, r.Description)
 			}
 			return nil
 		},
@@ -238,14 +238,15 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 }
 
 func newRepoSetCmd() *cobra.Command {
-	var autoFix string
+	var autoApprove string
 	var autoMerge string
+	var autoMergeFix string
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
 		Short:   "Set configuration flags for a repository",
 		Args:    cobra.ExactArgs(1),
-		Example: "  clawflow repo set owner/repo --auto-fix on\n  clawflow repo set owner/repo --auto-merge on",
+		Example: "  clawflow repo set owner/repo --auto-approve on\n  clawflow repo set owner/repo --auto-merge on",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ownerRepo := args[0]
 			cfg, err := config.Load()
@@ -256,14 +257,14 @@ func newRepoSetCmd() *cobra.Command {
 			if !exists {
 				return fmt.Errorf("repo %q not found", ownerRepo)
 			}
-			if autoFix != "" {
-				switch autoFix {
+			if autoApprove != "" {
+				switch autoApprove {
 				case "on", "true", "1":
-					r.AutoFix = true
+					r.AutoApprove = true
 				case "off", "false", "0":
-					r.AutoFix = false
+					r.AutoApprove = false
 				default:
-					return fmt.Errorf("--auto-fix must be on or off")
+					return fmt.Errorf("--auto-approve must be on or off")
 				}
 			}
 			if autoMerge != "" {
@@ -276,6 +277,16 @@ func newRepoSetCmd() *cobra.Command {
 					return fmt.Errorf("--auto-merge must be on or off")
 				}
 			}
+			if autoMergeFix != "" {
+				switch autoMergeFix {
+				case "on", "true", "1":
+					r.AutoMergeFix = true
+				case "off", "false", "0":
+					r.AutoMergeFix = false
+				default:
+					return fmt.Errorf("--auto-merge-fix must be on or off")
+				}
+			}
 			cfg.Repos[ownerRepo] = r
 			if err := cfg.Save(); err != nil {
 				return err
@@ -284,13 +295,15 @@ func newRepoSetCmd() *cobra.Command {
 				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
 			}
 			fmt.Printf("repo %q updated\n", ownerRepo)
-			fmt.Printf("  auto_fix:   %v\n", r.AutoFix)
-			fmt.Printf("  auto_merge: %v\n", r.AutoMerge)
+			fmt.Printf("  auto_approve:   %v\n", r.AutoApprove)
+			fmt.Printf("  auto_merge:     %v\n", r.AutoMerge)
+			fmt.Printf("  auto_merge_fix: %v\n", r.AutoMergeFix)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&autoFix, "auto-fix", "", "enable/disable auto-fix: on or off")
+	cmd.Flags().StringVar(&autoApprove, "auto-approve", "", "enable/disable auto-approve: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
+	cmd.Flags().StringVar(&autoMergeFix, "auto-merge-fix", "", "enable/disable auto-merge-fix: on or off")
 	return cmd
 }
 

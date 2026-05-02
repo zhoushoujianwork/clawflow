@@ -12,11 +12,29 @@ interface Repo {
   base_branch: string
   local_path?: string
   enabled: boolean
-  auto_fix: boolean
+  auto_approve: boolean
   auto_merge: boolean
+  auto_merge_fix: boolean
+}
+
+interface RunEntry {
+  repo: string
+  started_at: string
 }
 
 const PROVIDER_KEY = 'clawflow.repos.provider'
+
+function timeAgo(iso: string): string {
+  if (!iso) return '—'
+  const t = new Date(iso).getTime()
+  if (!isFinite(t)) return '—'
+  const diff = Math.floor((Date.now() - t) / 1000)
+  if (diff < 0) return 'just now'
+  if (diff < 60) return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}min ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
 
 type RepoSearch = { provider?: string }
 
@@ -32,15 +50,23 @@ function RepoList() {
   const navigate = Route.useNavigate()
 
   const [repos, setRepos] = useState<Repo[]>([])
+  const [runs, setRuns] = useState<RunEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [didApplyDefault, setDidApplyDefault] = useState(false)
 
   useEffect(() => {
-    fetch('/data/repos.json', { cache: 'no-store' })
-      .then(r => (r.ok ? r.json() : []))
-      .then(r => setRepos(Array.isArray(r) ? r : []))
-      .catch(() => setRepos([]))
-      .finally(() => setLoading(false))
+    Promise.all([
+      fetch('/data/repos.json', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : []))
+        .catch(() => []),
+      fetch('/data/runs.json', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : []))
+        .catch(() => []),
+    ]).then(([rp, rn]) => {
+      setRepos(Array.isArray(rp) ? rp : [])
+      setRuns(Array.isArray(rn) ? rn : [])
+      setLoading(false)
+    })
   }, [])
 
   const counts = useMemo(() => {
@@ -78,10 +104,28 @@ function RepoList() {
     navigate({ search: { provider: next } })
   }
 
+  // Build a map of repo → most recent run timestamp
+  const lastActivityMap = useMemo<Record<string, string>>(() => {
+    const m: Record<string, string> = {}
+    for (const r of runs) {
+      if (!r.repo || !r.started_at) continue
+      if (!m[r.repo] || r.started_at > m[r.repo]) {
+        m[r.repo] = r.started_at
+      }
+    }
+    return m
+  }, [runs])
+
   const filtered = useMemo(() => {
-    if (active === 'all') return repos
-    return repos.filter(r => (r.platform || 'github') === active)
-  }, [repos, active])
+    const list = active === 'all' ? [...repos] : repos.filter(r => (r.platform || 'github') === active)
+    list.sort((a, b) => {
+      const ta = lastActivityMap[a.full_name] || ''
+      const tb = lastActivityMap[b.full_name] || ''
+      if (ta !== tb) return tb.localeCompare(ta)
+      return a.full_name.localeCompare(b.full_name)
+    })
+    return list
+  }, [repos, active, lastActivityMap])
 
   const repoMap = useMemo<RepoInfoMap>(() => {
     const m: RepoInfoMap = {}
@@ -152,10 +196,11 @@ function RepoList() {
             <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
               <tr>
                 <th className="text-left px-4 py-2 font-semibold">Repo</th>
+                <th className="text-left px-4 py-2 font-semibold">Last activity</th>
                 <th className="text-left px-4 py-2 font-semibold">Platform</th>
                 <th className="text-left px-4 py-2 font-semibold">Base</th>
                 <th className="text-left px-4 py-2 font-semibold">Enabled</th>
-                <th className="text-left px-4 py-2 font-semibold">Auto-fix</th>
+                <th className="text-left px-4 py-2 font-semibold">Auto-approve</th>
                 <th className="text-left px-4 py-2 font-semibold">Auto-merge</th>
               </tr>
             </thead>
@@ -187,13 +232,16 @@ function RepoList() {
                       </a>
                     </div>
                   </td>
+                  <td className="px-4 py-2 text-muted-foreground text-xs tabular-nums">
+                    {lastActivityMap[r.full_name] ? timeAgo(lastActivityMap[r.full_name]) : '—'}
+                  </td>
                   <td className="px-4 py-2 text-muted-foreground">{r.platform || 'github'}</td>
                   <td className="px-4 py-2 text-muted-foreground font-mono text-xs">{r.base_branch}</td>
                   <td className="px-4 py-2">
                     <Pill on={r.enabled}>{r.enabled ? 'enabled' : 'disabled'}</Pill>
                   </td>
                   <td className="px-4 py-2">
-                    <Pill on={r.auto_fix}>{r.auto_fix ? 'on' : 'off'}</Pill>
+                    <Pill on={r.auto_approve}>{r.auto_approve ? 'on' : 'off'}</Pill>
                   </td>
                   <td className="px-4 py-2">
                     <Pill on={r.auto_merge}>{r.auto_merge ? 'on' : 'off'}</Pill>

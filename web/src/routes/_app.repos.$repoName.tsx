@@ -13,8 +13,9 @@ interface Repo {
   base_branch: string
   local_path?: string
   enabled: boolean
-  auto_fix: boolean
+  auto_approve: boolean
   auto_merge: boolean
+  auto_merge_fix: boolean
 }
 
 interface Run {
@@ -136,7 +137,7 @@ function RepoDetail() {
   }, [fullName, syncing, refreshData])
 
 
-  const toggleConfig = useCallback((field: 'enabled' | 'auto_fix' | 'auto_merge') => {
+  const toggleConfig = useCallback((field: 'enabled' | 'auto_approve' | 'auto_merge' | 'auto_merge_fix') => {
     if (!repo || saving) return
     const newVal = !(repo as any)[field]
     setSaving(true)
@@ -317,10 +318,11 @@ function RepoDetail() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-6">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-6">
             <ToggleCard label="Status" enabled={repo.enabled} onToggle={() => toggleConfig('enabled')} disabled={saving} />
-            <ToggleCard label="Auto-fix" enabled={repo.auto_fix} onToggle={() => toggleConfig('auto_fix')} disabled={saving} />
+            <ToggleCard label="Auto-approve" enabled={repo.auto_approve} onToggle={() => toggleConfig('auto_approve')} disabled={saving} />
             <ToggleCard label="Auto-merge" enabled={repo.auto_merge} onToggle={() => toggleConfig('auto_merge')} disabled={saving} />
+            <ToggleCard label="Merge-fix" enabled={repo.auto_merge_fix} onToggle={() => toggleConfig('auto_merge_fix')} disabled={saving} />
             <div className="bg-card border border-border rounded-xl p-3 min-w-0">
               <div className="text-xs text-muted-foreground">Local path</div>
               {repo.local_path ? (
