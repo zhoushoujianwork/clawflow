@@ -59,8 +59,9 @@ type RepoView struct {
 	BaseBranch string `json:"base_branch"`
 	LocalPath  string `json:"local_path,omitempty"`
 	Enabled    bool   `json:"enabled"`
-	AutoFix    bool   `json:"auto_fix"`
-	AutoMerge  bool   `json:"auto_merge"`
+	AutoApprove  bool   `json:"auto_approve"`
+	AutoMerge    bool   `json:"auto_merge"`
+	AutoMergeFix bool   `json:"auto_merge_fix"`
 }
 
 // OperatorView is the dashboard-facing view of one loaded operator.
@@ -254,23 +255,59 @@ type UsageSummary struct {
 	ByOperator  map[string]UsageAggregate `json:"by_operator"`
 	ByRepo      map[string]UsageAggregate `json:"by_repo"`
 	ByModel     map[string]ModelAggregate `json:"by_model"`
+	Periods     []PeriodSummary           `json:"periods,omitempty"`
+}
+
+// PeriodSummary holds usage aggregated within a single billing period.
+type PeriodSummary struct {
+	PeriodStart string                    `json:"period_start"`
+	PeriodEnd   string                    `json:"period_end"`
+	Totals      UsageAggregate            `json:"totals"`
+	ByOperator  map[string]UsageAggregate `json:"by_operator"`
+	ByRepo      map[string]UsageAggregate `json:"by_repo"`
+	ByModel     map[string]ModelAggregate `json:"by_model"`
+	DailyTrend  []DailyPoint             `json:"daily_trend"`
+}
+
+// DailyPoint is one day's aggregated usage within a billing period.
+type DailyPoint struct {
+	Date         string                    `json:"date"`
+	Runs         int                       `json:"runs"`
+	TotalCostUSD float64                   `json:"total_cost_usd"`
+	InputTokens  int64                     `json:"input_tokens"`
+	OutputTokens int64                     `json:"output_tokens"`
+	ByOperator   map[string]UsageAggregate `json:"by_operator,omitempty"`
+	ByRepo       map[string]UsageAggregate `json:"by_repo,omitempty"`
+	ByModel      map[string]ModelAggregate `json:"by_model,omitempty"`
 }
 
 // WriteUsageSummary aggregates usage across the supplied entries and writes
-// data/usage.json. Entries without usage (run still in flight, or pre-feature
-// data on disk) are simply skipped — the summary reflects what's known.
-func WriteUsageSummary(entries []RunIndexEntry) error {
+// data/usage.json. billingCycleDay (1-28) controls when monthly periods start;
+// 0 defaults to 1 (calendar month). Entries without usage (run still in flight,
+// or pre-feature data on disk) are simply skipped.
+func WriteUsageSummary(entries []RunIndexEntry, billingCycleDay int) error {
+	if billingCycleDay < 1 || billingCycleDay > 28 {
+		billingCycleDay = 1
+	}
+
 	sum := UsageSummary{
 		GeneratedAt: time.Now().UTC(),
 		ByOperator:  map[string]UsageAggregate{},
 		ByRepo:      map[string]UsageAggregate{},
 		ByModel:     map[string]ModelAggregate{},
 	}
+
+	// periodKey → *PeriodSummary for grouping
+	type periodKey struct{ start, end time.Time }
+	periods := map[periodKey]*PeriodSummary{}
+
 	for _, e := range entries {
 		if e.Usage == nil {
 			continue
 		}
 		u := e.Usage
+
+		// All-time aggregation (unchanged)
 		addUsage(&sum.Totals, u)
 		op := sum.ByOperator[e.Operator]
 		addUsage(&op, u)
@@ -287,8 +324,117 @@ func WriteUsageSummary(entries []RunIndexEntry) error {
 			cur.CacheCreationInputTokens += m.CacheCreationInputTokens
 			sum.ByModel[name] = cur
 		}
+
+		// Period aggregation
+		pStart, pEnd := billingPeriod(e.StartedAt, billingCycleDay)
+		pk := periodKey{pStart, pEnd}
+		ps, ok := periods[pk]
+		if !ok {
+			ps = &PeriodSummary{
+				PeriodStart: pStart.Format("2006-01-02"),
+				PeriodEnd:   pEnd.Format("2006-01-02"),
+				ByOperator:  map[string]UsageAggregate{},
+				ByRepo:      map[string]UsageAggregate{},
+				ByModel:     map[string]ModelAggregate{},
+			}
+			periods[pk] = ps
+		}
+		addUsage(&ps.Totals, u)
+		pop := ps.ByOperator[e.Operator]
+		addUsage(&pop, u)
+		ps.ByOperator[e.Operator] = pop
+		prepo := ps.ByRepo[e.Repo]
+		addUsage(&prepo, u)
+		ps.ByRepo[e.Repo] = prepo
+		for name, m := range u.ModelUsage {
+			cur := ps.ByModel[name]
+			cur.CostUSD += m.CostUSD
+			cur.InputTokens += m.InputTokens
+			cur.OutputTokens += m.OutputTokens
+			cur.CacheReadInputTokens += m.CacheReadInputTokens
+			cur.CacheCreationInputTokens += m.CacheCreationInputTokens
+			ps.ByModel[name] = cur
+		}
 	}
+
+	// Build daily trends and collect periods sorted newest-first
+	var sortedPeriods []PeriodSummary
+	for pk, ps := range periods {
+		ps.DailyTrend = buildDailyTrend(entries, pk.start, pk.end)
+		sortedPeriods = append(sortedPeriods, *ps)
+	}
+	sort.Slice(sortedPeriods, func(i, j int) bool {
+		return sortedPeriods[i].PeriodStart > sortedPeriods[j].PeriodStart
+	})
+	sum.Periods = sortedPeriods
+
 	return writeJSON(filepath.Join(DataDir(), "usage.json"), sum)
+}
+
+// billingPeriod returns the start and end dates of the billing period that
+// contains t, given a cycle start day (1-28).
+func billingPeriod(t time.Time, cycleDay int) (start, end time.Time) {
+	y, m, _ := t.UTC().Date()
+	if t.Day() >= cycleDay {
+		start = time.Date(y, m, cycleDay, 0, 0, 0, 0, time.UTC)
+	} else {
+		start = time.Date(y, m-1, cycleDay, 0, 0, 0, 0, time.UTC)
+	}
+	end = time.Date(start.Year(), start.Month()+1, cycleDay-1, 0, 0, 0, 0, time.UTC)
+	return
+}
+
+// buildDailyTrend produces a DailyPoint for every day in [periodStart, periodEnd],
+// filling in zeros for days with no runs. Each point includes per-operator,
+// per-repo, and per-model breakdowns so the frontend can drill down on click.
+func buildDailyTrend(entries []RunIndexEntry, periodStart, periodEnd time.Time) []DailyPoint {
+	dayMap := map[string]*DailyPoint{}
+	for d := periodStart; !d.After(periodEnd); d = d.AddDate(0, 0, 1) {
+		key := d.Format("2006-01-02")
+		dayMap[key] = &DailyPoint{
+			Date:       key,
+			ByOperator: map[string]UsageAggregate{},
+			ByRepo:     map[string]UsageAggregate{},
+			ByModel:    map[string]ModelAggregate{},
+		}
+	}
+	for _, e := range entries {
+		if e.Usage == nil {
+			continue
+		}
+		day := e.StartedAt.UTC().Format("2006-01-02")
+		dp, ok := dayMap[day]
+		if !ok {
+			continue
+		}
+		dp.Runs++
+		dp.TotalCostUSD += e.Usage.TotalCostUSD
+		dp.InputTokens += e.Usage.InputTokens
+		dp.OutputTokens += e.Usage.OutputTokens
+
+		op := dp.ByOperator[e.Operator]
+		addUsage(&op, e.Usage)
+		dp.ByOperator[e.Operator] = op
+
+		repo := dp.ByRepo[e.Repo]
+		addUsage(&repo, e.Usage)
+		dp.ByRepo[e.Repo] = repo
+
+		for name, m := range e.Usage.ModelUsage {
+			cur := dp.ByModel[name]
+			cur.CostUSD += m.CostUSD
+			cur.InputTokens += m.InputTokens
+			cur.OutputTokens += m.OutputTokens
+			cur.CacheReadInputTokens += m.CacheReadInputTokens
+			cur.CacheCreationInputTokens += m.CacheCreationInputTokens
+			dp.ByModel[name] = cur
+		}
+	}
+	out := make([]DailyPoint, 0, len(dayMap))
+	for d := periodStart; !d.After(periodEnd); d = d.AddDate(0, 0, 1) {
+		out = append(out, *dayMap[d.Format("2006-01-02")])
+	}
+	return out
 }
 
 func addUsage(agg *UsageAggregate, u *Usage) {
@@ -312,8 +458,9 @@ func WriteRepos(cfg *config.Config) error {
 			BaseBranch: r.BaseBranch,
 			LocalPath:  r.LocalPath,
 			Enabled:    r.Enabled,
-			AutoFix:    r.AutoFix,
-			AutoMerge:  r.AutoMerge,
+			AutoApprove:  r.AutoApprove,
+			AutoMerge:    r.AutoMerge,
+			AutoMergeFix: r.AutoMergeFix,
 		})
 	}
 	return writeJSON(filepath.Join(DataDir(), "repos.json"), views)

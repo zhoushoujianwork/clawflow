@@ -168,7 +168,7 @@ func TestUsageSummaryAggregation(t *testing.T) {
 		},
 	}
 
-	if err := WriteUsageSummary(entries); err != nil {
+	if err := WriteUsageSummary(entries, 1); err != nil {
 		t.Fatalf("WriteUsageSummary: %v", err)
 	}
 

@@ -35,7 +35,8 @@ type Repo struct {
 	CIRequired        bool              `yaml:"ci_required,omitempty"`
 	CITimeout         int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
-	AutoFix           bool              `yaml:"auto_fix,omitempty"`
+	AutoApprove       bool              `yaml:"auto_approve,omitempty"`
+	AutoMergeFix      bool              `yaml:"auto_merge_fix,omitempty"`
 	// AutoEvaluateAllIssues, when true, makes the discover loop fetch every
 	// open issue on the repo (not just those carrying the trigger label) and
 	// hand each one to local Claude scoring. Low-score runs get filtered by
@@ -69,6 +70,11 @@ type Settings struct {
 	// restart — losing it on restart would silently re-enable runs the
 	// user explicitly stopped.
 	RunPaused bool `yaml:"run_paused,omitempty"`
+
+	// BillingCycleDay is the day of month (1-28) when a billing period
+	// starts. Usage is aggregated into monthly periods aligned to this
+	// day. 0 or unset defaults to 1 (calendar month).
+	BillingCycleDay int `yaml:"billing_cycle_day,omitempty"`
 }
 
 // ResolveGithubCloneDir returns the configured GitHub clone directory, defaulting to ~/github.

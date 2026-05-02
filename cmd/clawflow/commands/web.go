@@ -77,6 +77,18 @@ here — run 'clawflow run' first if you want fresh data.`,
 			if _, err := snapshot.WriteRunsIndex(50); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠ snapshot runs index on startup: %v\n", err)
 			}
+			// Regenerate usage.json with period data on startup so the
+			// dashboard has fresh billing breakdowns without waiting for
+			// the next `clawflow run`.
+			if allEntries, err := snapshot.WriteRunsIndex(0); err == nil {
+				billingDay := 1
+				if cfg, err := config.Load(); err == nil {
+					billingDay = cfg.Settings.BillingCycleDay
+				}
+				if err := snapshot.WriteUsageSummary(allEntries, billingDay); err != nil {
+					fmt.Fprintf(os.Stderr, "⚠ snapshot usage summary on startup: %v\n", err)
+				}
+			}
 
 			// Background reconcile: every minute, sweep for orphaned
 			// running entries (events.jsonl gone quiet for >2 min) and

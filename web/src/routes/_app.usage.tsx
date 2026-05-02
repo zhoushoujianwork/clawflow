@@ -4,10 +4,6 @@ import { Receipt } from 'lucide-react'
 import { type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 
-/**
- * Mirrors snapshot.UsageAggregate / snapshot.ModelAggregate / snapshot.UsageSummary
- * on the Go side. Fields stay snake_case to match writeJSON output.
- */
 interface UsageAggregate {
   runs: number
   total_cost_usd: number
@@ -26,12 +22,34 @@ interface ModelAggregate {
   cache_creation_input_tokens: number
 }
 
+interface DailyPoint {
+  date: string
+  runs: number
+  total_cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  by_operator?: Record<string, UsageAggregate>
+  by_repo?: Record<string, UsageAggregate>
+  by_model?: Record<string, ModelAggregate>
+}
+
+interface PeriodSummary {
+  period_start: string
+  period_end: string
+  totals: UsageAggregate
+  by_operator: Record<string, UsageAggregate>
+  by_repo: Record<string, UsageAggregate>
+  by_model: Record<string, ModelAggregate>
+  daily_trend: DailyPoint[]
+}
+
 interface UsageSummary {
   generated_at: string
   totals: UsageAggregate
   by_operator: Record<string, UsageAggregate>
   by_repo: Record<string, UsageAggregate>
   by_model: Record<string, ModelAggregate>
+  periods?: PeriodSummary[]
 }
 
 interface Repo {
@@ -75,10 +93,20 @@ function fmtNum(n: number): string {
   return n.toLocaleString()
 }
 
+function fmtPeriodLabel(start: string, end: string): string {
+  const s = new Date(start + 'T00:00:00')
+  const e = new Date(end + 'T00:00:00')
+  const fmt = (d: Date) =>
+    d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return `${fmt(s)} – ${fmt(e)}`
+}
+
 function UsagePage() {
   const [summary, setSummary] = useState<UsageSummary | null>(null)
   const [repos, setRepos] = useState<Repo[]>([])
   const [loading, setLoading] = useState(true)
+  const [selectedPeriod, setSelectedPeriod] = useState<string>('current')
+  const [selectedDay, setSelectedDay] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -100,8 +128,6 @@ function UsagePage() {
     }
 
     refetch(true)
-    // Match the dashboard's polling cadence so a fresh `clawflow run` shows
-    // up here without a manual reload.
     const id = setInterval(() => refetch(false), 5000)
     return () => {
       cancelled = true
@@ -122,32 +148,49 @@ function UsagePage() {
     return m
   }, [repos])
 
-  // Sort each breakdown by cost desc so the highest spenders surface first —
-  // that is what a "where did the money go" page is actually for.
+  const periods = summary?.periods ?? []
+
+  const activePeriod = useMemo<PeriodSummary | null>(() => {
+    if (selectedPeriod === 'all' || periods.length === 0) return null
+    if (selectedPeriod === 'current') return periods[0] ?? null
+    return periods.find(p => p.period_start === selectedPeriod) ?? null
+  }, [selectedPeriod, periods])
+
+  // When a day bar is clicked, drill down into that day's breakdowns
+  const activeDay = useMemo<DailyPoint | null>(() => {
+    if (!selectedDay || !activePeriod) return null
+    return activePeriod.daily_trend.find(d => d.date === selectedDay) ?? null
+  }, [selectedDay, activePeriod])
+
+  // Clear day selection when period changes
+  useEffect(() => { setSelectedDay(null) }, [selectedPeriod])
+
+  const viewTotals = activeDay
+    ? { runs: activeDay.runs, total_cost_usd: activeDay.total_cost_usd, input_tokens: activeDay.input_tokens, output_tokens: activeDay.output_tokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, duration_ms: 0 } as UsageAggregate
+    : activePeriod?.totals ?? summary?.totals
+  const viewByOperator = activeDay?.by_operator ?? activePeriod?.by_operator ?? summary?.by_operator ?? {}
+  const viewByRepo = activeDay?.by_repo ?? activePeriod?.by_repo ?? summary?.by_repo ?? {}
+  const viewByModel = activeDay?.by_model ?? activePeriod?.by_model ?? summary?.by_model ?? {}
+
   const operatorRows = useMemo(() => {
-    if (!summary) return []
-    return Object.entries(summary.by_operator)
+    return Object.entries(viewByOperator)
       .map(([name, v]) => ({ name, ...v }))
       .sort((a, b) => b.total_cost_usd - a.total_cost_usd)
-  }, [summary])
+  }, [viewByOperator])
 
   const modelRows = useMemo(() => {
-    if (!summary) return []
-    return Object.entries(summary.by_model)
+    return Object.entries(viewByModel)
       .map(([name, v]) => ({ name, ...v }))
       .sort((a, b) => b.cost_usd - a.cost_usd)
-  }, [summary])
+  }, [viewByModel])
 
   const repoRows = useMemo(() => {
-    if (!summary) return []
-    return Object.entries(summary.by_repo)
+    return Object.entries(viewByRepo)
       .map(([name, v]) => ({ name, ...v }))
       .sort((a, b) => b.total_cost_usd - a.total_cost_usd)
-  }, [summary])
+  }, [viewByRepo])
 
-  const empty =
-    !summary ||
-    summary.totals.runs === 0
+  const empty = !summary || summary.totals.runs === 0
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
@@ -160,6 +203,23 @@ function UsagePage() {
             </p>
           )}
         </div>
+        {!empty && periods.length > 0 && (
+          <select
+            value={selectedPeriod}
+            onChange={e => setSelectedPeriod(e.target.value)}
+            className="text-sm bg-secondary border border-border rounded-lg px-3 py-1.5 text-foreground"
+          >
+            <option value="current">
+              Current period ({fmtPeriodLabel(periods[0].period_start, periods[0].period_end)})
+            </option>
+            {periods.slice(1).map(p => (
+              <option key={p.period_start} value={p.period_start}>
+                {fmtPeriodLabel(p.period_start, p.period_end)}
+              </option>
+            ))}
+            <option value="all">All time</option>
+          </select>
+        )}
       </div>
 
       {loading ? (
@@ -176,20 +236,34 @@ function UsagePage() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-5">
-            <StatCard label="Total runs" value={fmtNum(summary!.totals.runs)} />
-            <StatCard
-              label="Total cost"
-              value={fmtCost(summary!.totals.total_cost_usd)}
-              tone="brand"
-            />
-            <StatCard
-              label="Total tokens (in + out)"
-              value={fmtNum(
-                summary!.totals.input_tokens + summary!.totals.output_tokens,
-              )}
-            />
-          </div>
+          {viewTotals && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-5">
+              <StatCard label="Total runs" value={fmtNum(viewTotals.runs)} />
+              <StatCard
+                label="Total cost"
+                value={fmtCost(viewTotals.total_cost_usd)}
+                tone="brand"
+              />
+              <StatCard
+                label="Total tokens (in + out)"
+                value={fmtNum(viewTotals.input_tokens + viewTotals.output_tokens)}
+              />
+            </div>
+          )}
+
+          {activePeriod && activePeriod.daily_trend.length > 0 && (
+            <Section title={
+              selectedDay
+                ? `Daily cost trend — viewing ${selectedDay}`
+                : 'Daily cost trend'
+            }>
+              <DailyChart
+                data={activePeriod.daily_trend}
+                selectedDay={selectedDay}
+                onSelectDay={(day) => setSelectedDay(day === selectedDay ? null : day)}
+              />
+            </Section>
+          )}
 
           <Section title="By operator">
             <table className="w-full text-sm">
@@ -281,6 +355,102 @@ function UsagePage() {
             </table>
           </Section>
         </>
+      )}
+    </div>
+  )
+}
+
+function DailyChart({ data, selectedDay, onSelectDay }: { data: DailyPoint[]; selectedDay: string | null; onSelectDay: (day: string) => void }) {
+  const maxCost = Math.max(...data.map(d => d.total_cost_usd), 0.0001)
+  const barWidth = Math.max(4, Math.floor(600 / data.length) - 2)
+  const chartWidth = data.length * (barWidth + 2)
+  const chartHeight = 120
+  const [hovered, setHovered] = useState<number | null>(null)
+
+  return (
+    <div className="px-4 py-3">
+      <div className="overflow-x-auto">
+        <svg
+          width={Math.max(chartWidth, 200)}
+          height={chartHeight + 32}
+          className="block cursor-pointer"
+          viewBox={`0 0 ${Math.max(chartWidth, 200)} ${chartHeight + 32}`}
+        >
+          {data.map((d, i) => {
+            const h = (d.total_cost_usd / maxCost) * chartHeight
+            const x = i * (barWidth + 2)
+            const y = chartHeight - h
+            const isHovered = hovered === i
+            const isSelected = selectedDay === d.date
+            let fillClass = 'fill-brand/40'
+            if (isSelected) fillClass = 'fill-brand'
+            else if (isHovered) fillClass = 'fill-brand/70'
+            else if (selectedDay) fillClass = 'fill-brand/20'
+            return (
+              <g
+                key={d.date}
+                onMouseEnter={() => setHovered(i)}
+                onMouseLeave={() => setHovered(null)}
+                onClick={() => onSelectDay(d.date)}
+              >
+                <rect
+                  x={x}
+                  y={y}
+                  width={barWidth}
+                  height={Math.max(h, 1)}
+                  rx={1}
+                  className={fillClass}
+                />
+                {(isHovered || isSelected) && (
+                  <text
+                    x={x + barWidth / 2}
+                    y={y - 4}
+                    textAnchor="middle"
+                    className="fill-foreground text-[10px]"
+                  >
+                    {fmtCost(d.total_cost_usd)}
+                  </text>
+                )}
+              </g>
+            )
+          })}
+          {data.map((d, i) => {
+            if (data.length <= 15 || i % Math.ceil(data.length / 10) === 0 || i === data.length - 1) {
+              const x = i * (barWidth + 2) + barWidth / 2
+              const label = new Date(d.date + 'T00:00:00').getDate().toString()
+              return (
+                <text
+                  key={`label-${d.date}`}
+                  x={x}
+                  y={chartHeight + 14}
+                  textAnchor="middle"
+                  className="fill-muted-foreground text-[10px]"
+                >
+                  {label}
+                </text>
+              )
+            }
+            return null
+          })}
+        </svg>
+      </div>
+      {(hovered !== null || selectedDay) && (
+        <div className="text-xs text-muted-foreground mt-1 tabular-nums">
+          {(() => {
+            const d = selectedDay
+              ? data.find(p => p.date === selectedDay)
+              : hovered !== null ? data[hovered] : null
+            if (!d) return null
+            return (
+              <>
+                {d.date} — {d.runs} run{d.runs !== 1 ? 's' : ''},{' '}
+                {fmtCost(d.total_cost_usd)},{' '}
+                {fmtNum(d.input_tokens + d.output_tokens)} tokens
+                {selectedDay && <span className="ml-2 text-muted-foreground/60">(click again to deselect)</span>}
+              </>
+            )
+          })()}
+        </div>
       )}
     </div>
   )
