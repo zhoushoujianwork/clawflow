@@ -23,6 +23,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/project"
 )
 
 // DashboardRoot is ~/.clawflow/dashboard. The SPA assets live at the root;
@@ -821,6 +822,39 @@ func collectRunEntries(root string) []RunIndexEntry {
 		return nil
 	})
 	return out
+}
+
+// ProjectView is the dashboard-facing view of one project.
+type ProjectView struct {
+	Name      string   `json:"name"`
+	Repos     []string `json:"repos"`
+	Context   string   `json:"context,omitempty"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
+}
+
+// WriteProjects writes data/projects.json from the on-disk project store.
+func WriteProjects() error {
+	projects, err := project.List()
+	if err != nil {
+		// No projects dir yet — write empty array.
+		if os.IsNotExist(err) {
+			return writeJSON(filepath.Join(DataDir(), "projects.json"), []ProjectView{})
+		}
+		return err
+	}
+	views := make([]ProjectView, 0, len(projects))
+	for _, p := range projects {
+		ctx, _ := project.ReadContext(p.Name)
+		views = append(views, ProjectView{
+			Name:      p.Name,
+			Repos:     p.Repos,
+			Context:   ctx,
+			CreatedAt: p.CreatedAt,
+			UpdatedAt: p.UpdatedAt,
+		})
+	}
+	return writeJSON(filepath.Join(DataDir(), "projects.json"), views)
 }
 
 func writeJSON(path string, v any) error {
