@@ -57,6 +57,9 @@ here — run 'clawflow run' first if you want fresh data.`,
 			if cfg, err := config.Load(); err == nil {
 				_ = snapshot.WriteRepos(cfg)
 			}
+			// Refresh data/projects.json so the dashboard picks up any
+			// project changes made via the CLI since the last web start.
+			_ = snapshot.WriteProjects()
 
 			// Reconcile any "running" entries left over from an
 			// interrupted `clawflow run` (Ctrl-C, SIGTERM, machine
