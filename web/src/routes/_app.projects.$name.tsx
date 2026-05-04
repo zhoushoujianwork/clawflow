@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
-import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, MessageSquare, Sparkles, X, Trash2, Plus, Loader2 } from 'lucide-react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
@@ -31,6 +31,23 @@ interface RepoEntry {
   auto_approve?: boolean
   auto_merge?: boolean
   enabled?: boolean
+}
+
+interface PMRun {
+  project: string
+  started_at: string
+  ended_at?: string
+  status: string
+  result?: string
+  error?: string
+  summary?: string
+  usage?: {
+    duration_ms: number
+    num_turns: number
+    total_cost_usd: number
+    input_tokens: number
+    output_tokens: number
+  }
 }
 
 // previewMD returns a one-line preview suitable for a collapsed-card
@@ -82,6 +99,10 @@ function ProjectDetail() {
 
   // Remove repo state
   const [removingRepo, setRemovingRepo] = useState<string | null>(null)
+
+  // PM runs state
+  const [pmRuns, setPmRuns] = useState<PMRun[]>([])
+  const [pmRunsOpen, setPmRunsOpen] = useState(false)
 
   // Generate context state. Used only by the empty-state Initialize
   // button — once context.md exists, all further edits go through
@@ -155,6 +176,7 @@ function ProjectDetail() {
     // render auto_approve / auto_merge badges immediately. The add-repo
     // dropdown re-fetches on open to catch any repos added since.
     fetchAvailableRepos()
+    fetchPMRuns()
     // Check if a generate job is already running for this project so
     // navigating away mid-run and coming back resumes the spinner.
     fetch(`/api/project/generate-context/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
@@ -182,6 +204,13 @@ function ProjectDetail() {
         }
         setRepoMeta(byName)
       })
+  }
+
+  function fetchPMRuns() {
+    fetch(`/api/project/pm-runs?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : []))
+      .catch(() => [])
+      .then(data => setPmRuns(Array.isArray(data) ? data : []))
   }
 
   async function handleDelete() {
@@ -876,6 +905,76 @@ function ProjectDetail() {
               applied (or after a healthy re-run), it disappears and
               the page collapses back to its compact layout. */}
           <HealthCheckReviewPanel healthCheck={healthCheck} />
+
+          {/* PM Activity — collapsible log of recent PM wakes with
+              their PM-RESULT summaries, cost, and duration. */}
+          {pmRuns.length > 0 && (
+            <section className="mb-6">
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setPmRunsOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={pmRunsOpen}
+                >
+                  {pmRunsOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <Activity className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-sm font-semibold text-foreground">PM Activity</span>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {pmRuns.length} run{pmRuns.length !== 1 ? 's' : ''}
+                  </span>
+                  {!pmRunsOpen && pmRuns[0]?.result && (
+                    <span className="text-xs text-muted-foreground truncate ml-1">
+                      · {pmRuns[0].result.replace(/^PM-RESULT:\s*/, '')}
+                    </span>
+                  )}
+                </button>
+                {pmRunsOpen && (
+                  <div className="border-t border-border divide-y divide-border">
+                    {pmRuns.map((run, i) => (
+                      <div key={i} className="px-4 py-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span
+                            className={cn(
+                              'inline-block w-2 h-2 rounded-full shrink-0',
+                              run.status === 'success' ? 'bg-emerald-500' : run.status === 'failed' ? 'bg-red-500' : 'bg-amber-500 animate-pulse',
+                            )}
+                          />
+                          <span className="text-xs text-muted-foreground tabular-nums">
+                            {new Date(run.started_at).toLocaleString()}
+                          </span>
+                          {run.ended_at && (
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              · {Math.round((new Date(run.ended_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s
+                            </span>
+                          )}
+                          {run.usage && (
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              · ${run.usage.total_cost_usd.toFixed(2)}
+                            </span>
+                          )}
+                          {run.usage && (
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              · {run.usage.num_turns} turns
+                            </span>
+                          )}
+                        </div>
+                        {run.result ? (
+                          <p className="text-sm text-foreground">
+                            {run.result.replace(/^PM-RESULT:\s*/, '')}
+                          </p>
+                        ) : run.error ? (
+                          <p className="text-sm text-red-600 font-mono text-xs">{run.error}</p>
+                        ) : (
+                          <p className="text-xs text-muted-foreground italic">no result line</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
         </>
       )}
     </div>

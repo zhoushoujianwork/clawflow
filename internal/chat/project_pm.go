@@ -227,6 +227,13 @@ Check ` + "`~/.clawflow/skills/`" + ` for the authoritative list. Common ones:
 
 ## Output contract
 
+**Attribution:** Every comment you post and every issue body you write MUST
+end with this signature line (on its own line, separated by a blank line):
+
+` + "`— ClawFlow PM · " + name + "`" + `
+
+This makes PM actions traceable in the issue timeline. Do NOT omit it.
+
 End your turn with a one-line summary on its own line:
 
 - ` + "`PM-RESULT: no-action — <reason>`" + ` if you took no actions

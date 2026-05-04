@@ -40,6 +40,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
@@ -117,7 +119,21 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 // and invokes claude -p. The PM's stdout is streamed to the user's
 // stderr by operator.RunClaude; we additionally echo the parsed
 // PM-RESULT line so the run summary reads cleanly.
+//
+// Each wake is persisted to ~/.clawflow/dashboard/data/pm-runs/<project>/<ts>/
+// with meta.json + events.jsonl so the dashboard can show PM activity.
 func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *config.Credentials, timeout time.Duration) error {
+	startedAt := time.Now()
+	runDir := snapshot.PMRunDir(p.Name, startedAt)
+	_ = os.MkdirAll(runDir, 0o755)
+
+	meta := snapshot.PMRunMeta{
+		Project:   p.Name,
+		StartedAt: startedAt.UTC(),
+		Status:    "running",
+	}
+	_ = snapshot.WritePMRunMeta(runDir, meta)
+
 	digests := buildDigests(p, cfg, creds)
 	contextMD, _ := project.ReadContext(p.Name)
 
@@ -125,16 +141,42 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	model := creds.EffectiveOperatorModel()
 	workdir := project.ProjectDir(p.Name)
 
-	output, err := operator.RunClaude(ctx, prompt, workdir, timeout, nil, model)
-	if err != nil {
-		return err
+	eventsFile, _ := os.Create(filepath.Join(runDir, "events.jsonl"))
+
+	output, err := operator.RunClaude(ctx, prompt, workdir, timeout, eventsFile, model)
+	if eventsFile != nil {
+		_ = eventsFile.Close()
 	}
-	if line := extractResult(output); line != "" {
-		fmt.Fprintf(os.Stderr, "[pm] %s: %s\n", p.Name, line)
+
+	endedAt := time.Now().UTC()
+	meta.EndedAt = &endedAt
+
+	resultLine := extractResult(output)
+	meta.Result = resultLine
+	meta.Summary = output
+
+	if err != nil {
+		meta.Status = "failed"
+		meta.Error = err.Error()
 	} else {
+		meta.Status = "success"
+	}
+
+	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil {
+		meta.Usage = u
+	}
+	_ = snapshot.WritePMRunMeta(runDir, meta)
+
+	if _, ierr := snapshot.WritePMRunsIndex(20); ierr != nil {
+		fmt.Fprintf(os.Stderr, "[pm] %s: snapshot pm-runs index: %v\n", p.Name, ierr)
+	}
+
+	if resultLine != "" {
+		fmt.Fprintf(os.Stderr, "[pm] %s: %s\n", p.Name, resultLine)
+	} else if err == nil {
 		fmt.Fprintf(os.Stderr, "[pm] %s: completed (no PM-RESULT line found)\n", p.Name)
 	}
-	return nil
+	return err
 }
 
 // buildDigests collects per-repo open-issue and open-PR snapshots.

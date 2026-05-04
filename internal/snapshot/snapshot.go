@@ -929,6 +929,96 @@ func WriteProjects() error {
 	return writeJSON(filepath.Join(DataDir(), "projects.json"), views)
 }
 
+// --- PM run snapshot ---
+
+// PMRunMeta describes one project-manager wake. Stored alongside operator
+// runs so the dashboard can show PM activity on the project detail page.
+type PMRunMeta struct {
+	Project   string     `json:"project"`
+	StartedAt time.Time  `json:"started_at"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"`
+	Status    string     `json:"status"` // "running", "success", "failed"
+	Result    string     `json:"result,omitempty"`
+	Error     string     `json:"error,omitempty"`
+	Summary   string     `json:"summary,omitempty"`
+	Usage     *Usage     `json:"usage,omitempty"`
+}
+
+// PMRunDir returns the directory for a single PM run.
+func PMRunDir(projectName string, startedAt time.Time) string {
+	return filepath.Join(
+		DataDir(),
+		"pm-runs",
+		projectName,
+		startedAt.UTC().Format("2006-01-02T15-04-05Z"),
+	)
+}
+
+// WritePMRunMeta writes meta.json inside a PM run directory.
+func WritePMRunMeta(runDir string, m PMRunMeta) error {
+	if m.StartedAt.IsZero() {
+		m.StartedAt = time.Now().UTC()
+	}
+	return writeJSON(filepath.Join(runDir, "meta.json"), m)
+}
+
+// PMRunIndexEntry is a flattened row for the dashboard's PM runs list.
+type PMRunIndexEntry struct {
+	PMRunMeta
+	Path string `json:"path"`
+}
+
+// WritePMRunsIndex walks data/pm-runs/* and writes data/pm-runs.json.
+func WritePMRunsIndex(limit int) ([]PMRunIndexEntry, error) {
+	root := filepath.Join(DataDir(), "pm-runs")
+	entries := collectPMRunEntries(root)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].StartedAt.After(entries[j].StartedAt)
+	})
+	indexed := entries
+	if limit > 0 && len(indexed) > limit {
+		indexed = indexed[:limit]
+	}
+	if err := writeJSON(filepath.Join(DataDir(), "pm-runs.json"), indexed); err != nil {
+		return entries, err
+	}
+	return entries, nil
+}
+
+func collectPMRunEntries(root string) []PMRunIndexEntry {
+	out := []PMRunIndexEntry{}
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return out
+	}
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != "meta.json" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var m PMRunMeta
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil
+		}
+		if m.Usage == nil && m.Status != "" && m.Status != "running" {
+			runDir := filepath.Dir(path)
+			if u, err := ExtractUsage(filepath.Join(runDir, "events.jsonl")); err == nil && u != nil {
+				m.Usage = u
+				_ = WritePMRunMeta(runDir, m)
+			}
+		}
+		relDir := strings.TrimPrefix(filepath.Dir(path), DataDir())
+		out = append(out, PMRunIndexEntry{
+			PMRunMeta: m,
+			Path:      "./data" + filepath.ToSlash(relDir) + "/",
+		})
+		return nil
+	})
+	return out
+}
+
 func writeJSON(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
