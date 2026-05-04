@@ -3,18 +3,21 @@ package vcs
 
 // IssueComment represents a single comment on an issue.
 type IssueComment struct {
-	ID     int64
-	Author string
-	Body   string
+	ID        int64  `json:"id"`
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // Issue represents a VCS issue/ticket.
 type Issue struct {
-	Number int
-	Title  string
-	Body   string
-	Labels []string
-	State  string // "open" | "closed"
+	Number    int      `json:"number"`
+	Title     string   `json:"title"`
+	Body      string   `json:"body"`
+	Labels    []string `json:"labels"`
+	State     string   `json:"state"`
+	CreatedAt string   `json:"created_at,omitempty"`
+	UpdatedAt string   `json:"updated_at,omitempty"`
 }
 
 // HasLabel reports whether the issue has a given label.
@@ -29,13 +32,15 @@ func (i Issue) HasLabel(name string) bool {
 
 // PR represents a pull/merge request.
 type PR struct {
-	Number     int
-	Title      string
-	HeadBranch string
-	Body       string
-	State      string // "open" | "closed" | "merged"
-	MergedAt   string // ISO timestamp, empty if not merged
-	URL        string // HTML URL
+	Number     int    `json:"number"`
+	Title      string `json:"title"`
+	HeadBranch string `json:"head_branch"`
+	Body       string `json:"body"`
+	State      string `json:"state"`
+	MergedAt   string `json:"merged_at,omitempty"`
+	URL        string `json:"url,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
 }
 
 // IsMerged reports whether the PR was merged (not just closed).

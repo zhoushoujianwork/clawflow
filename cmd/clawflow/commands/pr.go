@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -96,12 +98,13 @@ func newPRViewCmd() *cobra.Command {
 
 func newPRListCmd() *cobra.Command {
 	var repo, state string
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:     "list",
 		Short:   "List pull requests / merge requests",
 		Aliases: []string{"ls"},
-		Example: "  clawflow pr list --repo owner/repo\n  clawflow pr list --repo owner/repo --state merged",
+		Example: "  clawflow pr list --repo owner/repo\n  clawflow pr list --repo owner/repo --state merged\n  clawflow pr list --repo owner/repo --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, _, err := newVCSClientForRepo(repo)
 			if err != nil {
@@ -117,8 +120,17 @@ func newPRListCmd() *cobra.Command {
 				return err
 			}
 			if len(prs) == 0 {
-				fmt.Printf("no PRs in %s\n", repo)
+				if jsonOutput {
+					fmt.Println("[]")
+				} else {
+					fmt.Printf("no PRs in %s\n", repo)
+				}
 				return nil
+			}
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(prs)
 			}
 			fmt.Printf("%-6s  %-8s  %-30s  %s\n", "NUMBER", "STATE", "BRANCH", "TITLE")
 			for _, p := range prs {
@@ -129,6 +141,7 @@ func newPRListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().StringVar(&state, "state", "open", "PR state: open, closed, merged, all")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output full PRs as JSON")
 	_ = cmd.MarkFlagRequired("repo")
 	return cmd
 }

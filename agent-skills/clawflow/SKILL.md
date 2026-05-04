@@ -89,3 +89,16 @@ Config and repos are stored in `~/.clawflow/config/config.yaml`
 - Use `git` directly for local branch and commit work
 - Run `clawflow <cmd> --help` when unsure about command flags
 - The CLI provides clear error messages to guide you
+
+## Companion skills
+
+### clawflow-patrol
+Automated project health monitoring. Scans repos for stale issues, failed CI,
+anomalous failure patterns, and other conditions that need attention. Runs via
+`/loop` for continuous monitoring:
+
+```
+/loop 30m run project patrol on all enabled repos
+```
+
+Install alongside this skill with `clawflow install-skill`.

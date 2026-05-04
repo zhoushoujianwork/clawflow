@@ -74,10 +74,12 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 		return nil, fmt.Errorf("github list issues: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
-		Number      int    `json:"number"`
-		Title       string `json:"title"`
-		Body        string `json:"body"`
-		PullRequest *struct{} `json:"pull_request"` // present only on PRs
+		Number      int       `json:"number"`
+		Title       string    `json:"title"`
+		Body        string    `json:"body"`
+		CreatedAt   string    `json:"created_at"`
+		UpdatedAt   string    `json:"updated_at"`
+		PullRequest *struct{} `json:"pull_request"`
 		Labels      []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
@@ -90,7 +92,7 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 		if r.PullRequest != nil {
 			continue // GitHub returns PRs in /issues — skip them
 		}
-		issue := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body}
+		issue := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 		for _, l := range r.Labels {
 			issue.Labels = append(issue.Labels, l.Name)
 		}
@@ -113,11 +115,13 @@ func (c *Client) ListOpenPRs(repo string) ([]vcs.PR, error) {
 		return nil, fmt.Errorf("github list PRs: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		Body   string `json:"body"`
-		State  string `json:"state"`
-		Head   struct {
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		State     string `json:"state"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Head      struct {
 			Ref string `json:"ref"`
 		} `json:"head"`
 	}
@@ -126,7 +130,7 @@ func (c *Client) ListOpenPRs(repo string) ([]vcs.PR, error) {
 	}
 	prs := make([]vcs.PR, len(raw))
 	for i, r := range raw {
-		prs[i] = vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, HeadBranch: r.Head.Ref}
+		prs[i] = vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, HeadBranch: r.Head.Ref, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 	}
 	return prs, nil
 }
@@ -236,9 +240,10 @@ func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.Is
 		return nil, fmt.Errorf("github list comments: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
-		ID   int64  `json:"id"`
-		Body string `json:"body"`
-		User struct {
+		ID        int64  `json:"id"`
+		Body      string `json:"body"`
+		CreatedAt string `json:"created_at"`
+		User      struct {
 			Login string `json:"login"`
 		} `json:"user"`
 	}
@@ -247,7 +252,7 @@ func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.Is
 	}
 	out := make([]vcs.IssueComment, len(raw))
 	for i, r := range raw {
-		out[i] = vcs.IssueComment{ID: r.ID, Author: r.User.Login, Body: r.Body}
+		out[i] = vcs.IssueComment{ID: r.ID, Author: r.User.Login, Body: r.Body, CreatedAt: r.CreatedAt}
 	}
 	return out, nil
 }
@@ -353,10 +358,12 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		return nil, fmt.Errorf("github list issues: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
-		Number      int    `json:"number"`
-		Title       string `json:"title"`
-		Body        string `json:"body"`
-		State       string `json:"state"`
+		Number      int       `json:"number"`
+		Title       string    `json:"title"`
+		Body        string    `json:"body"`
+		State       string    `json:"state"`
+		CreatedAt   string    `json:"created_at"`
+		UpdatedAt   string    `json:"updated_at"`
 		PullRequest *struct{} `json:"pull_request"`
 		Labels      []struct {
 			Name string `json:"name"`
@@ -370,7 +377,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		if r.PullRequest != nil {
 			continue
 		}
-		issue := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, State: r.State}
+		issue := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 		for _, l := range r.Labels {
 			issue.Labels = append(issue.Labels, l.Name)
 		}
@@ -409,13 +416,15 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		return nil, fmt.Errorf("github list PRs: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
-		Number   int    `json:"number"`
-		Title    string `json:"title"`
-		Body     string `json:"body"`
-		State    string `json:"state"`
-		HTMLURL  string `json:"html_url"`
-		MergedAt string `json:"merged_at"`
-		Head     struct {
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		State     string `json:"state"`
+		HTMLURL   string `json:"html_url"`
+		MergedAt  string `json:"merged_at"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Head      struct {
 			Ref string `json:"ref"`
 		} `json:"head"`
 	}
@@ -428,7 +437,7 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		if r.MergedAt != "" {
 			s = "merged"
 		}
-		prs[i] = vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: s, HeadBranch: r.Head.Ref, MergedAt: r.MergedAt, URL: r.HTMLURL}
+		prs[i] = vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: s, HeadBranch: r.Head.Ref, MergedAt: r.MergedAt, URL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 	}
 	return prs, nil
 }

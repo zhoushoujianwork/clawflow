@@ -54,12 +54,13 @@ func newIssueCreateCmd() *cobra.Command {
 func newIssueListCmd() *cobra.Command {
 	var repo, state string
 	var labels []string
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:     "list",
 		Short:   "List issues in a repository",
 		Aliases: []string{"ls"},
-		Example: "  clawflow issue list --repo owner/repo\n  clawflow issue list --repo owner/repo --state closed --label agent-evaluated",
+		Example: "  clawflow issue list --repo owner/repo\n  clawflow issue list --repo owner/repo --state closed --label agent-evaluated\n  clawflow issue list --repo owner/repo --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, _, err := newVCSClientForRepo(repo)
 			if err != nil {
@@ -75,8 +76,17 @@ func newIssueListCmd() *cobra.Command {
 				return err
 			}
 			if len(issues) == 0 {
-				fmt.Printf("no issues in %s\n", repo)
+				if jsonOutput {
+					fmt.Println("[]")
+				} else {
+					fmt.Printf("no issues in %s\n", repo)
+				}
 				return nil
+			}
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(issues)
 			}
 			fmt.Printf("%-6s  %-8s  %s\n", "NUMBER", "STATE", "TITLE")
 			for _, i := range issues {
@@ -88,6 +98,7 @@ func newIssueListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().StringVar(&state, "state", "open", "issue state: open, closed, all")
 	cmd.Flags().StringArrayVar(&labels, "label", nil, "filter by label (repeatable)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output full issues as JSON")
 	_ = cmd.MarkFlagRequired("repo")
 	return cmd
 }

@@ -97,17 +97,19 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 	}
 	// GitLab 11.11: labels is []string
 	var raw []struct {
-		IID    int      `json:"iid"`
-		Title  string   `json:"title"`
-		Body   string   `json:"description"`
-		Labels []string `json:"labels"`
+		IID       int      `json:"iid"`
+		Title     string   `json:"title"`
+		Body      string   `json:"description"`
+		Labels    []string `json:"labels"`
+		CreatedAt string   `json:"created_at"`
+		UpdatedAt string   `json:"updated_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
 	issues := make([]vcs.Issue, len(raw))
 	for i, r := range raw {
-		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, Labels: r.Labels}
+		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 	}
 	return issues, nil
 }
@@ -127,13 +129,15 @@ func (c *Client) ListOpenPRs(repo string) ([]vcs.PR, error) {
 		Description  string `json:"description"`
 		State        string `json:"state"`
 		SourceBranch string `json:"source_branch"`
+		CreatedAt    string `json:"created_at"`
+		UpdatedAt    string `json:"updated_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
 	prs := make([]vcs.PR, len(raw))
 	for i, r := range raw {
-		prs[i] = vcs.PR{Number: r.IID, Title: r.Title, Body: r.Description, State: r.State, HeadBranch: r.SourceBranch}
+		prs[i] = vcs.PR{Number: r.IID, Title: r.Title, Body: r.Description, State: r.State, HeadBranch: r.SourceBranch, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 	}
 	return prs, nil
 }
@@ -274,10 +278,11 @@ func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.Is
 		return nil, fmt.Errorf("gitlab list comments: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
-		ID     int64  `json:"id"`
-		Body   string `json:"body"`
-		System bool   `json:"system"`
-		Author struct {
+		ID        int64  `json:"id"`
+		Body      string `json:"body"`
+		System    bool   `json:"system"`
+		CreatedAt string `json:"created_at"`
+		Author    struct {
 			Username string `json:"username"`
 		} `json:"author"`
 	}
@@ -287,7 +292,7 @@ func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.Is
 	var out []vcs.IssueComment
 	for _, r := range raw {
 		if !r.System {
-			out = append(out, vcs.IssueComment{ID: r.ID, Author: r.Author.Username, Body: r.Body})
+			out = append(out, vcs.IssueComment{ID: r.ID, Author: r.Author.Username, Body: r.Body, CreatedAt: r.CreatedAt})
 		}
 	}
 	return out, nil
@@ -344,11 +349,13 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		return nil, fmt.Errorf("gitlab list issues: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
-		IID    int      `json:"iid"`
-		Title  string   `json:"title"`
-		Body   string   `json:"description"`
-		State  string   `json:"state"`
-		Labels []string `json:"labels"`
+		IID       int      `json:"iid"`
+		Title     string   `json:"title"`
+		Body      string   `json:"description"`
+		State     string   `json:"state"`
+		Labels    []string `json:"labels"`
+		CreatedAt string   `json:"created_at"`
+		UpdatedAt string   `json:"updated_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -359,7 +366,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		if s == "opened" {
 			s = "open"
 		}
-		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, State: s, Labels: r.Labels}
+		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, State: s, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 	}
 	return issues, nil
 }
@@ -400,6 +407,8 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		WebURL       string `json:"web_url"`
 		MergedAt     string `json:"merged_at"`
 		SourceBranch string `json:"source_branch"`
+		CreatedAt    string `json:"created_at"`
+		UpdatedAt    string `json:"updated_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -410,7 +419,7 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		if s == "opened" {
 			s = "open"
 		}
-		prs[i] = vcs.PR{Number: r.IID, Title: r.Title, Body: r.Description, State: s, HeadBranch: r.SourceBranch, MergedAt: r.MergedAt, URL: r.WebURL}
+		prs[i] = vcs.PR{Number: r.IID, Title: r.Title, Body: r.Description, State: s, HeadBranch: r.SourceBranch, MergedAt: r.MergedAt, URL: r.WebURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 	}
 	return prs, nil
 }

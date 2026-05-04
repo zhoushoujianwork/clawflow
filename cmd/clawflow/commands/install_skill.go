@@ -110,22 +110,34 @@ func listTargets() error {
 		return err
 	}
 
+	skills, err := discoverAgentSkills()
+	if err != nil {
+		return err
+	}
+
 	fmt.Println("AI Tool          Status      Skills Directory")
 	fmt.Println("───────────────  ──────────  ────────────────────────────────────")
 	for _, t := range knownTargets {
 		dir := filepath.Join(home, t.SkillsDir)
-		skillPath := filepath.Join(dir, "clawflow", "SKILL.md")
-
 		status := "not found"
 		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			status = "detected"
-			if _, err := os.Stat(skillPath); err == nil {
+			installed := 0
+			for _, s := range skills {
+				if _, err := os.Stat(filepath.Join(dir, s, "SKILL.md")); err == nil {
+					installed++
+				}
+			}
+			if installed == len(skills) {
 				status = "installed"
+			} else if installed > 0 {
+				status = fmt.Sprintf("%d/%d skills", installed, len(skills))
+			} else {
+				status = "detected"
 			}
 		}
-
 		fmt.Printf("%-16s %-11s ~/%s\n", t.DisplayName, status, t.SkillsDir)
 	}
+	fmt.Printf("\nAgent skills (%d): %s\n", len(skills), strings.Join(skills, ", "))
 	return nil
 }
 
@@ -135,22 +147,29 @@ func installSkill(targets []skillTarget) error {
 		return err
 	}
 
-	data, err := rootmod.EmbeddedAgentSkills.ReadFile("agent-skills/clawflow/SKILL.md")
+	skills, err := discoverAgentSkills()
 	if err != nil {
-		return fmt.Errorf("read embedded skill: %w", err)
+		return err
 	}
 
-	for _, t := range targets {
-		dest := filepath.Join(home, t.SkillsDir, "clawflow", "SKILL.md")
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			fmt.Printf("  [err] %s: %v\n", t.DisplayName, err)
+	for _, skillName := range skills {
+		data, err := rootmod.EmbeddedAgentSkills.ReadFile(fmt.Sprintf("agent-skills/%s/SKILL.md", skillName))
+		if err != nil {
+			fmt.Printf("  [err] read embedded %s: %v\n", skillName, err)
 			continue
 		}
-		if err := os.WriteFile(dest, data, 0o644); err != nil {
-			fmt.Printf("  [err] %s: %v\n", t.DisplayName, err)
-			continue
+		for _, t := range targets {
+			dest := filepath.Join(home, t.SkillsDir, skillName, "SKILL.md")
+			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				fmt.Printf("  [err] %s/%s: %v\n", t.DisplayName, skillName, err)
+				continue
+			}
+			if err := os.WriteFile(dest, data, 0o644); err != nil {
+				fmt.Printf("  [err] %s/%s: %v\n", t.DisplayName, skillName, err)
+				continue
+			}
+			fmt.Printf("  [ok] %s → ~/%s/%s/SKILL.md\n", t.DisplayName, t.SkillsDir, skillName)
 		}
-		fmt.Printf("  [ok] %s → ~/%s/clawflow/SKILL.md\n", t.DisplayName, t.SkillsDir)
 	}
 	return nil
 }
@@ -161,17 +180,41 @@ func removeSkill(targets []skillTarget) error {
 		return err
 	}
 
-	for _, t := range targets {
-		dir := filepath.Join(home, t.SkillsDir, "clawflow")
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			fmt.Printf("  [skip] %s — not installed\n", t.DisplayName)
-			continue
+	skills, err := discoverAgentSkills()
+	if err != nil {
+		return err
+	}
+
+	for _, skillName := range skills {
+		for _, t := range targets {
+			dir := filepath.Join(home, t.SkillsDir, skillName)
+			if _, err := os.Stat(dir); os.IsNotExist(err) {
+				fmt.Printf("  [skip] %s/%s — not installed\n", t.DisplayName, skillName)
+				continue
+			}
+			if err := os.RemoveAll(dir); err != nil {
+				fmt.Printf("  [err] %s/%s: %v\n", t.DisplayName, skillName, err)
+				continue
+			}
+			fmt.Printf("  [ok] %s/%s — removed\n", t.DisplayName, skillName)
 		}
-		if err := os.RemoveAll(dir); err != nil {
-			fmt.Printf("  [err] %s: %v\n", t.DisplayName, err)
-			continue
-		}
-		fmt.Printf("  [ok] %s — removed\n", t.DisplayName)
 	}
 	return nil
+}
+
+func discoverAgentSkills() ([]string, error) {
+	entries, err := rootmod.EmbeddedAgentSkills.ReadDir("agent-skills")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded agent-skills: %w", err)
+	}
+	var skills []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := rootmod.EmbeddedAgentSkills.ReadFile(fmt.Sprintf("agent-skills/%s/SKILL.md", e.Name())); err == nil {
+			skills = append(skills, e.Name())
+		}
+	}
+	return skills, nil
 }

@@ -155,6 +155,40 @@ See [`CLAUDE.md`](CLAUDE.md) for the frontmatter schema and operator design prin
 
 ---
 
+## Dual-Layer Automation
+
+ClawFlow's full automation model has two layers that communicate through labels:
+
+```
+┌─────────────────────────────────────────────┐
+│           Variable Layer (Brain)             │
+│  Claude Code skill + /loop                   │
+│  Observes → Judges → Outputs labels/issues   │
+└──────────────────┬──────────────────────────┘
+                   │ labels / issues / comments
+                   ▼
+┌─────────────────────────────────────────────┐
+│            Fixed Layer (Hands)               │
+│  clawflow run                                │
+│  Label match → Operator → Outcome label      │
+└─────────────────────────────────────────────┘
+```
+
+- **Fixed layer** (`clawflow run`): deterministic, label-triggered operators. Handles the 80% of work that follows known paths.
+- **Variable layer** (agent skill + `/loop`): intelligent observer that makes judgment calls — stale issues, failure patterns, missing approvals. Handles the 20% that needs context.
+
+The built-in `project-patrol` skill implements the variable layer. Set it up:
+
+```bash
+clawflow install-skill          # installs both clawflow + project-patrol skills
+# In Claude Code:
+/loop 30m run project patrol on all enabled repos
+```
+
+For the full design rationale, see [Dual-Layer Automation](docs/dual-layer-automation.md).
+
+---
+
 ## Directory Layout
 
 ```
@@ -164,6 +198,10 @@ See [`CLAUDE.md`](CLAUDE.md) for the frontmatter schema and operator design prin
 │   ├── config.yaml                   ← repos to monitor
 │   ├── credentials.yaml              ← tokens (0600)
 │   └── install.yaml                  ← install record
+├── projects/                         ← multi-repo project groupings
+│   └── my-project/
+│       ├── project.yaml              ← member repos
+│       └── context.md                ← AI-generated project overview
 └── skills/                           ← user-custom operators (override built-ins by name)
     └── my-operator/
         └── SKILL.md
@@ -173,11 +211,15 @@ clawflow/ (this repo)
 ├── internal/
 │   ├── config/                       ← config parsing + write
 │   ├── operator/                     ← operator loader + runner
+│   ├── project/                      ← project grouping CRUD
 │   └── vcs/                          ← platform-agnostic VCS client (GitHub + GitLab)
-└── skills/                           ← built-in operators (embedded at build time)
-    ├── evaluate-bug/SKILL.md
-    ├── implement/SKILL.md
-    └── reply-comment/SKILL.md
+├── skills/                           ← built-in operators (embedded at build time)
+│   ├── evaluate-bug/SKILL.md
+│   ├── implement/SKILL.md
+│   └── reply-comment/SKILL.md
+└── agent-skills/                     ← agent skills for AI coding tools
+    ├── clawflow/SKILL.md             ← teaches AI tools the clawflow CLI
+    └── clawflow-patrol/SKILL.md      ← autonomous project health monitor
 ```
 
 ---
@@ -226,13 +268,17 @@ If you prefer not to use `clawflow web`, point any static file server (`python3 
 
 ## Claude Code integration (optional)
 
-If you use [Claude Code](https://claude.ai/code), you can install a small skill that teaches Claude about the ClawFlow surface — so mentioning "evaluate this issue", "run the agent on issue 7", or anything about the operator pipeline triggers Claude to reach for `clawflow` commands:
+If you use [Claude Code](https://claude.ai/code), install the agent skills that teach Claude about ClawFlow:
 
 ```bash
-./install.sh --claude-skill
+clawflow install-skill
 ```
 
-This drops a single `SKILL.md` in `~/.claude/skills/clawflow/`. Skip the flag if you just want the CLI.
+This installs two skills to `~/.claude/skills/`:
+- **clawflow** — teaches Claude the CLI commands for issue/PR/label operations
+- **clawflow-patrol** — autonomous health monitor that runs via `/loop` to detect stale issues, failed CI, and anomalies
+
+Skip the flag if you just want the CLI without AI tool integration.
 
 ---
 
