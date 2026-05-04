@@ -42,13 +42,11 @@ type VCS interface {
 	PostIssueComment(repo string, issueNumber int, body string) error
 }
 
-// Concurrency model: the runner does NOT serialize concurrent calls
-// against the same issue. The label-based `agent-running` lock that
-// used to live here was removed when we moved to in-process locking —
-// see cmd/clawflow/commands/run.go for the per-issue mutex that gates
-// dispatch. Callers running operators outside the standard `clawflow
-// run` loop are responsible for not invoking Run twice on the same
-// issue at the same time.
+// Concurrency model: cross-process locking uses local lockfiles
+// (~/.clawflow/locks/) — see snapshot.AcquireLock. The in-process
+// per-issue mutex in cmd/clawflow/commands/run.go gates dispatch within
+// a single process. Callers running operators outside the standard
+// `clawflow run` loop should use snapshot.AcquireLock themselves.
 
 // RunOptions configures a single operator invocation.
 type RunOptions struct {
@@ -74,18 +72,19 @@ type RunOptions struct {
 	// RunFunc executes the claude subprocess. Leave nil to use the real
 	// RunClaude; tests inject a fake that returns canned output without
 	// spawning a process.
-	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, model string) (string, error)
+	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, model string, systemPrompt ...string) (string, error)
 }
 
 // Run executes one operator against one subject and returns the operator's
 // final stdout text, the outcome label (empty if none), or an error.
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
-	prompt := BuildPrompt(op, sub, opts.Repo, opts.Comments)
+	systemPrompt := BuildSystemPrompt(op, opts.Repo)
+	userMessage := BuildUserMessage(sub, opts.Repo, opts.Comments)
 	runFunc := opts.RunFunc
 	if runFunc == nil {
 		runFunc = RunClaude
 	}
-	output, err := runFunc(ctx, prompt, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Model)
+	output, err := runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Model, systemPrompt)
 	if err != nil {
 		msg := fmt.Sprintf("⚠️ Operator `%s` failed:\n\n```\n%v\n```", op.Name, err)
 		_ = v.PostIssueComment(opts.Repo, sub.Number, msg)

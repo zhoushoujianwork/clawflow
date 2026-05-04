@@ -28,7 +28,7 @@ import (
 // --dangerously-skip-permissions is used because operators run unattended;
 // the subprocess cwd is `workdir`, so callers must scope that carefully
 // (tempdir for read-only ops, repo clone for code-writing ops).
-func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, model string) (string, error) {
+func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, model string, systemPrompt ...string) (string, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -62,6 +62,9 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 	}
 	if model != "" {
 		args = append(args, "--model", model)
+	}
+	if len(systemPrompt) > 0 && systemPrompt[0] != "" {
+		args = append(args, "--system-prompt", systemPrompt[0])
 	}
 	args = append(args, prompt)
 	cmd := exec.CommandContext(ctx, claude.Resolve(), args...)

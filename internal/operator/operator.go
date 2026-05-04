@@ -18,11 +18,10 @@ type Operator struct {
 	Name        string
 	Description string
 	Trigger     Trigger
-	// LockLabel is parsed but no longer used by the runtime — concurrency
-	// is now gated by an in-process per-issue mutex (see
-	// cmd/clawflow/commands/run.go). The field is kept for back-compat
-	// with SKILL.md files that still declare `lock_label:`; new operators
-	// can safely omit it. Will be removed once all bundled skills drop it.
+	// LockLabel is parsed from SKILL.md but no longer used by the runtime.
+	// Cross-process locking is handled by local lockfiles in ~/.clawflow/locks/;
+	// the field is kept for back-compat with SKILL.md files that still declare
+	// `lock_label:`. New operators can safely omit it.
 	LockLabel   string
 	// Outcomes is the allow-list of labels the operator may declare via the
 	// `<!-- clawflow:outcome=<label> -->` marker in its stdout. The runner

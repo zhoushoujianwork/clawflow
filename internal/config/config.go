@@ -74,6 +74,11 @@ type Settings struct {
 	// starts. Usage is aggregated into monthly periods aligned to this
 	// day. 0 or unset defaults to 1 (calendar month).
 	BillingCycleDay int `yaml:"billing_cycle_day,omitempty"`
+
+	// MaxConsecutiveFailures is the number of consecutive failed runs on
+	// the same (repo, issue) before the runner auto-adds `agent-failed`
+	// to stop retrying. 0 or unset defaults to 3.
+	MaxConsecutiveFailures int `yaml:"max_consecutive_failures,omitempty"`
 }
 
 // ResolveGithubCloneDir returns the configured GitHub clone directory, defaulting to ~/github.

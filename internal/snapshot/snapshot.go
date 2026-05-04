@@ -607,12 +607,13 @@ const quietWindow = 2 * time.Minute
 // AND at clawflow web startup. Returns the number of runs reconciled so
 // the caller can log it.
 //
-// Does NOT touch any VCS state — the lock label on the corresponding issue
-// is left alone. Removing it would silently re-enable the operator to
-// trigger again, which is a recovery decision the user should make
-// explicitly (by deleting the lock label themselves once they've
-// investigated the stuck run).
+// Also cleans up stale lockfiles (~/.clawflow/locks/) whose owner PID
+// is no longer running, so crashed processes don't permanently block
+// issues from being re-processed.
 func ReconcileStaleRuns(staleAfter time.Duration) (int, error) {
+	if n := CleanStaleLocks(); n > 0 {
+		fmt.Fprintf(os.Stderr, "✓ cleaned %d stale lockfile(s)\n", n)
+	}
 	return reconcileStaleRunsAt(filepath.Join(DataDir(), "runs"), staleAfter)
 }
 
@@ -755,6 +756,59 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 		return nil
 	})
 	return fixed, nil
+}
+
+// ConsecutiveFailures counts how many of the most recent runs for a given
+// (repo, issue) ended with status "failed", stopping at the first non-failed
+// run. This powers the circuit breaker: after N consecutive failures the
+// runner auto-labels the issue `agent-failed` to stop retrying.
+func ConsecutiveFailures(repo string, issueNum int) int {
+	slug := strings.ReplaceAll(repo, "/", "__")
+	issueDir := filepath.Join(DataDir(), "runs", slug, fmt.Sprintf("issue-%d", issueNum))
+	if _, err := os.Stat(issueDir); os.IsNotExist(err) {
+		return 0
+	}
+
+	// Each run is a subdirectory named by timestamp. Walk them, collect
+	// meta.json, sort newest-first, then count leading failures.
+	type runEntry struct {
+		startedAt time.Time
+		status    string
+	}
+	var runs []runEntry
+	entries, err := os.ReadDir(issueDir)
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		metaPath := filepath.Join(issueDir, e.Name(), "meta.json")
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue
+		}
+		var m RunMeta
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		if m.Status == "running" {
+			continue
+		}
+		runs = append(runs, runEntry{startedAt: m.StartedAt, status: m.Status})
+	}
+	sort.Slice(runs, func(i, j int) bool {
+		return runs[i].startedAt.After(runs[j].startedAt)
+	})
+	count := 0
+	for _, r := range runs {
+		if r.status != "failed" {
+			break
+		}
+		count++
+	}
+	return count
 }
 
 // WriteRunsIndex walks data/runs/* and writes data/runs.json containing the

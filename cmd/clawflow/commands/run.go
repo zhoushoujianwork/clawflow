@@ -158,10 +158,10 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	//     ad-hoc "rerun for issue 7" doesn't accidentally fire across the
 	//     whole org.
 	//
-	// Phase 1 (sequential): scan every repo, sweep stale agent-running
-	// labels (legacy of the abandoned label-lock model), build the
-	// pending snapshot, and queue the (issue × first-matching-operator)
-	// pairs that are eligible to run.
+	// Phase 1 (sequential): scan every repo, build the pending snapshot,
+	// and queue the (issue × first-matching-operator) pairs that are
+	// eligible to run. Issues locked by another process (local lockfile)
+	// are skipped at queue time.
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
 	for fullName, repoCfg := range allRepos {
@@ -175,11 +175,11 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	}
 
 	// Phase 2 (parallel): dispatch matched jobs across `workers` goroutines.
-	// Two in-process locks gate concurrency:
-	//   - per-issue mutex ensures at most one operator runs against a
-	//     given (repo, issue) at any moment — replaces the old
-	//     `agent-running` label.
-	//   - per-repo mutex serializes `implement` against the shared local
+	// Three concurrency gates:
+	//   - local lockfile (~/.clawflow/locks/): cross-process lock, visible
+	//     to other clawflow run processes via PID-liveness check
+	//   - per-issue mutex: within this process, at most one operator per issue
+	//   - per-repo mutex: serializes `implement` against the shared local
 	//     git clone (worktree add + fetch are not safe in parallel).
 	//     Read-only operators (classify, evaluate-*, reply-comment) skip
 	//     the per-repo lock and run freely.
@@ -279,24 +279,10 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 	debugf("[%s] %d open issue(s) fetched (executeHere=%v onlyIssue=%d)",
 		fullName, len(issues), executeHere, onlyIssue)
 
-	// Sweep stale `agent-running` labels. Older clawflow versions used
-	// `agent-running` as the issue-side concurrency lock; the new
-	// in-process mutex obsoletes it. Any issue still carrying it can
-	// only have arrived there via a crashed run from an older binary,
-	// so removing it is unconditionally safe and keeps the issue from
-	// being silently excluded by old SKILL.md `labels_excluded` lists
-	// users may still have in ~/.clawflow/skills.
-	for i := range issues {
-		if !slices.Contains(issues[i].Labels, "agent-running") {
-			continue
-		}
-		if err := client.RemoveLabel(fullName, issues[i].Number, "agent-running"); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s#%d] ⚠ sweep stale agent-running: %v\n", fullName, issues[i].Number, err)
-			continue
-		}
-		issues[i].Labels = slices.DeleteFunc(issues[i].Labels, func(l string) bool { return l == "agent-running" })
-		fmt.Fprintf(os.Stderr, "[%s#%d] ✓ swept stale agent-running label\n", fullName, issues[i].Number)
-	}
+	// NOTE: cross-process locking now uses local lockfiles (~/.clawflow/locks/)
+	// instead of the `agent-running` VCS label. Stale lockfiles from crashed
+	// processes are cleaned up by CleanStaleLocks (called in ReconcileStaleRuns)
+	// and by AcquireLock's PID-liveness check.
 
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
@@ -351,6 +337,17 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 			continue
 		}
 		if firstMatch != nil {
+			// Pre-flight: skip deterministic failures early. implement
+			// needs a local clone but the repo may not have local_path set.
+			if firstMatch.Name == "implement" && repoCfg.LocalPath == "" {
+				debugf("  · skipping %s on #%d: implement requires local_path but it's empty", fullName, iss.Number)
+				continue
+			}
+			// Skip issues already locked by another process.
+			if snapshot.IsLocked(fullName, iss.Number) {
+				debugf("  · skipping #%d: locked by another process", iss.Number)
+				continue
+			}
 			jobs = append(jobs, &runJob{op: firstMatch, sub: sub, repo: fullName, repoCfg: repoCfg, client: client})
 		}
 	}
@@ -478,6 +475,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
 	fmt.Printf("%s → start\n", prefix)
 
+	// Cross-process lock: acquire a local lockfile so other clawflow run
+	// processes (cron, web scheduler) skip this issue. If the lock is
+	// already held by a live process, bail out.
+	if err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "%s ⚠ lock failed (another process owns it): %v\n", prefix, err)
+		return false
+	}
+	defer snapshot.ReleaseLock(j.repo, j.sub.Number)
+
 	// Persist per-run events.jsonl + meta.json under the dashboard
 	// data dir so `clawflow web` can replay this run later. The dirs
 	// and the placeholder meta are created BEFORE the workdir setup so
@@ -510,6 +516,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		now := time.Now().UTC()
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
+		_ = j.client.PostIssueComment(j.repo, j.sub.Number,
+			fmt.Sprintf("⚠️ Operator `%s` failed (workdir setup):\n\n```\n%v\n```", j.op.Name, err))
+		checkCircuitBreaker(j, prefix)
 		return false
 	}
 	fmt.Fprintf(os.Stderr, "%s ✓ workdir ready: %s\n", prefix, workdir)
@@ -581,18 +590,40 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		fmt.Printf("%s ✓ done\n", prefix)
 		return true
 	case "skipped":
-		// Operator ran to completion but produced no output (e.g. claude
-		// returned empty stdout, or the run was a no-op). Counts as
-		// "fired" for pending-dedup purposes — it shouldn't requeue.
 		return true
 	default:
-		// "failed" — keep the pending entry so the next clawflow run
-		// can retry once the user has investigated.
+		checkCircuitBreaker(j, prefix)
 		return false
 	}
 }
 
 var prURLRE = regexp.MustCompile(`(?:pull|merge_requests)/(\d+)`)
+
+// checkCircuitBreaker counts consecutive failures for this (repo, issue)
+// and auto-adds `agent-failed` when the threshold is exceeded, preventing
+// infinite retry loops on permanently broken issues.
+func checkCircuitBreaker(j *runJob, prefix string) {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	maxFails := cfg.Settings.MaxConsecutiveFailures
+	if maxFails <= 0 {
+		maxFails = 3
+	}
+	count := snapshot.ConsecutiveFailures(j.repo, j.sub.Number)
+	if count < maxFails {
+		fmt.Fprintf(os.Stderr, "%s ⚠ failure %d/%d (circuit breaker at %d)\n", prefix, count, maxFails, maxFails)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s ✗ circuit breaker: %d consecutive failures, adding agent-failed\n", prefix, count)
+	if err := j.client.AddLabel(j.repo, j.sub.Number, "agent-failed"); err != nil {
+		fmt.Fprintf(os.Stderr, "%s ⚠ circuit breaker label failed: %v\n", prefix, err)
+		return
+	}
+	_ = j.client.PostIssueComment(j.repo, j.sub.Number,
+		fmt.Sprintf("🛑 Circuit breaker: %d consecutive failures on this issue. Adding `agent-failed` to stop automatic retries.\n\nRemove the `agent-failed` label to re-enable processing after investigating the root cause.", count))
+}
 
 // runPostAutomation handles auto-approve and auto-merge after an operator completes.
 func runPostAutomation(j *runJob, outcome, output, prefix string) {
