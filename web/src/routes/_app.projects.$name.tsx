@@ -101,18 +101,24 @@ function ProjectDetail() {
   const [testingOpen, setTestingOpen] = useState(false)
 
   function fetchProject() {
-    fetch('/data/projects.json', { cache: 'no-store' })
-      .then(r => (r.ok ? r.json() : []))
-      .catch(() => [])
+    // Live read from /api/project/get — bypasses the
+    // /data/projects.json snapshot so out-of-band file edits
+    // (most common path: `clawflow project chat` writing back an
+    // updated context.md or testing.md) show up on the next page
+    // refresh without waiting for a fresh `clawflow run` snapshot.
+    fetch(`/api/project/get?name=${encodeURIComponent(name)}`, { cache: 'no-store' })
+      .then(async r => {
+        if (!r.ok) return null
+        return r.json().catch(() => null) as Promise<Project | null>
+      })
+      .catch(() => null)
       .then(data => {
-        const list: Project[] = Array.isArray(data) ? data : []
-        const match = list.find(p => p.name === name) || null
-        setProject(match)
+        setProject(data)
         // Seed the cooldown input from the persisted value. Only do this
         // on initial load (or when the field comes back empty) so a user
         // mid-edit doesn't have their typing wiped by a refetch.
-        if (match?.automation && (cooldownDraft === '30' || !cooldownDraft)) {
-          setCooldownDraft(String(match.automation.cooldown_minutes ?? 30))
+        if (data?.automation && (cooldownDraft === '30' || !cooldownDraft)) {
+          setCooldownDraft(String(data.automation.cooldown_minutes ?? 30))
         }
         setLoading(false)
       })

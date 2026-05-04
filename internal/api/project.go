@@ -212,6 +212,54 @@ func HandleProjectGenerateContextStatus(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, job)
 }
 
+// HandleProjectGet returns the LIVE view of a single project by
+// reading project.yaml + context.md + testing.md fresh from disk.
+//
+// This exists alongside the static /data/projects.json snapshot
+// because the snapshot is only refreshed on `clawflow run` and on
+// HTTP mutations — out-of-band file edits (the most common one is
+// `clawflow project chat` writing back an updated context.md or
+// testing.md) don't touch the snapshot, so the dashboard would
+// otherwise show stale content until the next run.
+//
+// The dashboard's project detail page polls this endpoint instead
+// of /data/projects.json so a browser refresh always reflects the
+// latest on-disk state, regardless of how the file was edited.
+// The project list page can keep using the snapshot — listing many
+// projects is read-heavier and freshness matters less there.
+func HandleProjectGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		writeJSON(w, 400, map[string]string{"error": "name is required"})
+		return
+	}
+	p, err := project.Get(name)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+		return
+	}
+	ctx, _ := project.ReadContext(name)
+	testing, _ := project.ReadTesting(name)
+	view := snapshot.ProjectView{
+		Name:    p.Name,
+		Repos:   p.Repos,
+		Context: ctx,
+		Testing: testing,
+		Automation: snapshot.ProjectAutomationView{
+			Enabled:         p.Automation.Enabled,
+			CooldownMinutes: p.Automation.CooldownMinutes,
+			LastWokenAt:     p.Automation.LastWokenAt,
+		},
+		CreatedAt: p.CreatedAt,
+		UpdatedAt: p.UpdatedAt,
+	}
+	writeJSON(w, 200, view)
+}
+
 type projectAutomationRequest struct {
 	Project         string `json:"project"`
 	Enabled         bool   `json:"enabled"`
