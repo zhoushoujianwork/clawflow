@@ -26,6 +26,9 @@ interface ProjectAutomation {
 
 interface RepoEntry {
   full_name: string
+  auto_approve?: boolean
+  auto_merge?: boolean
+  enabled?: boolean
 }
 
 export const Route = createFileRoute('/_app/projects/$name')({
@@ -50,6 +53,12 @@ function ProjectDetail() {
   const [repoSearch, setRepoSearch] = useState('')
   const [addingRepo, setAddingRepo] = useState<string | null>(null)
   const [repoError, setRepoError] = useState<string | null>(null)
+
+  // Per-repo auto_approve / auto_merge state, keyed by full_name. Populated
+  // from /data/repos.json on mount so the member-repo list can render the
+  // automation rollup badges without waiting for the add-repo dropdown to
+  // open. Empty until the fetch resolves.
+  const [repoMeta, setRepoMeta] = useState<Record<string, RepoEntry>>({})
 
   // Remove repo state
   const [removingRepo, setRemovingRepo] = useState<string | null>(null)
@@ -109,6 +118,10 @@ function ProjectDetail() {
 
   useEffect(() => {
     fetchProject()
+    // Always fetch repo metadata on mount so the member-repo list can
+    // render auto_approve / auto_merge badges immediately. The add-repo
+    // dropdown re-fetches on open to catch any repos added since.
+    fetchAvailableRepos()
     // Check if a generate job is already running for this project so
     // navigating away mid-run and coming back resumes the spinner.
     fetch(`/api/project/generate-context/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
@@ -130,6 +143,11 @@ function ProjectDetail() {
       .then(data => {
         const repos: RepoEntry[] = Array.isArray(data) ? data : []
         setAvailableRepos(repos.map(r => r.full_name).filter(Boolean))
+        const byName: Record<string, RepoEntry> = {}
+        for (const r of repos) {
+          if (r.full_name) byName[r.full_name] = r
+        }
+        setRepoMeta(byName)
       })
   }
 
@@ -548,35 +566,94 @@ function ProjectDetail() {
                 </p>
               </div>
             ) : (
-              <div className="bg-card border border-border rounded-xl overflow-hidden divide-y divide-border">
-                {project.repos.map(repo => (
-                  <div
-                    key={repo}
-                    className="flex items-center justify-between px-4 py-2 hover:bg-secondary/20 group"
-                  >
-                    <Link
-                      to="/repos/$repoName"
-                      params={{ repoName: encodeURIComponent(repo) }}
-                      className="font-mono text-sm text-foreground hover:underline"
-                    >
-                      {repo}
-                    </Link>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveRepo(repo)}
-                      disabled={removingRepo === repo}
-                      className="text-muted-foreground hover:text-red-600 transition-colors disabled:opacity-50"
-                      title="Remove from project"
-                    >
-                      {removingRepo === repo ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <>
+                {/* Automation rollup — surface auto_approve / auto_merge
+                    coverage across the project so the user can see at a
+                    glance which repos are fully autopiloted vs which still
+                    need manual approval/merge. Repo-level config; we only
+                    read it here, not edit. */}
+                {(() => {
+                  const meta = project.repos.map(r => repoMeta[r] ?? null)
+                  const known = meta.filter(m => m !== null) as RepoEntry[]
+                  const approveOn = known.filter(m => m.auto_approve).length
+                  const mergeOn = known.filter(m => m.auto_merge).length
+                  const pmOn = project.automation?.enabled
+                  const allOn = pmOn && approveOn === project.repos.length && mergeOn === project.repos.length
+                  return (
+                    <div className="text-xs text-muted-foreground mb-2 flex items-center gap-3 flex-wrap">
+                      <span className="tabular-nums">
+                        auto-approve: <span className="font-medium text-foreground">{approveOn}/{project.repos.length}</span>
+                      </span>
+                      <span className="tabular-nums">
+                        auto-merge: <span className="font-medium text-foreground">{mergeOn}/{project.repos.length}</span>
+                      </span>
+                      {allOn ? (
+                        <span className="text-emerald-700 dark:text-emerald-400 font-medium">· fully autopiloted</span>
+                      ) : pmOn ? (
+                        <span>· PM scheduling on; some repos need manual approve/merge</span>
                       ) : (
-                        <X className="w-3.5 h-3.5" />
+                        <span>· PM scheduling off — toggle Automation above</span>
                       )}
-                    </button>
-                  </div>
-                ))}
-              </div>
+                    </div>
+                  )
+                })()}
+                <div className="bg-card border border-border rounded-xl overflow-hidden divide-y divide-border">
+                  {project.repos.map(repo => {
+                    const m = repoMeta[repo]
+                    return (
+                      <div
+                        key={repo}
+                        className="flex items-center justify-between px-4 py-2 hover:bg-secondary/20 group gap-3"
+                      >
+                        <Link
+                          to="/repos/$repoName"
+                          params={{ repoName: encodeURIComponent(repo) }}
+                          className="font-mono text-sm text-foreground hover:underline truncate"
+                        >
+                          {repo}
+                        </Link>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span
+                            className={cn(
+                              'px-1.5 py-0.5 rounded text-[10px] font-medium tabular-nums',
+                              m?.auto_approve
+                                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
+                                : 'bg-secondary text-muted-foreground',
+                            )}
+                            title={m?.auto_approve ? 'auto_approve enabled — agent-evaluated → ready-for-agent automatically' : 'auto_approve off — needs manual ready-for-agent label'}
+                          >
+                            approve {m?.auto_approve ? 'on' : 'off'}
+                          </span>
+                          <span
+                            className={cn(
+                              'px-1.5 py-0.5 rounded text-[10px] font-medium tabular-nums',
+                              m?.auto_merge
+                                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
+                                : 'bg-secondary text-muted-foreground',
+                            )}
+                            title={m?.auto_merge ? 'auto_merge enabled — agent-implemented PRs auto-merged after CI' : 'auto_merge off — PR needs manual merge'}
+                          >
+                            merge {m?.auto_merge ? 'on' : 'off'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveRepo(repo)}
+                            disabled={removingRepo === repo}
+                            className="text-muted-foreground hover:text-red-600 transition-colors disabled:opacity-50 ml-1"
+                            title="Remove from project"
+                          >
+                            {removingRepo === repo ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <X className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
             )}
           </section>
         </>
