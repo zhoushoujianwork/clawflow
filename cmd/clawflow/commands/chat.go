@@ -98,10 +98,15 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	// through `clawflow run` (the implement operator) on a labeled
 	// issue, not from this REPL. Read/Bash/Grep/Glob/etc. stay
 	// allowed so claude can still inspect the repo to inform its
-	// analysis.
+	// analysis. --dangerously-skip-permissions removes the per-Bash
+	// confirmation prompt: the chat is local-only on the user's own
+	// machine, against repos they explicitly added to clawflow, and
+	// the user can Esc out anytime — confirming each `git log` /
+	// `cat` / `grep` is just noise.
 	args := []string{
 		"--model", model,
 		"--name", name,
+		"--dangerously-skip-permissions",
 		"--disallowedTools", "Edit,Write,NotebookEdit",
 	}
 	// When the user has explicitly configured an API key in clawflow's

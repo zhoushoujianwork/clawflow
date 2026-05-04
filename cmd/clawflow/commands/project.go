@@ -403,10 +403,17 @@ func runProjectChat(name, model string) error {
 	// code in member repos when they ask for it. Repo chat keeps
 	// its read-only stance because that surface is meant for analysis
 	// only; project chat is meant for orchestration.
+	//
+	// --dangerously-skip-permissions removes per-Bash confirmation
+	// prompts. The chat is local-only on the user's own machine,
+	// against repos they explicitly added to clawflow; auto-mode
+	// here is the whole point of project chat. User retains Esc /
+	// Ctrl-C to abort if claude does something unexpected.
 	args := []string{
 		"--model", model,
 		"--name", sessionName,
 		"--session-id", sessionID,
+		"--dangerously-skip-permissions",
 		"--append-system-prompt", systemCtx,
 	}
 
