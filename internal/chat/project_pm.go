@@ -39,15 +39,25 @@ type PMPRRow struct {
 // BuildProjectPMContext builds the system prompt for a non-interactive
 // project-manager wake (`clawflow run`'s post-pass step).
 //
-// The PM is the project's TRIAGE MANAGER. It can:
-//   - file new issues to schedule work
-//   - comment on / label / close existing issues to keep the backlog
-//     coherent (dedupe, retire stale, push evaluated issues forward
-//     by adding ready-for-agent, fix missing trigger labels)
+// The PM is the project's TRIAGE MANAGER. It works at the EDGES of
+// the operator pipeline — upstream (issue genesis, missing trigger
+// labels) and downstream (close stale / duplicate / already-fixed)
+// — and stays OUT of the middle (evaluate → implement → merge),
+// which is fully owned by operators + repo-level auto_approve /
+// auto_merge.
 //
-// The PM cannot push code, merge PRs, edit files, or change repo
-// settings — those mutations stay with the implement operator and
-// the human.
+// What PM does:
+//   - file new issues from observations
+//   - add missing trigger labels (bug/feature) to issues users opened
+//     without one — otherwise operators never pick them up
+//   - close stale, duplicate, or already-fixed issues
+//   - comment to explain decisions or respond to human discussion
+//
+// What PM does NOT do:
+//   - touch ready-for-agent (auto_approve's domain)
+//   - touch operator outcome labels (agent-evaluated, agent-implemented,
+//     agent-running, agent-skipped, agent-failed)
+//   - push code, merge PRs, edit files, modify repo settings
 //
 // Closed loop:
 //
@@ -142,14 +152,6 @@ Triage the backlog so it stays actionable. Common moves:
 - Don't relabel issues that already have a trigger label or are mid-
   flight (see safety rails below).
 
-**Push evaluated issues forward** when the project is ready to commit:
-- An ` + "`agent-evaluated`" + ` issue that's been reviewed (look at the
-  comments and any human ack) → add ` + "`ready-for-agent`" + ` so
-  ` + "`implement`" + ` runs on the next pass.
-- This is the same effect as ` + "`auto_approve`" + ` at the repo level,
-  but you can apply judgment: don't push forward an evaluated issue
-  whose evaluation comment raised real concerns.
-
 **Retire stale work**:
 - Close issues that are duplicates of others (` + "`Closing as dup of #N`" + `).
 - Close issues whose work was completed by a merged PR not linked back.
@@ -183,22 +185,30 @@ You CANNOT — these are humans' or the implement operator's job:
 
 ## Safety rails — non-negotiable
 
-1. **Skip ` + "`agent-running`" + ` issues.** If you see this label on an
-   issue, an operator is mid-flight on it. Do NOT add/remove labels,
-   comment, or close — your change will race the operator. Treat
-   the issue as read-only this wake.
+1. **Operator-managed labels are off-limits.** Never add, remove, or
+   touch any of these:
+   - ` + "`ready-for-agent`" + ` — owned by repo ` + "`auto_approve`" + ` (or the
+     human reviewing an evaluation). PM does not push evaluated
+     issues into the implement queue, period. If a project wants
+     auto-promote, the user enables ` + "`auto_approve`" + ` on the repo.
+   - ` + "`agent-evaluated`" + `, ` + "`agent-implemented`" + `, ` + "`agent-running`" + `,
+     ` + "`agent-skipped`" + `, ` + "`agent-failed`" + ` — operator outcome /
+     lock labels. Reading is fine; writing is not.
 
-2. **Skip your own already-handled issues.** Look for prior
-   ` + "`pm-touched`" + ` activity (your past comments or label changes).
-   If you already pushed an issue forward last wake and nothing
-   material changed, leave it alone. Acting twice on the same
-   thing is the noise pattern that erodes user trust.
+2. **Skip ` + "`agent-running`" + ` issues entirely.** An operator is
+   mid-flight — do NOT comment, close, or touch any label.
+   Your change will race the operator. Read-only this wake.
 
-3. **One concern per action.** Don't bundle 5 label changes into
+3. **Skip your own already-handled issues.** If you commented on or
+   labeled an issue in a recent wake and nothing material has changed
+   since (no new human comment, no new operator outcome), leave it
+   alone. Acting twice on the same thing is the noise pattern.
+
+4. **One concern per action.** Don't bundle 5 label changes into
    one comment-less batch. If a triage decision needs explanation,
    leave a brief comment alongside the label change.
 
-4. **Don't undo human decisions.** If a human closed an issue or
+5. **Don't undo human decisions.** If a human closed an issue or
    removed a label, don't reopen / re-add. Trust their judgment
    even if it disagrees with your earlier reasoning.
 

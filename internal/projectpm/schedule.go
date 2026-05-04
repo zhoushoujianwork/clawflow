@@ -1,10 +1,18 @@
 // Package projectpm wakes per-project "project manager" agents at the
 // end of each `clawflow run` pass. Each enabled project is fanned out
 // to a non-interactive `claude -p` invocation that triages the
-// backlog — files new issues, fixes missing trigger labels, dedupes,
-// retires stale work, and pushes evaluated issues forward by adding
-// ready-for-agent. PM cannot push code, merge PRs, or edit files;
-// those stay with the implement operator and the human.
+// backlog at the EDGES of the operator pipeline:
+//
+//   - upstream: files new issues, fixes missing trigger labels
+//     (e.g. user opened a clear bug without the `bug` label)
+//   - downstream: closes stale, duplicate, or already-fixed issues
+//
+// PM stays out of the middle (evaluate → ready-for-agent → implement
+// → merge), which is fully owned by operators + repo-level
+// `auto_approve` (auto-adds ready-for-agent after evaluate) +
+// `auto_merge` (auto-merges agent-implemented PRs after CI). PM does
+// NOT add ready-for-agent — that's auto_approve's domain. Trying to
+// have PM apply judgment there would just race auto_approve.
 //
 // Closed loop:
 //
