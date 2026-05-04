@@ -17,6 +17,7 @@ import (
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/projectpm"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -212,6 +213,25 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	}
 	if err := snapshot.WriteIssues(globalIssues); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot issues: %v\n", err)
+	}
+
+	// Phase 4 (sequential): wake the project-manager for every project
+	// with automation enabled and past its cooldown. PMs run AFTER
+	// operators so they see the post-pass state — any issue an
+	// operator just marked agent-evaluated is visible to the PM
+	// scheduling decision. PM failures are non-fatal: the run as a
+	// whole is reported successful as long as the operator phase
+	// completed.
+	//
+	// Gated on --repo / --issue narrowing: ad-hoc single-issue runs
+	// shouldn't wake every project's PM. Only the unscoped pass
+	// (the one a cron / hook normally invokes) triggers PMs.
+	if onlyRepo == "" && onlyIssue == 0 {
+		if n, err := projectpm.Schedule(ctx, timeout); err != nil {
+			fmt.Fprintf(os.Stderr, "[pm] schedule: %v\n", err)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "[pm] woke %d project(s)\n", n)
+		}
 	}
 	return nil
 }

@@ -826,11 +826,21 @@ func collectRunEntries(root string) []RunIndexEntry {
 
 // ProjectView is the dashboard-facing view of one project.
 type ProjectView struct {
-	Name      string   `json:"name"`
-	Repos     []string `json:"repos"`
-	Context   string   `json:"context_md,omitempty"`
-	CreatedAt string   `json:"created_at"`
-	UpdatedAt string   `json:"updated_at"`
+	Name       string                `json:"name"`
+	Repos      []string              `json:"repos"`
+	Context    string                `json:"context_md,omitempty"`
+	Automation ProjectAutomationView `json:"automation"`
+	CreatedAt  string                `json:"created_at"`
+	UpdatedAt  string                `json:"updated_at"`
+}
+
+// ProjectAutomationView mirrors project.Automation for the dashboard.
+// Always emitted (even when disabled) so the frontend can render the
+// toggle in its current state without conditional access.
+type ProjectAutomationView struct {
+	Enabled         bool   `json:"enabled"`
+	CooldownMinutes int    `json:"cooldown_minutes"`
+	LastWokenAt     string `json:"last_woken_at,omitempty"`
 }
 
 // WriteProjects writes data/projects.json from the on-disk project store.
@@ -847,9 +857,14 @@ func WriteProjects() error {
 	for _, p := range projects {
 		ctx, _ := project.ReadContext(p.Name)
 		views = append(views, ProjectView{
-			Name:      p.Name,
-			Repos:     p.Repos,
-			Context:   ctx,
+			Name:    p.Name,
+			Repos:   p.Repos,
+			Context: ctx,
+			Automation: ProjectAutomationView{
+				Enabled:         p.Automation.Enabled,
+				CooldownMinutes: p.Automation.CooldownMinutes,
+				LastWokenAt:     p.Automation.LastWokenAt,
+			},
 			CreatedAt: p.CreatedAt,
 			UpdatedAt: p.UpdatedAt,
 		})

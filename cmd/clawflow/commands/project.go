@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
@@ -37,7 +38,86 @@ Storage: ~/.clawflow/projects/<name>/project.yaml + context.md`,
 	cmd.AddCommand(newProjectGenerateCmd())
 	cmd.AddCommand(newProjectChatCmd())
 	cmd.AddCommand(newProjectDeleteCmd())
+	cmd.AddCommand(newProjectAutomationCmd())
 	return cmd
+}
+
+// newProjectAutomationCmd is the parent for automation toggle subcommands.
+// `clawflow project automation enable/disable/show <name>`.
+//
+// Enabling makes `clawflow run` wake this project's PM (a non-interactive
+// claude -p) at the end of each pass, throttled by --cooldown. The PM
+// can only create new issues — it does not touch existing issue state.
+func newProjectAutomationCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "automation",
+		Short: "Toggle the project-manager automation for a project",
+	}
+	cmd.AddCommand(newProjectAutomationEnableCmd())
+	cmd.AddCommand(newProjectAutomationDisableCmd())
+	cmd.AddCommand(newProjectAutomationShowCmd())
+	return cmd
+}
+
+func newProjectAutomationEnableCmd() *cobra.Command {
+	var cooldown int
+	cmd := &cobra.Command{
+		Use:   "enable <name>",
+		Short: "Enable PM auto-wakeup at the end of each `clawflow run` pass",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := project.SetAutomation(args[0], true, cooldown); err != nil {
+				return err
+			}
+			fmt.Printf("automation enabled for project %q (cooldown: %d min)\n", args[0], cooldown)
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&cooldown, "cooldown", 30, "Minutes between PM wakeups (0 = every run pass)")
+	return cmd
+}
+
+func newProjectAutomationDisableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "disable <name>",
+		Short: "Disable PM auto-wakeup",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := project.SetAutomation(args[0], false, -1); err != nil {
+				return err
+			}
+			fmt.Printf("automation disabled for project %q\n", args[0])
+			return nil
+		},
+	}
+}
+
+func newProjectAutomationShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show automation status for a project",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := project.Get(args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Project: %s\n", p.Name)
+			fmt.Printf("Enabled: %t\n", p.Automation.Enabled)
+			fmt.Printf("Cooldown: %d min\n", p.Automation.CooldownMinutes)
+			if p.Automation.LastWokenAt != "" {
+				fmt.Printf("Last woken: %s\n", p.Automation.LastWokenAt)
+				if rem := p.CooldownRemaining(time.Now()); rem > 0 {
+					fmt.Printf("Cooldown remaining: %s\n", rem.Round(time.Second))
+				} else {
+					fmt.Println("Cooldown: ready")
+				}
+			} else {
+				fmt.Println("Last woken: (never)")
+			}
+			return nil
+		},
+	}
 }
 
 func newProjectCreateCmd() *cobra.Command {

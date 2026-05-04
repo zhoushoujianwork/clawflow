@@ -212,6 +212,50 @@ func HandleProjectGenerateContextStatus(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, job)
 }
 
+type projectAutomationRequest struct {
+	Project         string `json:"project"`
+	Enabled         bool   `json:"enabled"`
+	CooldownMinutes int    `json:"cooldown_minutes"`
+}
+
+// HandleProjectAutomation flips the per-project PM auto-wakeup
+// toggle. The dashboard's project detail page sends one of these
+// every time the user moves the switch or edits the cooldown.
+//
+// Implementation note: the request always carries both `enabled` and
+// `cooldown_minutes` (the UI sends the full current state), so we
+// pass cooldown straight through. The CLI's "disable" path uses
+// SetAutomation(name, false, -1) to keep the prior cooldown — that's
+// for terminal use where the user shouldn't have to retype the value.
+// The dashboard never has that ambiguity since the form holds the
+// canonical value.
+func HandleProjectAutomation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req projectAutomationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	name := strings.TrimSpace(req.Project)
+	if name == "" {
+		writeJSON(w, 400, map[string]string{"error": "project is required"})
+		return
+	}
+	if req.CooldownMinutes < 0 {
+		writeJSON(w, 400, map[string]string{"error": "cooldown_minutes must be >= 0"})
+		return
+	}
+	if err := project.SetAutomation(name, req.Enabled, req.CooldownMinutes); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	_ = snapshot.WriteProjects()
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
 func HandleProjectRemoveRepo(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

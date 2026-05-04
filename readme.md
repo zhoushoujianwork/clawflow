@@ -155,37 +155,33 @@ See [`CLAUDE.md`](CLAUDE.md) for the frontmatter schema and operator design prin
 
 ---
 
-## Dual-Layer Automation
+## Project-Manager Automation (per-project, opt-in)
 
-ClawFlow's full automation model has two layers that communicate through labels:
-
-```
-┌─────────────────────────────────────────────┐
-│           Variable Layer (Brain)             │
-│  Claude Code skill + /loop                   │
-│  Observes → Judges → Outputs labels/issues   │
-└──────────────────┬──────────────────────────┘
-                   │ labels / issues / comments
-                   ▼
-┌─────────────────────────────────────────────┐
-│            Fixed Layer (Hands)               │
-│  clawflow run                                │
-│  Label match → Operator → Outcome label      │
-└─────────────────────────────────────────────┘
-```
-
-- **Fixed layer** (`clawflow run`): deterministic, label-triggered operators. Handles the 80% of work that follows known paths.
-- **Variable layer** (agent skill + `/loop`): intelligent observer that makes judgment calls — stale issues, failure patterns, missing approvals. Handles the 20% that needs context.
-
-The built-in `project-patrol` skill implements the variable layer. Set it up:
+For projects you want ClawFlow to actively schedule (not just react to labeled issues), enable the **project manager**:
 
 ```bash
-clawflow install-skill          # installs both clawflow + project-patrol skills
-# In Claude Code:
-/loop 30m run project patrol on all enabled repos
+clawflow project automation enable my-project --cooldown 30
 ```
 
-For the full design rationale, see [Dual-Layer Automation](docs/dual-layer-automation.md).
+Or flip the toggle in the dashboard's project detail page.
+
+When on, every `clawflow run` pass — after the operator phase finishes — wakes a per-project PM agent (a non-interactive `claude -p`). The PM:
+
+- Reads the project's `context.md` and the post-pass state of every member repo (open issues + PRs).
+- Decides whether new work should be queued.
+- Files **new** issues with trigger labels (`bug`, `feature`, etc.) so the next pass picks them up via the existing operator pipeline.
+
+The PM never touches existing issue state — no comments, no label changes, no closes. That stays under operator control. The closed loop is:
+
+```
+clawflow run
+  → operators process labeled issues
+  → PM wakes (cooldown-gated, per project)
+  → PM files NEW issues with trigger labels
+  → next clawflow run pass executes them
+```
+
+`--cooldown` (default 30 min) throttles wakes so a fast cron doesn't fire the PM on every pass. Disable with `clawflow project automation disable my-project`.
 
 ---
 
@@ -218,8 +214,7 @@ clawflow/ (this repo)
 │   ├── implement/SKILL.md
 │   └── reply-comment/SKILL.md
 └── agent-skills/                     ← agent skills for AI coding tools
-    ├── clawflow/SKILL.md             ← teaches AI tools the clawflow CLI
-    └── clawflow-patrol/SKILL.md      ← autonomous project health monitor
+    └── clawflow/SKILL.md             ← teaches AI tools the clawflow CLI
 ```
 
 ---
@@ -274,9 +269,9 @@ If you use [Claude Code](https://claude.ai/code), install the agent skills that 
 clawflow install-skill
 ```
 
-This installs two skills to `~/.claude/skills/`:
-- **clawflow** — teaches Claude the CLI commands for issue/PR/label operations
-- **clawflow-patrol** — autonomous health monitor that runs via `/loop` to detect stale issues, failed CI, and anomalies
+This installs the **clawflow** skill to `~/.claude/skills/`, teaching Claude the CLI commands for issue/PR/label operations.
+
+For autonomous scheduling, use per-project automation (`clawflow project automation enable`) instead — it runs inside `clawflow run` and doesn't depend on Claude Code being open.
 
 Skip the flag if you just want the CLI without AI tool integration.
 

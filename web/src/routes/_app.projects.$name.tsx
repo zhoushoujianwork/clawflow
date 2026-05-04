@@ -15,6 +15,13 @@ interface Project {
   repos: string[]
   created_at?: string
   context_md?: string
+  automation?: ProjectAutomation
+}
+
+interface ProjectAutomation {
+  enabled: boolean
+  cooldown_minutes: number
+  last_woken_at?: string
 }
 
 interface RepoEntry {
@@ -55,6 +62,14 @@ function ProjectDetail() {
   const [generateError, setGenerateError] = useState<string | null>(null)
   const pollTimerRef = useRef<number | null>(null)
 
+  // Automation state. The cooldown input is held locally so the user
+  // can edit it freely without each keystroke firing a save — the
+  // server only learns the new value on toggle change or explicit Save.
+  // Defaults to 30 min to match the CLI's `--cooldown` default.
+  const [cooldownDraft, setCooldownDraft] = useState<string>('30')
+  const [automationSaving, setAutomationSaving] = useState(false)
+  const [automationError, setAutomationError] = useState<string | null>(null)
+
   function fetchProject() {
     fetch('/data/projects.json', { cache: 'no-store' })
       .then(r => (r.ok ? r.json() : []))
@@ -63,8 +78,33 @@ function ProjectDetail() {
         const list: Project[] = Array.isArray(data) ? data : []
         const match = list.find(p => p.name === name) || null
         setProject(match)
+        // Seed the cooldown input from the persisted value. Only do this
+        // on initial load (or when the field comes back empty) so a user
+        // mid-edit doesn't have their typing wiped by a refetch.
+        if (match?.automation && (cooldownDraft === '30' || !cooldownDraft)) {
+          setCooldownDraft(String(match.automation.cooldown_minutes ?? 30))
+        }
         setLoading(false)
       })
+  }
+
+  async function saveAutomation(enabled: boolean, cooldownMinutes: number) {
+    setAutomationSaving(true)
+    setAutomationError(null)
+    try {
+      const r = await fetch('/api/project/automation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name, enabled, cooldown_minutes: cooldownMinutes }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
+      fetchProject()
+    } catch (e) {
+      setAutomationError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setAutomationSaving(false)
+    }
   }
 
   useEffect(() => {
@@ -291,6 +331,87 @@ function ProjectDetail() {
               </div>
             )}
           </div>
+
+          {/* Automation toggle — wakes the project-manager agent
+              after each `clawflow run` pass when enabled. PM can only
+              file new issues; existing issue state stays under
+              operator control. */}
+          <section className="mb-6">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-sm font-semibold text-foreground">Automation</h2>
+              {project.automation?.last_woken_at && (
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  last woken {new Date(project.automation.last_woken_at).toLocaleString()}
+                </span>
+              )}
+            </div>
+            <div className="bg-card border border-border rounded-xl p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cd = parseInt(cooldownDraft, 10)
+                        saveAutomation(!project.automation?.enabled, isNaN(cd) ? 30 : cd)
+                      }}
+                      disabled={automationSaving}
+                      role="switch"
+                      aria-checked={project.automation?.enabled ?? false}
+                      className={cn(
+                        'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
+                        project.automation?.enabled ? 'bg-primary' : 'bg-secondary',
+                        automationSaving && 'opacity-50 cursor-not-allowed',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                          project.automation?.enabled ? 'translate-x-4' : 'translate-x-0.5',
+                        )}
+                      />
+                    </button>
+                    <span className="text-sm font-medium text-foreground">
+                      {project.automation?.enabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-2">
+                    When on, every <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code> pass wakes the project manager. The PM can file new issues to schedule work — it never touches existing issue state.
+                  </p>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-muted-foreground">Cooldown (min)</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={cooldownDraft}
+                      onChange={e => setCooldownDraft(e.target.value)}
+                      className="w-20 px-2 py-1 bg-background border border-border rounded-lg text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-primary"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cd = parseInt(cooldownDraft, 10)
+                        saveAutomation(project.automation?.enabled ?? false, isNaN(cd) ? 30 : cd)
+                      }}
+                      disabled={
+                        automationSaving ||
+                        parseInt(cooldownDraft, 10) === (project.automation?.cooldown_minutes ?? 30)
+                      }
+                      className="px-2 py-1 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+              {automationError && (
+                <p className="mt-3 text-xs text-red-600">{automationError}</p>
+              )}
+            </div>
+          </section>
 
           {/* Context.md */}
           <section className="mb-6">

@@ -90,15 +90,16 @@ Config and repos are stored in `~/.clawflow/config/config.yaml`
 - Run `clawflow <cmd> --help` when unsure about command flags
 - The CLI provides clear error messages to guide you
 
-## Companion skills
+## Autonomous scheduling
 
-### clawflow-patrol
-Automated project health monitoring. Scans repos for stale issues, failed CI,
-anomalous failure patterns, and other conditions that need attention. Runs via
-`/loop` for continuous monitoring:
+For continuous health monitoring, use per-project automation rather than a Claude
+Code skill — it runs inside `clawflow run` and doesn't require Claude Code to be
+open. Enable per project:
 
 ```
-/loop 30m run project patrol on all enabled repos
+clawflow project automation enable <project> --cooldown 30
 ```
 
-Install alongside this skill with `clawflow install-skill`.
+When on, every `clawflow run` pass wakes the project manager, which can file new
+issues to schedule work. See the project's `automation` section in the dashboard
+for the toggle and live status.

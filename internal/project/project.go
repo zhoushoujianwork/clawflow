@@ -17,10 +17,34 @@ import (
 
 // Project is the in-memory representation of project.yaml.
 type Project struct {
-	Name      string   `yaml:"name"`
-	Repos     []string `yaml:"repos"`
-	CreatedAt string   `yaml:"created_at"`
-	UpdatedAt string   `yaml:"updated_at"`
+	Name       string     `yaml:"name"`
+	Repos      []string   `yaml:"repos"`
+	Automation Automation `yaml:"automation,omitempty"`
+	CreatedAt  string     `yaml:"created_at"`
+	UpdatedAt  string     `yaml:"updated_at"`
+}
+
+// Automation captures the per-project "project manager" toggle.
+//
+// When Enabled is true, every `clawflow run` pass will, after the
+// fixed-layer operators finish, wake the project manager (a
+// non-interactive `claude -p` invocation) for this project. The PM
+// is restricted to creating new issues — it does not touch existing
+// issue state. Created issues flow back into the operator pipeline
+// on the next pass, forming the closed loop.
+//
+// CooldownMinutes throttles wakeups: even if `clawflow run` is
+// invoked every few minutes, the PM only fires when at least
+// CooldownMinutes has elapsed since LastWokenAt. Zero = no cooldown
+// (fires every pass — usually too aggressive).
+//
+// LastWokenAt is the RFC3339 UTC timestamp of the last PM invocation;
+// the runner stamps it after each wake (success or failure) to anchor
+// the next cooldown window.
+type Automation struct {
+	Enabled         bool   `yaml:"enabled"`
+	CooldownMinutes int    `yaml:"cooldown_minutes,omitempty"`
+	LastWokenAt     string `yaml:"last_woken_at,omitempty"`
 }
 
 // ProjectsRoot returns ~/.clawflow/projects.
@@ -210,6 +234,72 @@ func WriteContext(name, content string) error {
 		return err
 	}
 	return os.WriteFile(ContextPath(name), []byte(content), 0o644)
+}
+
+// SetAutomation flips the automation toggle and/or cooldown for a
+// project. Pass cooldownMinutes < 0 to leave the existing value in
+// place (use case: enable/disable without retyping the cooldown).
+func SetAutomation(name string, enabled bool, cooldownMinutes int) error {
+	p, err := Get(name)
+	if err != nil {
+		return err
+	}
+	p.Automation.Enabled = enabled
+	if cooldownMinutes >= 0 {
+		p.Automation.CooldownMinutes = cooldownMinutes
+	}
+	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return save(p)
+}
+
+// MarkWoken stamps LastWokenAt to now. Called by the runner right
+// before invoking the PM so cooldown accounting starts immediately —
+// a PM that takes 20 minutes to think doesn't get re-fired the
+// instant it returns.
+func MarkWoken(name string) error {
+	p, err := Get(name)
+	if err != nil {
+		return err
+	}
+	p.Automation.LastWokenAt = time.Now().UTC().Format(time.RFC3339)
+	p.UpdatedAt = p.Automation.LastWokenAt
+	return save(p)
+}
+
+// CooldownRemaining returns how long until this project's PM can
+// next be woken. Returns 0 if the project is ready (cooldown elapsed
+// or never woken). Returns 0 also when automation is disabled — the
+// caller is expected to filter on Enabled separately.
+func (p *Project) CooldownRemaining(now time.Time) time.Duration {
+	if p.Automation.CooldownMinutes <= 0 || p.Automation.LastWokenAt == "" {
+		return 0
+	}
+	last, err := time.Parse(time.RFC3339, p.Automation.LastWokenAt)
+	if err != nil {
+		return 0
+	}
+	deadline := last.Add(time.Duration(p.Automation.CooldownMinutes) * time.Minute)
+	if now.After(deadline) {
+		return 0
+	}
+	return deadline.Sub(now)
+}
+
+// ListAutomationEnabled returns all projects with Automation.Enabled
+// set, in name order. Used by the runner to decide which PMs to fan
+// out to at the end of each pass.
+func ListAutomationEnabled() ([]*Project, error) {
+	all, err := List()
+	if err != nil {
+		return nil, err
+	}
+	enabled := make([]*Project, 0, len(all))
+	for _, p := range all {
+		if p.Automation.Enabled {
+			enabled = append(enabled, p)
+		}
+	}
+	return enabled, nil
 }
 
 // save persists a Project to its project.yaml.
