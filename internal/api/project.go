@@ -2,7 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,10 +27,13 @@ import (
 // initial confirmation and on detail-page mount, so navigating away
 // mid-run and coming back picks up the spinner where it left off.
 //
-// "done"/"error" entries linger so that a poll arriving after
-// completion can still see the result instead of a 404. They get
-// reaped on the next POST for the same project, so memory growth is
-// bounded by the number of distinct project names ever generated.
+// "done"/"error" entries linger in memory, AND get persisted to disk
+// so a `clawflow web` restart doesn't make a recent error message
+// disappear (the success result is already durable as context.md
+// itself; persistence here is mostly to preserve the failure path).
+// "running" is intentionally NOT persisted — if the process dies
+// mid-run the goroutine is gone, and resuming a stale "running" on
+// next start would just leave the dashboard spinning forever.
 type generateJob struct {
 	Status    string    `json:"status"` // "running" | "done" | "error"
 	Error     string    `json:"error,omitempty"`
@@ -39,6 +45,56 @@ var (
 	generateJobsMu sync.Mutex
 	generateJobs   = map[string]*generateJob{}
 )
+
+// generateJobStorePath is the on-disk JSON for the most recent
+// completed generate-context run. Sits next to context.md /
+// testing.md / health-check.json under the project directory so all
+// per-project state cleans up together when the project is deleted.
+func generateJobStorePath(projectName string) string {
+	return filepath.Join(project.ProjectDir(projectName), "generate-context.json")
+}
+
+// saveGenerateJob writes the job to disk atomically (tmp + rename).
+// Best-effort: caller logs and continues on failure since the
+// in-memory map remains the source of truth during the live session.
+func saveGenerateJob(projectName string, job *generateJob) error {
+	path := generateJobStorePath(projectName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	data, err := json.MarshalIndent(job, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+// loadGenerateJob hydrates the latest persisted job from disk.
+// Returns (nil, nil) when the file doesn't exist so callers can
+// distinguish "never generated" from a real read error.
+func loadGenerateJob(projectName string) (*generateJob, error) {
+	path := generateJobStorePath(projectName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var job generateJob
+	if err := json.Unmarshal(data, &job); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	return &job, nil
+}
 
 type projectCreateRequest struct {
 	Name string `json:"name"`
@@ -171,7 +227,6 @@ func HandleProjectGenerateContext(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		_, err := projectgen.Generate(name, model, instructions)
 		generateJobsMu.Lock()
-		defer generateJobsMu.Unlock()
 		job.EndedAt = time.Now()
 		if err != nil {
 			job.Status = "error"
@@ -179,6 +234,15 @@ func HandleProjectGenerateContext(w http.ResponseWriter, r *http.Request) {
 		} else {
 			job.Status = "done"
 			_ = snapshot.WriteProjects()
+		}
+		// Snapshot under the lock so the disk write below can't race
+		// with a concurrent reader. Persistence here is best-effort —
+		// the dashboard reads from the in-memory map first, so a save
+		// failure only costs us cross-restart visibility into errors.
+		snapshotJob := *job
+		generateJobsMu.Unlock()
+		if err := saveGenerateJob(name, &snapshotJob); err != nil {
+			fmt.Fprintf(os.Stderr, "[generate-context] %s: persist failed: %v\n", name, err)
 		}
 	}()
 
@@ -205,11 +269,30 @@ func HandleProjectGenerateContextStatus(w http.ResponseWriter, r *http.Request) 
 	generateJobsMu.Lock()
 	job, ok := generateJobs[name]
 	generateJobsMu.Unlock()
-	if !ok {
+	if ok {
+		writeJSON(w, 200, job)
+		return
+	}
+	// Cold cache (e.g. after `clawflow web` restart): hydrate from
+	// the persisted snapshot so a recent error or completion is
+	// still visible. We populate the in-memory map under lock to
+	// avoid every poll re-reading the file.
+	persisted, err := loadGenerateJob(name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[generate-context] %s: load persisted failed: %v\n", name, err)
 		writeJSON(w, 404, map[string]string{"status": "idle"})
 		return
 	}
-	writeJSON(w, 200, job)
+	if persisted == nil {
+		writeJSON(w, 404, map[string]string{"status": "idle"})
+		return
+	}
+	generateJobsMu.Lock()
+	if _, raced := generateJobs[name]; !raced {
+		generateJobs[name] = persisted
+	}
+	generateJobsMu.Unlock()
+	writeJSON(w, 200, persisted)
 }
 
 // HandleProjectGet returns the LIVE view of a single project by

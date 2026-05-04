@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, MessageSquare, Sp
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
+import { HealthCheckSummaryCard, HealthCheckReviewPanel, useHealthCheck } from '../components/HealthCheckCard'
 
 // Long claude -p run (typically 30s–2min). The job runs server-side
 // so the user is free to navigate away — re-opening the page resumes
@@ -53,6 +54,11 @@ function ProjectDetail() {
   const { name } = Route.useParams()
   const navigate = useNavigate()
   const chatDrawer = useChatDrawer()
+
+  // Health-check state lives in the parent so the compact summary
+  // card (status row) and the full-width review panel (under the
+  // repo list) can both consume the same hook instance.
+  const healthCheck = useHealthCheck(name)
 
   const [project, setProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
@@ -325,7 +331,7 @@ function ProjectDetail() {
                 <FolderKanban className="w-5 h-5 text-muted-foreground" />
                 {project.name}
               </h1>
-              <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+              <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground flex-wrap">
                 <span className="tabular-nums">
                   {project.repos?.length ?? 0} {(project.repos?.length ?? 0) === 1 ? 'repo' : 'repos'}
                 </span>
@@ -343,6 +349,45 @@ function ProjectDetail() {
                 >
                   <MessageSquare className="w-3 h-3" /> chat
                 </button>
+                {/* At-a-glance status pills: PM scheduling state and
+                    latest health-check outcome. They duplicate info
+                    surfaced lower on the page on purpose — the user
+                    might be looking at the repo list far from those
+                    sections and still want a quick read on whether
+                    automation is on and whether the docs are healthy. */}
+                <span>·</span>
+                <span
+                  className={cn(
+                    'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium',
+                    project.automation?.enabled
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
+                      : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400',
+                  )}
+                  title={project.automation?.enabled ? 'PM scheduling on — wakes after each clawflow run' : 'PM scheduling off'}
+                >
+                  <span
+                    className={cn(
+                      'inline-block w-1.5 h-1.5 rounded-full',
+                      project.automation?.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400',
+                    )}
+                  />
+                  PM {project.automation?.enabled ? 'on' : 'off'}
+                </span>
+                {healthCheck.status === 'done' && healthCheck.result?.outcome === 'healthy' && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">
+                    ✓ healthy
+                  </span>
+                )}
+                {healthCheck.status === 'done' && healthCheck.result?.outcome === 'changes-proposed' && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">
+                    ⚠ {healthCheck.result.changes.length} pending
+                  </span>
+                )}
+                {healthCheck.status === 'running' && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-400">
+                    <Loader2 className="w-2.5 h-2.5 animate-spin" /> health check running
+                  </span>
+                )}
               </div>
             </div>
             {/* Delete button */}
@@ -377,11 +422,17 @@ function ProjectDetail() {
             )}
           </div>
 
+          {/* Status row — Automation (config) on the left, Health
+              Check (status) on the right. Two short cards side by
+              side at lg+; stacks at smaller widths. The two together
+              answer "what is this project doing right now and what
+              needs attention". */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
           {/* Automation toggle — wakes the project-manager agent
               after each `clawflow run` pass when enabled. PM can only
               file new issues; existing issue state stays under
               operator control. */}
-          <section className="mb-6">
+          <section>
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-semibold text-foreground">Automation</h2>
@@ -493,11 +544,21 @@ function ProjectDetail() {
             </div>
           </section>
 
+          {/* Health Check summary — paired with Automation in the
+              status row. The full-width review panel (with diffs and
+              Apply UI) renders below the repo list when there are
+              changes to review; here we just show button + outcome. */}
+          <HealthCheckSummaryCard healthCheck={healthCheck} />
+          </div>
+
           {/* Context.md — collapsible. Default collapsed because the
               doc is often long enough to push the rest of the page out
               of view. Header bar carries enough preview info (heading
-              or size) so the user knows whether it's worth opening. */}
-          <section className="mb-6">
+              or size) so the user knows whether it's worth opening.
+              Stays full-width (not paired with testing.md in a 2-col
+              grid) so the collapsed/expanded card never visually
+              merges with the status row above. */}
+          <section className="mb-3">
             {generateError && (
               <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
                 {generateError}
@@ -628,8 +689,10 @@ function ProjectDetail() {
             )}
           </section>
 
-          {/* Member repos */}
-          <section>
+          {/* Member repos — full width. Each entry needs horizontal
+              room for the auto-approve / auto-merge badges, so we
+              never pair this with anything in a side-by-side grid. */}
+          <section className="mb-6">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-sm font-semibold text-foreground">
                 Member repos{' '}
@@ -806,6 +869,13 @@ function ProjectDetail() {
               </>
             )}
           </section>
+
+          {/* Conditional Health Check review — full width because the
+              per-file diffs need horizontal space to render side-by-
+              side. Only mounts while there are proposed changes; once
+              applied (or after a healthy re-run), it disappears and
+              the page collapses back to its compact layout. */}
+          <HealthCheckReviewPanel healthCheck={healthCheck} />
         </>
       )}
     </div>

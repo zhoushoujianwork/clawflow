@@ -14,6 +14,16 @@ import "embed"
 //go:embed all:skills
 var EmbeddedSkills embed.FS
 
+// EmbeddedProjectSkills holds project-level SKILL.md files
+// (project-skills/<name>/SKILL.md). Project skills are a separate
+// concept from issue/PR operators: dashboard-triggered, span all repos
+// in a project, and emit structured propose blocks the runner diffs
+// and applies on user approval. User overrides live in
+// ~/.clawflow/project-skills/<name>/SKILL.md.
+//
+//go:embed all:project-skills
+var EmbeddedProjectSkills embed.FS
+
 // EmbeddedAgentSkills holds the agent skill files (SKILL.md) that teach
 // AI coding assistants how to use the clawflow CLI. Installed to each
 // tool's global skills directory via `clawflow install-skill`.
