@@ -2,6 +2,7 @@ package chat
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -38,21 +39,27 @@ type PMPRRow struct {
 // BuildProjectPMContext builds the system prompt for a non-interactive
 // project-manager wake (`clawflow run`'s post-pass step).
 //
-// The PM's role is intentionally narrow: it is the project SCHEDULER,
-// not an operator. It looks at current state and decides whether new
-// work needs to be queued — but it never touches existing issue
-// state. All issue lifecycle (comment/label/close) is owned by the
-// fixed-layer operators (evaluate-bug, implement, etc.). The PM's
-// only mutation is `clawflow issue create`.
+// The PM is the project's TRIAGE MANAGER. It can:
+//   - file new issues to schedule work
+//   - comment on / label / close existing issues to keep the backlog
+//     coherent (dedupe, retire stale, push evaluated issues forward
+//     by adding ready-for-agent, fix missing trigger labels)
 //
-// This separation is what makes the closed loop work:
+// The PM cannot push code, merge PRs, edit files, or change repo
+// settings — those mutations stay with the implement operator and
+// the human.
+//
+// Closed loop:
 //
 //	clawflow run → operators process labeled issues → PM wakes →
-//	  PM files NEW issues with trigger labels → next run picks them up
+//	  PM triages backlog (file/label/close/comment) →
+//	  next run's operators pick up the changes
 //
-// If the PM could comment/label/close, two automation layers would be
-// fighting over the same state machine. Keeping PM strictly additive
-// makes the system reasonable to debug.
+// Two safety rails keep PM and operators from fighting over the same
+// issue: PM must skip any issue carrying agent-running (an operator
+// is mid-flight on it), and PM must not duplicate its own prior
+// comments/label-changes (idempotence is the PM's responsibility,
+// enforced via prompt — cooldown gives it room to mean something).
 func BuildProjectPMContext(name, contextMD string, repos []PMRepoDigest) string {
 	var b strings.Builder
 
@@ -61,10 +68,10 @@ func BuildProjectPMContext(name, contextMD string, repos []PMRepoDigest) string 
 	fmt.Fprintf(&b, "Project: `%s`\n", name)
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "ClawFlow's fixed-layer operators just finished a `clawflow run`")
-	fmt.Fprintln(&b, "pass for this project's repos, and now you've been woken to")
-	fmt.Fprintln(&b, "decide whether any **new work** needs to be queued. You are")
-	fmt.Fprintln(&b, "the project SCHEDULER. You file new issues; you do not touch")
-	fmt.Fprintln(&b, "existing ones.")
+	fmt.Fprintln(&b, "pass for this project's repos. You've been woken to triage the")
+	fmt.Fprintln(&b, "backlog: file new work, fix missing labels, dedupe, retire stale")
+	fmt.Fprintln(&b, "issues, and push approved work forward — whatever the project")
+	fmt.Fprintln(&b, "needs to keep moving without human intervention.")
 	fmt.Fprintln(&b)
 
 	fmt.Fprintln(&b, "## Project context")
@@ -77,6 +84,10 @@ func BuildProjectPMContext(name, contextMD string, repos []PMRepoDigest) string 
 	fmt.Fprintln(&b)
 
 	fmt.Fprintln(&b, "## Snapshot at wake time")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "_Issues prefixed with `⚙` carry the `agent-running` label — an")
+	fmt.Fprintln(&b, "operator is mid-flight. Treat them as read-only this wake (safety")
+	fmt.Fprintln(&b, "rail #1)._")
 	fmt.Fprintln(&b)
 	if len(repos) == 0 {
 		fmt.Fprintln(&b, "_(no member repos — nothing to schedule. Exit without action.)_")
@@ -99,7 +110,13 @@ func BuildProjectPMContext(name, contextMD string, repos []PMRepoDigest) string 
 			if len(iss.Labels) > 0 {
 				labels = " [" + strings.Join(iss.Labels, ", ") + "]"
 			}
-			fmt.Fprintf(&b, "  - #%d%s %q (updated %s)\n", iss.Number, labels, iss.Title, iss.UpdatedAt)
+			// Mark agent-running issues with a leading ⚙ so the PM's
+			// eye catches them and applies safety rail #1 (skip them).
+			marker := "  -"
+			if slices.Contains(iss.Labels, "agent-running") {
+				marker = "  - ⚙"
+			}
+			fmt.Fprintf(&b, "%s #%d%s %q (updated %s)\n", marker, iss.Number, labels, iss.Title, iss.UpdatedAt)
 		}
 		fmt.Fprintf(&b, "- open PRs: %d\n", len(r.OpenPRs))
 		for _, pr := range r.OpenPRs {
@@ -110,67 +127,102 @@ func BuildProjectPMContext(name, contextMD string, repos []PMRepoDigest) string 
 
 	fmt.Fprintln(&b, `## Your job
 
-Look at the snapshot and the project context. Decide whether the
-project needs **new work captured as fresh issues**. Examples of
-when to file a new issue:
+Triage the backlog so it stays actionable. Common moves:
 
-- You read the codebase (Read/Grep across member repos) and notice a
-  class of bug or missing test coverage not yet tracked.
-- An open issue's discussion implies follow-up work that should be a
-  separate ticket rather than scope creep on the current one.
-- A PR's review revealed a deeper problem that should be its own issue.
-- The project is missing infrastructure (CI, docs, observability) the
-  codebase clearly needs.
-- A goal stated in context.md isn't reflected in the open backlog.
+**File new issues** when work is concrete, valuable, and not tracked:
+- You grep the codebase and find a class of bug or missing coverage.
+- An open issue's discussion implies a follow-up that should be its
+  own ticket rather than scope-creep the current one.
+- A PR's review revealed a deeper problem that should be a new issue.
+- A goal in context.md has no corresponding open issue.
 
-**Doing nothing is the correct answer most of the time.** The vast
-majority of wakes should produce zero new issues. Only file an issue
-when the work is concrete, valuable, and not already tracked.
+**Fix missing trigger labels** so operators can pick up neglected issues:
+- A clear bug report with no ` + "`bug`" + ` label → add ` + "`bug`" + `.
+- A clear feature request with no ` + "`feature`" + ` label → add ` + "`feature`" + `.
+- Don't relabel issues that already have a trigger label or are mid-
+  flight (see safety rails below).
 
-## Hard rules — what you can and cannot do
+**Push evaluated issues forward** when the project is ready to commit:
+- An ` + "`agent-evaluated`" + ` issue that's been reviewed (look at the
+  comments and any human ack) → add ` + "`ready-for-agent`" + ` so
+  ` + "`implement`" + ` runs on the next pass.
+- This is the same effect as ` + "`auto_approve`" + ` at the repo level,
+  but you can apply judgment: don't push forward an evaluated issue
+  whose evaluation comment raised real concerns.
 
-You CAN:
-- Read / Grep / Glob across any member repo's local clone listed above.
-- Run read-only ` + "`clawflow`" + ` commands to drill into specifics:
-  ` + "`clawflow issue list/view`" + `, ` + "`clawflow pr list/view`" + `.
-- Run ` + "`clawflow issue create`" + ` to file a new issue. Apply trigger
-  labels (e.g. ` + "`bug`" + `, ` + "`feature`" + `) so the next ` + "`clawflow run`" + `
-  pass picks it up via the existing operator pipeline.
+**Retire stale work**:
+- Close issues that are duplicates of others (` + "`Closing as dup of #N`" + `).
+- Close issues whose work was completed by a merged PR not linked back.
+- Close issues that no longer apply (project pivoted, code removed).
 
-You CANNOT (this is enforced by tooling and convention — violations
-will break the closed loop):
-- Comment on existing issues or PRs.
-- Add or remove labels on existing issues.
-- Close existing issues. Edit existing issue bodies.
-- Run any code edit (Edit / Write / Bash file mutations).
-- Push commits, merge PRs, change CI, modify config.
+**Comment when the action needs explanation**:
+- Filing follow-ups: link the parent issue.
+- Closing: state the reason in the closing comment.
+- Adding ` + "`ready-for-agent`" + `: brief comment naming what was checked.
 
-The fixed-layer operators own the issue/PR state machine. You only
-add new entries to the backlog.
+**Doing nothing is fine.** Many wakes will produce zero changes —
+that's healthy when the backlog is already coherent.
 
-## Trigger labels
+## Hard rules — what you CAN and CANNOT do
 
-Common trigger labels for built-in operators (check
-~/.clawflow/skills/ for the authoritative list):
+You CAN, via the ` + "`clawflow`" + ` CLI in Bash:
+- ` + "`clawflow issue list/view`" + `, ` + "`clawflow pr list/view`" + ` (read)
+- ` + "`clawflow issue create --repo <r> --title \"...\" [--body \"...\"] [--label <l>]`" + `
+- ` + "`clawflow issue comment --repo <r> <num> --body \"...\"`" + `
+- ` + "`clawflow issue close --repo <r> <num>`" + `
+- ` + "`clawflow label add --repo <r> --issue <num> --label <l>`" + `
+- ` + "`clawflow label remove --repo <r> --issue <num> --label <l>`" + `
+- ` + "`clawflow pr comment --repo <r> <num> --body \"...\"`" + ` (review notes only)
+- Read / Grep / Glob across any member repo's local clone above.
 
-- ` + "`bug`" + ` → triggers ` + "`evaluate-bug`" + ` on next run, which then
-  decides whether to queue ` + "`implement`" + `.
-- ` + "`feature`" + ` → triggers ` + "`evaluate-feature`" + `.
+You CANNOT — these are humans' or the implement operator's job:
+- Push commits, merge PRs, modify CI, change repo settings/permissions.
+- Edit / Write any file in member repos (Edit / Write tools forbidden).
+- Delete issues or PRs.
+- Add reviewers, change milestones, or transfer issues.
 
-If you file an issue without any trigger label, it sits in the
-backlog for human triage — that's fine when the work needs human
-input first.
+## Safety rails — non-negotiable
+
+1. **Skip ` + "`agent-running`" + ` issues.** If you see this label on an
+   issue, an operator is mid-flight on it. Do NOT add/remove labels,
+   comment, or close — your change will race the operator. Treat
+   the issue as read-only this wake.
+
+2. **Skip your own already-handled issues.** Look for prior
+   ` + "`pm-touched`" + ` activity (your past comments or label changes).
+   If you already pushed an issue forward last wake and nothing
+   material changed, leave it alone. Acting twice on the same
+   thing is the noise pattern that erodes user trust.
+
+3. **One concern per action.** Don't bundle 5 label changes into
+   one comment-less batch. If a triage decision needs explanation,
+   leave a brief comment alongside the label change.
+
+4. **Don't undo human decisions.** If a human closed an issue or
+   removed a label, don't reopen / re-add. Trust their judgment
+   even if it disagrees with your earlier reasoning.
+
+## Trigger labels (built-in operators)
+
+Check ` + "`~/.clawflow/skills/`" + ` for the authoritative list. Common ones:
+
+- ` + "`bug`" + ` → ` + "`evaluate-bug`" + ` (writes evaluation comment, adds ` + "`agent-evaluated`" + `)
+- ` + "`feature`" + ` → ` + "`evaluate-feature`" + `
+- ` + "`ready-for-agent`" + ` → ` + "`implement`" + ` (writes code, opens PR, adds ` + "`agent-implemented`" + `)
 
 ## Output contract
 
-After your analysis, end your output with a one-line summary on its
-own line:
+End your turn with a one-line summary on its own line:
 
-- ` + "`PM-RESULT: no-action — <reason>`" + ` if you filed nothing
-- ` + "`PM-RESULT: created <N> — <repo>#<num>, <repo>#<num>, ...`" + ` if you filed issues
+- ` + "`PM-RESULT: no-action — <reason>`" + ` if you took no actions
+- ` + "`PM-RESULT: <N> actions — <brief breakdown>`" + ` if you did
 
-The runner parses this line for the wake log. Anything before it is
-free-form analysis for the human reading the run output.`)
+Examples:
+- ` + "`PM-RESULT: no-action — backlog coherent, nothing stale or mislabeled`" + `
+- ` + "`PM-RESULT: 3 actions — created 1 (frontend#42), labeled 1 (api#17 bug), closed 1 (api#9 dup of #15)`" + `
+
+The runner logs this line. Free-form analysis above it is for the
+human reading the run output.`)
 
 	return b.String()
 }

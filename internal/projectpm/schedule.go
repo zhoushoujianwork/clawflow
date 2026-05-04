@@ -1,15 +1,31 @@
 // Package projectpm wakes per-project "project manager" agents at the
 // end of each `clawflow run` pass. Each enabled project is fanned out
-// to a non-interactive `claude -p` invocation that may file new
-// issues but cannot touch existing ones — the closed loop is:
+// to a non-interactive `claude -p` invocation that triages the
+// backlog — files new issues, fixes missing trigger labels, dedupes,
+// retires stale work, and pushes evaluated issues forward by adding
+// ready-for-agent. PM cannot push code, merge PRs, or edit files;
+// those stay with the implement operator and the human.
+//
+// Closed loop:
 //
 //	clawflow run → operators process labeled issues →
 //	  projectpm.Schedule wakes the PM →
-//	  PM files NEW issues with trigger labels →
-//	  next `clawflow run` pass picks them up
+//	  PM triages backlog (file/label/close/comment) →
+//	  next `clawflow run` pass executes the changes
 //
-// PMs are the "what should we be working on next?" layer; operators
-// are the "execute the work that's already on the board" layer.
+// PMs are the "what should we be working on, and is the backlog
+// coherent?" layer; operators are the "execute the work that's
+// already on the board" layer.
+//
+// Two safety rails are enforced via prompt (not code), since the PM
+// invokes the same `clawflow` CLI users do and the CLI doesn't know
+// whether its caller is a PM or a human:
+//
+//   - PM must skip issues carrying agent-running (operator mid-flight).
+//   - PM must not duplicate its own prior actions; cooldown gives this
+//     room to mean something. If runaway PM noise is observed in the
+//     wild, the next iteration will add a pm-touched marker label
+//     so the runner can enforce mechanically rather than by prompt.
 package projectpm
 
 import (
