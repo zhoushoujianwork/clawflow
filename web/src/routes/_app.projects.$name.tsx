@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
-import { ChevronLeft, FolderKanban, MessageSquare, Sparkles, X, Trash2, Plus, Loader2 } from 'lucide-react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, MessageSquare, Sparkles, X, Trash2, Plus, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
@@ -30,6 +30,19 @@ interface RepoEntry {
   auto_approve?: boolean
   auto_merge?: boolean
   enabled?: boolean
+}
+
+// previewMD returns a one-line preview suitable for a collapsed-card
+// header — first non-empty heading if there is one, else the first
+// non-empty line truncated. Used by the context.md / testing.md
+// section headers when collapsed so the user sees what's inside
+// without expanding.
+function previewMD(md: string): string {
+  const lines = md.split('\n').map(l => l.trim()).filter(Boolean)
+  for (const l of lines) {
+    if (l.startsWith('#')) return l.replace(/^#+\s*/, '').slice(0, 80)
+  }
+  return (lines[0] ?? '').slice(0, 80)
 }
 
 export const Route = createFileRoute('/_app/projects/$name')({
@@ -79,6 +92,13 @@ function ProjectDetail() {
   const [cooldownDraft, setCooldownDraft] = useState<string>('30')
   const [automationSaving, setAutomationSaving] = useState(false)
   const [automationError, setAutomationError] = useState<string | null>(null)
+
+  // Collapsed-by-default state for the two docs. Both can be long
+  // (especially context.md), so the page would otherwise scroll past
+  // the member-repo list for non-trivial projects. Empty docs render
+  // their own "no content yet" panel and ignore this state.
+  const [contextOpen, setContextOpen] = useState(false)
+  const [testingOpen, setTestingOpen] = useState(false)
 
   function fetchProject() {
     fetch('/data/projects.json', { cache: 'no-store' })
@@ -357,14 +377,42 @@ function ProjectDetail() {
               operator control. */}
           <section className="mb-6">
             <div className="flex items-center justify-between mb-2">
-              <h2 className="text-sm font-semibold text-foreground">Automation</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-semibold text-foreground">Automation</h2>
+                {/* Status pill — visible at a glance even when scanning the
+                    page peripherally. Emerald when on, amber on never-woken
+                    "armed" state for the first cycle, slate when off. */}
+                <span
+                  className={cn(
+                    'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium',
+                    project.automation?.enabled
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
+                      : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400',
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'inline-block w-1.5 h-1.5 rounded-full',
+                      project.automation?.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400',
+                    )}
+                  />
+                  {project.automation?.enabled ? 'PM scheduling on' : 'PM scheduling off'}
+                </span>
+              </div>
               {project.automation?.last_woken_at && (
                 <span className="text-xs text-muted-foreground tabular-nums">
                   last woken {new Date(project.automation.last_woken_at).toLocaleString()}
                 </span>
               )}
             </div>
-            <div className="bg-card border border-border rounded-xl p-4">
+            <div
+              className={cn(
+                'rounded-xl p-4 border transition-colors',
+                project.automation?.enabled
+                  ? 'bg-emerald-50/50 border-emerald-200 dark:bg-emerald-950/10 dark:border-emerald-900/40'
+                  : 'bg-card border-border',
+              )}
+            >
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-3">
@@ -378,19 +426,26 @@ function ProjectDetail() {
                       role="switch"
                       aria-checked={project.automation?.enabled ?? false}
                       className={cn(
-                        'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
-                        project.automation?.enabled ? 'bg-primary' : 'bg-secondary',
+                        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
+                        project.automation?.enabled ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700',
                         automationSaving && 'opacity-50 cursor-not-allowed',
                       )}
                     >
                       <span
                         className={cn(
-                          'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
-                          project.automation?.enabled ? 'translate-x-4' : 'translate-x-0.5',
+                          'inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform',
+                          project.automation?.enabled ? 'translate-x-5' : 'translate-x-0.5',
                         )}
                       />
                     </button>
-                    <span className="text-sm font-medium text-foreground">
+                    <span
+                      className={cn(
+                        'text-sm font-semibold',
+                        project.automation?.enabled
+                          ? 'text-emerald-700 dark:text-emerald-400'
+                          : 'text-slate-600 dark:text-slate-400',
+                      )}
+                    >
                       {project.automation?.enabled ? 'Enabled' : 'Disabled'}
                     </span>
                   </div>
@@ -432,97 +487,138 @@ function ProjectDetail() {
             </div>
           </section>
 
-          {/* Context.md */}
+          {/* Context.md — collapsible. Default collapsed because the
+              doc is often long enough to push the rest of the page out
+              of view. Header bar carries enough preview info (heading
+              or size) so the user knows whether it's worth opening. */}
           <section className="mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-sm font-semibold text-foreground">Context</h2>
-              {project.context_md && (
-                <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
-                  <MessageSquare className="w-3 h-3" />
-                  Edit via the <strong className="font-semibold text-foreground">chat</strong> link above
-                </span>
-              )}
-            </div>
             {generateError && (
               <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
                 {generateError}
               </div>
             )}
             {project.context_md ? (
-              <div className="bg-card border border-border rounded-xl p-4">
-                <Markdown>{project.context_md}</Markdown>
-              </div>
-            ) : (
-              <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">context.md</code> yet.
-                </p>
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
                 <button
                   type="button"
-                  onClick={handleInitialize}
-                  disabled={generating || !project.repos?.length}
-                  className={cn(
-                    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
-                    'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
-                  )}
+                  onClick={() => setContextOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={contextOpen}
                 >
-                  {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                  {generating ? 'Generating…' : 'Initialize context.md'}
+                  {contextOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <span className="text-sm font-semibold text-foreground">Context</span>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+                    {(project.context_md.length / 1024).toFixed(1)}kb
+                  </span>
+                  {!contextOpen && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      · {previewMD(project.context_md)}
+                    </span>
+                  )}
+                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
+                    <MessageSquare className="w-3 h-3" />
+                    Edit via chat
+                  </span>
                 </button>
-                {!project.repos?.length && (
-                  <p className="text-xs text-muted-foreground">Add at least one repo first.</p>
-                )}
-                {generating && (
-                  <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
+                {contextOpen && (
+                  <div className="px-4 pb-4 pt-0 border-t border-border">
+                    <Markdown>{project.context_md}</Markdown>
+                  </div>
                 )}
               </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-foreground">Context</h2>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">context.md</code> yet.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleInitialize}
+                    disabled={generating || !project.repos?.length}
+                    className={cn(
+                      'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                      'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
+                    )}
+                  >
+                    {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    {generating ? 'Generating…' : 'Initialize context.md'}
+                  </button>
+                  {!project.repos?.length && (
+                    <p className="text-xs text-muted-foreground">Add at least one repo first.</p>
+                  )}
+                  {generating && (
+                    <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
+                  )}
+                </div>
+              </>
             )}
           </section>
 
-          {/* Testing.md — local environment SOP. No "initialize" button
-              because there's no AI auto-generation path: testing.md
-              relies on details only the user knows (which serial port,
-              which board, what startup order). Authored interactively
-              via the project chat. */}
+          {/* Testing.md — collapsible. Same pattern as Context above.
+              No AI auto-generation path; authored interactively via
+              project chat (the SOP relies on details only the user
+              knows: which serial port, which board, startup order). */}
           <section className="mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-sm font-semibold text-foreground">
-                Local environment SOP
-              </h2>
-              {project.testing_md ? (
-                <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
-                  <MessageSquare className="w-3 h-3" />
-                  Edit via the <strong className="font-semibold text-foreground">chat</strong> link above
-                </span>
-              ) : (
-                <span className="text-xs text-muted-foreground">
-                  How to bring up the local runtime — startup order, services, hardware
-                </span>
-              )}
-            </div>
             {project.testing_md ? (
-              <div className="bg-card border border-border rounded-xl p-4">
-                <Markdown>{project.testing_md}</Markdown>
-              </div>
-            ) : (
-              <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">testing.md</code> yet.
-                  Describe how to start your local env (frontend + backend + hardware/serial)
-                  so <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">implement</code> can verify changes locally.
-                </p>
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
                 <button
                   type="button"
-                  onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
+                  onClick={() => setTestingOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={testingOpen}
                 >
-                  <MessageSquare className="w-3.5 h-3.5" />
-                  Draft via chat
+                  {testingOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <span className="text-sm font-semibold text-foreground">Local environment SOP</span>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+                    {(project.testing_md.length / 1024).toFixed(1)}kb
+                  </span>
+                  {!testingOpen && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      · {previewMD(project.testing_md)}
+                    </span>
+                  )}
+                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
+                    <MessageSquare className="w-3 h-3" />
+                    Edit via chat
+                  </span>
                 </button>
-                <p className="text-xs text-muted-foreground">
-                  This is a runbook (startup steps), not a list of test cases.
-                </p>
+                {testingOpen && (
+                  <div className="px-4 pb-4 pt-0 border-t border-border">
+                    <Markdown>{project.testing_md}</Markdown>
+                  </div>
+                )}
               </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-foreground">Local environment SOP</h2>
+                  <span className="text-xs text-muted-foreground">
+                    How to bring up the local runtime — startup order, services, hardware
+                  </span>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">testing.md</code> yet.
+                    Describe how to start your local env (frontend + backend + hardware/serial)
+                    so <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">implement</code> can verify changes locally.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    Draft via chat
+                  </button>
+                  <p className="text-xs text-muted-foreground">
+                    This is a runbook (startup steps), not a list of test cases.
+                  </p>
+                </div>
+              </>
             )}
           </section>
 
