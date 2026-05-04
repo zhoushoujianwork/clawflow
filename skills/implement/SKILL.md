@@ -30,7 +30,9 @@ ClawFlow owns labels and comments. Your stdout becomes the issue comment; the la
    ```
    Do NOT run `git checkout <base_branch>` or `git pull` first. The base branch is already checked out in the user's primary clone, so checkout here would fail with "already checked out". That's why ClawFlow gives you a worktree.
 3. **IMPLEMENT** — Minimum change to fix the issue. No unrelated refactoring.
-4. **TEST** — If the repo has tests (`go test`, `npm test`, `pytest`, `cargo test`, `make test`), run the ones most likely affected. Fix any breaks. If no tests, note "no tests" in the summary.
+4. **TEST** — Two layers, in order:
+   - **Repo tests**: if the repo has them (`go test`, `npm test`, `pytest`, `cargo test`, `make test`), run the ones most likely affected. Fix any breaks. If no tests, note "no tests" in the summary.
+   - **Local env verification**: if the system prompt above includes a "Local environment SOP (testing.md)" section under Project Context, your change probably needs runtime verification (frontend rendering, backend API, embedded device behavior, etc.) — not just unit tests. Read the SOP, decide if your change touches a surface it covers, and if so, follow its startup steps and run the linkage checks it describes. If the SOP requires hardware you don't have access to (serial device, etc.), note that explicitly in the PR body so the human knows what's still untested. Skip this step entirely if no testing.md SOP is present or your change is purely internal (no runtime behavior).
 5. **COMMIT** — One focused commit:
    ```
    fix: {one-line summary}

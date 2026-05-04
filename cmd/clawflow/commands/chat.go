@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
@@ -135,14 +134,11 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 		return fmt.Errorf("build context: %w", err)
 	}
 
-	// Auto-inject project context: if this repo belongs to a project,
-	// prepend the project's context.md so the AI has cross-repo awareness.
-	if proj, err := project.FindProjectByRepo(repo); err == nil && proj != nil {
-		if projCtx, err := project.ReadContext(proj.Name); err == nil && projCtx != "" {
-			projectHeader := fmt.Sprintf("# Project Context: %s\n\nThis repo is part of the %q project (members: %s).\n\n%s\n\n---\n\n",
-				proj.Name, proj.Name, strings.Join(proj.Repos, ", "), projCtx)
-			systemCtx = projectHeader + systemCtx
-		}
+	// Auto-inject project context (context.md + testing.md) when this
+	// repo belongs to a project. Uses the same helper as the operator
+	// runner so chat and operators see identical project framing.
+	if header := project.HeaderForRepo(repo); header != "" {
+		systemCtx = header + systemCtx
 	}
 	// claude CLI 2.x dropped --append-system-prompt-file; the prompt
 	// must be passed inline via --append-system-prompt. ARG_MAX is

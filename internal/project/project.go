@@ -70,6 +70,17 @@ func ContextPath(name string) string {
 	return filepath.Join(ProjectDir(name), "context.md")
 }
 
+// TestingPath returns the testing.md path for a named project.
+//
+// testing.md is a SOP for the project's local test environment —
+// startup order, services that need to be running, hardware/serial
+// hookups, etc. It is NOT a list of test cases. The implement
+// operator reads it (auto-injected via project header) to decide
+// whether to spin up local env for verification before opening a PR.
+func TestingPath(name string) string {
+	return filepath.Join(ProjectDir(name), "testing.md")
+}
+
 // Create creates a new project with the given name.
 func Create(name string) (*Project, error) {
 	if strings.TrimSpace(name) == "" {
@@ -92,9 +103,15 @@ func Create(name string) (*Project, error) {
 	if err := save(p); err != nil {
 		return nil, err
 	}
-	// Create an empty context.md so the file always exists.
+	// Create empty context.md and testing.md so both files always
+	// exist. context.md is the project overview; testing.md is the
+	// local-environment SOP. Both get auto-injected into operator
+	// prompts via the project header.
 	if err := os.WriteFile(ContextPath(name), []byte(""), 0o644); err != nil {
 		return nil, fmt.Errorf("create context.md: %w", err)
+	}
+	if err := os.WriteFile(TestingPath(name), []byte(""), 0o644); err != nil {
+		return nil, fmt.Errorf("create testing.md: %w", err)
 	}
 	return p, nil
 }
@@ -236,6 +253,28 @@ func WriteContext(name, content string) error {
 	return os.WriteFile(ContextPath(name), []byte(content), 0o644)
 }
 
+// ReadTesting reads the project's testing.md. Returns "" if the file
+// doesn't exist.
+func ReadTesting(name string) (string, error) {
+	data, err := os.ReadFile(TestingPath(name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(data), nil
+}
+
+// WriteTesting writes content to the project's testing.md.
+func WriteTesting(name, content string) error {
+	dir := ProjectDir(name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(TestingPath(name), []byte(content), 0o644)
+}
+
 // SetAutomation flips the automation toggle and/or cooldown for a
 // project. Pass cooldownMinutes < 0 to leave the existing value in
 // place (use case: enable/disable without retyping the cooldown).
@@ -300,6 +339,53 @@ func ListAutomationEnabled() ([]*Project, error) {
 		}
 	}
 	return enabled, nil
+}
+
+// HeaderForRepo returns a project-context header to prepend to any
+// prompt for an operation rooted at `repo`. Empty string if the repo
+// isn't a member of any project, or if the project has no
+// non-trivial context.md / testing.md to share.
+//
+// The header carries everything an AI consumer (operator, chat) needs
+// to act with project-wide awareness:
+//
+//   - which project this repo belongs to
+//   - sibling repos in the same project
+//   - the project's context.md (architecture / conventions / state)
+//   - the project's testing.md (local env SOP — start order, services,
+//     hardware hookups; consulted before doing local verification)
+//
+// Both context and testing sections are emitted only when non-empty,
+// so a project with neither doc won't generate a noisy "_(empty)_"
+// header. The returned string ends with `\n---\n\n` so a caller can
+// concatenate it directly in front of an existing system prompt.
+func HeaderForRepo(repo string) string {
+	p, err := FindProjectByRepo(repo)
+	if err != nil || p == nil {
+		return ""
+	}
+	ctx, _ := ReadContext(p.Name)
+	testing, _ := ReadTesting(p.Name)
+	if strings.TrimSpace(ctx) == "" && strings.TrimSpace(testing) == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Project Context: %s\n\n", p.Name)
+	fmt.Fprintf(&b, "This repo is part of the %q project (members: %s).\n\n",
+		p.Name, strings.Join(p.Repos, ", "))
+	if strings.TrimSpace(ctx) != "" {
+		fmt.Fprintf(&b, "## Project overview (context.md)\n\n%s\n\n", ctx)
+	}
+	if strings.TrimSpace(testing) != "" {
+		fmt.Fprintf(&b, "## Local environment SOP (testing.md)\n\n")
+		fmt.Fprintf(&b, "_How to bring up the local runtime for this project — startup\n")
+		fmt.Fprintf(&b, "order, services, hardware/serial hookups. Consult this before\n")
+		fmt.Fprintf(&b, "running local verification of code changes._\n\n")
+		fmt.Fprintf(&b, "%s\n\n", testing)
+	}
+	b.WriteString("---\n\n")
+	return b.String()
 }
 
 // save persists a Project to its project.yaml.

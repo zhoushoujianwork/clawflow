@@ -829,6 +829,7 @@ type ProjectView struct {
 	Name       string                `json:"name"`
 	Repos      []string              `json:"repos"`
 	Context    string                `json:"context_md,omitempty"`
+	Testing    string                `json:"testing_md,omitempty"`
 	Automation ProjectAutomationView `json:"automation"`
 	CreatedAt  string                `json:"created_at"`
 	UpdatedAt  string                `json:"updated_at"`
@@ -856,10 +857,12 @@ func WriteProjects() error {
 	views := make([]ProjectView, 0, len(projects))
 	for _, p := range projects {
 		ctx, _ := project.ReadContext(p.Name)
+		testing, _ := project.ReadTesting(p.Name)
 		views = append(views, ProjectView{
 			Name:    p.Name,
 			Repos:   p.Repos,
 			Context: ctx,
+			Testing: testing,
 			Automation: ProjectAutomationView{
 				Enabled:         p.Automation.Enabled,
 				CooldownMinutes: p.Automation.CooldownMinutes,

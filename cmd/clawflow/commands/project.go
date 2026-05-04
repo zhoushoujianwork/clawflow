@@ -200,6 +200,19 @@ func newProjectShowCmd() *cobra.Command {
 				fmt.Println("context.md: (empty)")
 				fmt.Println("  generate with: clawflow project generate", p.Name)
 			}
+			testing, err := project.ReadTesting(p.Name)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(testing) != "" {
+				fmt.Println()
+				fmt.Println("--- testing.md ---")
+				fmt.Println(testing)
+			} else {
+				fmt.Println()
+				fmt.Println("testing.md: (empty)")
+				fmt.Println("  describe local-env startup SOP via: clawflow project chat", p.Name)
+			}
 			return nil
 		},
 	}
@@ -338,6 +351,10 @@ func runProjectChat(name, model string) error {
 	if err != nil {
 		return err
 	}
+	originalTesting, err := project.ReadTesting(name)
+	if err != nil {
+		return err
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -365,7 +382,7 @@ func runProjectChat(name, model string) error {
 		}
 	}
 
-	systemCtx := chat.BuildProjectChatContext(name, chatRepos, originalCtx)
+	systemCtx := chat.BuildProjectChatContext(name, chatRepos, originalCtx, originalTesting)
 
 	sessionID := chat.NewSessionID("project/"+name, 0)
 	sessionName := fmt.Sprintf("clawflow: project/%s", name)
@@ -452,7 +469,7 @@ func runProjectChat(name, model string) error {
 	// Claude for the final context.md (if anything was changed). This
 	// is the workaround for stream-json + interactive being mutually
 	// exclusive in claude CLI 2.x — split into two phases instead.
-	wbErr := resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx, useBare, apiKey, baseURL)
+	wbErr := resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx, originalTesting, useBare, apiKey, baseURL)
 
 	// Refresh the dashboard snapshot regardless of whether we wrote
 	// back via the extract path — the AI may also have edited
@@ -466,25 +483,29 @@ func runProjectChat(name, model string) error {
 }
 
 // resumeAndMaybeWriteBack runs `claude -p --session-id <same>` to
-// extract the final context.md from the just-ended chat. If a
-// non-empty fenced block is found and differs from the original, the
-// user is shown a preview and asked to confirm save.
+// extract the final context.md AND testing.md from the just-ended
+// chat. For each doc whose extracted content differs from the
+// original, the user is shown a preview and asked to confirm save.
+// Each doc is offered independently so the user can save one and
+// discard the other.
 //
-// Cost: one short follow-up turn (~1–5s, a few cents). Skipped
-// silently if the model returns NO_UPDATES, which is the prompted
-// signal for "the chat didn't touch context.md."
-func resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx string, useBare bool, apiKey, baseURL string) error {
-	fmt.Fprintln(os.Stderr, "\n[clawflow] checking for context.md updates from this conversation…")
+// Cost: one short follow-up turn covers both docs (~1–5s, a few
+// cents). Skipped silently for any doc the model omits — the prompt
+// invites the model to output zero, one, or both blocks.
+func resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx, originalTesting string, useBare bool, apiKey, baseURL string) error {
+	fmt.Fprintln(os.Stderr, "\n[clawflow] checking for context.md / testing.md updates from this conversation…")
 
-	extractPrompt := `Reply with EXACTLY one of two things:
-
-1. If you produced or refined a context.md document during our conversation, output the COMPLETE final version inside a fenced code block tagged "context.md", like:
+	extractPrompt := `If the conversation produced or refined either of these documents, output the COMPLETE final version of each, inside its own fenced code block tagged with the doc name. Output zero, one, or both blocks — whatever changed.
 
 ` + "```" + `context.md
 # ...full document...
 ` + "```" + `
 
-2. Otherwise, reply with the literal token NO_UPDATES on a single line.
+` + "```" + `testing.md
+# ...full document...
+` + "```" + `
+
+If neither doc changed, reply with the literal token NO_UPDATES on a single line.
 
 Do not include any other text, preamble, or explanation.`
 
@@ -507,39 +528,55 @@ Do not include any other text, preamble, or explanation.`
 
 	output, err := cmd.Output()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[clawflow] could not extract updates (%v) — context.md left as-is\n", err)
+		fmt.Fprintf(os.Stderr, "[clawflow] could not extract updates (%v) — docs left as-is\n", err)
+		return nil
+	}
+	outStr := string(output)
+
+	if err := offerSave(outStr, originalCtx, "context.md", chat.ExtractLastContextMD,
+		project.ContextPath(name), func(c string) error { return project.WriteContext(name, c) }); err != nil {
+		return err
+	}
+	if err := offerSave(outStr, originalTesting, "testing.md", chat.ExtractLastTestingMD,
+		project.TestingPath(name), func(c string) error { return project.WriteTesting(name, c) }); err != nil {
+		return err
+	}
+	return nil
+}
+
+// offerSave is the per-doc tail of resumeAndMaybeWriteBack. Pulled
+// out so context.md and testing.md follow identical extract → diff →
+// confirm → write paths without duplicating 25 lines.
+func offerSave(output, original, label string, extract func(string) string, path string, write func(string) error) error {
+	proposed := extract(output)
+	if proposed == "" {
+		fmt.Fprintf(os.Stderr, "[clawflow] no %s updates from this chat.\n", label)
+		return nil
+	}
+	if !strings.HasSuffix(proposed, "\n") {
+		proposed += "\n"
+	}
+	if proposed == original {
+		fmt.Fprintf(os.Stderr, "[clawflow] proposed %s is identical to current — no save needed.\n", label)
 		return nil
 	}
 
-	newCtx := chat.ExtractLastContextMD(string(output))
-	if newCtx == "" {
-		fmt.Fprintln(os.Stderr, "[clawflow] no context.md updates from this chat.")
-		return nil
-	}
-	if !strings.HasSuffix(newCtx, "\n") {
-		newCtx += "\n"
-	}
-	if newCtx == originalCtx {
-		fmt.Fprintln(os.Stderr, "[clawflow] proposed context.md is identical to current — no save needed.")
-		return nil
-	}
-
-	fmt.Fprintln(os.Stderr, "\n[clawflow] ─── Proposed context.md ───")
-	fmt.Fprintln(os.Stderr, newCtx)
+	fmt.Fprintf(os.Stderr, "\n[clawflow] ─── Proposed %s ───\n", label)
+	fmt.Fprintln(os.Stderr, proposed)
 	fmt.Fprintln(os.Stderr, "[clawflow] ─── End ───")
-	fmt.Fprint(os.Stderr, "[clawflow] Save this as the new context.md? [y/N] ")
+	fmt.Fprintf(os.Stderr, "[clawflow] Save this as the new %s? [y/N] ", label)
 
 	reader := bufio.NewReader(os.Stdin)
 	answer, _ := reader.ReadString('\n')
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer != "y" && answer != "yes" {
-		fmt.Fprintln(os.Stderr, "[clawflow] discarded — context.md unchanged.")
+		fmt.Fprintf(os.Stderr, "[clawflow] discarded — %s unchanged.\n", label)
 		return nil
 	}
 
-	if err := project.WriteContext(name, newCtx); err != nil {
-		return fmt.Errorf("write context.md: %w", err)
+	if err := write(proposed); err != nil {
+		return fmt.Errorf("write %s: %w", label, err)
 	}
-	fmt.Fprintf(os.Stderr, "[clawflow] saved → %s\n", project.ContextPath(name))
+	fmt.Fprintf(os.Stderr, "[clawflow] saved → %s\n", path)
 	return nil
 }

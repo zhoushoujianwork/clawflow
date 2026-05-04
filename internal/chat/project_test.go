@@ -108,7 +108,7 @@ func TestBuildProjectChatContext(t *testing.T) {
 		{Name: "owner/repo-a", LocalPath: "/tmp/repo-a"},
 		{Name: "owner/repo-b", LocalPath: ""},
 	}
-	ctx := BuildProjectChatContext("my-proj", repos, "# My Project\n\nSome content.\n")
+	ctx := BuildProjectChatContext("my-proj", repos, "# My Project\n\nSome content.\n", "")
 
 	if !containsStr(ctx, "Project: my-proj") {
 		t.Error("missing project name in context")

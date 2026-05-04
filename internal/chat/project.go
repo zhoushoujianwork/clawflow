@@ -18,22 +18,29 @@ type ProjectChatRepo struct {
 
 // BuildProjectChatContext assembles the system prompt for
 // `clawflow project chat`. The chat is the user's primary surface
-// for two distinct things:
+// for three distinct things:
 //
-//  1. Maintaining the project's shared context.md (a living document
-//     auto-injected into every per-repo chat). Updates land via a
-//     ```context.md fenced block which the tool extracts after the
-//     session ends and offers to write back.
+//  1. Maintaining the project's shared context.md (architecture,
+//     conventions, current state — auto-injected into every per-repo
+//     chat and operator). Updates land via a ```context.md fenced
+//     block which the tool extracts after the session ends and offers
+//     to write back.
 //
-//  2. Cross-repo project-manager work — issue triage, PR review,
+//  2. Maintaining the project's testing.md (the local-environment
+//     SOP — startup order, services, hardware/serial hookups —
+//     consulted by the implement operator before doing local
+//     verification). Update path mirrors context.md but with a
+//     ```testing.md fenced block.
+//
+//  3. Cross-repo project-manager work — issue triage, PR review,
 //     label/milestone management — performed via Bash invocations of
 //     the `clawflow` CLI. Member repos are mounted via --add-dir so
 //     Claude can read code from any of them when triaging.
 //
 // The prompt establishes the role, lists member repos with paths,
 // enumerates allowed tools and CLI commands, and pins the output
-// contract for context.md updates.
-func BuildProjectChatContext(name string, repos []ProjectChatRepo, contextMD string) string {
+// contract for both context.md and testing.md updates.
+func BuildProjectChatContext(name string, repos []ProjectChatRepo, contextMD, testingMD string) string {
 	var b strings.Builder
 
 	fmt.Fprintln(&b, "# Project Chat Context")
@@ -64,6 +71,17 @@ func BuildProjectChatContext(name string, repos []ProjectChatRepo, contextMD str
 		fmt.Fprintln(&b, "_(empty — this is a new project; treat it as an opportunity to draft the first version with the user)_")
 	} else {
 		fmt.Fprintln(&b, contextMD)
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "## Current testing.md")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "_The local-environment SOP — how to bring up the runtime to verify changes (startup order, services, hardware/serial). NOT a list of test cases. The implement operator reads this before doing local verification._")
+	fmt.Fprintln(&b)
+	if strings.TrimSpace(testingMD) == "" {
+		fmt.Fprintln(&b, "_(empty — if the project has any non-trivial local setup, ask the user for it and draft the SOP)_")
+	} else {
+		fmt.Fprintln(&b, testingMD)
 	}
 
 	fmt.Fprintln(&b, "---")
@@ -143,24 +161,33 @@ open issues across ALL member repos in parallel.
 - **Stay grounded.** Cite file paths and issue numbers when making
   claims. If you haven't read the code, say so before recommending.
 
-## Updating context.md
+## Updating context.md or testing.md
 
-When the user asks you to update context.md, or when the conversation
+When the user asks you to update either doc, or when the conversation
 naturally produces a meaningful change, output the COMPLETE updated
-document inside a fenced code block with the ` + "`context.md`" + ` info string:
+document inside a fenced code block tagged with the doc name:
 
 ` + "```" + `context.md
 # Project Name
 ... full document content ...
 ` + "```" + `
 
-The tool reads the LAST such block from your output after the session
-ends and offers it to the user for review + save. Always output the
-COMPLETE document, never a partial diff.
+` + "```" + `testing.md
+# Local environment SOP
+... full document content ...
+` + "```" + `
 
-If the user is just discussing or triaging issues and not editing the
-context, you don't need to output it. The save prompt only fires when
-a fenced block is found.`)
+You can output one, both, or neither — the tool extracts each
+independently after the session ends and offers each for review +
+save. Always output the COMPLETE document, never a partial diff.
+Don't emit a fenced block just to "show what's there" — only when
+you're proposing a change. The save prompt for each doc only fires
+when its fenced block is present.
+
+testing.md scope reminder: it's a SOP for bringing up the local
+runtime (startup order, services, hardware hookups), NOT a list of
+test cases. If the user describes test cases, push back and suggest
+those belong in the repo's test suite, not testing.md.`)
 
 	return b.String()
 }
@@ -188,13 +215,26 @@ type messagePayload struct {
 	Content []contentBlock `json:"content"`
 }
 
-// ExtractLastContextMD scans a stream-json output (one JSON object per line)
-// and returns the content of the last fenced code block tagged "context.md"
-// found in assistant messages. Returns "" if none found.
+// ExtractLastContextMD scans a stream-json output and returns the
+// content of the last fenced code block tagged "context.md" in
+// assistant messages. Returns "" if none found.
 func ExtractLastContextMD(output string) string {
-	// Collect all assistant text from the stream-json output.
-	// Claude's stream-json format emits various event types; we look for
-	// assistant message text in multiple possible shapes.
+	return extractFencedBlock(collectAssistantText(output), "context.md")
+}
+
+// ExtractLastTestingMD is the same as ExtractLastContextMD but for the
+// "testing.md" tag — used by the project-chat write-back path so the
+// AI can update both docs in one session and have each save offered
+// independently.
+func ExtractLastTestingMD(output string) string {
+	return extractFencedBlock(collectAssistantText(output), "testing.md")
+}
+
+// collectAssistantText concatenates every assistant text fragment in
+// a stream-json output. Claude emits assistant text in multiple
+// shapes (inline `content` string, content_block delta, `message`
+// wrapper) — handle all three.
+func collectAssistantText(output string) string {
 	var allText strings.Builder
 
 	scanner := bufio.NewScanner(strings.NewReader(output))
@@ -209,17 +249,14 @@ func ExtractLastContextMD(output string) string {
 			continue
 		}
 
-		// assistant message with inline content string
 		if msg.Role == "assistant" && msg.Content != "" {
 			allText.WriteString(msg.Content)
 			continue
 		}
-		// content_block with text
 		if msg.ContentBlock != nil && msg.ContentBlock.Type == "text" {
 			allText.WriteString(msg.ContentBlock.Text)
 			continue
 		}
-		// message wrapper with content array
 		if msg.Message != nil && msg.Message.Role == "assistant" {
 			for _, cb := range msg.Message.Content {
 				if cb.Type == "text" {
@@ -230,7 +267,7 @@ func ExtractLastContextMD(output string) string {
 		}
 	}
 
-	return extractFencedBlock(allText.String(), "context.md")
+	return allText.String()
 }
 
 // extractFencedBlock finds the last fenced code block with the given info

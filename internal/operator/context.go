@@ -3,15 +3,27 @@ package operator
 import (
 	"fmt"
 	"strings"
+
+	"github.com/zhoushoujianwork/clawflow/internal/project"
 )
 
-// BuildPrompt constructs the full prompt handed to `claude -p`. It prepends a
-// Context block with the issue/PR details so the operator's SKILL.md body can
-// reason about "this issue" without calling out to the VCS API itself.
+// BuildPrompt constructs the full prompt handed to `claude -p`. It prepends:
+//   - a project header (if the repo belongs to a project with non-empty
+//     context.md or testing.md), so operators get cross-repo awareness
+//     and the local-env SOP automatically — implement reads testing.md
+//     to decide whether local verification is warranted before opening
+//     a PR
+//   - a Context block with the issue/PR details so the operator's
+//     SKILL.md body can reason about "this issue" without calling out
+//     to the VCS API itself
 //
 // comments is optional; pass nil to skip the "Recent Comments" section.
 func BuildPrompt(op *Operator, sub *Subject, repo string, comments []string) string {
 	var b strings.Builder
+
+	if header := project.HeaderForRepo(repo); header != "" {
+		b.WriteString(header)
+	}
 
 	fmt.Fprintln(&b, "# Context")
 	fmt.Fprintln(&b)
