@@ -104,21 +104,32 @@ func TestExtractLastContextMD(t *testing.T) {
 }
 
 func TestBuildProjectChatContext(t *testing.T) {
-	ctx := BuildProjectChatContext("my-proj", "# My Project\n\nSome content.\n")
+	repos := []ProjectChatRepo{
+		{Name: "owner/repo-a", LocalPath: "/tmp/repo-a"},
+		{Name: "owner/repo-b", LocalPath: ""},
+	}
+	ctx := BuildProjectChatContext("my-proj", repos, "# My Project\n\nSome content.\n")
 
-	// Should contain the project name
-	if got := ctx; !containsStr(got, "Project: my-proj") {
+	if !containsStr(ctx, "Project: my-proj") {
 		t.Error("missing project name in context")
 	}
-
-	// Should contain the original content
 	if !containsStr(ctx, "# My Project") {
 		t.Error("missing original context.md content")
 	}
-
-	// Should contain the instruction about outputting context.md
 	if !containsStr(ctx, "context.md") {
 		t.Error("missing instruction about context.md code block")
+	}
+	if !containsStr(ctx, "owner/repo-a") || !containsStr(ctx, "/tmp/repo-a") {
+		t.Error("missing member repo with local_path")
+	}
+	if !containsStr(ctx, "owner/repo-b") || !containsStr(ctx, "no local_path") {
+		t.Error("missing member repo without local_path or its caveat")
+	}
+	if !containsStr(ctx, "clawflow issue") {
+		t.Error("missing clawflow CLI cheatsheet")
+	}
+	if !containsStr(ctx, "Confirm before mutations") {
+		t.Error("missing mutation-confirmation rule")
 	}
 }
 

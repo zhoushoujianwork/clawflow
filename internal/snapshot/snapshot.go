@@ -828,7 +828,7 @@ func collectRunEntries(root string) []RunIndexEntry {
 type ProjectView struct {
 	Name      string   `json:"name"`
 	Repos     []string `json:"repos"`
-	Context   string   `json:"context,omitempty"`
+	Context   string   `json:"context_md,omitempty"`
 	CreatedAt string   `json:"created_at"`
 	UpdatedAt string   `json:"updated_at"`
 }

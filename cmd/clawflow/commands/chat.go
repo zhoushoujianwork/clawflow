@@ -144,19 +144,12 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 			systemCtx = projectHeader + systemCtx
 		}
 	}
-	tmpFile, err := os.CreateTemp("", "clawflow-chat-ctx-*.md")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	if _, err := tmpFile.WriteString(systemCtx); err != nil {
-		tmpFile.Close()
-		return err
-	}
-	tmpFile.Close()
+	// claude CLI 2.x dropped --append-system-prompt-file; the prompt
+	// must be passed inline via --append-system-prompt. ARG_MAX is
+	// large enough for the 5–20KB context we build.
 	args = append(args,
 		"--session-id", sessionID,
-		"--append-system-prompt-file", tmpFile.Name(),
+		"--append-system-prompt", systemCtx,
 	)
 
 	bin := claude.Resolve()

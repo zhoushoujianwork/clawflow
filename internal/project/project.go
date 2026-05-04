@@ -29,19 +29,21 @@ func ProjectsRoot() string {
 	return filepath.Join(home, ".clawflow", "projects")
 }
 
-// projectDir returns the directory for a named project.
-func projectDir(name string) string {
+// ProjectDir returns the directory for a named project — i.e.
+// ~/.clawflow/projects/<name>/. Exported so callers (e.g. the
+// project-chat launcher) can use it as a workdir.
+func ProjectDir(name string) string {
 	return filepath.Join(ProjectsRoot(), name)
 }
 
 // yamlPath returns the project.yaml path for a named project.
 func yamlPath(name string) string {
-	return filepath.Join(projectDir(name), "project.yaml")
+	return filepath.Join(ProjectDir(name), "project.yaml")
 }
 
 // ContextPath returns the context.md path for a named project.
 func ContextPath(name string) string {
-	return filepath.Join(projectDir(name), "context.md")
+	return filepath.Join(ProjectDir(name), "context.md")
 }
 
 // Create creates a new project with the given name.
@@ -49,7 +51,7 @@ func Create(name string) (*Project, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, fmt.Errorf("project name cannot be empty")
 	}
-	dir := projectDir(name)
+	dir := ProjectDir(name)
 	if _, err := os.Stat(yamlPath(name)); err == nil {
 		return nil, fmt.Errorf("project %q already exists", name)
 	}
@@ -118,7 +120,7 @@ func List() ([]*Project, error) {
 
 // Delete removes a project and its directory.
 func Delete(name string) error {
-	dir := projectDir(name)
+	dir := ProjectDir(name)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("project %q not found", name)
 	}
@@ -203,7 +205,7 @@ func ReadContext(name string) (string, error) {
 
 // WriteContext writes content to the project's context.md.
 func WriteContext(name, content string) error {
-	dir := projectDir(name)
+	dir := ProjectDir(name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}

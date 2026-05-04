@@ -2,10 +2,7 @@ package commands
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,6 +12,8 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
+	"github.com/zhoushoujianwork/clawflow/internal/projectgen"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
 // NewProjectCmd returns the `clawflow project` parent command with all
@@ -208,156 +207,47 @@ func newProjectDeleteCmd() *cobra.Command {
 	}
 }
 
-// runProjectGenerate collects repo metadata and asks Claude to produce
-// a project overview, writing the result to context.md.
+// runProjectGenerate is a thin CLI wrapper around projectgen.Generate
+// — it adds stderr provenance lines and prints the generated content
+// to stdout. The actual prompt construction and `claude -p` invocation
+// live in internal/projectgen so the dashboard's HTTP handler can
+// reuse them.
 func runProjectGenerate(name, model string) error {
-	p, err := project.Get(name)
-	if err != nil {
-		return err
-	}
-	if len(p.Repos) == 0 {
-		return fmt.Errorf("project %q has no repos — add some first with: clawflow project add-repo %s <owner/repo>", name, name)
-	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-
-	// Collect repo info for the prompt
-	var promptParts []string
-	promptParts = append(promptParts, fmt.Sprintf("# Project: %s\n", name))
-	promptParts = append(promptParts, fmt.Sprintf("This project contains %d repositories:\n", len(p.Repos)))
-
-	scanned := 0
-	for _, repoName := range p.Repos {
-		repoCfg, ok := cfg.Repos[repoName]
-		localPath := ""
-		if ok {
-			localPath = repoCfg.LocalPath
-		}
-		if localPath == "" {
-			promptParts = append(promptParts, fmt.Sprintf("\n## %s\n(no local_path configured — skipped)\n", repoName))
-			continue
-		}
-
-		promptParts = append(promptParts, fmt.Sprintf("\n## %s\nLocal path: %s\n", repoName, localPath))
-
-		// Collect README
-		for _, readme := range []string{"README.md", "readme.md", "README"} {
-			data, err := os.ReadFile(fmt.Sprintf("%s/%s", localPath, readme))
-			if err == nil {
-				content := string(data)
-				if len(content) > 3000 {
-					content = content[:3000] + "\n... (truncated)"
-				}
-				promptParts = append(promptParts, fmt.Sprintf("\n### README\n```\n%s\n```\n", content))
-				break
-			}
-		}
-
-		// Collect config files
-		configFiles := []string{"go.mod", "package.json", "Cargo.toml", "pyproject.toml", "pom.xml", "build.gradle"}
-		for _, cf := range configFiles {
-			data, err := os.ReadFile(fmt.Sprintf("%s/%s", localPath, cf))
-			if err == nil {
-				content := string(data)
-				if len(content) > 1500 {
-					content = content[:1500] + "\n... (truncated)"
-				}
-				promptParts = append(promptParts, fmt.Sprintf("\n### %s\n```\n%s\n```\n", cf, content))
-			}
-		}
-
-		// Top-level directory listing
-		entries, err := os.ReadDir(localPath)
-		if err == nil {
-			var dirs, files []string
-			for _, e := range entries {
-				if strings.HasPrefix(e.Name(), ".") {
-					continue
-				}
-				if e.IsDir() {
-					dirs = append(dirs, e.Name()+"/")
-				} else {
-					files = append(files, e.Name())
-				}
-			}
-			promptParts = append(promptParts, "\n### Directory structure\n```\n")
-			for _, d := range dirs {
-				promptParts = append(promptParts, d+"\n")
-			}
-			for _, f := range files {
-				promptParts = append(promptParts, f+"\n")
-			}
-			promptParts = append(promptParts, "```\n")
-		}
-		scanned++
-	}
-
-	if scanned == 0 {
-		return fmt.Errorf("no repos with local_path configured — set local_path in config for at least one member repo")
-	}
-
-	promptParts = append(promptParts, `
----
-
-Based on the repository information above, produce a project overview document in Markdown. Include:
-
-1. **Project Overview** — one paragraph describing what this project does
-2. **Repository Roles** — for each repo, its role and responsibility (2-3 sentences)
-3. **Inter-repo Dependencies** — how the repos depend on and collaborate with each other
-4. **Architecture Overview** — high-level architecture description
-
-Write the output as a standalone Markdown document suitable for context.md.
-Output ONLY the Markdown document, no preamble or explanation.`)
-
-	prompt := strings.Join(promptParts, "")
-
-	if model == "" {
+	resolved := model
+	if resolved == "" {
 		creds, _ := config.LoadCredentials()
-		model = creds.EffectiveChatModel()
+		resolved = creds.EffectiveChatModel()
 	}
+	fmt.Fprintf(os.Stderr, "[clawflow] generating context.md for project %q (model=%s)...\n", name, resolved)
 
-	fmt.Fprintf(os.Stderr, "[clawflow] generating context.md for project %q (model=%s, %d repos scanned)...\n", name, model, scanned)
-
-	bin := claude.Resolve()
-	args := []string{
-		"--model", model,
-		"--print",
-		"-p", prompt,
-	}
-
-	cmd := exec.Command(bin, args...)
-	creds, _ := config.LoadCredentials()
-	apiKey, baseURL := "", ""
-	if creds != nil {
-		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
-	}
-	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
-	cmd.Stderr = os.Stderr
-
-	output, err := cmd.Output()
+	content, err := projectgen.Generate(name, model, "")
 	if err != nil {
-		return fmt.Errorf("claude generate failed: %w", err)
-	}
-
-	content := strings.TrimSpace(string(output))
-	if content == "" {
-		return fmt.Errorf("claude returned empty output")
-	}
-
-	if err := project.WriteContext(name, content); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "✓ context.md written (%d bytes)\n", len(content))
+	// Match the dashboard API path: refresh snapshot so a running
+	// `clawflow web` reflects the new context.md on next page load.
+	if err := snapshot.WriteProjects(); err != nil {
+		fmt.Fprintf(os.Stderr, "[clawflow] (warning) snapshot refresh failed: %v\n", err)
+	}
 	fmt.Println(content)
 	return nil
 }
 
-// runProjectChat launches an interactive Claude session with the current
-// context.md loaded as system context. After the session, it extracts any
-// updated context.md from the stream-json output and offers to write it back.
+// runProjectChat launches the project-manager interactive Claude
+// session. It is the single surface for two things:
+//
+//  1. Editing the project's context.md (write-back via post-chat
+//     session-resume extract — see the bottom of this function).
+//  2. Cross-repo project work — issue triage, PR review, label and
+//     milestone management — via the clawflow CLI invoked through
+//     Bash. All member repos with local clones are mounted via
+//     --add-dir so Claude can grep across the whole project in one
+//     session.
+//
+// Code edits are blocked at the launcher level via --disallowedTools.
+// The implement operator (run on a labeled issue) remains the only
+// path that mutates code.
 func runProjectChat(name, model string) error {
 	p, err := project.Get(name)
 	if err != nil {
@@ -369,47 +259,70 @@ func runProjectChat(name, model string) error {
 		return err
 	}
 
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
 	if model == "" {
 		creds, _ := config.LoadCredentials()
 		model = creds.EffectiveChatModel()
 	}
 
-	// Build system context using the chat package's prompt builder
-	systemCtx := chat.BuildProjectChatContext(name, originalCtx)
-
-	// Append member-repo info so the AI knows the project structure
-	var sb strings.Builder
-	sb.WriteString(systemCtx)
-	fmt.Fprintf(&sb, "\n\nMember repos: %s\n", strings.Join(p.Repos, ", "))
-	fullCtx := sb.String()
-
-	tmpFile, err := os.CreateTemp("", "clawflow-project-chat-*.md")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+	// Build the member-repo descriptor table — both for the system
+	// prompt (so Claude knows what's where) and for --add-dir below
+	// (so it can actually read those paths).
+	chatRepos := make([]chat.ProjectChatRepo, 0, len(p.Repos))
+	memberPaths := make([]string, 0, len(p.Repos))
+	for _, repoName := range p.Repos {
+		localPath := ""
+		if rc, ok := cfg.Repos[repoName]; ok {
+			localPath = rc.LocalPath
+		}
+		chatRepos = append(chatRepos, chat.ProjectChatRepo{Name: repoName, LocalPath: localPath})
+		if localPath != "" {
+			memberPaths = append(memberPaths, localPath)
+		}
 	}
-	defer os.Remove(tmpFile.Name())
-	if _, err := tmpFile.WriteString(fullCtx); err != nil {
-		tmpFile.Close()
-		return err
-	}
-	tmpFile.Close()
+
+	systemCtx := chat.BuildProjectChatContext(name, chatRepos, originalCtx)
 
 	sessionID := chat.NewSessionID("project/"+name, 0)
 	sessionName := fmt.Sprintf("clawflow: project/%s", name)
-	workdir := os.TempDir()
 
+	// Workdir: the project's own metadata dir
+	// (~/.clawflow/projects/<name>/). Stable, neutral across member
+	// repos (no implicit primacy of repo[0]), and contains
+	// project.yaml + context.md so Claude can `cat` project metadata
+	// directly. Member repo source is reachable via --add-dir below.
+	workdir := project.ProjectDir(name)
+
+	// claude CLI 2.x has no --append-system-prompt-file flag — the
+	// content must be passed inline. macOS/Linux ARG_MAX is well into
+	// the hundreds of KB, so a 10–30KB context fits comfortably.
+	//
+	// Tool permissions: project chat is the project-manager seat —
+	// the user wants full agency, including direct Edit/Write of
+	// code in member repos when they ask for it. Repo chat keeps
+	// its read-only stance because that surface is meant for analysis
+	// only; project chat is meant for orchestration.
 	args := []string{
 		"--model", model,
 		"--name", sessionName,
-		"--output-format", "stream-json",
 		"--session-id", sessionID,
-		"--append-system-prompt-file", tmpFile.Name(),
+		"--append-system-prompt", systemCtx,
 	}
 
 	preCreds, _ := config.LoadCredentials()
 	useBare := preCreds != nil && preCreds.ClaudeAPIKey != ""
 	if useBare {
-		args = append(args, "--bare", "--add-dir", workdir)
+		args = append(args, "--bare")
+	}
+	// Mount every member repo's local clone so Claude can read across
+	// the project. --add-dir is also appended for non-bare mode so the
+	// behavior is consistent regardless of auth path.
+	for _, path := range memberPaths {
+		args = append(args, "--add-dir", path)
 	}
 
 	bin := claude.Resolve()
@@ -423,7 +336,6 @@ func runProjectChat(name, model string) error {
 	}
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 
-	// Print provenance banner
 	keyHint := "(none — falling back to OAuth/keychain)"
 	if apiKey != "" {
 		if n := len(apiKey); n >= 4 {
@@ -441,158 +353,113 @@ func runProjectChat(name, model string) error {
 		bareNote = " --bare (forced, API key takes priority over claude.ai login)"
 	}
 	fmt.Fprintf(os.Stderr, "[clawflow] project chat → %s (model=%s key=%s base_url=%s%s)\n", name, model, keyHint, urlHint, bareNote)
-
-	// Connect stdin directly so the user can interact.
-	cmd.Stdin = os.Stdin
-
-	// Capture stdout (stream-json) while also displaying assistant text
-	// to stderr for the interactive experience.
-	var capturedOutput bytes.Buffer
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
+	if len(memberPaths) > 0 {
+		fmt.Fprintf(os.Stderr, "[clawflow] mounted %d repo(s) via --add-dir; cwd = %s\n", len(memberPaths), workdir)
 	}
+
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start claude: %w", err)
+	if err := cmd.Run(); err != nil {
+		// The user pressing Ctrl-D / typing /exit is not an error;
+		// surface other failures so the post-chat extract still runs
+		// only when the session actually started.
+		fmt.Fprintf(os.Stderr, "[clawflow] chat exited: %v\n", err)
 	}
 
-	// Read stream-json from stdout, display assistant text to stderr, and
-	// capture everything for post-session extraction.
-	streamDone := make(chan error, 1)
-	go func() {
-		streamDone <- streamAndCapture(stdoutPipe, os.Stderr, &capturedOutput)
-	}()
+	// Post-chat: resume the same session non-interactively to ask
+	// Claude for the final context.md (if anything was changed). This
+	// is the workaround for stream-json + interactive being mutually
+	// exclusive in claude CLI 2.x — split into two phases instead.
+	wbErr := resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx, useBare, apiKey, baseURL)
 
-	if err := <-streamDone; err != nil {
-		debugf("stream reader error: %v", err)
+	// Refresh the dashboard snapshot regardless of whether we wrote
+	// back via the extract path — the AI may also have edited
+	// context.md / project.yaml directly via Edit/Write while in the
+	// project workdir, and the dashboard's /data/projects.json
+	// otherwise wouldn't pick that up until the next web restart.
+	if err := snapshot.WriteProjects(); err != nil {
+		fmt.Fprintf(os.Stderr, "[clawflow] (warning) snapshot refresh failed: %v\n", err)
+	}
+	return wbErr
+}
+
+// resumeAndMaybeWriteBack runs `claude -p --session-id <same>` to
+// extract the final context.md from the just-ended chat. If a
+// non-empty fenced block is found and differs from the original, the
+// user is shown a preview and asked to confirm save.
+//
+// Cost: one short follow-up turn (~1–5s, a few cents). Skipped
+// silently if the model returns NO_UPDATES, which is the prompted
+// signal for "the chat didn't touch context.md."
+func resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx string, useBare bool, apiKey, baseURL string) error {
+	fmt.Fprintln(os.Stderr, "\n[clawflow] checking for context.md updates from this conversation…")
+
+	extractPrompt := `Reply with EXACTLY one of two things:
+
+1. If you produced or refined a context.md document during our conversation, output the COMPLETE final version inside a fenced code block tagged "context.md", like:
+
+` + "```" + `context.md
+# ...full document...
+` + "```" + `
+
+2. Otherwise, reply with the literal token NO_UPDATES on a single line.
+
+Do not include any other text, preamble, or explanation.`
+
+	args := []string{
+		"--model", model,
+		"--session-id", sessionID,
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose", // stream-json with -p requires --verbose
+	}
+	if useBare {
+		args = append(args, "--bare")
+	}
+	args = append(args, extractPrompt)
+
+	cmd := exec.Command(claude.Resolve(), args...)
+	cmd.Dir = workdir
+	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
+	cmd.Stderr = os.Stderr
+
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[clawflow] could not extract updates (%v) — context.md left as-is\n", err)
+		return nil
 	}
 
-	runErr := cmd.Wait()
-
-	if runErr != nil {
-		debugf("claude exited with: %v", runErr)
-	}
-
-	// Extract the last context.md block from the captured stream-json output.
-	captured := capturedOutput.String()
-	newCtx := chat.ExtractLastContextMD(captured)
-
+	newCtx := chat.ExtractLastContextMD(string(output))
 	if newCtx == "" {
-		fmt.Fprintln(os.Stderr, "\n[clawflow] No updated context.md found in the session output.")
-		fmt.Fprintln(os.Stderr, "[clawflow] Tip: ask Claude to output the final document in a ```context.md code block.")
-		return runErr
+		fmt.Fprintln(os.Stderr, "[clawflow] no context.md updates from this chat.")
+		return nil
 	}
-
-	// Ensure the extracted content ends with a newline
 	if !strings.HasSuffix(newCtx, "\n") {
 		newCtx += "\n"
 	}
-
-	// Show preview
-	fmt.Fprintln(os.Stderr, "\n[clawflow] ─── Updated context.md preview ───")
-	fmt.Fprintln(os.Stderr, newCtx)
-	fmt.Fprintln(os.Stderr, "[clawflow] ─── End preview ───")
-
-	if originalCtx == newCtx {
-		fmt.Fprintln(os.Stderr, "[clawflow] No changes detected — context.md is unchanged.")
-		return runErr
+	if newCtx == originalCtx {
+		fmt.Fprintln(os.Stderr, "[clawflow] proposed context.md is identical to current — no save needed.")
+		return nil
 	}
 
-	// Prompt for confirmation
-	fmt.Fprint(os.Stderr, "[clawflow] Save updated context.md? [y/N] ")
+	fmt.Fprintln(os.Stderr, "\n[clawflow] ─── Proposed context.md ───")
+	fmt.Fprintln(os.Stderr, newCtx)
+	fmt.Fprintln(os.Stderr, "[clawflow] ─── End ───")
+	fmt.Fprint(os.Stderr, "[clawflow] Save this as the new context.md? [y/N] ")
+
 	reader := bufio.NewReader(os.Stdin)
 	answer, _ := reader.ReadString('\n')
 	answer = strings.TrimSpace(strings.ToLower(answer))
-
-	if answer == "y" || answer == "yes" {
-		if err := project.WriteContext(name, newCtx); err != nil {
-			return fmt.Errorf("write context.md: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "[clawflow] Saved → %s\n", project.ContextPath(name))
-	} else {
-		fmt.Fprintln(os.Stderr, "[clawflow] Discarded — context.md unchanged.")
+	if answer != "y" && answer != "yes" {
+		fmt.Fprintln(os.Stderr, "[clawflow] discarded — context.md unchanged.")
+		return nil
 	}
 
-	return runErr
-}
-
-// streamAndCapture reads stream-json lines from r, writes them to captured,
-// and renders a human-friendly version of assistant text to display.
-func streamAndCapture(r io.Reader, display io.Writer, captured *bytes.Buffer) error {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// Always capture the raw line
-		captured.Write(line)
-		captured.WriteByte('\n')
-
-		// Try to extract displayable text for the user
-		displayStreamLine(line, display)
+	if err := project.WriteContext(name, newCtx); err != nil {
+		return fmt.Errorf("write context.md: %w", err)
 	}
-	return scanner.Err()
-}
-
-// displayStreamLine parses a single stream-json line and writes any
-// assistant text content to w for the user to see.
-func displayStreamLine(line []byte, w io.Writer) {
-	// Quick pre-check to avoid parsing non-text events
-	if !bytes.Contains(line, []byte(`"text"`)) && !bytes.Contains(line, []byte(`"assistant"`)) {
-		return
-	}
-
-	var evt struct {
-		Type         string `json:"type"`
-		Role         string `json:"role,omitempty"`
-		Content      string `json:"content,omitempty"`
-		ContentBlock *struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content_block,omitempty"`
-		Delta *struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"delta,omitempty"`
-		Message *struct {
-			Role    string `json:"role"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"message,omitempty"`
-	}
-
-	if err := json.Unmarshal(line, &evt); err != nil {
-		return
-	}
-
-	// content_block_delta with text — the most common streaming event
-	if evt.Delta != nil && evt.Delta.Type == "text_delta" {
-		fmt.Fprint(w, evt.Delta.Text)
-		return
-	}
-
-	// Full content_block
-	if evt.ContentBlock != nil && evt.ContentBlock.Type == "text" {
-		fmt.Fprint(w, evt.ContentBlock.Text)
-		return
-	}
-
-	// Inline assistant content
-	if evt.Role == "assistant" && evt.Content != "" {
-		fmt.Fprint(w, evt.Content)
-		return
-	}
-
-	// Message wrapper
-	if evt.Message != nil && evt.Message.Role == "assistant" {
-		for _, cb := range evt.Message.Content {
-			if cb.Type == "text" {
-				fmt.Fprint(w, cb.Text)
-			}
-		}
-	}
+	fmt.Fprintf(os.Stderr, "[clawflow] saved → %s\n", project.ContextPath(name))
+	return nil
 }

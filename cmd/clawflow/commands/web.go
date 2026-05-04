@@ -150,6 +150,12 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/settings/verify-token", api.HandleVerifyToken)
 			mux.HandleFunc("/api/browse-directory", api.HandleBrowseDirectory)
 			mux.HandleFunc("/api/chat/spawn", api.HandleChatSpawn)
+			mux.HandleFunc("/api/project/create", api.HandleProjectCreate)
+			mux.HandleFunc("/api/project/delete", api.HandleProjectDelete)
+			mux.HandleFunc("/api/project/add-repo", api.HandleProjectAddRepo)
+			mux.HandleFunc("/api/project/remove-repo", api.HandleProjectRemoveRepo)
+			mux.HandleFunc("/api/project/generate-context", api.HandleProjectGenerateContext)
+			mux.HandleFunc("/api/project/generate-context/status", api.HandleProjectGenerateContextStatus)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				// SPA fallback: if the requested path maps to a real file
 				// (or lives under /data/ or /assets/ which tanstack-router
