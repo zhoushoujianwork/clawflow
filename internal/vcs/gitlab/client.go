@@ -525,6 +525,67 @@ func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
 	}
 }
 
+// SearchIssues runs GitLab's project-scoped issue search via the
+// `?search=` query param (matches title + description). state ∈
+// {open, closed, all}; "" defaults to all. limit caps results,
+// clamped to [1, 100].
+//
+// GitLab uses "opened" wire-side; we accept "open" and translate
+// for parity with the GitHub client and the public CLI surface.
+func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("search query is required")
+	}
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	q := url.Values{}
+	q.Set("search", query)
+	q.Set("per_page", fmt.Sprintf("%d", limit))
+	switch state {
+	case "open":
+		q.Set("state", "opened")
+	case "closed":
+		q.Set("state", "closed")
+	case "", "all":
+		// no state filter
+	default:
+		return nil, fmt.Errorf("invalid state %q (want open|closed|all)", state)
+	}
+	path := fmt.Sprintf("/projects/%s/issues?%s", projectID(repo), q.Encode())
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("gitlab search issues: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		IID       int      `json:"iid"`
+		Title     string   `json:"title"`
+		Body      string   `json:"description"`
+		State     string   `json:"state"`
+		Labels    []string `json:"labels"`
+		CreatedAt string   `json:"created_at"`
+		UpdatedAt string   `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	issues := make([]vcs.Issue, len(raw))
+	for i, r := range raw {
+		s := r.State
+		if s == "opened" {
+			s = "open"
+		}
+		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, State: s, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+	}
+	return issues, nil
+}
+
 // ListIssuesByBodyKeyword returns all open issues whose body contains keyword.
 func (c *Client) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.Issue, error) {
 	issues, err := c.ListOpenIssues(repo)

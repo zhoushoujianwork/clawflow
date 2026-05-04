@@ -12,9 +12,17 @@ A CLI for managing GitHub/GitLab projects from your local terminal. View issues,
 ### Issue / PR / Label operations
 ```
 clawflow issue list / create / view / comment / close --repo <R>
+clawflow issue search "<query>" --repo <R> [--state all|open|closed]   # title+body search
+clawflow issue search "<query>" --project <name>                       # fan-out across project repos
 clawflow pr list / create / view / comment / merge --repo <R>
 clawflow label add / remove --repo <R> --issue <N> --label <L>
 ```
+
+`issue search` is the historical-context lookup: every change in a clawflow-managed
+project goes through an issue, so past issues (open + closed) are the project's
+decision archive. Before doing analysis on a new issue, search for related ones —
+duplicates, prior decisions, and related code-area history are usually the
+strongest signal. Pass `--json` for structured output.
 
 ### Repo management
 ```

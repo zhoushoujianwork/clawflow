@@ -169,6 +169,11 @@ that's healthy when the backlog is already coherent.
 
 You CAN, via the ` + "`clawflow`" + ` CLI in Bash:
 - ` + "`clawflow issue list/view`" + `, ` + "`clawflow pr list/view`" + ` (read)
+- ` + "`clawflow issue search \"<query>\" --repo <r> --state all --json --limit 10`" + `
+  — title+body search across open + closed issues. Use it to check
+  for duplicates before filing, and to look up prior decisions on
+  similar work (` + "`clawflow issue search ... --project <name>`" + ` fans
+  out across all member repos in parallel).
 - ` + "`clawflow issue create --repo <r> --title \"...\" [--body \"...\"] [--label <l>]`" + `
 - ` + "`clawflow issue comment --repo <r> <num> --body \"...\"`" + `
 - ` + "`clawflow issue close --repo <r> <num>`" + `

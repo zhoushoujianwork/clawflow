@@ -86,6 +86,12 @@ type Client interface {
 	DeleteIssueComment(repo string, issueNumber int, commentID int64) error
 	// ListIssuesByBodyKeyword returns open issues whose body contains keyword.
 	ListIssuesByBodyKeyword(repo string, keyword string) ([]Issue, error)
+	// SearchIssues runs a keyword search across title + body for the
+	// given repo. state is one of "open"/"closed"/"all". limit caps the
+	// returned slice (clamp to a sane max in implementations). Used by
+	// `clawflow issue search` so operators / PM can pull historical
+	// related issues into evaluation context.
+	SearchIssues(repo, query, state string, limit int) ([]Issue, error)
 
 	// Labels
 	AddLabel(repo string, issueNumber int, labels ...string) error

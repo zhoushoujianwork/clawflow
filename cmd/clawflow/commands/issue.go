@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -16,11 +19,138 @@ func NewIssueCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newIssueCreateCmd())
 	cmd.AddCommand(newIssueListCmd())
+	cmd.AddCommand(newIssueSearchCmd())
 	cmd.AddCommand(newIssueCommentCmd())
 	cmd.AddCommand(newIssueCommentListCmd())
 	cmd.AddCommand(newIssueCommentDeleteCmd())
 	cmd.AddCommand(newIssueCloseCmd())
 	return cmd
+}
+
+// searchHit pairs an Issue with the repo it came from, so cross-repo
+// project searches can render unambiguously and JSON consumers know
+// which repo each result lives in.
+type searchHit struct {
+	Repo  string    `json:"repo"`
+	Issue vcs.Issue `json:"issue"`
+}
+
+func newIssueSearchCmd() *cobra.Command {
+	var repo, projectName, state string
+	var limit int
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "search <query>",
+		Short: "Keyword-search issues across title + body (one repo or all member repos of a project)",
+		Long: `Run a keyword search across issues — title and body matched server-side.
+
+Use --repo for a single repo, or --project to fan out across every member repo
+of a clawflow project in parallel. Default state is "all" so closed issues
+(the historical-decision archive) are included; pass --state open to narrow.
+
+Designed for AI agent use: the evaluate / implement / PM prompts call this
+command to pull historical related issues into their evaluation context.
+Pass --json for AI consumption; the default table output is for humans.`,
+		Example: "  clawflow issue search \"auth token\" --repo owner/name\n  clawflow issue search \"auth token\" --project bbclaw --state all\n  clawflow issue search \"flaky test\" --repo owner/name --json --limit 50",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			query := args[0]
+			if (repo == "" && projectName == "") || (repo != "" && projectName != "") {
+				return fmt.Errorf("exactly one of --repo or --project is required")
+			}
+			repos, err := resolveSearchScope(repo, projectName)
+			if err != nil {
+				return err
+			}
+			hits, err := runSearch(repos, query, state, limit)
+			if err != nil {
+				return err
+			}
+			return printSearchHits(hits, jsonOutput, query)
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo to search (mutually exclusive with --project)")
+	cmd.Flags().StringVar(&projectName, "project", "", "search every member repo of this project in parallel")
+	cmd.Flags().StringVar(&state, "state", "all", "issue state: open, closed, all")
+	cmd.Flags().IntVar(&limit, "limit", 20, "max results per repo (clamped to 100)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output search hits as JSON")
+	return cmd
+}
+
+func resolveSearchScope(repo, projectName string) ([]string, error) {
+	if repo != "" {
+		return []string{repo}, nil
+	}
+	p, err := project.Get(projectName)
+	if err != nil {
+		return nil, err
+	}
+	if len(p.Repos) == 0 {
+		return nil, fmt.Errorf("project %q has no member repos", projectName)
+	}
+	return p.Repos, nil
+}
+
+// runSearch fans out one search per repo in parallel. Per-repo errors
+// are logged to stderr but don't fail the whole command — partial
+// results are more useful than nothing for AI consumers.
+func runSearch(repos []string, query, state string, limit int) ([]searchHit, error) {
+	var (
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		hits []searchHit
+	)
+	for _, r := range repos {
+		wg.Add(1)
+		go func(r string) {
+			defer wg.Done()
+			client, _, err := newVCSClientForRepo(r)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] client: %v\n", r, err)
+				return
+			}
+			results, err := client.SearchIssues(r, query, state, limit)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] search: %v\n", r, err)
+				return
+			}
+			mu.Lock()
+			for _, iss := range results {
+				hits = append(hits, searchHit{Repo: r, Issue: iss})
+			}
+			mu.Unlock()
+		}(r)
+	}
+	wg.Wait()
+	return hits, nil
+}
+
+func printSearchHits(hits []searchHit, jsonOutput bool, query string) error {
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if hits == nil {
+			hits = []searchHit{}
+		}
+		return enc.Encode(hits)
+	}
+	if len(hits) == 0 {
+		fmt.Printf("no issues match %q\n", query)
+		return nil
+	}
+	fmt.Printf("%d issue(s) matching %q:\n\n", len(hits), query)
+	for _, h := range hits {
+		labels := ""
+		if len(h.Issue.Labels) > 0 {
+			labels = "  [" + strings.Join(h.Issue.Labels, ", ") + "]"
+		}
+		fmt.Printf("  %s  #%d  %-7s%s  %s\n", h.Repo, h.Issue.Number, h.Issue.State, labels, h.Issue.Title)
+		if h.Issue.UpdatedAt != "" {
+			fmt.Printf("      updated %s\n", h.Issue.UpdatedAt)
+		}
+	}
+	return nil
 }
 
 func newIssueCreateCmd() *cobra.Command {

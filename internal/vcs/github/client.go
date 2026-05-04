@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -568,6 +569,80 @@ func (c *Client) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.Iss
 		}
 	}
 	return out, nil
+}
+
+// SearchIssues runs GitHub's /search/issues against the given repo,
+// querying title + body. state ∈ {open, closed, all}; "" defaults to
+// all. limit caps results (clamped to [1, 100], the per-page max).
+//
+// We exclude PRs from results — the search API conflates issues and
+// PRs, but the Issue type carries no PR concept and downstream code
+// (operators, PM) only wants real issues for triage context.
+//
+// Note: GitHub's search index lags issue creation by ~1-5 minutes,
+// so brand-new issues may not appear immediately. Acceptable for
+// the historical-context use case (operators searching past issues
+// to inform a current evaluation); not suitable for "did the PM
+// just file a duplicate of itself one second ago" — which we avoid
+// with cooldowns and skip-touched-issue rules instead.
+func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("search query is required")
+	}
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	q := query + " repo:" + repo + " is:issue"
+	switch state {
+	case "open":
+		q += " is:open"
+	case "closed":
+		q += " is:closed"
+	case "", "all":
+		// no state filter
+	default:
+		return nil, fmt.Errorf("invalid state %q (want open|closed|all)", state)
+	}
+	path := fmt.Sprintf("/search/issues?q=%s&per_page=%d", url.QueryEscape(q), limit)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github search issues: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		Items []struct {
+			Number      int       `json:"number"`
+			Title       string    `json:"title"`
+			Body        string    `json:"body"`
+			State       string    `json:"state"`
+			CreatedAt   string    `json:"created_at"`
+			UpdatedAt   string    `json:"updated_at"`
+			PullRequest *struct{} `json:"pull_request"`
+			Labels      []struct {
+				Name string `json:"name"`
+			} `json:"labels"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	var issues []vcs.Issue
+	for _, r := range raw.Items {
+		if r.PullRequest != nil {
+			continue
+		}
+		iss := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		for _, l := range r.Labels {
+			iss.Labels = append(iss.Labels, l.Name)
+		}
+		issues = append(issues, iss)
+	}
+	return issues, nil
 }
 
 func (c *Client) MergePR(repo string, prNumber int) error {
