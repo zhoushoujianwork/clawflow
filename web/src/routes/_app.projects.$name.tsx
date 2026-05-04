@@ -15,6 +15,7 @@ interface Project {
   repos: string[]
   created_at?: string
   context_md?: string
+  testing_md?: string
   automation?: ProjectAutomation
 }
 
@@ -474,6 +475,53 @@ function ProjectDetail() {
                 {generating && (
                   <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
                 )}
+              </div>
+            )}
+          </section>
+
+          {/* Testing.md — local environment SOP. No "initialize" button
+              because there's no AI auto-generation path: testing.md
+              relies on details only the user knows (which serial port,
+              which board, what startup order). Authored interactively
+              via the project chat. */}
+          <section className="mb-6">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-sm font-semibold text-foreground">
+                Local environment SOP
+              </h2>
+              {project.testing_md ? (
+                <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
+                  <MessageSquare className="w-3 h-3" />
+                  Edit via the <strong className="font-semibold text-foreground">chat</strong> link above
+                </span>
+              ) : (
+                <span className="text-xs text-muted-foreground">
+                  How to bring up the local runtime — startup order, services, hardware
+                </span>
+              )}
+            </div>
+            {project.testing_md ? (
+              <div className="bg-card border border-border rounded-xl p-4">
+                <Markdown>{project.testing_md}</Markdown>
+              </div>
+            ) : (
+              <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">testing.md</code> yet.
+                  Describe how to start your local env (frontend + backend + hardware/serial)
+                  so <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">implement</code> can verify changes locally.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  Draft via chat
+                </button>
+                <p className="text-xs text-muted-foreground">
+                  This is a runbook (startup steps), not a list of test cases.
+                </p>
               </div>
             )}
           </section>
