@@ -271,6 +271,35 @@ function ClaudeSection({
           {testing ? <Loader2 className="w-3 h-3 animate-spin inline mr-1" /> : null}
           Test connection
         </button>
+        {view.api_key_set && (
+          <button
+            type="button"
+            onClick={() => {
+              if (!window.confirm('清除 Claude API 配置？\n\n清除后将使用本地 Claude CLI 的认证方式（OAuth/keychain），无需手动注入 API key。')) return
+              setBusy(true); setSaveMsg(null)
+              fetch('/api/settings/claude', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ api_key: '', base_url: '' }),
+              })
+                .then(async r => {
+                  const d = await r.json().catch(() => null)
+                  if (!r.ok) throw new Error((d && d.error) || `HTTP ${r.status}`)
+                })
+                .then(() => {
+                  setSaveMsg({ ok: true, text: 'Cleared — using local auth' })
+                  setApiKey(''); setBaseURL('')
+                  onSaved()
+                })
+                .catch(e => setSaveMsg({ ok: false, text: String(e.message || e) }))
+                .finally(() => setBusy(false))
+            }}
+            disabled={busy}
+            className="text-sm px-3 py-1 rounded border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+          >
+            Clear API config
+          </button>
+        )}
 
         {saveMsg && <Status ok={saveMsg.ok} text={saveMsg.text} />}
         {testResult && testResult.ok && <Status ok text={testResult.text} />}

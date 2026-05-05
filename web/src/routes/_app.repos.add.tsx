@@ -47,10 +47,25 @@ function AddRemoteRepo() {
   const [searchQuery, setSearchQuery] = useState('')
   const [addingRepo, setAddingRepo] = useState<string | null>(null)
   const [addedRepos, setAddedRepos] = useState<Set<string>>(new Set())
+  const [preExistingRepos, setPreExistingRepos] = useState<Set<string>>(new Set())
   const [addErrors, setAddErrors] = useState<Map<string, string>>(new Map())
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
   const repos = reposCache.get(platform) || []
+
+  // Fetch local config repos on mount to mark already-added ones
+  useEffect(() => {
+    fetch('/data/repos.json', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : []))
+      .then(data => {
+        if (Array.isArray(data)) {
+          const names = new Set(data.map((r: { full_name: string }) => r.full_name))
+          setAddedRepos(names)
+          setPreExistingRepos(names)
+        }
+      })
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     // Only fetch if not already fetched
@@ -389,9 +404,14 @@ function AddRemoteRepo() {
                               </div>
                               <div className="shrink-0">
                                 {isAdded ? (
-                                  <div className="flex items-center gap-2 text-green-600">
+                                  <div className={cn(
+                                    "flex items-center gap-2",
+                                    preExistingRepos.has(repo.full_name) ? "text-muted-foreground" : "text-green-600"
+                                  )}>
                                     <CheckCircle2 className="w-4 h-4" />
-                                    <span className="text-sm font-semibold">Added</span>
+                                    <span className="text-sm font-semibold">
+                                      {preExistingRepos.has(repo.full_name) ? 'Added' : 'Just added'}
+                                    </span>
                                   </div>
                                 ) : (
                                   <button

@@ -93,21 +93,24 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 		model = creds.EffectiveChatModel()
 	}
 
-	// Hard-block file mutations and notebook edits. The chat is
-	// strictly an analysis / planning assistant — code changes go
-	// through `clawflow run` (the implement operator) on a labeled
-	// issue, not from this REPL. Read/Bash/Grep/Glob/etc. stay
-	// allowed so claude can still inspect the repo to inform its
-	// analysis. --dangerously-skip-permissions removes the per-Bash
-	// confirmation prompt: the chat is local-only on the user's own
-	// machine, against repos they explicitly added to clawflow, and
-	// the user can Esc out anytime — confirming each `git log` /
-	// `cat` / `grep` is just noise.
+	// Hard-block file mutations and notebook edits for REPO-level chat.
+	// Repo chat is strictly an analysis / planning assistant — code changes
+	// go through `clawflow run` (the implement operator) on a labeled issue.
+	//
+	// ISSUE-level chat (issueNum > 0) is allowed to edit files for hot-fixes:
+	// the user explicitly targeted a specific issue and wants to fix it
+	// directly without going through the full clawflow run pipeline.
+	// The working directory is already pinned to the repo's local clone,
+	// so edits are scoped to that repo. --dangerously-skip-permissions
+	// removes the per-Bash confirmation prompt for both modes.
 	args := []string{
 		"--model", model,
 		"--name", name,
 		"--dangerously-skip-permissions",
-		"--disallowedTools", "Edit,Write,NotebookEdit",
+	}
+	if issueNum == 0 {
+		// Repo-level chat: read-only, no file edits
+		args = append(args, "--disallowedTools", "Edit,Write,NotebookEdit")
 	}
 	// When the user has explicitly configured an API key in clawflow's
 	// settings (typically pointing at a corporate proxy via

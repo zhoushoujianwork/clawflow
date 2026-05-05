@@ -138,6 +138,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/version", api.HandleVersion)
 			mux.HandleFunc("/api/update", api.HandleUpdate)
 			mux.HandleFunc("/api/repo/config", api.HandleRepoConfig)
+			mux.HandleFunc("/api/repo/remove", api.HandleRepoRemove)
 			mux.HandleFunc("/api/repo/clone", api.HandleClone)
 			mux.HandleFunc("/api/repos/list-remote", api.HandleListRemoteRepos)
 			mux.HandleFunc("/api/repos/add-remote", api.HandleAddRemoteRepo)

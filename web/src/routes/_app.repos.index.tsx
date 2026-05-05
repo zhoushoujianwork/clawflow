@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useEffect, useMemo, useState } from 'react'
-import { ExternalLink, Plus } from 'lucide-react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
+import { ExternalLink, Plus, Trash2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -52,6 +52,8 @@ function RepoList() {
   const [runs, setRuns] = useState<RunEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [didApplyDefault, setDidApplyDefault] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [removing, setRemoving] = useState(false)
 
   useEffect(() => {
     Promise.all([
@@ -126,6 +128,56 @@ function RepoList() {
     return list
   }, [repos, active, lastActivityMap])
 
+  // Clear selection when filter changes (so stale selections from another tab don't linger)
+  useEffect(() => {
+    setSelected(new Set())
+  }, [active])
+
+  const toggleSelect = useCallback((name: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }, [])
+
+  const toggleSelectAll = useCallback(() => {
+    setSelected(prev => {
+      if (prev.size === filtered.length) return new Set()
+      return new Set(filtered.map(r => r.full_name))
+    })
+  }, [filtered])
+
+  const handleRemoveSelected = useCallback(async () => {
+    if (selected.size === 0) return
+    const names = Array.from(selected)
+    const confirmed = window.confirm(
+      `确认移除 ${names.length} 个仓库？\n\n${names.join('\n')}\n\n（仅从配置中移除，不会删除本地项目文件）`
+    )
+    if (!confirmed) return
+
+    setRemoving(true)
+    try {
+      const resp = await fetch('/api/repo/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repos: names }),
+      })
+      if (resp.ok) {
+        setRepos(prev => prev.filter(r => !selected.has(r.full_name)))
+        setSelected(new Set())
+      } else {
+        const data = await resp.json().catch(() => ({}))
+        alert(data.error || '移除失败')
+      }
+    } catch {
+      alert('网络错误，请重试')
+    } finally {
+      setRemoving(false)
+    }
+  }, [selected])
+
   const repoMap = useMemo<RepoInfoMap>(() => {
     const m: RepoInfoMap = {}
     for (const r of repos) {
@@ -151,13 +203,26 @@ function RepoList() {
             Use <code className="px-1 py-0.5 bg-secondary rounded text-[10px]">clawflow repo add</code> to add more.
           </p>
         </div>
-        <Link
-          to="/repos/add"
-          className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          Add from VCS
-        </Link>
+        <div className="flex items-center gap-2">
+          {selected.size > 0 && (
+            <button
+              type="button"
+              onClick={handleRemoveSelected}
+              disabled={removing}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-destructive text-destructive-foreground rounded-lg text-sm font-semibold hover:bg-destructive/90 transition-colors disabled:opacity-50"
+            >
+              <Trash2 className="w-4 h-4" />
+              {removing ? '移除中…' : `移除 (${selected.size})`}
+            </button>
+          )}
+          <Link
+            to="/repos/add"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            Add from VCS
+          </Link>
+        </div>
       </div>
 
       {showTabs && (
@@ -194,6 +259,15 @@ function RepoList() {
           <table className="w-full text-sm">
             <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
               <tr>
+                <th className="text-left px-4 py-2 w-10">
+                  <input
+                    type="checkbox"
+                    checked={filtered.length > 0 && selected.size === filtered.length}
+                    onChange={toggleSelectAll}
+                    className="rounded border-border"
+                    aria-label="Select all repos"
+                  />
+                </th>
                 <th className="text-left px-4 py-2 font-semibold">Repo</th>
                 <th className="text-left px-4 py-2 font-semibold">Last activity</th>
                 <th className="text-left px-4 py-2 font-semibold">Platform</th>
@@ -205,7 +279,16 @@ function RepoList() {
             </thead>
             <tbody className="divide-y divide-border">
               {filtered.map(r => (
-                <tr key={r.full_name} className="hover:bg-secondary/20">
+                <tr key={r.full_name} className={cn("hover:bg-secondary/20", selected.has(r.full_name) && "bg-secondary/30")}>
+                  <td className="px-4 py-2">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(r.full_name)}
+                      onChange={() => toggleSelect(r.full_name)}
+                      className="rounded border-border"
+                      aria-label={`Select ${r.full_name}`}
+                    />
+                  </td>
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2">
                       <VcsIcon
