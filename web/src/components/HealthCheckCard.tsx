@@ -43,13 +43,14 @@ interface HealthCheckJob {
   started_at?: string
   ended_at?: string
   result?: HealthCheckResult
+  last_apply?: ApplyResult
 }
 
 interface ApplyOutcome {
   target: string
   repo_id?: string
   path: string
-  status: 'written' | 'committed' | 'committed-only' | 'failed' | string
+  status: 'written' | 'unchanged' | 'committed' | 'committed-only' | 'failed' | string
   commit_hash?: string
   detail?: string
   error?: string
@@ -131,6 +132,9 @@ export function useHealthCheck(projectName: string): HealthCheckHookValue {
             setResult(d.result)
             setSelected(new Set((d.result.changes ?? []).map(changeKey)))
             setExpandedDiffs(new Set())
+            // A fresh run invalidates any prior apply outcomes; the
+            // server already cleared LastApply on run start so we
+            // mirror that here.
             setApplyOutcomes(null)
             setApplyError(null)
           }
@@ -171,6 +175,12 @@ export function useHealthCheck(projectName: string): HealthCheckHookValue {
           setResult(body.result)
           setSelected(new Set((body.result.changes ?? []).map(changeKey)))
           if (body.ended_at) setEndedAt(body.ended_at)
+          // Restore prior apply outcomes (and their errors) after a
+          // page reload — the persisted last_apply field is the
+          // dashboard's only memory of an Apply call across restarts.
+          if (body.last_apply?.outcomes) {
+            setApplyOutcomes(body.last_apply.outcomes)
+          }
         }
         if (s === 200 && body.status === 'error') {
           setStatus('error')
@@ -518,6 +528,21 @@ function ChangeRow({ change, selected, expanded, outcome, onToggleSelect, onTogg
         </button>
       </div>
 
+      {/* Render the per-file failure / push-warning text inline so the
+          user sees what went wrong without having to hover the badge.
+          Tooltip is kept too via OutcomeBadge for screen readers and
+          truncated long messages. */}
+      {outcome?.status === 'failed' && outcome.error && (
+        <div className="px-3 pb-2 -mt-1 text-[11px] font-mono text-red-700 dark:text-red-400 break-all">
+          {outcome.error}
+        </div>
+      )}
+      {outcome?.status === 'committed-only' && outcome.detail && (
+        <div className="px-3 pb-2 -mt-1 text-[11px] font-mono text-amber-700 dark:text-amber-400 break-all">
+          {outcome.detail}
+        </div>
+      )}
+
       {expanded && (
         <div className="border-t border-border">
           {change.action === 'update' && (
@@ -705,6 +730,20 @@ function OutcomeBadge({ outcome }: { outcome: ApplyOutcome }) {
         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 shrink-0">
           <CheckCircle2 className="w-3 h-3" />
           written
+        </span>
+      )
+    case 'unchanged':
+      // Healthy no-op: file already matched the proposal byte-for-byte.
+      // Used to surface as a confusing red "failed" because git commit
+      // refused with "nothing to commit". Distinct neutral chip so the
+      // user reads it as "fine, already applied".
+      return (
+        <span
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-secondary text-muted-foreground shrink-0"
+          title="proposed content was identical to disk — no write needed"
+        >
+          <CheckCircle2 className="w-3 h-3" />
+          unchanged
         </span>
       )
     case 'failed':

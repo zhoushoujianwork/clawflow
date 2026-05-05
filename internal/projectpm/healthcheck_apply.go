@@ -20,6 +20,10 @@ import (
 // Status values:
 //
 //	"written"        — file written, no git involved (project-level files)
+//	"unchanged"      — proposed content was byte-identical to disk; no
+//	                    file write, no git commit. Healthy normal path:
+//	                    a previous apply already landed this exact change,
+//	                    or the operator re-proposed the same content.
 //	"committed"      — file written and committed; push succeeded
 //	"committed-only" — file written and committed locally; push failed
 //	                    (likely branch protection); surface for manual push
@@ -106,6 +110,13 @@ func applyProjectChange(p *project.Project, c ProposedChange) ApplyOutcome {
 		out.Error = "mkdir: " + err.Error()
 		return out
 	}
+	// Skip the write entirely if the file already matches the proposal.
+	// Otherwise we'd `WriteFile` the same bytes back and (for repo files)
+	// hit a confusing "nothing to commit" error downstream.
+	if existing, err := os.ReadFile(abs); err == nil && string(existing) == c.ProposedContent {
+		out.Status = "unchanged"
+		return out
+	}
 	if err := os.WriteFile(abs, []byte(c.ProposedContent), 0o644); err != nil {
 		out.Status = "failed"
 		out.Error = "write: " + err.Error()
@@ -121,8 +132,12 @@ func applyProjectChange(p *project.Project, c ProposedChange) ApplyOutcome {
 // Failure modes:
 //   - any write fails → emit "failed" outcomes for the failing file
 //     and skip git entirely (don't commit a half-applied set)
-//   - commit fails (e.g. nothing to commit because content was
-//     identical) → emit "failed" outcomes
+//   - file content was already identical → emit "unchanged" and skip
+//     this file from the commit batch (NOT a failure: previous apply
+//     already landed it, or the operator re-proposed the same bytes).
+//     This is what used to surface as a confusing "git commit: nothing
+//     to commit" error.
+//   - commit fails for any other reason → emit "failed" outcomes
 //   - push fails (branch protection, network, auth) → keep the local
 //     commit and emit "committed-only" with the push error in Detail.
 func applyRepoChanges(cfg *config.Config, repoID string, changes []ProposedChange) []ApplyOutcome {
@@ -167,6 +182,14 @@ func applyRepoChanges(cfg *config.Config, repoID string, changes []ProposedChang
 			outs[i].Status = "failed"
 			outs[i].Error = "mkdir: " + err.Error()
 			writeFailed = true
+			continue
+		}
+		// Pre-check: if the file already matches the proposal byte-for-
+		// byte, mark it "unchanged" and DON'T add it to relPaths. The
+		// remaining files in this repo can still be committed; only the
+		// no-op file is excluded from the commit batch.
+		if existing, err := os.ReadFile(abs); err == nil && string(existing) == c.ProposedContent {
+			outs[i].Status = "unchanged"
 			continue
 		}
 		if err := os.WriteFile(abs, []byte(c.ProposedContent), 0o644); err != nil {

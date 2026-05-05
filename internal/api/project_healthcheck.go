@@ -42,6 +42,11 @@ type healthCheckJob struct {
 	StartedAt time.Time                    `json:"started_at"`
 	EndedAt   time.Time                    `json:"ended_at,omitzero"`
 	Result    *projectpm.HealthCheckResult `json:"result,omitempty"`
+	// LastApply preserves the most recent Apply call's per-file outcomes
+	// so the dashboard can re-render success/failure badges (and any
+	// errors) after a page reload. Set by HandleProjectHealthCheckApply
+	// and cleared by the next run start.
+	LastApply *projectpm.ApplyResult `json:"last_apply,omitempty"`
 }
 
 var (
@@ -163,6 +168,8 @@ func HandleProjectHealthCheckRun(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Starting a fresh run invalidates the previous Apply outcomes —
+	// they belonged to the previous proposal.
 	job := &healthCheckJob{Status: "running", StartedAt: time.Now()}
 	healthCheckJobs[name] = job
 	healthCheckJobsMu.Unlock()
@@ -288,5 +295,31 @@ func HandleProjectHealthCheckApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := projectpm.ApplyHealthCheckChanges(p, cfg, req.Changes)
+
+	// Persist the apply outcomes onto the existing job so a page
+	// reload can re-render the per-file badges (and tooltip errors).
+	// Best-effort: failure to persist is logged but the HTTP response
+	// is unaffected — the user has the result in the JSON they're
+	// about to receive.
+	healthCheckJobsMu.Lock()
+	job, ok := healthCheckJobs[name]
+	if !ok {
+		// Cold cache path: hydrate from disk first so we don't lose
+		// the prior Result by writing a job that only carries LastApply.
+		if persisted, lerr := loadHealthCheckJob(name); lerr == nil && persisted != nil {
+			job = persisted
+			healthCheckJobs[name] = job
+		} else {
+			job = &healthCheckJob{Status: "done"}
+			healthCheckJobs[name] = job
+		}
+	}
+	job.LastApply = result
+	snapshot := *job
+	healthCheckJobsMu.Unlock()
+	if perr := saveHealthCheckJob(name, &snapshot); perr != nil {
+		fmt.Fprintf(os.Stderr, "[health-check] %s: persist apply failed: %v\n", name, perr)
+	}
+
 	writeJSON(w, 200, result)
 }
