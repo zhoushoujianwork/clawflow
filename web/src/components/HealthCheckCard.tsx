@@ -300,7 +300,7 @@ export function HealthCheckSummaryCard({ healthCheck }: { healthCheck: HealthChe
   const isHealthy = result?.outcome === 'healthy'
 
   return (
-    <section>
+    <section className="flex flex-col">
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-sm font-semibold text-foreground">Health Check</h2>
         {status === 'done' && isHealthy && (
@@ -322,7 +322,7 @@ export function HealthCheckSummaryCard({ healthCheck }: { healthCheck: HealthChe
 
       <div
         className={cn(
-          'rounded-xl p-4 border h-full transition-colors',
+          'rounded-xl p-4 border flex-1 transition-colors',
           isHealthy
             ? 'bg-emerald-50/40 border-emerald-200 dark:bg-emerald-950/10 dark:border-emerald-900/40'
             : hasChanges

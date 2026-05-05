@@ -86,8 +86,14 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	}
 	output, err := runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Model, systemPrompt)
 	if err != nil {
-		msg := fmt.Sprintf("⚠️ Operator `%s` failed:\n\n```\n%v\n```", op.Name, err)
-		_ = v.PostIssueComment(opts.Repo, sub.Number, msg)
+		// Failure path: do NOT pollute the issue with a comment. The
+		// failure is already recorded in events.jsonl + the dashboard
+		// run timeline; the circuit breaker upstream will eventually
+		// add `agent-failed` once consecutive failures exceed the
+		// configured threshold. Keeping the issue thread clean lets a
+		// human (or PM during patrol) make the recovery decision
+		// without scrolling through error tracebacks.
+		fmt.Fprintf(os.Stderr, "  ✗ operator %q failed: %v\n", op.Name, err)
 		return output, "", err
 	}
 

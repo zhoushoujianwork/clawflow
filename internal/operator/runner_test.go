@@ -114,7 +114,14 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 }
 
-func TestRun_ClaudeFails_PostsFailureComment(t *testing.T) {
+// TestRun_ClaudeFails_NoIssuePollution locks the failure-path
+// contract: when the underlying claude run errors, the runner must
+// NOT post a comment to the issue and must NOT add any labels. The
+// failure is recorded out-of-band (events.jsonl, dashboard run row),
+// and the upstream circuit breaker — not this layer — decides when a
+// run of failures warrants the `agent-failed` label. Keeping the
+// issue thread quiet lets a human (or PM patrol) own recovery.
+func TestRun_ClaudeFails_NoIssuePollution(t *testing.T) {
 	op := &Operator{Name: "x", LockLabel: "running", Prompt: "p"}
 	sub := &Subject{Number: 5, Labels: []string{"bug"}}
 	v := newFakeVCS()
@@ -133,15 +140,8 @@ func TestRun_ClaudeFails_PostsFailureComment(t *testing.T) {
 	if v.addLabelCalls != 0 || v.removeLabelCals != 0 {
 		t.Errorf("add=%d remove=%d, want 0/0 (no labels touched on failure)", v.addLabelCalls, v.removeLabelCals)
 	}
-	if len(v.comments) != 1 {
-		t.Fatalf("want 1 failure comment, got %d", len(v.comments))
-	}
-	body := v.comments[0].body
-	if !strings.Contains(body, "Operator `x` failed") {
-		t.Errorf("failure comment missing op name marker: %q", body)
-	}
-	if !strings.Contains(body, "model refused") {
-		t.Errorf("failure comment should include the claude error: %q", body)
+	if len(v.comments) != 0 {
+		t.Fatalf("want 0 comments on failure (issue thread stays clean), got %d: %+v", len(v.comments), v.comments)
 	}
 }
 

@@ -461,13 +461,9 @@ function ProjectDetail() {
               after each `clawflow run` pass when enabled. PM can only
               file new issues; existing issue state stays under
               operator control. */}
-          <section>
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2">
+          <section className="flex flex-col">
+            <div className="flex items-center gap-2 mb-2">
                 <h2 className="text-sm font-semibold text-foreground">Automation</h2>
-                {/* Status pill — visible at a glance even when scanning the
-                    page peripherally. Emerald when on, amber on never-woken
-                    "armed" state for the first cycle, slate when off. */}
                 <span
                   className={cn(
                     'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium',
@@ -484,16 +480,15 @@ function ProjectDetail() {
                   />
                   {project.automation?.enabled ? 'PM scheduling on' : 'PM scheduling off'}
                 </span>
-              </div>
-              {project.automation?.last_woken_at && (
-                <span className="text-xs text-muted-foreground tabular-nums">
-                  last woken {new Date(project.automation.last_woken_at).toLocaleString()}
-                </span>
-              )}
+                {project.automation?.last_woken_at && (
+                  <span className="text-xs text-muted-foreground tabular-nums ml-auto">
+                    last woken {new Date(project.automation.last_woken_at).toLocaleString()}
+                  </span>
+                )}
             </div>
             <div
               className={cn(
-                'rounded-xl p-4 border transition-colors',
+                'rounded-xl p-4 border transition-colors flex-1',
                 project.automation?.enabled
                   ? 'bg-emerald-50/50 border-emerald-200 dark:bg-emerald-950/10 dark:border-emerald-900/40'
                   : 'bg-card border-border',

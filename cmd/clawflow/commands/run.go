@@ -510,14 +510,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 
 	workdir, cleanup, err := resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt)
 	if err != nil {
+		// Failure path: do NOT post a comment to the issue. The full
+		// error is captured in events.jsonl and the run row on the
+		// dashboard; the circuit breaker below is the only thing that
+		// touches the issue (an `agent-failed` label after enough
+		// consecutive failures). PM patrol can clear that label later
+		// if the underlying problem looks recovered.
 		fmt.Fprintf(os.Stderr, "%s ✗ workdir: %v\n", prefix, err)
 		runningMeta.Status = "failed"
 		runningMeta.Error = err.Error()
 		now := time.Now().UTC()
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
-		_ = j.client.PostIssueComment(j.repo, j.sub.Number,
-			fmt.Sprintf("⚠️ Operator `%s` failed (workdir setup):\n\n```\n%v\n```", j.op.Name, err))
 		checkCircuitBreaker(j, prefix)
 		return false
 	}
@@ -621,21 +625,24 @@ func checkCircuitBreaker(j *runJob, prefix string) {
 		fmt.Fprintf(os.Stderr, "%s ⚠ circuit breaker label failed: %v\n", prefix, err)
 		return
 	}
-	_ = j.client.PostIssueComment(j.repo, j.sub.Number,
-		fmt.Sprintf("🛑 Circuit breaker: %d consecutive failures on this issue. Adding `agent-failed` to stop automatic retries.\n\nRemove the `agent-failed` label to re-enable processing after investigating the root cause.", count))
+	// No accompanying comment by design: the failure trail lives in
+	// events.jsonl + dashboard runs, and chatter on the issue itself
+	// just adds noise users have to scroll past. PM patrol may remove
+	// `agent-failed` later if the underlying issue looks recoverable.
 }
 
 // runPostAutomation handles auto-approve and auto-merge after an operator completes.
 func runPostAutomation(j *runJob, outcome, output, prefix string) {
-	// Auto-approve: after evaluate produces agent-evaluated, auto-add ready-for-agent
+	// Auto-approve: after evaluate produces agent-evaluated, auto-add ready-for-agent.
+	// No accompanying comment by design — the label change itself is the
+	// signal, and the issue timeline shows clawflow as the actor. Adding
+	// a "Auto-approved by ClawFlow" comment was duplicating that.
 	if outcome == "agent-evaluated" && j.repoCfg.AutoApprove {
 		fmt.Fprintf(os.Stderr, "%s → auto-approve: adding ready-for-agent\n", prefix)
 		if err := j.client.AddLabel(j.repo, j.sub.Number, "ready-for-agent"); err != nil {
 			fmt.Fprintf(os.Stderr, "%s ⚠ auto-approve failed: %v\n", prefix, err)
 			return
 		}
-		_ = j.client.PostIssueComment(j.repo, j.sub.Number,
-			"🤖 Auto-approved by ClawFlow (`auto_approve` enabled). The `implement` operator will run on the next pass.")
 		fmt.Fprintf(os.Stderr, "%s ✓ auto-approved\n", prefix)
 	}
 
@@ -683,13 +690,19 @@ func runPostAutomation(j *runJob, outcome, output, prefix string) {
 		}
 
 		if err := j.client.MergePR(j.repo, prNum); err != nil {
+			// Keep the failure comment: the user explicitly enabled
+			// auto_merge, the merge attempt failed, and the reason
+			// (auth, branch protection, network) isn't otherwise
+			// surfaced on the PR. This is the one auto-merge comment
+			// that pulls real weight.
 			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge failed: %v\n", prefix, err)
 			_ = j.client.PostIssueComment(j.repo, j.sub.Number,
 				"🤖 Auto-merge failed for PR #"+strconv.Itoa(prNum)+": "+err.Error())
 			return
 		}
-		_ = j.client.PostIssueComment(j.repo, j.sub.Number,
-			"🤖 Auto-merged PR #"+strconv.Itoa(prNum)+" (`auto_merge` enabled).")
+		// No success comment: the PR's "merged by clawflow-bot" state
+		// is already shown in GitHub/GitLab UI. Adding a comment on
+		// top was redundant noise.
 		fmt.Fprintf(os.Stderr, "%s ✓ auto-merged PR #%d\n", prefix, prNum)
 	}
 }

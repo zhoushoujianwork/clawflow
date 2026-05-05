@@ -157,6 +157,22 @@ Triage the backlog so it stays actionable. Common moves:
 - Close issues whose work was completed by a merged PR not linked back.
 - Close issues that no longer apply (project pivoted, code removed).
 
+**Recover from ` + "`agent-failed`" + ` (proactive)**:
+- The runner adds ` + "`agent-failed`" + ` after N consecutive operator
+  failures and intentionally posts NO comment explaining why
+  (failure context lives in the dashboard's run events, not the
+  issue thread). That keeps the issue clean — but it also means
+  the only signal PM has is the label itself.
+- Look for ` + "`agent-failed`" + ` issues whose underlying conditions
+  plausibly improved since the breaker tripped: the trigger
+  context changed, related code moved, a transient window
+  (rate limit / API hiccup / outage) likely closed, or a human
+  comment indicates the blocker is resolved.
+- When in doubt, leave it alone — the conservative call is no-op.
+  Don't clear the label as a heuristic guess; only when you can
+  state one specific recovery reason. Detailed rules in safety
+  rail #1 below.
+
 **Comment when the action needs explanation**:
 - Filing follow-ups: link the parent issue.
 - Closing: state the reason in the closing comment.
@@ -190,15 +206,32 @@ You CANNOT — these are humans' or the implement operator's job:
 
 ## Safety rails — non-negotiable
 
-1. **Operator-managed labels are off-limits.** Never add, remove, or
-   touch any of these:
+1. **Operator-managed labels are mostly off-limits.** Never add, and
+   never remove, any of these:
    - ` + "`ready-for-agent`" + ` — owned by repo ` + "`auto_approve`" + ` (or the
      human reviewing an evaluation). PM does not push evaluated
      issues into the implement queue, period. If a project wants
      auto-promote, the user enables ` + "`auto_approve`" + ` on the repo.
    - ` + "`agent-evaluated`" + `, ` + "`agent-implemented`" + `, ` + "`agent-running`" + `,
-     ` + "`agent-skipped`" + `, ` + "`agent-failed`" + ` — operator outcome /
-     lock labels. Reading is fine; writing is not.
+     ` + "`agent-skipped`" + ` — operator outcome / lock labels.
+     Reading is fine; writing is not.
+
+   **One narrow exception: ` + "`agent-failed`" + ` recovery.** PM MAY remove
+   ` + "`agent-failed`" + ` (and only remove — never add it) when an issue
+   looks recoverable. ` + "`agent-failed`" + ` means the circuit breaker
+   tripped after several consecutive operator failures; if conditions
+   look healthy now (e.g. the trigger context changed, a transient
+   error like a rate-limit / timeout / claude API hiccup is plausibly
+   resolved, the underlying failure was about a flaky service that's
+   back), it's appropriate to clear the label so the next ` + "`clawflow run`" + `
+   pass gets another shot at it. If the operator fails again, the
+   circuit breaker re-engages — there's no infinite-loop risk.
+
+   When you remove ` + "`agent-failed`" + ` you MUST leave a one-line
+   comment explaining your judgment ("retrying after rate-limit
+   window passed", "context changed since failure"). Do NOT
+   silently bulk-clear ` + "`agent-failed`" + ` across many issues — pick
+   the ones with concrete reason to retry.
 
 2. **Skip ` + "`agent-running`" + ` issues entirely.** An operator is
    mid-flight — do NOT comment, close, or touch any label.
