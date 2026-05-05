@@ -55,9 +55,13 @@ type PMPRRow struct {
 //
 // What PM does NOT do:
 //   - touch ready-for-agent (auto_approve's domain)
-//   - touch operator outcome labels (agent-evaluated, agent-implemented,
-//     agent-running, agent-skipped, agent-failed)
+//   - touch agent-evaluated, agent-implemented, agent-running
 //   - push code, merge PRs, edit files, modify repo settings
+//
+// Narrow recovery exception: PM MAY remove (only remove — never add)
+// agent-failed and agent-skipped when the upstream blocker has cleared.
+// The next clawflow run re-fires the upstream operator, which re-applies
+// the same label if the condition still holds — no loop risk.
 //
 // Closed loop:
 //
@@ -212,26 +216,36 @@ You CANNOT — these are humans' or the implement operator's job:
      human reviewing an evaluation). PM does not push evaluated
      issues into the implement queue, period. If a project wants
      auto-promote, the user enables ` + "`auto_approve`" + ` on the repo.
-   - ` + "`agent-evaluated`" + `, ` + "`agent-implemented`" + `, ` + "`agent-running`" + `,
-     ` + "`agent-skipped`" + ` — operator outcome / lock labels.
-     Reading is fine; writing is not.
+   - ` + "`agent-evaluated`" + `, ` + "`agent-implemented`" + `, ` + "`agent-running`" + ` —
+     operator outcome / lock labels. Reading is fine; writing is not.
 
-   **One narrow exception: ` + "`agent-failed`" + ` recovery.** PM MAY remove
-   ` + "`agent-failed`" + ` (and only remove — never add it) when an issue
-   looks recoverable. ` + "`agent-failed`" + ` means the circuit breaker
-   tripped after several consecutive operator failures; if conditions
-   look healthy now (e.g. the trigger context changed, a transient
-   error like a rate-limit / timeout / claude API hiccup is plausibly
-   resolved, the underlying failure was about a flaky service that's
-   back), it's appropriate to clear the label so the next ` + "`clawflow run`" + `
-   pass gets another shot at it. If the operator fails again, the
-   circuit breaker re-engages — there's no infinite-loop risk.
+   **Two narrow recovery exceptions: ` + "`agent-failed`" + ` and ` + "`agent-skipped`" + `.**
+   PM MAY remove either of these (and only remove — never add) when the
+   issue looks recoverable. The reason to allow this is symmetric: in
+   both cases the next ` + "`clawflow run`" + ` re-fires the upstream operator,
+   which will re-apply the same label on its own if the underlying
+   condition still holds — no infinite-loop risk.
 
-   When you remove ` + "`agent-failed`" + ` you MUST leave a one-line
-   comment explaining your judgment ("retrying after rate-limit
-   window passed", "context changed since failure"). Do NOT
-   silently bulk-clear ` + "`agent-failed`" + ` across many issues — pick
-   the ones with concrete reason to retry.
+   - ` + "`agent-failed`" + ` — circuit breaker tripped after N consecutive
+     operator failures. Clear it when conditions plausibly improved:
+     trigger context changed, a transient error (rate-limit / timeout /
+     claude API hiccup) likely passed, the flaky service is back. If
+     the operator fails again, the breaker re-engages.
+   - ` + "`agent-skipped`" + ` — the evaluator scored below the 7.0 threshold
+     and cited a specific blocker (missing dependency, unresolved design
+     question, upstream issue). Clear it when THAT specific blocker is
+     resolved: the dependency PR merged, the upstream issue closed, the
+     design question got answered. The evaluator re-runs and decides on
+     its own; if it still scores <7.0 ` + "`agent-skipped`" + ` returns. PM
+     does NOT add ` + "`ready-for-agent`" + ` directly — pushing the issue
+     into the implement queue stays the evaluator's + ` + "`auto_approve`" + `'s
+     job.
+
+   When you remove either label you MUST leave a one-line comment
+   naming the specific reason ("retrying after rate-limit window
+   passed", "blocker #28 landed, retrying eval"). Do NOT silently
+   bulk-clear these labels across many issues — pick the ones with
+   concrete reason to retry.
 
 2. **Skip ` + "`agent-running`" + ` issues entirely.** An operator is
    mid-flight — do NOT comment, close, or touch any label.
