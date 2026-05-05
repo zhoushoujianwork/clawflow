@@ -1,5 +1,56 @@
 # CLAUDE.md
 
+## 项目简介
+
+ClawFlow 是一个 label 驱动的自动化工具，连接 GitHub/GitLab issue/PR 与 AI 算子。它轮询配置的仓库，将 open issue/PR 与算子（`SKILL.md`）匹配，通过 `claude -p` 执行。所有状态通过 VCS label 和 comment 管理——无数据库、无 SaaS 后端。二进制独立运行：单次、cron 或编辑器内触发。
+
+---
+
+## 技术栈
+
+| 层 | 技术 |
+|---|---|
+| 语言 | Go (见 `go.mod` 中版本) |
+| CLI 框架 | Cobra |
+| 配置 | YAML (`~/.clawflow/config/`) |
+| 嵌入资源 | `embed.FS`（内置算子编译进二进制） |
+| Web 前端 | React + TypeScript (`web/` 目录) |
+| CI/CD | GitHub Actions (`.github/workflows/release.yml`) |
+| 运行时依赖 | Claude Code CLI (`claude -p`) 必须在 PATH 中 |
+
+---
+
+## 开发环境
+
+### 前置条件
+
+- Go 1.21+（以 `go.mod` 为准）
+- Node.js（用于 `web/` 前端开发）
+- Claude Code CLI（`claude -p` 可用）
+
+### 构建与运行
+
+```bash
+# 构建二进制
+go build -o clawflow .
+
+# 本地运行（扫描配置中的仓库）
+./clawflow run
+
+# 仅处理特定仓库
+./clawflow run --repo owner/name
+```
+
+### Web 前端开发
+
+```bash
+cd web/
+npm install
+npm run dev
+```
+
+---
+
 ## 工具规范
 
 **禁止使用 `gh` CLI**，所有 VCS 操作（issue、PR、label、comment）统一使用 `clawflow` 命令：
@@ -11,6 +62,62 @@ clawflow label add/remove
 ```
 
 `gh` 仅允许在 `clawflow update` 内部实现中使用（拉取 release assets），其他场景一律禁止。
+
+---
+
+## 测试
+
+### 运行测试
+
+```bash
+# 全量单元测试
+go test ./...
+
+# 带 verbose 输出
+go test -v ./...
+
+# 单个包
+go test ./internal/operator/...
+```
+
+### 测试规范
+
+- 新功能和 bug 修复必须附带测试
+- 测试文件与源文件同目录，命名 `*_test.go`
+- 使用标准 `testing` 包，不引入外部测试框架
+- 算子集成测试：在测试仓库上运行 `clawflow run`，验证 label 和 comment 结果
+
+> TODO: CI 中的测试流程——确认 GitHub Actions 是否在 release 之外也跑 `go test`
+
+---
+
+## 代码规范
+
+- 包命名：小写单词，不用下划线或驼峰（Go 标准）
+- 错误处理：显式返回 `error`，不 panic
+- 目录结构遵循 `cmd/` + `internal/` 的标准 Go 布局
+- 算子相关代码在 `internal/operator/`
+- 嵌入资源通过 `skills/` 目录 + `embed.FS`
+- 注释语言：代码注释用英文，用户面文档可用中文
+
+---
+
+## Commit / PR 规范
+
+- 分支策略：功能分支从 main 切出，PR 合并回 main
+- Commit message：简洁描述变更内容，中英文均可
+- PR 标题应概括变更，正文说明动机和测试方式
+
+> TODO: 确认是否使用 Conventional Commits 格式或其他约定
+
+---
+
+## 安全约束
+
+- **禁止提交**：`~/.clawflow/config/` 下的用户配置（含 token）
+- **禁止提交**：`.env` 文件、API key、个人 token
+- `.gitignore` 已覆盖 `/config/`、构建产物 `clawflow`、`clawflow_*`
+- 算子执行时不应泄露用户 token 到 comment 或日志中
 
 ---
 
@@ -30,8 +137,8 @@ ClawFlow 的核心设计:**一切可扩展单元都是算子 (operator)**。要�
 
 | 位置 | 用途 | 优先级 |
 |---|---|---|
-| `skills/<name>/SKILL.md`(repo 内) | 内置算子,通过 `embed.FS` 打进二进制 | 低 |
-| `~/.clawflow/skills/<name>/SKILL.md` | 用户自定义算子 | 高(同名覆盖内置) |
+| `skills/<name>/SKILL.md`（repo 内） | 内置算子,通过 `embed.FS` 打进二进制 | 低 |
+| `~/.clawflow/skills/<name>/SKILL.md` | 用户自定义算子 | 高（同名覆盖内置） |
 
 ### Frontmatter schema
 
@@ -75,18 +182,18 @@ operator:
 runner 拿到 stdout 后:
 
 1. 自动 fallback 到最后一个有 text 的 assistant turn,所以即使模型最后一 turn 是 tool_use 也不会丢答案
-2. 解析 marker(出现多次取**最后一个**),拿到 outcome label
+2. 解析 marker（出现多次取**最后一个**），拿到 outcome label
 3. 把 marker 行从 body 中剥掉
 4. `PostIssueComment(repo, issue, cleanedBody)`
-5. 校验 label 在 `outcomes` 白名单内(白名单为空则放行)
+5. 校验 label 在 `outcomes` 白名单内（白名单为空则放行）
 6. `AddLabel(repo, issue, outcome)`
 7. 删除 `lock_label`
 
 这样算子作者只关心"分析什么 / 怎么组织文本",不需要管 VCS API、不会因 turn 顺序丢答案、也不会有重复 comment。
 
-**故意不做的事**(第一版 schema 的边界):
+**故意不做的事**（第一版 schema 的边界）:
 
-- 不支持 `timeout` 字段 —— 由 CLI 全局配置(默认 60 分钟)
+- 不支持 `timeout` 字段 —— 由 CLI 全局配置（默认 60 分钟）
 - 不支持多平台过滤 —— 一个算子对 GitHub/GitLab 都适用
 - 不支持 body 正则匹配 —— label 匹配已足够
 - marker 只支持"加单一 label",不支持复杂状态机(remove/swap)。需要 swap 的算子目前仍自己用 tool 处理(implement 是个例)
@@ -94,9 +201,9 @@ runner 拿到 stdout 后:
 ### 如何新增算子
 
 1. 在 `skills/<name>/SKILL.md` 创建目录和文件
-2. 写 frontmatter(name / description / trigger / lock_label)
-3. 正文写给 Claude 的指令(自然语言 prompt)
-4. `go build` 重新编译二进制(内置算子嵌入在 binary 里)
+2. 写 frontmatter（name / description / trigger / lock_label）
+3. 正文写给 Claude 的指令（自然语言 prompt）
+4. `go build` 重新编译二进制（内置算子嵌入在 binary 里）
 5. 本地 `clawflow run` 在测试仓库上验证
 
 用户算子不需要 `go build` —— 直接放在 `~/.clawflow/skills/` 下,下次 `clawflow run` 自动加载。
@@ -174,6 +281,12 @@ clawflow update --from-source     # 从本地 repo 重新构建(开发用)
 
 ---
 
+## 关联项目
+
+本仓库是单体项目，无外部 repo 依赖。曾计划的 SaaS 后端（`clawflow-saas`）已废弃。唯一运行时依赖是 Claude Code CLI。
+
+---
+
 ## .gitignore 说明
 
 | 规则 | 原因 |
@@ -195,14 +308,14 @@ clawflow update --from-source     # 从本地 repo 重新构建(开发用)
 ```
 skills/<operator-name>/
 ├── SKILL.md           # 必须,frontmatter + prompt 正文
-├── <extras>.md        # 可选:评估模板、维度表等,SKILL.md 过长时拆出来
-└── scripts/           # 可选:算子调用的辅助脚本
+├── <extras>.md        # 可选：评估模板、维度表等,SKILL.md 过长时拆出来
+└── scripts/           # 可选：算子调用的辅助脚本
 ```
 
 ### SKILL.md 规模
 
 - **控制在 500 行以内**,超出部分拆到独立文件
-- 详细内容(评论模板、prompt 模板、评估维度)放到独立 `.md` 文件
+- 详细内容（评论模板、prompt 模板、评估维度）放到独立 `.md` 文件
 - SKILL.md 里用 Markdown 链接引用,并说明何时加载:
   ```markdown
   详见 [evaluation.md](evaluation.md),包含 Bug/Feature 评估维度与评论模板
@@ -215,11 +328,3 @@ skills/<operator-name>/
 | 算子 frontmatter、触发说明 | 评论/prompt 模板 |
 | 流程步骤、CLI 命令 | 评估维度表格 |
 | 安全约束、核心指令 | 详细示例、参考文档 |
-
----
-
-## 商业版
-
-此 repo 曾配套过一个闭源的 SaaS 协同方向(`clawflow-saas`,Rust):CLI 作为 worker 连 SaaS 后端拉任务、上报 token 用量、走计费。该方向已废弃,本仓库完全独立,不再依赖任何后端。
-
-如果半年后翻 git log 发现一堆 `worker_*.go`、`/api/v1/worker/...`、`pipeline_run` 字样的历史提交,那就是这段。`clawflow-saas` 代码保留在另一个目录里仅供参考,不再活跃维护。
