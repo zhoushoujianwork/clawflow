@@ -120,43 +120,19 @@ function RepoDetail() {
   const syncNow = useCallback(() => {
     if (syncing) return
     setSyncing(true)
-
-    // POST /api/run spawns `clawflow run` as a background subprocess and
-    // returns immediately. issues.json is only rewritten when that run
-    // finishes, so we must poll /api/run/status until it flips back to
-    // "idle" before refreshing — otherwise we re-read a stale file and
-    // the user sees no change. Both 200 ("started") and 409 ("busy", a
-    // run is already in flight) join the same polling loop.
-    const pollIntervalMs = 2000
-    const safetyTimeoutMs = 120_000
-    let pollId: ReturnType<typeof setInterval> | null = null
-    let timeoutId: ReturnType<typeof setTimeout> | null = null
-
-    const finish = () => {
-      if (pollId !== null) clearInterval(pollId)
-      if (timeoutId !== null) clearTimeout(timeoutId)
-      refreshData().finally(() => setSyncing(false))
-    }
-
-    const startPolling = () => {
-      pollId = setInterval(() => {
-        fetch('/api/run/status', { cache: 'no-store' })
-          .then(r => (r.ok ? r.json() : null))
-          .then(d => {
-            if (d && d.status !== 'running') finish()
-          })
-          .catch(() => {})
-      }, pollIntervalMs)
-      timeoutId = setTimeout(finish, safetyTimeoutMs)
-    }
-
-    fetch('/api/run', {
+    // Refresh just this repo's issue states (open/closed/labels/title).
+    // Cheap synchronous endpoint — no operator runs are triggered, no
+    // 10-most-recent cap on closed issues. The endpoint rewrites this
+    // repo's slice of issues.json and returns; we then re-read it.
+    fetch('/api/repo/refresh-issues', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repo: fullName }),
     })
-      .then(() => startPolling())
-      .catch(() => finish())
+      .catch(() => {})
+      .finally(() => {
+        refreshData().finally(() => setSyncing(false))
+      })
   }, [fullName, syncing, refreshData])
 
 
