@@ -354,32 +354,20 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 
 	// MVP: skip PRs. All 3 built-in operators target issues. When a
 	// pr-target operator appears we'll add the same loop over ListOpenPRs.
-	
-	// Collect all issues (open and closed) for dashboard display
-	repoIssues := []snapshot.IssueEntry{}
-	
-	// Add open issues
-	for _, iss := range issues {
-		repoIssues = append(repoIssues, snapshot.IssueEntry{
-			Repo:        fullName,
-			IssueNumber: iss.Number,
-			IssueTitle:  iss.Title,
-			Labels:      append([]string(nil), iss.Labels...),
-			State:       iss.State,
-			CapturedAt:  capturedAt,
-		})
-	}
-	
-	// Add closed issues (recent 10)
-	closedIssues, err := client.ListIssues(fullName, "closed", nil)
-	if err == nil {
-		// Limit to recent 10 closed issues to keep dashboard clean
-		limit := 10
-		if len(closedIssues) > limit {
-			closedIssues = closedIssues[:limit]
-		}
-		for _, iss := range closedIssues {
-			repoIssues = append(repoIssues, snapshot.IssueEntry{
+
+	// Snapshot every issue (open + closed) for the dashboard via a
+	// single ListIssues("all") call — same shape as POST
+	// /api/repo/refresh-issues so the cron path and the manual Sync
+	// button can't disagree about which issues are open vs closed.
+	//
+	// Operator matching above keeps using ListOpenIssues so the
+	// per_page=100 budget for open issues is independent of any closed
+	// noise. Snapshot side accepts the implicit ~100-issue cap from
+	// the "all" call (sorted updated_at desc), which keeps stale
+	// ancient closed issues out of the view.
+	if snapshotIssues, sErr := client.ListIssues(fullName, "all", nil); sErr == nil {
+		for _, iss := range snapshotIssues {
+			*allIssues = append(*allIssues, snapshot.IssueEntry{
 				Repo:        fullName,
 				IssueNumber: iss.Number,
 				IssueTitle:  iss.Title,
@@ -388,10 +376,9 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 				CapturedAt:  capturedAt,
 			})
 		}
+	} else {
+		fmt.Fprintf(os.Stderr, "[%s] snapshot list issues: %v\n", fullName, sErr)
 	}
-	
-	// Add to global collection (thread-safe since we're in single-threaded context)
-	*allIssues = append(*allIssues, repoIssues...)
 
 	return pending, jobs, nil
 }
