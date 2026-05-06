@@ -309,7 +309,7 @@ function RepoList() {
                       </a>
                       {r.local_path && (
                         <a
-                          href={`qoder://file/${r.local_path}`}
+                          href={`qoder://file/${r.local_path}?windowId=_blank`}
                           title={`Open in VS Code: ${r.local_path}`}
                           className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0"
                         >
