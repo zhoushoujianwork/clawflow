@@ -112,7 +112,8 @@ function ProjectDetail() {
 
   // PM runs state
   const [pmRuns, setPmRuns] = useState<PMRun[]>([])
-  const [pmRunsOpen, setPmRunsOpen] = useState(false)
+  const [pmRunsOpen, setPmRunsOpen] = useState(true)
+  const [pmRunDetail, setPmRunDetail] = useState<PMRun | null>(null)
 
   // Generate context state. Used only by the empty-state Initialize
   // button — once context.md exists, all further edits go through
@@ -587,6 +588,83 @@ function ProjectDetail() {
               </div>
             )}
           </div>
+
+          {/* PM Activity — collapsible log of recent PM wakes with
+              their PM-RESULT summaries, cost, and duration. */}
+          {pmRuns.length > 0 && (
+            <section className="mb-6">
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setPmRunsOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={pmRunsOpen}
+                >
+                  {pmRunsOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <Activity className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-sm font-semibold text-foreground">PM Activity</span>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {pmRuns.length} run{pmRuns.length !== 1 ? 's' : ''}
+                  </span>
+                  {!pmRunsOpen && pmRuns[0]?.result && (
+                    <span className="text-xs text-muted-foreground truncate ml-1">
+                      · {pmRuns[0].result.replace(/^PM-RESULT:\s*/, '')}
+                    </span>
+                  )}
+                </button>
+                {pmRunsOpen && (
+                  <div className="border-t border-border divide-y divide-border">
+                    {pmRuns.map((run, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => setPmRunDetail(run)}
+                        className="w-full text-left px-4 py-3 hover:bg-secondary/20 transition-colors"
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <span
+                            className={cn(
+                              'inline-block w-2 h-2 rounded-full shrink-0',
+                              run.status === 'success' ? 'bg-emerald-500' : run.status === 'failed' ? 'bg-red-500' : 'bg-amber-500 animate-pulse',
+                            )}
+                          />
+                          <span className="text-xs text-muted-foreground tabular-nums">
+                            {new Date(run.started_at).toLocaleString()}
+                          </span>
+                          {run.ended_at && (
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              · {Math.round((new Date(run.ended_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s
+                            </span>
+                          )}
+                          {run.usage && (
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              · ${run.usage.total_cost_usd.toFixed(2)}
+                            </span>
+                          )}
+                          {run.usage && (
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              · {run.usage.num_turns} turns
+                            </span>
+                          )}
+                        </div>
+                        {run.result ? (
+                          <p className="text-sm text-foreground truncate">
+                            {run.result.replace(/^PM-RESULT:\s*/, '')}
+                          </p>
+                        ) : run.error ? (
+                          <p className="text-sm text-red-600 font-mono text-xs truncate">{run.error}</p>
+                        ) : (
+                          <p className="text-xs text-muted-foreground italic">no result line</p>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {pmRunDetail && <PMRunDetailModal run={pmRunDetail} onClose={() => setPmRunDetail(null)} />}
 
           {/* Status row — Automation (config) on the left, Health
               Check (status) on the right. Two short cards side by
@@ -1141,75 +1219,6 @@ function ProjectDetail() {
             syncing={backlogSyncing}
           />
 
-          {/* PM Activity — collapsible log of recent PM wakes with
-              their PM-RESULT summaries, cost, and duration. */}
-          {pmRuns.length > 0 && (
-            <section className="mb-6">
-              <div className="bg-card border border-border rounded-xl overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setPmRunsOpen(o => !o)}
-                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
-                  aria-expanded={pmRunsOpen}
-                >
-                  {pmRunsOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                  <Activity className="w-4 h-4 text-muted-foreground" />
-                  <span className="text-sm font-semibold text-foreground">PM Activity</span>
-                  <span className="text-xs text-muted-foreground tabular-nums">
-                    {pmRuns.length} run{pmRuns.length !== 1 ? 's' : ''}
-                  </span>
-                  {!pmRunsOpen && pmRuns[0]?.result && (
-                    <span className="text-xs text-muted-foreground truncate ml-1">
-                      · {pmRuns[0].result.replace(/^PM-RESULT:\s*/, '')}
-                    </span>
-                  )}
-                </button>
-                {pmRunsOpen && (
-                  <div className="border-t border-border divide-y divide-border">
-                    {pmRuns.map((run, i) => (
-                      <div key={i} className="px-4 py-3">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span
-                            className={cn(
-                              'inline-block w-2 h-2 rounded-full shrink-0',
-                              run.status === 'success' ? 'bg-emerald-500' : run.status === 'failed' ? 'bg-red-500' : 'bg-amber-500 animate-pulse',
-                            )}
-                          />
-                          <span className="text-xs text-muted-foreground tabular-nums">
-                            {new Date(run.started_at).toLocaleString()}
-                          </span>
-                          {run.ended_at && (
-                            <span className="text-xs text-muted-foreground tabular-nums">
-                              · {Math.round((new Date(run.ended_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s
-                            </span>
-                          )}
-                          {run.usage && (
-                            <span className="text-xs text-muted-foreground tabular-nums">
-                              · ${run.usage.total_cost_usd.toFixed(2)}
-                            </span>
-                          )}
-                          {run.usage && (
-                            <span className="text-xs text-muted-foreground tabular-nums">
-                              · {run.usage.num_turns} turns
-                            </span>
-                          )}
-                        </div>
-                        {run.result ? (
-                          <p className="text-sm text-foreground">
-                            {run.result.replace(/^PM-RESULT:\s*/, '')}
-                          </p>
-                        ) : run.error ? (
-                          <p className="text-sm text-red-600 font-mono text-xs">{run.error}</p>
-                        ) : (
-                          <p className="text-xs text-muted-foreground italic">no result line</p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </section>
-          )}
         </>
       )}
     </div>
@@ -1343,5 +1352,101 @@ function BacklogSection({
         )
       )}
     </section>
+  )
+}
+
+function PMRunDetailModal({ run, onClose }: { run: PMRun; onClose: () => void }) {
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handleEsc)
+    return () => document.removeEventListener('keydown', handleEsc)
+  }, [onClose])
+
+  const duration = run.ended_at
+    ? Math.round((new Date(run.ended_at).getTime() - new Date(run.started_at).getTime()) / 1000)
+    : null
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div className="relative w-full max-w-2xl max-h-[80vh] mx-4 bg-card border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                'inline-block w-2.5 h-2.5 rounded-full shrink-0',
+                run.status === 'success' ? 'bg-emerald-500' : run.status === 'failed' ? 'bg-red-500' : 'bg-amber-500 animate-pulse',
+              )}
+            />
+            <h2 className="text-sm font-semibold text-foreground">PM Run Detail</h2>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {new Date(run.started_at).toLocaleString()}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+            {duration !== null && (
+              <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
+                Duration: {duration}s
+              </span>
+            )}
+            {run.usage && (
+              <>
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
+                  Cost: ${run.usage.total_cost_usd.toFixed(3)}
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
+                  Turns: {run.usage.num_turns}
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
+                  Input: {(run.usage.input_tokens / 1000).toFixed(1)}k tokens
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
+                  Output: {(run.usage.output_tokens / 1000).toFixed(1)}k tokens
+                </span>
+              </>
+            )}
+          </div>
+
+          {run.result && (
+            <div>
+              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Result</h3>
+              <div className="text-sm text-foreground bg-secondary/40 rounded-lg px-4 py-3 whitespace-pre-wrap">
+                {run.result.replace(/^PM-RESULT:\s*/, '')}
+              </div>
+            </div>
+          )}
+
+          {run.summary && (
+            <div>
+              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Summary</h3>
+              <div className="text-sm text-foreground bg-secondary/40 rounded-lg px-4 py-3 whitespace-pre-wrap">
+                {run.summary}
+              </div>
+            </div>
+          )}
+
+          {run.error && (
+            <div>
+              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Error</h3>
+              <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-3 font-mono whitespace-pre-wrap dark:bg-red-950/30 dark:border-red-900">
+                {run.error}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
