@@ -80,8 +80,25 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 			saveLocalPath(cfg, ownerRepo, candidate)
 			return candidate, nil
 		}
-		// Directory exists but is not the expected repo — don't clobber it.
-		return "", fmt.Errorf("directory %s exists but is not a clone of %s", candidate, ownerRepo)
+		// Name collision: the flat path is occupied by a different repo.
+		// Try a disambiguated path: <cloneBase>/<owner>-<repo>
+		// e.g. ~/github/daboluocc-bbclaw instead of ~/github/bbclaw
+		fallback := filepath.Join(cloneBase, strings.ReplaceAll(ownerRepo, "/", "-"))
+		if _, err := os.Stat(fallback); err == nil {
+			// Fallback path already exists — check if it's already the right clone.
+			if matchesRepo(fallback, ownerRepo, repoCfg) {
+				saveLocalPath(cfg, ownerRepo, fallback)
+				return fallback, nil
+			}
+			// Both flat and disambiguated paths are occupied by other repos.
+			return "", fmt.Errorf("directory %s exists but is not a clone of %s (also tried %s)", candidate, ownerRepo, fallback)
+		}
+		fmt.Fprintf(progress, "path %s is occupied by another repo, cloning %s to %s instead ...\n", candidate, ownerRepo, fallback)
+		if err := cloneRepo(ownerRepo, fallback, repoCfg, progress, token); err != nil {
+			return "", fmt.Errorf("auto-clone failed: %w", err)
+		}
+		saveLocalPath(cfg, ownerRepo, fallback)
+		return fallback, nil
 	}
 
 	fmt.Fprintf(progress, "local clone not found, cloning %s to %s ...\n", ownerRepo, candidate)
@@ -239,6 +256,8 @@ func normalizeRemoteURL(rawURL string) string {
 
 // DetectLocalClone checks if a local clone already exists for the given
 // ownerRepo at the expected path (based on platform clone dir settings).
+// Checks both the flat path (<cloneBase>/<repo>) and the disambiguated path
+// (<cloneBase>/<owner>-<repo>) that EnsureLocalClone falls back to on collision.
 // Returns the local path if found and verified, empty string otherwise.
 func DetectLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo) string {
 	cloneBase := cfg.Settings.ResolveGithubCloneDir()
@@ -250,12 +269,20 @@ func DetectLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo)
 	subPath := parts[len(parts)-1]
 	candidate := filepath.Join(cloneBase, subPath)
 
-	if _, err := os.Stat(candidate); err != nil {
-		return ""
+	if _, err := os.Stat(candidate); err == nil {
+		if matchesRepo(candidate, ownerRepo, repoCfg) {
+			return candidate
+		}
 	}
-	if matchesRepo(candidate, ownerRepo, repoCfg) {
-		return candidate
+
+	// Also check the disambiguated fallback path used when the flat name collides.
+	fallback := filepath.Join(cloneBase, strings.ReplaceAll(ownerRepo, "/", "-"))
+	if _, err := os.Stat(fallback); err == nil {
+		if matchesRepo(fallback, ownerRepo, repoCfg) {
+			return fallback
+		}
 	}
+
 	return ""
 }
 
