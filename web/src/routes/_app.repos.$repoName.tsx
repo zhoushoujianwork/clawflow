@@ -1,10 +1,18 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ChevronRight, ExternalLink, MessageSquare, Download, Loader2, RotateCw } from 'lucide-react'
+import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
+import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 import { useChatDrawer } from '../lib/chatContext'
+import {
+  IssueList,
+  REPO_SECTIONS,
+  useIssueGroups,
+  type IssueEntry,
+  type PendingEntry,
+  type Run,
+} from '../components/IssueList'
 
 interface Repo {
   full_name: string
@@ -15,47 +23,6 @@ interface Repo {
   enabled: boolean
   auto_approve: boolean
   auto_merge: boolean
-}
-
-interface Run {
-  operator: string
-  repo: string
-  issue_number: number
-  issue_title?: string
-  started_at: string
-  ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running'
-  summary?: string
-  path: string
-  pr_url?: string
-  error?: string
-}
-
-interface PendingEntry {
-  repo: string
-  issue_number: number
-  issue_title?: string
-  operator: string
-  labels?: string[]
-  captured_at: string
-}
-
-interface IssueEntry {
-  repo: string
-  issue_number: number
-  issue_title?: string
-  labels?: string[]
-  state: string // "open" | "closed"
-  captured_at: string
-}
-
-interface IssueGroup {
-  issue_number: number
-  issue_title?: string
-  runs: Run[]
-  pending: PendingEntry[]
-  labels?: string[]
-  state?: string // "open" | "closed"
 }
 export const Route = createFileRoute('/_app/repos/$repoName')({
   component: RepoDetail,
@@ -70,7 +37,10 @@ function RepoDetail() {
   const [runs, setRuns] = useState<Run[]>([])
   const [pending, setPending] = useState<PendingEntry[]>([])
   const [loading, setLoading] = useState(true)
-  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  // expanded keys are `repo:issue_number` strings — single-repo on this
+  // page but the renderer is shared with the project-level list which
+  // is multi-repo, so the key shape is the union.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
   const [cloning, setCloning] = useState(false)
   const [cloneError, setCloneError] = useState<string | null>(null)
@@ -175,102 +145,34 @@ function RepoDetail() {
 
   const slug = fullName.replace(/\//g, '__')
 
-  const issues = useMemo<IssueGroup[]>(() => {
-    const map = new Map<number, IssueGroup>()
-    
-    // Start with all issues from issues.json
-    for (const issue of allIssues) {
-      let g = map.get(issue.issue_number)
-      if (!g) {
-        g = { 
-          issue_number: issue.issue_number, 
-          issue_title: issue.issue_title, 
-          runs: [], 
-          pending: [], 
-          labels: [...(issue.labels || [])],
-          state: issue.state
-        }
-        map.set(issue.issue_number, g)
-      }
-      // Merge labels from issue data
-      if (issue.labels) {
-        for (const label of issue.labels) {
-          if (!g.labels?.includes(label)) {
-            g.labels?.push(label)
-          }
-        }
-      }
-    }
-    
-    // Add runs data
-    for (const r of runs) {
-      let g = map.get(r.issue_number)
-      if (!g) {
-        g = { issue_number: r.issue_number, issue_title: r.issue_title, runs: [], pending: [], labels: [], state: 'open' }
-        map.set(r.issue_number, g)
-      }
-      g.runs.push(r)
-      if (!g.issue_title && r.issue_title) g.issue_title = r.issue_title
-    }
-    
-    // Add pending data
-    for (const p of pending) {
-      let g = map.get(p.issue_number)
-      if (!g) {
-        g = { issue_number: p.issue_number, issue_title: p.issue_title, runs: [], pending: [], labels: [], state: 'open' }
-        map.set(p.issue_number, g)
-      }
-      g.pending.push(p)
-      if (!g.issue_title && p.issue_title) g.issue_title = p.issue_title
-      // Collect labels from pending entries
-      if (p.labels && g.labels) {
-        for (const label of p.labels) {
-          if (!g.labels.includes(label)) {
-            g.labels.push(label)
-          }
-        }
-      }
-    }
-    
-    for (const g of map.values()) {
-      g.runs.sort((a, b) => b.started_at.localeCompare(a.started_at))
-      g.pending.sort((a, b) => a.operator.localeCompare(b.operator))
-      if (g.labels) g.labels.sort()
-    }
-    return Array.from(map.values())
-  }, [runs, pending, allIssues])
+  // Merge runs / pending / issues into per-issue groups via the shared
+  // hook. Single-repo page → no extra filtering needed (the `setX`
+  // callers in refreshData already scope to this repo).
+  const issueGroups = useIssueGroups({ issues: allIssues, runs, pending })
 
-  const sections = useMemo(() => {
-    const running: IssueGroup[] = []
-    const pendingI: IssueGroup[] = []
-    const done: IssueGroup[] = []
-    const closed: IssueGroup[] = []
-    
-    for (const g of issues) {
-      if (g.state === 'closed') {
-        closed.push(g)
-      } else {
-        const latest = g.runs[0]
-        if (latest?.status === 'running') running.push(g)
-        else if (g.pending.length > 0) pendingI.push(g)
-        else done.push(g)
-      }
+  // Same 4-bucket layout the page has shipped with for months — Running,
+  // Pending, Done, Closed (capped at 10 most recent). Encoded in
+  // REPO_SECTIONS so the project-level list can swap in its own.
+  // Pre-bucketed counts are derived for the section header summary.
+  const sectionCounts = useMemo(() => {
+    let running = 0,
+      pendingI = 0,
+      done = 0,
+      closed = 0
+    for (const g of issueGroups) {
+      if (g.state === 'closed') closed++
+      else if (g.runs[0]?.status === 'running') running++
+      else if (g.pending.length > 0) pendingI++
+      else done++
     }
-    
-    const sortKey = (g: IssueGroup) => g.runs[0]?.started_at || g.pending[0]?.captured_at || ''
-    const cmp = (a: IssueGroup, b: IssueGroup) => sortKey(b).localeCompare(sortKey(a))
-    running.sort(cmp)
-    pendingI.sort(cmp)
-    done.sort(cmp)
-    closed.sort(cmp)
     return { running, pending: pendingI, done, closed }
-  }, [issues])
+  }, [issueGroups])
 
-  function toggle(n: number) {
+  function toggle(k: string) {
     setExpanded(prev => {
       const next = new Set(prev)
-      if (next.has(n)) next.delete(n)
-      else next.add(n)
+      if (next.has(k)) next.delete(k)
+      else next.add(k)
       return next
     })
   }
@@ -366,10 +268,10 @@ function RepoDetail() {
           <section>
             <div className="flex items-baseline gap-2 mb-2">
               <h2 className="text-sm font-semibold text-foreground">
-                Issues <span className="font-normal text-muted-foreground">({issues.length})</span>
+                Issues <span className="font-normal text-muted-foreground">({issueGroups.length})</span>
               </h2>
               <span className="text-xs text-muted-foreground">
-                {sections.running.length} running · {sections.pending.length} pending · {sections.done.length} done · {sections.closed.length} closed
+                {sectionCounts.running} running · {sectionCounts.pending} pending · {sectionCounts.done} done · {sectionCounts.closed} closed
               </span>
               <button
                 onClick={syncNow}
@@ -394,17 +296,20 @@ function RepoDetail() {
               </button>
             </div>
 
-            {issues.length === 0 ? (
+            {issueGroups.length === 0 ? (
               <p className="text-sm text-muted-foreground py-4">
                 No activity yet for this repo. Run <code className="px-1 py-0.5 bg-secondary rounded font-mono">clawflow run --repo {repo.full_name}</code>.
               </p>
             ) : (
-              <div className="space-y-4">
-                <IssueSection title="Running" tone="blue" groups={sections.running} repo={fullName} repoMap={repoMap} slug={slug} expanded={expanded} onToggle={toggle} />
-                <IssueSection title="Pending" tone="amber" groups={sections.pending} repo={fullName} repoMap={repoMap} slug={slug} expanded={expanded} onToggle={toggle} />
-                <IssueSection title="Done" tone="muted" groups={sections.done} repo={fullName} repoMap={repoMap} slug={slug} expanded={expanded} onToggle={toggle} />
-                <IssueSection title="Closed" tone="gray" groups={sections.closed} repo={fullName} repoMap={repoMap} slug={slug} expanded={expanded} onToggle={toggle} />
-              </div>
+              <IssueList
+                groups={issueGroups}
+                sections={REPO_SECTIONS}
+                showRepo={false}
+                repoMap={repoMap}
+                slug={slug}
+                expanded={expanded}
+                onToggle={toggle}
+              />
             )}
           </section>
         </>
@@ -413,226 +318,6 @@ function RepoDetail() {
   )
 }
 
-function IssueSection({
-  title, tone, groups, repo, repoMap, slug, expanded, onToggle,
-}: {
-  title: string
-  tone: 'blue' | 'amber' | 'muted' | 'gray'
-  groups: IssueGroup[]
-  repo: string
-  repoMap: RepoInfoMap
-  slug: string
-  expanded: Set<number>
-  onToggle: (n: number) => void
-}) {
-  if (groups.length === 0) return null
-  const dotCls = {
-    blue: 'bg-blue-400',
-    amber: 'bg-amber-400',
-    muted: 'bg-muted-foreground/40',
-    gray: 'bg-gray-400',
-  }[tone]
-  return (
-    <div>
-      <div className="flex items-center gap-2 mb-1.5 px-1">
-        <span className={cn('w-1.5 h-1.5 rounded-full', dotCls)} />
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {title} <span className="font-normal">({groups.length})</span>
-        </h3>
-      </div>
-      <div className="bg-card border border-border rounded-xl overflow-hidden divide-y divide-border">
-        {groups.map(g => (
-          <IssueRow
-            key={g.issue_number}
-            group={g}
-            repo={repo}
-            repoMap={repoMap}
-            slug={slug}
-            expanded={expanded.has(g.issue_number)}
-            onToggle={onToggle}
-          />
-        ))}
-        {title === 'Closed' && groups.length > 0 && (
-          <div className="px-4 py-3 bg-secondary/20 border-t border-border">
-            <a
-              href={`${repoUrl(repo, repoMap)}/issues?q=is%3Aissue+is%3Aclosed`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground hover:underline"
-            >
-              View more closed issues on GitHub <ExternalLink className="w-3 h-3" />
-            </a>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function IssueRow({
-  group, repo, repoMap, slug, expanded, onToggle,
-}: {
-  group: IssueGroup
-  repo: string
-  repoMap: RepoInfoMap
-  slug: string
-  expanded: boolean
-  onToggle: (n: number) => void
-}) {
-  const chatDrawer = useChatDrawer()
-  const latest = group.runs[0]
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={() => onToggle(group.issue_number)}
-        className="w-full flex items-center gap-3 px-4 py-2 hover:bg-secondary/30 text-left flex-wrap"
-      >
-        <ChevronRight className={cn('w-3.5 h-3.5 text-muted-foreground transition-transform shrink-0', expanded && 'rotate-90')} />
-        <a
-          href={issueUrl(repo, group.issue_number, repoMap)}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={e => e.stopPropagation()}
-          className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 w-12"
-        >
-          #{group.issue_number}
-        </a>
-        {latest && <StatusBadge status={latest.status} />}
-        <span className={cn("text-sm truncate flex-1", group.state === 'closed' && "line-through text-muted-foreground")}>
-          {group.issue_title || '(no title)'}
-        </span>
-        {group.labels && group.labels.length > 0 && (
-          <div className="flex flex-wrap gap-1 shrink-0">
-            {group.labels.map(label => (
-              <span
-                key={label}
-                className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-secondary text-secondary-foreground border border-border"
-              >
-                {label}
-              </span>
-            ))}
-          </div>
-        )}
-        {group.pending.length > 0 && (
-          <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
-            queued: {group.pending.map(p => p.operator).join(', ')}
-          </span>
-        )}
-        <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-16 text-right">
-          {group.runs.length} {group.runs.length === 1 ? 'run' : 'runs'}
-        </span>
-        <button
-          onClick={e => { e.stopPropagation(); chatDrawer.open({ repo, issue: group.issue_number }) }}
-          className="shrink-0 text-muted-foreground hover:text-foreground"
-          title="Chat about this issue"
-        >
-          <MessageSquare className="w-3.5 h-3.5" />
-        </button>
-      </button>
-      {expanded && <Timeline group={group} slug={slug} />}
-    </div>
-  )
-}
-
-function Timeline({ group, slug }: { group: IssueGroup; slug: string }) {
-  return (
-    <div className="bg-secondary/20 border-t border-border px-6 py-4">
-      <ol className="relative border-l border-border space-y-3 ml-1">
-        {group.pending.map(p => (
-          <li key={'pending-' + p.operator} className="pl-4 relative">
-            <span className="absolute -left-[7px] top-1.5 w-3 h-3 rounded-full bg-amber-200 border-2 border-amber-400" />
-            <div className="text-sm">
-              <span className="font-mono">{p.operator}</span>
-              <span className="ml-2 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
-                queued
-              </span>
-            </div>
-            {p.labels && p.labels.length > 0 && (
-              <div className="flex flex-wrap gap-1 mt-1">
-                {p.labels.map(label => (
-                  <span
-                    key={label}
-                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-secondary text-secondary-foreground border border-border"
-                  >
-                    {label}
-                  </span>
-                ))}
-              </div>
-            )}
-            <div className="text-xs text-muted-foreground tabular-nums mt-0.5">
-              captured {new Date(p.captured_at).toLocaleString()}
-            </div>
-          </li>
-        ))}
-        {group.runs.map(r => {
-          const ts = r.path.replace(/\/$/, '').split('/').pop() || ''
-          const runHref = `/runs/${slug}/issue-${group.issue_number}/${ts}`
-          const dotCls =
-            r.status === 'success' ? 'bg-green-400 border-green-600' :
-            r.status === 'failed' ? 'bg-red-400 border-red-600' :
-            r.status === 'running' ? 'bg-blue-400 border-blue-600 animate-pulse' :
-            'bg-muted-foreground/30 border-muted-foreground/60'
-          return (
-            <li key={r.path} className="pl-4 relative">
-              <span className={cn('absolute -left-[7px] top-1.5 w-3 h-3 rounded-full border-2', dotCls)} />
-              <a
-                href={runHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block -mx-2 px-2 py-1 rounded hover:bg-background"
-              >
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="font-mono">{r.operator}</span>
-                  <StatusBadge status={r.status} />
-                  {r.pr_url && (
-                    <a
-                      href={r.pr_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={e => e.stopPropagation()}
-                      className="inline-flex items-center gap-0.5 text-xs text-muted-foreground hover:text-foreground hover:underline"
-                    >
-                      PR <ExternalLink className="w-3 h-3" />
-                    </a>
-                  )}
-                </div>
-                <div className="text-xs text-muted-foreground tabular-nums mt-0.5">
-                  {new Date(r.started_at).toLocaleString()}
-                  {r.ended_at && ' · ' + formatDuration(r.started_at, r.ended_at)}
-                </div>
-              </a>
-            </li>
-          )
-        })}
-      </ol>
-    </div>
-  )
-}
-
-function StatusBadge({ status }: { status: Run['status'] }) {
-  return (
-    <span className={cn(
-      'inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border shrink-0',
-      status === 'success' && 'bg-green-100 text-green-700 border-green-200',
-      status === 'failed' && 'bg-red-100 text-red-700 border-red-200',
-      status === 'skipped' && 'bg-muted text-muted-foreground border-border',
-      status === 'running' && 'bg-blue-100 text-blue-700 border-blue-200',
-    )}>{status}</span>
-  )
-}
-
-function formatDuration(start: string, end: string): string {
-  const ms = new Date(end).getTime() - new Date(start).getTime()
-  if (!isFinite(ms) || ms < 0) return ''
-  if (ms < 1000) return ms + 'ms'
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return s + 's'
-  const m = Math.floor(s / 60)
-  if (m < 60) return m + 'm ' + (s % 60) + 's'
-  const h = Math.floor(m / 60)
-  return h + 'h ' + (m % 60) + 'm'
-}
 
 function ToggleCard({ label, enabled, onToggle, disabled }: {
   label: string
