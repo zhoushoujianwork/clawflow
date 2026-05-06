@@ -34,17 +34,11 @@ func LockPath(repo string, issueNum int) string {
 // AcquireLock creates a lockfile for the given (repo, issue). Returns nil
 // on success, an error if the lock is already held by a live process.
 // Stale locks (owner PID is dead) are automatically reclaimed.
+//
+// The lock is created with O_CREATE|O_EXCL so the operation is atomic on
+// POSIX filesystems — two concurrent callers cannot both succeed.
 func AcquireLock(repo string, issueNum int, operatorName string) error {
 	path := LockPath(repo, issueNum)
-
-	if info, err := ReadLock(path); err == nil {
-		if processAlive(info.PID) {
-			return fmt.Errorf("locked by PID %d (operator %s, since %s)",
-				info.PID, info.Operator, info.StartedAt.Format(time.RFC3339))
-		}
-		// Stale lock — owner is dead, reclaim it.
-		_ = os.Remove(path)
-	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir lock dir: %w", err)
@@ -61,7 +55,64 @@ func AcquireLock(repo string, issueNum int, operatorName string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+
+	// First attempt: O_CREATE|O_EXCL is atomic — only one caller wins.
+	if err := writeExclusive(path, data); err == nil {
+		return nil
+	} else if !os.IsExist(err) {
+		return fmt.Errorf("create lockfile: %w", err)
+	}
+
+	// Lock file already exists. Check whether the owner is still alive.
+	existing, readErr := ReadLock(path)
+	if readErr != nil {
+		// Unreadable/corrupt lockfile — try to remove and re-acquire once.
+		_ = os.Remove(path)
+		if err2 := writeExclusive(path, data); err2 != nil {
+			if os.IsExist(err2) {
+				return fmt.Errorf("lock already held by another process")
+			}
+			return fmt.Errorf("create lockfile: %w", err2)
+		}
+		return nil
+	}
+
+	if processAlive(existing.PID) {
+		return fmt.Errorf("locked by PID %d (operator %s, since %s)",
+			existing.PID, existing.Operator, existing.StartedAt.Format(time.RFC3339))
+	}
+
+	// Stale lock — owner is dead. Remove it and re-acquire with O_EXCL so
+	// we don't race with another process doing the same reclaim.
+	_ = os.Remove(path)
+	if err2 := writeExclusive(path, data); err2 != nil {
+		if os.IsExist(err2) {
+			// Another process won the reclaim race — report the new owner.
+			if info2, readErr2 := ReadLock(path); readErr2 == nil {
+				return fmt.Errorf("locked by PID %d (operator %s, since %s)",
+					info2.PID, info2.Operator, info2.StartedAt.Format(time.RFC3339))
+			}
+			return fmt.Errorf("lock already held by another process")
+		}
+		return fmt.Errorf("create lockfile: %w", err2)
+	}
+	return nil
+}
+
+// writeExclusive atomically creates path and writes data to it using
+// O_CREATE|O_EXCL. Returns os.ErrExist (via os.IsExist) if the file
+// already exists.
+func writeExclusive(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
 }
 
 // ReleaseLock removes the lockfile for the given (repo, issue). No-op if
