@@ -1,5 +1,6 @@
 import { createFileRoute, Outlet, Link } from '@tanstack/react-router'
-import { BookOpen, Receipt, FolderKanban } from 'lucide-react'
+import { BookOpen, Receipt, FolderKanban, Loader2 } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTheme } from '../lib/useTheme'
 import { ChatProvider } from '../lib/chatContext'
 import { ChatDrawer } from '../components/ChatDrawer'
@@ -10,6 +11,61 @@ export const Route = createFileRoute('/_app')({
 
 function AppLayout() {
   const { theme, toggle } = useTheme()
+  const [currentVersion, setCurrentVersion] = useState<string | null>(null)
+  const [latestVersion, setLatestVersion] = useState<string | null>(null)
+  const [updateAvailable, setUpdateAvailable] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const [restarting, setRestarting] = useState(false)
+  const [showTooltip, setShowTooltip] = useState(false)
+
+  // Check version once on mount
+  useEffect(() => {
+    fetch('/api/version', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d) {
+          setCurrentVersion(d.current || null)
+          setLatestVersion(d.latest || null)
+          setUpdateAvailable(!!d.update_available)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  const triggerUpdate = useCallback(() => {
+    setUpdating(true)
+    fetch('/api/update', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => {
+        if (d.status !== 'ok') {
+          setUpdating(false)
+          return
+        }
+        if (d.respawning) {
+          setRestarting(true)
+          const started = Date.now()
+          const tick = () => {
+            fetch('/api/version', { cache: 'no-store' })
+              .then(r => r.ok ? r.json() : Promise.reject(new Error('not ok')))
+              .then(() => window.location.reload())
+              .catch(() => {
+                if (Date.now() - started > 30_000) {
+                  setRestarting(false)
+                  setUpdating(false)
+                  return
+                }
+                setTimeout(tick, 500)
+              })
+          }
+          setTimeout(tick, 800)
+          return
+        }
+        setUpdating(false)
+        setUpdateAvailable(false)
+        setLatestVersion(null)
+      })
+      .catch(() => setUpdating(false))
+  }, [])
 
   return (
     <ChatProvider>
@@ -38,6 +94,52 @@ function AppLayout() {
                 local
               </span>
             </a>
+            {/* Version badge with upgrade indicator */}
+            {currentVersion && (
+              <div className="relative">
+                <button
+                  onClick={updateAvailable ? triggerUpdate : undefined}
+                  onMouseEnter={() => setShowTooltip(true)}
+                  onMouseLeave={() => setShowTooltip(false)}
+                  disabled={!updateAvailable || updating || restarting}
+                  className={`relative inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
+                    updateAvailable && !updating && !restarting
+                      ? 'cursor-pointer hover:bg-[hsl(var(--brand)/0.1)] text-[hsl(var(--text-mid,var(--text-low)))]'
+                      : 'cursor-default text-[hsl(var(--text-low))]'
+                  }`}
+                  style={{ color: 'hsl(var(--text-low))' }}
+                  aria-label={updateAvailable ? `Upgrade to ${latestVersion}` : `Version ${currentVersion}`}
+                >
+                  {restarting ? (
+                    <><Loader2 className="w-3 h-3 animate-spin" /> Restarting…</>
+                  ) : updating ? (
+                    <><Loader2 className="w-3 h-3 animate-spin" /> Updating…</>
+                  ) : (
+                    <>
+                      {currentVersion}
+                      {updateAvailable && (
+                        <svg className="w-2 h-2 shrink-0" viewBox="0 0 8 8" aria-hidden="true">
+                          <circle cx="4" cy="4" r="4" fill="#ef4444" />
+                        </svg>
+                      )}
+                    </>
+                  )}
+                </button>
+                {/* Tooltip */}
+                {showTooltip && updateAvailable && !updating && !restarting && (
+                  <div
+                    className="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 px-2.5 py-1.5 rounded-md text-[11px] whitespace-nowrap shadow-lg z-50 border"
+                    style={{
+                      background: 'hsl(var(--bg-panel))',
+                      borderColor: 'hsl(var(--border))',
+                      color: 'hsl(var(--text-high))',
+                    }}
+                  >
+                    Click to upgrade to <span className="font-semibold">{latestVersion}</span>
+                  </div>
+                )}
+              </div>
+            )}
             <nav className="flex gap-1">
               <Link
                 to="/dashboard"
