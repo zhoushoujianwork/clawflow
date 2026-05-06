@@ -1,14 +1,20 @@
 // Package snapshot writes JSON snapshots of ClawFlow state to
-// ~/.clawflow/dashboard/data/ so the local web dashboard can render
-// "what did ClawFlow do" without a backend server. Each operator run
-// gets its own directory containing an append-only events.jsonl
-// (raw claude stream-json events) plus a meta.json with
-// start/end/status/pr_url.
+// ~/.clawflow/data/ so the local web dashboard can render "what did
+// ClawFlow do" without a backend server. Each operator run gets its
+// own directory containing an append-only events.jsonl (raw claude
+// stream-json events) plus a meta.json with start/end/status/pr_url.
 //
 // The contract is deliberately file-based: CLI writes, dashboard reads.
 // If a user hates the bundled dashboard they can `cd` into the data
 // directory, `jq` the JSON themselves, or point any static file server
 // at it.
+//
+// Layout note (changed in v0.x): runtime data lives at ~/.clawflow/data/,
+// SEPARATE from the SPA assets at ~/.clawflow/dashboard/. Earlier
+// versions co-located them at ~/.clawflow/dashboard/data/, which made
+// "refresh the SPA bundle" and "blow away run history" look like the
+// same operation. MigrateLegacyDataDir handles a one-shot move on
+// startup so existing installs upgrade transparently.
 package snapshot
 
 import (
@@ -26,16 +32,149 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 )
 
-// DashboardRoot is ~/.clawflow/dashboard. The SPA assets live at the root;
-// data lives under DashboardRoot/data.
+// DashboardRoot is ~/.clawflow/dashboard — strictly the SPA bundle
+// (assets/, index.html, favicon.svg, logo.svg). Treated as a build
+// artifact: `clawflow web` overwrites it from the embedded FS on every
+// start. Safe to delete; nothing in here needs to persist across
+// upgrades.
 func DashboardRoot() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".clawflow", "dashboard")
 }
 
-// DataDir is the JSON snapshot root. Dashboard fetches are relative to this.
+// DataDir is the JSON snapshot root — append-only run history, PM
+// activity, and aggregate views the dashboard reads. Lives at
+// ~/.clawflow/data/, deliberately OUTSIDE DashboardRoot so the SPA's
+// "delete and re-extract" cycle can never touch it.
 func DataDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".clawflow", "data")
+}
+
+// LegacyDataDir is the pre-split location (~/.clawflow/dashboard/data).
+// Only consulted by MigrateLegacyDataDir during startup.
+func LegacyDataDir() string {
 	return filepath.Join(DashboardRoot(), "data")
+}
+
+// MigrateLegacyDataDir is a one-shot no-op-if-already-done move from
+// ~/.clawflow/dashboard/data/ → ~/.clawflow/data/. Called from
+// `clawflow web` start before anything reads or writes data.
+//
+// Conditions for the move:
+//   - legacy directory exists and is non-empty
+//   - new directory does not exist (or exists but is empty)
+//
+// Both same-FS rename and cross-FS copy are handled. Failures are
+// returned to the caller, which logs and continues with the new
+// location empty — no dataloss, just a missed migration the user can
+// retry by manually moving the directory.
+func MigrateLegacyDataDir() (moved bool, err error) {
+	legacy := LegacyDataDir()
+	if _, statErr := os.Stat(legacy); os.IsNotExist(statErr) {
+		return false, nil
+	} else if statErr != nil {
+		return false, fmt.Errorf("stat legacy data dir: %w", statErr)
+	}
+
+	current := DataDir()
+	if entries, statErr := os.ReadDir(current); statErr == nil && len(entries) > 0 {
+		// New location already populated — assume the migration ran
+		// previously (or the user populated it manually). Leave both
+		// in place rather than risk merging.
+		return false, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(current), 0o755); err != nil {
+		return false, fmt.Errorf("mkdir parent: %w", err)
+	}
+	// Drop any empty pre-created new dir so Rename has a clean target.
+	_ = os.Remove(current)
+	if renameErr := os.Rename(legacy, current); renameErr == nil {
+		return true, nil
+	}
+	// Cross-filesystem fallback: walk-copy then remove. Unusual on the
+	// home dir but possible if ~/.clawflow is on a different mount than
+	// the parent home — at least we don't lose data.
+	if copyErr := copyTree(legacy, current); copyErr != nil {
+		return false, fmt.Errorf("copy %s → %s: %w", legacy, current, copyErr)
+	}
+	if rmErr := os.RemoveAll(legacy); rmErr != nil {
+		// Copy succeeded but cleanup failed — not fatal; warn and move on.
+		return true, fmt.Errorf("copied to new location but failed to remove legacy %s: %w", legacy, rmErr)
+	}
+	return true, nil
+}
+
+// CleanupLegacyDashboardDir removes the now-obsolete ~/.clawflow/dashboard/
+// directory. As of the v0.x SPA-from-embed.FS refactor, `clawflow web` no
+// longer extracts dashboard assets to disk — the binary serves them
+// directly from the embedded FS — so the dashboard directory is dead
+// weight after data migration. Called from `clawflow web` startup right
+// after MigrateLegacyDataDir.
+//
+// Safe to call repeatedly: missing directory is a no-op. The caller logs
+// any error but should not fail startup over it; cleanup of a stray
+// directory is purely cosmetic.
+func CleanupLegacyDashboardDir() error {
+	root := DashboardRoot()
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat dashboard dir: %w", err)
+	}
+	// Sanity-check: only proceed if the directory looks like an old
+	// extracted SPA (assets/, index.html, …) and NOT a populated data
+	// dir. The migration already moved data out, but defensive coding
+	// is cheap insurance against future contributors who repurpose the
+	// path without realizing this cleanup runs.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("read dashboard dir: %w", err)
+	}
+	for _, e := range entries {
+		switch e.Name() {
+		case "assets", "index.html", "favicon.svg", "logo.svg":
+			// known SPA artifact — fine to remove
+		case "data":
+			// Migration should have emptied this. If it's still here
+			// non-empty something went wrong; bail rather than nuke it.
+			subEntries, _ := os.ReadDir(filepath.Join(root, "data"))
+			if len(subEntries) > 0 {
+				return fmt.Errorf("legacy data subdir is non-empty (%d entries) — refusing to clean dashboard dir", len(subEntries))
+			}
+		default:
+			return fmt.Errorf("unexpected entry %q in legacy dashboard dir — refusing to clean", e.Name())
+		}
+	}
+	return os.RemoveAll(root)
+}
+
+// copyTree is a minimal recursive copier used only by MigrateLegacyDataDir's
+// cross-FS fallback. Preserves file mode but not ownership/timestamps —
+// fine for our use, the data inside is already content-addressed by name.
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(src, path)
+		if relErr != nil {
+			return relErr
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
 }
 
 // RunDir is the directory for a single operator run. Callers mkdir'p before

@@ -454,3 +454,188 @@ func TestReconcileStaleRuns_Idempotent(t *testing.T) {
 		t.Errorf("second pass fixed=%d, want 0 (idempotent)", n)
 	}
 }
+
+
+// --- MigrateLegacyDataDir tests ----------------------------------------
+
+// TestMigrateLegacyDataDir_MovesContentWhenLegacyExists is the happy path:
+// pre-split installs that have data under ~/.clawflow/dashboard/data/ should
+// have it transparently moved to ~/.clawflow/data/ on the next web start.
+func TestMigrateLegacyDataDir_MovesContentWhenLegacyExists(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	legacy := filepath.Join(tmp, ".clawflow", "dashboard", "data")
+	if err := os.MkdirAll(filepath.Join(legacy, "runs", "owner__repo", "issue-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "runs.json"), []byte(`[]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "runs", "owner__repo", "issue-1", "meta.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	moved, err := MigrateLegacyDataDir()
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if !moved {
+		t.Fatal("expected moved=true when legacy dir had content")
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy dir should be gone after migrate, stat err=%v", err)
+	}
+	want := filepath.Join(tmp, ".clawflow", "data", "runs", "owner__repo", "issue-1", "meta.json")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("expected migrated file at %s: %v", want, err)
+	}
+}
+
+// TestMigrateLegacyDataDir_NoOpWhenLegacyMissing returns moved=false on a
+// fresh install where there is nothing to migrate. Critical because we call
+// it on every web start; a noisy success on a no-op would clutter logs.
+func TestMigrateLegacyDataDir_NoOpWhenLegacyMissing(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	moved, err := MigrateLegacyDataDir()
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if moved {
+		t.Fatal("expected moved=false when no legacy dir exists")
+	}
+}
+
+// TestMigrateLegacyDataDir_SkipsWhenNewLocationPopulated covers the rare
+// "both exist" case (manual user move, partial prior migration). We never
+// merge — too easy to clobber. Caller can investigate by hand.
+func TestMigrateLegacyDataDir_SkipsWhenNewLocationPopulated(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	legacy := filepath.Join(tmp, ".clawflow", "dashboard", "data")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "runs.json"), []byte(`["legacy"]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	current := filepath.Join(tmp, ".clawflow", "data")
+	if err := os.MkdirAll(current, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(current, "runs.json"), []byte(`["new"]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	moved, err := MigrateLegacyDataDir()
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if moved {
+		t.Fatal("expected moved=false when new location already populated")
+	}
+	// Both dirs should be untouched.
+	got, _ := os.ReadFile(filepath.Join(current, "runs.json"))
+	if string(got) != `["new"]` {
+		t.Fatalf("new location overwritten: %q", got)
+	}
+	got2, _ := os.ReadFile(filepath.Join(legacy, "runs.json"))
+	if string(got2) != `["legacy"]` {
+		t.Fatalf("legacy location overwritten: %q", got2)
+	}
+}
+
+
+
+// TestCleanupLegacyDashboardDir_RemovesDirWithSPAArtifacts is the
+// post-refactor happy path: an existing extracted SPA tree (assets/,
+// index.html, favicon.svg, logo.svg) gets nuked because the binary
+// now serves SPA content from embed.FS — the on-disk copy is dead
+// weight.
+func TestCleanupLegacyDashboardDir_RemovesDirWithSPAArtifacts(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	root := filepath.Join(tmp, ".clawflow", "dashboard")
+	if err := os.MkdirAll(filepath.Join(root, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"index.html", "favicon.svg", "logo.svg"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := CleanupLegacyDashboardDir(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("dashboard dir should be gone, stat err=%v", err)
+	}
+}
+
+// TestCleanupLegacyDashboardDir_NoOpWhenMissing returns nil quietly
+// for fresh installs where there is nothing to clean up. Important
+// because the cleanup runs on every web start.
+func TestCleanupLegacyDashboardDir_NoOpWhenMissing(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	if err := CleanupLegacyDashboardDir(); err != nil {
+		t.Fatalf("expected nil for missing dir, got %v", err)
+	}
+}
+
+// TestCleanupLegacyDashboardDir_RefusesUnknownEntries is the safety
+// net: if a future contributor (or a user) drops something we do not
+// recognize into the dashboard root, we refuse rather than blindly
+// rm -rf. Better to leave a stray dir than corrupt unknown data.
+func TestCleanupLegacyDashboardDir_RefusesUnknownEntries(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	root := filepath.Join(tmp, ".clawflow", "dashboard")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "user-notes.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CleanupLegacyDashboardDir(); err == nil {
+		t.Fatal("expected error refusing to clean dir with unknown entry")
+	}
+	// Dir + file should still be there.
+	if _, err := os.Stat(filepath.Join(root, "user-notes.txt")); err != nil {
+		t.Fatalf("user file should be preserved: %v", err)
+	}
+}
+
+// TestCleanupLegacyDashboardDir_RefusesNonEmptyDataSubdir guards
+// against running cleanup before MigrateLegacyDataDir succeeds.
+// If data is still inside the dashboard tree, removing the parent
+// would silently delete it.
+func TestCleanupLegacyDashboardDir_RefusesNonEmptyDataSubdir(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	root := filepath.Join(tmp, ".clawflow", "dashboard")
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "data", "runs.json"), []byte("[]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CleanupLegacyDashboardDir(); err == nil {
+		t.Fatal("expected error refusing to clean dashboard dir with non-empty data/")
+	}
+	if _, err := os.Stat(filepath.Join(root, "data", "runs.json")); err != nil {
+		t.Fatalf("data/runs.json should be preserved: %v", err)
+	}
+}
+

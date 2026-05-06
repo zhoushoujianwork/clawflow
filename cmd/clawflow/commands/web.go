@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -23,9 +22,10 @@ import (
 )
 
 // NewWebCmd exposes `clawflow web`, a zero-dependency local dashboard.
-// The data it renders is whatever was persisted to ~/.clawflow/dashboard/
-// by previous `clawflow run` invocations — this command does not fetch
-// anything from the VCS itself.
+// The SPA bundle is served directly from the binary's embedded FS (no
+// on-disk extraction); the JSON snapshots it renders live under
+// ~/.clawflow/data/ and are written by `clawflow run` plus a few
+// startup refreshes (repos/projects/operators) right here.
 func NewWebCmd() *cobra.Command {
 	var (
 		port     int
@@ -41,8 +41,20 @@ previous 'clawflow run' invocations (repos.json, operators.json,
 runs.json, plus per-run events.jsonl for replay). No VCS calls happen
 here — run 'clawflow run' first if you want fresh data.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := ensureDashboardExtracted(); err != nil {
-				return fmt.Errorf("extract dashboard assets: %w", err)
+			// Migrate legacy ~/.clawflow/dashboard/data/ → ~/.clawflow/data/
+			// for installs upgrading from the pre-split layout. No-op for
+			// fresh installs.
+			if moved, err := snapshot.MigrateLegacyDataDir(); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠ migrate legacy data dir: %v\n", err)
+			} else if moved {
+				fmt.Fprintf(os.Stderr, "✓ migrated runtime data ~/.clawflow/dashboard/data → ~/.clawflow/data\n")
+			}
+			// Drop the old extracted SPA tree under ~/.clawflow/dashboard/
+			// — we now serve directly from embed.FS, the directory is
+			// purely cosmetic. Best-effort: a non-empty / unrecognized
+			// dashboard dir is reported and skipped, never blocks startup.
+			if err := snapshot.CleanupLegacyDashboardDir(); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠ cleanup legacy dashboard dir: %v\n", err)
 			}
 
 			// Wire version info for the API
@@ -60,6 +72,20 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// Refresh data/projects.json so the dashboard picks up any
 			// project changes made via the CLI since the last web start.
 			_ = snapshot.WriteProjects()
+			// Refresh data/operators.json from embedded + user skills.
+			// Operators are derived purely from on-disk skill files (no
+			// run history involved) so the Operators page should never
+			// be empty just because the user hasn't run a `clawflow run`
+			// yet — write the snapshot eagerly here, same as repos /
+			// projects above. Best-effort: a malformed user skill is
+			// reported on stderr but doesn't block web startup.
+			if reg, err := loadRegistry(); err == nil {
+				if werr := snapshot.WriteOperators(reg); werr != nil {
+					fmt.Fprintf(os.Stderr, "⚠ snapshot operators on startup: %v\n", werr)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "⚠ load operator registry on startup: %v\n", err)
+			}
 
 			// Reconcile any "running" entries left over from an
 			// interrupted `clawflow run` (Ctrl-C, SIGTERM, machine
@@ -126,9 +152,26 @@ here — run 'clawflow run' first if you want fresh data.`,
 			addr := fmt.Sprintf("%s:%d", host, port)
 			url := fmt.Sprintf("http://%s/", addr)
 
-			root := snapshot.DashboardRoot()
-			fsrv := http.FileServer(http.Dir(root))
+			// Serve the SPA bundle straight from the embedded FS — no
+			// disk extraction. fs.Sub strips the `web/dist/` prefix so
+			// requests for `/assets/foo.js` map to `web/dist/assets/foo.js`
+			// inside the embed.
+			spaFS, err := fs.Sub(rootmod.EmbeddedDashboard, "web/dist")
+			if err != nil {
+				return fmt.Errorf("embedded SPA fs: %w", err)
+			}
+			fsrv := http.FileServer(http.FS(spaFS))
+			// /data/ is served from a SEPARATE root (~/.clawflow/data/)
+			// — runtime snapshots that live on disk and accumulate over
+			// time. Mounted explicitly so the SPA fallback below never
+			// tries to find data files inside the embedded SPA bundle.
+			dataDir := snapshot.DataDir()
+			if err := os.MkdirAll(dataDir, 0o755); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠ mkdir data dir: %v\n", err)
+			}
+			dataFsrv := http.FileServer(http.Dir(dataDir))
 			mux := http.NewServeMux()
+			mux.Handle("/data/", http.StripPrefix("/data/", dataFsrv))
 			mux.HandleFunc("/ws/pty", ptyserver.HandlePTY)
 			mux.HandleFunc("/api/labels/add", api.HandleAddLabel)
 			mux.HandleFunc("/api/labels/remove", api.HandleRemoveLabel)
@@ -165,21 +208,32 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/project/health-check/apply", api.HandleProjectHealthCheckApply)
 			mux.HandleFunc("/api/project/pm-runs", api.HandleProjectPMRuns)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				// SPA fallback: if the requested path maps to a real file
-				// (or lives under /data/ or /assets/ which tanstack-router
-				// wouldn't own anyway), serve it. Otherwise hand back
-				// index.html so the client-side router can resolve
-				// /dashboard, /repos, /runs/… on hard-refresh.
+				// SPA fallback: if the requested path maps to a real
+				// asset inside the embedded bundle (assets/, favicon.svg,
+				// logo.svg, etc.) serve it from spaFS. Otherwise hand
+				// back index.html so the client-side router can resolve
+				// /dashboard, /repos, /runs/… on hard-refresh. /data/
+				// is mounted separately above and never reaches here.
 				reqPath := strings.TrimPrefix(r.URL.Path, "/")
 				if reqPath == "" {
 					fsrv.ServeHTTP(w, r)
 					return
 				}
-				if _, err := os.Stat(filepath.Join(root, reqPath)); err == nil {
+				if f, err := spaFS.Open(reqPath); err == nil {
+					_ = f.Close()
 					fsrv.ServeHTTP(w, r)
 					return
 				}
-				http.ServeFile(w, r, filepath.Join(root, "index.html"))
+				// index.html is small (under a kilobyte); reading it on
+				// every SPA-route request is cheaper than a syscall.
+				indexHTML, err := fs.ReadFile(spaFS, "index.html")
+				if err != nil {
+					http.Error(w, "index.html missing from embed", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-cache")
+				_, _ = w.Write(indexHTML)
 			})
 
 			srv := &http.Server{
@@ -239,39 +293,6 @@ here — run 'clawflow run' first if you want fresh data.`,
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host/IP to bind — 127.0.0.1 by default so the dashboard stays off the LAN")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the dashboard in your default browser")
 	return cmd
-}
-
-// ensureDashboardExtracted materializes the embedded dashboard SPA into
-// ~/.clawflow/dashboard/. If an existing file has the same content we skip
-// it; if the user hand-edited it we leave their version alone.
-func ensureDashboardExtracted() error {
-	root := snapshot.DashboardRoot()
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return err
-	}
-
-	return fs.WalkDir(rootmod.EmbeddedDashboard, "web/dist", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		// Strip the "web/dist/" prefix so files land at the root of ~/.clawflow/dashboard/.
-		rel := strings.TrimPrefix(path, "web/dist")
-		rel = strings.TrimPrefix(rel, "/")
-		dest := filepath.Join(root, rel)
-
-		if d.IsDir() {
-			return os.MkdirAll(dest, 0o755)
-		}
-		data, err := rootmod.EmbeddedDashboard.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		// Overwrite unconditionally. Upgrades need fresh dashboard bundles;
-		// if a user wants to hand-edit they should fork the repo's web/
-		// directory and build their own rather than patching the extracted
-		// copy.
-		return os.WriteFile(dest, data, 0o644)
-	})
 }
 
 // runPeriodicScheduler is the goroutine that fires `clawflow run` on a

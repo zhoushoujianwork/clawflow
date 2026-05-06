@@ -120,7 +120,7 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 // stderr by operator.RunClaude; we additionally echo the parsed
 // PM-RESULT line so the run summary reads cleanly.
 //
-// Each wake is persisted to ~/.clawflow/dashboard/data/pm-runs/<project>/<ts>/
+// Each wake is persisted to ~/.clawflow/data/pm-runs/<project>/<ts>/
 // with meta.json + events.jsonl so the dashboard can show PM activity.
 func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *config.Credentials, timeout time.Duration) error {
 	startedAt := time.Now()
