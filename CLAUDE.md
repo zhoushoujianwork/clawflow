@@ -105,8 +105,7 @@ go test ./internal/operator/...
 - 分支策略：功能分支从 main 切出，PR 合并回 main
 - Commit message：简洁描述变更内容，中英文均可
 - PR 标题应概括变更，正文说明动机和测试方式
-
-> TODO: 确认是否使用 Conventional Commits 格式或其他约定
+- Commit message format: [Conventional Commits](https://www.conventionalcommits.org/) — `type(scope): description`. Types in use: `feat`, `fix`, `ci`, `docs`, `refactor`, `test`.
 
 ---
 
