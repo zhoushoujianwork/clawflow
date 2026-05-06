@@ -3,6 +3,7 @@ package project
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -165,5 +166,96 @@ func TestReadWriteContext(t *testing.T) {
 	}
 	if content != "# My Project\nOverview here." {
 		t.Errorf("ReadContext = %q", content)
+	}
+}
+
+func TestCreateCreatesDeploymentMd(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	if _, err := Create("deploy-test"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := os.Stat(DeploymentPath("deploy-test")); err != nil {
+		t.Errorf("deployment.md not created: %v", err)
+	}
+}
+
+func TestReadWriteDeployment(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	Create("dep-rw")
+	content, err := ReadDeployment("dep-rw")
+	if err != nil {
+		t.Fatalf("ReadDeployment on empty file: %v", err)
+	}
+	if content != "" {
+		t.Errorf("expected empty, got %q", content)
+	}
+
+	want := "# Deployment\n\n## Environments\n\nproduction: VPS"
+	if err := WriteDeployment("dep-rw", want); err != nil {
+		t.Fatalf("WriteDeployment: %v", err)
+	}
+	got, err := ReadDeployment("dep-rw")
+	if err != nil {
+		t.Fatalf("ReadDeployment: %v", err)
+	}
+	if got != want {
+		t.Errorf("ReadDeployment = %q, want %q", got, want)
+	}
+}
+
+func TestReadDeploymentMissingFile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// No project created — file doesn't exist; should return "" not error.
+	content, err := ReadDeployment("nonexistent")
+	if err != nil {
+		t.Fatalf("ReadDeployment on missing file: %v", err)
+	}
+	if content != "" {
+		t.Errorf("expected empty string, got %q", content)
+	}
+}
+
+func TestHeaderForRepoWithDeployment(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	Create("hdr-proj")
+	AddRepo("hdr-proj", "owner/repo")
+
+	// Only deployment.md populated — header should still be emitted.
+	WriteDeployment("hdr-proj", "# Deployment\n\nproduction: VPS")
+	header := HeaderForRepo("owner/repo")
+	if header == "" {
+		t.Fatal("expected non-empty header when deployment.md is set")
+	}
+	if !strings.Contains(header, "## Deployment environment (deployment.md)") {
+		t.Errorf("header missing deployment section:\n%s", header)
+	}
+	if !strings.Contains(header, "production: VPS") {
+		t.Errorf("header missing deployment content:\n%s", header)
+	}
+}
+
+func TestHeaderForRepoDeploymentAbsent(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	Create("hdr-no-deploy")
+	AddRepo("hdr-no-deploy", "owner/repo2")
+
+	// Only context.md populated; deployment.md empty → no deployment section.
+	WriteContext("hdr-no-deploy", "# Overview")
+	header := HeaderForRepo("owner/repo2")
+	if strings.Contains(header, "deployment") {
+		t.Errorf("header should not contain deployment section when deployment.md is empty:\n%s", header)
+	}
+	if !strings.Contains(header, "## Project overview (context.md)") {
+		t.Errorf("header missing context section:\n%s", header)
 	}
 }
