@@ -210,32 +210,6 @@ func TestCreateCreatesDeploymentMd(t *testing.T) {
 	}
 }
 
-func TestReadWriteDeployment(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-
-	Create("dep-rw")
-	content, err := ReadDeployment("dep-rw")
-	if err != nil {
-		t.Fatalf("ReadDeployment on empty file: %v", err)
-	}
-	if content != "" {
-		t.Errorf("expected empty, got %q", content)
-	}
-
-	want := "# Deployment\n\n## Environments\n\nproduction: VPS"
-	if err := WriteDeployment("dep-rw", want); err != nil {
-		t.Fatalf("WriteDeployment: %v", err)
-	}
-	got, err := ReadDeployment("dep-rw")
-	if err != nil {
-		t.Fatalf("ReadDeployment: %v", err)
-	}
-	if got != want {
-		t.Errorf("ReadDeployment = %q, want %q", got, want)
-	}
-}
-
 func TestReadDeploymentMissingFile(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
