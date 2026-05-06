@@ -104,6 +104,24 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 
 	outcome, body := parseOutcome(trimmed)
 
+	// Guard: if the operator produced output but no outcome marker, the model
+	// likely violated the output contract by posting the result via a VCS tool
+	// call (e.g. `gh issue comment`) instead of emitting it to stdout. In that
+	// case `trimmed` contains only a short summary line with no marker.
+	//
+	// Posting this summary as a comment would accumulate duplicate meta-comments
+	// on every run (the trigger label is still present, so the operator fires
+	// again). Instead, log a warning and skip the comment post. The lock label
+	// will still be removed by the caller, so the issue is left in a clean state
+	// for the next run (which may succeed once the prompt hardening takes effect).
+	if outcome == "" {
+		fmt.Fprintf(os.Stderr,
+			"  ⚠ operator %q stdout has no outcome marker — operator may have self-posted via a tool call; skipping comment post to prevent duplicate accumulation\n",
+			op.Name)
+		fmt.Fprintf(os.Stderr, "  ⚠ stdout was: %s\n", trimmed)
+		return trimmed, "", nil
+	}
+
 	if body != "" {
 		if err := v.PostIssueComment(opts.Repo, sub.Number, body); err != nil {
 			return body, outcome, fmt.Errorf("post result comment: %w", err)

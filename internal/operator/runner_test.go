@@ -106,11 +106,12 @@ func TestRun_HappyPath(t *testing.T) {
 	if v.removeLabelCals != 0 {
 		t.Errorf("RemoveLabel called %d times, want 0", v.removeLabelCals)
 	}
-	if len(v.comments) != 1 {
-		t.Fatalf("want 1 comment, got %d", len(v.comments))
-	}
-	if v.comments[0].body != "evaluation posted" {
-		t.Errorf("comment body = %q", v.comments[0].body)
+	// No outcome marker in the output → runner skips the comment post to
+	// prevent duplicate accumulation (the self-posting guard introduced in
+	// fix/issue-53). A real operator must include a marker; this test op
+	// intentionally omits one to verify the guard fires cleanly.
+	if len(v.comments) != 0 {
+		t.Fatalf("want 0 comments (no outcome marker → guard skips post), got %d", len(v.comments))
 	}
 }
 
@@ -315,7 +316,12 @@ func TestRun_OutcomeMarker_NoOutcomesSet_AcceptsAny(t *testing.T) {
 	}
 }
 
-func TestRun_OutcomeMarker_None_BackCompat(t *testing.T) {
+// TestRun_OutcomeMarker_None_NoPost verifies that when an operator produces
+// output with no outcome marker, the runner does NOT post a comment. This
+// prevents the infinite-loop / duplicate-comment accumulation that occurs when
+// a model violates the output contract by self-posting via a VCS tool call and
+// emitting only a short summary line (with no marker) to stdout.
+func TestRun_OutcomeMarker_None_NoPost(t *testing.T) {
 	op := &Operator{
 		Name:      "legacy-skill",
 		LockLabel: "lock",
@@ -334,10 +340,11 @@ func TestRun_OutcomeMarker_None_BackCompat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if len(v.comments) != 1 || v.comments[0].body != body {
-		t.Errorf("comment should be posted unchanged when no marker present; got %v", v.comments)
+	// No marker → runner skips comment post (self-posting guard).
+	if len(v.comments) != 0 {
+		t.Errorf("want 0 comments (no marker → guard skips post); got %v", v.comments)
 	}
-	// No marker → no outcome label, and no lock label is added either.
+	// No marker → no outcome label.
 	if v.addLabelCalls != 0 {
 		t.Errorf("AddLabel calls = %d, want 0", v.addLabelCalls)
 	}
