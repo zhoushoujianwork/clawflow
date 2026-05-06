@@ -87,8 +87,6 @@ go test ./internal/operator/...
 - 使用标准 `testing` 包，不引入外部测试框架
 - 算子集成测试：在测试仓库上运行 `clawflow run`，验证 label 和 comment 结果
 
-> TODO: CI 中的测试流程——确认 GitHub Actions 是否在 release 之外也跑 `go test`
-
 ---
 
 ## 代码规范

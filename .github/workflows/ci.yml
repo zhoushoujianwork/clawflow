@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test -v -race ./...
+
+      - name: CLI smoke tests
+        run: |
+          go build -o clawflow ./cmd/clawflow/
+          ./clawflow --help
+          ./clawflow version
+          ./clawflow run --help
+          ./clawflow operators list
+          # Hard fail if any embedded SKILL.md has bad frontmatter.
+          ./clawflow operators validate
+          ./clawflow repo --help
+          ./clawflow issue --help
+          ./clawflow label --help
+          ./clawflow pr --help
+          ./clawflow config --help
+          ./clawflow status --help
+          ./clawflow worktree --help
+          ./clawflow pr-check --help
+          ./clawflow update --help
+          ./clawflow web --help
