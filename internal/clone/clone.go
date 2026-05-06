@@ -138,11 +138,17 @@ func buildCloneURL(ownerRepo string, repoCfg config.Repo, token *Token) string {
 	if isGitLab && repoCfg.BaseURL != "" {
 		baseURL := strings.TrimSuffix(repoCfg.BaseURL, "/")
 		if effectiveToken != "" {
-			// https://oauth2:<token>@gitlab.example.com/owner/repo.git
-			// GitLab uses "oauth2" as the username for token auth
-			stripped := strings.TrimPrefix(baseURL, "https://")
-			stripped = strings.TrimPrefix(stripped, "http://")
-			return "https://oauth2:" + effectiveToken + "@" + stripped + "/" + ownerRepo + ".git"
+			// Preserve the user's configured scheme (http or https).
+			// Format: <scheme>://oauth2:<token>@<host>/<owner>/<repo>.git
+			scheme := "http"
+			host := baseURL
+			if strings.HasPrefix(baseURL, "https://") {
+				scheme = "https"
+				host = strings.TrimPrefix(baseURL, "https://")
+			} else if strings.HasPrefix(baseURL, "http://") {
+				host = strings.TrimPrefix(baseURL, "http://")
+			}
+			return scheme + "://oauth2:" + effectiveToken + "@" + host + "/" + ownerRepo + ".git"
 		}
 		// SSH fallback: extract host from base_url
 		host := strings.TrimPrefix(baseURL, "https://")
