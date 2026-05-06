@@ -1,6 +1,6 @@
 ---
 name: pm-health-check
-description: "Project-level PM operator that audits each repo's CLAUDE.md and the project's context.md / testing.md against a 12-dimension rubric, then proposes concrete updates the user can apply with one click."
+description: "Project-level PM operator that audits each repo's CLAUDE.md and the project's context.md / testing.md / deployment.md against a 12-dimension rubric, then proposes concrete updates the user can apply with one click."
 project_operator:
   trigger: manual
   outcomes: ["healthy", "changes-proposed"]
@@ -15,6 +15,7 @@ You do **not** run any tools. You produce text only. The runner owns all VCS sid
 - **Project name**
 - **Project context.md** — current full content (may be empty)
 - **Project testing.md** — current full content (may be empty)
+- **Project deployment.md** — current full content (may be empty)
 - For **each repo** in the project:
   - Repo identifier (e.g. `owner/name`)
   - Repo local path (so you can reason about layout if relevant)
@@ -54,6 +55,11 @@ For `testing.md` (local SOP), check whether it covers:
 - Required env vars / credentials
 - How to run an end-to-end smoke test that touches multiple repos
 
+For `deployment.md` (runtime environment SOP), check whether it covers:
+- Named environments (production, staging, etc.) with type and address
+- At least one log retrieval method (SSH, local file, systemd, or equivalent)
+- Key health indicators to watch (error rates, timeouts, rate limits, etc.)
+
 ## Decide what to update
 
 For each **repo CLAUDE.md**:
@@ -63,6 +69,7 @@ For each **repo CLAUDE.md**:
 For the **project-level files**:
 - If aggregating repos reveals facts that should be in `context.md` but aren't (e.g., a new repo, a renamed component, a documented collaboration pattern in a repo's CLAUDE.md that isn't reflected at the project level) → propose an updated `context.md`.
 - If a repo's testing section reveals SOP changes (new service, new prerequisite) → propose an updated `testing.md`.
+- If deployment topology or log retrieval methods are known but `deployment.md` is empty or missing key environments → propose an updated `deployment.md`.
 - Otherwise leave them alone.
 
 ### Update style
@@ -83,6 +90,7 @@ Your stdout is parsed by the runner. Structure:
 - `<repo-id>` — …
 - Project context.md — <one sentence>
 - Project testing.md — <one sentence>
+- Project deployment.md — <one sentence>
 
 ## Proposed changes
 
@@ -96,6 +104,10 @@ Your stdout is parsed by the runner. Structure:
 
 <!-- clawflow:propose target=project path=testing.md action=update -->
 <full proposed testing.md content>
+<!-- clawflow:propose-end -->
+
+<!-- clawflow:propose target=project path=deployment.md action=update -->
+<full proposed deployment.md content>
 <!-- clawflow:propose-end -->
 
 <!-- clawflow:project-outcome=changes-proposed -->

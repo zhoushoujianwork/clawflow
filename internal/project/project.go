@@ -81,6 +81,16 @@ func TestingPath(name string) string {
 	return filepath.Join(ProjectDir(name), "testing.md")
 }
 
+// DeploymentPath returns the deployment.md path for a named project.
+//
+// deployment.md is a natural-language SOP describing the runtime
+// environment and how to retrieve logs (SSH, local file, systemd,
+// etc.). It is consumed by PM-mode operators when diagnosing runtime
+// health — not parsed as structured data.
+func DeploymentPath(name string) string {
+	return filepath.Join(ProjectDir(name), "deployment.md")
+}
+
 // Create creates a new project with the given name.
 func Create(name string) (*Project, error) {
 	if strings.TrimSpace(name) == "" {
@@ -103,15 +113,19 @@ func Create(name string) (*Project, error) {
 	if err := save(p); err != nil {
 		return nil, err
 	}
-	// Create empty context.md and testing.md so both files always
-	// exist. context.md is the project overview; testing.md is the
-	// local-environment SOP. Both get auto-injected into operator
-	// prompts via the project header.
+	// Create empty context.md, testing.md, and deployment.md so all
+	// three files always exist. context.md is the project overview;
+	// testing.md is the local-environment SOP; deployment.md describes
+	// the runtime environment and log retrieval methods. All three get
+	// auto-injected into operator prompts via the project header.
 	if err := os.WriteFile(ContextPath(name), []byte(""), 0o644); err != nil {
 		return nil, fmt.Errorf("create context.md: %w", err)
 	}
 	if err := os.WriteFile(TestingPath(name), []byte(""), 0o644); err != nil {
 		return nil, fmt.Errorf("create testing.md: %w", err)
+	}
+	if err := os.WriteFile(DeploymentPath(name), []byte(""), 0o644); err != nil {
+		return nil, fmt.Errorf("create deployment.md: %w", err)
 	}
 	return p, nil
 }
@@ -275,6 +289,28 @@ func WriteTesting(name, content string) error {
 	return os.WriteFile(TestingPath(name), []byte(content), 0o644)
 }
 
+// ReadDeployment reads the project's deployment.md. Returns "" if the
+// file doesn't exist.
+func ReadDeployment(name string) (string, error) {
+	data, err := os.ReadFile(DeploymentPath(name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(data), nil
+}
+
+// WriteDeployment writes content to the project's deployment.md.
+func WriteDeployment(name, content string) error {
+	dir := ProjectDir(name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(DeploymentPath(name), []byte(content), 0o644)
+}
+
 // SetAutomation flips the automation toggle and/or cooldown for a
 // project. Pass cooldownMinutes < 0 to leave the existing value in
 // place (use case: enable/disable without retyping the cooldown).
@@ -344,7 +380,7 @@ func ListAutomationEnabled() ([]*Project, error) {
 // HeaderForRepo returns a project-context header to prepend to any
 // prompt for an operation rooted at `repo`. Empty string if the repo
 // isn't a member of any project, or if the project has no
-// non-trivial context.md / testing.md to share.
+// non-trivial context.md / testing.md / deployment.md to share.
 //
 // The header carries everything an AI consumer (operator, chat) needs
 // to act with project-wide awareness:
@@ -354,11 +390,13 @@ func ListAutomationEnabled() ([]*Project, error) {
 //   - the project's context.md (architecture / conventions / state)
 //   - the project's testing.md (local env SOP — start order, services,
 //     hardware hookups; consulted before doing local verification)
+//   - the project's deployment.md (runtime environment and log
+//     retrieval methods; consulted by PM operators for health checks)
 //
-// Both context and testing sections are emitted only when non-empty,
-// so a project with neither doc won't generate a noisy "_(empty)_"
-// header. The returned string ends with `\n---\n\n` so a caller can
-// concatenate it directly in front of an existing system prompt.
+// All three sections are emitted only when non-empty, so a project
+// with no docs won't generate a noisy "_(empty)_" header. The
+// returned string ends with `\n---\n\n` so a caller can concatenate
+// it directly in front of an existing system prompt.
 func HeaderForRepo(repo string) string {
 	p, err := FindProjectByRepo(repo)
 	if err != nil || p == nil {
@@ -366,7 +404,8 @@ func HeaderForRepo(repo string) string {
 	}
 	ctx, _ := ReadContext(p.Name)
 	testing, _ := ReadTesting(p.Name)
-	if strings.TrimSpace(ctx) == "" && strings.TrimSpace(testing) == "" {
+	deployment, _ := ReadDeployment(p.Name)
+	if strings.TrimSpace(ctx) == "" && strings.TrimSpace(testing) == "" && strings.TrimSpace(deployment) == "" {
 		return ""
 	}
 
@@ -383,6 +422,12 @@ func HeaderForRepo(repo string) string {
 		fmt.Fprintf(&b, "order, services, hardware/serial hookups. Consult this before\n")
 		fmt.Fprintf(&b, "running local verification of code changes._\n\n")
 		fmt.Fprintf(&b, "%s\n\n", testing)
+	}
+	if strings.TrimSpace(deployment) != "" {
+		fmt.Fprintf(&b, "## Deployment environment (deployment.md)\n\n")
+		fmt.Fprintf(&b, "_Runtime environment details and log retrieval methods.\n")
+		fmt.Fprintf(&b, "Consult this when diagnosing runtime health or fetching logs._\n\n")
+		fmt.Fprintf(&b, "%s\n\n", deployment)
 	}
 	b.WriteString("---\n\n")
 	return b.String()
