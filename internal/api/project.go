@@ -295,6 +295,151 @@ func HandleProjectGenerateContextStatus(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, persisted)
 }
 
+// --- generate-deployment ---
+
+// generateDeploymentJobStorePath is the on-disk JSON for the most recent
+// completed generate-deployment run, stored alongside deployment.md.
+func generateDeploymentJobStorePath(projectName string) string {
+	return filepath.Join(project.ProjectDir(projectName), "generate-deployment.json")
+}
+
+var (
+	generateDeploymentJobsMu sync.Mutex
+	generateDeploymentJobs   = map[string]*generateJob{}
+)
+
+// HandleProjectGenerateDeployment kicks off deployment.md generation for a
+// project and returns immediately. Mirrors HandleProjectGenerateContext —
+// same async job pattern, same polling contract, same 202/409 semantics.
+// The AI prompt is built by projectgen.GenerateDeployment.
+func HandleProjectGenerateDeployment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req projectGenerateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	name := strings.TrimSpace(req.Project)
+	if name == "" {
+		writeJSON(w, 400, map[string]string{"error": "project is required"})
+		return
+	}
+
+	generateDeploymentJobsMu.Lock()
+	if existing, ok := generateDeploymentJobs[name]; ok && existing.Status == "running" {
+		generateDeploymentJobsMu.Unlock()
+		writeJSON(w, 409, map[string]any{
+			"error": "generation already running for this project",
+			"job":   existing,
+		})
+		return
+	}
+	job := &generateJob{Status: "running", StartedAt: time.Now()}
+	generateDeploymentJobs[name] = job
+	generateDeploymentJobsMu.Unlock()
+
+	model := req.Model
+	go func() {
+		_, err := projectgen.GenerateDeployment(name, model)
+		generateDeploymentJobsMu.Lock()
+		job.EndedAt = time.Now()
+		if err != nil {
+			job.Status = "error"
+			job.Error = err.Error()
+		} else {
+			job.Status = "done"
+			_ = snapshot.WriteProjects()
+		}
+		snapshotJob := *job
+		generateDeploymentJobsMu.Unlock()
+		if err := saveDeploymentJob(name, &snapshotJob); err != nil {
+			fmt.Fprintf(os.Stderr, "[generate-deployment] %s: persist failed: %v\n", name, err)
+		}
+	}()
+
+	writeJSON(w, 202, map[string]any{
+		"status": "accepted",
+		"job":    job,
+	})
+}
+
+// HandleProjectGenerateDeploymentStatus reports the current job state
+// for `?project=X`. Returns 404 when no job has been recorded — the
+// frontend treats 404 as "idle".
+func HandleProjectGenerateDeploymentStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("project"))
+	if name == "" {
+		writeJSON(w, 400, map[string]string{"error": "project is required"})
+		return
+	}
+	generateDeploymentJobsMu.Lock()
+	job, ok := generateDeploymentJobs[name]
+	generateDeploymentJobsMu.Unlock()
+	if ok {
+		writeJSON(w, 200, job)
+		return
+	}
+	persisted, err := loadDeploymentJob(name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[generate-deployment] %s: load persisted failed: %v\n", name, err)
+		writeJSON(w, 404, map[string]string{"status": "idle"})
+		return
+	}
+	if persisted == nil {
+		writeJSON(w, 404, map[string]string{"status": "idle"})
+		return
+	}
+	generateDeploymentJobsMu.Lock()
+	if _, raced := generateDeploymentJobs[name]; !raced {
+		generateDeploymentJobs[name] = persisted
+	}
+	generateDeploymentJobsMu.Unlock()
+	writeJSON(w, 200, persisted)
+}
+
+func saveDeploymentJob(projectName string, job *generateJob) error {
+	path := generateDeploymentJobStorePath(projectName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	data, err := json.MarshalIndent(job, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+func loadDeploymentJob(projectName string) (*generateJob, error) {
+	path := generateDeploymentJobStorePath(projectName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var job generateJob
+	if err := json.Unmarshal(data, &job); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	return &job, nil
+}
+
 // HandleProjectGet returns the LIVE view of a single project by
 // reading project.yaml + context.md + testing.md fresh from disk.
 //
@@ -327,11 +472,13 @@ func HandleProjectGet(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, _ := project.ReadContext(name)
 	testing, _ := project.ReadTesting(name)
+	deployment, _ := project.ReadDeployment(name)
 	view := snapshot.ProjectView{
-		Name:    p.Name,
-		Repos:   p.Repos,
-		Context: ctx,
-		Testing: testing,
+		Name:       p.Name,
+		Repos:      p.Repos,
+		Context:    ctx,
+		Testing:    testing,
+		Deployment: deployment,
 		Automation: snapshot.ProjectAutomationView{
 			Enabled:         p.Automation.Enabled,
 			CooldownMinutes: p.Automation.CooldownMinutes,

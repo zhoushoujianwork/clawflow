@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/zhoushoujianwork/clawflow/internal/claude"
@@ -82,7 +83,166 @@ func Generate(name, model, instructions string) (string, error) {
 	return content, nil
 }
 
-// sanitizeOutput cleans up `claude -p` output that disobeyed the
+// GenerateDeployment scans the project's member repos for CI workflow files
+// and existing context.md, builds a prompt, runs `claude -p`, writes the
+// result to deployment.md, and returns the content that was written.
+// `model` may be empty to use the default chat model from credentials.
+func GenerateDeployment(name, model string) (string, error) {
+	p, err := project.Get(name)
+	if err != nil {
+		return "", err
+	}
+	if len(p.Repos) == 0 {
+		return "", fmt.Errorf("project %q has no repos — add one first", name)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return "", fmt.Errorf("load config: %w", err)
+	}
+
+	prompt, scanned := buildDeploymentPrompt(name, p.Repos, cfg)
+	if scanned == 0 {
+		return "", fmt.Errorf("no repos with local_path configured — set local_path in config for at least one member repo")
+	}
+
+	if model == "" {
+		creds, _ := config.LoadCredentials()
+		model = creds.EffectiveChatModel()
+	}
+
+	bin := claude.Resolve()
+	args := []string{
+		"--model", model,
+		"--print",
+		"-p", prompt,
+	}
+	cmd := exec.Command(bin, args...)
+	creds, _ := config.LoadCredentials()
+	apiKey, baseURL := "", ""
+	if creds != nil {
+		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
+	}
+	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
+	cmd.Stderr = os.Stderr
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("claude generate failed: %w", err)
+	}
+
+	content := sanitizeOutput(string(output))
+	if content == "" {
+		return "", fmt.Errorf("claude returned empty output")
+	}
+
+	if err := project.WriteDeployment(name, content); err != nil {
+		return "", err
+	}
+	return content, nil
+}
+
+// buildDeploymentPrompt constructs the prompt for deployment.md generation.
+// It scans each repo's .github/workflows/ directory for CI configs and
+// includes the existing context.md for deployment-related context.
+func buildDeploymentPrompt(name string, repos []string, cfg *config.Config) (string, int) {
+	var parts []string
+	parts = append(parts, fmt.Sprintf("# Project: %s\n\n", name))
+	parts = append(parts, fmt.Sprintf("This project contains %d repositories:\n", len(repos)))
+
+	scanned := 0
+	for _, repoName := range repos {
+		repoCfg, ok := cfg.Repos[repoName]
+		localPath := ""
+		if ok {
+			localPath = repoCfg.LocalPath
+		}
+		if localPath == "" {
+			parts = append(parts, fmt.Sprintf("\n## %s\n(no local_path configured — skipped)\n", repoName))
+			continue
+		}
+
+		parts = append(parts, fmt.Sprintf("\n## %s\nLocal path: %s\n", repoName, localPath))
+
+		// Scan CI workflow files for deployment clues (release jobs, deploy
+		// steps, Docker/k8s references, cron schedules, etc.)
+		workflowDir := filepath.Join(localPath, ".github", "workflows")
+		if entries, err := os.ReadDir(workflowDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() || (!strings.HasSuffix(e.Name(), ".yml") && !strings.HasSuffix(e.Name(), ".yaml")) {
+					continue
+				}
+				data, err := os.ReadFile(filepath.Join(workflowDir, e.Name()))
+				if err != nil {
+					continue
+				}
+				content := string(data)
+				if len(content) > 2000 {
+					content = content[:2000] + "\n... (truncated)"
+				}
+				parts = append(parts, fmt.Sprintf("\n### CI: .github/workflows/%s\n```yaml\n%s\n```\n", e.Name(), content))
+			}
+		}
+
+		// Also check for docker-compose, Dockerfile, k8s manifests at root
+		for _, deployFile := range []string{"docker-compose.yml", "docker-compose.yaml", "Dockerfile"} {
+			data, err := os.ReadFile(filepath.Join(localPath, deployFile))
+			if err != nil {
+				continue
+			}
+			content := string(data)
+			if len(content) > 1500 {
+				content = content[:1500] + "\n... (truncated)"
+			}
+			parts = append(parts, fmt.Sprintf("\n### %s\n```\n%s\n```\n", deployFile, content))
+		}
+
+		scanned++
+	}
+
+	// Include existing context.md for deployment-related references
+	existing, _ := project.ReadContext(name)
+	if strings.TrimSpace(existing) != "" {
+		parts = append(parts, "\n---\n\n## Existing context.md (for deployment context)\n\n```\n")
+		if len(existing) > 3000 {
+			existing = existing[:3000] + "\n... (truncated)"
+		}
+		parts = append(parts, existing)
+		if !strings.HasSuffix(existing, "\n") {
+			parts = append(parts, "\n")
+		}
+		parts = append(parts, "```\n")
+	}
+
+	parts = append(parts, "\n---\n\n"+
+		"Based on the repository information above, produce a deployment.md document in Markdown.\n"+
+		"This document will be used by an AI project manager to inspect runtime health, retrieve logs,\n"+
+		"and assess the live system. Include the following sections:\n\n"+
+		"# Deployment\n\n"+
+		"## 环境\n"+
+		"| 名称 | 类型 | 地址 |\n"+
+		"|------|------|------|\n"+
+		"(fill in from CI/CD config if available, otherwise leave as placeholders)\n\n"+
+		"## 部署方式\n"+
+		"Describe the deployment method inferred from CI workflows (e.g. GitHub Actions release, Docker, k8s, systemd, cron).\n"+
+		"If unclear, provide a template the user should fill in.\n\n"+
+		"## 日志获取\n"+
+		"### 方式: (infer from deployment type — docker logs / kubectl logs / journalctl / SSH)\n"+
+		"- command: `<fill in>`\n\n"+
+		"## 健康指标关注点\n"+
+		"- List key metrics or endpoints to check (infer from the codebase if possible)\n\n"+
+		"OUTPUT FORMAT — strict:\n"+
+		"- Output ONLY the Markdown document body.\n"+
+		"- Do NOT prepend any preamble like \"Here is the document:\" or \"I have generated...\".\n"+
+		"- Do NOT wrap the document in a ``` fence.\n"+
+		"- Start your response with \"# Deployment\" and end with the last section of the document.\n"+
+		"- Use placeholder text like \"<待配置>\" for values the user must fill in.",
+	)
+
+	return strings.Join(parts, ""), scanned
+}
+
+
 // "Markdown only, no preamble" instruction. Two common failure modes:
 //
 //  1. Preamble like "Here is the updated context.md:" before the doc
