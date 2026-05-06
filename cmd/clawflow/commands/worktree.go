@@ -140,7 +140,12 @@ func newWorktreeRemoveCmd() *cobra.Command {
 // `git clone` progress is teed to stderr so users running interactive
 // `clawflow run` see the clone happen.
 func resolveLocalPath(cfg *config.Config, ownerRepo string, repoCfg config.Repo) (string, error) {
-	return clone.EnsureLocalClone(cfg, ownerRepo, repoCfg, os.Stderr)
+	creds, _ := config.LoadCredentials()
+	var token *clone.Token
+	if creds != nil {
+		token = &clone.Token{GHToken: creds.GHToken, GitLabToken: creds.GitLabToken}
+	}
+	return clone.EnsureLocalClone(cfg, ownerRepo, repoCfg, os.Stderr, token)
 }
 
 func expandHomeStr(path string) string {

@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Search, Loader2, CheckCircle2, XCircle, ExternalLink, ChevronRight, ChevronDown, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Search, Loader2, CheckCircle2, XCircle, ExternalLink, ChevronRight, ChevronDown, RefreshCw, KeyRound, FolderCheck } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { VcsIcon } from '../components/VcsIcon'
 
@@ -12,6 +12,7 @@ interface RemoteRepo {
   private: boolean
   html_url: string
   base_url?: string
+  local_path?: string
 }
 
 type Platform = 'github' | 'gitlab'
@@ -44,6 +45,7 @@ function AddRemoteRepo() {
   const [fetchedPlatforms, setFetchedPlatforms] = useState<Set<Platform>>(new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [tokenMissing, setTokenMissing] = useState<Set<Platform>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
   const [addingRepo, setAddingRepo] = useState<string | null>(null)
   const [addedRepos, setAddedRepos] = useState<Set<string>>(new Set())
@@ -83,6 +85,13 @@ function AddRemoteRepo() {
       const response = await fetch(`/api/repos/list-remote?platform=${platform}`)
       const data = await response.json()
 
+      // Handle token not configured (returned as 200 with token_configured=false)
+      if (data.token_configured === false) {
+        setTokenMissing(prev => new Set(prev).add(platform))
+        setReposCache(prev => new Map(prev).set(platform, []))
+        return
+      }
+
       if (!response.ok) {
         throw new Error(data.error || 'Failed to fetch repositories')
       }
@@ -90,6 +99,13 @@ function AddRemoteRepo() {
       if (data.error) {
         throw new Error(data.error)
       }
+
+      // Token is configured and working
+      setTokenMissing(prev => {
+        const next = new Set(prev)
+        next.delete(platform)
+        return next
+      })
 
       const fetchedRepos = data.repos || []
       setReposCache(prev => new Map(prev).set(platform, fetchedRepos))
@@ -111,13 +127,18 @@ function AddRemoteRepo() {
   }
 
   function handleRefresh() {
-    // Clear cache and fetched flag for current platform, then re-fetch
+    // Clear cache, fetched flag, and token-missing state for current platform, then re-fetch
     setReposCache(prev => {
       const next = new Map(prev)
       next.delete(platform)
       return next
     })
     setFetchedPlatforms(prev => {
+      const next = new Set(prev)
+      next.delete(platform)
+      return next
+    })
+    setTokenMissing(prev => {
       const next = new Set(prev)
       next.delete(platform)
       return next
@@ -302,8 +323,35 @@ function AddRemoteRepo() {
         </div>
       )}
 
+      {/* Token not configured state */}
+      {!loading && !error && tokenMissing.has(platform) && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-6">
+          <div className="flex items-start gap-4">
+            <div className="p-2 bg-amber-100 rounded-lg">
+              <KeyRound className="w-5 h-5 text-amber-600" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-amber-900">
+                {platform === 'github' ? 'GitHub' : 'GitLab'} Token Not Configured
+              </p>
+              <p className="text-sm text-amber-700 mt-1">
+                A {platform === 'github' ? 'GitHub' : 'GitLab'} personal access token is required to list and clone repositories.
+                Without it, cloning will fall back to SSH keys (which may not be configured).
+              </p>
+              <Link
+                to="/settings"
+                className="inline-flex items-center gap-1.5 mt-3 px-3 py-1.5 text-sm font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg transition-colors"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                Configure in Settings
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Empty state */}
-      {!loading && !error && repos.length === 0 && (
+      {!loading && !error && !tokenMissing.has(platform) && repos.length === 0 && (
         <div className="bg-card border border-border rounded-xl p-8 text-center">
           <p className="text-sm text-muted-foreground">
             No repositories found for your {platform === 'github' ? 'GitHub' : 'GitLab'} account.
@@ -347,6 +395,7 @@ function AddRemoteRepo() {
                         const isAdding = addingRepo === repo.full_name
                         const isAdded = addedRepos.has(repo.full_name)
                         const addError = addErrors.get(repo.full_name)
+                        const hasLocalClone = !!repo.local_path
                         const repoName = group.groupPath
                           ? repo.full_name.substring(group.groupPath.length + 1)
                           : repo.full_name
@@ -386,6 +435,12 @@ function AddRemoteRepo() {
                                       Private
                                     </span>
                                   )}
+                                  {hasLocalClone && !isAdded && (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                                      <FolderCheck className="w-3 h-3" />
+                                      Local clone found
+                                    </span>
+                                  )}
                                 </div>
                                 {repo.description && (
                                   <p className="text-xs text-muted-foreground line-clamp-2 mb-1">
@@ -394,6 +449,11 @@ function AddRemoteRepo() {
                                 )}
                                 <p className="text-xs text-muted-foreground">
                                   Default branch: <code className="px-1 py-0.5 bg-secondary rounded font-mono">{repo.default_branch}</code>
+                                  {hasLocalClone && !isAdded && (
+                                    <span className="ml-2 text-blue-600" title={repo.local_path}>
+                                      · {repo.local_path}
+                                    </span>
+                                  )}
                                 </p>
                                 {addError && (
                                   <p className="text-xs text-red-600 mt-2 flex items-start gap-1">
@@ -422,16 +482,18 @@ function AddRemoteRepo() {
                                       'px-4 py-2 rounded-lg text-sm font-semibold transition-colors',
                                       isAdding
                                         ? 'bg-secondary text-muted-foreground cursor-not-allowed'
-                                        : 'bg-primary text-primary-foreground hover:bg-primary/90',
+                                        : hasLocalClone
+                                          ? 'bg-blue-600 text-white hover:bg-blue-700'
+                                          : 'bg-primary text-primary-foreground hover:bg-primary/90',
                                     )}
                                   >
                                     {isAdding ? (
                                       <span className="flex items-center gap-2">
                                         <Loader2 className="w-4 h-4 animate-spin" />
-                                        Cloning...
+                                        {hasLocalClone ? 'Linking...' : 'Cloning...'}
                                       </span>
                                     ) : (
-                                      'Add'
+                                      hasLocalClone ? 'Link' : 'Add'
                                     )}
                                   </button>
                                 )}

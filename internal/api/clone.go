@@ -58,7 +58,12 @@ func HandleClone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var log bytes.Buffer
-	localPath, err := clone.EnsureLocalClone(cfg, req.Repo, repoCfg, &log)
+	creds, _ := config.LoadCredentials()
+	var token *clone.Token
+	if creds != nil {
+		token = &clone.Token{GHToken: creds.GHToken, GitLabToken: creds.GitLabToken}
+	}
+	localPath, err := clone.EnsureLocalClone(cfg, req.Repo, repoCfg, &log, token)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{
 			"error": err.Error(),

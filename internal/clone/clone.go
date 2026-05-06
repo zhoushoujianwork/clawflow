@@ -14,6 +14,13 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
 
+// Token holds the VCS credentials used for clone authentication.
+// Passed in by the caller so clone doesn't need to load credentials itself.
+type Token struct {
+	GHToken     string
+	GitLabToken string
+}
+
 // EnsureLocalClone returns the local repo path for `ownerRepo`,
 // auto-cloning when necessary. Behavior:
 //
@@ -26,7 +33,11 @@ import (
 //
 // `progress` receives `git clone`'s stdout+stderr so the caller can
 // stream it (HTTP response, log file, …); pass io.Discard to silence it.
-func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo, progress io.Writer) (string, error) {
+//
+// `token` provides VCS credentials for HTTPS clone. If nil or empty,
+// falls back to SSH URL (git@host:owner/repo.git) which relies on the
+// user's local SSH key configuration.
+func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo, progress io.Writer, token *Token) (string, error) {
 	if progress == nil {
 		progress = io.Discard
 	}
@@ -37,7 +48,7 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 			return expanded, nil
 		}
 		fmt.Fprintf(progress, "local path %q not found, cloning %s ...\n", expanded, ownerRepo)
-		if err := cloneRepo(ownerRepo, expanded, repoCfg, progress); err != nil {
+		if err := cloneRepo(ownerRepo, expanded, repoCfg, progress, token); err != nil {
 			return "", fmt.Errorf("auto-clone failed: %w", err)
 		}
 		return expanded, nil
@@ -63,13 +74,18 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 	candidate := filepath.Join(cloneBase, subPath)
 
 	if _, err := os.Stat(candidate); err == nil {
-		// Found existing clone — save path back to config and return.
-		saveLocalPath(cfg, ownerRepo, candidate)
-		return candidate, nil
+		// Found existing directory — verify it's actually a clone of the
+		// expected repo by checking the git remote origin URL.
+		if matchesRepo(candidate, ownerRepo, repoCfg) {
+			saveLocalPath(cfg, ownerRepo, candidate)
+			return candidate, nil
+		}
+		// Directory exists but is not the expected repo — don't clobber it.
+		return "", fmt.Errorf("directory %s exists but is not a clone of %s", candidate, ownerRepo)
 	}
 
 	fmt.Fprintf(progress, "local clone not found, cloning %s to %s ...\n", ownerRepo, candidate)
-	if err := cloneRepo(ownerRepo, candidate, repoCfg, progress); err != nil {
+	if err := cloneRepo(ownerRepo, candidate, repoCfg, progress, token); err != nil {
 		return "", fmt.Errorf("auto-clone failed: %w", err)
 	}
 	saveLocalPath(cfg, ownerRepo, candidate)
@@ -77,21 +93,83 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 }
 
 // cloneRepo runs `git clone <url> <dest>`, deriving the URL from the
-// platform/base_url combo. `progress` captures stdout+stderr of git.
-func cloneRepo(ownerRepo, dest string, repoCfg config.Repo, progress io.Writer) error {
+// platform/base_url combo. Authentication strategy:
+//
+//  1. If a token is available → HTTPS URL with token embedded
+//     (https://x-access-token:<token>@github.com/owner/repo.git)
+//  2. If no token → SSH URL (git@host:owner/repo.git) relying on
+//     the user's local SSH key configuration.
+//
+// GIT_TERMINAL_PROMPT=0 is always set to prevent git from hanging on
+// interactive credential prompts when running headless.
+func cloneRepo(ownerRepo, dest string, repoCfg config.Repo, progress io.Writer, token *Token) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	var cloneURL string
-	if repoCfg.Platform == "gitlab" && repoCfg.BaseURL != "" {
-		cloneURL = strings.TrimSuffix(repoCfg.BaseURL, "/") + "/" + ownerRepo + ".git"
-	} else {
-		cloneURL = "https://github.com/" + ownerRepo + ".git"
-	}
+
+	cloneURL := buildCloneURL(ownerRepo, repoCfg, token)
+	// Log the URL without the embedded token for security
+	safeURL := sanitizeURLForLog(cloneURL)
+	fmt.Fprintf(progress, "clone url: %s\n", safeURL)
+
 	c := exec.Command("git", "clone", cloneURL, dest)
 	c.Stdout = progress
 	c.Stderr = progress
+	// Prevent git from waiting for interactive password input
+	c.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	return c.Run()
+}
+
+// buildCloneURL constructs the clone URL based on available credentials.
+// Priority: token-based HTTPS > SSH fallback.
+func buildCloneURL(ownerRepo string, repoCfg config.Repo, token *Token) string {
+	isGitLab := repoCfg.Platform == "gitlab"
+
+	// Determine the effective token
+	var effectiveToken string
+	if token != nil {
+		if isGitLab {
+			effectiveToken = token.GitLabToken
+		} else {
+			effectiveToken = token.GHToken
+		}
+	}
+
+	if isGitLab && repoCfg.BaseURL != "" {
+		baseURL := strings.TrimSuffix(repoCfg.BaseURL, "/")
+		if effectiveToken != "" {
+			// https://oauth2:<token>@gitlab.example.com/owner/repo.git
+			// GitLab uses "oauth2" as the username for token auth
+			stripped := strings.TrimPrefix(baseURL, "https://")
+			stripped = strings.TrimPrefix(stripped, "http://")
+			return "https://oauth2:" + effectiveToken + "@" + stripped + "/" + ownerRepo + ".git"
+		}
+		// SSH fallback: extract host from base_url
+		host := strings.TrimPrefix(baseURL, "https://")
+		host = strings.TrimPrefix(host, "http://")
+		return "git@" + host + ":" + ownerRepo + ".git"
+	}
+
+	// GitHub
+	if effectiveToken != "" {
+		// https://x-access-token:<token>@github.com/owner/repo.git
+		return "https://x-access-token:" + effectiveToken + "@github.com/" + ownerRepo + ".git"
+	}
+	// SSH fallback
+	return "git@github.com:" + ownerRepo + ".git"
+}
+
+// sanitizeURLForLog removes embedded credentials from a URL for safe logging.
+func sanitizeURLForLog(rawURL string) string {
+	// Pattern: https://<user>:<token>@host/...
+	if idx := strings.Index(rawURL, "://"); idx >= 0 {
+		rest := rawURL[idx+3:]
+		if atIdx := strings.Index(rest, "@"); atIdx >= 0 {
+			// Has credentials embedded — mask them
+			return rawURL[:idx+3] + "***@" + rest[atIdx+1:]
+		}
+	}
+	return rawURL
 }
 
 func saveLocalPath(cfg *config.Config, ownerRepo, localPath string) {
@@ -100,6 +178,79 @@ func saveLocalPath(cfg *config.Config, ownerRepo, localPath string) {
 		cfg.Repos[ownerRepo] = r
 		_ = cfg.Save()
 	}
+}
+
+// matchesRepo checks whether the directory at `dir` is a git clone whose
+// origin remote matches the expected ownerRepo. Tolerates both HTTPS and
+// SSH URL formats.
+func matchesRepo(dir, ownerRepo string, repoCfg config.Repo) bool {
+	remoteURL, err := config.ReadGitRemoteURL(dir)
+	if err != nil {
+		return false
+	}
+	// Normalize: strip trailing .git, protocol prefix, and user@ prefix
+	normalized := normalizeRemoteURL(remoteURL)
+	// Build expected suffixes for matching
+	// e.g. "github.com/owner/repo" or "gitlab.example.com/ns/repo"
+	var expected string
+	if repoCfg.Platform == "gitlab" && repoCfg.BaseURL != "" {
+		host := strings.TrimPrefix(repoCfg.BaseURL, "https://")
+		host = strings.TrimPrefix(host, "http://")
+		host = strings.TrimSuffix(host, "/")
+		expected = host + "/" + ownerRepo
+	} else {
+		expected = "github.com/" + ownerRepo
+	}
+	return strings.EqualFold(normalized, expected)
+}
+
+// normalizeRemoteURL strips a git remote URL down to "host/path" form
+// for comparison. Handles:
+//   - https://github.com/owner/repo.git
+//   - git@github.com:owner/repo.git
+//   - ssh://git@github.com/owner/repo.git
+func normalizeRemoteURL(rawURL string) string {
+	u := rawURL
+	u = strings.TrimSuffix(u, ".git")
+	u = strings.TrimSpace(u)
+
+	// SSH shorthand: git@host:path
+	if strings.HasPrefix(u, "git@") {
+		u = strings.TrimPrefix(u, "git@")
+		u = strings.Replace(u, ":", "/", 1)
+		return u
+	}
+	// ssh:// or https:// or http://
+	u = strings.TrimPrefix(u, "ssh://")
+	u = strings.TrimPrefix(u, "https://")
+	u = strings.TrimPrefix(u, "http://")
+	// Strip user@ if present (e.g. git@)
+	if atIdx := strings.Index(u, "@"); atIdx >= 0 && atIdx < strings.Index(u, "/") {
+		u = u[atIdx+1:]
+	}
+	return u
+}
+
+// DetectLocalClone checks if a local clone already exists for the given
+// ownerRepo at the expected path (based on platform clone dir settings).
+// Returns the local path if found and verified, empty string otherwise.
+func DetectLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo) string {
+	cloneBase := cfg.Settings.ResolveGithubCloneDir()
+	if repoCfg.Platform == "gitlab" {
+		cloneBase = cfg.Settings.ResolveGitlabCloneDir()
+	}
+
+	parts := strings.Split(ownerRepo, "/")
+	subPath := parts[len(parts)-1]
+	candidate := filepath.Join(cloneBase, subPath)
+
+	if _, err := os.Stat(candidate); err != nil {
+		return ""
+	}
+	if matchesRepo(candidate, ownerRepo, repoCfg) {
+		return candidate
+	}
+	return ""
 }
 
 // ExpandHome resolves a leading `~/` to the current user's home dir.

@@ -22,11 +22,13 @@ type RemoteRepo struct {
 	Private       bool   `json:"private"`
 	HTMLURL       string `json:"html_url"`
 	BaseURL       string `json:"base_url,omitempty"` // GitLab instance URL
+	LocalPath     string `json:"local_path,omitempty"` // non-empty if a matching local clone exists
 }
 
 type listRemoteReposResponse struct {
-	Repos []RemoteRepo `json:"repos"`
-	Error string       `json:"error,omitempty"`
+	Repos           []RemoteRepo `json:"repos"`
+	TokenConfigured bool         `json:"token_configured"`
+	Error           string       `json:"error,omitempty"`
 }
 
 type addRemoteRepoRequest struct {
@@ -66,13 +68,13 @@ func HandleListRemoteRepos(w http.ResponseWriter, r *http.Request) {
 	switch platform {
 	case "github":
 		if creds.GHToken == "" {
-			writeJSON(w, 400, listRemoteReposResponse{Error: "GitHub token not configured"})
+			writeJSON(w, 200, listRemoteReposResponse{TokenConfigured: false, Error: "GitHub token not configured. Please add your GitHub token in Settings."})
 			return
 		}
 		repos, err = listGitHubRepos(creds.GHToken)
 	case "gitlab":
 		if creds.GitLabToken == "" {
-			writeJSON(w, 400, listRemoteReposResponse{Error: "GitLab token not configured. Please add your GitLab token in Settings."})
+			writeJSON(w, 200, listRemoteReposResponse{TokenConfigured: false, Error: "GitLab token not configured. Please add your GitLab token in Settings."})
 			return
 		}
 		cfg, err := config.Load()
@@ -92,11 +94,26 @@ func HandleListRemoteRepos(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		writeJSON(w, 500, listRemoteReposResponse{Error: err.Error()})
+		writeJSON(w, 500, listRemoteReposResponse{TokenConfigured: true, Error: err.Error()})
 		return
 	}
 
-	writeJSON(w, 200, listRemoteReposResponse{Repos: repos})
+	// Detect existing local clones for each repo so the frontend can
+	// show "local clone found" without requiring an actual clone operation.
+	cfg, cfgErr := config.Load()
+	if cfgErr == nil {
+		for i := range repos {
+			repoCfg := config.Repo{
+				Platform: repos[i].Platform,
+				BaseURL:  repos[i].BaseURL,
+			}
+			if localPath := clone.DetectLocalClone(cfg, repos[i].FullName, repoCfg); localPath != "" {
+				repos[i].LocalPath = localPath
+			}
+		}
+	}
+
+	writeJSON(w, 200, listRemoteReposResponse{Repos: repos, TokenConfigured: true})
 }
 
 // HandleAddRemoteRepo handles POST /api/repos/add-remote
@@ -159,17 +176,29 @@ func HandleAddRemoteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clone the repository with output capture
-	var logBuf bytes.Buffer
-	localPath, err := clone.EnsureLocalClone(cfg, req.FullName, repoCfg, &logBuf)
-	if err != nil {
-		// Remove from config on clone failure
-		delete(cfg.Repos, req.FullName)
-		_ = cfg.Save()
-		writeJSON(w, 500, addRemoteRepoResponse{
-			Error: fmt.Sprintf("clone failed: %v\nLog:\n%s", err, logBuf.String()),
-		})
-		return
+	// Check if a matching local clone already exists — skip clone if so.
+	var localPath string
+	if detected := clone.DetectLocalClone(cfg, req.FullName, repoCfg); detected != "" {
+		localPath = detected
+	} else {
+		// Clone the repository with output capture
+		var logBuf bytes.Buffer
+		creds, _ := config.LoadCredentials()
+		var token *clone.Token
+		if creds != nil {
+			token = &clone.Token{GHToken: creds.GHToken, GitLabToken: creds.GitLabToken}
+		}
+		var cloneErr error
+		localPath, cloneErr = clone.EnsureLocalClone(cfg, req.FullName, repoCfg, &logBuf, token)
+		if cloneErr != nil {
+			// Remove from config on clone failure
+			delete(cfg.Repos, req.FullName)
+			_ = cfg.Save()
+			writeJSON(w, 500, addRemoteRepoResponse{
+				Error: fmt.Sprintf("clone failed: %v\nLog:\n%s", cloneErr, logBuf.String()),
+			})
+			return
+		}
 	}
 
 	// Update config with local path
