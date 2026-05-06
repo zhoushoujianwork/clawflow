@@ -125,8 +125,8 @@ func openInTerminal(cmdLine string) error {
 
 	// Handle explicit terminal choices that work cross-platform.
 	switch terminal {
-	case "vscode", "code", "cursor", "qoder":
-		return openInVSCode(terminal, cmdLine)
+	case "vscode", "code":
+		return openInVSCode(cmdLine)
 	case "iterm", "iterm2":
 		if runtime.GOOS != "darwin" {
 			return fmt.Errorf("iTerm2 is only available on macOS")
@@ -156,26 +156,10 @@ func openInTerminal(cmdLine string) error {
 // Strategy: use AppleScript (macOS) or xdotool (Linux) to tell VS Code
 // to open a new terminal and send the command. This is more reliable
 // than `code --command` which requires specific VS Code versions.
-// cliBinForEditor maps a settings value to the CLI binary name(s) to try.
-var cliBinForEditor = map[string][]string{
-	"cursor": {"cursor"},
-	"qoder":  {"qoder"},
-}
-
-func openInVSCode(editorKey, cmdLine string) error {
-	bins := cliBinForEditor[editorKey]
-	if len(bins) == 0 {
-		bins = []string{"code"}
-	}
-	var codeBin string
-	for _, b := range bins {
-		if p, err := exec.LookPath(b); err == nil {
-			codeBin = p
-			break
-		}
-	}
-	if codeBin == "" {
-		return fmt.Errorf("%q CLI not found on PATH — make sure the editor's shell command is installed", bins[0])
+func openInVSCode(cmdLine string) error {
+	codeBin, err := exec.LookPath("code")
+	if err != nil {
+		return fmt.Errorf("'code' CLI not found on PATH — install it from VS Code: Cmd+Shift+P → 'Shell Command: Install code command in PATH'")
 	}
 
 	switch runtime.GOOS {

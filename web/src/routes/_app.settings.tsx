@@ -597,8 +597,6 @@ function GlobalSection({
         >
           <option value="">System default (Terminal.app / xterm)</option>
           <option value="vscode">VS Code (supports image paste)</option>
-          <option value="cursor">Cursor (supports image paste)</option>
-          <option value="qoder">Qoder (supports image paste)</option>
           <option value="iterm">iTerm2 (macOS)</option>
         </select>
       </Row>
