@@ -81,6 +81,16 @@ func TestingPath(name string) string {
 	return filepath.Join(ProjectDir(name), "testing.md")
 }
 
+// DeploymentPath returns the deployment.md path for a named project.
+//
+// deployment.md describes how to inspect the project's runtime health:
+// log retrieval commands (SSH, kubectl, docker logs, etc.), key metrics
+// endpoints, and any other commands the PM should run to assess the
+// live system before triaging the backlog.
+func DeploymentPath(name string) string {
+	return filepath.Join(ProjectDir(name), "deployment.md")
+}
+
 // Create creates a new project with the given name.
 func Create(name string) (*Project, error) {
 	if strings.TrimSpace(name) == "" {
@@ -273,6 +283,31 @@ func WriteTesting(name, content string) error {
 		return err
 	}
 	return os.WriteFile(TestingPath(name), []byte(content), 0o644)
+}
+
+// ReadDeployment reads the project's deployment.md. Returns "" if the
+// file doesn't exist (not an error — the user may not have created it yet).
+//
+// deployment.md contains commands the PM uses to inspect runtime health:
+// log retrieval, metrics endpoints, SSH/kubectl invocations, etc.
+func ReadDeployment(name string) (string, error) {
+	data, err := os.ReadFile(DeploymentPath(name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(data), nil
+}
+
+// WriteDeployment writes content to the project's deployment.md.
+func WriteDeployment(name, content string) error {
+	dir := ProjectDir(name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(DeploymentPath(name), []byte(content), 0o644)
 }
 
 // SetAutomation flips the automation toggle and/or cooldown for a

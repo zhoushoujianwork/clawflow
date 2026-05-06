@@ -133,6 +133,62 @@ func TestBuildProjectChatContext(t *testing.T) {
 	}
 }
 
+func TestBuildProjectPMContext_WithDeployment(t *testing.T) {
+	repos := []PMRepoDigest{
+		{Name: "owner/api", OpenIssues: []PMIssueRow{{Number: 1, Title: "crash on startup", Labels: []string{"bug"}}}},
+	}
+	deploymentMD := "## Logs\n\n```bash\nssh prod 'journalctl -u myapp -n 200'\n```"
+
+	prompt := BuildProjectPMContext("my-proj", "# Context\n\nSome overview.", deploymentMD, repos)
+
+	// deployment section present
+	if !containsStr(prompt, "Deployment & runtime health") {
+		t.Error("missing 'Deployment & runtime health' section")
+	}
+	if !containsStr(prompt, "journalctl") {
+		t.Error("missing deployment.md content in prompt")
+	}
+	if !containsStr(prompt, "Log inspection instructions") {
+		t.Error("missing 'Log inspection instructions' subsection")
+	}
+	if !containsStr(prompt, "Repeated errors") {
+		t.Error("missing log analysis guidance")
+	}
+	// filing budget present
+	if !containsStr(prompt, "AT MOST 2 new issues") {
+		t.Error("missing issue filing budget cap")
+	}
+	if !containsStr(prompt, "Production-breaking errors") {
+		t.Error("missing filing budget prioritization")
+	}
+	// log-driven triage instruction in "Your job"
+	if !containsStr(prompt, "start by inspecting runtime logs") {
+		t.Error("missing log-first triage instruction in 'Your job'")
+	}
+	// project name attribution
+	if !containsStr(prompt, "my-proj") {
+		t.Error("missing project name")
+	}
+}
+
+func TestBuildProjectPMContext_NoDeployment(t *testing.T) {
+	repos := []PMRepoDigest{}
+
+	prompt := BuildProjectPMContext("empty-proj", "", "", repos)
+
+	// deployment section still present but with fallback message
+	if !containsStr(prompt, "Deployment & runtime health") {
+		t.Error("missing 'Deployment & runtime health' section even when empty")
+	}
+	if !containsStr(prompt, "deployment.md not found") {
+		t.Error("missing fallback message when deployment.md is absent")
+	}
+	// filing budget always present
+	if !containsStr(prompt, "AT MOST 2 new issues") {
+		t.Error("missing issue filing budget even without deployment.md")
+	}
+}
+
 func containsStr(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
