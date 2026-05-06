@@ -140,6 +140,9 @@ export function useIssueGroups({
         }
         map.set(k, g)
       }
+      // Skip if a running run for the same operator already exists — the
+      // pending entry is stale from the previous scan cycle.
+      if (g.runs.some(r => r.operator === p.operator && r.status === 'running')) continue
       g.pending.push(p)
       if (!g.issue_title && p.issue_title) g.issue_title = p.issue_title
       if (p.labels && g.labels) {
