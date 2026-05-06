@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState, useCallback } from 'react'
-import { ExternalLink, Plus, Trash2 } from 'lucide-react'
+import { FolderOpen, Plus, Trash2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -291,11 +291,6 @@ function RepoList() {
                   </td>
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2">
-                      <VcsIcon
-                        repo={r.full_name}
-                        map={repoMap}
-                        className="w-3.5 h-3.5 text-muted-foreground shrink-0"
-                      />
                       <Link
                         to="/repos/$repoName"
                         params={{ repoName: encodeURIComponent(r.full_name) }}
@@ -308,10 +303,26 @@ function RepoList() {
                         target="_blank"
                         rel="noopener noreferrer"
                         title="Open in VCS"
-                        className="inline-flex items-center text-muted-foreground hover:text-foreground"
+                        className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0"
                       >
-                        <ExternalLink className="w-3 h-3" />
+                        <VcsIcon repo={r.full_name} map={repoMap} className="w-3.5 h-3.5" />
                       </a>
+                      {r.local_path && (
+                        <button
+                          type="button"
+                          title={`Open in VS Code: ${r.local_path}`}
+                          className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0"
+                          onClick={() =>
+                            fetch('/api/repo/open', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ repo: r.full_name }),
+                            })
+                          }
+                        >
+                          <FolderOpen className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </td>
                   <td className="px-4 py-2 text-muted-foreground text-xs tabular-nums">
