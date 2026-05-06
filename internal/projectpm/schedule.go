@@ -136,8 +136,9 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 
 	digests := buildDigests(p, cfg, creds)
 	contextMD, _ := project.ReadContext(p.Name)
+	deploymentMD, _ := project.ReadDeployment(p.Name)
 
-	prompt := chat.BuildProjectPMContext(p.Name, contextMD, digests)
+	prompt := chat.BuildProjectPMContext(p.Name, contextMD, deploymentMD, digests)
 	model := creds.EffectiveOperatorModel()
 	workdir := project.ProjectDir(p.Name)
 

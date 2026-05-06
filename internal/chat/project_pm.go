@@ -74,7 +74,7 @@ type PMPRRow struct {
 // is mid-flight on it), and PM must not duplicate its own prior
 // comments/label-changes (idempotence is the PM's responsibility,
 // enforced via prompt — cooldown gives it room to mean something).
-func BuildProjectPMContext(name, contextMD string, repos []PMRepoDigest) string {
+func BuildProjectPMContext(name, contextMD, deploymentMD string, repos []PMRepoDigest) string {
 	var b strings.Builder
 
 	fmt.Fprintln(&b, "# Project Manager Auto-Wake")
@@ -95,6 +95,40 @@ func BuildProjectPMContext(name, contextMD string, repos []PMRepoDigest) string 
 	} else {
 		fmt.Fprintln(&b, contextMD)
 	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "## Deployment & runtime health")
+	fmt.Fprintln(&b)
+	if strings.TrimSpace(deploymentMD) == "" {
+		fmt.Fprintln(&b, "_(deployment.md not found — skip log inspection and proceed with issue-tracker-only triage.)_")
+	} else {
+		fmt.Fprintln(&b, deploymentMD)
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "### Log inspection instructions")
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "Before triaging the backlog, fetch recent runtime logs using the")
+		fmt.Fprintln(&b, "commands described above. Use Bash to execute them. Analyze for:")
+		fmt.Fprintln(&b, "- Repeated errors (same pattern 3+ times)")
+		fmt.Fprintln(&b, "- Operator failures (`agent-failed` triggers)")
+		fmt.Fprintln(&b, "- Rate limit or timeout patterns")
+		fmt.Fprintln(&b, "- Unexpected panics or crashes")
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "If SSH/remote access fails, note it and proceed with issue-tracker-only")
+		fmt.Fprintln(&b, "triage. Do NOT retry indefinitely on unreachable hosts.")
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "## Issue filing budget")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "Each wake you may file **AT MOST 2 new issues**. Prioritize by:")
+	fmt.Fprintln(&b, "1. Production-breaking errors (from deployment logs)")
+	fmt.Fprintln(&b, "2. Recurring failures (same error pattern 3+ times)")
+	fmt.Fprintln(&b, "3. Performance degradation")
+	fmt.Fprintln(&b, "4. Missing coverage / stale backlog items")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "If you see more than 2 problems, file the top 2 and note the rest in a")
+	fmt.Fprintln(&b, "single \"backlog observation\" comment on the most relevant existing issue.")
+	fmt.Fprintln(&b, "They will be picked up next wake.")
 	fmt.Fprintln(&b)
 
 	fmt.Fprintln(&b, "## Snapshot at wake time")
@@ -141,7 +175,12 @@ func BuildProjectPMContext(name, contextMD string, repos []PMRepoDigest) string 
 
 	fmt.Fprintln(&b, `## Your job
 
-Triage the backlog so it stays actionable. Common moves:
+Triage the backlog so it stays actionable. If deployment.md was
+provided above, start by inspecting runtime logs (see "Log inspection
+instructions") — production errors take priority over static backlog
+work. Then proceed with the moves below.
+
+Common moves:
 
 **File new issues** when work is concrete, valuable, and not tracked:
 - You grep the codebase and find a class of bug or missing coverage.

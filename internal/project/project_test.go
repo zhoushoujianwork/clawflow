@@ -152,6 +152,35 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+func TestReadWriteDeployment(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	Create("deploy-test")
+
+	// deployment.md does not exist yet — should return "" without error
+	content, err := ReadDeployment("deploy-test")
+	if err != nil {
+		t.Fatalf("ReadDeployment on missing file: %v", err)
+	}
+	if content != "" {
+		t.Errorf("ReadDeployment on missing file = %q, want empty", content)
+	}
+
+	// write and read back
+	body := "## Logs\n\nssh prod 'journalctl -u app -n 200'\n"
+	if err := WriteDeployment("deploy-test", body); err != nil {
+		t.Fatalf("WriteDeployment: %v", err)
+	}
+	got, err := ReadDeployment("deploy-test")
+	if err != nil {
+		t.Fatalf("ReadDeployment after write: %v", err)
+	}
+	if got != body {
+		t.Errorf("ReadDeployment = %q, want %q", got, body)
+	}
+}
+
 func TestReadWriteContext(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)

@@ -83,10 +83,10 @@ func TestingPath(name string) string {
 
 // DeploymentPath returns the deployment.md path for a named project.
 //
-// deployment.md is a natural-language SOP describing the runtime
-// environment and how to retrieve logs (SSH, local file, systemd,
-// etc.). It is consumed by PM-mode operators when diagnosing runtime
-// health — not parsed as structured data.
+// deployment.md describes how to inspect the project's runtime health:
+// log retrieval commands (SSH, kubectl, docker logs, etc.), key metrics
+// endpoints, and any other commands the PM should run to assess the
+// live system before triaging the backlog.
 func DeploymentPath(name string) string {
 	return filepath.Join(ProjectDir(name), "deployment.md")
 }
@@ -290,7 +290,10 @@ func WriteTesting(name, content string) error {
 }
 
 // ReadDeployment reads the project's deployment.md. Returns "" if the
-// file doesn't exist.
+// file doesn't exist (not an error — the user may not have created it yet).
+//
+// deployment.md contains commands the PM uses to inspect runtime health:
+// log retrieval, metrics endpoints, SSH/kubectl invocations, etc.
 func ReadDeployment(name string) (string, error) {
 	data, err := os.ReadFile(DeploymentPath(name))
 	if err != nil {
