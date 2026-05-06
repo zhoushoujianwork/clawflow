@@ -1,10 +1,19 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import { useEffect, useRef, useState } from 'react'
-import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
 import { HealthCheckSummaryCard, HealthCheckReviewPanel, useHealthCheck } from '../components/HealthCheckCard'
+import {
+  IssueList,
+  PROJECT_SECTIONS,
+  useIssueGroups,
+  type IssueEntry,
+  type PendingEntry,
+  type Run,
+} from '../components/IssueList'
+import { useRepoInfoMap } from '../lib/vcsUrls'
 
 // Long claude -p run (typically 30s–2min). The job runs server-side
 // so the user is free to navigate away — re-opening the page resumes
@@ -127,6 +136,16 @@ function ProjectDetail() {
   const [contextOpen, setContextOpen] = useState(false)
   const [testingOpen, setTestingOpen] = useState(false)
 
+  // Cross-repo backlog state — same data sources the per-repo page
+  // reads, just filtered to project.repos here. The shared IssueList
+  // component does the merging, sectioning, and rendering.
+  const [allIssues, setAllIssues] = useState<IssueEntry[]>([])
+  const [allRuns, setAllRuns] = useState<Run[]>([])
+  const [allPending, setAllPending] = useState<PendingEntry[]>([])
+  const [backlogExpanded, setBacklogExpanded] = useState<Set<string>>(new Set())
+  const [backlogSyncing, setBacklogSyncing] = useState(false)
+  const repoInfoMap = useRepoInfoMap()
+
   function fetchProject() {
     // Live read from /api/project/get — bypasses the
     // /data/projects.json snapshot so out-of-band file edits
@@ -177,6 +196,7 @@ function ProjectDetail() {
     // dropdown re-fetches on open to catch any repos added since.
     fetchAvailableRepos()
     fetchPMRuns()
+    fetchBacklog()
     // Check if a generate job is already running for this project so
     // navigating away mid-run and coming back resumes the spinner.
     fetch(`/api/project/generate-context/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
@@ -204,6 +224,46 @@ function ProjectDetail() {
         }
         setRepoMeta(byName)
       })
+  }
+
+  // fetchBacklog pulls the three snapshot files in parallel. No
+  // server-side filtering — the backlog is a small client-side
+  // .filter() across what's already on disk.
+  function fetchBacklog() {
+    Promise.all([
+      fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+    ]).then(([issues, runs, pending]) => {
+      setAllIssues(Array.isArray(issues) ? issues : [])
+      setAllRuns(Array.isArray(runs) ? runs : [])
+      setAllPending(Array.isArray(pending) ? pending : [])
+    })
+  }
+
+  // syncBacklog calls /api/repo/refresh-issues for every member repo
+  // sequentially — same endpoint the repo page's Sync button uses.
+  // Sequential because the endpoint hits the VCS provider per call;
+  // parallel fan-out would just multiply rate-limit pressure.
+  async function syncBacklog() {
+    if (!project || backlogSyncing) return
+    setBacklogSyncing(true)
+    try {
+      for (const repo of project.repos ?? []) {
+        try {
+          await fetch('/api/repo/refresh-issues', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repo }),
+          })
+        } catch {
+          // One repo failing (auth, network) shouldn't abort the rest.
+        }
+      }
+      fetchBacklog()
+    } finally {
+      setBacklogSyncing(false)
+    }
   }
 
   function fetchPMRuns() {
@@ -894,6 +954,31 @@ function ProjectDetail() {
             )}
           </section>
 
+          {/* Backlog — cross-repo issue + run + pending aggregate so the
+              user can see project progress without bouncing into each
+              repo page. Same renderer as the per-repo page (shared
+              IssueList component); the project-level section config
+              adds an "Awaiting evaluation" bucket up front and shows
+              the repo column on each row. */}
+          <BacklogSection
+            project={project}
+            issues={allIssues}
+            runs={allRuns}
+            pending={allPending}
+            repoMap={repoInfoMap}
+            expanded={backlogExpanded}
+            onToggle={k =>
+              setBacklogExpanded(prev => {
+                const next = new Set(prev)
+                if (next.has(k)) next.delete(k)
+                else next.add(k)
+                return next
+              })
+            }
+            onSync={syncBacklog}
+            syncing={backlogSyncing}
+          />
+
           {/* Conditional Health Check review — full width because the
               per-file diffs need horizontal space to render side-by-
               side. Only mounts while there are proposed changes; once
@@ -973,5 +1058,135 @@ function ProjectDetail() {
         </>
       )}
     </div>
+  )
+}
+
+// BacklogSection is the project-level cross-repo issue aggregate. It
+// owns the collapsed/open state and the bucket-counts header, and
+// delegates the actual list rendering to the shared IssueList. Heavy
+// per-row markup (StatusBadge, Timeline, etc.) lives in IssueList so
+// adding/changing row chrome doesn't require editing this file too.
+function BacklogSection({
+  project,
+  issues,
+  runs,
+  pending,
+  repoMap,
+  expanded,
+  onToggle,
+  onSync,
+  syncing,
+}: {
+  project: Project
+  issues: IssueEntry[]
+  runs: Run[]
+  pending: PendingEntry[]
+  repoMap: ReturnType<typeof useRepoInfoMap>
+  expanded: Set<string>
+  onToggle: (key: string) => void
+  onSync: () => void
+  syncing: boolean
+}) {
+  // Filter all three datasets to this project's member repos before
+  // merging. Cheap (a few hundred entries at most) so doing it inline
+  // beats threading per-project filtered slices through the API.
+  const memberSet = useMemo(() => new Set(project.repos ?? []), [project.repos])
+  const filteredIssues = useMemo(() => issues.filter(i => memberSet.has(i.repo)), [issues, memberSet])
+  const filteredRuns = useMemo(() => runs.filter(r => memberSet.has(r.repo)), [runs, memberSet])
+  const filteredPending = useMemo(() => pending.filter(p => memberSet.has(p.repo)), [pending, memberSet])
+  const groups = useIssueGroups({
+    issues: filteredIssues,
+    runs: filteredRuns,
+    pending: filteredPending,
+  })
+
+  // Counts roll up per section without rebuilding the buckets — same
+  // predicates as PROJECT_SECTIONS, applied once for the header
+  // summary line. Cheap, no need to memoize.
+  const counts = {
+    inFlight: 0,
+    queued: 0,
+    awaiting: 0,
+    done: 0,
+    closed: 0,
+  }
+  for (const g of groups) {
+    if (g.state === 'closed') counts.closed++
+    else if (g.runs[0]?.status === 'running') counts.inFlight++
+    else if (g.pending.length > 0) counts.queued++
+    else {
+      const labels = g.labels ?? []
+      const hasTrigger = labels.includes('bug') || labels.includes('feature')
+      const hasAgentLabel = labels.some(l => l.startsWith('agent-'))
+      if (g.runs.length === 0 && hasTrigger && !hasAgentLabel) counts.awaiting++
+      else counts.done++
+    }
+  }
+
+  const [open, setOpen] = useState(true)
+
+  if ((project.repos?.length ?? 0) === 0) return null
+
+  return (
+    <section className="mb-6">
+      <div className="flex items-center gap-2 mb-2">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className="inline-flex items-center gap-1 text-sm font-semibold text-foreground hover:text-foreground"
+          aria-expanded={open}
+        >
+          {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          <ListTodo className="w-3.5 h-3.5 text-muted-foreground" />
+          Backlog{' '}
+          <span className="font-normal text-muted-foreground">({groups.length})</span>
+        </button>
+        <span className="text-xs text-muted-foreground">
+          {counts.inFlight} in flight · {counts.queued} queued ·{' '}
+          <span className={cn(counts.awaiting > 0 && 'text-red-600 dark:text-red-400 font-medium')}>
+            {counts.awaiting} awaiting eval
+          </span>{' '}
+          · {counts.done} done · {counts.closed} closed
+        </span>
+        <button
+          onClick={onSync}
+          disabled={syncing}
+          title="Refresh issue state for every member repo"
+          className={cn(
+            'ml-auto inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border transition-colors',
+            syncing
+              ? 'border-border text-muted-foreground bg-secondary/30'
+              : 'border-border text-foreground hover:bg-secondary/50',
+          )}
+        >
+          {syncing ? (
+            <>
+              <Loader2 className="w-3 h-3 animate-spin" /> syncing…
+            </>
+          ) : (
+            <>
+              <RotateCw className="w-3 h-3" /> Sync all
+            </>
+          )}
+        </button>
+      </div>
+      {open && (
+        groups.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4">
+            No issues across {project.repos?.length ?? 0} repo{project.repos?.length === 1 ? '' : 's'} yet.
+            Click <strong>Sync all</strong> to pull current state from VCS.
+          </p>
+        ) : (
+          <IssueList
+            groups={groups}
+            sections={PROJECT_SECTIONS}
+            showRepo={true}
+            repoMap={repoMap}
+            expanded={expanded}
+            onToggle={onToggle}
+          />
+        )
+      )}
+    </section>
   )
 }
