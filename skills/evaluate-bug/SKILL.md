@@ -30,7 +30,15 @@ If `clawflow issue search` errors (rate limit, indexing lag), proceed with evalu
 
 ## Output contract (MUST follow)
 
-Your stdout IS the issue comment. ClawFlow posts it verbatim, then applies the outcome label declared by the marker line at the end. Four hard rules:
+Your stdout IS the issue comment. ClawFlow captures everything you print to stdout, posts it as a comment, and reads the outcome marker from it to decide which label to apply.
+
+**⛔ DO NOT call any tool that mutates VCS state.** This means: do NOT run `clawflow label`, `clawflow issue comment`, `clawflow pr`, `gh issue comment`, `gh pr`, or any other command that posts comments, adds labels, or changes PRs. If you call one of these tools, ClawFlow will NOT see your evaluation — it only reads your stdout. The outcome label will never be applied, and the operator will fire again on the next run, creating an infinite loop of duplicate comments.
+
+The correct flow is:
+- ✅ You print the full evaluation to stdout → ClawFlow posts it as a comment and applies the label.
+- ❌ You call `gh issue comment` or `clawflow issue comment` → ClawFlow sees only your summary line, finds no outcome marker, never applies the label, fires again next run.
+
+Four hard rules:
 
 1. **No tool calls that mutate VCS state.** Do NOT run `clawflow label`, `clawflow issue comment`, `clawflow pr`, `gh`, or any other command that changes labels / comments / PRs. ClawFlow owns those side-effects — your job is to produce text only.
 2. **End with exactly one outcome marker line.** The very last line of stdout must be either `<!-- clawflow:outcome=agent-evaluated -->` (confidence ≥ 7.0) or `<!-- clawflow:outcome=agent-skipped -->` (confidence < 7.0). ClawFlow strips this line before posting and uses it to decide which label to add.
@@ -38,6 +46,8 @@ Your stdout IS the issue comment. ClawFlow posts it verbatim, then applies the o
 4. **Produce a full, fresh evaluation every time.** If you see a prior evaluation comment in the thread, ignore it — the operator is triggering now because the owner removed `agent-evaluated` to request a new pass. Do not abbreviate into a "status update". Emit the complete Markdown template below.
 
 Output no preamble ("I will now evaluate…"), no code fences wrapping the whole output.
+
+**After you emit the final `<!-- clawflow:outcome=... -->` line, stop. Do NOT call any tool.**
 
 ## Score three dimensions (1-10 each)
 
@@ -82,4 +92,4 @@ Output exactly this Markdown, filling the placeholders. No code fences around th
 
 - Output **only** the Markdown comment body and the closing marker line. No "I will now evaluate…" preamble, no code fences around the whole output.
 - If the issue has too little information to score, give 1-3 on the affected dimension(s) and say *specifically what is missing*. Confidence below 7.0 → use `agent-skipped` in the marker.
-- The marker MUST be the last non-empty line of stdout. Do not run any tools after emitting the evaluation.
+- The marker MUST be the last non-empty line of stdout. **Do NOT call any tool after emitting the evaluation** — not `gh`, not `clawflow`, not anything. Your stdout is the comment; calling a tool to post it yourself will break the outcome label pipeline.
