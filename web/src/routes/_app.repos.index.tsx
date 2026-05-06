@@ -50,6 +50,7 @@ function RepoList() {
 
   const [repos, setRepos] = useState<Repo[]>([])
   const [runs, setRuns] = useState<RunEntry[]>([])
+  const [ideScheme, setIdeScheme] = useState('vscode://file/')
   const [loading, setLoading] = useState(true)
   const [didApplyDefault, setDidApplyDefault] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -63,9 +64,22 @@ function RepoList() {
       fetch('/data/runs.json', { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : []))
         .catch(() => []),
-    ]).then(([rp, rn]) => {
+      fetch('/api/settings', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ]).then(([rp, rn, settings]) => {
       setRepos(Array.isArray(rp) ? rp : [])
       setRuns(Array.isArray(rn) ? rn : [])
+      if (settings?.global?.default_ide) {
+        const ide = settings.global.default_ide as string
+        const schemeMap: Record<string, string> = {
+          vscode: 'vscode://file/',
+          cursor: 'cursor://file/',
+          qoder: 'qoder://file/',
+          'vscode-insiders': 'vscode-insiders://file/',
+        }
+        setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
+      }
       setLoading(false)
     })
   }, [])
@@ -309,8 +323,8 @@ function RepoList() {
                       </a>
                       {r.local_path && (
                         <a
-                          href={`qoder://file/${r.local_path}?windowId=_blank`}
-                          title={`Open in VS Code: ${r.local_path}`}
+                          href={`${ideScheme}${r.local_path}?windowId=_blank`}
+                          title={`Open in IDE: ${r.local_path}`}
                           className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0"
                         >
                           <FolderOpen className="w-3.5 h-3.5" />
