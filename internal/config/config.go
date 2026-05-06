@@ -78,6 +78,15 @@ type Settings struct {
 	//   custom path — any executable; invoked as `<path> -e <cmdLine>`
 	Terminal string `yaml:"terminal,omitempty"`
 
+	// DefaultIDE selects which IDE the dashboard's "Open in IDE" button
+	// uses. Supported values:
+	//   ""         / "vscode"          — VS Code (vscode://file/<path>)
+	//   "cursor"                       — Cursor (cursor://file/<path>)
+	//   "qoder"                        — Qoder (qoder://file/<path>)
+	//   "vscode-insiders"              — VS Code Insiders
+	// Empty/unset defaults to "vscode" for backward compatibility.
+	DefaultIDE string `yaml:"default_ide,omitempty"`
+
 	// BillingCycleDay is the day of month (1-28) when a billing period
 	// starts. Usage is aggregated into monthly periods aligned to this
 	// day. 0 or unset defaults to 1 (calendar month).
@@ -105,6 +114,23 @@ func (s *Settings) ResolveGitlabCloneDir() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "gitlab")
+}
+
+// ResolveIDEScheme returns the URI scheme prefix for the configured IDE.
+// The returned string is the full prefix up to and including "://file/",
+// ready to be concatenated with an absolute local path.
+// Unknown values fall back to the vscode scheme.
+func (s *Settings) ResolveIDEScheme() string {
+	switch s.DefaultIDE {
+	case "cursor":
+		return "cursor://file/"
+	case "qoder":
+		return "qoder://file/"
+	case "vscode-insiders":
+		return "vscode-insiders://file/"
+	default: // "", "vscode", or any unrecognised value
+		return "vscode://file/"
+	}
 }
 
 func expandHome(path string) string {

@@ -26,6 +26,7 @@ interface SettingsView {
     gitlab_clone_dir?: string
     gitlab_url?: string
     terminal?: string
+    default_ide?: string
   }
 }
 
@@ -496,6 +497,7 @@ function GlobalSection({
   const [glDir, setGlDir] = useState(view.gitlab_clone_dir ?? '')
   const [gitlabURL, setGitlabURL] = useState(view.gitlab_url ?? '')
   const [terminal, setTerminal] = useState(view.terminal ?? '')
+  const [defaultIDE, setDefaultIDE] = useState(view.default_ide ?? '')
   const [busy, setBusy] = useState(false)
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
@@ -510,6 +512,7 @@ function GlobalSection({
     setGlDir(view.gitlab_clone_dir ?? '')
     setGitlabURL(view.gitlab_url ?? '')
     setTerminal(view.terminal ?? '')
+    setDefaultIDE(view.default_ide ?? '')
   }, [view])
 
   const dirty =
@@ -521,7 +524,8 @@ function GlobalSection({
     ghDir !== (view.github_clone_dir ?? '') ||
     glDir !== (view.gitlab_clone_dir ?? '') ||
     gitlabURL !== (view.gitlab_url ?? '') ||
-    terminal !== (view.terminal ?? '')
+    terminal !== (view.terminal ?? '') ||
+    defaultIDE !== (view.default_ide ?? '')
 
   const save = () => {
     setBusy(true); setSaveMsg(null)
@@ -538,6 +542,7 @@ function GlobalSection({
         gitlab_clone_dir: glDir,
         gitlab_url: gitlabURL,
         terminal: terminal,
+        default_ide: defaultIDE,
       }),
     })
       .then(async r => {
@@ -598,6 +603,19 @@ function GlobalSection({
           <option value="">System default (Terminal.app / xterm)</option>
           <option value="vscode">VS Code (supports image paste)</option>
           <option value="iterm">iTerm2 (macOS)</option>
+        </select>
+      </Row>
+      <Row label="Default IDE" hint="IDE used by the 'Open in IDE' button on the repos list.">
+        <select
+          value={defaultIDE}
+          onChange={e => setDefaultIDE(e.target.value)}
+          className="flex-1 text-sm px-2 py-1 border border-border rounded bg-background"
+        >
+          <option value="">VS Code (default)</option>
+          <option value="vscode">VS Code</option>
+          <option value="cursor">Cursor</option>
+          <option value="qoder">Qoder</option>
+          <option value="vscode-insiders">VS Code Insiders</option>
         </select>
       </Row>
 
