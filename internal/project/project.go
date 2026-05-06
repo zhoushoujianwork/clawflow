@@ -127,6 +127,11 @@ func Create(name string) (*Project, error) {
 	if err := os.WriteFile(DeploymentPath(name), []byte(""), 0o644); err != nil {
 		return nil, fmt.Errorf("create deployment.md: %w", err)
 	}
+	// Initialize git repo for version history. Best-effort: if git is
+	// not installed the project still works, just without history.
+	if err := initGit(name); err != nil {
+		fmt.Fprintf(os.Stderr, "[project] git init skipped: %v\n", err)
+	}
 	return p, nil
 }
 
@@ -264,7 +269,14 @@ func WriteContext(name, content string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(ContextPath(name), []byte(content), 0o644)
+	if err := os.WriteFile(ContextPath(name), []byte(content), 0o644); err != nil {
+		return err
+	}
+	ensureGit(name)
+	if err := CommitChange(name, "update context.md"); err != nil {
+		fmt.Fprintf(os.Stderr, "[project] git commit skipped: %v\n", err)
+	}
+	return nil
 }
 
 // ReadTesting reads the project's testing.md. Returns "" if the file
@@ -286,7 +298,14 @@ func WriteTesting(name, content string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(TestingPath(name), []byte(content), 0o644)
+	if err := os.WriteFile(TestingPath(name), []byte(content), 0o644); err != nil {
+		return err
+	}
+	ensureGit(name)
+	if err := CommitChange(name, "update testing.md"); err != nil {
+		fmt.Fprintf(os.Stderr, "[project] git commit skipped: %v\n", err)
+	}
+	return nil
 }
 
 // ReadDeployment reads the project's deployment.md. Returns "" if the
@@ -311,7 +330,14 @@ func WriteDeployment(name, content string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(DeploymentPath(name), []byte(content), 0o644)
+	if err := os.WriteFile(DeploymentPath(name), []byte(content), 0o644); err != nil {
+		return err
+	}
+	ensureGit(name)
+	if err := CommitChange(name, "update deployment.md"); err != nil {
+		fmt.Fprintf(os.Stderr, "[project] git commit skipped: %v\n", err)
+	}
+	return nil
 }
 
 // SetAutomation flips the automation toggle and/or cooldown for a
@@ -442,5 +468,12 @@ func save(p *Project) error {
 	if err != nil {
 		return fmt.Errorf("marshal project: %w", err)
 	}
-	return os.WriteFile(yamlPath(p.Name), data, 0o644)
+	if err := os.WriteFile(yamlPath(p.Name), data, 0o644); err != nil {
+		return err
+	}
+	ensureGit(p.Name)
+	if err := CommitChange(p.Name, "update project.yaml"); err != nil {
+		fmt.Fprintf(os.Stderr, "[project] git commit skipped: %v\n", err)
+	}
+	return nil
 }
