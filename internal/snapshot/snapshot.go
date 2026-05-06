@@ -728,6 +728,54 @@ func WritePending(entries []PendingEntry) error {
 // reflects reality long before the timeout-based path triggers.
 const quietWindow = 2 * time.Minute
 
+// extractTerminalResult scans events.jsonl for the last "type":"result" line
+// and returns its subtype ("success" or "error") and the result text. If no
+// result line exists, returns ("", "", nil). This lets the reconciler
+// distinguish "runner died mid-stream" from "claude finished but runner
+// crashed before writing final meta".
+func extractTerminalResult(eventsPath string) (subtype string, resultText string, err error) {
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", nil
+		}
+		return "", "", err
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	type resultLine struct {
+		Type    string `json:"type"`
+		Subtype string `json:"subtype"`
+		Result  string `json:"result"`
+	}
+	var last *resultLine
+	for sc.Scan() {
+		line := sc.Bytes()
+		if !strings.Contains(string(line), `"type":"result"`) {
+			continue
+		}
+		var ev resultLine
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		if ev.Type != "result" {
+			continue
+		}
+		copy := ev
+		last = &copy
+	}
+	if err := sc.Err(); err != nil {
+		return "", "", err
+	}
+	if last == nil {
+		return "", "", nil
+	}
+	return last.Subtype, last.Result, nil
+}
+
 // ReconcileStaleRuns walks data/runs/* and patches up runs whose on-disk
 // state is inconsistent with reality:
 //
@@ -820,23 +868,39 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 			if !tooOld && !eventsQuiet {
 				return nil
 			}
-			m.Status = "failed"
-			switch {
-			case tooOld && eventsQuiet:
-				m.Error = fmt.Sprintf(
-					"reconciled: stuck in running for >%s and events.jsonl quiet for >%s; runner is gone",
-					staleAfter, quietWindow,
-				)
-			case tooOld:
-				m.Error = fmt.Sprintf(
-					"reconciled: stuck in running for >%s; runner exited without finalizing this run",
-					staleAfter,
-				)
-			default:
-				m.Error = fmt.Sprintf(
-					"reconciled: events.jsonl quiet for >%s while status=running; runner process is gone (interrupted/killed)",
-					quietWindow,
-				)
+			// Before marking as failed, check whether claude actually
+			// completed successfully. The runner may have crashed after
+			// claude finished but before it could write the final meta.
+			// In that case we should reconcile as "success" not "failed".
+			termSubtype, termResult, _ := extractTerminalResult(eventsPath)
+			if termSubtype == "success" {
+				m.Status = "success"
+				m.Summary = termResult
+				m.Error = "reconciled: runner exited after claude completed successfully but before finalizing meta"
+				// Backfill usage from the result event so the dashboard
+				// shows cost/tokens even though the runner never wrote them.
+				if u, uErr := ExtractUsage(eventsPath); uErr == nil && u != nil {
+					m.Usage = u
+				}
+			} else {
+				m.Status = "failed"
+				switch {
+				case tooOld && eventsQuiet:
+					m.Error = fmt.Sprintf(
+						"reconciled: stuck in running for >%s and events.jsonl quiet for >%s; runner is gone",
+						staleAfter, quietWindow,
+					)
+				case tooOld:
+					m.Error = fmt.Sprintf(
+						"reconciled: stuck in running for >%s; runner exited without finalizing this run",
+						staleAfter,
+					)
+				default:
+					m.Error = fmt.Sprintf(
+						"reconciled: events.jsonl quiet for >%s while status=running; runner process is gone (interrupted/killed)",
+						quietWindow,
+					)
+				}
 			}
 			// Treat both nil and a pointer to Go's zero time as "missing":
 			// older meta.json on disk (pre-pointer-type fix) literally

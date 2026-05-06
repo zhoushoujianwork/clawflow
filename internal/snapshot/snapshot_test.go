@@ -455,6 +455,100 @@ func TestReconcileStaleRuns_Idempotent(t *testing.T) {
 	}
 }
 
+// TestReconcileStaleRuns_SuccessResult_ReconciledAsSuccess verifies that when
+// events.jsonl contains a terminal "result" event with subtype "success", the
+// reconciler marks the run as "success" rather than "failed" — even though the
+// runner process died before writing the final meta.json.
+func TestReconcileStaleRuns_SuccessResult_ReconciledAsSuccess(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-quietWindow - time.Minute)
+	stuck := &RunMeta{
+		Operator:    "evaluate-bug",
+		Repo:        "owner/repo",
+		IssueNumber: 42,
+		StartedAt:   start,
+		Status:      "running",
+	}
+	events := `{"type":"system","subtype":"init"}` + "\n" +
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"evaluating..."}]}}` + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"duration_ms":120000,"num_turns":5,"result":"evaluation done\n<!-- clawflow:outcome=agent-evaluated -->","total_cost_usd":0.50,"usage":{"input_tokens":5000,"output_tokens":500,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"modelUsage":{"claude-opus-4-6":{"inputTokens":5000,"outputTokens":500,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.50}}}` + "\n"
+
+	dir := makeRunDir(t, root, "owner__repo", 42, start, stuck, events)
+	// Backdate events.jsonl mtime so it looks quiet
+	past := time.Now().Add(-quietWindow - 30*time.Second)
+	os.Chtimes(filepath.Join(dir, "events.jsonl"), past, past)
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("fixed=%d, want 1", n)
+	}
+
+	// Read back meta and verify it's success, not failed.
+	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var m RunMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m.Status != "success" {
+		t.Errorf("status=%q, want \"success\"", m.Status)
+	}
+	if m.Usage == nil {
+		t.Error("expected usage to be backfilled")
+	} else if m.Usage.DurationMs != 120000 {
+		t.Errorf("usage.duration_ms=%d, want 120000", m.Usage.DurationMs)
+	}
+	if m.Summary == "" {
+		t.Error("expected summary to be populated from result text")
+	}
+}
+
+// TestReconcileStaleRuns_ErrorResult_ReconciledAsFailed verifies that when
+// events.jsonl has a terminal result with subtype != "success" (e.g. "error"),
+// the reconciler still marks the run as "failed".
+func TestReconcileStaleRuns_ErrorResult_ReconciledAsFailed(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-quietWindow - time.Minute)
+	stuck := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 99,
+		StartedAt:   start,
+		Status:      "running",
+	}
+	events := `{"type":"system","subtype":"init"}` + "\n" +
+		`{"type":"result","subtype":"error","is_error":true,"duration_ms":5000,"num_turns":1,"result":"something went wrong","total_cost_usd":0.01,"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"modelUsage":{}}` + "\n"
+
+	dir := makeRunDir(t, root, "owner__repo", 99, start, stuck, events)
+	past := time.Now().Add(-quietWindow - 30*time.Second)
+	os.Chtimes(filepath.Join(dir, "events.jsonl"), past, past)
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("fixed=%d, want 1", n)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var m RunMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m.Status != "failed" {
+		t.Errorf("status=%q, want \"failed\"", m.Status)
+	}
+}
+
 
 // --- MigrateLegacyDataDir tests ----------------------------------------
 
