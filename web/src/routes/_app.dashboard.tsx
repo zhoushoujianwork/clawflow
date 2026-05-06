@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Search,
@@ -14,7 +14,7 @@ import {
   Pause,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { repoUrl, issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
+import { issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 
 /**
@@ -567,14 +567,14 @@ function PendingRow({ p, repoMap }: { p: Pending; repoMap: RepoInfoMap }) {
       <span className="text-sm text-foreground truncate flex-1">
         {p.issue_title || '(no title)'}
       </span>
-      <a
-        href={repoUrl(p.repo, repoMap)}
-        target="_blank"
-        rel="noopener noreferrer"
+      <Link
+        to="/repos/$repoName"
+        params={{ repoName: encodeURIComponent(p.repo) }}
+        onClick={e => e.stopPropagation()}
         className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 hidden sm:inline"
       >
         {p.repo}
-      </a>
+      </Link>
       <span className="text-xs text-muted-foreground shrink-0 w-16 text-right">{timeAgo(p.captured_at)}</span>
     </div>
   )
@@ -640,15 +640,14 @@ function Row({ r, repoMap }: { r: Run; repoMap: RepoInfoMap }) {
       <span className="text-sm text-foreground truncate flex-1">
         {r.operator} · {r.issue_title || '(no title)'}
       </span>
-      <a
-        href={repoUrl(r.repo, repoMap)}
-        target="_blank"
-        rel="noopener noreferrer"
+      <Link
+        to="/repos/$repoName"
+        params={{ repoName: encodeURIComponent(r.repo) }}
         onClick={e => e.stopPropagation()}
         className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 hidden sm:inline"
       >
         {r.repo}
-      </a>
+      </Link>
       {dur && <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-14 text-right">{dur}</span>}
       {r.pr_url && (
         <a

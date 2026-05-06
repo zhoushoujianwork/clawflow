@@ -308,20 +308,13 @@ function RepoList() {
                         <VcsIcon repo={r.full_name} map={repoMap} className="w-3.5 h-3.5" />
                       </a>
                       {r.local_path && (
-                        <button
-                          type="button"
+                        <a
+                          href={`qoder://file/${r.local_path}`}
                           title={`Open in VS Code: ${r.local_path}`}
                           className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0"
-                          onClick={() =>
-                            fetch('/api/repo/open', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ repo: r.full_name }),
-                            })
-                          }
                         >
                           <FolderOpen className="w-3.5 h-3.5" />
-                        </button>
+                        </a>
                       )}
                     </div>
                   </td>
