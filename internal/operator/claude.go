@@ -155,7 +155,14 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 		}
 		switch {
 		case env.Type == "result":
-			finalResult = env.Result
+			// Only keep the first non-empty result. Claude CLI emits
+			// additional result events for background tasks (origin.kind
+			// == "task-notification") which carry a short summary without
+			// the outcome marker. Letting those overwrite the primary
+			// session result causes the runner to miss the outcome label.
+			if finalResult == "" {
+				finalResult = env.Result
+			}
 		case env.Type == "assistant":
 			// Concatenate every text block in this assistant turn. Skip
 			// thinking/tool_use blocks — those are not part of the user-

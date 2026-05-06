@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, Message
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
-import { HealthCheckSummaryCard, HealthCheckReviewPanel, useHealthCheck } from '../components/HealthCheckCard'
+import { HealthCheckSummaryCard, useHealthCheck } from '../components/HealthCheckCard'
 import {
   IssueList,
   PROJECT_SECTIONS,
@@ -1140,13 +1140,6 @@ function ProjectDetail() {
             onSync={syncBacklog}
             syncing={backlogSyncing}
           />
-
-          {/* Conditional Health Check review — full width because the
-              per-file diffs need horizontal space to render side-by-
-              side. Only mounts while there are proposed changes; once
-              applied (or after a healthy re-run), it disappears and
-              the page collapses back to its compact layout. */}
-          <HealthCheckReviewPanel healthCheck={healthCheck} />
 
           {/* PM Activity — collapsible log of recent PM wakes with
               their PM-RESULT summaries, cost, and duration. */}

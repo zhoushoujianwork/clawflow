@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
-import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, Wrench, MessageSquare, Brain } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, ChevronsUp, ChevronsDown } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -94,6 +94,8 @@ function RunDetail() {
   const [events, setEvents] = useState<RawEvent[]>([])
   const [rawLoading, setRawLoading] = useState(true)
   const repoMap = useRepoInfoMap()
+  const terminalRef = useRef<HTMLDivElement>(null)
+  const isAtBottom = useRef(true)
 
   useEffect(() => {
     let cancelled = false
@@ -132,6 +134,18 @@ function RunDetail() {
       cancelled = true
     }
   }, [basePath])
+
+  useEffect(() => {
+    if (isAtBottom.current && terminalRef.current) {
+      terminalRef.current.scrollTop = terminalRef.current.scrollHeight
+    }
+  }, [events])
+
+  const handleTerminalScroll = () => {
+    const el = terminalRef.current
+    if (!el) return
+    isAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+  }
 
   const repo = slug.replace(/__/g, '/')
   const issueNum = issue.replace(/^issue-/, '')
@@ -231,10 +245,6 @@ function RunDetail() {
       {(() => {
         const visible = visibleEvents(events)
         const toolNames = collectToolNames(events)
-        // While the operator is still running there's no conclusion yet, so
-        // open the trace by default — the user is actively waiting on it.
-        // Terminal runs get a collapsed trace so the conclusion stays the
-        // first thing on screen.
         const openByDefault = !meta || meta.status === 'running'
         return (
           <details open={openByDefault} className="group">
@@ -244,17 +254,41 @@ function RunDetail() {
               <span className="font-normal text-muted-foreground">({visible.length} steps)</span>
             </summary>
             <div className="mt-3">
-              {rawLoading ? (
-                <p className="text-sm text-muted-foreground">Loading…</p>
-              ) : visible.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No trace yet.</p>
-              ) : (
-                <div className="space-y-2">
-                  {visible.map((ev, i) => (
-                    <EventCard key={i} ev={ev} toolNames={toolNames} />
-                  ))}
+              <div className="flex items-center justify-between px-3 py-1.5 bg-[#2d2d2d] rounded-t-lg border border-[#3d3d3d] border-b-0">
+                <span className="text-xs text-gray-400 font-mono">trace</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500">{visible.length} steps</span>
+                  <button
+                    onClick={() => { if (terminalRef.current) terminalRef.current.scrollTop = 0 }}
+                    className="text-gray-500 hover:text-gray-300 cursor-pointer"
+                    title="Scroll to top"
+                  >
+                    <ChevronsUp className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => { if (terminalRef.current) terminalRef.current.scrollTop = terminalRef.current.scrollHeight }}
+                    className="text-gray-500 hover:text-gray-300 cursor-pointer"
+                    title="Scroll to bottom"
+                  >
+                    <ChevronsDown className="w-3.5 h-3.5" />
+                  </button>
                 </div>
-              )}
+              </div>
+              <div
+                ref={terminalRef}
+                onScroll={handleTerminalScroll}
+                className="h-[500px] overflow-y-auto bg-[#1e1e1e] rounded-b-lg border border-[#3d3d3d] p-3 font-mono text-[13px] leading-relaxed"
+              >
+                {rawLoading ? (
+                  <p className="text-gray-500">Loading…</p>
+                ) : visible.length === 0 ? (
+                  <p className="text-gray-500">No trace yet.</p>
+                ) : (
+                  visible.map((ev, i) => (
+                    <TerminalLine key={i} ev={ev} toolNames={toolNames} />
+                  ))
+                )}
+              </div>
             </div>
           </details>
         )
@@ -556,77 +590,79 @@ function prettyValue(v: unknown): string {
   }
 }
 
-/**
- * Wrap long content in <details> so the overview stays compact. Short
- * content renders directly without the expand toggle.
- */
-function CollapsibleBlock({ text, threshold = 280 }: { text: string; threshold?: number }) {
-  if (text.length <= threshold) {
-    return <pre className="text-[11px] font-mono whitespace-pre-wrap text-muted-foreground">{text}</pre>
+function TerminalCollapsible({ text, maxLines = 8 }: { text: string; maxLines?: number }) {
+  const [expanded, setExpanded] = useState(false)
+  const lines = text.split('\n')
+  if (lines.length <= maxLines) {
+    return <span className="text-gray-300 whitespace-pre-wrap">{text}</span>
+  }
+  if (!expanded) {
+    return (
+      <span className="text-gray-300 whitespace-pre-wrap">
+        {lines.slice(0, maxLines).join('\n')}
+        {'\n'}
+        <button
+          onClick={() => setExpanded(true)}
+          className="text-cyan-400 hover:text-cyan-300 cursor-pointer"
+        >
+          ··· {lines.length - maxLines} more lines (click to expand)
+        </button>
+      </span>
+    )
   }
   return (
-    <details className="text-[11px] font-mono">
-      <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
-        {text.slice(0, threshold).replace(/\s+/g, ' ').trim()}…{' '}
-        <span style={{ color: 'hsl(var(--brand))' }}>show more</span>
-      </summary>
-      <pre className="whitespace-pre-wrap text-muted-foreground mt-1">{text}</pre>
-    </details>
+    <span className="text-gray-300 whitespace-pre-wrap">
+      {text}
+      {'\n'}
+      <button
+        onClick={() => setExpanded(false)}
+        className="text-cyan-400 hover:text-cyan-300 cursor-pointer"
+      >
+        ··· (collapse)
+      </button>
+    </span>
   )
 }
 
-/**
- * EventCard renders one logical step of the trace. Three flavors:
- *   - assistant: thinking / reply / tool_use blocks
- *   - user:     tool_result blocks (collapsible)
- *   - result:   the final summary line + body
- * Anything visibleEvents doesn't filter is one of these by construction,
- * so there is no JSON-dump fallback — that was the noise the user
- * complained about.
- */
-function EventCard({ ev, toolNames }: { ev: RawEvent; toolNames: Record<string, string> }) {
+function TerminalLine({ ev, toolNames }: { ev: RawEvent; toolNames: Record<string, string> }) {
   if (ev.type === 'assistant' && ev.message?.content) {
     return (
-      <div className="space-y-2">
+      <>
         {ev.message.content.map((c, i) => {
           if (c.type === 'thinking' && c.thinking) {
             return (
-              <div key={i} className="bg-purple-50/50 dark:bg-purple-950/10 border border-purple-200/60 dark:border-purple-900/40 rounded-lg p-3">
-                <div className="flex items-center gap-1.5 text-xs text-purple-700 dark:text-purple-400 mb-1">
-                  <Brain className="w-3 h-3" />
-                  <span>thinking</span>
-                </div>
-                <div className="text-sm whitespace-pre-wrap text-foreground/80 italic leading-relaxed">{c.thinking.trim()}</div>
+              <div key={i} className="mb-1">
+                <span className="text-purple-400 opacity-70">[thinking] </span>
+                <span className="text-gray-400 italic">{c.thinking.trim()}</span>
               </div>
             )
           }
           if (c.type === 'text' && c.text) {
             return (
-              <div key={i} className="bg-card border border-border rounded-lg p-3">
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
-                  <MessageSquare className="w-3 h-3" />
-                  <span>reply</span>
-                </div>
-                <Markdown>{c.text}</Markdown>
+              <div key={i} className="mb-1">
+                <span className="text-green-400">[reply] </span>
+                <span className="text-gray-200 whitespace-pre-wrap">{c.text}</span>
               </div>
             )
           }
           if (c.type === 'tool_use') {
             const inputStr = prettyValue(c.input ?? {})
             return (
-              <div key={i} className="bg-secondary/40 border border-border rounded-lg p-3">
-                <div className="flex items-center gap-1.5 text-xs font-mono mb-1">
-                  <Wrench className="w-3 h-3 text-blue-600" />
-                  <span className="text-blue-700 dark:text-blue-400">{c.name || 'tool'}</span>
-                  <span className="text-muted-foreground">→</span>
-                </div>
-                <CollapsibleBlock text={inputStr} threshold={200} />
+              <div key={i} className="mb-1">
+                <span className="text-cyan-400">$ </span>
+                <span className="text-cyan-300 font-semibold">{c.name || 'tool'}</span>
+                {inputStr.length > 0 && inputStr !== '{}' && (
+                  <>
+                    {'\n'}
+                    <TerminalCollapsible text={inputStr} maxLines={6} />
+                  </>
+                )}
               </div>
             )
           }
           return null
         })}
-      </div>
+      </>
     )
   }
 
@@ -634,11 +670,9 @@ function EventCard({ ev, toolNames }: { ev: RawEvent; toolNames: Record<string, 
     const results = ev.message.content.filter(c => c.type === 'tool_result')
     if (results.length === 0) return null
     return (
-      <div className="space-y-2">
+      <>
         {results.map((r, i) => {
           const name = (r.tool_use_id && toolNames[r.tool_use_id]) || 'tool'
-          // tool_result.content is sometimes a string, sometimes an array of
-          // text blocks. Normalize to a single string.
           let body: string
           if (typeof r.content === 'string') {
             body = r.content
@@ -650,45 +684,43 @@ function EventCard({ ev, toolNames }: { ev: RawEvent; toolNames: Record<string, 
             body = prettyValue(r.content)
           }
           return (
-            <div
-              key={i}
-              className={cn(
-                'border rounded-lg p-3',
-                r.is_error
-                  ? 'bg-red-50/60 dark:bg-red-950/20 border-red-200 dark:border-red-900/50'
-                  : 'bg-amber-50/40 dark:bg-amber-950/10 border-amber-200 dark:border-amber-900/50',
+            <div key={i} className="mb-1">
+              <span className={r.is_error ? 'text-red-400' : 'text-yellow-400'}>
+                ← {name}{r.is_error ? ' (error)' : ''}
+              </span>
+              {body && (
+                <>
+                  {'\n'}
+                  <TerminalCollapsible text={body} maxLines={8} />
+                </>
               )}
-            >
-              <div className={cn(
-                'flex items-center gap-1.5 text-xs font-mono mb-1',
-                r.is_error ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400',
-              )}>
-                <Wrench className="w-3 h-3" />
-                <span>← {name}{r.is_error ? ' (error)' : ''}</span>
-              </div>
-              <CollapsibleBlock text={body} />
             </div>
           )
         })}
-      </div>
+      </>
     )
   }
 
   if (ev.type === 'result') {
     return (
-      <div className={cn(
-        'border rounded-lg p-3 text-sm whitespace-pre-wrap',
-        ev.is_error
-          ? 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900 text-red-700 dark:text-red-400'
-          : 'bg-green-50 dark:bg-green-950/20 border-green-200 dark:border-green-900 text-foreground',
-      )}>
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-2 font-sans">
-          <CheckCircle2 className="w-3 h-3" />
-          <span>result {ev.subtype || ''}</span>
-          {ev.duration_ms != null && <span>· {Math.round(ev.duration_ms / 1000)}s</span>}
-          {ev.total_cost_usd != null && <span>· ${ev.total_cost_usd.toFixed(4)}</span>}
-        </div>
-        {ev.result || <span className="text-muted-foreground italic">(empty — operator returned no stdout, so no comment was posted)</span>}
+      <div className="mb-1 mt-2 pt-2 border-t border-gray-700">
+        <span className={ev.is_error ? 'text-red-400 font-bold' : 'text-green-400 font-bold'}>
+          [result] {ev.subtype || ''}
+        </span>
+        {ev.duration_ms != null && <span className="text-gray-500"> · {Math.round(ev.duration_ms / 1000)}s</span>}
+        {ev.total_cost_usd != null && <span className="text-gray-500"> · ${ev.total_cost_usd.toFixed(4)}</span>}
+        {ev.result && (
+          <>
+            {'\n'}
+            <span className="text-gray-200 whitespace-pre-wrap">{ev.result}</span>
+          </>
+        )}
+        {!ev.result && (
+          <>
+            {'\n'}
+            <span className="text-gray-500 italic">(empty — no stdout)</span>
+          </>
+        )}
       </div>
     )
   }
