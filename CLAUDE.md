@@ -103,10 +103,17 @@ go test ./internal/operator/...
 ## Commit / PR 规范
 
 - 分支策略：功能分支从 main 切出，PR 合并回 main
-- Commit message：简洁描述变更内容，中英文均可
+- Commit message 使用 **Conventional Commits** 格式：
+  - `feat:` / `feat(scope):` — 新功能
+  - `fix:` / `fix(scope):` — Bug 修复
+  - `refactor:` — 重构（不改变行为）
+  - `ci:` — CI/CD 配置变更
+  - `docs:` — 文档变更
+  - `test:` — 测试相关
+  - `chore:` — 杂项（依赖更新等）
+- scope 可选，常用值：`operator`, `pm`, `web`, `api`, `snapshot`, `chat`, `run`, `projects`
+- 中英文均可，但 prefix 必须用英文
 - PR 标题应概括变更，正文说明动机和测试方式
-
-> TODO: 确认是否使用 Conventional Commits 格式或其他约定
 
 ---
 

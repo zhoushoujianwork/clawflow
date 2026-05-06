@@ -8,6 +8,7 @@ operator:
     labels_excluded:
       - "bug"
       - "feat"
+      - "feature"
       - "question"
       - "agent-evaluated"
       - "agent-skipped"

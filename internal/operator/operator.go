@@ -40,8 +40,9 @@ type Operator struct {
 // Trigger gates when an operator fires on a given issue/PR.
 type Trigger struct {
 	Target         string
-	LabelsRequired []string
-	LabelsExcluded []string
+	LabelsRequired    []string
+	LabelsRequiredAny []string // OR semantics: at least one must be present (empty = no constraint)
+	LabelsExcluded    []string
 }
 
 // frontmatter mirrors the YAML shape inside the SKILL.md.
@@ -50,9 +51,10 @@ type frontmatter struct {
 	Description string `yaml:"description"`
 	Operator    struct {
 		Trigger struct {
-			Target         string   `yaml:"target"`
-			LabelsRequired []string `yaml:"labels_required"`
-			LabelsExcluded []string `yaml:"labels_excluded"`
+			Target            string   `yaml:"target"`
+			LabelsRequired    []string `yaml:"labels_required"`
+			LabelsRequiredAny []string `yaml:"labels_required_any"`
+			LabelsExcluded    []string `yaml:"labels_excluded"`
 		} `yaml:"trigger"`
 		LockLabel string   `yaml:"lock_label"`
 		Outcomes  []string `yaml:"outcomes"`
@@ -95,9 +97,10 @@ func Parse(data []byte, source string) (*Operator, error) {
 		Name:        fm.Name,
 		Description: fm.Description,
 		Trigger: Trigger{
-			Target:         tgt,
-			LabelsRequired: fm.Operator.Trigger.LabelsRequired,
-			LabelsExcluded: fm.Operator.Trigger.LabelsExcluded,
+			Target:            tgt,
+			LabelsRequired:    fm.Operator.Trigger.LabelsRequired,
+			LabelsRequiredAny: fm.Operator.Trigger.LabelsRequiredAny,
+			LabelsExcluded:    fm.Operator.Trigger.LabelsExcluded,
 		},
 		LockLabel: fm.Operator.LockLabel,
 		Outcomes:  fm.Operator.Outcomes,

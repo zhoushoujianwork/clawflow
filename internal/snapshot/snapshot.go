@@ -205,13 +205,14 @@ type RepoView struct {
 
 // OperatorView is the dashboard-facing view of one loaded operator.
 type OperatorView struct {
-	Name           string   `json:"name"`
-	Description    string   `json:"description"`
-	Target         string   `json:"target"`
-	LabelsRequired []string `json:"labels_required"`
-	LabelsExcluded []string `json:"labels_excluded"`
-	LockLabel      string   `json:"lock_label"`
-	Source         string   `json:"source"`
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	Target            string   `json:"target"`
+	LabelsRequired    []string `json:"labels_required"`
+	LabelsRequiredAny []string `json:"labels_required_any,omitempty"`
+	LabelsExcluded    []string `json:"labels_excluded"`
+	LockLabel         string   `json:"lock_label"`
+	Source            string   `json:"source"`
 }
 
 // Meta is the top-level snapshot metadata; the dashboard reads it on load
@@ -610,13 +611,14 @@ func WriteOperators(reg *operator.Registry) error {
 	views := make([]OperatorView, 0, len(ops))
 	for _, op := range ops {
 		views = append(views, OperatorView{
-			Name:           op.Name,
-			Description:    op.Description,
-			Target:         op.Trigger.Target,
-			LabelsRequired: op.Trigger.LabelsRequired,
-			LabelsExcluded: op.Trigger.LabelsExcluded,
-			LockLabel:      op.LockLabel,
-			Source:         op.Source,
+			Name:              op.Name,
+			Description:       op.Description,
+			Target:            op.Trigger.Target,
+			LabelsRequired:    op.Trigger.LabelsRequired,
+			LabelsRequiredAny: op.Trigger.LabelsRequiredAny,
+			LabelsExcluded:    op.Trigger.LabelsExcluded,
+			LockLabel:         op.LockLabel,
+			Source:            op.Source,
 		})
 	}
 	return writeJSON(filepath.Join(DataDir(), "operators.json"), views)

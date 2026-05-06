@@ -4,7 +4,8 @@ description: "Evaluate a feat-labeled issue for clarity, scope, and architectura
 operator:
   trigger:
     target: "issue"
-    labels_required: ["feat"]
+    labels_required: []
+    labels_required_any: ["feat", "feature"]
     labels_excluded: ["agent-evaluated", "agent-skipped", "agent-failed", "agent-running"]
   outcomes: ["agent-evaluated", "agent-skipped"]
 ---
