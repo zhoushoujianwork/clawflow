@@ -128,6 +128,14 @@ type streamEnvelope struct {
 // tool_use (e.g. the model emits its answer, then calls one more tool to
 // touch labels and ends). Without the fallback, a trailing tool call
 // silently wipes out the operator's output.
+//
+// Multi-turn outcome recovery: when a long session emits the outcome marker
+// in an intermediate assistant turn and then produces a short wrap-up in the
+// final turn, the "result" event (or lastAssistantText fallback) contains no
+// marker. In that case we return lastAssistantTextWithMarker — the last
+// assistant turn that contained a valid outcome marker — so the runner can
+// still parse the outcome and fire post-automation. A warning is printed to
+// stderr so the prompt can be improved upstream.
 func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	sc := bufio.NewScanner(r)
 	// Claude stream-json lines can carry full assistant messages; bump the
@@ -135,7 +143,8 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	var finalResult string
-	var lastAssistantText string // last assistant turn that emitted any text
+	var lastAssistantText string            // last assistant turn that emitted any text
+	var lastAssistantTextWithMarker string  // last assistant turn that contained an outcome marker
 	printedAnyDelta := false
 
 	for sc.Scan() {
@@ -179,6 +188,14 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 			}
 			if turn != "" {
 				lastAssistantText = turn
+				// Track the last turn that contains an outcome marker
+				// separately. This lets us recover when the marker appears
+				// in an intermediate turn and the final turn is a short
+				// wrap-up with no marker (see multi-turn outcome recovery
+				// comment above).
+				if outcomeRE.MatchString(turn) {
+					lastAssistantTextWithMarker = turn
+				}
 			}
 		case env.Type == "stream_event" &&
 			env.Event.Type == "content_block_delta" &&
@@ -207,6 +224,15 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	}
 	if finalResult == "" {
 		finalResult = lastAssistantText
+	}
+	// If the resolved result has no outcome marker but an earlier assistant
+	// turn did, fall back to that turn. This handles the multi-turn case
+	// where the model emits the full structured output (including the marker)
+	// in turn N and then produces a brief wrap-up in turn N+1.
+	if !outcomeRE.MatchString(finalResult) && lastAssistantTextWithMarker != "" {
+		fmt.Fprintf(os.Stderr,
+			"  ⚠ outcome marker found in intermediate assistant turn but not in final result — using intermediate turn (consider tightening the operator prompt)\n")
+		finalResult = lastAssistantTextWithMarker
 	}
 	return finalResult, nil
 }
