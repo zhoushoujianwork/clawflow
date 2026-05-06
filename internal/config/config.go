@@ -313,7 +313,8 @@ func (c *Config) EnabledRepos() map[string]Repo {
 	return out
 }
 
-// RepoSlug converts "owner/repo" to "owner-repo" for use in file paths.
+// RepoSlug converts "owner/repo" to "owner-repo" for use in branch names and
+// other contexts where a dash separator is conventional.
 func RepoSlug(ownerRepo string) string {
 	for i, c := range ownerRepo {
 		if c == '/' {
@@ -323,9 +324,21 @@ func RepoSlug(ownerRepo string) string {
 	return ownerRepo
 }
 
+// RepoSlugFS converts "owner/repo" to "owner__repo" for use in filesystem
+// paths. The double-underscore separator is unambiguous: a repo named
+// "foo-bar" under owner "foo" won't collide with owner "foo-bar" + repo "baz".
+func RepoSlugFS(ownerRepo string) string {
+	return strings.ReplaceAll(ownerRepo, "/", "__")
+}
+
 // WorktreePath returns the standard worktree path for an issue.
+// All worktrees live under ~/.clawflow/worktrees/<owner__repo>/issue-<N>
+// so they are user-scoped, survive reboots, and match the path the
+// automated runner (setupWorktree in run.go) uses — enabling
+// clawflow worktree remove to clean up what the runner created.
 func WorktreePath(ownerRepo string, issueNumber int) string {
-	return fmt.Sprintf("/tmp/clawflow-fix/%s-issue-%d", RepoSlug(ownerRepo), issueNumber)
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".clawflow", "worktrees", RepoSlugFS(ownerRepo), fmt.Sprintf("issue-%d", issueNumber))
 }
 
 // BranchName returns the standard branch name for an issue.
