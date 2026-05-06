@@ -51,6 +51,18 @@ func MatchesWithReason(sub *Subject, op *Operator) (bool, string) {
 			return false, fmt.Sprintf("missing required label %q", req)
 		}
 	}
+	if len(op.Trigger.LabelsRequiredAny) > 0 {
+		found := false
+		for _, req := range op.Trigger.LabelsRequiredAny {
+			if _, ok := labelSet[req]; ok {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false, fmt.Sprintf("none of the required-any labels present %v", op.Trigger.LabelsRequiredAny)
+		}
+	}
 	for _, ex := range op.Trigger.LabelsExcluded {
 		if _, ok := labelSet[ex]; ok {
 			return false, fmt.Sprintf("excluded label %q present", ex)

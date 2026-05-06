@@ -41,7 +41,13 @@ type Operator struct {
 type Trigger struct {
 	Target         string
 	LabelsRequired []string
-	LabelsExcluded []string
+	// LabelsRequiredAny uses OR semantics: at least one of the listed labels
+	// must be present on the subject. Useful for alias groups like
+	// ["feat", "feature"] where either label should trigger the operator.
+	// LabelsRequired (AND) and LabelsRequiredAny (OR) are evaluated
+	// independently; both must pass when both are non-empty.
+	LabelsRequiredAny []string
+	LabelsExcluded    []string
 }
 
 // frontmatter mirrors the YAML shape inside the SKILL.md.
@@ -50,9 +56,10 @@ type frontmatter struct {
 	Description string `yaml:"description"`
 	Operator    struct {
 		Trigger struct {
-			Target         string   `yaml:"target"`
-			LabelsRequired []string `yaml:"labels_required"`
-			LabelsExcluded []string `yaml:"labels_excluded"`
+			Target            string   `yaml:"target"`
+			LabelsRequired    []string `yaml:"labels_required"`
+			LabelsRequiredAny []string `yaml:"labels_required_any"`
+			LabelsExcluded    []string `yaml:"labels_excluded"`
 		} `yaml:"trigger"`
 		LockLabel string   `yaml:"lock_label"`
 		Outcomes  []string `yaml:"outcomes"`
@@ -95,9 +102,10 @@ func Parse(data []byte, source string) (*Operator, error) {
 		Name:        fm.Name,
 		Description: fm.Description,
 		Trigger: Trigger{
-			Target:         tgt,
-			LabelsRequired: fm.Operator.Trigger.LabelsRequired,
-			LabelsExcluded: fm.Operator.Trigger.LabelsExcluded,
+			Target:            tgt,
+			LabelsRequired:    fm.Operator.Trigger.LabelsRequired,
+			LabelsRequiredAny: fm.Operator.Trigger.LabelsRequiredAny,
+			LabelsExcluded:    fm.Operator.Trigger.LabelsExcluded,
 		},
 		LockLabel: fm.Operator.LockLabel,
 		Outcomes:  fm.Operator.Outcomes,

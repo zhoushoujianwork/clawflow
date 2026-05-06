@@ -90,6 +90,56 @@ func TestMatches_RequiredAndExcludedCombined(t *testing.T) {
 	}
 }
 
+func TestMatches_LabelsRequiredAny(t *testing.T) {
+	op := &Operator{Trigger: Trigger{
+		Target:            "issue",
+		LabelsRequiredAny: []string{"feat", "feature"},
+	}}
+	cases := map[string]struct {
+		labels []string
+		want   bool
+	}{
+		"first alias present":  {[]string{"feat"}, true},
+		"second alias present": {[]string{"feature"}, true},
+		"both present":         {[]string{"feat", "feature"}, true},
+		"with extras":          {[]string{"feature", "p1"}, true},
+		"neither present":      {[]string{"bug"}, false},
+		"empty":                {[]string{}, false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := &Subject{Labels: c.labels}
+			if got := Matches(s, op); got != c.want {
+				t.Errorf("labels=%v: got %v want %v", c.labels, got, c.want)
+			}
+		})
+	}
+}
+
+func TestMatches_RequiredAndRequiredAnyCombined(t *testing.T) {
+	// Both LabelsRequired (AND) and LabelsRequiredAny (OR) must pass.
+	op := &Operator{Trigger: Trigger{
+		Target:            "issue",
+		LabelsRequired:    []string{"ready-for-agent"},
+		LabelsRequiredAny: []string{"feat", "feature"},
+	}}
+	// Both conditions satisfied
+	if !Matches(&Subject{Labels: []string{"ready-for-agent", "feat"}}, op) {
+		t.Error("ready-for-agent + feat should match")
+	}
+	if !Matches(&Subject{Labels: []string{"ready-for-agent", "feature"}}, op) {
+		t.Error("ready-for-agent + feature should match")
+	}
+	// Missing the AND label
+	if Matches(&Subject{Labels: []string{"feat"}}, op) {
+		t.Error("feat without ready-for-agent should not match")
+	}
+	// Missing the OR label
+	if Matches(&Subject{Labels: []string{"ready-for-agent", "bug"}}, op) {
+		t.Error("ready-for-agent without feat/feature should not match")
+	}
+}
+
 func TestMatches_NoRulesAlwaysMatches(t *testing.T) {
 	op := &Operator{Trigger: Trigger{Target: "issue"}} // no required, no excluded
 	if !Matches(&Subject{Labels: []string{}}, op) {
