@@ -5,7 +5,7 @@ operator:
   trigger:
     target: "issue"
     labels_required: ["question"]
-    labels_excluded: ["agent-replied", "agent-failed"]
+    labels_excluded: ["agent-replied", "agent-skipped", "agent-failed", "agent-running"]
   lock_label: "agent-running"
   outcomes: ["agent-replied", "agent-skipped"]
 ---

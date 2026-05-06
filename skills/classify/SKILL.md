@@ -15,6 +15,7 @@ operator:
       - "agent-failed"
       - "agent-mentioned"
       - "agent-replied"
+      - "agent-running"
   outcomes: ["bug", "feat", "question"]
 ---
 
