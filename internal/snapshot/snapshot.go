@@ -1171,5 +1171,21 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", path, err)
 	}
-	return os.WriteFile(path, data, 0o644)
+	// Write to a temp file in the same directory, then rename atomically.
+	// os.Rename on the same filesystem is atomic on POSIX — the target
+	// either has the old content or the new content, never a partial write.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // no-op if rename succeeded
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp: %w", err)
+	}
+	return os.Rename(tmpName, path)
 }
