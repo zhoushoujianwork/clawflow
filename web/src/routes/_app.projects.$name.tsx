@@ -26,6 +26,7 @@ interface Project {
   created_at?: string
   context_md?: string
   testing_md?: string
+  deployment_md?: string
   automation?: ProjectAutomation
 }
 
@@ -135,6 +136,12 @@ function ProjectDetail() {
   // their own "no content yet" panel and ignore this state.
   const [contextOpen, setContextOpen] = useState(false)
   const [testingOpen, setTestingOpen] = useState(false)
+  const [deploymentOpen, setDeploymentOpen] = useState(false)
+
+  // Generate deployment state — mirrors the context generation pattern.
+  const [generatingDeployment, setGeneratingDeployment] = useState(false)
+  const [generateDeploymentError, setGenerateDeploymentError] = useState<string | null>(null)
+  const deploymentPollTimerRef = useRef<number | null>(null)
 
   // Cross-repo backlog state — same data sources the per-repo page
   // reads, just filtered to project.repos here. The shared IssueList
@@ -208,7 +215,17 @@ function ProjectDetail() {
         }
       })
       .catch(() => { /* idle */ })
-    return () => { stopPolling() }
+    // Same resume-on-navigate check for deployment generation.
+    fetch(`/api/project/generate-deployment/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+      .then(r => r.json().catch(() => ({})).then(d => ({ status: r.status, body: d })))
+      .then(({ status, body }) => {
+        if (status === 200 && body.status === 'running') {
+          setGeneratingDeployment(true)
+          startDeploymentPolling()
+        }
+      })
+      .catch(() => { /* idle */ })
+    return () => { stopPolling(); stopDeploymentPolling() }
   }, [name])
 
   function fetchAvailableRepos() {
@@ -348,6 +365,66 @@ function ProjectDetail() {
     if (pollTimerRef.current !== null) {
       window.clearInterval(pollTimerRef.current)
       pollTimerRef.current = null
+    }
+  }
+
+  function startDeploymentPolling() {
+    if (deploymentPollTimerRef.current !== null) return
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/project/generate-deployment/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+        const d = await r.json().catch(() => ({}))
+        if (r.status === 404 || d.status === 'idle') {
+          stopDeploymentPolling()
+          setGeneratingDeployment(false)
+          return
+        }
+        if (d.status === 'running') return
+        if (d.status === 'done') {
+          stopDeploymentPolling()
+          setGeneratingDeployment(false)
+          fetchProject()
+          return
+        }
+        if (d.status === 'error') {
+          stopDeploymentPolling()
+          setGeneratingDeployment(false)
+          setGenerateDeploymentError(d.error || 'generation failed')
+          return
+        }
+      } catch {
+        // network blip — keep polling
+      }
+    }
+    void tick()
+    deploymentPollTimerRef.current = window.setInterval(tick, 2000)
+  }
+
+  function stopDeploymentPolling() {
+    if (deploymentPollTimerRef.current !== null) {
+      window.clearInterval(deploymentPollTimerRef.current)
+      deploymentPollTimerRef.current = null
+    }
+  }
+
+  async function handleGenerateDeployment() {
+    setGenerateDeploymentError(null)
+    setGeneratingDeployment(true)
+    try {
+      const r = await fetch('/api/project/generate-deployment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (r.status === 202 || r.status === 409) {
+        startDeploymentPolling()
+        return
+      }
+      throw new Error(d.error || `HTTP ${r.status}`)
+    } catch (e) {
+      setGeneratingDeployment(false)
+      setGenerateDeploymentError(e instanceof Error ? e.message : 'Unknown error')
     }
   }
 
@@ -768,6 +845,91 @@ function ProjectDetail() {
                   <p className="text-xs text-muted-foreground">
                     This is a runbook (startup steps), not a list of test cases.
                   </p>
+                </div>
+              </>
+            )}
+          </section>
+
+          {/* Deployment.md — collapsible. Same pattern as Context and
+              Testing above. Has an AI Generate button in the empty state
+              (mirrors context.md's Initialize button) because deployment
+              config can be inferred from CI workflows and context.md. */}
+          <section className="mb-6">
+            {generateDeploymentError && (
+              <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
+                {generateDeploymentError}
+              </div>
+            )}
+            {project.deployment_md ? (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setDeploymentOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={deploymentOpen}
+                >
+                  {deploymentOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <span className="text-sm font-semibold text-foreground">Deployment</span>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+                    {(project.deployment_md.length / 1024).toFixed(1)}kb
+                  </span>
+                  {!deploymentOpen && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      · {previewMD(project.deployment_md)}
+                    </span>
+                  )}
+                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
+                    <MessageSquare className="w-3 h-3" />
+                    Edit via chat
+                  </span>
+                </button>
+                {deploymentOpen && (
+                  <div className="px-4 pb-4 pt-0 border-t border-border">
+                    <Markdown>{project.deployment_md}</Markdown>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-foreground">Deployment</h2>
+                  <span className="text-xs text-muted-foreground">
+                    Runtime environment, log retrieval, health indicators
+                  </span>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">deployment.md</code> yet.
+                    Describe how to inspect the runtime (logs, metrics, SSH/kubectl) so the PM can assess live health.
+                  </p>
+                  <div className="flex items-center justify-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={handleGenerateDeployment}
+                      disabled={generatingDeployment || !project.repos?.length}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                        'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
+                      )}
+                    >
+                      {generatingDeployment ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                      {generatingDeployment ? 'Generating…' : 'Generate deployment.md'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      Draft via chat
+                    </button>
+                  </div>
+                  {!project.repos?.length && (
+                    <p className="text-xs text-muted-foreground">Add at least one repo first.</p>
+                  )}
+                  {generatingDeployment && (
+                    <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
+                  )}
                 </div>
               </>
             )}

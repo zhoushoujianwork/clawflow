@@ -201,6 +201,8 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/project/remove-repo", api.HandleProjectRemoveRepo)
 			mux.HandleFunc("/api/project/generate-context", api.HandleProjectGenerateContext)
 			mux.HandleFunc("/api/project/generate-context/status", api.HandleProjectGenerateContextStatus)
+			mux.HandleFunc("/api/project/generate-deployment", api.HandleProjectGenerateDeployment)
+			mux.HandleFunc("/api/project/generate-deployment/status", api.HandleProjectGenerateDeploymentStatus)
 			mux.HandleFunc("/api/project/automation", api.HandleProjectAutomation)
 			mux.HandleFunc("/api/project/get", api.HandleProjectGet)
 			mux.HandleFunc("/api/project/health-check/run", api.HandleProjectHealthCheckRun)
