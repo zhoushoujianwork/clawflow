@@ -59,6 +59,7 @@ type settingsView struct {
 		GithubCloneDir      string   `json:"github_clone_dir,omitempty"`
 		GitlabCloneDir      string   `json:"gitlab_clone_dir,omitempty"`
 		GitLabURL           string   `json:"gitlab_url,omitempty"`
+		Terminal            string   `json:"terminal,omitempty"`
 	} `json:"global"`
 }
 
@@ -103,6 +104,7 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	if len(cfg.Settings.GitLabHosts) > 0 {
 		v.Global.GitLabURL = cfg.Settings.GitLabHosts[0]
 	}
+	v.Global.Terminal = cfg.Settings.Terminal
 
 	writeJSON(w, 200, v)
 }
@@ -243,6 +245,7 @@ type globalUpdate struct {
 	GithubCloneDir      *string `json:"github_clone_dir,omitempty"`
 	GitlabCloneDir      *string `json:"gitlab_clone_dir,omitempty"`
 	GitLabURL           *string `json:"gitlab_url,omitempty"`
+	Terminal            *string `json:"terminal,omitempty"`
 }
 
 // HandleUpdateGlobalSettings handles POST /api/settings/global.
@@ -297,6 +300,9 @@ func HandleUpdateGlobalSettings(w http.ResponseWriter, r *http.Request) {
 		} else {
 			cfg.Settings.GitLabHosts = []string{url}
 		}
+	}
+	if req.Terminal != nil {
+		cfg.Settings.Terminal = strings.TrimSpace(*req.Terminal)
 	}
 	if err := cfg.Save(); err != nil {
 		writeErr(w, err)

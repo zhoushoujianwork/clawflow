@@ -70,6 +70,14 @@ type Settings struct {
 	// user explicitly stopped.
 	RunPaused bool `yaml:"run_paused,omitempty"`
 
+	// Terminal selects which terminal emulator `clawflow web` opens for
+	// chat sessions. Supported values:
+	//   ""          / "system" — platform default (Terminal.app on macOS)
+	//   "vscode"    — VS Code integrated terminal (supports image paste)
+	//   "iterm"     — iTerm2 on macOS
+	//   custom path — any executable; invoked as `<path> -e <cmdLine>`
+	Terminal string `yaml:"terminal,omitempty"`
+
 	// BillingCycleDay is the day of month (1-28) when a billing period
 	// starts. Usage is aggregated into monthly periods aligned to this
 	// day. 0 or unset defaults to 1 (calendar month).

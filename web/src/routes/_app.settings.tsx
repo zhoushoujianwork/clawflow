@@ -25,6 +25,7 @@ interface SettingsView {
     github_clone_dir?: string
     gitlab_clone_dir?: string
     gitlab_url?: string
+    terminal?: string
   }
 }
 
@@ -494,6 +495,7 @@ function GlobalSection({
   const [ghDir, setGhDir] = useState(view.github_clone_dir ?? '')
   const [glDir, setGlDir] = useState(view.gitlab_clone_dir ?? '')
   const [gitlabURL, setGitlabURL] = useState(view.gitlab_url ?? '')
+  const [terminal, setTerminal] = useState(view.terminal ?? '')
   const [busy, setBusy] = useState(false)
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
@@ -507,6 +509,7 @@ function GlobalSection({
     setGhDir(view.github_clone_dir ?? '')
     setGlDir(view.gitlab_clone_dir ?? '')
     setGitlabURL(view.gitlab_url ?? '')
+    setTerminal(view.terminal ?? '')
   }, [view])
 
   const dirty =
@@ -517,7 +520,8 @@ function GlobalSection({
     runInterval !== view.run_interval_minutes ||
     ghDir !== (view.github_clone_dir ?? '') ||
     glDir !== (view.gitlab_clone_dir ?? '') ||
-    gitlabURL !== (view.gitlab_url ?? '')
+    gitlabURL !== (view.gitlab_url ?? '') ||
+    terminal !== (view.terminal ?? '')
 
   const save = () => {
     setBusy(true); setSaveMsg(null)
@@ -533,6 +537,7 @@ function GlobalSection({
         github_clone_dir: ghDir,
         gitlab_clone_dir: glDir,
         gitlab_url: gitlabURL,
+        terminal: terminal,
       }),
     })
       .then(async r => {
@@ -583,6 +588,19 @@ function GlobalSection({
           placeholder="https://gitlab.com or http://git.internal.com:8080"
           className="flex-1 text-sm font-mono px-2 py-1 border border-border rounded bg-background"
         />
+      </Row>
+      <Row label="Chat terminal" hint="Terminal used for chat sessions. VS Code supports image paste.">
+        <select
+          value={terminal}
+          onChange={e => setTerminal(e.target.value)}
+          className="flex-1 text-sm px-2 py-1 border border-border rounded bg-background"
+        >
+          <option value="">System default (Terminal.app / xterm)</option>
+          <option value="vscode">VS Code (supports image paste)</option>
+          <option value="cursor">Cursor (supports image paste)</option>
+          <option value="qoder">Qoder (supports image paste)</option>
+          <option value="iterm">iTerm2 (macOS)</option>
+        </select>
       </Row>
 
       <div className="flex items-center gap-2 pt-2">
