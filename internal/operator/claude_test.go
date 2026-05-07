@@ -2,6 +2,7 @@ package operator
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -156,5 +157,83 @@ func TestParseClaudeStream_MultipleMarkerTurns_LastWins(t *testing.T) {
 	label, _ := parseOutcome(got)
 	if label != "agent-evaluated" {
 		t.Errorf("last marker turn should win; got label %q", label)
+	}
+}
+
+func TestIsRateLimitError(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		output  string
+		want    bool
+	}{
+		{
+			name:   "nil error",
+			err:    nil,
+			output: "",
+			want:   false,
+		},
+		{
+			name:   "generic exit status 1",
+			err:    errors.New("claude: exit status 1"),
+			output: "some unrelated error",
+			want:   false,
+		},
+		{
+			name:   "hit your limit in output",
+			err:    errors.New("claude: exit status 1"),
+			output: "You've hit your limit · resets 3:20am (Asia/Shanghai)",
+			want:   true,
+		},
+		{
+			name:   "hit your limit case-insensitive",
+			err:    errors.New("claude: exit status 1"),
+			output: "YOU'VE HIT YOUR LIMIT",
+			want:   true,
+		},
+		{
+			name:   "rate_limit_error in err",
+			err:    errors.New("claude: rate_limit_error"),
+			output: "",
+			want:   true,
+		},
+		{
+			name:   "429 in output",
+			err:    errors.New("claude: exit status 1"),
+			output: "HTTP 429 Too Many Requests",
+			want:   true,
+		},
+		{
+			name:   "usage limit reached",
+			err:    errors.New("claude: exit status 1"),
+			output: "Usage limit reached for this billing period",
+			want:   true,
+		},
+		{
+			name:   "credit balance is too low",
+			err:    errors.New("claude: exit status 1"),
+			output: "Credit balance is too low to run this request",
+			want:   true,
+		},
+		{
+			name:   "quota exceeded",
+			err:    errors.New("claude: exit status 1"),
+			output: "quota exceeded",
+			want:   true,
+		},
+		{
+			name:   "overloaded_error",
+			err:    errors.New("claude: exit status 1"),
+			output: "overloaded_error: API is temporarily overloaded",
+			want:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsRateLimitError(tc.err, tc.output)
+			if got != tc.want {
+				t.Errorf("IsRateLimitError(%v, %q) = %v, want %v", tc.err, tc.output, got, tc.want)
+			}
+		})
 	}
 }
