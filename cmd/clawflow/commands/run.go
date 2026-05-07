@@ -471,6 +471,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	}
 	defer snapshot.ReleaseLock(j.repo, j.sub.Number)
 
+	// Re-fetch the issue's current labels to guard against the race where
+	// labels were added between the initial poll and now (e.g. user manually
+	// labelled the issue while classify was already queued).
+	if freshLabels, err := j.client.GetIssueLabels(j.repo, j.sub.Number); err == nil {
+		freshSub := *j.sub
+		freshSub.Labels = freshLabels
+		if ok, reason := operator.MatchesWithReason(&freshSub, j.op); !ok {
+			fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
+			return false
+		}
+	}
+
 	// Persist per-run events.jsonl + meta.json under the dashboard
 	// data dir so `clawflow web` can replay this run later. The dirs
 	// and the placeholder meta are created BEFORE the workdir setup so

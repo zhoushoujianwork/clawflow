@@ -175,6 +175,10 @@ func (c *Client) getIssueLabels(repo string, issueNumber int) ([]string, error) 
 	return raw.Labels, nil
 }
 
+func (c *Client) GetIssueLabels(repo string, issueNumber int) ([]string, error) {
+	return c.getIssueLabels(repo, issueNumber)
+}
+
 func (c *Client) AddLabel(repo string, issueNumber int, labels ...string) error {
 	current, err := c.getIssueLabels(repo, issueNumber)
 	if err != nil {

@@ -111,6 +111,7 @@ type Client interface {
 	GetParentIssue(repo string, issueNumber int) (*Issue, error)
 
 	// Labels
+	GetIssueLabels(repo string, issueNumber int) ([]string, error)
 	AddLabel(repo string, issueNumber int, labels ...string) error
 	RemoveLabel(repo string, issueNumber int, labels ...string) error
 	InitLabels(repo string, labels []Label) error

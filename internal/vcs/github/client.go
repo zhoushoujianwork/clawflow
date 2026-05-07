@@ -151,6 +151,32 @@ func (c *Client) PRExistsForIssue(repo string, issueNumber int) (bool, error) {
 	return false, nil
 }
 
+func (c *Client) GetIssueLabels(repo string, issueNumber int) ([]string, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/labels", owner, name, issueNumber)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github get issue labels: HTTP %d: %s", status, data)
+	}
+	var raw []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	labels := make([]string, len(raw))
+	for i, l := range raw {
+		labels[i] = l.Name
+	}
+	return labels, nil
+}
+
 func (c *Client) AddLabel(repo string, issueNumber int, labels ...string) error {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
