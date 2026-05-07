@@ -773,7 +773,7 @@ function SyncSection() {
   return (
     <Card
       title="Sync"
-      hint="Sync repos and settings across machines via a private GitHub Gist. Credentials and local_path are never synced."
+      hint="Sync repos, settings, and project knowledge files across machines via a private GitHub Gist. Credentials and local_path stay local."
     >
       {loadErr && (
         <div className="text-xs text-red-700 bg-red-50 border border-red-200 px-2 py-1.5 rounded">
@@ -946,9 +946,38 @@ function SyncSection() {
       )}
 
       {/* Info text */}
-      <div className="text-[11px] text-muted-foreground/80 pt-1 space-y-0.5 border-t border-border mt-1">
-        <p><span className="font-medium text-muted-foreground">Synced:</span> repos list, global settings, operator config.</p>
-        <p><span className="font-medium text-muted-foreground">Never synced:</span> credentials (tokens, API keys) and local_path overrides — these stay local.</p>
+      <div className="text-[11px] text-muted-foreground/80 pt-2 space-y-1.5 border-t border-border mt-1">
+        <p>
+          <span className="font-medium text-muted-foreground">Synced:</span>{' '}
+          <code className="text-[10px] bg-secondary px-1 rounded">config.yaml</code> (repos, settings, operator config) plus project knowledge files
+          (<code className="text-[10px] bg-secondary px-1 rounded">.md</code>, <code className="text-[10px] bg-secondary px-1 rounded">.yaml</code>)
+          under <code className="text-[10px] bg-secondary px-1 rounded">~/.clawflow/projects/&lt;name&gt;/</code> — e.g. CLAUDE.md, context.md, testing.md, project.yaml.
+        </p>
+        <p>
+          <span className="font-medium text-muted-foreground">Never synced:</span>{' '}
+          credentials (tokens, API keys), <code className="text-[10px] bg-secondary px-1 rounded">local_path</code> overrides,
+          and runtime caches (<code className="text-[10px] bg-secondary px-1 rounded">health-check.json</code>, <code className="text-[10px] bg-secondary px-1 rounded">generate-*.json</code>).
+        </p>
+        <details className="pt-1">
+          <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">How it works</summary>
+          <div className="pt-1.5 space-y-1 pl-2">
+            <p>
+              Gist is a flat namespace, so paths are encoded with <code className="text-[10px] bg-secondary px-1 rounded">--</code> as separator:
+              <code className="text-[10px] bg-secondary px-1 rounded ml-1">projects/clawflow/context.md</code>
+              {' '}↔{' '}
+              <code className="text-[10px] bg-secondary px-1 rounded">projects--clawflow--context.md</code>.
+            </p>
+            <p>
+              Pull is cloud-wins for individual files; <code className="text-[10px] bg-secondary px-1 rounded">repos</code> entries are union-merged
+              so each machine keeps its own <code className="text-[10px] bg-secondary px-1 rounded">local_path</code>.
+            </p>
+            <p>
+              Auto-push runs after <code className="text-[10px] bg-secondary px-1 rounded">clawflow run</code>; auto-pull runs at
+              <code className="text-[10px] bg-secondary px-1 rounded ml-1">clawflow web</code> /
+              <code className="text-[10px] bg-secondary px-1 rounded ml-1">run</code> boot.
+            </p>
+          </div>
+        </details>
       </div>
     </Card>
   )
