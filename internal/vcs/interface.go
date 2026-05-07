@@ -1,6 +1,12 @@
 // Package vcs defines the platform-agnostic VCS client interface.
 package vcs
 
+import "errors"
+
+// ErrNotSupported is returned by platform implementations for operations
+// that have no equivalent on that platform (e.g. sub-issues on GitLab).
+var ErrNotSupported = errors.New("operation not supported on this platform")
+
 // IssueComment represents a single comment on an issue.
 type IssueComment struct {
 	ID        int64  `json:"id"`
@@ -11,6 +17,7 @@ type IssueComment struct {
 
 // Issue represents a VCS issue/ticket.
 type Issue struct {
+	ID        int64    `json:"id,omitempty"`  // platform internal ID (GitHub: id, GitLab: id); used for sub-issue API
 	Number    int      `json:"number"`
 	Title     string   `json:"title"`
 	Body      string   `json:"body"`
@@ -92,6 +99,16 @@ type Client interface {
 	// `clawflow issue search` so operators / PM can pull historical
 	// related issues into evaluation context.
 	SearchIssues(repo, query, state string, limit int) ([]Issue, error)
+
+	// Sub-issues (GitHub native; GitLab returns ErrNotSupported).
+	// AddSubIssue links subIssueID (Issue.ID, the platform internal id)
+	// as a child of parentNumber.
+	AddSubIssue(repo string, parentNumber int, subIssueID int64) error
+	// ListSubIssues returns all sub-issues of the given issue.
+	ListSubIssues(repo string, issueNumber int) ([]Issue, error)
+	// GetParentIssue returns the parent issue of the given issue, or
+	// ErrNotSupported / nil if there is no parent.
+	GetParentIssue(repo string, issueNumber int) (*Issue, error)
 
 	// Labels
 	AddLabel(repo string, issueNumber int, labels ...string) error

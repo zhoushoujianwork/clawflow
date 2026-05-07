@@ -692,6 +692,35 @@ func runPostAutomation(j *runJob, outcome, output, prefix string) {
 		// top was redundant noise.
 		fmt.Fprintf(os.Stderr, "%s ✓ auto-merged PR #%d\n", prefix, prNum)
 	}
+
+	// Tracking issue: after decompose creates sub-issues, add progress-check
+	// so track-progress fires on the next run.
+	if outcome == "agent-decomposed" {
+		if err := j.client.AddLabel(j.repo, j.sub.Number, "progress-check"); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ progress-check label failed: %v\n", prefix, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s ✓ progress-check added\n", prefix)
+		}
+	}
+
+	// Tracking issue: sub-issues still pending — re-add progress-check so
+	// track-progress fires again on the next run.
+	if outcome == "agent-watching" {
+		if err := j.client.AddLabel(j.repo, j.sub.Number, "progress-check"); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ re-add progress-check failed: %v\n", prefix, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s ✓ progress-check re-added (sub-issues pending)\n", prefix)
+		}
+	}
+
+	// Tracking issue: all sub-issues done — close the parent issue.
+	if outcome == "agent-closed" {
+		if err := j.client.CloseIssue(j.repo, j.sub.Number); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ auto-close tracking issue failed: %v\n", prefix, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s ✓ tracking issue closed\n", prefix)
+		}
+	}
 }
 
 func extractPRNumber(output string) int {

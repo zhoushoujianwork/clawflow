@@ -332,6 +332,7 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 		return vcs.Issue{}, fmt.Errorf("github create issue: HTTP %d: %s", status, data)
 	}
 	var raw struct {
+		ID     int64  `json:"id"`
 		Number int    `json:"number"`
 		Title  string `json:"title"`
 		Body   string `json:"body"`
@@ -339,7 +340,7 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.Issue{}, err
 	}
-	return vcs.Issue{Number: raw.Number, Title: raw.Title, Body: raw.Body}, nil
+	return vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Body: raw.Body}, nil
 }
 
 func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.Issue, error) {
@@ -744,6 +745,87 @@ func (c *Client) GetPRMergeability(repo string, prNumber int) (vcs.MergeStatus, 
 		return vcs.MergeStatusConflict, nil
 	}
 	return vcs.MergeStatusClean, nil
+}
+
+func (c *Client) AddSubIssue(repo string, parentNumber int, subIssueID int64) error {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/sub_issues", owner, name, parentNumber)
+	_, status, err := c.do("POST", path, map[string]any{"sub_issue_id": subIssueID})
+	if err != nil {
+		return err
+	}
+	if status != 200 && status != 201 {
+		return fmt.Errorf("github add sub-issue: HTTP %d", status)
+	}
+	return nil
+}
+
+func (c *Client) ListSubIssues(repo string, issueNumber int) ([]vcs.Issue, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/sub_issues", owner, name, issueNumber)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github list sub-issues: HTTP %d", status)
+	}
+	var raw []struct {
+		ID     int64  `json:"id"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		State  string `json:"state"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	issues := make([]vcs.Issue, len(raw))
+	for i, r := range raw {
+		labels := make([]string, len(r.Labels))
+		for j, l := range r.Labels {
+			labels[j] = l.Name
+		}
+		issues[i] = vcs.Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, Labels: labels}
+	}
+	return issues, nil
+}
+
+func (c *Client) GetParentIssue(repo string, issueNumber int) (*vcs.Issue, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/parent", owner, name, issueNumber)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status == 404 {
+		return nil, nil // no parent
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github get parent issue: HTTP %d", status)
+	}
+	var raw struct {
+		ID     int64  `json:"id"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	return &vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, State: raw.State}, nil
 }
 
 func splitRepo(repo string) (owner, name string, err error) {

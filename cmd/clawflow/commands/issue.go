@@ -24,6 +24,8 @@ func NewIssueCmd() *cobra.Command {
 	cmd.AddCommand(newIssueCommentListCmd())
 	cmd.AddCommand(newIssueCommentDeleteCmd())
 	cmd.AddCommand(newIssueCloseCmd())
+	cmd.AddCommand(newIssueAddSubCmd())
+	cmd.AddCommand(newIssueListSubCmd())
 	return cmd
 }
 
@@ -389,6 +391,91 @@ func newIssueCommentDeleteCmd() *cobra.Command {
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
 	cmd.Flags().Int64Var(&commentID, "comment-id", 0, "delete a specific comment by ID")
 	cmd.Flags().StringVar(&author, "author", "", "delete all comments by this author")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("issue")
+	return cmd
+}
+
+func newIssueAddSubCmd() *cobra.Command {
+	var repo string
+	var parent, sub int
+
+	cmd := &cobra.Command{
+		Use:     "add-sub",
+		Short:   "Add a sub-issue to a parent issue (GitHub only)",
+		Example: "  clawflow issue add-sub --repo owner/repo --parent 10 --sub 11",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			// Resolve the sub-issue's internal ID from its number.
+			issues, err := client.ListIssues(repo, "all", nil)
+			if err != nil {
+				return fmt.Errorf("list issues: %w", err)
+			}
+			var subID int64
+			for _, iss := range issues {
+				if iss.Number == sub {
+					subID = iss.ID
+					break
+				}
+			}
+			if subID == 0 {
+				return fmt.Errorf("issue #%d not found in %s", sub, repo)
+			}
+			if err := client.AddSubIssue(repo, parent, subID); err != nil {
+				return err
+			}
+			fmt.Printf("linked %s#%d as sub-issue of #%d\n", repo, sub, parent)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&parent, "parent", 0, "parent issue number (required)")
+	cmd.Flags().IntVar(&sub, "sub", 0, "sub-issue number (required)")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("parent")
+	_ = cmd.MarkFlagRequired("sub")
+	return cmd
+}
+
+func newIssueListSubCmd() *cobra.Command {
+	var repo string
+	var issue int
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:     "list-sub",
+		Short:   "List sub-issues of an issue (GitHub only)",
+		Example: "  clawflow issue list-sub --repo owner/repo --issue 10\n  clawflow issue list-sub --repo owner/repo --issue 10 --json",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			subs, err := client.ListSubIssues(repo, issue)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(subs)
+			}
+			if len(subs) == 0 {
+				fmt.Printf("no sub-issues for %s#%d\n", repo, issue)
+				return nil
+			}
+			for _, s := range subs {
+				fmt.Printf("#%d [%s] %s\n", s.Number, s.State, s.Title)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("issue")
 	return cmd

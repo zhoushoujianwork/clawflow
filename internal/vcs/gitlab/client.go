@@ -321,6 +321,7 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 		return vcs.Issue{}, fmt.Errorf("gitlab create issue: HTTP %d: %s", status, data)
 	}
 	var raw struct {
+		ID    int64  `json:"id"`
 		IID   int    `json:"iid"`
 		Title string `json:"title"`
 		Body  string `json:"description"`
@@ -328,7 +329,7 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.Issue{}, err
 	}
-	return vcs.Issue{Number: raw.IID, Title: raw.Title, Body: raw.Body}, nil
+	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body}, nil
 }
 
 func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.Issue, error) {
@@ -676,4 +677,16 @@ func (c *Client) InitLabels(repo string, labels []vcs.Label) error {
 		fmt.Printf("  [ok]   %s\n", l.Name)
 	}
 	return nil
+}
+
+func (c *Client) AddSubIssue(repo string, parentNumber int, subIssueID int64) error {
+	return vcs.ErrNotSupported
+}
+
+func (c *Client) ListSubIssues(repo string, issueNumber int) ([]vcs.Issue, error) {
+	return nil, vcs.ErrNotSupported
+}
+
+func (c *Client) GetParentIssue(repo string, issueNumber int) (*vcs.Issue, error) {
+	return nil, vcs.ErrNotSupported
 }

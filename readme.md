@@ -155,7 +155,42 @@ See [`CLAUDE.md`](CLAUDE.md) for the frontmatter schema and operator design prin
 
 ---
 
-## Project-Manager Automation (per-project, opt-in)
+## Tracking Issues & Sub-issues
+
+For large features that span multiple implementation tasks, ClawFlow supports a **tracking issue** pattern backed by GitHub's native sub-issue relationship.
+
+### How it works
+
+1. Create an issue and add the `tracking` label.
+2. Let it flow through `classify` → `evaluate-feat` → add `ready-for-agent`.
+3. The `decompose` operator fires, reads the issue body, creates sub-issues via `clawflow issue create` + `clawflow issue add-sub`, and posts a checklist comment.
+4. Sub-issues flow through the normal pipeline independently: `classify` → `evaluate` → `ready-for-agent` → `implement`.
+5. After each `clawflow run`, the `track-progress` operator checks sub-issue completion via `clawflow issue list-sub`. When all sub-issues are done, it emits `agent-closed` and ClawFlow closes the parent automatically.
+
+### Labels involved
+
+| Label | Role |
+|---|---|
+| `tracking` | Marks the parent issue; prevents `implement` from touching it directly |
+| `agent-decomposed` | Set after `decompose` creates sub-issues |
+| `progress-check` | Ephemeral trigger for `track-progress`; re-added each run until all sub-issues are done |
+| `agent-watching` | Outcome when sub-issues are still pending |
+| `agent-closed` | Terminal outcome; triggers automatic close of the parent issue |
+
+### CLI commands
+
+```bash
+# Link an existing issue as a sub-issue of a parent
+clawflow issue add-sub --repo owner/repo --parent 10 --sub 11
+
+# List all sub-issues of an issue
+clawflow issue list-sub --repo owner/repo --issue 10
+clawflow issue list-sub --repo owner/repo --issue 10 --json
+```
+
+GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return an error on GitLab repos. The `decompose` operator still creates the issues; `track-progress` falls back to parsing the checklist in the issue body.
+
+---
 
 For projects you want ClawFlow to actively schedule (not just react to labeled issues), enable the **project manager**:
 

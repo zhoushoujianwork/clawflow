@@ -1,10 +1,10 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw } from 'lucide-react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Copy, Check, Settings2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
-import { HealthCheckSummaryCard, useHealthCheck } from '../components/HealthCheckCard'
+import { useHealthCheck } from '../components/HealthCheckCard'
 import {
   IssueList,
   PROJECT_SECTIONS,
@@ -112,8 +112,15 @@ function ProjectDetail() {
 
   // PM runs state
   const [pmRuns, setPmRuns] = useState<PMRun[]>([])
-  const [pmRunsOpen, setPmRunsOpen] = useState(true)
+  const [pmRunsOpen, setPmRunsOpen] = useState(false)
+  const [pmRunsVisible, setPmRunsVisible] = useState(5)
   const [pmRunDetail, setPmRunDetail] = useState<PMRun | null>(null)
+  const [pmCopied, setPmCopied] = useState(false)
+
+  // Automation popover
+  const [automationPopoverOpen, setAutomationPopoverOpen] = useState(false)
+  // Health check popover
+  const [healthCheckPopoverOpen, setHealthCheckPopoverOpen] = useState(false)
 
   // Generate context state. Used only by the empty-state Initialize
   // button — once context.md exists, all further edits go through
@@ -523,38 +530,180 @@ function ProjectDetail() {
                     sections and still want a quick read on whether
                     automation is on and whether the docs are healthy. */}
                 <span>·</span>
-                <span
-                  className={cn(
-                    'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium',
-                    project.automation?.enabled
-                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
-                      : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400',
-                  )}
-                  title={project.automation?.enabled ? 'PM scheduling on — wakes after each clawflow run' : 'PM scheduling off'}
-                >
-                  <span
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => { setAutomationPopoverOpen(o => !o); setHealthCheckPopoverOpen(false) }}
                     className={cn(
-                      'inline-block w-1.5 h-1.5 rounded-full',
-                      project.automation?.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400',
+                      'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium transition-colors',
+                      project.automation?.enabled
+                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-950/60'
+                        : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700/60',
                     )}
-                  />
-                  PM {project.automation?.enabled ? 'on' : 'off'}
-                </span>
-                {healthCheck.status === 'done' && healthCheck.result?.outcome === 'healthy' && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">
-                    ✓ healthy
-                  </span>
-                )}
-                {healthCheck.status === 'done' && healthCheck.result?.outcome === 'changes-proposed' && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">
-                    ⚠ {healthCheck.result.changes.length} pending
-                  </span>
-                )}
-                {healthCheck.status === 'running' && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-400">
-                    <Loader2 className="w-2.5 h-2.5 animate-spin" /> health check running
-                  </span>
-                )}
+                    title="Automation settings"
+                  >
+                    <span
+                      className={cn(
+                        'inline-block w-1.5 h-1.5 rounded-full',
+                        project.automation?.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400',
+                      )}
+                    />
+                    PM {project.automation?.enabled ? 'on' : 'off'}
+                    <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
+                  </button>
+                  {automationPopoverOpen && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setAutomationPopoverOpen(false)} />
+                      <div className="absolute left-0 top-full mt-2 z-20 w-72 bg-card border border-border rounded-xl shadow-lg p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-sm font-semibold text-foreground">Automation</span>
+                          <button type="button" onClick={() => setAutomationPopoverOpen(false)} className="text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5" /></button>
+                        </div>
+                        <div className="flex items-center gap-3 mb-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const cd = parseInt(cooldownDraft, 10)
+                              saveAutomation(!project.automation?.enabled, isNaN(cd) ? 30 : cd)
+                            }}
+                            disabled={automationSaving}
+                            role="switch"
+                            aria-checked={project.automation?.enabled ?? false}
+                            className={cn(
+                              'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
+                              project.automation?.enabled ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700',
+                              automationSaving && 'opacity-50 cursor-not-allowed',
+                            )}
+                          >
+                            <span className={cn('inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform', project.automation?.enabled ? 'translate-x-5' : 'translate-x-0.5')} />
+                          </button>
+                          <span className={cn('text-sm font-medium', project.automation?.enabled ? 'text-emerald-700 dark:text-emerald-400' : 'text-slate-600 dark:text-slate-400')}>
+                            {project.automation?.enabled ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mb-3">
+                          When on, every <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code> pass wakes the PM. It can file new issues — never touches existing state.
+                        </p>
+                        {project.automation?.last_woken_at && (
+                          <p className="text-[11px] text-muted-foreground mb-3 tabular-nums">
+                            Last woken {new Date(project.automation.last_woken_at).toLocaleString()}
+                          </p>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <label className="text-xs text-muted-foreground shrink-0">Cooldown (min)</label>
+                          <input
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={cooldownDraft}
+                            onChange={e => setCooldownDraft(e.target.value)}
+                            className="w-16 px-2 py-1 bg-background border border-border rounded-lg text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const cd = parseInt(cooldownDraft, 10)
+                              saveAutomation(project.automation?.enabled ?? false, isNaN(cd) ? 30 : cd)
+                            }}
+                            disabled={automationSaving || parseInt(cooldownDraft, 10) === (project.automation?.cooldown_minutes ?? 30)}
+                            className="px-2 py-1 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        {automationError && <p className="mt-2 text-xs text-red-600">{automationError}</p>}
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="relative">
+                  {healthCheck.status === 'done' && healthCheck.result?.outcome === 'healthy' && (
+                    <button
+                      type="button"
+                      onClick={() => { setHealthCheckPopoverOpen(o => !o); setAutomationPopoverOpen(false) }}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-950/60 transition-colors"
+                    >
+                      ✓ healthy
+                      <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
+                    </button>
+                  )}
+                  {healthCheck.status === 'done' && healthCheck.result?.outcome === 'changes-proposed' && (
+                    <button
+                      type="button"
+                      onClick={() => { setHealthCheckPopoverOpen(o => !o); setAutomationPopoverOpen(false) }}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-950/60 transition-colors"
+                    >
+                      ⚠ {healthCheck.result.changes.length} pending
+                      <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
+                    </button>
+                  )}
+                  {healthCheck.status === 'running' && (
+                    <button
+                      type="button"
+                      onClick={() => { setHealthCheckPopoverOpen(o => !o); setAutomationPopoverOpen(false) }}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-950/60 transition-colors"
+                    >
+                      <Loader2 className="w-2.5 h-2.5 animate-spin" /> running
+                    </button>
+                  )}
+                  {healthCheck.status === 'idle' && (
+                    <button
+                      type="button"
+                      onClick={() => { setHealthCheckPopoverOpen(o => !o); setAutomationPopoverOpen(false) }}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700/60 transition-colors"
+                    >
+                      health check
+                      <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
+                    </button>
+                  )}
+                  {healthCheckPopoverOpen && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setHealthCheckPopoverOpen(false)} />
+                      <div className="absolute left-0 top-full mt-2 z-20 w-80 bg-card border border-border rounded-xl shadow-lg p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-sm font-semibold text-foreground">Health Check</span>
+                          <button type="button" onClick={() => setHealthCheckPopoverOpen(false)} className="text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5" /></button>
+                        </div>
+                        <p className="text-xs text-muted-foreground mb-3">
+                          Audits each repo's CLAUDE.md and project docs against a 12-dimension rubric.
+                        </p>
+                        {healthCheck.status === 'done' && healthCheck.endedAt && (
+                          <p className="text-[11px] text-muted-foreground mb-3 tabular-nums">
+                            Last run {new Date(healthCheck.endedAt).toLocaleString()}
+                          </p>
+                        )}
+                        {healthCheck.error && (
+                          <div className="mb-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
+                            {healthCheck.error}
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => { healthCheck.handleRun(); setHealthCheckPopoverOpen(false) }}
+                            disabled={healthCheck.status === 'running'}
+                            className={cn(
+                              'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                              'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
+                            )}
+                          >
+                            {healthCheck.status === 'running' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5" />}
+                            {healthCheck.status === 'running' ? 'Running…' : healthCheck.status === 'done' ? 'Re-run' : 'Run'}
+                          </button>
+                          {healthCheck.result?.outcome === 'changes-proposed' && (
+                            <button
+                              type="button"
+                              onClick={() => setHealthCheckPopoverOpen(false)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+                            >
+                              View changes
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
             {/* Delete button */}
@@ -590,7 +739,8 @@ function ProjectDetail() {
           </div>
 
           {/* PM Activity — collapsible log of recent PM wakes with
-              their PM-RESULT summaries, cost, and duration. */}
+              their PM-RESULT summaries, cost, and duration.
+              Shows 5 most recent by default; load-more expands. */}
           {pmRuns.length > 0 && (
             <section className="mb-6">
               <div className="bg-card border border-border rounded-xl overflow-hidden">
@@ -611,10 +761,33 @@ function ProjectDetail() {
                       · {pmRuns[0].result.replace(/^PM-RESULT:\s*/, '')}
                     </span>
                   )}
+                  {pmRunsOpen && (
+                    <button
+                      type="button"
+                      onClick={e => {
+                        e.stopPropagation()
+                        const text = pmRuns.map(r => {
+                          const ts = new Date(r.started_at).toLocaleString()
+                          const result = r.result ? r.result.replace(/^PM-RESULT:\s*/, '') : r.error ?? 'no result'
+                          const cost = r.usage ? ` $${r.usage.total_cost_usd.toFixed(2)}` : ''
+                          return `[${ts}]${cost} ${result}`
+                        }).join('\n')
+                        navigator.clipboard.writeText(text).then(() => {
+                          setPmCopied(true)
+                          setTimeout(() => setPmCopied(false), 2000)
+                        })
+                      }}
+                      className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors shrink-0"
+                      title="Copy all activity"
+                    >
+                      {pmCopied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                      {pmCopied ? 'Copied' : 'Copy'}
+                    </button>
+                  )}
                 </button>
                 {pmRunsOpen && (
                   <div className="border-t border-border divide-y divide-border">
-                    {pmRuns.map((run, i) => (
+                    {pmRuns.slice(0, pmRunsVisible).map((run, i) => (
                       <button
                         key={i}
                         type="button"
@@ -658,6 +831,15 @@ function ProjectDetail() {
                         )}
                       </button>
                     ))}
+                    {pmRuns.length > pmRunsVisible && (
+                      <button
+                        type="button"
+                        onClick={() => setPmRunsVisible(v => v + 10)}
+                        className="w-full px-4 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/20 transition-colors text-center"
+                      >
+                        Show {Math.min(10, pmRuns.length - pmRunsVisible)} more ({pmRuns.length - pmRunsVisible} remaining)
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -666,356 +848,8 @@ function ProjectDetail() {
 
           {pmRunDetail && <PMRunDetailModal run={pmRunDetail} onClose={() => setPmRunDetail(null)} />}
 
-          {/* Status row — Automation (config) on the left, Health
-              Check (status) on the right. Two short cards side by
-              side at lg+; stacks at smaller widths. The two together
-              answer "what is this project doing right now and what
-              needs attention". */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-          {/* Automation toggle — wakes the project-manager agent
-              after each `clawflow run` pass when enabled. PM can only
-              file new issues; existing issue state stays under
-              operator control. */}
-          <section className="flex flex-col">
-            <div className="flex items-center gap-2 mb-2">
-                <h2 className="text-sm font-semibold text-foreground">Automation</h2>
-                <span
-                  className={cn(
-                    'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium',
-                    project.automation?.enabled
-                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
-                      : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400',
-                  )}
-                >
-                  <span
-                    className={cn(
-                      'inline-block w-1.5 h-1.5 rounded-full',
-                      project.automation?.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400',
-                    )}
-                  />
-                  {project.automation?.enabled ? 'PM scheduling on' : 'PM scheduling off'}
-                </span>
-                {project.automation?.last_woken_at && (
-                  <span className="text-xs text-muted-foreground tabular-nums ml-auto">
-                    last woken {new Date(project.automation.last_woken_at).toLocaleString()}
-                  </span>
-                )}
-            </div>
-            <div
-              className={cn(
-                'rounded-xl p-4 border transition-colors flex-1',
-                project.automation?.enabled
-                  ? 'bg-emerald-50/50 border-emerald-200 dark:bg-emerald-950/10 dark:border-emerald-900/40'
-                  : 'bg-card border-border',
-              )}
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const cd = parseInt(cooldownDraft, 10)
-                        saveAutomation(!project.automation?.enabled, isNaN(cd) ? 30 : cd)
-                      }}
-                      disabled={automationSaving}
-                      role="switch"
-                      aria-checked={project.automation?.enabled ?? false}
-                      className={cn(
-                        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
-                        project.automation?.enabled ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700',
-                        automationSaving && 'opacity-50 cursor-not-allowed',
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          'inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform',
-                          project.automation?.enabled ? 'translate-x-5' : 'translate-x-0.5',
-                        )}
-                      />
-                    </button>
-                    <span
-                      className={cn(
-                        'text-sm font-semibold',
-                        project.automation?.enabled
-                          ? 'text-emerald-700 dark:text-emerald-400'
-                          : 'text-slate-600 dark:text-slate-400',
-                      )}
-                    >
-                      {project.automation?.enabled ? 'Enabled' : 'Disabled'}
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-2">
-                    When on, every <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code> pass wakes the project manager. The PM can file new issues to schedule work — it never touches existing issue state.
-                  </p>
-                </div>
-                <div className="flex flex-col gap-1">
-                  <label className="text-xs text-muted-foreground">Cooldown (min)</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={cooldownDraft}
-                      onChange={e => setCooldownDraft(e.target.value)}
-                      className="w-20 px-2 py-1 bg-background border border-border rounded-lg text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-primary"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const cd = parseInt(cooldownDraft, 10)
-                        saveAutomation(project.automation?.enabled ?? false, isNaN(cd) ? 30 : cd)
-                      }}
-                      disabled={
-                        automationSaving ||
-                        parseInt(cooldownDraft, 10) === (project.automation?.cooldown_minutes ?? 30)
-                      }
-                      className="px-2 py-1 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      Save
-                    </button>
-                  </div>
-                </div>
-              </div>
-              {automationError && (
-                <p className="mt-3 text-xs text-red-600">{automationError}</p>
-              )}
-            </div>
-          </section>
-
-          {/* Health Check summary — paired with Automation in the
-              status row. The full-width review panel (with diffs and
-              Apply UI) renders below the repo list when there are
-              changes to review; here we just show button + outcome. */}
-          <HealthCheckSummaryCard healthCheck={healthCheck} />
-          </div>
-
-          {/* Context.md — collapsible. Default collapsed because the
-              doc is often long enough to push the rest of the page out
-              of view. Header bar carries enough preview info (heading
-              or size) so the user knows whether it's worth opening.
-              Stays full-width (not paired with testing.md in a 2-col
-              grid) so the collapsed/expanded card never visually
-              merges with the status row above. */}
-          <section className="mb-3">
-            {generateError && (
-              <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
-                {generateError}
-              </div>
-            )}
-            {project.context_md ? (
-              <div className="bg-card border border-border rounded-xl overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setContextOpen(o => !o)}
-                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
-                  aria-expanded={contextOpen}
-                >
-                  {contextOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                  <span className="text-sm font-semibold text-foreground">Context</span>
-                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
-                    {(project.context_md.length / 1024).toFixed(1)}kb
-                  </span>
-                  {!contextOpen && (
-                    <span className="text-xs text-muted-foreground truncate">
-                      · {previewMD(project.context_md)}
-                    </span>
-                  )}
-                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
-                    <MessageSquare className="w-3 h-3" />
-                    Edit via chat
-                  </span>
-                </button>
-                {contextOpen && (
-                  <div className="px-4 pb-4 pt-0 border-t border-border">
-                    <Markdown>{project.context_md}</Markdown>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-sm font-semibold text-foreground">Context</h2>
-                </div>
-                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
-                  <p className="text-sm text-muted-foreground">
-                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">context.md</code> yet.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={handleInitialize}
-                    disabled={generating || !project.repos?.length}
-                    className={cn(
-                      'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
-                      'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
-                    )}
-                  >
-                    {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                    {generating ? 'Generating…' : 'Initialize context.md'}
-                  </button>
-                  {!project.repos?.length && (
-                    <p className="text-xs text-muted-foreground">Add at least one repo first.</p>
-                  )}
-                  {generating && (
-                    <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
-                  )}
-                </div>
-              </>
-            )}
-          </section>
-
-          {/* Testing.md — collapsible. Same pattern as Context above.
-              No AI auto-generation path; authored interactively via
-              project chat (the SOP relies on details only the user
-              knows: which serial port, which board, startup order). */}
-          <section className="mb-6">
-            {project.testing_md ? (
-              <div className="bg-card border border-border rounded-xl overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setTestingOpen(o => !o)}
-                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
-                  aria-expanded={testingOpen}
-                >
-                  {testingOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                  <span className="text-sm font-semibold text-foreground">Local environment SOP</span>
-                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
-                    {(project.testing_md.length / 1024).toFixed(1)}kb
-                  </span>
-                  {!testingOpen && (
-                    <span className="text-xs text-muted-foreground truncate">
-                      · {previewMD(project.testing_md)}
-                    </span>
-                  )}
-                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
-                    <MessageSquare className="w-3 h-3" />
-                    Edit via chat
-                  </span>
-                </button>
-                {testingOpen && (
-                  <div className="px-4 pb-4 pt-0 border-t border-border">
-                    <Markdown>{project.testing_md}</Markdown>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-sm font-semibold text-foreground">Local environment SOP</h2>
-                  <span className="text-xs text-muted-foreground">
-                    How to bring up the local runtime — startup order, services, hardware
-                  </span>
-                </div>
-                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
-                  <p className="text-sm text-muted-foreground">
-                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">testing.md</code> yet.
-                    Describe how to start your local env (frontend + backend + hardware/serial)
-                    so <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">implement</code> can verify changes locally.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
-                  >
-                    <MessageSquare className="w-3.5 h-3.5" />
-                    Draft via chat
-                  </button>
-                  <p className="text-xs text-muted-foreground">
-                    This is a runbook (startup steps), not a list of test cases.
-                  </p>
-                </div>
-              </>
-            )}
-          </section>
-
-          {/* Deployment.md — collapsible. Same pattern as Context and
-              Testing above. Has an AI Generate button in the empty state
-              (mirrors context.md's Initialize button) because deployment
-              config can be inferred from CI workflows and context.md. */}
-          <section className="mb-6">
-            {generateDeploymentError && (
-              <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
-                {generateDeploymentError}
-              </div>
-            )}
-            {project.deployment_md ? (
-              <div className="bg-card border border-border rounded-xl overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setDeploymentOpen(o => !o)}
-                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
-                  aria-expanded={deploymentOpen}
-                >
-                  {deploymentOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                  <span className="text-sm font-semibold text-foreground">Deployment</span>
-                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
-                    {(project.deployment_md.length / 1024).toFixed(1)}kb
-                  </span>
-                  {!deploymentOpen && (
-                    <span className="text-xs text-muted-foreground truncate">
-                      · {previewMD(project.deployment_md)}
-                    </span>
-                  )}
-                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
-                    <MessageSquare className="w-3 h-3" />
-                    Edit via chat
-                  </span>
-                </button>
-                {deploymentOpen && (
-                  <div className="px-4 pb-4 pt-0 border-t border-border">
-                    <Markdown>{project.deployment_md}</Markdown>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-sm font-semibold text-foreground">Deployment</h2>
-                  <span className="text-xs text-muted-foreground">
-                    Runtime environment, log retrieval, health indicators
-                  </span>
-                </div>
-                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
-                  <p className="text-sm text-muted-foreground">
-                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">deployment.md</code> yet.
-                    Describe how to inspect the runtime (logs, metrics, SSH/kubectl) so the PM can assess live health.
-                  </p>
-                  <div className="flex items-center justify-center gap-2 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={handleGenerateDeployment}
-                      disabled={generatingDeployment || !project.repos?.length}
-                      className={cn(
-                        'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
-                        'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
-                      )}
-                    >
-                      {generatingDeployment ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                      {generatingDeployment ? 'Generating…' : 'Generate deployment.md'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50"
-                    >
-                      <MessageSquare className="w-3.5 h-3.5" />
-                      Draft via chat
-                    </button>
-                  </div>
-                  {!project.repos?.length && (
-                    <p className="text-xs text-muted-foreground">Add at least one repo first.</p>
-                  )}
-                  {generatingDeployment && (
-                    <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
-                  )}
-                </div>
-              </>
-            )}
-          </section>
-
-          {/* Member repos — full width. Each entry needs horizontal
-              room for the auto-approve / auto-merge badges, so we
-              never pair this with anything in a side-by-side grid. */}
+          {/* Member repos — moved above automation/health-check so the
+              user sees the repo list before the config controls. */}
           <section className="mb-6">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-sm font-semibold text-foreground">
@@ -1104,11 +938,6 @@ function ProjectDetail() {
               </div>
             ) : (
               <>
-                {/* Automation rollup — surface auto_approve / auto_merge
-                    coverage across the project so the user can see at a
-                    glance which repos are fully autopiloted vs which still
-                    need manual approval/merge. Repo-level config; we only
-                    read it here, not edit. */}
                 {(() => {
                   const meta = project.repos.map(r => repoMeta[r] ?? null)
                   const known = meta.filter(m => m !== null) as RepoEntry[]
@@ -1157,7 +986,7 @@ function ProjectDetail() {
                                 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
                                 : 'bg-secondary text-muted-foreground',
                             )}
-                            title={m?.auto_approve ? 'auto_approve enabled — agent-evaluated → ready-for-agent automatically' : 'auto_approve off — needs manual ready-for-agent label'}
+                            title={m?.auto_approve ? 'auto_approve enabled' : 'auto_approve off'}
                           >
                             approve {m?.auto_approve ? 'on' : 'off'}
                           </span>
@@ -1168,7 +997,7 @@ function ProjectDetail() {
                                 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
                                 : 'bg-secondary text-muted-foreground',
                             )}
-                            title={m?.auto_merge ? 'auto_merge enabled — agent-implemented PRs auto-merged after CI' : 'auto_merge off — PR needs manual merge'}
+                            title={m?.auto_merge ? 'auto_merge enabled' : 'auto_merge off'}
                           >
                             merge {m?.auto_merge ? 'on' : 'off'}
                           </span>
@@ -1189,6 +1018,229 @@ function ProjectDetail() {
                       </div>
                     )
                   })}
+                </div>
+              </>
+            )}
+          </section>
+
+          {/* Context.md — collapsible. Default collapsed because the
+              doc is often long enough to push the rest of the page out
+              of view. Header bar carries enough preview info (heading
+              or size) so the user knows whether it's worth opening.
+              Stays full-width (not paired with testing.md in a 2-col
+              grid) so the collapsed/expanded card never visually
+              merges with the status row above. */}
+          <section className="mb-3">
+            {generateError && (
+              <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
+                {generateError}
+              </div>
+            )}
+            {project.context_md ? (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setContextOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={contextOpen}
+                >
+                  {contextOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <span className="text-sm font-semibold text-foreground">Context</span>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+                    {(project.context_md.length / 1024).toFixed(1)}kb
+                  </span>
+                  {!contextOpen && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      · {previewMD(project.context_md)}
+                    </span>
+                  )}
+                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
+                    <MessageSquare className="w-3 h-3" />
+                    Edit via chat
+                  </span>
+                </button>
+                {contextOpen && (
+                  <div className="px-4 pb-4 pt-0 border-t border-border">
+                    <Markdown>{project.context_md}</Markdown>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-foreground">Context</h2>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">context.md</code> yet.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleInitialize}
+                    disabled={generating || !project.repos?.length}
+                    className={cn(
+                      'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                      'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
+                    )}
+                  >
+                    {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    {generating ? 'Generating…' : 'Initialize context.md'}
+                  </button>
+                  {!project.repos?.length && (
+                    <p className="text-xs text-muted-foreground">Add at least one repo first.</p>
+                  )}
+                  {generating && (
+                    <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+
+          {/* Testing.md — collapsible. Same pattern as Context above.
+              No AI auto-generation path; authored interactively via
+              project chat (the SOP relies on details only the user
+              knows: which serial port, which board, startup order). */}
+          <section className="mb-3">
+            {project.testing_md ? (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setTestingOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={testingOpen}
+                >
+                  {testingOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <span className="text-sm font-semibold text-foreground">Local environment SOP</span>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+                    {(project.testing_md.length / 1024).toFixed(1)}kb
+                  </span>
+                  {!testingOpen && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      · {previewMD(project.testing_md)}
+                    </span>
+                  )}
+                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
+                    <MessageSquare className="w-3 h-3" />
+                    Edit via chat
+                  </span>
+                </button>
+                {testingOpen && (
+                  <div className="px-4 pb-4 pt-0 border-t border-border">
+                    <Markdown>{project.testing_md}</Markdown>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-foreground">Local environment SOP</h2>
+                  <span className="text-xs text-muted-foreground">
+                    How to bring up the local runtime — startup order, services, hardware
+                  </span>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">testing.md</code> yet.
+                    Describe how to start your local env (frontend + backend + hardware/serial)
+                    so <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">implement</code> can verify changes locally.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    Draft via chat
+                  </button>
+                  <p className="text-xs text-muted-foreground">
+                    This is a runbook (startup steps), not a list of test cases.
+                  </p>
+                </div>
+              </>
+            )}
+          </section>
+
+          {/* Deployment.md — collapsible. Same pattern as Context and
+              Testing above. Has an AI Generate button in the empty state
+              (mirrors context.md's Initialize button) because deployment
+              config can be inferred from CI workflows and context.md. */}
+          <section className="mb-3">
+            {generateDeploymentError && (
+              <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
+                {generateDeploymentError}
+              </div>
+            )}
+            {project.deployment_md ? (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setDeploymentOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={deploymentOpen}
+                >
+                  {deploymentOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <span className="text-sm font-semibold text-foreground">Deployment</span>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+                    {(project.deployment_md.length / 1024).toFixed(1)}kb
+                  </span>
+                  {!deploymentOpen && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      · {previewMD(project.deployment_md)}
+                    </span>
+                  )}
+                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
+                    <MessageSquare className="w-3 h-3" />
+                    Edit via chat
+                  </span>
+                </button>
+                {deploymentOpen && (
+                  <div className="px-4 pb-4 pt-0 border-t border-border">
+                    <Markdown>{project.deployment_md}</Markdown>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-foreground">Deployment</h2>
+                  <span className="text-xs text-muted-foreground">
+                    Runtime environment, log retrieval, health indicators
+                  </span>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">deployment.md</code> yet.
+                    Describe how to inspect the runtime (logs, metrics, SSH/kubectl) so the PM can assess live health.
+                  </p>
+                  <div className="flex items-center justify-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={handleGenerateDeployment}
+                      disabled={generatingDeployment || !project.repos?.length}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                        'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
+                      )}
+                    >
+                      {generatingDeployment ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                      {generatingDeployment ? 'Generating…' : 'Generate deployment.md'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      Draft via chat
+                    </button>
+                  </div>
+                  {!project.repos?.length && (
+                    <p className="text-xs text-muted-foreground">Add at least one repo first.</p>
+                  )}
+                  {generatingDeployment && (
+                    <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
+                  )}
                 </div>
               </>
             )}
