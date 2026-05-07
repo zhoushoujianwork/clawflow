@@ -2,6 +2,15 @@
 // config to/from a private GitHub Gist. Both the CLI commands (sync push/pull,
 // login) and the HTTP API handlers reuse these functions so the logic lives
 // in exactly one place.
+//
+// In addition to config.yaml, the sync package also handles project-level
+// knowledge assets stored under ~/.clawflow/projects/<name>/. Since Gist is
+// flat (no directories), a "--" delimiter convention maps directory paths to
+// filenames:
+//
+//	projects/<name>/context.md  →  projects--<name>--context.md
+//
+// See codec.go for the encoding details and projects.go for discovery/apply.
 package sync
 
 import (
@@ -41,6 +50,33 @@ func BuildGistContent() (string, error) {
 	return string(b), nil
 }
 
+// BuildAllGistFiles returns the complete set of files to upload to the Gist:
+// config.yaml plus all eligible project asset files discovered under
+// ~/.clawflow/projects/. The map key is the Gist filename; the value is the
+// file content.
+func BuildAllGistFiles() (map[string]string, error) {
+	configContent, err := BuildGistContent()
+	if err != nil {
+		return nil, fmt.Errorf("cannot build config payload: %w", err)
+	}
+
+	files := map[string]string{
+		config.GistConfigFilename: configContent,
+	}
+
+	projectFiles, err := DiscoverProjectAssets()
+	if err != nil {
+		// Non-fatal: log and continue with config-only push.
+		fmt.Fprintf(os.Stderr, "⚠ sync: cannot discover project assets: %v\n", err)
+	} else {
+		for k, v := range projectFiles {
+			files[k] = v
+		}
+	}
+
+	return files, nil
+}
+
 // FetchGistContent retrieves the config.yaml content from the given Gist.
 func FetchGistContent(gh *github.Client, gistID string) ([]byte, error) {
 	gist, err := gh.GetGist(gistID)
@@ -54,11 +90,45 @@ func FetchGistContent(gh *github.Client, gistID string) ([]byte, error) {
 	return []byte(f.Content), nil
 }
 
+// FetchAndApplyProjectAssets fetches the Gist and writes any project asset
+// files (those whose filename matches the "projects--*" convention) back to
+// their correct local paths under ~/.clawflow/projects/. Directories are
+// created as needed. Existing files are overwritten (cloud-wins).
+//
+// This is called alongside FetchGistContent + ApplyGistConfig during pull so
+// that project knowledge assets are restored on a new machine.
+func FetchAndApplyProjectAssets(gh *github.Client, gistID string) error {
+	gist, err := gh.GetGist(gistID)
+	if err != nil {
+		return fmt.Errorf("cannot fetch Gist %s: %w", gistID, err)
+	}
+
+	// Convert github.GistFile map to our internal GistFileContent map.
+	files := make(map[string]GistFileContent, len(gist.Files))
+	for name, f := range gist.Files {
+		files[name] = GistFileContent{Content: f.Content}
+	}
+
+	return ApplyProjectAssets(files)
+}
+
 // PushToGist uploads content to an existing Gist or creates a new one.
 // Returns the Gist ID (which may be newly created if none existed).
+//
+// Deprecated: prefer PushAllToGist which also syncs project assets.
 func PushToGist(gh *github.Client, gistID, content string) (string, error) {
 	files := map[string]string{config.GistConfigFilename: content}
+	return pushFiles(gh, gistID, files)
+}
 
+// PushAllToGist uploads config.yaml plus all project asset files to the Gist.
+// Returns the Gist ID (which may be newly created if none existed).
+func PushAllToGist(gh *github.Client, gistID string, files map[string]string) (string, error) {
+	return pushFiles(gh, gistID, files)
+}
+
+// pushFiles is the shared implementation for PushToGist and PushAllToGist.
+func pushFiles(gh *github.Client, gistID string, files map[string]string) (string, error) {
 	if gistID != "" {
 		// Try to update the existing Gist.
 		_, err := gh.UpdateGist(gistID, files)

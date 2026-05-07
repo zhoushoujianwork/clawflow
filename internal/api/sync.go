@@ -68,13 +68,13 @@ func HandleSyncPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := clawsync.BuildGistContent()
+	files, err := clawsync.BuildAllGistFiles()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, syncPushResponse{Error: "cannot build config payload: " + err.Error()})
+		writeJSON(w, http.StatusInternalServerError, syncPushResponse{Error: "cannot build sync payload: " + err.Error()})
 		return
 	}
 
-	newGistID, err := clawsync.PushToGist(gh, gistID, content)
+	newGistID, err := clawsync.PushAllToGist(gh, gistID, files)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, syncPushResponse{Error: err.Error()})
 		return
@@ -132,6 +132,11 @@ func HandleSyncPull(w http.ResponseWriter, r *http.Request) {
 	if err := config.ApplyGistConfig(remoteYAML); err != nil {
 		writeJSON(w, http.StatusInternalServerError, syncPullResponse{Error: "merge failed: " + err.Error()})
 		return
+	}
+
+	if err := clawsync.FetchAndApplyProjectAssets(gh, gistID); err != nil {
+		// Non-fatal: config was already applied; surface as a warning in the response.
+		fmt.Fprintf(os.Stderr, "⚠ sync pull: could not restore project assets: %v\n", err)
 	}
 
 	// Record the sync timestamp.
@@ -280,6 +285,10 @@ func AutoPull() bool {
 		fmt.Fprintf(os.Stderr, "⚠ auto-pull: apply config: %v\n", err)
 		return false
 	}
+	if err := clawsync.FetchAndApplyProjectAssets(gh, gistID); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ auto-pull: restore project assets: %v\n", err)
+		// Non-fatal: config was applied; continue.
+	}
 	_ = recordLastSynced()
 	return true
 }
@@ -292,12 +301,12 @@ func AutoPush() bool {
 	if err != nil {
 		return false
 	}
-	content, err := clawsync.BuildGistContent()
+	files, err := clawsync.BuildAllGistFiles()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ auto-push: build content: %v\n", err)
 		return false
 	}
-	newGistID, err := clawsync.PushToGist(gh, gistID, content)
+	newGistID, err := clawsync.PushAllToGist(gh, gistID, files)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ auto-push: push Gist: %v\n", err)
 		return false
