@@ -34,7 +34,7 @@ type syncableRepo struct {
 	AutoMerge             bool              `yaml:"auto_merge,omitempty"`
 	AutoApprove           bool              `yaml:"auto_approve,omitempty"`
 	AutoEvaluateAllIssues bool              `yaml:"auto_evaluate_all_issues,omitempty"`
-	// local_path is intentionally absent — never synced.
+	// local_path and bound_machine are intentionally absent — machine-specific, never synced.
 }
 
 // toSyncable converts a Repo to its syncable representation (strips local_path).
@@ -58,8 +58,9 @@ func toSyncable(r Repo) syncableRepo {
 	}
 }
 
-// fromSyncable converts a syncableRepo back to a Repo, preserving the given local_path.
-func fromSyncable(s syncableRepo, localPath string) Repo {
+// fromSyncable converts a syncableRepo back to a Repo, preserving the given
+// local_path and bound_machine (both are machine-specific and never synced).
+func fromSyncable(s syncableRepo, localPath, boundMachine string) Repo {
 	return Repo{
 		Enabled:               s.Enabled,
 		Platform:              s.Platform,
@@ -77,6 +78,7 @@ func fromSyncable(s syncableRepo, localPath string) Repo {
 		AutoMerge:             s.AutoMerge,
 		AutoApprove:           s.AutoApprove,
 		AutoEvaluateAllIssues: s.AutoEvaluateAllIssues,
+		BoundMachine:          boundMachine,
 	}
 }
 
@@ -126,13 +128,14 @@ func MergeConfigs(local *Config, remoteYAML []byte) (*Config, error) {
 		merged.Repos[k] = v
 	}
 
-	// Apply remote repos: union merge, local_path preserved from local copy.
+	// Apply remote repos: union merge, local_path and bound_machine preserved from local copy.
 	for k, remoteRepo := range remote.Repos {
-		localPath := ""
+		var localPath, boundMachine string
 		if existing, ok := local.Repos[k]; ok {
 			localPath = existing.LocalPath
+			boundMachine = existing.BoundMachine
 		}
-		merged.Repos[k] = fromSyncable(remoteRepo, localPath)
+		merged.Repos[k] = fromSyncable(remoteRepo, localPath, boundMachine)
 	}
 
 	return merged, nil
