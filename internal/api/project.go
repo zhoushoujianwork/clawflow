@@ -471,12 +471,14 @@ func HandleProjectGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, _ := project.ReadContext(name)
+	goals, _ := project.ReadGoals(name)
 	testing, _ := project.ReadTesting(name)
 	deployment, _ := project.ReadDeployment(name)
 	view := snapshot.ProjectView{
 		Name:       p.Name,
 		Repos:      p.Repos,
 		Context:    ctx,
+		Goals:      goals,
 		Testing:    testing,
 		Deployment: deployment,
 		Automation: snapshot.ProjectAutomationView{
@@ -550,6 +552,37 @@ func HandleProjectRemoveRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := project.RemoveRepo(req.Project, req.Repo); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	_ = snapshot.WriteProjects()
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+type projectWriteGoalsRequest struct {
+	Project string `json:"project"`
+	Content string `json:"content"`
+}
+
+// HandleProjectWriteGoals persists a goals.md draft from the dashboard's
+// chat-stream save path. The request carries the FULL document content
+// (the chat protocol mandates a complete fenced block, not a diff).
+func HandleProjectWriteGoals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req projectWriteGoalsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	name := strings.TrimSpace(req.Project)
+	if name == "" {
+		writeJSON(w, 400, map[string]string{"error": "project is required"})
+		return
+	}
+	if err := project.WriteGoals(name, req.Content); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	_ = snapshot.WriteProjects()

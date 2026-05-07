@@ -369,6 +369,22 @@ func ReadGoals(name string) (string, error) {
 	return string(data), nil
 }
 
+// WriteGoals writes content to the project's goals.md.
+func WriteGoals(name, content string) error {
+	dir := ProjectDir(name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(GoalsPath(name), []byte(content), 0o644); err != nil {
+		return err
+	}
+	ensureGit(name)
+	if err := CommitChange(name, "update goals.md"); err != nil {
+		fmt.Fprintf(os.Stderr, "[project] git commit skipped: %v\n", err)
+	}
+	return nil
+}
+
 // ParseAutoApprove checks whether goals.md contains "auto_approve: true".
 func ParseAutoApprove(goalsMD string) bool {
 	for _, line := range strings.Split(goalsMD, "\n") {
