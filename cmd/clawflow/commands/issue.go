@@ -8,6 +8,8 @@ import (
 	"sync"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+	githubpkg "github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -409,22 +411,21 @@ func newIssueAddSubCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Resolve the sub-issue's internal ID from its number.
-			issues, err := client.ListIssues(repo, "all", nil)
+			// Resolve the sub-issue's internal ID directly by number (avoids
+			// paginated list which misses recently-created issues).
+			creds, err := config.LoadCredentials()
 			if err != nil {
-				return fmt.Errorf("list issues: %w", err)
+				return fmt.Errorf("load credentials: %w", err)
 			}
-			var subID int64
-			for _, iss := range issues {
-				if iss.Number == sub {
-					subID = iss.ID
-					break
-				}
+			gh := githubpkg.New(creds.GHToken, "")
+			iss, err := gh.GetIssue(repo, sub)
+			if err != nil {
+				return fmt.Errorf("get issue: %w", err)
 			}
-			if subID == 0 {
+			if iss == nil {
 				return fmt.Errorf("issue #%d not found in %s", sub, repo)
 			}
-			if err := client.AddSubIssue(repo, parent, subID); err != nil {
+			if err := client.AddSubIssue(repo, parent, iss.ID); err != nil {
 				return err
 			}
 			fmt.Printf("linked %s#%d as sub-issue of #%d\n", repo, sub, parent)

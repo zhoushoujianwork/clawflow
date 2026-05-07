@@ -855,6 +855,35 @@ func (c *Client) GetParentIssue(repo string, issueNumber int) (*vcs.Issue, error
 	return &vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, State: raw.State}, nil
 }
 
+// GetIssue fetches a single issue by number.
+func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d", owner, name, number)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status == 404 {
+		return nil, nil
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github get issue: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		ID     int64  `json:"id"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	return &vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, State: raw.State}, nil
+}
+
 func splitRepo(repo string) (owner, name string, err error) {
 	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) != 2 {

@@ -290,6 +290,31 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("list open issues: %w", err)
 	}
+
+	// GitHub sub-issues are not returned by the standard /issues list API.
+	// Walk every open issue and append any sub-issues that aren't already
+	// in the list. Two levels deep covers the current tracking→sub→sub-sub
+	// pattern; deeper nesting is uncommon and can be added later.
+	seen := make(map[int]bool, len(issues))
+	for _, iss := range issues {
+		seen[iss.Number] = true
+	}
+	for _, iss := range issues {
+		subs, subErr := client.ListSubIssues(fullName, iss.Number)
+		if subErr != nil {
+			debugf("[%s] list sub-issues of #%d: %v (skipping)", fullName, iss.Number, subErr)
+			continue
+		}
+		for _, sub := range subs {
+			if seen[sub.Number] || sub.State != "open" {
+				continue
+			}
+			seen[sub.Number] = true
+			issues = append(issues, sub)
+			debugf("[%s] discovered sub-issue #%d (parent #%d)", fullName, sub.Number, iss.Number)
+		}
+	}
+
 	debugf("[%s] %d open issue(s) fetched (executeHere=%v onlyIssue=%d)",
 		fullName, len(issues), executeHere, onlyIssue)
 
