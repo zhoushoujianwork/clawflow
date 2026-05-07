@@ -566,7 +566,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (running): %v\n", prefix, err)
 	}
 
-	workdir, cleanup, err := resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt)
+	wtResult, cleanup, err := resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt)
 	if err != nil {
 		// Failure path: do NOT post a comment to the issue. The full
 		// error is captured in events.jsonl and the run row on the
@@ -583,7 +583,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		checkCircuitBreaker(j, prefix)
 		return false
 	}
-	fmt.Fprintf(os.Stderr, "%s ✓ workdir ready: %s\n", prefix, workdir)
+	workdir := wtResult.Path
+	if wtResult.Resumed {
+		fmt.Fprintf(os.Stderr, "%s ✓ workdir RESUMED: %s (branch: %s)\n", prefix, workdir, wtResult.BranchName)
+	} else {
+		fmt.Fprintf(os.Stderr, "%s ✓ workdir ready: %s\n", prefix, workdir)
+	}
 
 	comments, _ := j.client.ListIssueComments(j.repo, j.sub.Number)
 
@@ -597,13 +602,21 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	fmt.Fprintf(os.Stderr, "%s → claude (model %s, timeout %s)\n", prefix, model, timeout)
 	debugf("%s using model %q", prefix, model)
 	runStart := time.Now()
+
+	// Build resume context for the operator prompt when reusing a worktree.
+	var resumeCtx string
+	if wtResult.Resumed {
+		resumeCtx = buildResumeContext(wtResult)
+	}
+
 	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
-		Repo:        j.repo,
-		Workdir:     workdir,
-		Timeout:     timeout,
-		Comments:    comments,
-		Model:       model,
-		EventWriter: eventsFile,
+		Repo:          j.repo,
+		Workdir:       workdir,
+		Timeout:       timeout,
+		Comments:      comments,
+		Model:         model,
+		EventWriter:   eventsFile,
+		ResumeContext: resumeCtx,
 	})
 	runDur := time.Since(runStart).Round(time.Second)
 	if eventsFile != nil {
@@ -614,7 +627,6 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	} else {
 		fmt.Fprintf(os.Stderr, "%s ✓ claude finished in %s\n", prefix, runDur)
 	}
-	cleanup()
 
 	endedAt := time.Now().UTC()
 	rm := snapshot.RunMeta{
@@ -635,6 +647,16 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	default:
 		rm.Status = "success"
 	}
+
+	// Conditional cleanup: only remove the worktree on success/skip.
+	// On failure, preserve it so the next run can resume from the
+	// partial work instead of starting from scratch.
+	if rm.Status == "success" || rm.Status == "skipped" {
+		cleanup()
+	} else {
+		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
+	}
+
 	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil {
 		rm.Usage = u
 	}
@@ -660,6 +682,32 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 }
 
 var prURLRE = regexp.MustCompile(`(?:pull|merge_requests)/(\d+)`)
+
+// buildResumeContext produces a markdown section that tells the operator about
+// the existing partial work in the worktree. This is injected into the user
+// message so claude knows to continue rather than start from scratch.
+func buildResumeContext(wt worktreeResult) string {
+	var b strings.Builder
+	b.WriteString("## ⚠️ Resume Context (previous run was interrupted)\n\n")
+	b.WriteString("This worktree contains **partial work from a previous interrupted run**. ")
+	b.WriteString("Do NOT start from scratch. Inspect the existing changes and continue where the previous attempt left off.\n\n")
+	if wt.BranchName != "" && wt.BranchName != "HEAD" {
+		fmt.Fprintf(&b, "**Current branch:** `%s`\n\n", wt.BranchName)
+	}
+	if wt.DiffStat != "" {
+		b.WriteString("**Existing changes:**\n```\n")
+		b.WriteString(wt.DiffStat)
+		b.WriteString("\n```\n\n")
+	}
+	b.WriteString("**Instructions:**\n")
+	b.WriteString("1. Review the existing uncommitted/committed changes with `git status` and `git diff`\n")
+	b.WriteString("2. Understand what was already done and what remains\n")
+	b.WriteString("3. Continue the implementation from where it stopped\n")
+	b.WriteString("4. If the branch already exists, stay on it — do NOT create a new branch\n")
+	b.WriteString("5. If the existing changes look correct, commit and push them\n")
+	b.WriteString("6. If they need fixes, fix them before committing\n\n")
+	return b.String()
+}
 
 // checkCircuitBreaker counts consecutive failures for this (repo, issue)
 // and auto-adds `agent-failed` when the threshold is exceeded, preventing
@@ -823,53 +871,159 @@ func waitForCI(client vcs.Client, repo string, prNum int, timeoutSec int, prefix
 
 // resolveWorkdir picks the cwd for the claude subprocess and returns a
 // cleanup callback. For operators that write code (implement) or target
-// PRs, the workdir must be a fresh git worktree backed by the repo's
-// local clone — that way the operator's branch/commit/checkout commands
-// don't stomp on whatever the user has open in their primary clone. For
+// PRs, the workdir must be a git worktree backed by the repo's local
+// clone — that way the operator's branch/commit/checkout commands don't
+// stomp on whatever the user has open in their primary clone. For
 // read-only operators, a tempdir is fine and gets RemoveAll'd on cleanup.
-func resolveWorkdir(op *operator.Operator, repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time) (string, func(), error) {
+func resolveWorkdir(op *operator.Operator, repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time) (worktreeResult, func(), error) {
 	// Pragmatic heuristic: "implement" and any pr-target operator need the
 	// repo. Everything else gets an ephemeral tempdir. A future schema field
 	// (e.g. operator.requires_workdir: true) can replace this.
 	needsRepo := op.Name == "implement" || op.Trigger.Target == "pr"
 	if needsRepo {
 		if repoCfg.LocalPath == "" {
-			return "", func() {}, fmt.Errorf("operator %q needs repo local_path but it's empty in config", op.Name)
+			return worktreeResult{}, func() {}, fmt.Errorf("operator %q needs repo local_path but it's empty in config", op.Name)
 		}
 		return setupWorktree(repoCfg, fullName, issueNum, startedAt)
 	}
 	dir, err := os.MkdirTemp("", "clawflow-op-")
 	if err != nil {
-		return "", func() {}, err
+		return worktreeResult{}, func() {}, err
 	}
-	return dir, func() { _ = os.RemoveAll(dir) }, nil
+	return worktreeResult{Path: dir}, func() { _ = os.RemoveAll(dir) }, nil
 }
 
-// setupWorktree provisions a fresh git worktree at
-// ~/.clawflow/worktrees/<repo-slug>/issue-<N>-<ts> backed by the user's
-// local clone. The worktree starts on detached HEAD at the latest
-// origin/<base_branch> so the operator can `git checkout -b fix/issue-N`
-// without ever touching the user's checked-out branch. Cleanup removes
-// the worktree (force) but leaves any branches the operator created
-// alone — pushed branches stay locally for the user to inspect/delete.
-func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time) (string, func(), error) {
+// worktreeResult holds the outcome of setupWorktree so the caller knows
+// whether this is a fresh worktree or a resumed one with prior work.
+type worktreeResult struct {
+	Path       string // absolute path to the worktree
+	Resumed    bool   // true if we reused an existing worktree with WIP
+	DiffStat   string // `git diff --stat` output (non-empty only when Resumed)
+	BranchName string // branch checked out in the worktree (non-empty only when Resumed)
+}
+
+// findExistingWorktree scans ~/.clawflow/worktrees/<slug>/issue-<N>-* for a
+// worktree that has uncommitted changes or commits ahead of origin/<base>.
+// Returns the path and a short diff summary if found, or ("", "", "") if none.
+func findExistingWorktree(parent string, issueNum int, localPath, base string) (wtPath, diffStat, branch string) {
+	prefix := fmt.Sprintf("issue-%d-", issueNum)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return "", "", ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		candidate := filepath.Join(parent, e.Name())
+		// Check it's a valid git worktree (has .git file)
+		if _, err := os.Stat(filepath.Join(candidate, ".git")); err != nil {
+			continue
+		}
+		// Check for uncommitted changes
+		diffCmd := exec.Command("git", "-C", candidate, "diff", "--stat", "HEAD")
+		diffOut, _ := diffCmd.Output()
+		// Check for staged changes
+		stagedCmd := exec.Command("git", "-C", candidate, "diff", "--stat", "--cached")
+		stagedOut, _ := stagedCmd.Output()
+		// Check for untracked files
+		untrackedCmd := exec.Command("git", "-C", candidate, "ls-files", "--others", "--exclude-standard")
+		untrackedOut, _ := untrackedCmd.Output()
+		// Check current branch
+		branchCmd := exec.Command("git", "-C", candidate, "rev-parse", "--abbrev-ref", "HEAD")
+		branchOut, _ := branchCmd.Output()
+		currentBranch := strings.TrimSpace(string(branchOut))
+
+		hasUncommitted := len(strings.TrimSpace(string(diffOut))) > 0 ||
+			len(strings.TrimSpace(string(stagedOut))) > 0 ||
+			len(strings.TrimSpace(string(untrackedOut))) > 0
+
+		// Check for commits ahead of origin/base (branch was created and committed to)
+		hasCommitsAhead := false
+		if currentBranch != "" && currentBranch != "HEAD" {
+			aheadCmd := exec.Command("git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
+			aheadOut, _ := aheadCmd.Output()
+			hasCommitsAhead = len(strings.TrimSpace(string(aheadOut))) > 0
+		}
+
+		if hasUncommitted || hasCommitsAhead {
+			// Build a combined diff stat for the resume context
+			var statParts []string
+			if s := strings.TrimSpace(string(diffOut)); s != "" {
+				statParts = append(statParts, s)
+			}
+			if s := strings.TrimSpace(string(stagedOut)); s != "" {
+				statParts = append(statParts, "(staged)\n"+s)
+			}
+			if s := strings.TrimSpace(string(untrackedOut)); s != "" {
+				statParts = append(statParts, "(untracked)\n"+s)
+			}
+			if hasCommitsAhead {
+				aheadCmd := exec.Command("git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
+				aheadOut, _ := aheadCmd.Output()
+				statParts = append(statParts, "(commits ahead of origin/"+base+")\n"+strings.TrimSpace(string(aheadOut)))
+			}
+			return candidate, strings.Join(statParts, "\n"), currentBranch
+		}
+	}
+	return "", "", ""
+}
+
+// setupWorktree provisions a git worktree for the implement operator.
+//
+// Resume logic: before creating a fresh worktree, it scans for an existing
+// worktree from a previous interrupted run that has uncommitted changes or
+// commits ahead of origin/<base>. If found, it reuses that worktree so the
+// operator can continue where it left off instead of starting from scratch.
+//
+// Fresh path: ~/.clawflow/worktrees/<repo-slug>/issue-<N>-<ts>, starting on
+// detached HEAD at origin/<base_branch>.
+//
+// Cleanup removes the worktree (force) but leaves any branches the operator
+// created alone — pushed branches stay locally for the user to inspect/delete.
+func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time) (worktreeResult, func(), error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", func() {}, fmt.Errorf("home dir: %w", err)
+		return worktreeResult{}, func() {}, fmt.Errorf("home dir: %w", err)
 	}
 	slug := strings.ReplaceAll(fullName, "/", "__")
-	ts := startedAt.UTC().Format("2006-01-02T15-04-05Z")
 	parent := filepath.Join(home, ".clawflow", "worktrees", slug)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return "", func() {}, fmt.Errorf("mkdir worktree parent: %w", err)
+		return worktreeResult{}, func() {}, fmt.Errorf("mkdir worktree parent: %w", err)
 	}
-	wtPath := filepath.Join(parent, fmt.Sprintf("issue-%d-%s", issueNum, ts))
 
 	base := repoCfg.BaseBranch
 	if base == "" {
 		base = "main"
 	}
 	localPath := repoCfg.LocalPath
+
+	// Resume: check for an existing worktree with work-in-progress.
+	if existingPath, diffStat, branch := findExistingWorktree(parent, issueNum, localPath, base); existingPath != "" {
+		fmt.Fprintf(os.Stderr, "  ✓ resuming existing worktree: %s (branch: %s)\n", existingPath, branch)
+		result := worktreeResult{
+			Path:       existingPath,
+			Resumed:    true,
+			DiffStat:   diffStat,
+			BranchName: branch,
+		}
+		cleanup := func() {
+			fmt.Fprintln(os.Stderr, "  → cleanup: removing worktree")
+			rm := exec.Command("git", "-C", localPath, "worktree", "remove", "--force", existingPath)
+			rm.Stdout = os.Stderr
+			rm.Stderr = os.Stderr
+			if err := rm.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠ worktree remove failed: %v\n", err)
+				return
+			}
+			fmt.Fprintln(os.Stderr, "  ✓ worktree removed")
+		}
+		return result, cleanup, nil
+	}
+
+	// Fresh worktree: create a new one at issue-<N>-<ts>.
+	ts := startedAt.UTC().Format("2006-01-02T15-04-05Z")
+	wtPath := filepath.Join(parent, fmt.Sprintf("issue-%d-%s", issueNum, ts))
 
 	// Best-effort fetch to align origin/<base> with the remote. A repo
 	// without network reachability (offline dev, private bastion) should
@@ -895,11 +1049,12 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 		addLocal.Stdout = os.Stderr
 		addLocal.Stderr = os.Stderr
 		if err2 := addLocal.Run(); err2 != nil {
-			return "", func() {}, fmt.Errorf("git worktree add failed (origin/%s: %v; %s: %w)", base, err, base, err2)
+			return worktreeResult{}, func() {}, fmt.Errorf("git worktree add failed (origin/%s: %v; %s: %w)", base, err, base, err2)
 		}
 	}
 	fmt.Fprintf(os.Stderr, "  ✓ worktree ready (detached HEAD at origin/%s)\n", base)
 
+	result := worktreeResult{Path: wtPath}
 	cleanup := func() {
 		fmt.Fprintln(os.Stderr, "  → cleanup: removing worktree")
 		rm := exec.Command("git", "-C", localPath, "worktree", "remove", "--force", wtPath)
@@ -911,5 +1066,5 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 		}
 		fmt.Fprintln(os.Stderr, "  ✓ worktree removed")
 	}
-	return wtPath, cleanup, nil
+	return result, cleanup, nil
 }

@@ -70,6 +70,12 @@ type RunOptions struct {
 	// leave it nil.
 	EventWriter io.Writer
 
+	// ResumeContext, if non-empty, is a markdown section describing partial
+	// work from a previous interrupted run that exists in the worktree.
+	// Injected into the user message so the operator knows to continue
+	// rather than start from scratch.
+	ResumeContext string
+
 	// RunFunc executes the claude subprocess. Leave nil to use the real
 	// RunClaude; tests inject a fake that returns canned output without
 	// spawning a process.
@@ -81,6 +87,9 @@ type RunOptions struct {
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
 	systemPrompt := BuildSystemPrompt(op, opts.Repo)
 	userMessage := BuildUserMessage(sub, opts.Repo, opts.Comments)
+	if opts.ResumeContext != "" {
+		userMessage += "\n---\n\n" + opts.ResumeContext
+	}
 	runFunc := opts.RunFunc
 	if runFunc == nil {
 		runFunc = RunClaude
