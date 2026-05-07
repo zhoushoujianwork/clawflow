@@ -255,6 +255,92 @@ settings:
 	}
 }
 
+// TestMarshalForGist_ExcludesBoundMachine verifies that bound_machine is
+// stripped from the Gist payload (machine-specific, like local_path).
+func TestMarshalForGist_ExcludesBoundMachine(t *testing.T) {
+	cfg := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/repo": {
+				Enabled:      true,
+				BaseBranch:   "main",
+				LocalPath:    "/home/user/repo",
+				BoundMachine: "my-laptop",
+			},
+		},
+	}
+
+	data, err := config.MarshalForGist(cfg)
+	if err != nil {
+		t.Fatalf("MarshalForGist error: %v", err)
+	}
+
+	payload := string(data)
+	if strings.Contains(payload, "my-laptop") {
+		t.Error("bound_machine value should not appear in Gist payload")
+	}
+	if strings.Contains(payload, "bound_machine") {
+		t.Error("bound_machine key should not appear in Gist payload")
+	}
+}
+
+// TestMergeConfigs_BoundMachinePreserved verifies that bound_machine is never
+// overwritten by the remote config (local wins, same as local_path).
+func TestMergeConfigs_BoundMachinePreserved(t *testing.T) {
+	local := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/repo": {
+				Enabled:      true,
+				BaseBranch:   "main",
+				LocalPath:    "/home/user/repo",
+				BoundMachine: "my-laptop",
+			},
+		},
+	}
+
+	// Remote has no bound_machine (stripped on push).
+	remoteYAML := `
+repos:
+  owner/repo:
+    enabled: true
+    base_branch: develop
+`
+
+	merged, err := config.MergeConfigs(local, []byte(remoteYAML))
+	if err != nil {
+		t.Fatalf("MergeConfigs error: %v", err)
+	}
+
+	repo := merged.Repos["owner/repo"]
+	if repo.BoundMachine != "my-laptop" {
+		t.Errorf("bound_machine should be preserved: got %q, want %q", repo.BoundMachine, "my-laptop")
+	}
+}
+
+// TestMergeConfigs_BoundMachineEmptyForNewRepo verifies that a repo arriving
+// only from the remote gets an empty bound_machine (not inherited).
+func TestMergeConfigs_BoundMachineEmptyForNewRepo(t *testing.T) {
+	local := &config.Config{
+		Repos: map[string]config.Repo{},
+	}
+
+	remoteYAML := `
+repos:
+  owner/new-repo:
+    enabled: true
+    base_branch: main
+`
+
+	merged, err := config.MergeConfigs(local, []byte(remoteYAML))
+	if err != nil {
+		t.Fatalf("MergeConfigs error: %v", err)
+	}
+
+	repo := merged.Repos["owner/new-repo"]
+	if repo.BoundMachine != "" {
+		t.Errorf("new repo from remote should have empty bound_machine, got %q", repo.BoundMachine)
+	}
+}
+
 // TestMergeConfigs_EmptyRemote verifies that an empty remote YAML leaves
 // local repos intact (no repos deleted).
 func TestMergeConfigs_EmptyRemote(t *testing.T) {

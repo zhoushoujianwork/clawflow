@@ -43,6 +43,16 @@ type Repo struct {
 	// false preserves the original "label is gatekeeper" behaviour. Pushed
 	// from SaaS via /sync/config (issue #28).
 	AutoEvaluateAllIssues bool `yaml:"auto_evaluate_all_issues,omitempty"`
+
+	// BoundMachine, when non-empty, restricts processing of this repo to the
+	// machine whose hostname matches this value. Repos with no BoundMachine
+	// (or whose BoundMachine matches the current hostname) are processed
+	// normally. This allows multiple machines sharing a synced config to each
+	// own a subset of repos without stepping on each other.
+	//
+	// Like local_path, this field is machine-specific and is intentionally
+	// excluded from cloud sync (see syncableRepo in sync.go).
+	BoundMachine string `yaml:"bound_machine,omitempty"`
 }
 
 // Settings holds global ClawFlow settings.

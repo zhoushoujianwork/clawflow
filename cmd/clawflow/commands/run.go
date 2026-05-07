@@ -127,6 +127,12 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 			op.Name, op.Trigger.Target, op.Trigger.LabelsRequired, op.Trigger.LabelsExcluded)
 	}
 
+	// Resolve the current machine's hostname once. Used to skip repos that
+	// are bound to a different machine (BoundMachine field). Errors are
+	// non-fatal: an empty hostname means no repos will be skipped by the
+	// bound_machine check (safe default).
+	hostname, _ := os.Hostname()
+
 	// Reconcile any runs whose on-disk state is inconsistent (stuck
 	// "running", missing meta.json) BEFORE we touch anything else, so the
 	// dashboard's first refresh of this run picks up the fixed state. The
@@ -165,6 +171,14 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
 	for fullName, repoCfg := range allRepos {
+		// Skip repos bound to a different machine. A repo with no BoundMachine
+		// (empty string) is processed by every machine — the common case.
+		// When hostname resolution failed (empty string), we conservatively
+		// process all repos so a misconfigured machine doesn't silently drop work.
+		if repoCfg.BoundMachine != "" && hostname != "" && repoCfg.BoundMachine != hostname {
+			debugf("repo %s is bound to %s, skipping (current machine: %s)", fullName, repoCfg.BoundMachine, hostname)
+			continue
+		}
 		executeHere := onlyRepo == "" || onlyRepo == fullName
 		repoPending, repoJobs, err := scanRepoOnce(reg, fullName, repoCfg, executeHere, onlyIssue, &globalIssues)
 		if err != nil {
