@@ -4,6 +4,13 @@
 
 ClawFlow 是一个 label 驱动的自动化工具，连接 GitHub/GitLab issue/PR 与 AI 算子。它轮询配置的仓库，将 open issue/PR 与算子（`SKILL.md`）匹配，通过 `claude -p` 执行。所有状态通过 VCS label 和 comment 管理——无数据库、无 SaaS 后端。二进制独立运行：单次、cron 或编辑器内触发。
 
+### 解决的核心场景
+
+| 场景 | 痛点 | ClawFlow 的解法 |
+|---|---|---|
+| **大需求拆解** | 一个复杂 feature issue 难以分配、难以追踪进度 | `decompose` 算子自动将 tracking issue 拆成 GitHub 原生 sub-issue，并在父 issue 留下 checklist；`track-progress` 算子定期检查所有子任务是否完成，完成后自动关闭父 issue |
+| **多机器配置同步** | 在公司机器配置好的仓库列表、设置，换到家里的机器就要重新配 | `clawflow sync push/pull` 将 `config.yaml`（排除 token 和本地路径）存入私有 GitHub Gist，新机器 `clawflow sync pull` 即可恢复全部配置；`clawflow login` 自动发现或创建 Gist |
+
 ---
 
 ## 技术栈

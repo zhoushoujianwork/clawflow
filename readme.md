@@ -192,6 +192,38 @@ GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return 
 
 ---
 
+## Config Sync (multi-machine)
+
+Working across multiple machines? `clawflow sync` keeps your repo list and settings in sync via a **private GitHub Gist** — no extra account, no SaaS backend.
+
+```bash
+# 1. Authenticate first (stores token + discovers/creates the Gist)
+clawflow login <github-token>
+
+# 2. First machine: push local config to the private Gist
+clawflow sync push
+
+# 3. Second machine: authenticate, then pull and merge
+clawflow login <github-token>
+clawflow sync pull
+
+# Preview the diff before applying
+clawflow sync
+```
+
+**What syncs:**
+
+| Field | Synced? | Notes |
+|---|---|---|
+| `repos` | ✅ | Union merge — repos from both sides are kept |
+| `settings.*` | ✅ | Cloud wins on pull |
+| `credentials` | ❌ | Never synced — tokens stay local |
+| `local_path` | ❌ | Machine-specific — always kept from local copy |
+
+The Gist ID is stored in `~/.clawflow/config/credentials.yaml` after the first push. `clawflow login` auto-discovers an existing `clawflow-config` Gist if you've pushed from another machine before.
+
+---
+
 For projects you want ClawFlow to actively schedule (not just react to labeled issues), enable the **project manager**:
 
 ```bash
@@ -267,6 +299,7 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 | **Issues** | `clawflow issue create / list / comment / close` |
 | **PRs** | `clawflow pr create / list / view / comment / merge` |
 | **Config** | `clawflow config set-token / set-gitlab-token / show` |
+| **Sync** | `clawflow sync` — preview diff · `clawflow sync push` — upload to Gist · `clawflow sync pull` — merge from Gist |
 | **Dashboard** | `clawflow web` — serve the local dashboard at http://127.0.0.1:8080 |
 | **Update** | `clawflow update` — fetch the latest binary |
 | **Operator helpers** *(invoked from SKILL.md bodies)* | `clawflow worktree` — create/remove per-issue git worktrees · `clawflow pr-check` — has an open PR for this issue? · `clawflow lang` — detect build/test commands for changed files · `clawflow status` — per-repo health summary |
