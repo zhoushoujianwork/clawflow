@@ -360,6 +360,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		return nil, fmt.Errorf("github list issues: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
+		ID          int64     `json:"id"`
 		Number      int       `json:"number"`
 		Title       string    `json:"title"`
 		Body        string    `json:"body"`
@@ -379,7 +380,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		if r.PullRequest != nil {
 			continue
 		}
-		issue := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		issue := vcs.Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 		for _, l := range r.Labels {
 			issue.Labels = append(issue.Labels, l.Name)
 		}
