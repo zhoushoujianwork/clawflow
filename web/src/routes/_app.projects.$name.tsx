@@ -110,12 +110,12 @@ function ProjectDetail() {
   // Remove repo state
   const [removingRepo, setRemovingRepo] = useState<string | null>(null)
 
-  // PM runs state
+  // Pilot runs state
   const [pilotRuns, setPilotRuns] = useState<PilotRun[]>([])
   const [pilotRunsOpen, setPilotRunsOpen] = useState(false)
   const [pilotRunsVisible, setPilotRunsVisible] = useState(5)
   const [pilotRunDetail, setPilotRunDetail] = useState<PilotRun | null>(null)
-  const [pmCopied, setPmCopied] = useState(false)
+  const [pilotCopied, setPilotCopied] = useState(false)
 
   // Automation popover
   const [automationPopoverOpen, setAutomationPopoverOpen] = useState(false)
@@ -523,7 +523,7 @@ function ProjectDetail() {
                 >
                   <MessageSquare className="w-3 h-3" /> chat
                 </button>
-                {/* At-a-glance status pills: PM scheduling state and
+                {/* At-a-glance status pills: Pilot scheduling state and
                     latest health-check outcome. They duplicate info
                     surfaced lower on the page on purpose — the user
                     might be looking at the repo list far from those
@@ -548,7 +548,7 @@ function ProjectDetail() {
                         project.automation?.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400',
                       )}
                     />
-                    PM {project.automation?.enabled ? 'on' : 'off'}
+                    Pilot {project.automation?.enabled ? 'on' : 'off'}
                     <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
                   </button>
                   {automationPopoverOpen && (
@@ -582,7 +582,7 @@ function ProjectDetail() {
                           </span>
                         </div>
                         <p className="text-xs text-muted-foreground mb-3">
-                          When on, every <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code> pass wakes the PM. It can file new issues — never touches existing state.
+                          When on, every <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code> pass wakes the Pilot. It triages the backlog: files new work, fixes missing labels, closes stale/duplicate issues, and resolves merge conflicts on existing PRs.
                         </p>
                         {project.automation?.last_woken_at && (
                           <p className="text-[11px] text-muted-foreground mb-3 tabular-nums">
@@ -738,56 +738,71 @@ function ProjectDetail() {
             )}
           </div>
 
-          {/* Pilot Activity — collapsible log of recent PM wakes with
-              their PILOT-RESULT summaries, cost, and duration.
-              Shows 5 most recent by default; load-more expands. */}
-          {pilotRuns.length > 0 && (
-            <section className="mb-6">
-              <div className="bg-card border border-border rounded-xl overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setPilotRunsOpen(o => !o)}
-                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
-                  aria-expanded={pilotRunsOpen}
-                >
-                  {pilotRunsOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                  <Activity className="w-4 h-4 text-muted-foreground" />
-                  <span className="text-sm font-semibold text-foreground">Pilot Activity</span>
-                  <span className="text-xs text-muted-foreground tabular-nums">
-                    {pilotRuns.length} run{pilotRuns.length !== 1 ? 's' : ''}
+          {/* Pilot Activity — collapsible log of recent Pilot wakes with
+              their PILOT-RESULT summaries, cost, and duration. Always
+              rendered (even with 0 runs) so the board is discoverable;
+              empty state explains why there's nothing yet. */}
+          <section className="mb-6">
+            <div className="bg-card border border-border rounded-xl overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setPilotRunsOpen(o => !o)}
+                className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                aria-expanded={pilotRunsOpen}
+              >
+                {pilotRunsOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                <Activity className="w-4 h-4 text-muted-foreground" />
+                <span className="text-sm font-semibold text-foreground">Pilot Activity</span>
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  {pilotRuns.length} run{pilotRuns.length !== 1 ? 's' : ''}
+                </span>
+                {!pilotRunsOpen && pilotRuns.length === 0 && (
+                  <span className="text-xs text-muted-foreground truncate ml-1">
+                    · no wakes yet
                   </span>
-                  {!pilotRunsOpen && pilotRuns[0]?.result && (
-                    <span className="text-xs text-muted-foreground truncate ml-1">
-                      · {pilotRuns[0].result.replace(/^PILOT-RESULT:\s*/, '')}
-                    </span>
-                  )}
-                  {pilotRunsOpen && (
-                    <button
-                      type="button"
-                      onClick={e => {
-                        e.stopPropagation()
-                        const text = pilotRuns.map(r => {
-                          const ts = new Date(r.started_at).toLocaleString()
-                          const result = r.result ? r.result.replace(/^PILOT-RESULT:\s*/, '') : r.error ?? 'no result'
-                          const cost = r.usage ? ` $${r.usage.total_cost_usd.toFixed(2)}` : ''
-                          return `[${ts}]${cost} ${result}`
-                        }).join('\n')
-                        navigator.clipboard.writeText(text).then(() => {
-                          setPmCopied(true)
-                          setTimeout(() => setPmCopied(false), 2000)
-                        })
-                      }}
-                      className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors shrink-0"
-                      title="Copy all activity"
-                    >
-                      {pmCopied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-                      {pmCopied ? 'Copied' : 'Copy'}
-                    </button>
-                  )}
-                </button>
-                {pilotRunsOpen && (
-                  <div className="border-t border-border divide-y divide-border">
-                    {pilotRuns.slice(0, pilotRunsVisible).map((run, i) => (
+                )}
+                {!pilotRunsOpen && pilotRuns[0]?.result && (
+                  <span className="text-xs text-muted-foreground truncate ml-1">
+                    · {pilotRuns[0].result.replace(/^PILOT-RESULT:\s*/, '')}
+                  </span>
+                )}
+                {pilotRunsOpen && pilotRuns.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={e => {
+                      e.stopPropagation()
+                      const text = pilotRuns.map(r => {
+                        const ts = new Date(r.started_at).toLocaleString()
+                        const result = r.result ? r.result.replace(/^PILOT-RESULT:\s*/, '') : r.error ?? 'no result'
+                        const cost = r.usage ? ` $${r.usage.total_cost_usd.toFixed(2)}` : ''
+                        return `[${ts}]${cost} ${result}`
+                      }).join('\n')
+                      navigator.clipboard.writeText(text).then(() => {
+                        setPilotCopied(true)
+                        setTimeout(() => setPilotCopied(false), 2000)
+                      })
+                    }}
+                    className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors shrink-0"
+                    title="Copy all activity"
+                  >
+                    {pilotCopied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                    {pilotCopied ? 'Copied' : 'Copy'}
+                  </button>
+                )}
+              </button>
+              {pilotRunsOpen && pilotRuns.length === 0 && (
+                <div className="border-t border-border px-4 py-6 text-center">
+                  <p className="text-sm text-muted-foreground mb-1">No Pilot wakes recorded yet.</p>
+                  <p className="text-xs text-muted-foreground">
+                    {project.automation?.enabled
+                      ? 'Wait for the next clawflow run pass — the Pilot wakes after operators finish.'
+                      : 'Enable Pilot scheduling above to start. Each clawflow run pass will record a wake here.'}
+                  </p>
+                </div>
+              )}
+              {pilotRunsOpen && pilotRuns.length > 0 && (
+                <div className="border-t border-border divide-y divide-border">
+                  {pilotRuns.slice(0, pilotRunsVisible).map((run, i) => (
                       <button
                         key={i}
                         type="button"
@@ -840,11 +855,10 @@ function ProjectDetail() {
                         Show {Math.min(10, pilotRuns.length - pilotRunsVisible)} more ({pilotRuns.length - pilotRunsVisible} remaining)
                       </button>
                     )}
-                  </div>
-                )}
-              </div>
-            </section>
-          )}
+                </div>
+              )}
+            </div>
+          </section>
 
           {pilotRunDetail && <PilotRunDetailModal run={pilotRunDetail} onClose={() => setPilotRunDetail(null)} />}
 
@@ -956,9 +970,9 @@ function ProjectDetail() {
                       {allOn ? (
                         <span className="text-emerald-700 dark:text-emerald-400 font-medium">· fully autopiloted</span>
                       ) : pmOn ? (
-                        <span>· PM scheduling on; some repos need manual approve/merge</span>
+                        <span>· Pilot scheduling on; some repos need manual approve/merge</span>
                       ) : (
-                        <span>· PM scheduling off — toggle Automation above</span>
+                        <span>· Pilot scheduling off — toggle Automation above</span>
                       )}
                     </div>
                   )
@@ -1211,7 +1225,7 @@ function ProjectDetail() {
                 <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
                   <p className="text-sm text-muted-foreground">
                     No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">deployment.md</code> yet.
-                    Describe how to inspect the runtime (logs, metrics, SSH/kubectl) so the PM can assess live health.
+                    Describe how to inspect the runtime (logs, metrics, SSH/kubectl) so the Pilot can assess live health.
                   </p>
                   <div className="flex items-center justify-center gap-2 flex-wrap">
                     <button
@@ -1432,7 +1446,7 @@ function PilotRunDetailModal({ run, onClose }: { run: PilotRun; onClose: () => v
                 run.status === 'success' ? 'bg-emerald-500' : run.status === 'failed' ? 'bg-red-500' : 'bg-amber-500 animate-pulse',
               )}
             />
-            <h2 className="text-sm font-semibold text-foreground">PM Run Detail</h2>
+            <h2 className="text-sm font-semibold text-foreground">Pilot Run Detail</h2>
             <span className="text-xs text-muted-foreground tabular-nums">
               {new Date(run.started_at).toLocaleString()}
             </span>

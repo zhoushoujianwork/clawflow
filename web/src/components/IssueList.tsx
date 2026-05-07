@@ -10,7 +10,7 @@ import { useChatDrawer } from '../lib/chatContext'
 // page hides the repo column and uses a 4-section layout (Running /
 // Pending / Done / Closed); the project page shows the repo column
 // and uses a 5-section layout that adds an "Awaiting evaluation"
-// bucket so PMs can spot the bottleneck.
+// bucket so users can spot the bottleneck.
 //
 // Inputs are the raw arrays read from /data/issues.json /data/runs.json
 // /data/pending.json — callers filter them however they need (single
@@ -187,7 +187,7 @@ export function bucketize(
 //
 // REPO_SECTIONS matches the historical repo-page layout exactly so the
 // migration is a no-op visually. PROJECT_SECTIONS adds two front-of-
-// list buckets that PM users care about most: in-flight work and the
+// list buckets that triagers care about most: in-flight work and the
 // "awaiting evaluation" bottleneck.
 export const REPO_SECTIONS: SectionConfig[] = [
   { title: 'Running', tone: 'blue', filter: g => g.state !== 'closed' && g.runs[0]?.status === 'running' },
