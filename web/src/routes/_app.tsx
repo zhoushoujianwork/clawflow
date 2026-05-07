@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useTheme } from '../lib/useTheme'
 import { ChatProvider } from '../lib/chatContext'
 import { ChatDrawer } from '../components/ChatDrawer'
+import { SyncPopover } from '../components/SyncPopover'
 
 export const Route = createFileRoute('/_app')({
   component: AppLayout,
@@ -206,6 +207,7 @@ function AppLayout() {
             >
               <BookOpen className="w-3.5 h-3.5" />
             </a>
+            <SyncPopover />
             <button
               onClick={toggle}
               className="w-7 h-7 flex items-center justify-center rounded-sm transition-colors"
