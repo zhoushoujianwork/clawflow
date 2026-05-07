@@ -16,11 +16,14 @@ import (
 type fakeVCS struct {
 	labels          map[int][]string
 	comments        []postedComment
+	closedIssues    []int
 	errOnAdd        bool
 	errOnRemove     bool
 	errOnComment    bool
+	errOnClose      bool
 	addLabelCalls   int
 	removeLabelCals int
+	closeCalls      int
 }
 
 type postedComment struct {
@@ -64,6 +67,15 @@ func (f *fakeVCS) PostIssueComment(repo string, issueNumber int, body string) er
 		return errors.New("fake post-comment error")
 	}
 	f.comments = append(f.comments, postedComment{issueNumber, body})
+	return nil
+}
+
+func (f *fakeVCS) CloseIssue(repo string, issueNumber int) error {
+	f.closeCalls++
+	if f.errOnClose {
+		return errors.New("fake close-issue error")
+	}
+	f.closedIssues = append(f.closedIssues, issueNumber)
 	return nil
 }
 
@@ -386,6 +398,56 @@ func TestRun_OutcomeMarker_RemovesTriggerLabels(t *testing.T) {
 	// Only the trigger label cleanup remains — lock label removal is gone.
 	if v.removeLabelCals != 1 {
 		t.Errorf("RemoveLabel called %d times, want 1 (trigger only)", v.removeLabelCals)
+	}
+
+	// Non-close outcome should NOT close the issue.
+	if v.closeCalls != 0 {
+		t.Errorf("CloseIssue called %d times, want 0 (outcome is not agent-closed)", v.closeCalls)
+	}
+}
+
+func TestRun_OutcomeAgentClosed_ClosesIssue(t *testing.T) {
+	op := &Operator{
+		Name:      "track-progress",
+		LockLabel: "agent-running",
+		Trigger: Trigger{
+			LabelsRequired: []string{"progress-check"},
+		},
+		Outcomes: []string{"agent-closed", "agent-watching"},
+	}
+	sub := &Subject{Number: 15, Labels: []string{"progress-check"}}
+	v := newFakeVCS()
+
+	body := "## 📊 Progress Check\n\n3/3 complete. Closing.\n\n<!-- clawflow:outcome=agent-closed -->\n"
+	_, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "acme/webapp",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if outcome != "agent-closed" {
+		t.Errorf("outcome = %q, want %q", outcome, "agent-closed")
+	}
+
+	// Issue should be closed.
+	if v.closeCalls != 1 {
+		t.Fatalf("CloseIssue called %d times, want 1", v.closeCalls)
+	}
+	if !slices.Contains(v.closedIssues, 15) {
+		t.Errorf("issue #15 should be in closedIssues; got %v", v.closedIssues)
+	}
+
+	// Outcome label should still be added.
+	if !slices.Contains(v.labels[15], "agent-closed") {
+		t.Errorf("agent-closed label should be added; labels = %v", v.labels[15])
+	}
+
+	// Trigger label should be removed.
+	if slices.Contains(v.labels[15], "progress-check") {
+		t.Errorf("progress-check trigger label should be removed; labels = %v", v.labels[15])
 	}
 }
 

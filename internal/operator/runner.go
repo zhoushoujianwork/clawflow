@@ -40,6 +40,7 @@ type VCS interface {
 	AddLabel(repo string, issueNumber int, labels ...string) error
 	RemoveLabel(repo string, issueNumber int, labels ...string) error
 	PostIssueComment(repo string, issueNumber int, body string) error
+	CloseIssue(repo string, issueNumber int) error
 }
 
 // Concurrency model: cross-process locking uses local lockfiles
@@ -145,6 +146,17 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 					fmt.Fprintf(os.Stderr, "  ✓ trigger labels removed: %v\n", op.Trigger.LabelsRequired)
 				}
 			}
+		}
+	}
+
+	// Auto-close: when the outcome is "agent-closed" (e.g. track-progress
+	// determined all sub-issues are done), close the issue to complete the
+	// lifecycle loop.
+	if outcome == "agent-closed" {
+		if err := v.CloseIssue(opts.Repo, sub.Number); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ auto-close failed: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  ✓ issue #%d closed (all sub-issues complete)\n", sub.Number)
 		}
 	}
 
