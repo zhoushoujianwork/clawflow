@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
+	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/projectpm"
@@ -93,6 +94,15 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	// Auto-pull: sync config from Gist before scanning so this machine
+	// picks up any changes pushed from other machines (e.g. new repos,
+	// updated settings). Best-effort: if sync is not configured or the
+	// network is unavailable, we continue with the local config.
+	if api.AutoPull() {
+		fmt.Fprintf(os.Stderr, "✓ auto-pulled config from Gist\n")
+	}
+
 	reg, err := loadRegistry()
 	if err != nil {
 		return err
@@ -247,6 +257,14 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 			fmt.Fprintf(os.Stderr, "[pm] woke %d project(s)\n", n)
 		}
 	}
+
+	// Auto-push: sync config to Gist after the run so any label/config
+	// changes made during this pass are visible to other machines.
+	// Best-effort: push failure does not fail the run.
+	if api.AutoPush() {
+		fmt.Fprintf(os.Stderr, "✓ auto-pushed config to Gist\n")
+	}
+
 	return nil
 }
 

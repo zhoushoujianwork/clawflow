@@ -193,14 +193,18 @@ func RunDir(repo string, issueNum int, startedAt time.Time) string {
 // are deliberately NOT included — the dashboard is local but still renders
 // in a browser and we don't want tokens in the DOM.
 type RepoView struct {
-	FullName   string `json:"full_name"`
-	Platform   string `json:"platform"`
-	BaseURL    string `json:"base_url,omitempty"`
-	BaseBranch string `json:"base_branch"`
-	LocalPath  string `json:"local_path,omitempty"`
-	Enabled    bool   `json:"enabled"`
+	FullName     string `json:"full_name"`
+	Platform     string `json:"platform"`
+	BaseURL      string `json:"base_url,omitempty"`
+	BaseBranch   string `json:"base_branch"`
+	LocalPath    string `json:"local_path,omitempty"`
+	Enabled      bool   `json:"enabled"`
 	AutoApprove  bool   `json:"auto_approve"`
 	AutoMerge    bool   `json:"auto_merge"`
+	// BoundMachine is the hostname this repo is restricted to, or empty if
+	// unbound. Exposed to the dashboard so the bind/unbind button can show
+	// the current binding state without a separate API call.
+	BoundMachine string `json:"bound_machine,omitempty"`
 }
 
 // OperatorView is the dashboard-facing view of one loaded operator.
@@ -593,14 +597,15 @@ func WriteRepos(cfg *config.Config) error {
 	views := make([]RepoView, 0, len(cfg.Repos))
 	for name, r := range cfg.Repos {
 		views = append(views, RepoView{
-			FullName:   name,
-			Platform:   r.Platform,
-			BaseURL:    r.BaseURL,
-			BaseBranch: r.BaseBranch,
-			LocalPath:  r.LocalPath,
-			Enabled:    r.Enabled,
+			FullName:     name,
+			Platform:     r.Platform,
+			BaseURL:      r.BaseURL,
+			BaseBranch:   r.BaseBranch,
+			LocalPath:    r.LocalPath,
+			Enabled:      r.Enabled,
 			AutoApprove:  r.AutoApprove,
 			AutoMerge:    r.AutoMerge,
+			BoundMachine: r.BoundMachine,
 		})
 	}
 	return writeJSON(filepath.Join(DataDir(), "repos.json"), views)

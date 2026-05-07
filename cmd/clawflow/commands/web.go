@@ -69,6 +69,19 @@ here — run 'clawflow run' first if you want fresh data.`,
 			if cfg, err := config.Load(); err == nil {
 				_ = snapshot.WriteRepos(cfg)
 			}
+
+			// Auto-pull: sync config from Gist on startup so this machine
+			// picks up any changes pushed from other machines. Best-effort:
+			// if the Gist is unreachable or sync is not configured, we
+			// continue with the local config unchanged.
+			if api.AutoPull() {
+				fmt.Fprintf(os.Stderr, "✓ auto-pulled config from Gist on startup\n")
+				// Re-snapshot repos after pull so the dashboard reflects
+				// any changes that came in from the remote config.
+				if cfg, err := config.Load(); err == nil {
+					_ = snapshot.WriteRepos(cfg)
+				}
+			}
 			// Refresh data/projects.json so the dashboard picks up any
 			// project changes made via the CLI since the last web start.
 			_ = snapshot.WriteProjects()
@@ -181,6 +194,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/version", api.HandleVersion)
 			mux.HandleFunc("/api/update", api.HandleUpdate)
 			mux.HandleFunc("/api/repo/config", api.HandleRepoConfig)
+			mux.HandleFunc("/api/repo/bind", api.HandleRepoBind)
 			mux.HandleFunc("/api/repo/remove", api.HandleRepoRemove)
 			mux.HandleFunc("/api/repo/clone", api.HandleClone)
 			mux.HandleFunc("/api/repo/refresh-issues", api.HandleRepoRefreshIssues)
