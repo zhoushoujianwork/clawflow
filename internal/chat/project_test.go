@@ -133,59 +133,149 @@ func TestBuildProjectChatContext(t *testing.T) {
 	}
 }
 
-func TestBuildProjectPMContext_WithDeployment(t *testing.T) {
-	repos := []PMRepoDigest{
-		{Name: "owner/api", OpenIssues: []PMIssueRow{{Number: 1, Title: "crash on startup", Labels: []string{"bug"}}}},
+func TestBuildPilotContext_WithDeployment(t *testing.T) {
+	repos := []PilotRepoDigest{
+		{Name: "owner/api", OpenIssues: []PilotIssueRow{{Number: 1, Title: "crash on startup", Labels: []string{"bug"}}}},
 	}
 	deploymentMD := "## Logs\n\n```bash\nssh prod 'journalctl -u myapp -n 200'\n```"
 
-	prompt := BuildProjectPMContext("my-proj", "# Context\n\nSome overview.", deploymentMD, repos)
+	prompt := BuildPilotContext("my-proj", "# Context\n\nSome overview.", "", deploymentMD, nil, repos)
 
-	// deployment section present
 	if !containsStr(prompt, "Deployment & runtime health") {
 		t.Error("missing 'Deployment & runtime health' section")
 	}
 	if !containsStr(prompt, "journalctl") {
 		t.Error("missing deployment.md content in prompt")
 	}
-	if !containsStr(prompt, "Log inspection instructions") {
-		t.Error("missing 'Log inspection instructions' subsection")
-	}
-	if !containsStr(prompt, "Repeated errors") {
+	if !containsStr(prompt, "repeated errors") {
 		t.Error("missing log analysis guidance")
 	}
-	// filing budget present
 	if !containsStr(prompt, "AT MOST 2 new issues") {
 		t.Error("missing issue filing budget cap")
 	}
 	if !containsStr(prompt, "Production-breaking errors") {
 		t.Error("missing filing budget prioritization")
 	}
-	// log-driven triage instruction in "Your job"
 	if !containsStr(prompt, "start by inspecting runtime logs") {
-		t.Error("missing log-first triage instruction in 'Your job'")
+		t.Error("missing log-first triage instruction")
 	}
-	// project name attribution
 	if !containsStr(prompt, "my-proj") {
 		t.Error("missing project name")
 	}
 }
 
-func TestBuildProjectPMContext_NoDeployment(t *testing.T) {
-	repos := []PMRepoDigest{}
+func TestBuildPilotContext_NoDeployment(t *testing.T) {
+	repos := []PilotRepoDigest{}
 
-	prompt := BuildProjectPMContext("empty-proj", "", "", repos)
+	prompt := BuildPilotContext("empty-proj", "", "", "", nil, repos)
 
-	// deployment section still present but with fallback message
 	if !containsStr(prompt, "Deployment & runtime health") {
 		t.Error("missing 'Deployment & runtime health' section even when empty")
 	}
 	if !containsStr(prompt, "deployment.md not found") {
 		t.Error("missing fallback message when deployment.md is absent")
 	}
-	// filing budget always present
 	if !containsStr(prompt, "AT MOST 2 new issues") {
 		t.Error("missing issue filing budget even without deployment.md")
+	}
+	// goals.md fallback when empty
+	if !containsStr(prompt, "no explicit user goals") {
+		t.Error("missing goals.md fallback message when empty")
+	}
+	// recent wakes fallback when empty
+	if !containsStr(prompt, "first Pilot run") {
+		t.Error("missing recent-wakes fallback when none on file")
+	}
+}
+
+func TestBuildPilotContext_GoalsAndRecent(t *testing.T) {
+	repos := []PilotRepoDigest{}
+	goals := "## Priorities\n- ship v1 by EOM\n- no flaky tests"
+	recent := []PilotWakeSummary{
+		{StartedAt: "2026-05-06T12:00:00Z", Status: "success", Result: "PILOT-RESULT: 2 actions — labeled api#7, closed api#3"},
+		{StartedAt: "2026-05-05T12:00:00Z", Status: "success", Result: "PILOT-RESULT: no-action — backlog coherent"},
+	}
+
+	prompt := BuildPilotContext("my-proj", "", goals, "", recent, repos)
+
+	if !containsStr(prompt, "User goals (goals.md") {
+		t.Error("missing User goals section header")
+	}
+	if !containsStr(prompt, "ship v1 by EOM") {
+		t.Error("missing goals.md content in prompt")
+	}
+	if !containsStr(prompt, "Recent wake history") {
+		t.Error("missing Recent wake history section")
+	}
+	if !containsStr(prompt, "labeled api#7") {
+		t.Error("missing recent wake result line")
+	}
+	if !containsStr(prompt, "Don't repeat what you already did") {
+		t.Error("missing recent-wakes anti-duplication guidance")
+	}
+	// context.md update protocol always present
+	if !containsStr(prompt, "Updating your own memory") {
+		t.Error("missing context.md update protocol section")
+	}
+	if !containsStr(prompt, "```context.md") {
+		t.Error("missing fenced context.md block in update protocol")
+	}
+}
+
+func TestBuildPilotContext_StandardPlays(t *testing.T) {
+	repos := []PilotRepoDigest{}
+	prompt := BuildPilotContext("p", "", "", "", nil, repos)
+
+	// Section header present
+	if !containsStr(prompt, "Standard plays") {
+		t.Error("missing Standard plays section header")
+	}
+
+	// Play 1 — branch cleanup
+	if !containsStr(prompt, "Stale-branch cleanup") {
+		t.Error("missing Play 1 (stale branch cleanup) header")
+	}
+	if !containsStr(prompt, "git push origin --delete") {
+		t.Error("missing branch deletion command")
+	}
+	if !containsStr(prompt, "merged") || !containsStr(prompt, "default/base branch") {
+		t.Error("missing branch-cleanup safety bounds (merged-only, skip default)")
+	}
+
+	// Play 2 — conflict resolution
+	if !containsStr(prompt, "Merge-conflict resolution") {
+		t.Error("missing Play 2 (conflict resolution) header")
+	}
+	if !containsStr(prompt, "git rebase") {
+		t.Error("missing rebase instruction")
+	}
+	if !containsStr(prompt, "--force-with-lease") {
+		t.Error("missing force-with-lease guard")
+	}
+	if !containsStr(prompt, "ONE conflict resolution per wake") {
+		t.Error("missing per-wake conflict resolution cap")
+	}
+	if !containsStr(prompt, "git rebase --abort") {
+		t.Error("missing abort-on-failure escape hatch")
+	}
+
+	// Play 3 — log patrol
+	if !containsStr(prompt, "Runtime log patrol") {
+		t.Error("missing Play 3 (log patrol) header")
+	}
+	if !containsStr(prompt, "PATROL:") {
+		t.Error("missing PATROL summary line format")
+	}
+
+	// Hard rules updated to allow narrow Edit/push exceptions
+	if !containsStr(prompt, "Edit") || !containsStr(prompt, "ONLY inside an") {
+		t.Error("hard rules missing the active-play scope on Edit/Write")
+	}
+	if !containsStr(prompt, "push --force-with-lease") {
+		t.Error("hard rules missing force-with-lease exception line")
+	}
+	if !containsStr(prompt, "push --delete") {
+		t.Error("hard rules missing branch-delete exception line")
 	}
 }
 

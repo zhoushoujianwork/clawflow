@@ -224,7 +224,7 @@ The Gist ID is stored in `~/.clawflow/config/credentials.yaml` after the first p
 
 ---
 
-For projects you want ClawFlow to actively schedule (not just react to labeled issues), enable the **project manager**:
+For projects you want ClawFlow to actively triage (not just react to labeled issues), enable the **Pilot**:
 
 ```bash
 clawflow project automation enable my-project --cooldown 30
@@ -232,23 +232,37 @@ clawflow project automation enable my-project --cooldown 30
 
 Or flip the toggle in the dashboard's project detail page.
 
-When on, every `clawflow run` pass — after the operator phase finishes — wakes a per-project PM agent (a non-interactive `claude -p`). The PM:
+When on, every `clawflow run` pass — after operators finish — wakes a per-project Pilot (a non-interactive `claude -p` invocation rooted at `~/.clawflow/projects/<name>/`). The Pilot triages the backlog at the **edges** of the operator pipeline: file new work, fix missing trigger labels, close stale/duplicate issues, comment to explain decisions. The middle of the pipeline (evaluate → ready-for-agent → implement → merge) stays owned by operators + repo-level `auto_approve` / `auto_merge`.
 
-- Reads the project's `context.md` and the post-pass state of every member repo (open issues + PRs).
-- Decides whether new work should be queued.
-- Files **new** issues with trigger labels (`bug`, `feature`, etc.) so the next pass picks them up via the existing operator pipeline.
+#### Pilot's working files
 
-The PM never touches existing issue state — no comments, no label changes, no closes. That stays under operator control. The closed loop is:
+`~/.clawflow/projects/<name>/` carries the Pilot's whole world:
+
+| File | Owner | Role |
+|---|---|---|
+| `CLAUDE.md` | clawflow (auto-generated) | Member repo loader. Refreshed from `project.yaml` on every wake; auto-loaded by `claude -p` so the Pilot always knows which repos belong and where they live locally. Don't hand-edit — your changes get overwritten. |
+| `context.md` | **the Pilot itself** | The Pilot's evolving working memory. Read at wake start. The Pilot may rewrite it at wake end via a fenced ` ```context.md ``` ` block when something material was learned. Versioned by the project-level git repo. |
+| `goals.md` | **you** | User-maintained objectives, priorities, and Pilot configuration (e.g. `auto_approve: true`). Read-only for the Pilot. Edit it to steer triage. |
+| `deployment.md` | you | Optional: log-retrieval / health-check commands. When present, the Pilot inspects logs before triaging the backlog (production errors take priority over tracker work). |
+| `testing.md` | you | Optional: local-environment SOP. Used by the `implement` operator, not the Pilot. |
+
+#### What the Pilot wakes with
+
+Each wake's prompt carries: `context.md` (own memory), `goals.md` (your requirements), `deployment.md` (if present), the **last 3 wakes' `PILOT-RESULT` lines** (short-term memory — prevents the Pilot from re-doing what it already did), and the current backlog snapshot (open issues + PRs across all member repos).
+
+#### Closed loop
 
 ```
 clawflow run
   → operators process labeled issues
-  → PM wakes (cooldown-gated, per project)
-  → PM files NEW issues with trigger labels
-  → next clawflow run pass executes them
+  → Pilot wakes (cooldown-gated, per project)
+      → reads context.md / goals.md / recent history / live backlog
+      → triages: file/label/close/comment (≤2 new issues per wake)
+      → optionally rewrites context.md
+  → next clawflow run pass executes the changes
 ```
 
-`--cooldown` (default 30 min) throttles wakes so a fast cron doesn't fire the PM on every pass. Disable with `clawflow project automation disable my-project`.
+`--cooldown` (default 30 min) throttles wakes so a fast cron doesn't fire on every pass. Disable with `clawflow project automation disable my-project`.
 
 ---
 
@@ -263,8 +277,12 @@ clawflow run
 │   └── install.yaml                  ← install record
 ├── projects/                         ← multi-repo project groupings
 │   └── my-project/
-│       ├── project.yaml              ← member repos
-│       └── context.md                ← AI-generated project overview
+│       ├── project.yaml              ← member repos + automation config
+│       ├── CLAUDE.md                 ← auto-gen Pilot repo loader
+│       ├── context.md                ← Pilot's evolving memory (Pilot writes)
+│       ├── goals.md                  ← user-maintained requirements
+│       ├── deployment.md             ← optional: log/health commands
+│       └── testing.md                ← optional: local-env SOP
 └── skills/                           ← user-custom operators (override built-ins by name)
     └── my-operator/
         └── SKILL.md

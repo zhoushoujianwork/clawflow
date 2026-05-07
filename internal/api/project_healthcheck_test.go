@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zhoushoujianwork/clawflow/internal/projectpm"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 )
 
 // TestSaveLoadHealthCheckJob_Roundtrip locks the on-disk JSON shape
@@ -23,10 +23,10 @@ func TestSaveLoadHealthCheckJob_Roundtrip(t *testing.T) {
 		Status:    "done",
 		StartedAt: time.Now().UTC().Truncate(time.Second),
 		EndedAt:   time.Now().UTC().Truncate(time.Second),
-		Result: &projectpm.HealthCheckResult{
+		Result: &pilot.HealthCheckResult{
 			Outcome: "changes-proposed",
 			Summary: "one repo needs an update",
-			Changes: []projectpm.ProposedChange{
+			Changes: []pilot.ProposedChange{
 				{Target: "repo", RepoID: "owner/r", Path: "CLAUDE.md", Action: "update", ProposedContent: "# new\n", CurrentContent: "# old\n"},
 			},
 		},
@@ -102,11 +102,11 @@ func TestSaveHealthCheckJob_AtomicReplace(t *testing.T) {
 	t.Setenv("HOME", tmp)
 
 	const name = "replace-me"
-	first := &healthCheckJob{Status: "done", Result: &projectpm.HealthCheckResult{Outcome: "healthy"}}
+	first := &healthCheckJob{Status: "done", Result: &pilot.HealthCheckResult{Outcome: "healthy"}}
 	if err := saveHealthCheckJob(name, first); err != nil {
 		t.Fatal(err)
 	}
-	second := &healthCheckJob{Status: "done", Result: &projectpm.HealthCheckResult{Outcome: "changes-proposed"}}
+	second := &healthCheckJob{Status: "done", Result: &pilot.HealthCheckResult{Outcome: "changes-proposed"}}
 	if err := saveHealthCheckJob(name, second); err != nil {
 		t.Fatal(err)
 	}

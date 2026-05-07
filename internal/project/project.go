@@ -85,10 +85,19 @@ func TestingPath(name string) string {
 //
 // deployment.md describes how to inspect the project's runtime health:
 // log retrieval commands (SSH, kubectl, docker logs, etc.), key metrics
-// endpoints, and any other commands the PM should run to assess the
+// endpoints, and any other commands the Pilot should run to assess the
 // live system before triaging the backlog.
 func DeploymentPath(name string) string {
 	return filepath.Join(ProjectDir(name), "deployment.md")
+}
+
+// GoalsPath returns the goals.md path for a named project.
+//
+// goals.md is user-maintained: project objectives, current priorities,
+// and Pilot configuration (e.g. auto_approve). The Pilot reads it as
+// its "flight plan" but never writes to it.
+func GoalsPath(name string) string {
+	return filepath.Join(ProjectDir(name), "goals.md")
 }
 
 // Create creates a new project with the given name.
@@ -113,19 +122,30 @@ func Create(name string) (*Project, error) {
 	if err := save(p); err != nil {
 		return nil, err
 	}
-	// Create empty context.md, testing.md, and deployment.md so all
-	// three files always exist. context.md is the project overview;
-	// testing.md is the local-environment SOP; deployment.md describes
-	// the runtime environment and log retrieval methods. All three get
-	// auto-injected into operator prompts via the project header.
+	// Create empty context.md, goals.md, testing.md, and deployment.md
+	// so all four files always exist. context.md is the Pilot's own
+	// evolving memory; goals.md is the user's requirements file (read-
+	// only for the Pilot); testing.md is the local-environment SOP;
+	// deployment.md describes the runtime environment and log retrieval
+	// methods. context/testing/deployment get auto-injected into
+	// operator prompts via the project header. goals + context drive
+	// the Pilot's per-wake prompt.
 	if err := os.WriteFile(ContextPath(name), []byte(""), 0o644); err != nil {
 		return nil, fmt.Errorf("create context.md: %w", err)
+	}
+	if err := os.WriteFile(GoalsPath(name), []byte(""), 0o644); err != nil {
+		return nil, fmt.Errorf("create goals.md: %w", err)
 	}
 	if err := os.WriteFile(TestingPath(name), []byte(""), 0o644); err != nil {
 		return nil, fmt.Errorf("create testing.md: %w", err)
 	}
 	if err := os.WriteFile(DeploymentPath(name), []byte(""), 0o644); err != nil {
 		return nil, fmt.Errorf("create deployment.md: %w", err)
+	}
+	// Generate the Pilot's CLAUDE.md (member repo loader). Auto-loaded
+	// by `claude -p` whenever the workdir is the project directory.
+	if err := RefreshClaudeMD(name); err != nil {
+		fmt.Fprintf(os.Stderr, "[project] CLAUDE.md refresh skipped: %v\n", err)
 	}
 	// Initialize git repo for version history. Best-effort: if git is
 	// not installed the project still works, just without history.
@@ -207,7 +227,13 @@ func AddRepo(name, repo string) error {
 	p.Repos = append(p.Repos, repo)
 	sort.Strings(p.Repos)
 	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return save(p)
+	if err := save(p); err != nil {
+		return err
+	}
+	if err := RefreshClaudeMD(name); err != nil {
+		fmt.Fprintf(os.Stderr, "[project] CLAUDE.md refresh skipped: %v\n", err)
+	}
+	return nil
 }
 
 // RemoveRepo disassociates a repo from the project.
@@ -230,7 +256,13 @@ func RemoveRepo(name, repo string) error {
 	}
 	p.Repos = filtered
 	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return save(p)
+	if err := save(p); err != nil {
+		return err
+	}
+	if err := RefreshClaudeMD(name); err != nil {
+		fmt.Fprintf(os.Stderr, "[project] CLAUDE.md refresh skipped: %v\n", err)
+	}
+	return nil
 }
 
 // FindProjectByRepo scans all projects and returns the one containing
@@ -311,7 +343,7 @@ func WriteTesting(name, content string) error {
 // ReadDeployment reads the project's deployment.md. Returns "" if the
 // file doesn't exist (not an error — the user may not have created it yet).
 //
-// deployment.md contains commands the PM uses to inspect runtime health:
+// deployment.md contains commands the Pilot uses to inspect runtime health:
 // log retrieval, metrics endpoints, SSH/kubectl invocations, etc.
 func ReadDeployment(name string) (string, error) {
 	data, err := os.ReadFile(DeploymentPath(name))
@@ -322,6 +354,30 @@ func ReadDeployment(name string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// ReadGoals reads the project's goals.md. Returns "" if the file
+// doesn't exist (not an error — the user may not have created it yet).
+func ReadGoals(name string) (string, error) {
+	data, err := os.ReadFile(GoalsPath(name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(data), nil
+}
+
+// ParseAutoApprove checks whether goals.md contains "auto_approve: true".
+func ParseAutoApprove(goalsMD string) bool {
+	for _, line := range strings.Split(goalsMD, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "auto_approve: true" {
+			return true
+		}
+	}
+	return false
 }
 
 // WriteDeployment writes content to the project's deployment.md.

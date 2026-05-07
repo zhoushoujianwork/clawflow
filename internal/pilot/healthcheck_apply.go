@@ -1,4 +1,4 @@
-package projectpm
+package pilot
 
 import (
 	"errors"

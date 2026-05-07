@@ -556,8 +556,8 @@ func HandleProjectRemoveRepo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
-// HandleProjectPMRuns returns the recent PM run history for a project.
-func HandleProjectPMRuns(w http.ResponseWriter, r *http.Request) {
+// HandleProjectPilotRuns returns the recent Pilot run history for a project.
+func HandleProjectPilotRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -567,15 +567,15 @@ func HandleProjectPMRuns(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "project is required"})
 		return
 	}
-	entries, _ := snapshot.WritePMRunsIndex(20)
-	var filtered []snapshot.PMRunIndexEntry
+	entries, _ := snapshot.WritePilotRunsIndex(20)
+	var filtered []snapshot.PilotRunIndexEntry
 	for _, e := range entries {
 		if e.Project == name {
 			filtered = append(filtered, e)
 		}
 	}
 	if filtered == nil {
-		filtered = []snapshot.PMRunIndexEntry{}
+		filtered = []snapshot.PilotRunIndexEntry{}
 	}
 	writeJSON(w, 200, filtered)
 }

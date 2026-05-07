@@ -17,7 +17,7 @@ import (
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
-	"github.com/zhoushoujianwork/clawflow/internal/projectpm"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -241,10 +241,10 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// shouldn't wake every project's PM. Only the unscoped pass
 	// (the one a cron / hook normally invokes) triggers PMs.
 	if onlyRepo == "" && onlyIssue == 0 {
-		if n, err := projectpm.Schedule(ctx, timeout); err != nil {
-			fmt.Fprintf(os.Stderr, "[pm] schedule: %v\n", err)
+		if n, err := pilot.Schedule(ctx, timeout); err != nil {
+			fmt.Fprintf(os.Stderr, "[pilot] schedule: %v\n", err)
 		} else if n > 0 {
-			fmt.Fprintf(os.Stderr, "[pm] woke %d project(s)\n", n)
+			fmt.Fprintf(os.Stderr, "[pilot] woke %d project(s)\n", n)
 		}
 	}
 	return nil

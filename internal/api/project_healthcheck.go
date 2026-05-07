@@ -13,7 +13,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
-	"github.com/zhoushoujianwork/clawflow/internal/projectpm"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 )
 
 // healthCheckJob is the dashboard-poll-friendly view of one in-flight
@@ -41,12 +41,12 @@ type healthCheckJob struct {
 	Error     string                       `json:"error,omitempty"`
 	StartedAt time.Time                    `json:"started_at"`
 	EndedAt   time.Time                    `json:"ended_at,omitzero"`
-	Result    *projectpm.HealthCheckResult `json:"result,omitempty"`
+	Result    *pilot.HealthCheckResult `json:"result,omitempty"`
 	// LastApply preserves the most recent Apply call's per-file outcomes
 	// so the dashboard can re-render success/failure badges (and any
 	// errors) after a page reload. Set by HandleProjectHealthCheckApply
 	// and cleared by the next run start.
-	LastApply *projectpm.ApplyResult `json:"last_apply,omitempty"`
+	LastApply *pilot.ApplyResult `json:"last_apply,omitempty"`
 }
 
 var (
@@ -178,7 +178,7 @@ func HandleProjectHealthCheckRun(w http.ResponseWriter, r *http.Request) {
 		// Detached context: HTTP request finishes before this does.
 		// Time-bound via the timeout passed to RunHealthCheck.
 		ctx := context.Background()
-		result, err := projectpm.RunHealthCheck(ctx, p, cfg, model, healthCheckTimeout)
+		result, err := pilot.RunHealthCheck(ctx, p, cfg, model, healthCheckTimeout)
 		healthCheckJobsMu.Lock()
 		job.EndedAt = time.Now()
 		if err != nil {
@@ -251,7 +251,7 @@ func HandleProjectHealthCheckStatus(w http.ResponseWriter, r *http.Request) {
 
 type healthCheckApplyRequest struct {
 	Project string                     `json:"project"`
-	Changes []projectpm.ProposedChange `json:"changes"`
+	Changes []pilot.ProposedChange `json:"changes"`
 }
 
 // HandleProjectHealthCheckApply writes the user-approved subset of
@@ -294,7 +294,7 @@ func HandleProjectHealthCheckApply(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": "load config: " + err.Error()})
 		return
 	}
-	result := projectpm.ApplyHealthCheckChanges(p, cfg, req.Changes)
+	result := pilot.ApplyHealthCheckChanges(p, cfg, req.Changes)
 
 	// Persist the apply outcomes onto the existing job so a page
 	// reload can re-render the per-file badges (and tooltip errors).

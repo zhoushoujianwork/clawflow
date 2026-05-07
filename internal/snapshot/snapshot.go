@@ -42,7 +42,7 @@ func DashboardRoot() string {
 	return filepath.Join(home, ".clawflow", "dashboard")
 }
 
-// DataDir is the JSON snapshot root — append-only run history, PM
+// DataDir is the JSON snapshot root — append-only run history, Pilot
 // activity, and aggregate views the dashboard reads. Lives at
 // ~/.clawflow/data/, deliberately OUTSIDE DashboardRoot so the SPA's
 // "delete and re-extract" cycle can never touch it.
@@ -1138,11 +1138,11 @@ func WriteProjects() error {
 	return writeJSON(filepath.Join(DataDir(), "projects.json"), views)
 }
 
-// --- PM run snapshot ---
+// --- Pilot run snapshot ---
 
-// PMRunMeta describes one project-manager wake. Stored alongside operator
-// runs so the dashboard can show PM activity on the project detail page.
-type PMRunMeta struct {
+// PilotRunMeta describes one Pilot wake. Stored alongside operator
+// runs so the dashboard can show Pilot activity on the project detail page.
+type PilotRunMeta struct {
 	Project   string     `json:"project"`
 	StartedAt time.Time  `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
@@ -1153,34 +1153,34 @@ type PMRunMeta struct {
 	Usage     *Usage     `json:"usage,omitempty"`
 }
 
-// PMRunDir returns the directory for a single PM run.
-func PMRunDir(projectName string, startedAt time.Time) string {
+// PilotRunDir returns the directory for a single Pilot run.
+func PilotRunDir(projectName string, startedAt time.Time) string {
 	return filepath.Join(
 		DataDir(),
-		"pm-runs",
+		"pilot-runs",
 		projectName,
 		startedAt.UTC().Format("2006-01-02T15-04-05Z"),
 	)
 }
 
-// WritePMRunMeta writes meta.json inside a PM run directory.
-func WritePMRunMeta(runDir string, m PMRunMeta) error {
+// WritePilotRunMeta writes meta.json inside a Pilot run directory.
+func WritePilotRunMeta(runDir string, m PilotRunMeta) error {
 	if m.StartedAt.IsZero() {
 		m.StartedAt = time.Now().UTC()
 	}
 	return writeJSON(filepath.Join(runDir, "meta.json"), m)
 }
 
-// PMRunIndexEntry is a flattened row for the dashboard's PM runs list.
-type PMRunIndexEntry struct {
-	PMRunMeta
+// PilotRunIndexEntry is a flattened row for the dashboard's Pilot runs list.
+type PilotRunIndexEntry struct {
+	PilotRunMeta
 	Path string `json:"path"`
 }
 
-// WritePMRunsIndex walks data/pm-runs/* and writes data/pm-runs.json.
-func WritePMRunsIndex(limit int) ([]PMRunIndexEntry, error) {
-	root := filepath.Join(DataDir(), "pm-runs")
-	entries := collectPMRunEntries(root)
+// WritePilotRunsIndex walks data/pilot-runs/* and writes data/pilot-runs.json.
+func WritePilotRunsIndex(limit int) ([]PilotRunIndexEntry, error) {
+	root := filepath.Join(DataDir(), "pilot-runs")
+	entries := collectPilotRunEntries(root)
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].StartedAt.After(entries[j].StartedAt)
 	})
@@ -1188,14 +1188,54 @@ func WritePMRunsIndex(limit int) ([]PMRunIndexEntry, error) {
 	if limit > 0 && len(indexed) > limit {
 		indexed = indexed[:limit]
 	}
-	if err := writeJSON(filepath.Join(DataDir(), "pm-runs.json"), indexed); err != nil {
+	if err := writeJSON(filepath.Join(DataDir(), "pilot-runs.json"), indexed); err != nil {
 		return entries, err
 	}
 	return entries, nil
 }
 
-func collectPMRunEntries(root string) []PMRunIndexEntry {
-	out := []PMRunIndexEntry{}
+// LastPilotRunSummaries returns the most recent n PilotRunMeta entries
+// for a given project. Reads only meta.json files (no events.jsonl).
+// Summary field is truncated to 500 chars to keep prompt size bounded.
+func LastPilotRunSummaries(projectName string, n int) []PilotRunMeta {
+	root := filepath.Join(DataDir(), "pilot-runs", projectName)
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return nil
+	}
+	var dirs []string
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+	if len(dirs) > n {
+		dirs = dirs[:n]
+	}
+	var out []PilotRunMeta
+	for _, d := range dirs {
+		data, err := os.ReadFile(filepath.Join(root, d, "meta.json"))
+		if err != nil {
+			continue
+		}
+		var m PilotRunMeta
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		if len(m.Summary) > 500 {
+			m.Summary = m.Summary[:500] + "…"
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func collectPilotRunEntries(root string) []PilotRunIndexEntry {
+	out := []PilotRunIndexEntry{}
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return out
 	}
@@ -1207,7 +1247,7 @@ func collectPMRunEntries(root string) []PMRunIndexEntry {
 		if err != nil {
 			return nil
 		}
-		var m PMRunMeta
+		var m PilotRunMeta
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil
 		}
@@ -1215,12 +1255,12 @@ func collectPMRunEntries(root string) []PMRunIndexEntry {
 			runDir := filepath.Dir(path)
 			if u, err := ExtractUsage(filepath.Join(runDir, "events.jsonl")); err == nil && u != nil {
 				m.Usage = u
-				_ = WritePMRunMeta(runDir, m)
+				_ = WritePilotRunMeta(runDir, m)
 			}
 		}
 		relDir := strings.TrimPrefix(filepath.Dir(path), DataDir())
-		out = append(out, PMRunIndexEntry{
-			PMRunMeta: m,
+		out = append(out, PilotRunIndexEntry{
+			PilotRunMeta: m,
 			Path:      "./data" + filepath.ToSlash(relDir) + "/",
 		})
 		return nil

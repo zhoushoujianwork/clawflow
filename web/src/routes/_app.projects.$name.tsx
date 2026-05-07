@@ -43,7 +43,7 @@ interface RepoEntry {
   enabled?: boolean
 }
 
-interface PMRun {
+interface PilotRun {
   project: string
   started_at: string
   ended_at?: string
@@ -111,10 +111,10 @@ function ProjectDetail() {
   const [removingRepo, setRemovingRepo] = useState<string | null>(null)
 
   // PM runs state
-  const [pmRuns, setPmRuns] = useState<PMRun[]>([])
-  const [pmRunsOpen, setPmRunsOpen] = useState(false)
-  const [pmRunsVisible, setPmRunsVisible] = useState(5)
-  const [pmRunDetail, setPmRunDetail] = useState<PMRun | null>(null)
+  const [pilotRuns, setPilotRuns] = useState<PilotRun[]>([])
+  const [pilotRunsOpen, setPilotRunsOpen] = useState(false)
+  const [pilotRunsVisible, setPilotRunsVisible] = useState(5)
+  const [pilotRunDetail, setPilotRunDetail] = useState<PilotRun | null>(null)
   const [pmCopied, setPmCopied] = useState(false)
 
   // Automation popover
@@ -210,7 +210,7 @@ function ProjectDetail() {
     // render auto_approve / auto_merge badges immediately. The add-repo
     // dropdown re-fetches on open to catch any repos added since.
     fetchAvailableRepos()
-    fetchPMRuns()
+    fetchPilotRuns()
     fetchBacklog()
     // Check if a generate job is already running for this project so
     // navigating away mid-run and coming back resumes the spinner.
@@ -291,11 +291,11 @@ function ProjectDetail() {
     }
   }
 
-  function fetchPMRuns() {
-    fetch(`/api/project/pm-runs?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+  function fetchPilotRuns() {
+    fetch(`/api/project/pilot-runs?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
       .then(r => (r.ok ? r.json() : []))
       .catch(() => [])
-      .then(data => setPmRuns(Array.isArray(data) ? data : []))
+      .then(data => setPilotRuns(Array.isArray(data) ? data : []))
   }
 
   async function handleDelete() {
@@ -738,37 +738,37 @@ function ProjectDetail() {
             )}
           </div>
 
-          {/* PM Activity — collapsible log of recent PM wakes with
-              their PM-RESULT summaries, cost, and duration.
+          {/* Pilot Activity — collapsible log of recent PM wakes with
+              their PILOT-RESULT summaries, cost, and duration.
               Shows 5 most recent by default; load-more expands. */}
-          {pmRuns.length > 0 && (
+          {pilotRuns.length > 0 && (
             <section className="mb-6">
               <div className="bg-card border border-border rounded-xl overflow-hidden">
                 <button
                   type="button"
-                  onClick={() => setPmRunsOpen(o => !o)}
+                  onClick={() => setPilotRunsOpen(o => !o)}
                   className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
-                  aria-expanded={pmRunsOpen}
+                  aria-expanded={pilotRunsOpen}
                 >
-                  {pmRunsOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  {pilotRunsOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
                   <Activity className="w-4 h-4 text-muted-foreground" />
-                  <span className="text-sm font-semibold text-foreground">PM Activity</span>
+                  <span className="text-sm font-semibold text-foreground">Pilot Activity</span>
                   <span className="text-xs text-muted-foreground tabular-nums">
-                    {pmRuns.length} run{pmRuns.length !== 1 ? 's' : ''}
+                    {pilotRuns.length} run{pilotRuns.length !== 1 ? 's' : ''}
                   </span>
-                  {!pmRunsOpen && pmRuns[0]?.result && (
+                  {!pilotRunsOpen && pilotRuns[0]?.result && (
                     <span className="text-xs text-muted-foreground truncate ml-1">
-                      · {pmRuns[0].result.replace(/^PM-RESULT:\s*/, '')}
+                      · {pilotRuns[0].result.replace(/^PILOT-RESULT:\s*/, '')}
                     </span>
                   )}
-                  {pmRunsOpen && (
+                  {pilotRunsOpen && (
                     <button
                       type="button"
                       onClick={e => {
                         e.stopPropagation()
-                        const text = pmRuns.map(r => {
+                        const text = pilotRuns.map(r => {
                           const ts = new Date(r.started_at).toLocaleString()
-                          const result = r.result ? r.result.replace(/^PM-RESULT:\s*/, '') : r.error ?? 'no result'
+                          const result = r.result ? r.result.replace(/^PILOT-RESULT:\s*/, '') : r.error ?? 'no result'
                           const cost = r.usage ? ` $${r.usage.total_cost_usd.toFixed(2)}` : ''
                           return `[${ts}]${cost} ${result}`
                         }).join('\n')
@@ -785,13 +785,13 @@ function ProjectDetail() {
                     </button>
                   )}
                 </button>
-                {pmRunsOpen && (
+                {pilotRunsOpen && (
                   <div className="border-t border-border divide-y divide-border">
-                    {pmRuns.slice(0, pmRunsVisible).map((run, i) => (
+                    {pilotRuns.slice(0, pilotRunsVisible).map((run, i) => (
                       <button
                         key={i}
                         type="button"
-                        onClick={() => setPmRunDetail(run)}
+                        onClick={() => setPilotRunDetail(run)}
                         className="w-full text-left px-4 py-3 hover:bg-secondary/20 transition-colors"
                       >
                         <div className="flex items-center gap-2 mb-1">
@@ -822,7 +822,7 @@ function ProjectDetail() {
                         </div>
                         {run.result ? (
                           <p className="text-sm text-foreground truncate">
-                            {run.result.replace(/^PM-RESULT:\s*/, '')}
+                            {run.result.replace(/^PILOT-RESULT:\s*/, '')}
                           </p>
                         ) : run.error ? (
                           <p className="text-sm text-red-600 font-mono text-xs truncate">{run.error}</p>
@@ -831,13 +831,13 @@ function ProjectDetail() {
                         )}
                       </button>
                     ))}
-                    {pmRuns.length > pmRunsVisible && (
+                    {pilotRuns.length > pilotRunsVisible && (
                       <button
                         type="button"
-                        onClick={() => setPmRunsVisible(v => v + 10)}
+                        onClick={() => setPilotRunsVisible(v => v + 10)}
                         className="w-full px-4 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/20 transition-colors text-center"
                       >
-                        Show {Math.min(10, pmRuns.length - pmRunsVisible)} more ({pmRuns.length - pmRunsVisible} remaining)
+                        Show {Math.min(10, pilotRuns.length - pilotRunsVisible)} more ({pilotRuns.length - pilotRunsVisible} remaining)
                       </button>
                     )}
                   </div>
@@ -846,7 +846,7 @@ function ProjectDetail() {
             </section>
           )}
 
-          {pmRunDetail && <PMRunDetailModal run={pmRunDetail} onClose={() => setPmRunDetail(null)} />}
+          {pilotRunDetail && <PilotRunDetailModal run={pilotRunDetail} onClose={() => setPilotRunDetail(null)} />}
 
           {/* Member repos — moved above automation/health-check so the
               user sees the repo list before the config controls. */}
@@ -1407,7 +1407,7 @@ function BacklogSection({
   )
 }
 
-function PMRunDetailModal({ run, onClose }: { run: PMRun; onClose: () => void }) {
+function PilotRunDetailModal({ run, onClose }: { run: PilotRun; onClose: () => void }) {
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', handleEsc)
@@ -1475,7 +1475,7 @@ function PMRunDetailModal({ run, onClose }: { run: PMRun; onClose: () => void })
             <div>
               <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Result</h3>
               <div className="text-sm text-foreground bg-secondary/40 rounded-lg px-4 py-3 whitespace-pre-wrap">
-                {run.result.replace(/^PM-RESULT:\s*/, '')}
+                {run.result.replace(/^PILOT-RESULT:\s*/, '')}
               </div>
             </div>
           )}
