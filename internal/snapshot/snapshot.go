@@ -228,6 +228,7 @@ type RunMeta struct {
 	Repo        string    `json:"repo"`
 	IssueNumber int       `json:"issue_number"`
 	IssueTitle  string    `json:"issue_title,omitempty"`
+	IssueState  string    `json:"issue_state,omitempty"` // "open" | "closed"
 	StartedAt   time.Time `json:"started_at"`
 	// EndedAt is a pointer so a nil value omits the JSON key for a still-
 	// running run. With a value type, Go's `omitempty` does NOT skip a zero

@@ -332,6 +332,7 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 			Title:  iss.Title,
 			Body:   iss.Body,
 			Labels: iss.Labels,
+			State:  iss.State,
 			IsPR:   false,
 		}
 		debugf("[%s] #%d labels=%v title=%q", fullName, sub.Number, sub.Labels, sub.Title)
@@ -536,6 +537,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		Repo:        j.repo,
 		IssueNumber: j.sub.Number,
 		IssueTitle:  j.sub.Title,
+		IssueState:  j.sub.State,
 		StartedAt:   startedAt.UTC(),
 		Status:      "running",
 	}

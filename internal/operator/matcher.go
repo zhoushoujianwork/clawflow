@@ -13,6 +13,7 @@ type Subject struct {
 	Title      string
 	Body       string
 	Labels     []string
+	State      string // "open" | "closed"
 	IsPR       bool
 	HeadBranch string // PR only
 	URL        string // HTML URL, if the VCS exposes one
