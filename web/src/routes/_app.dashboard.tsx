@@ -27,6 +27,7 @@ interface Run {
   repo: string
   issue_number: number
   issue_title?: string
+  issue_state?: string
   started_at: string
   ended_at?: string
   status: 'success' | 'failed' | 'skipped' | 'running'
@@ -58,6 +59,7 @@ interface Pending {
   repo: string
   issue_number: number
   issue_title?: string
+  issue_state?: string
   operator: string
   labels?: string[]
   captured_at: string
@@ -302,6 +304,7 @@ function Dashboard() {
   const filteredPending = useMemo(() => {
     const q = query.trim().toLowerCase()
     return pending.filter(p => {
+      if (p.issue_state === 'closed') return false
       if (activeRunKeys.has(`${p.repo}#${p.issue_number}/${p.operator}`)) return false
       if (repoFilter !== 'all' && p.repo !== repoFilter) return false
       if (q && !(p.issue_title || '').toLowerCase().includes(q) && !String(p.issue_number).includes(q) && !p.operator.toLowerCase().includes(q)) return false
@@ -635,7 +638,7 @@ function Row({ r, repoMap }: { r: Run; repoMap: RepoInfoMap }) {
         target="_blank"
         rel="noopener noreferrer"
         onClick={e => e.stopPropagation()}
-        className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0"
+        className={`font-mono text-xs hover:text-foreground hover:underline shrink-0 ${r.issue_state === 'closed' ? 'text-muted-foreground/50 line-through' : 'text-muted-foreground'}`}
       >
         #{r.issue_number}
       </a>
