@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
-	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
+	clawsync "github.com/zhoushoujianwork/clawflow/internal/sync"
 )
 
 // NewSyncCmd returns the `clawflow sync` command tree.
@@ -54,23 +54,23 @@ local_path fields) and uploads it to your private clawflow-config Gist.
 If no Gist exists yet, one is created automatically. The Gist ID is stored
 in credentials.yaml so subsequent pushes update the same Gist.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			gh, gistID, err := syncClient()
+			gh, gistID, err := clawsync.Client()
 			if err != nil {
 				return err
 			}
 
-			content, err := buildGistContent()
+			content, err := clawsync.BuildGistContent()
 			if err != nil {
 				return fmt.Errorf("cannot build config payload: %w", err)
 			}
 
-			gistID, err = pushToGist(gh, gistID, content)
+			gistID, err = clawsync.PushToGist(gh, gistID, content)
 			if err != nil {
 				return err
 			}
 
 			// Persist the Gist ID if it was just created.
-			if err := saveGistID(gistID); err != nil {
+			if err := clawsync.SaveGistID(gistID); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not persist Gist ID: %v\n", err)
 			}
 
@@ -92,7 +92,7 @@ func newSyncPullCmd() *cobra.Command {
   repos       → union merge (local_path preserved from local copy)
   credentials → never touched`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			gh, gistID, err := syncClient()
+			gh, gistID, err := clawsync.Client()
 			if err != nil {
 				return err
 			}
@@ -100,7 +100,7 @@ func newSyncPullCmd() *cobra.Command {
 				return fmt.Errorf("no Gist ID found — run 'clawflow sync push' first or 'clawflow login' to set up sync")
 			}
 
-			remoteYAML, err := fetchGistContent(gh, gistID)
+			remoteYAML, err := clawsync.FetchGistContent(gh, gistID)
 			if err != nil {
 				return err
 			}
@@ -118,7 +118,7 @@ func newSyncPullCmd() *cobra.Command {
 // runSyncInteractive is the bare `clawflow sync` handler: shows a diff and
 // asks for confirmation before applying the pull.
 func runSyncInteractive(cmd *cobra.Command, args []string) error {
-	gh, gistID, err := syncClient()
+	gh, gistID, err := clawsync.Client()
 	if err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func runSyncInteractive(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no Gist ID found — run 'clawflow sync push' first or 'clawflow login' to set up sync")
 	}
 
-	remoteYAML, err := fetchGistContent(gh, gistID)
+	remoteYAML, err := clawsync.FetchGistContent(gh, gistID)
 	if err != nil {
 		return err
 	}
@@ -162,84 +162,6 @@ func runSyncInteractive(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "Config merged from Gist %s → %s\n", gistID, config.ConfigPath())
 	return nil
-}
-
-// syncClient loads credentials and returns a GitHub client plus the stored Gist ID.
-func syncClient() (*github.Client, string, error) {
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return nil, "", fmt.Errorf("cannot load credentials: %w", err)
-	}
-	if creds == nil || creds.GHToken == "" {
-		return nil, "", fmt.Errorf("no GitHub token found — run 'clawflow login <token>' first")
-	}
-	gh := github.New(creds.GHToken, "")
-	return gh, creds.GistID, nil
-}
-
-// fetchGistContent retrieves the config.yaml content from the given Gist.
-func fetchGistContent(gh *github.Client, gistID string) ([]byte, error) {
-	gist, err := gh.GetGist(gistID)
-	if err != nil {
-		return nil, fmt.Errorf("cannot fetch Gist %s: %w", gistID, err)
-	}
-	f, ok := gist.Files[config.GistConfigFilename]
-	if !ok {
-		return nil, fmt.Errorf("Gist %s has no %s file", gistID, config.GistConfigFilename)
-	}
-	return []byte(f.Content), nil
-}
-
-// pushToGist uploads content to an existing Gist or creates a new one.
-// Returns the Gist ID (which may be new if none existed).
-func pushToGist(gh *github.Client, gistID, content string) (string, error) {
-	files := map[string]string{config.GistConfigFilename: content}
-
-	if gistID != "" {
-		// Try to update the existing Gist.
-		_, err := gh.UpdateGist(gistID, files)
-		if err == nil {
-			return gistID, nil
-		}
-		// Gist may have been deleted — fall through to create.
-		fmt.Fprintf(os.Stderr, "Stored Gist %s not accessible (%v), creating new one...\n", gistID, err)
-	}
-
-	// Search for an existing Gist with the canonical description before creating.
-	existing, err := gh.FindGistByDescription(config.GistDescription)
-	if err != nil {
-		return "", fmt.Errorf("cannot search Gists: %w", err)
-	}
-	if existing != nil {
-		_, err := gh.UpdateGist(existing.ID, files)
-		if err != nil {
-			return "", fmt.Errorf("cannot update Gist: %w", err)
-		}
-		return existing.ID, nil
-	}
-
-	// Create a brand-new private Gist.
-	newGist, err := gh.CreateGist(config.GistDescription, files)
-	if err != nil {
-		return "", fmt.Errorf("cannot create Gist: %w", err)
-	}
-	return newGist.ID, nil
-}
-
-// saveGistID persists the Gist ID into credentials.yaml.
-func saveGistID(gistID string) error {
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return err
-	}
-	if creds == nil {
-		creds = &config.Credentials{}
-	}
-	if creds.GistID == gistID {
-		return nil // already stored
-	}
-	creds.GistID = gistID
-	return config.SaveCredentials(creds)
 }
 
 // confirmPrompt prints prompt and returns true if the user types "y" or "yes".

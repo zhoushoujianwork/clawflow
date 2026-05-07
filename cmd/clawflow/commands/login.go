@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	clawsync "github.com/zhoushoujianwork/clawflow/internal/sync"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
@@ -149,26 +150,14 @@ func discoverOrCreateGist(gh *github.Client, creds *config.Credentials) (string,
 
 // pullConfigFromGist fetches the Gist content and merges it into the local config.
 func pullConfigFromGist(gh *github.Client, gistID string) error {
-	gist, err := gh.GetGist(gistID)
+	content, err := clawsync.FetchGistContent(gh, gistID)
 	if err != nil {
 		return err
 	}
-	f, ok := gist.Files[config.GistConfigFilename]
-	if !ok {
-		return fmt.Errorf("gist %s has no %s file", gistID, config.GistConfigFilename)
-	}
-	return config.ApplyGistConfig([]byte(f.Content))
+	return config.ApplyGistConfig(content)
 }
 
 // buildGistContent serialises the current local config for upload.
 func buildGistContent() (string, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return "", err
-	}
-	b, err := config.MarshalForGist(cfg)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
+	return clawsync.BuildGistContent()
 }
