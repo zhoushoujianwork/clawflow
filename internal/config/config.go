@@ -200,6 +200,12 @@ type Credentials struct {
 	ClaudeChatModel     string `yaml:"claude_chat_model,omitempty"`
 	ClaudeEvalModel     string `yaml:"claude_eval_model,omitempty"`
 	ClaudeOperatorModel string `yaml:"claude_operator_model,omitempty"`
+
+	// LastSyncedAt is an RFC3339 timestamp recording when the config was
+	// last successfully pushed or pulled via the sync API. It is stored in
+	// credentials.yaml (alongside GistID) because it is machine-specific
+	// metadata, not part of the synced config payload itself.
+	LastSyncedAt string `yaml:"last_synced_at,omitempty"`
 }
 
 // Default model identifiers used when the corresponding Credentials

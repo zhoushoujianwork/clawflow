@@ -209,6 +209,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/project/health-check/status", api.HandleProjectHealthCheckStatus)
 			mux.HandleFunc("/api/project/health-check/apply", api.HandleProjectHealthCheckApply)
 			mux.HandleFunc("/api/project/pm-runs", api.HandleProjectPMRuns)
+			mux.HandleFunc("/api/sync/status", api.HandleSyncStatus)
+			mux.HandleFunc("/api/sync/push", api.HandleSyncPush)
+			mux.HandleFunc("/api/sync/pull", api.HandleSyncPull)
+			mux.HandleFunc("/api/login", api.HandleLogin)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				// SPA fallback: if the requested path maps to a real
 				// asset inside the embedded bundle (assets/, favicon.svg,
