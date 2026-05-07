@@ -17,9 +17,16 @@ import (
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	ptyserver "github.com/zhoushoujianwork/clawflow/internal/pty"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
+
+// webLog is the package-level web.log handle, set by NewWebCmd's RunE
+// so the periodic auto-run scheduler (which lives at file scope, not
+// inside the closure) can write its own ticks to the same log file.
+// nil-safe.
+var webLog *clog.Logger
 
 // NewWebCmd exposes `clawflow web`, a zero-dependency local dashboard.
 // The SPA bundle is served directly from the binary's embedded FS (no
@@ -61,6 +68,19 @@ here — run 'clawflow run' first if you want fresh data.`,
 			api.VersionInfo.Current = Version
 			api.VersionInfo.Fetch = FetchLatestTag
 			api.VersionInfo.IsNewer = IsNewerVersion
+
+			// Open the web.log sink for the lifetime of this process. The
+			// nil-safe Logger keeps the rest of startup unaffected if the
+			// open fails. The same handle is wired into the snapshot
+			// package so reconciler skip/fix events land here too.
+			lg, _ := clog.Open("web")
+			defer lg.Close()
+			webLog = lg
+			if lg != nil {
+				snapshot.ReconcileLog = lg
+			}
+			lg.Info("web/start", "pid", os.Getpid(), "version", Version, "host", host, "port", port)
+			defer lg.Info("web/exit", "pid", os.Getpid())
 
 			// Refresh data/repos.json from the live config on startup
 			// so the dashboard never serves a stale snapshot left over
@@ -113,8 +133,13 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// 60 min staleAfter mirrors the default per-operator
 			// timeout — anything older than that is definitively dead
 			// regardless of events.jsonl activity.
-			if n, err := snapshot.ReconcileStaleRuns(60 * time.Minute); err == nil && n > 0 {
-				fmt.Fprintf(os.Stderr, "✓ reconciled %d stale run(s) on startup\n", n)
+			if n, err := snapshot.ReconcileStaleRuns(60 * time.Minute); err == nil {
+				if n > 0 {
+					fmt.Fprintf(os.Stderr, "✓ reconciled %d stale run(s) on startup\n", n)
+				}
+				lg.Info("web/reconcile_startup", "fixed", n)
+			} else {
+				lg.Warn("web/reconcile_startup", "err", err.Error())
 			}
 			if _, err := snapshot.WriteRunsIndex(50); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠ snapshot runs index on startup: %v\n", err)
@@ -144,12 +169,16 @@ here — run 'clawflow run' first if you want fresh data.`,
 				for range tick.C {
 					n, err := snapshot.ReconcileStaleRuns(60 * time.Minute)
 					if err != nil {
+						lg.Warn("web/reconcile_tick", "err", err.Error())
 						continue
 					}
 					if n > 0 {
 						fmt.Fprintf(os.Stderr, "✓ reconciled %d orphaned run(s)\n", n)
 						_, _ = snapshot.WriteRunsIndex(50)
 					}
+					// Logged unconditionally (n=0 is the steady state) so
+					// the user can confirm the ticker is alive at all.
+					lg.Info("web/reconcile_tick", "fixed", n)
 				}
 			}()
 
@@ -382,6 +411,7 @@ func runPeriodicScheduler() {
 			lastFire = time.Now()
 			fmt.Fprintf(os.Stderr, "[scheduler] auto-fire at %s (next in %s)\n",
 				lastFire.Format("15:04:05"), intervalDur)
+			webLog.Info("web/auto_run", "fired_at", lastFire.UTC().Format(time.RFC3339), "next_in", intervalDur)
 		}
 	}
 }

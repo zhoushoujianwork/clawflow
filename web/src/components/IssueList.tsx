@@ -30,6 +30,11 @@ export interface Run {
   path: string
   pr_url?: string
   error?: string
+  // Set by the snapshot index for status="running" rows when the
+  // (repo, issue) lockfile is held by a live PID. Lets the dashboard
+  // distinguish "actively running, just quietly retrying upstream"
+  // from a frozen row pending reconcile.
+  runner_alive?: boolean
 }
 
 export interface PendingEntry {
@@ -405,7 +410,7 @@ function IssueRow({
         >
           #{group.issue_number}
         </a>
-        {latest && <StatusBadge status={latest.status} />}
+        {latest && <StatusBadge status={latest.status} runnerAlive={latest.runner_alive} />}
         <span
           className={cn(
             'text-sm truncate flex-1',
@@ -507,7 +512,7 @@ function Timeline({ group, slug }: { group: IssueGroup; slug?: string }) {
               >
                 <div className="flex items-center gap-2 text-sm">
                   <span className="font-mono">{r.operator}</span>
-                  <StatusBadge status={r.status} />
+                  <StatusBadge status={r.status} runnerAlive={r.runner_alive} />
                   {r.pr_url && (
                     <a
                       href={r.pr_url}
@@ -533,18 +538,32 @@ function Timeline({ group, slug }: { group: IssueGroup; slug?: string }) {
   )
 }
 
-export function StatusBadge({ status }: { status: Run['status'] }) {
+export function StatusBadge({ status, runnerAlive }: { status: Run['status']; runnerAlive?: boolean }) {
+  // For running rows the snapshot index sets runner_alive when the lockfile
+  // PID is live. Show a green dot adjacent to the badge so users can tell
+  // a true-running run apart from a stuck one (latter will reconcile soon).
   return (
-    <span
-      className={cn(
-        'inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border shrink-0',
-        status === 'success' && 'bg-green-100 text-green-700 border-green-200',
-        status === 'failed' && 'bg-red-100 text-red-700 border-red-200',
-        status === 'skipped' && 'bg-muted text-muted-foreground border-border',
-        status === 'running' && 'bg-blue-100 text-blue-700 border-blue-200',
+    <span className="inline-flex items-center gap-1 shrink-0">
+      <span
+        className={cn(
+          'inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border',
+          status === 'success' && 'bg-green-100 text-green-700 border-green-200',
+          status === 'failed' && 'bg-red-100 text-red-700 border-red-200',
+          status === 'skipped' && 'bg-muted text-muted-foreground border-border',
+          status === 'running' && 'bg-blue-100 text-blue-700 border-blue-200',
+        )}
+      >
+        {status}
+      </span>
+      {status === 'running' && runnerAlive && (
+        <span
+          className="inline-flex items-center gap-0.5 text-[10px] text-green-700"
+          title="lockfile PID is alive — runner is actively working"
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+          live
+        </span>
       )}
-    >
-      {status}
     </span>
   )
 }

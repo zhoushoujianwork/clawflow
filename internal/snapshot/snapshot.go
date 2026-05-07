@@ -654,9 +654,17 @@ func WriteRunMeta(runDir string, m RunMeta) error {
 // RunIndexEntry is a flattened row for the dashboard's "recent runs" list.
 // Path is a dashboard-relative URL so fetches work directly against the
 // static file server (e.g. "./data/runs/foo__bar/issue-7/2026-04-24T.../").
+//
+// RunnerAlive is set only for rows with Status=="running". It reports
+// whether the runner's PID lockfile is held by a live process AND the
+// lock matches this row's StartedAt (so the lock isn't from a different
+// run that happened to recycle the same issue). nil means "not checked"
+// (terminal status) or "no live runner found"; true means the dashboard
+// can show a "live" badge instead of treating long-quiet runs as suspect.
 type RunIndexEntry struct {
 	RunMeta
-	Path string `json:"path"`
+	Path        string `json:"path"`
+	RunnerAlive *bool  `json:"runner_alive,omitempty"`
 }
 
 // PendingEntry is one (issue, operator) pair that matched the operator's
@@ -733,6 +741,56 @@ func WritePending(entries []PendingEntry) error {
 // than the default per-operator timeout (60 min) so dashboard
 // reflects reality long before the timeout-based path triggers.
 const quietWindow = 2 * time.Minute
+
+// LogSink is the small subset of internal/log.Logger that the reconciler
+// needs to record events. Defined here as an interface so the snapshot
+// package doesn't import internal/log (which would be a cycle once any
+// log call site reaches back into snapshot).
+//
+// The default is a no-op so production code that forgets to install a
+// real sink still works. cmd/clawflow/commands/run.go and web.go install
+// their logger right after Open.
+type LogSink interface {
+	Info(area string, kv ...any)
+	Warn(area string, kv ...any)
+	Error(area string, kv ...any)
+}
+
+type nopSink struct{}
+
+func (nopSink) Info(string, ...any)  {}
+func (nopSink) Warn(string, ...any)  {}
+func (nopSink) Error(string, ...any) {}
+
+// ReconcileLog is the sink the reconciler writes its diagnostic events to.
+// Override at process startup; safe to leave nil-equivalent (noop default).
+var ReconcileLog LogSink = nopSink{}
+
+// runnerStillAlive reports whether the (repo, issue) lockfile is held by a
+// running process whose start time matches metaStart closely enough to be
+// the same run instance. Used by the reconciler to skip mis-flagging a
+// healthy runner as dead just because events.jsonl went briefly quiet
+// (long API retry, slow `go test`, `Task` subagent, etc.).
+//
+// Declared as a var so tests can stub it without spawning real processes.
+var runnerStillAlive = func(repo string, issueNum int, metaStart time.Time) bool {
+	info, err := ReadLock(LockPath(repo, issueNum))
+	if err != nil {
+		return false
+	}
+	if !processAlive(info.PID) {
+		return false
+	}
+	// AcquireLock and the meta.json write happen back-to-back at runner
+	// startup, so a same-run lock is sub-second off from metaStart. 30s
+	// of slop tolerates slow filesystems while rejecting a brand-new run
+	// for the same issue (which would have a much later StartedAt).
+	delta := info.StartedAt.Sub(metaStart)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta < 30*time.Second
+}
 
 // extractTerminalResult scans events.jsonl for the last "type":"result" line
 // and returns its subtype ("success" or "error") and the result text. If no
@@ -874,6 +932,31 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 			if !tooOld && !eventsQuiet {
 				return nil
 			}
+			// events.jsonl can stall past quietWindow even on a healthy
+			// runner — claude's API retries on upstream 5xx, a long
+			// `go test` or `Task` subagent call, etc. Before declaring
+			// the runner dead, consult the lockfile written by
+			// AcquireLock: it carries the runner's PID and start time.
+			// A live PID whose lock matches this meta's StartedAt means
+			// the runner is just temporarily quiet, not gone.
+			if runnerStillAlive(m.Repo, m.IssueNumber, m.StartedAt) {
+				// Diagnostic crumb so the user can later confirm "this
+				// run wasn't reconciled because we saw the lock". The
+				// stale-lock and stale-events story used to be an
+				// invisible race that misreported live runs as failed.
+				quietFor := time.Duration(0)
+				if !lastTouch.IsZero() {
+					quietFor = time.Since(lastTouch).Round(time.Second)
+				}
+				ReconcileLog.Info("web/reconcile_skipped",
+					"repo", m.Repo,
+					"issue", m.IssueNumber,
+					"op", m.Operator,
+					"reason", "runner_alive",
+					"quiet_for", quietFor,
+				)
+				return nil
+			}
 			// Before marking as failed, check whether claude actually
 			// completed successfully. The runner may have crashed after
 			// claude finished but before it could write the final meta.
@@ -903,7 +986,7 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 					)
 				default:
 					m.Error = fmt.Sprintf(
-						"reconciled: events.jsonl quiet for >%s while status=running; runner process is gone (interrupted/killed)",
+						"reconciled: events.jsonl quiet for >%s and runner PID is dead/missing (interrupted/killed)",
 						quietWindow,
 					)
 				}
@@ -1080,10 +1163,19 @@ func collectRunEntries(root string) []RunIndexEntry {
 			}
 		}
 		relDir := strings.TrimPrefix(filepath.Dir(path), DataDir())
-		out = append(out, RunIndexEntry{
+		entry := RunIndexEntry{
 			RunMeta: m,
 			Path:    "./data" + filepath.ToSlash(relDir) + "/",
-		})
+		}
+		// For running rows, surface whether the lockfile's PID is alive
+		// at index time. The dashboard renders this as a green "live"
+		// badge so users can distinguish "actively running, just quietly
+		// retrying upstream" from "frozen, will be reconciled soon".
+		if m.Status == "running" && runnerStillAlive(m.Repo, m.IssueNumber, m.StartedAt) {
+			alive := true
+			entry.RunnerAlive = &alive
+		}
+		out = append(out, entry)
 		return nil
 	})
 	return out

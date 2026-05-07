@@ -46,6 +46,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -123,6 +124,13 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 // Each wake is persisted to ~/.clawflow/data/pilot-runs/<project>/<ts>/
 // with meta.json + events.jsonl so the dashboard can show Pilot activity.
 func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *config.Credentials, timeout time.Duration) error {
+	// Pilot wakes happen inside `clawflow run` (process owns the run.log
+	// handle) but emitting them on a separate "pilot" log keeps the run
+	// tail readable. Open per-wake — wakes are tens of seconds apart and
+	// the file is opened with O_APPEND so it's safe.
+	lg, _ := clog.Open("pilot")
+	defer lg.Close()
+
 	startedAt := time.Now()
 	runDir := snapshot.PilotRunDir(p.Name, startedAt)
 	_ = os.MkdirAll(runDir, 0o755)
@@ -133,6 +141,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		Status:    "running",
 	}
 	_ = snapshot.WritePilotRunMeta(runDir, meta)
+	lg.Info("pilot/start", "project", p.Name, "model", creds.EffectiveOperatorModel(), "timeout", timeout)
 
 	// Refresh CLAUDE.md from current project.yaml + cfg.Repos before
 	// every wake. `claude -p` will auto-load it from the workdir, giving
@@ -188,6 +197,12 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		meta.Usage = u
 	}
 	_ = snapshot.WritePilotRunMeta(runDir, meta)
+	lg.Info("pilot/end",
+		"project", p.Name,
+		"status", meta.Status,
+		"duration", endedAt.Sub(startedAt).Round(time.Second),
+		"result", resultLine,
+	)
 
 	if _, ierr := snapshot.WritePilotRunsIndex(20); ierr != nil {
 		fmt.Fprintf(os.Stderr, "[pilot] %s: snapshot pilot-runs index: %v\n", p.Name, ierr)

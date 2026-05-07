@@ -17,11 +17,18 @@ import (
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
+
+// runLog is the package-level run.log handle, set by NewRunCmd's RunE
+// so that runJob worker functions can write structured lifecycle events
+// without each layer threading the logger through. Nil-safe (the log
+// package's nil receiver is a no-op).
+var runLog *clog.Logger
 
 // modelForOperator picks which credentials-configured model an
 // operator should run on. evaluate-* operators read existing context
@@ -95,12 +102,26 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		ctx = context.Background()
 	}
 
+	// Open the run.log sink. nil-safe — if Open fails (read-only home,
+	// disk full) the rest of the command still runs; only the file
+	// trail is missing. Install it as the snapshot.ReconcileLog sink so
+	// reconciler skip events land in the same file as run lifecycle.
+	lg, _ := clog.Open("run")
+	defer lg.Close()
+	runLog = lg
+	if lg != nil {
+		snapshot.ReconcileLog = lg
+	}
+	lg.Info("run/start", "pid", os.Getpid(), "version", Version, "only_repo", onlyRepo, "only_issue", onlyIssue, "timeout", timeout)
+	defer lg.Info("run/exit", "pid", os.Getpid())
+
 	// Auto-pull: sync config from Gist before scanning so this machine
 	// picks up any changes pushed from other machines (e.g. new repos,
 	// updated settings). Best-effort: if sync is not configured or the
 	// network is unavailable, we continue with the local config.
 	if api.AutoPull() {
 		fmt.Fprintf(os.Stderr, "✓ auto-pulled config from Gist\n")
+		lg.Info("run/auto_pull", "result", "ok")
 	}
 
 	reg, err := loadRegistry()
@@ -148,10 +169,14 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// dashboard's first refresh of this run picks up the fixed state. The
 	// staleAfter threshold matches the per-operator default timeout — any
 	// run still showing "running" past that is definitively dead.
-	if n, err := snapshot.ReconcileStaleRuns(timeout); err == nil && n > 0 {
-		fmt.Fprintf(os.Stderr, "✓ reconciled %d stale run(s) on disk\n", n)
-	} else if err != nil {
+	if n, err := snapshot.ReconcileStaleRuns(timeout); err == nil {
+		if n > 0 {
+			fmt.Fprintf(os.Stderr, "✓ reconciled %d stale run(s) on disk\n", n)
+		}
+		lg.Info("run/reconcile", "fixed", n, "stale_after", timeout)
+	} else {
 		fmt.Fprintf(os.Stderr, "⚠ reconcile stale runs: %v\n", err)
+		lg.Warn("run/reconcile", "err", err.Error())
 	}
 
 	// Snapshot the static state so the dashboard can render it even if no
@@ -525,9 +550,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	// already held by a live process, bail out.
 	if err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ lock failed (another process owns it): %v\n", prefix, err)
+		runLog.Warn("run/lock_failed", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", err.Error())
 		return false
 	}
 	defer snapshot.ReleaseLock(j.repo, j.sub.Number)
+	runLog.Info("run/lock", "pid", os.Getpid(), "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
+	defer runLog.Info("run/unlock", "repo", j.repo, "issue", j.sub.Number)
 
 	// Re-fetch the issue's current labels to guard against the race where
 	// labels were added between the initial poll and now (e.g. user manually
@@ -600,6 +628,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	creds, _ := config.LoadCredentials()
 	model := modelForOperator(creds, j.op.Name)
 	fmt.Fprintf(os.Stderr, "%s → claude (model %s, timeout %s)\n", prefix, model, timeout)
+	runLog.Info("run/claude_start", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "model", model, "timeout", timeout)
 	debugf("%s using model %q", prefix, model)
 	runStart := time.Now()
 
@@ -663,6 +692,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	if err := snapshot.WriteRunMeta(runDir, rm); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ run meta: %v\n", prefix, err)
 	}
+	runLog.Info("run/end",
+		"repo", j.repo,
+		"issue", j.sub.Number,
+		"op", j.op.Name,
+		"status", rm.Status,
+		"duration", runDur,
+		"outcome", outcome,
+		"pr", rm.PRUrl,
+	)
 
 	// Post-run automation: auto-approve and auto-merge
 	if rm.Status == "success" {

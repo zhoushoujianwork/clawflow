@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -363,6 +364,101 @@ func TestReconcileStaleRuns_NoEventsBeyondQuietWindow_RewrittenToFailed(t *testi
 	}
 	if n != 1 {
 		t.Errorf("fixed=%d, want 1 (no events past quietWindow should reconcile)", n)
+	}
+}
+
+// A run whose events.jsonl has gone quiet past quietWindow but whose
+// runner PID is still alive (e.g. claude is mid-`api_retry` against an
+// upstream 502, or running a slow tool/subagent) must NOT be marked
+// failed. Without this, `clawflow web`'s minute-tick reconciler races
+// the runner and falsely flips live runs to "failed", confusing the
+// dashboard while the actual claude subprocess keeps producing work.
+func TestReconcileStaleRuns_QuietButRunnerAlive_Untouched(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-quietWindow - time.Minute)
+	live := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 42,
+		StartedAt:   start,
+		Status:      "running",
+	}
+	dir := makeRunDir(t, root, "owner__repo", 42, start, live, `{"type":"system","subtype":"init"}`+"\n")
+	// Backdate events.jsonl so it's quiet by mtime even though the runner
+	// would still be considered alive.
+	old := start.Add(time.Second)
+	if err := os.Chtimes(filepath.Join(dir, "events.jsonl"), old, old); err != nil {
+		t.Fatalf("chtimes events.jsonl: %v", err)
+	}
+
+	prev := runnerStillAlive
+	t.Cleanup(func() { runnerStillAlive = prev })
+	runnerStillAlive = func(repo string, issueNum int, metaStart time.Time) bool {
+		if repo != "owner/repo" || issueNum != 42 {
+			t.Errorf("runnerStillAlive called with unexpected repo=%q issue=%d", repo, issueNum)
+		}
+		return true
+	}
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("fixed=%d, want 0 (live runner should be left alone)", n)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
+	var got RunMeta
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	if got.Status != "running" {
+		t.Errorf("status=%q, want running (untouched)", got.Status)
+	}
+}
+
+// Same setup as the previous test but the runner liveness check returns
+// false (no lock, dead PID, or mismatched start time). The reconciler
+// should mark the run failed and the error message must reflect the
+// real check (PID dead/missing) rather than the old wording that
+// claimed the runner was gone without ever checking.
+func TestReconcileStaleRuns_QuietRunnerDead_RewrittenToFailed(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-quietWindow - time.Minute)
+	dead := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 43,
+		StartedAt:   start,
+		Status:      "running",
+	}
+	dir := makeRunDir(t, root, "owner__repo", 43, start, dead, `{"type":"system","subtype":"init"}`+"\n")
+	old := start.Add(time.Second)
+	if err := os.Chtimes(filepath.Join(dir, "events.jsonl"), old, old); err != nil {
+		t.Fatalf("chtimes events.jsonl: %v", err)
+	}
+
+	prev := runnerStillAlive
+	t.Cleanup(func() { runnerStillAlive = prev })
+	runnerStillAlive = func(string, int, time.Time) bool { return false }
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("fixed=%d, want 1 (dead runner should be reconciled)", n)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
+	var got RunMeta
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	if got.Status != "failed" {
+		t.Errorf("status=%q, want failed", got.Status)
+	}
+	if !strings.Contains(got.Error, "PID is dead/missing") {
+		t.Errorf("Error=%q, want it to mention the real PID check", got.Error)
 	}
 }
 
