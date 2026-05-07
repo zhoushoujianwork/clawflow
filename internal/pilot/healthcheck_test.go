@@ -125,7 +125,7 @@ new
 
 func TestStripFrontmatter(t *testing.T) {
 	in := `---
-name: pm-health-check
+name: pilot-health-check
 description: "test"
 ---
 
@@ -139,7 +139,7 @@ hello
 	if !strings.HasPrefix(strings.TrimLeft(body, "\n"), "# Body") {
 		t.Fatalf("body = %q (expected to start with # Body after leading newlines)", body)
 	}
-	if strings.Contains(body, "name: pm-health-check") {
+	if strings.Contains(body, "name: pilot-health-check") {
 		t.Fatalf("frontmatter leaked into body: %q", body)
 	}
 }

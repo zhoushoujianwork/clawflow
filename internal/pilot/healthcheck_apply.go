@@ -273,12 +273,12 @@ func applyRepoChanges(cfg *config.Config, repoID string, changes []ProposedChang
 
 // healthCheckCommitMessage produces a Conventional Commit message that
 // names every touched path so a casual git log reader knows what the
-// PM bot did without opening the diff.
+// Pilot did without opening the diff.
 func healthCheckCommitMessage(paths []string) string {
 	if len(paths) == 1 {
-		return "docs(claude): refresh " + paths[0] + " via clawflow pm-health-check"
+		return "docs(claude): refresh " + paths[0] + " via clawflow pilot-health-check"
 	}
-	return "docs(claude): refresh " + fmt.Sprintf("%d files", len(paths)) + " via clawflow pm-health-check\n\n- " + strings.Join(paths, "\n- ")
+	return "docs(claude): refresh " + fmt.Sprintf("%d files", len(paths)) + " via clawflow pilot-health-check\n\n- " + strings.Join(paths, "\n- ")
 }
 
 // safeRepoRelPath validates that `path` stays inside the repo working
