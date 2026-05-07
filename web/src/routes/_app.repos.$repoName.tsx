@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw } from 'lucide-react'
+import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -23,6 +23,7 @@ interface Repo {
   enabled: boolean
   auto_approve: boolean
   auto_merge: boolean
+  bound_machine?: string
 }
 export const Route = createFileRoute('/_app/repos/$repoName')({
   component: RepoDetail,
@@ -45,6 +46,7 @@ function RepoDetail() {
   const [cloning, setCloning] = useState(false)
   const [cloneError, setCloneError] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
+  const [binding, setBinding] = useState(false)
   const [allIssues, setAllIssues] = useState<IssueEntry[]>([])
 
   const cloneNow = useCallback(() => {
@@ -105,6 +107,25 @@ function RepoDetail() {
       })
   }, [fullName, syncing, refreshData])
 
+
+  const toggleBind = useCallback(() => {
+    if (!repo || binding) return
+    const shouldBind = !repo.bound_machine
+    setBinding(true)
+    fetch('/api/repo/bind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: fullName, bind: shouldBind }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d && d.status === 'ok') {
+          setRepo(prev => prev ? { ...prev, bound_machine: d.bound_machine || undefined } : prev)
+        }
+      })
+      .catch(() => {})
+      .finally(() => setBinding(false))
+  }, [repo, fullName, binding])
 
   const toggleConfig = useCallback((field: 'enabled' | 'auto_approve' | 'auto_merge') => {
     if (!repo || saving) return
@@ -219,7 +240,7 @@ function RepoDetail() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 mb-6">
             <ToggleCard label="Status" enabled={repo.enabled} onToggle={() => toggleConfig('enabled')} disabled={saving} />
             <ToggleCard label="Auto-approve" enabled={repo.auto_approve} onToggle={() => toggleConfig('auto_approve')} disabled={saving} />
             <ToggleCard label="Auto-merge" enabled={repo.auto_merge} onToggle={() => toggleConfig('auto_merge')} disabled={saving} />
@@ -263,6 +284,37 @@ function RepoDetail() {
                 </div>
               )}
             </div>
+            {/* Bind to this machine */}
+            <button
+              onClick={toggleBind}
+              disabled={binding}
+              title={repo.bound_machine
+                ? `Bound to ${repo.bound_machine} — click to unbind`
+                : 'Bind this repo to the current machine so other machines skip it'}
+              className={cn(
+                'bg-card border rounded-xl p-3 text-left transition-all',
+                repo.bound_machine ? 'border-blue-300' : 'border-border',
+                binding ? 'opacity-60 cursor-not-allowed' : 'hover:shadow-sm cursor-pointer',
+              )}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-muted-foreground">Bound machine</div>
+                {binding ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
+                ) : repo.bound_machine ? (
+                  <Link2 className="w-3.5 h-3.5 text-blue-500" />
+                ) : (
+                  <Link2Off className="w-3.5 h-3.5 text-muted-foreground/50" />
+                )}
+              </div>
+              {repo.bound_machine ? (
+                <div className="text-xs font-mono mt-1.5 text-blue-600 truncate" title={repo.bound_machine}>
+                  {repo.bound_machine}
+                </div>
+              ) : (
+                <div className="text-base font-semibold mt-0.5 text-muted-foreground">unbound</div>
+              )}
+            </button>
           </div>
 
           <section>

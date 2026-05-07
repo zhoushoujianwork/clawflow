@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -254,6 +255,56 @@ func discoverOrCreateGistAPI(gh *github.Client, creds *config.Credentials) (stri
 		return "", fmt.Errorf("cannot create config Gist: %w", err)
 	}
 	return newGist.ID, nil
+}
+
+// AutoPull performs a best-effort config pull from the sync Gist. It is
+// called programmatically at startup (clawflow run, clawflow web) without
+// user interaction. Errors are non-fatal: if the Gist is unreachable or no
+// token is configured, we log and continue with the local config.
+// Returns true when the pull succeeded and the local config was updated.
+func AutoPull() bool {
+	gh, gistID, err := clawsync.Client()
+	if err != nil {
+		// No token configured — sync not set up, silently skip.
+		return false
+	}
+	if gistID == "" {
+		return false
+	}
+	remoteYAML, err := clawsync.FetchGistContent(gh, gistID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ auto-pull: fetch Gist: %v\n", err)
+		return false
+	}
+	if err := config.ApplyGistConfig(remoteYAML); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ auto-pull: apply config: %v\n", err)
+		return false
+	}
+	_ = recordLastSynced()
+	return true
+}
+
+// AutoPush performs a best-effort config push to the sync Gist. It is
+// called programmatically at the end of clawflow run. Errors are non-fatal.
+// Returns true when the push succeeded.
+func AutoPush() bool {
+	gh, gistID, err := clawsync.Client()
+	if err != nil {
+		return false
+	}
+	content, err := clawsync.BuildGistContent()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ auto-push: build content: %v\n", err)
+		return false
+	}
+	newGistID, err := clawsync.PushToGist(gh, gistID, content)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ auto-push: push Gist: %v\n", err)
+		return false
+	}
+	_ = clawsync.SaveGistID(newGistID)
+	_ = recordLastSynced()
+	return true
 }
 
 // recordLastSynced stamps the current UTC time into credentials.yaml so
