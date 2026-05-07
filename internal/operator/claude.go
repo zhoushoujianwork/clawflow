@@ -4,15 +4,58 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
+
+// ErrRateLimit is returned by RunClaude (and propagated through operator.Run)
+// when the claude CLI exits with a transient rate-limit or quota error.
+// Callers should NOT mark the run as permanently failed — instead they should
+// stop processing the current queue and let the next scheduled run retry.
+var ErrRateLimit = errors.New("claude rate limit")
+
+// rateLimitPatterns are substrings (case-insensitive) that identify a
+// transient rate-limit / quota response from the claude CLI. The list covers:
+//   - Claude Code CLI English output: "You've hit your limit"
+//   - Claude Code CLI Chinese locale: "您已达到限制" (unlikely but defensive)
+//   - HTTP 429 / API error codes surfaced in stderr
+//   - Anthropic credit/quota messages
+var rateLimitPatterns = []string{
+	"hit your limit",
+	"you've hit your limit",
+	"usage limit reached",
+	"rate_limit_error",
+	"rate limit",
+	"429",
+	"quota exceeded",
+	"credit balance is too low",
+	"overloaded_error",
+}
+
+// IsRateLimitError reports whether err or the captured claude output text
+// indicates a transient rate-limit condition. Both are checked because the
+// claude CLI sometimes writes the human-readable message to stdout (captured
+// in output) while the Go error only carries "exit status 1".
+func IsRateLimitError(err error, output string) bool {
+	if err == nil {
+		return false
+	}
+	combined := strings.ToLower(err.Error() + " " + output)
+	for _, pat := range rateLimitPatterns {
+		if strings.Contains(combined, strings.ToLower(pat)) {
+			return true
+		}
+	}
+	return false
+}
 
 // RunClaude executes `claude -p --output-format stream-json` in a subprocess
 // and returns the final result text. If `events` is non-nil, every raw
@@ -84,7 +127,14 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 	// text deltas for user-facing progress.
 	result, parseErr := parseClaudeStream(stdout, events)
 	if err := cmd.Wait(); err != nil {
-		return result, fmt.Errorf("claude: %w", err)
+		// Wrap transient rate-limit exits with ErrRateLimit so callers can
+		// distinguish them from permanent failures and avoid cascading the
+		// error across the remaining job queue.
+		wrapped := fmt.Errorf("claude: %w", err)
+		if IsRateLimitError(err, result) {
+			return result, fmt.Errorf("%w: %w", ErrRateLimit, wrapped)
+		}
+		return result, wrapped
 	}
 	if parseErr != nil {
 		return result, fmt.Errorf("parse stream: %w", parseErr)

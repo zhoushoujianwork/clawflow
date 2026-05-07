@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -473,6 +475,12 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 // clone stay serialized. Returns the set of jobs whose operator
 // produced output (i.e. fired), so the caller can deduplicate pending
 // entries.
+//
+// Rate-limit circuit breaker: when any worker detects a transient rate-limit
+// from claude, it sets a shared atomic flag. Subsequent workers check the flag
+// before starting and skip their job (recording status="rate-limited") so the
+// entire queue doesn't cascade into failures. The skipped issues retain their
+// trigger labels and will be retried on the next run pass.
 func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout time.Duration) []firedKey {
 	if len(jobs) == 0 {
 		return nil
@@ -485,10 +493,11 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 	}
 
 	var (
-		issueLocks sync.Map // key: "<repo>#<issue>" → *sync.Mutex
-		repoLocks  sync.Map // key: "<repo>"          → *sync.Mutex
-		fired      []firedKey
-		firedMu    sync.Mutex
+		issueLocks  sync.Map    // key: "<repo>#<issue>" → *sync.Mutex
+		repoLocks   sync.Map    // key: "<repo>"          → *sync.Mutex
+		fired       []firedKey
+		firedMu     sync.Mutex
+		rateLimited atomic.Bool // set when any worker hits a rate limit
 	)
 
 	mu := func(m *sync.Map, key string) *sync.Mutex {
@@ -503,6 +512,16 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 		go func() {
 			defer wg.Done()
 			for j := range jobCh {
+				// If a previous worker hit a rate limit, skip remaining
+				// jobs so they aren't permanently marked as failed. They
+				// keep their trigger labels and will be retried next pass.
+				if rateLimited.Load() {
+					prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
+					fmt.Fprintf(os.Stderr, "%s → skipped (rate limit hit earlier in this pass)\n", prefix)
+					runLog.Info("run/skipped_rate_limit", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
+					continue
+				}
+
 				iMu := mu(&issueLocks, fmt.Sprintf("%s#%d", j.repo, j.sub.Number))
 				iMu.Lock()
 				// `implement` mutates a shared local clone (worktree
@@ -514,11 +533,14 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 					rMu = mu(&repoLocks, j.repo)
 					rMu.Lock()
 				}
-				didFire := runOneOperator(ctx, j, timeout)
+				didFire, hitRateLimit := runOneOperator(ctx, j, timeout)
 				if rMu != nil {
 					rMu.Unlock()
 				}
 				iMu.Unlock()
+				if hitRateLimit {
+					rateLimited.Store(true)
+				}
 				if didFire {
 					firedMu.Lock()
 					fired = append(fired, firedKey{Repo: j.repo, IssueNumber: j.sub.Number, Operator: j.op.Name})
@@ -537,11 +559,14 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 
 // runOneOperator executes a single operator against its issue and
 // persists meta.json + events.jsonl under the dashboard data dir.
-// Returns true when the operator produced non-empty stdout (i.e.
-// "fired" — its outcome label was applied or its comment was posted).
+// Returns (didFire, hitRateLimit):
+//   - didFire: true when the operator produced non-empty stdout (outcome label applied)
+//   - hitRateLimit: true when claude exited with a transient rate-limit error;
+//     the caller should stop dispatching remaining jobs this pass
+//
 // All log lines are prefixed with "[<repo>#<issue> <op>]" so output
 // from concurrent workers stays disentangleable.
-func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool {
+func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool) {
 	prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
 	fmt.Printf("%s → start\n", prefix)
 
@@ -551,7 +576,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	if err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ lock failed (another process owns it): %v\n", prefix, err)
 		runLog.Warn("run/lock_failed", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", err.Error())
-		return false
+		return false, false
 	}
 	defer snapshot.ReleaseLock(j.repo, j.sub.Number)
 	runLog.Info("run/lock", "pid", os.Getpid(), "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
@@ -565,7 +590,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		freshSub.Labels = freshLabels
 		if ok, reason := operator.MatchesWithReason(&freshSub, j.op); !ok {
 			fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
-			return false
+			return false, false
 		}
 	}
 
@@ -609,7 +634,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
 		checkCircuitBreaker(j, prefix)
-		return false
+		return false, false
 	}
 	workdir := wtResult.Path
 	if wtResult.Resumed {
@@ -651,8 +676,19 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	if eventsFile != nil {
 		_ = eventsFile.Close()
 	}
+
+	// Detect transient rate-limit errors before deciding on the run status.
+	// A rate-limited run is NOT a permanent failure: the issue keeps its
+	// trigger labels and will be retried on the next pass. We also signal
+	// the caller so it can abort the remaining job queue.
+	isRateLimit := runErr != nil && errors.Is(runErr, operator.ErrRateLimit)
+
 	if runErr != nil {
-		fmt.Fprintf(os.Stderr, "%s ✗ claude failed: %v\n", prefix, runErr)
+		if isRateLimit {
+			fmt.Fprintf(os.Stderr, "%s ✗ claude rate limited (will retry next pass): %v\n", prefix, runErr)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s ✗ claude failed: %v\n", prefix, runErr)
+		}
 	} else {
 		fmt.Fprintf(os.Stderr, "%s ✓ claude finished in %s\n", prefix, runDur)
 	}
@@ -668,6 +704,11 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 		Summary:     output,
 	}
 	switch {
+	case isRateLimit:
+		// Record as "rate-limited" so the dashboard shows the real reason
+		// and ConsecutiveFailures doesn't count this toward the circuit breaker.
+		rm.Status = "rate-limited"
+		rm.Error = runErr.Error()
 	case runErr != nil:
 		rm.Status = "failed"
 		rm.Error = runErr.Error()
@@ -710,12 +751,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) bool 
 	switch rm.Status {
 	case "success":
 		fmt.Printf("%s ✓ done\n", prefix)
-		return true
+		return true, false
 	case "skipped":
-		return true
+		return true, false
+	case "rate-limited":
+		// Signal the caller to abort the queue; do NOT call checkCircuitBreaker.
+		return false, true
 	default:
 		checkCircuitBreaker(j, prefix)
-		return false
+		return false, false
 	}
 }
 
