@@ -287,10 +287,12 @@ function Dashboard() {
   // meta.json appears in runs.json with status=running we should hide
   // the matching pending row so the user doesn't see "queued" and
   // "running" for the same job.
-  const runningKeys = useMemo(() => {
+  // Keys for runs that are already in-flight or completed this cycle.
+  // Pending entries matching these are stale snapshots and should be hidden.
+  const activeRunKeys = useMemo(() => {
     const s = new Set<string>()
     for (const r of runs) {
-      if (r.status === 'running') {
+      if (r.status === 'running' || r.status === 'success' || r.status === 'skipped') {
         s.add(`${r.repo}#${r.issue_number}/${r.operator}`)
       }
     }
@@ -300,12 +302,12 @@ function Dashboard() {
   const filteredPending = useMemo(() => {
     const q = query.trim().toLowerCase()
     return pending.filter(p => {
-      if (runningKeys.has(`${p.repo}#${p.issue_number}/${p.operator}`)) return false
+      if (activeRunKeys.has(`${p.repo}#${p.issue_number}/${p.operator}`)) return false
       if (repoFilter !== 'all' && p.repo !== repoFilter) return false
       if (q && !(p.issue_title || '').toLowerCase().includes(q) && !String(p.issue_number).includes(q) && !p.operator.toLowerCase().includes(q)) return false
       return true
     })
-  }, [pending, repoFilter, query, runningKeys])
+  }, [pending, repoFilter, query, activeRunKeys])
 
   // Build the per-repo URL map from the same repos.json the dashboard already
   // pulls — no extra fetch needed.
