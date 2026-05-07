@@ -152,6 +152,11 @@ type Credentials struct {
 	GHToken     string `yaml:"gh_token,omitempty"`
 	GitLabToken string `yaml:"gitlab_token,omitempty"`
 
+	// GistID is the ID of the user's private "clawflow-config" GitHub Gist,
+	// discovered or created by `clawflow login`. Persisted here so subsequent
+	// sync operations skip the search step. Never synced to the Gist itself.
+	GistID string `yaml:"gist_id,omitempty"`
+
 	// ClaudeAPIKey, when set, overrides whatever auth the user's
 	// system claude would use (OAuth keychain, ~/.claude.json) by
 	// passing ANTHROPIC_API_KEY to every claude subprocess clawflow
