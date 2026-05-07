@@ -25,6 +25,7 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.PersistentFlags().BoolVar(&Debug, "debug", false, "Print debug trace to stderr (matcher decisions, scan counts)")
 
 	root.AddCommand(NewLoginCmd())
+	root.AddCommand(NewSyncCmd())
 	root.AddCommand(NewRunCmd())
 	root.AddCommand(NewWebCmd())
 	root.AddCommand(NewChatCmd())
