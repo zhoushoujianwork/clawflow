@@ -333,8 +333,10 @@ export function ChatPanel(props: ChatPanelProps): JSX.Element {
         </div>
 
         <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-          {/* LEFT: chat */}
-          <div className="flex-1 flex flex-col border-b md:border-b-0 md:border-r border-border min-h-0 bg-background/40">
+          {/* LEFT: chat. min-w-0 so wide assistant code blocks scroll inside
+              the bubble instead of expanding the column and squeezing the
+              right pane to zero. */}
+          <div className="flex-1 flex flex-col border-b md:border-b-0 md:border-r border-border min-h-0 min-w-0 bg-background/40">
             <div ref={historyRef} className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
               {isEmpty && (
                 <EmptyState
@@ -504,8 +506,8 @@ function Bubble({ role, text, streaming }: { role: Role; text: string; streaming
     )
   }
   return (
-    <div className="flex justify-start">
-      <div className="max-w-[88%] bg-card border border-border rounded-2xl rounded-tl-sm px-4 py-3 shadow-sm">
+    <div className="flex justify-start min-w-0">
+      <div className="max-w-[88%] min-w-0 bg-card border border-border rounded-2xl rounded-tl-sm px-4 py-3 shadow-sm overflow-hidden">
         <div className="text-sm text-foreground prose-sm">
           <Markdown>{text}</Markdown>
         </div>

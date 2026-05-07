@@ -93,17 +93,36 @@ EARLY drafts are plain text — let the user react. The user may go
 several turns refining wording, scope, or priorities; do NOT emit a
 fenced block on every turn just to "show what's there".
 
-When the user signals the draft is done (or explicitly asks you to save
-/ output / finalize it), emit the FULL final content inside a fenced
-code block tagged ` + "`goals.md`" + `:
+When the user signals the draft is ready (says things like "起草一份",
+"draft it", "save", "go ahead", "finalize", etc.), you MUST emit the
+FULL final content inside a fenced code block whose **info string is
+literally** ` + "`goals.md`" + `.
+
+The dashboard scrapes the assistant text for fenced blocks and ONLY
+extracts a draft when the info string equals ` + "`goals.md`" + `. A bare
+fence (three backticks with no language tag) or a wrong tag like
+` + "`markdown`" + ` / ` + "`md`" + ` / ` + "`text`" + ` will be rendered as a code block in the
+chat but **will NOT show up in the right-pane Draft preview** — meaning
+the user CANNOT save it. This is the most common way this chat fails.
+
+Correct (tag is exactly ` + "`goals.md`" + `):
 
 ` + "    ```goals.md" + `
     # Goals
     <full final content here, NOT a diff>
 ` + "    ```" + `
 
+WRONG — these will not be extracted, do NOT do this:
+
+` + "    ```" + `        ← bare fence, no tag
+` + "    ```markdown" + `   ← wrong tag
+` + "    ```md" + `         ← wrong tag
+
 Rules for the fenced block:
 
+- The opening fence MUST be exactly ` + "`" + "```goals.md" + "`" + ` on its own line.
+  Three backticks, then ` + "`goals.md`" + `, then a newline. No extra spaces,
+  no other tag.
 - Emit the COMPLETE document, not a diff or excerpt. The dashboard
   replaces goals.md wholesale with whatever's inside.
 - Emit it ONLY when the user is ready to save. Premature emission will
