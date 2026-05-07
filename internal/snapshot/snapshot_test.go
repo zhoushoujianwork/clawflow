@@ -341,14 +341,14 @@ func TestReconcileStaleRuns_RecentRunning_Untouched(t *testing.T) {
 }
 
 // A run whose meta.json says "running" but has no events.jsonl AT ALL is
-// reconciled once it's older than quietWindow — RunClaude opens the events
+// reconciled once it's older than DefaultQuietWindow — RunClaude opens the events
 // file before launching claude, so a missing file past that window means
 // the runner died before getting that far. Without this aggressive sweep
 // the dashboard would carry a frozen "running" row for the full staleAfter
 // timeout (default 1h).
 func TestReconcileStaleRuns_NoEventsBeyondQuietWindow_RewrittenToFailed(t *testing.T) {
 	root := t.TempDir()
-	start := time.Now().UTC().Add(-quietWindow - time.Minute) // safely past 2min
+	start := time.Now().UTC().Add(-DefaultQuietWindow - time.Minute) // safely past 2min
 	stuck := &RunMeta{
 		Operator:    "classify",
 		Repo:        "owner/repo",
@@ -363,11 +363,11 @@ func TestReconcileStaleRuns_NoEventsBeyondQuietWindow_RewrittenToFailed(t *testi
 		t.Fatalf("reconcile: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("fixed=%d, want 1 (no events past quietWindow should reconcile)", n)
+		t.Errorf("fixed=%d, want 1 (no events past DefaultQuietWindow should reconcile)", n)
 	}
 }
 
-// A run whose events.jsonl has gone quiet past quietWindow but whose
+// A run whose events.jsonl has gone quiet past DefaultQuietWindow but whose
 // runner PID is still alive (e.g. claude is mid-`api_retry` against an
 // upstream 502, or running a slow tool/subagent) must NOT be marked
 // failed. Without this, `clawflow web`'s minute-tick reconciler races
@@ -375,7 +375,7 @@ func TestReconcileStaleRuns_NoEventsBeyondQuietWindow_RewrittenToFailed(t *testi
 // dashboard while the actual claude subprocess keeps producing work.
 func TestReconcileStaleRuns_QuietButRunnerAlive_Untouched(t *testing.T) {
 	root := t.TempDir()
-	start := time.Now().UTC().Add(-quietWindow - time.Minute)
+	start := time.Now().UTC().Add(-DefaultQuietWindow - time.Minute)
 	live := &RunMeta{
 		Operator:    "implement",
 		Repo:        "owner/repo",
@@ -424,9 +424,9 @@ func TestReconcileStaleRuns_QuietButRunnerAlive_Untouched(t *testing.T) {
 // claimed the runner was gone without ever checking.
 func TestReconcileStaleRuns_QuietRunnerDead_RewrittenToFailed(t *testing.T) {
 	root := t.TempDir()
-	start := time.Now().UTC().Add(-quietWindow - time.Minute)
+	start := time.Now().UTC().Add(-DefaultQuietWindow - time.Minute)
 	dead := &RunMeta{
-		Operator:    "implement",
+		Operator:    "evaluate-bug", // uses DefaultQuietWindow, not an overridden operator
 		Repo:        "owner/repo",
 		IssueNumber: 43,
 		StartedAt:   start,
@@ -459,6 +459,78 @@ func TestReconcileStaleRuns_QuietRunnerDead_RewrittenToFailed(t *testing.T) {
 	}
 	if !strings.Contains(got.Error, "PID is dead/missing") {
 		t.Errorf("Error=%q, want it to mention the real PID check", got.Error)
+	}
+}
+
+// TestReconcileStaleRuns_ImplementOperator_WiderQuietWindow verifies that the
+// "implement" operator is not reconciled when events.jsonl is only past the
+// DefaultQuietWindow (2 min) but within the operator-specific window (10 min).
+// This is the core regression test for issue #105.
+func TestReconcileStaleRuns_ImplementOperator_WiderQuietWindow(t *testing.T) {
+	root := t.TempDir()
+	// Start time is well in the past so tooOld is false (staleAfter=1h).
+	start := time.Now().UTC().Add(-5 * time.Minute)
+	running := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 77,
+		StartedAt:   start,
+		Status:      "running",
+	}
+	dir := makeRunDir(t, root, "owner__repo", 77, start, running, `{"type":"system","subtype":"init"}`+"\n")
+
+	// Backdate events.jsonl to 3 minutes ago — past DefaultQuietWindow (2 min)
+	// but within the implement override (10 min). A live runner would not be
+	// killed here.
+	threeMinAgo := time.Now().Add(-3 * time.Minute)
+	if err := os.Chtimes(filepath.Join(dir, "events.jsonl"), threeMinAgo, threeMinAgo); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	prev := runnerStillAlive
+	t.Cleanup(func() { runnerStillAlive = prev })
+	runnerStillAlive = func(string, int, time.Time) bool { return false }
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("fixed=%d, want 0: implement operator should not be reconciled at 3 min quiet (window is 10 min)", n)
+	}
+}
+
+// TestReconcileStaleRuns_ImplementOperator_PastWiderWindow verifies that an
+// "implement" run IS reconciled once events.jsonl exceeds its 10-min window.
+func TestReconcileStaleRuns_ImplementOperator_PastWiderWindow(t *testing.T) {
+	root := t.TempDir()
+	implementWindow := OperatorQuietWindows["implement"]
+	start := time.Now().UTC().Add(-implementWindow - 5*time.Minute)
+	running := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 78,
+		StartedAt:   start,
+		Status:      "running",
+	}
+	dir := makeRunDir(t, root, "owner__repo", 78, start, running, `{"type":"system","subtype":"init"}`+"\n")
+
+	// Backdate events.jsonl past the 10-min implement window.
+	pastWindow := time.Now().Add(-implementWindow - time.Minute)
+	if err := os.Chtimes(filepath.Join(dir, "events.jsonl"), pastWindow, pastWindow); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	prev := runnerStillAlive
+	t.Cleanup(func() { runnerStillAlive = prev })
+	runnerStillAlive = func(string, int, time.Time) bool { return false }
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("fixed=%d, want 1: implement operator should be reconciled past its 10-min window", n)
 	}
 }
 
@@ -557,7 +629,7 @@ func TestReconcileStaleRuns_Idempotent(t *testing.T) {
 // runner process died before writing the final meta.json.
 func TestReconcileStaleRuns_SuccessResult_ReconciledAsSuccess(t *testing.T) {
 	root := t.TempDir()
-	start := time.Now().UTC().Add(-quietWindow - time.Minute)
+	start := time.Now().UTC().Add(-DefaultQuietWindow - time.Minute)
 	stuck := &RunMeta{
 		Operator:    "evaluate-bug",
 		Repo:        "owner/repo",
@@ -571,7 +643,7 @@ func TestReconcileStaleRuns_SuccessResult_ReconciledAsSuccess(t *testing.T) {
 
 	dir := makeRunDir(t, root, "owner__repo", 42, start, stuck, events)
 	// Backdate events.jsonl mtime so it looks quiet
-	past := time.Now().Add(-quietWindow - 30*time.Second)
+	past := time.Now().Add(-DefaultQuietWindow - 30*time.Second)
 	os.Chtimes(filepath.Join(dir, "events.jsonl"), past, past)
 
 	n, err := reconcileStaleRunsAt(root, time.Hour)
@@ -609,9 +681,9 @@ func TestReconcileStaleRuns_SuccessResult_ReconciledAsSuccess(t *testing.T) {
 // the reconciler still marks the run as "failed".
 func TestReconcileStaleRuns_ErrorResult_ReconciledAsFailed(t *testing.T) {
 	root := t.TempDir()
-	start := time.Now().UTC().Add(-quietWindow - time.Minute)
+	start := time.Now().UTC().Add(-DefaultQuietWindow - time.Minute)
 	stuck := &RunMeta{
-		Operator:    "implement",
+		Operator:    "evaluate-bug", // uses DefaultQuietWindow, not an overridden operator
 		Repo:        "owner/repo",
 		IssueNumber: 99,
 		StartedAt:   start,
@@ -621,7 +693,7 @@ func TestReconcileStaleRuns_ErrorResult_ReconciledAsFailed(t *testing.T) {
 		`{"type":"result","subtype":"error","is_error":true,"duration_ms":5000,"num_turns":1,"result":"something went wrong","total_cost_usd":0.01,"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"modelUsage":{}}` + "\n"
 
 	dir := makeRunDir(t, root, "owner__repo", 99, start, stuck, events)
-	past := time.Now().Add(-quietWindow - 30*time.Second)
+	past := time.Now().Add(-DefaultQuietWindow - 30*time.Second)
 	os.Chtimes(filepath.Join(dir, "events.jsonl"), past, past)
 
 	n, err := reconcileStaleRunsAt(root, time.Hour)
