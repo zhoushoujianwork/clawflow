@@ -178,9 +178,16 @@ export function SyncPopover() {
               </span>
             ) : configured ? (
               <div className="flex flex-col gap-0.5">
-                <span className="text-xs font-mono" style={{ color: 'hsl(var(--text-low))' }}>
-                  Gist: …{gistHint}
-                </span>
+                <a
+                  href={`https://gist.github.com/${status.gist_id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-mono underline hover:opacity-80 transition-opacity"
+                  style={{ color: 'hsl(var(--brand))' }}
+                  title={`Open Gist ${status.gist_id}`}
+                >
+                  Gist: …{gistHint} ↗
+                </a>
                 {status?.last_synced_at && (
                   <span className="text-[11px]" style={{ color: 'hsl(var(--text-low))' }}>
                     Last synced {formatRelativeTime(status.last_synced_at)}
