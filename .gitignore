@@ -2,8 +2,10 @@
 /clawflow
 /clawflow_*
 
-# Frontend tool caches. web/dist/ is intentionally tracked so the release
-# pipeline doesn't need a Node toolchain.
+# Frontend tool caches. web/dist/ is generated at build time and never
+# committed — release CI runs `pnpm build` before `go build`, and local
+# `make build` / `make install` chain it via the `web` target.
 /web/node_modules/
 /web/.vite/
 /web/.cache/
+/web/dist/

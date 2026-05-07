@@ -15,6 +15,19 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build web bundle
+        run: cd web && pnpm install --frozen-lockfile && pnpm build
+
       - name: Unit tests
         run: go test -v -race ./...
 

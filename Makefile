@@ -17,16 +17,16 @@ install: web
 	go build $(LDFLAGS) -o $(BINARY) $(SRC)
 	@echo "installed → $(BINARY) ($(VERSION))"
 
-# 仅构建，不安装
-build:
+# 仅构建，不安装（含前端，否则 //go:embed all:web/dist 会失败）
+build: web
 	go build $(LDFLAGS) -o clawflow $(SRC)
 	@echo "built → ./clawflow ($(VERSION))"
 
 # tidy + build，开发日常用
 dev: tidy install
 
-# 构建所有平台发版二进制
-release:
+# 构建所有平台发版二进制（含前端）
+release: web
 	GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o clawflow_darwin_arm64  $(SRC)
 	GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o clawflow_darwin_amd64  $(SRC)
 	GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o clawflow_linux_amd64   $(SRC)
