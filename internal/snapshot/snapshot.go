@@ -732,7 +732,7 @@ func WritePending(entries []PendingEntry) error {
 	return writeJSON(filepath.Join(DataDir(), "pending.json"), entries)
 }
 
-// quietWindow is how long events.jsonl can sit untouched before a
+// DefaultQuietWindow is how long events.jsonl can sit untouched before a
 // status="running" meta is considered orphaned. Live runs flush
 // stream-json events every few hundred ms; if nothing has hit the
 // file for a couple of minutes the runner process is gone (kill,
@@ -740,7 +740,26 @@ func WritePending(entries []PendingEntry) error {
 // inter-event gap (claude can pause ~30 s mid-tool-use) and shorter
 // than the default per-operator timeout (60 min) so dashboard
 // reflects reality long before the timeout-based path triggers.
-const quietWindow = 2 * time.Minute
+var DefaultQuietWindow = 2 * time.Minute
+
+// OperatorQuietWindows overrides DefaultQuietWindow for specific operators
+// whose workloads routinely produce long gaps between stream events (e.g.
+// running tests, large file writes, extended reasoning chains). Keys are
+// operator names as stored in RunMeta.Operator (the SKILL.md filename stem).
+var OperatorQuietWindows = map[string]time.Duration{
+	// implement tasks can pause 5+ minutes during `go test`, large file
+	// writes, or multi-step reasoning — 10 min avoids false-positive kills.
+	"implement": 10 * time.Minute,
+}
+
+// quietWindowFor returns the quiet-window threshold for the given operator,
+// falling back to DefaultQuietWindow when no override is registered.
+func quietWindowFor(operator string) time.Duration {
+	if d, ok := OperatorQuietWindows[operator]; ok {
+		return d
+	}
+	return DefaultQuietWindow
+}
 
 // LogSink is the small subset of internal/log.Logger that the reconciler
 // needs to record events. Defined here as an interface so the snapshot
@@ -848,9 +867,10 @@ func extractTerminalResult(eventsPath string) (subtype string, resultText string
 //     SIGTERM) before finalizing the meta. Without this, the dashboard
 //     would show a frozen "running" row forever.
 //   - meta.json with status="running" whose events.jsonl hasn't been
-//     written to in `quietWindow`: also rewrite to "failed" (interrupted
-//     process). Catches an interrupt within 2 min instead of waiting
-//     out the full per-operator timeout.
+//     written to in the operator's quiet window (DefaultQuietWindow for
+//     most operators, longer for complex ones like "implement"): rewrite
+//     to "failed" (interrupted process). Catches an interrupt well before
+//     the full per-operator staleAfter timeout.
 //   - run dir that contains events.jsonl but no meta.json: synthesize a
 //     "failed" meta from the dir layout (repo / issue / timestamp) and
 //     events.jsonl mtime. Possible when WriteRunMeta itself failed for
@@ -910,29 +930,31 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 			}
 			// A run is orphaned if EITHER it's been "running" longer than
 			// the per-operator timeout OR its events.jsonl has gone quiet.
-			// The events-quiet check fires much faster (2 min vs 60 min)
-			// and matches the actual failure mode users hit — they Ctrl-C
-			// or kill the process and want the dashboard to reflect that
-			// without waiting an hour.
+			// The events-quiet check fires much faster than staleAfter and
+			// matches the actual failure mode users hit — they Ctrl-C or
+			// kill the process and want the dashboard to reflect that
+			// without waiting an hour. The threshold is per-operator so
+			// long-running operators (e.g. "implement") get a wider window.
+			qw := quietWindowFor(m.Operator)
 			tooOld := !m.StartedAt.After(cutoff)
 			eventsQuiet := false
 			var lastTouch time.Time
 			if st, err := os.Stat(eventsPath); err == nil {
 				lastTouch = st.ModTime().UTC()
-				eventsQuiet = time.Since(lastTouch) > quietWindow
+				eventsQuiet = time.Since(lastTouch) > qw
 			} else {
 				// No events.jsonl at all: a healthy runner opens the
 				// file and writes claude's `system-init` event within
-				// seconds of starting, so anything past quietWindow
-				// (2 min) with no file means the runner died before
-				// launching claude — flag without waiting the full
-				// staleAfter timeout (default 1h) to land here.
-				eventsQuiet = time.Since(m.StartedAt) > quietWindow
+				// seconds of starting, so anything past the quiet window
+				// with no file means the runner died before launching
+				// claude — flag without waiting the full staleAfter
+				// timeout (default 1h) to land here.
+				eventsQuiet = time.Since(m.StartedAt) > qw
 			}
 			if !tooOld && !eventsQuiet {
 				return nil
 			}
-			// events.jsonl can stall past quietWindow even on a healthy
+			// events.jsonl can stall past the quiet window even on a healthy
 			// runner — claude's API retries on upstream 5xx, a long
 			// `go test` or `Task` subagent call, etc. Before declaring
 			// the runner dead, consult the lockfile written by
@@ -977,7 +999,7 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 				case tooOld && eventsQuiet:
 					m.Error = fmt.Sprintf(
 						"reconciled: stuck in running for >%s and events.jsonl quiet for >%s; runner is gone",
-						staleAfter, quietWindow,
+						staleAfter, qw,
 					)
 				case tooOld:
 					m.Error = fmt.Sprintf(
@@ -987,7 +1009,7 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 				default:
 					m.Error = fmt.Sprintf(
 						"reconciled: events.jsonl quiet for >%s and runner PID is dead/missing (interrupted/killed)",
-						quietWindow,
+						qw,
 					)
 				}
 			}
