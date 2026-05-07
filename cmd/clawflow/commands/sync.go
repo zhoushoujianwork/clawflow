@@ -59,12 +59,12 @@ in credentials.yaml so subsequent pushes update the same Gist.`,
 				return err
 			}
 
-			content, err := clawsync.BuildGistContent()
+			files, err := clawsync.BuildAllGistFiles()
 			if err != nil {
-				return fmt.Errorf("cannot build config payload: %w", err)
+				return fmt.Errorf("cannot build sync payload: %w", err)
 			}
 
-			gistID, err = clawsync.PushToGist(gh, gistID, content)
+			gistID, err = clawsync.PushAllToGist(gh, gistID, files)
 			if err != nil {
 				return err
 			}
@@ -74,7 +74,7 @@ in credentials.yaml so subsequent pushes update the same Gist.`,
 				fmt.Fprintf(os.Stderr, "Warning: could not persist Gist ID: %v\n", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "Config pushed to Gist %s\n", gistID)
+			fmt.Fprintf(os.Stderr, "Config and project assets pushed to Gist %s\n", gistID)
 			return nil
 		},
 	}
@@ -109,7 +109,12 @@ func newSyncPullCmd() *cobra.Command {
 				return fmt.Errorf("merge failed: %w", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "Config pulled and merged from Gist %s → %s\n", gistID, config.ConfigPath())
+			if err := clawsync.FetchAndApplyProjectAssets(gh, gistID); err != nil {
+				// Non-fatal: config was already applied; warn but don't fail.
+				fmt.Fprintf(os.Stderr, "Warning: could not restore project assets: %v\n", err)
+			}
+
+			fmt.Fprintf(os.Stderr, "Config and project assets pulled from Gist %s → %s\n", gistID, config.ConfigPath())
 			return nil
 		},
 	}
