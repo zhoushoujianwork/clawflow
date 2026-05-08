@@ -82,6 +82,17 @@ type RunOptions struct {
 	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, model string, systemPrompt ...string) (string, error)
 }
 
+// writeBackTimeout is the maximum time allowed for the post-claude VCS
+// write-back phase (post comment + apply outcome label + remove trigger labels).
+// Without this bound, a stalled GitHub/GitLab API call parks the runner
+// indefinitely until an external process kill (e.g. cron's 60-min SIGKILL)
+// terminates it, losing the claude output and leaving the issue half-processed.
+// See issue #117 for the observed failure mode.
+//
+// Declared as a var (not const) so tests can override it without spawning a
+// real 5-minute wait.
+var writeBackTimeout = 5 * time.Minute
+
 // Run executes one operator against one subject and returns the operator's
 // final stdout text, the outcome label (empty if none), or an error.
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
@@ -132,9 +143,41 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		return trimmed, "", nil
 	}
 
+	// Write-back phase: post comment, apply outcome label, remove trigger labels.
+	// Run under a deadline so a stalled GitHub/GitLab API call cannot block the
+	// runner indefinitely. Without this, a TCP read that never completes parks
+	// the process until an external 60-min kill fires, losing the claude output.
+	// The goroutine may outlive the timeout if the underlying HTTP call is truly
+	// stuck, but the runner returns promptly and ReconcileStaleRuns handles
+	// recovery on the next scan.
+	writeBackCtx, cancel := context.WithTimeout(ctx, writeBackTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWriteBack(v, op, sub, opts, body, outcome)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return body, outcome, err
+		}
+	case <-writeBackCtx.Done():
+		return body, outcome, fmt.Errorf("write-back timed out after %v (GitHub/GitLab API stall): %w", writeBackTimeout, writeBackCtx.Err())
+	}
+
+	return body, outcome, nil
+}
+
+// runWriteBack performs the VCS side-effects after claude completes:
+// post the result comment, apply the outcome label, remove trigger labels,
+// and optionally close the issue. Extracted so it can be run under a timeout
+// via a goroutine in Run.
+func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outcome string) error {
 	if body != "" {
 		if err := v.PostIssueComment(opts.Repo, sub.Number, body); err != nil {
-			return body, outcome, fmt.Errorf("post result comment: %w", err)
+			return fmt.Errorf("post result comment: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "  ✓ comment posted (%d chars)\n", len(body))
 	}
@@ -145,7 +188,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 				"  ⚠ operator %q produced disallowed outcome %q (allowed: %v); skipping label add\n",
 				op.Name, outcome, op.Outcomes)
 		} else if err := v.AddLabel(opts.Repo, sub.Number, outcome); err != nil {
-			return body, outcome, fmt.Errorf("add outcome label %q: %w", outcome, err)
+			return fmt.Errorf("add outcome label %q: %w", outcome, err)
 		} else {
 			fmt.Fprintf(os.Stderr, "  ✓ outcome label %q added\n", outcome)
 			if len(op.Trigger.LabelsRequired) > 0 {
@@ -169,7 +212,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		}
 	}
 
-	return body, outcome, nil
+	return nil
 }
 
 // outcomeAllowed reports whether `label` is in the operator's declared
