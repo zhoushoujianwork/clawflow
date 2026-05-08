@@ -4,6 +4,7 @@ interface ChatTarget {
   repo?: string
   issue?: number
   model?: string
+  mode?: 'issue' | 'edit'
   project?: string
   action?: 'generate' | 'chat'
 }

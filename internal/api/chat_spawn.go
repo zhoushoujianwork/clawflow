@@ -32,6 +32,7 @@ type chatSpawnRequest struct {
 	Repo    string `json:"repo,omitempty"`
 	Issue   int    `json:"issue,omitempty"`
 	Model   string `json:"model,omitempty"`
+	Mode    string `json:"mode,omitempty"`   // "issue" or "edit" — issue-level chat only
 	Project string `json:"project,omitempty"`
 	Action  string `json:"action,omitempty"` // "generate" or "chat" (project-scoped)
 }
@@ -83,10 +84,14 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 		}
 		parts = []string{shellEscape(self), "project", action, shellEscape(req.Project)}
 	} else {
-		// Repo-scoped spawn: `clawflow chat --repo <r> [--issue <n>]`
+		// Repo-scoped spawn: `clawflow chat --repo <r> [--issue <n>] [--mode <m>]`
 		parts = []string{shellEscape(self), "chat", "--repo", shellEscape(req.Repo)}
 		if req.Issue > 0 {
 			parts = append(parts, "--issue", strconv.Itoa(req.Issue))
+			// Only pass --mode for issue-level chat; validate to avoid injection.
+			if req.Mode == "issue" || req.Mode == "edit" {
+				parts = append(parts, "--mode", req.Mode)
+			}
 		}
 	}
 	if req.Model != "" {

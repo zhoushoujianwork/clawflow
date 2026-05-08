@@ -1,5 +1,5 @@
-import { useMemo } from 'react'
-import { ChevronRight, ExternalLink, MessageSquare } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { ChevronRight, ExternalLink, MessageSquare, Code } from 'lucide-react'
 import { Link } from '@tanstack/react-router'
 import { cn } from '../lib/utils'
 import { issueUrl, repoUrl, type RepoInfoMap } from '../lib/vcsUrls'
@@ -377,6 +377,14 @@ function IssueRow({
   const chatDrawer = useChatDrawer()
   const latest = group.runs[0]
   const k = rowKey(group)
+  // Mode picker state: null = picker hidden, 'issue'|'edit' = picker shown
+  const [showModePicker, setShowModePicker] = useState(false)
+
+  const openChat = (mode: 'issue' | 'edit') => {
+    setShowModePicker(false)
+    void chatDrawer.open({ repo: group.repo, issue: group.issue_number, mode })
+  }
+
   return (
     <div>
       <button
@@ -439,16 +447,49 @@ function IssueRow({
         <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-16 text-right">
           {group.runs.length} {group.runs.length === 1 ? 'run' : 'runs'}
         </span>
-        <button
-          onClick={e => {
-            e.stopPropagation()
-            chatDrawer.open({ repo: group.repo, issue: group.issue_number })
-          }}
-          className="shrink-0 text-muted-foreground hover:text-foreground"
-          title="Chat about this issue"
-        >
-          <MessageSquare className="w-3.5 h-3.5" />
-        </button>
+        {/* Chat button with mode picker */}
+        <div className="relative shrink-0" onClick={e => e.stopPropagation()}>
+          <button
+            onClick={() => setShowModePicker(v => !v)}
+            className="text-muted-foreground hover:text-foreground"
+            title="Chat about this issue"
+            aria-haspopup="true"
+            aria-expanded={showModePicker}
+          >
+            <MessageSquare className="w-3.5 h-3.5" />
+          </button>
+          {showModePicker && (
+            <div
+              className="absolute right-0 top-6 z-20 bg-card border border-border rounded-lg shadow-lg py-1 min-w-[160px]"
+              role="menu"
+            >
+              <button
+                role="menuitem"
+                onClick={() => openChat('issue')}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-secondary/60 text-left"
+                title="Discuss requirements and land conclusions as comments/labels. File editing disabled."
+              >
+                <MessageSquare className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                <span>
+                  <span className="font-medium text-foreground">Issue mode</span>
+                  <span className="block text-muted-foreground">discuss · no file edits</span>
+                </span>
+              </button>
+              <button
+                role="menuitem"
+                onClick={() => openChat('edit')}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-secondary/60 text-left"
+                title="Full file-editing access for hot-fixing the issue directly."
+              >
+                <Code className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                <span>
+                  <span className="font-medium text-foreground">Edit mode</span>
+                  <span className="block text-muted-foreground">hot-fix · full access</span>
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
       </button>
       {expanded && <Timeline group={group} slug={slug} />}
     </div>
