@@ -141,6 +141,16 @@ here — run 'clawflow run' first if you want fresh data.`,
 			} else {
 				lg.Warn("web/reconcile_startup", "err", err.Error())
 			}
+			// Heal historical rows: before "cancelled" was its own status,
+			// /api/run/cancel marked killed runs as "failed" with an error
+			// like "cancelled by user via dashboard". One-shot rewrite to
+			// the new status so the dashboard's stat counts and history
+			// pills match reality. Idempotent — runs every startup and
+			// becomes a no-op once the data is clean.
+			if n := snapshot.MigrateFailedToCancelled(); n > 0 {
+				fmt.Fprintf(os.Stderr, "✓ migrated %d failed run(s) to cancelled\n", n)
+				lg.Info("web/migrate_cancelled", "migrated", n)
+			}
 			if _, err := snapshot.WriteRunsIndex(50); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠ snapshot runs index on startup: %v\n", err)
 			}

@@ -658,6 +658,66 @@ func WriteRunMeta(runDir string, m RunMeta) error {
 	return writeJSON(filepath.Join(runDir, "meta.json"), m)
 }
 
+// MigrateFailedToCancelled walks every run dir and rewrites meta.json's
+// Status from "failed" to "cancelled" when the recorded Error makes it
+// unambiguous that the run was killed via /api/run/cancel rather than
+// crashing on its own. This is a one-shot heal-old-data migration:
+// before the dedicated "cancelled" status existed, cancelled rows were
+// written as failed with an error string we can pattern-match on.
+//
+// Conservative match list — only error texts the cancel path itself
+// emits. Reconciler-generated text like "events.jsonl quiet for >…;
+// runner PID is dead/missing (interrupted/killed)" is intentionally
+// NOT matched because it overlaps with genuine crashes (OOM kill,
+// machine sleep, etc.) and we don't want to silently relabel those.
+//
+// Returns the number of rows migrated. Idempotent: a second call sees
+// every row as already "cancelled" and does nothing.
+func MigrateFailedToCancelled() int {
+	runsRoot := filepath.Join(DataDir(), "runs")
+	if _, err := os.Stat(runsRoot); os.IsNotExist(err) {
+		return 0
+	}
+	cancelMarkers := []string{
+		"cancelled by user",            // /api/run/cancel after kill
+		"cleared by cancel",            // /api/run/cancel after dead-PID branch
+	}
+	var migrated int
+	_ = filepath.WalkDir(runsRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		metaPath := filepath.Join(path, "meta.json")
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			return nil
+		}
+		var m RunMeta
+		if json.Unmarshal(data, &m) != nil {
+			return nil
+		}
+		if m.Status != "failed" || m.Error == "" {
+			return nil
+		}
+		matched := false
+		for _, marker := range cancelMarkers {
+			if strings.Contains(m.Error, marker) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return nil
+		}
+		m.Status = "cancelled"
+		if err := WriteRunMeta(path, m); err == nil {
+			migrated++
+		}
+		return nil
+	})
+	return migrated
+}
+
 // MarkRunningAsCancelled finds any in-flight run for (repo, issue) — i.e. a
 // run dir whose meta.json has Status="running" — and rewrites it to
 // Status="cancelled" with Error="<reason>" and EndedAt=now. Returns the
