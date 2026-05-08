@@ -335,11 +335,14 @@ function Dashboard() {
   // Keys for runs that are already in-flight or completed this cycle.
   // Pending entries matching these are stale snapshots and should be hidden.
   const activeRunKeys = useMemo(() => {
+    // Pending.json is captured at scan start — once a run for the same
+    // (repo, issue, operator) exists in runs.json, the pending row is a
+    // stale duplicate. Cover ALL statuses (including failed/cancelled) so
+    // a kill or crash doesn't cause the row to bounce back into Pending
+    // until the next clawflow run rewrites pending.json fresh.
     const s = new Set<string>()
     for (const r of runs) {
-      if (r.status === 'running' || r.status === 'success' || r.status === 'skipped') {
-        s.add(`${r.repo}#${r.issue_number}/${r.operator}`)
-      }
+      s.add(`${r.repo}#${r.issue_number}/${r.operator}`)
     }
     return s
   }, [runs])

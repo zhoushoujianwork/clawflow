@@ -835,6 +835,80 @@ func WriteIssues(entries []IssueEntry) error {
 	return writeJSON(filepath.Join(DataDir(), "issues.json"), entries)
 }
 
+// PrunePending rewrites data/pending.json to drop entries that this
+// machine will never act on. Called from `clawflow web` startup so a
+// long-paused install (or a freshly re-bound repo) doesn't keep
+// surfacing rows that next-scan would have removed anyway.
+//
+// An entry is pruned when ANY of the following holds:
+//   - its repo is no longer in the config
+//   - its repo is pinned to a different machine via bound_machine
+//     (we only prune when we both have a hostname AND a non-empty
+//     bound_machine that differs — otherwise we can't be confident)
+//   - the issue is known closed in data/issues.json
+//
+// Idempotent: a clean pending.json comes through unchanged. Returns
+// the number of entries removed so the caller can log it.
+func PrunePending() int {
+	path := filepath.Join(DataDir(), "pending.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var pending []PendingEntry
+	if err := json.Unmarshal(raw, &pending); err != nil {
+		return 0
+	}
+	if len(pending) == 0 {
+		return 0
+	}
+
+	// Build the prune predicates from current state.
+	cfg, _ := config.Load()
+	repoBound := make(map[string]string)
+	repoExists := make(map[string]bool)
+	if cfg != nil {
+		for fullName, r := range cfg.Repos {
+			repoExists[fullName] = true
+			repoBound[fullName] = r.BoundMachine
+		}
+	}
+	hostname, _ := os.Hostname()
+
+	closedIssues := make(map[string]bool) // key: "repo#num"
+	if data, err := os.ReadFile(filepath.Join(DataDir(), "issues.json")); err == nil {
+		var issues []IssueEntry
+		if json.Unmarshal(data, &issues) == nil {
+			for _, i := range issues {
+				if i.State == "closed" {
+					closedIssues[fmt.Sprintf("%s#%d", i.Repo, i.IssueNumber)] = true
+				}
+			}
+		}
+	}
+
+	kept := pending[:0]
+	for _, p := range pending {
+		if !repoExists[p.Repo] {
+			continue
+		}
+		if bound := repoBound[p.Repo]; bound != "" && hostname != "" && bound != hostname {
+			continue
+		}
+		if closedIssues[fmt.Sprintf("%s#%d", p.Repo, p.IssueNumber)] {
+			continue
+		}
+		kept = append(kept, p)
+	}
+
+	removed := len(pending) - len(kept)
+	if removed == 0 {
+		return 0
+	}
+	_ = WritePending(kept)
+	return removed
+}
+
 // WritePending writes data/pending.json with the supplied entries. The list
 // is replaced wholesale on every refresh so stale entries (issues that just
 // got processed) drop off automatically.

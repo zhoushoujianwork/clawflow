@@ -151,6 +151,15 @@ here — run 'clawflow run' first if you want fresh data.`,
 				fmt.Fprintf(os.Stderr, "✓ migrated %d failed run(s) to cancelled\n", n)
 				lg.Info("web/migrate_cancelled", "migrated", n)
 			}
+			// Prune pending.json of rows this machine will never run:
+			// removed-from-config repos, bound-to-other-machine repos,
+			// and now-closed issues. clawflow run rebuilds pending from
+			// scratch each cycle so a paused install would otherwise
+			// keep showing stale queued rows indefinitely.
+			if n := snapshot.PrunePending(); n > 0 {
+				fmt.Fprintf(os.Stderr, "✓ pruned %d stale pending entr(ies)\n", n)
+				lg.Info("web/prune_pending", "removed", n)
+			}
 			if _, err := snapshot.WriteRunsIndex(50); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠ snapshot runs index on startup: %v\n", err)
 			}
