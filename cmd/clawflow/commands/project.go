@@ -56,11 +56,13 @@ func newProjectAutomationCmd() *cobra.Command {
 	cmd.AddCommand(newProjectAutomationEnableCmd())
 	cmd.AddCommand(newProjectAutomationDisableCmd())
 	cmd.AddCommand(newProjectAutomationShowCmd())
+	cmd.AddCommand(newProjectAutomationBindCmd())
 	return cmd
 }
 
 func newProjectAutomationEnableCmd() *cobra.Command {
 	var cooldown int
+	var boundMachine string
 	cmd := &cobra.Command{
 		Use:   "enable <name>",
 		Short: "Enable PM auto-wakeup at the end of each `clawflow run` pass",
@@ -69,11 +71,60 @@ func newProjectAutomationEnableCmd() *cobra.Command {
 			if err := project.SetAutomation(args[0], true, cooldown); err != nil {
 				return err
 			}
+			if cmd.Flags().Changed("bound-machine") {
+				if err := project.SetAutomationBoundMachine(args[0], boundMachine); err != nil {
+					return err
+				}
+			}
 			fmt.Printf("automation enabled for project %q (cooldown: %d min)\n", args[0], cooldown)
+			if boundMachine != "" {
+				fmt.Printf("  bound to machine: %s\n", boundMachine)
+			}
 			return nil
 		},
 	}
 	cmd.Flags().IntVar(&cooldown, "cooldown", 30, "Minutes between PM wakeups (0 = every run pass)")
+	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "Restrict Pilot wakeups to this hostname (empty = any machine)")
+	return cmd
+}
+
+// newProjectAutomationBindCmd adds or clears the bound_machine for a project's
+// automation without touching the enabled/cooldown state.
+func newProjectAutomationBindCmd() *cobra.Command {
+	var clear bool
+	cmd := &cobra.Command{
+		Use:   "bind <name>",
+		Short: "Set or clear the bound_machine for a project's Pilot automation",
+		Long: `Restrict Pilot wakeups to a specific machine hostname.
+
+Examples:
+  # Bind to the current machine
+  clawflow project automation bind myproject --machine $(hostname)
+
+  # Clear the binding (any machine may wake the Pilot)
+  clawflow project automation bind myproject --clear`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if clear {
+				if err := project.SetAutomationBoundMachine(args[0], ""); err != nil {
+					return err
+				}
+				fmt.Printf("bound_machine cleared for project %q — any machine may wake the Pilot\n", args[0])
+				return nil
+			}
+			machine, _ := cmd.Flags().GetString("machine")
+			if machine == "" {
+				return fmt.Errorf("provide --machine <hostname> or --clear")
+			}
+			if err := project.SetAutomationBoundMachine(args[0], machine); err != nil {
+				return err
+			}
+			fmt.Printf("project %q Pilot bound to machine %q\n", args[0], machine)
+			return nil
+		},
+	}
+	cmd.Flags().String("machine", "", "Hostname to bind to")
+	cmd.Flags().BoolVar(&clear, "clear", false, "Clear the binding so any machine may wake the Pilot")
 	return cmd
 }
 
@@ -102,9 +153,22 @@ func newProjectAutomationShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			hostname, _ := os.Hostname()
 			fmt.Printf("Project: %s\n", p.Name)
 			fmt.Printf("Enabled: %t\n", p.Automation.Enabled)
 			fmt.Printf("Cooldown: %d min\n", p.Automation.CooldownMinutes)
+			if p.Automation.BoundMachine != "" {
+				if hostname != "" && p.Automation.BoundMachine == hostname {
+					fmt.Printf("Bound machine: %s (current host matches ✓)\n", p.Automation.BoundMachine)
+				} else if hostname != "" {
+					fmt.Printf("Bound machine: %s (current host: %s — skipped on this machine)\n",
+						p.Automation.BoundMachine, hostname)
+				} else {
+					fmt.Printf("Bound machine: %s\n", p.Automation.BoundMachine)
+				}
+			} else {
+				fmt.Println("Bound machine: (any)")
+			}
 			if p.Automation.LastWokenAt != "" {
 				fmt.Printf("Last woken: %s\n", p.Automation.LastWokenAt)
 				if rem := p.CooldownRemaining(time.Now()); rem > 0 {
