@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/zhoushoujianwork/clawflow/internal/chat/prompts"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -125,6 +126,9 @@ than #`+fmt.Sprint(issue.Number)+`.
 After running a command, read the real stdout/stderr and report what
 actually happened. The command's exit status is the only source of
 truth.`)
+
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, prompts.LanguageRule())
 }
 
 // buildIssueModeRole writes the "issue mode" role section — discussion and
@@ -194,6 +198,9 @@ here as code would be discarded by that flow.
 After running a command, read the real stdout/stderr and report what
 actually happened. The command's exit status is the only source of
 truth.`)
+
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, prompts.LanguageRule())
 }
 
 
@@ -302,18 +309,16 @@ subcommand via Bash. Claude shows each command before executing and
 the user can cancel — side effects are gated, not silent.
 
 Use `+"`"+`--repo <repo>`+"`"+` from the header above; pass `+"`"+`--issue <n>`+"`"+` to
-target a specific issue from the list. Available commands:
+target a specific issue from the list.`)
 
-- Add a label:    `+"`"+`clawflow label add --repo <repo> --issue <n> --label <name>`+"`"+`
-- Remove a label: `+"`"+`clawflow label remove --repo <repo> --issue <n> --label <name>`+"`"+`
-- Post a comment: `+"`"+`clawflow issue comment --repo <repo> --issue <n> --body "<text>"`+"`"+`
-- Create issue:   `+"`"+`clawflow issue create --repo <repo> --title "<t>" --body "<b>"`+"`"+`
-                  `+"`"+`issue create`+"`"+` has no `+"`"+`--labels`+"`"+` flag. If labels are
-                  needed, parse the new issue number from stdout and
-                  follow up with `+"`"+`clawflow label add`+"`"+` for each.
-- Close issue:    `+"`"+`clawflow issue close --repo <repo> --issue <n>`+"`"+`
-
-After running, read the real stdout/stderr (issue URL, new label
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, prompts.CLICheatsheet(prompts.ScopeRepo))
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, prompts.BehaviorRules())
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, prompts.LanguageRule())
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, `After running a command, read the real stdout/stderr (issue URL, new label
 state) and report what actually happened. Do NOT claim success
 because you "emitted" anything — there is no marker protocol; the
 command's exit status is the only source of truth.`)
