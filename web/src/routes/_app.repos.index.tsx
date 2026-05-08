@@ -1,9 +1,10 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState, useCallback } from 'react'
-import { FolderOpen, Plus, Trash2 } from 'lucide-react'
+import { FolderOpen, Plus, Trash2, Link2, Link2Off, Search, X } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
+import { useConfigChanged } from '../lib/configEvents'
 
 interface Repo {
   full_name: string
@@ -14,6 +15,7 @@ interface Repo {
   enabled: boolean
   auto_approve: boolean
   auto_merge: boolean
+  bound_machine?: string
 }
 
 interface RunEntry {
@@ -55,9 +57,11 @@ function RepoList() {
   const [didApplyDefault, setDidApplyDefault] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [removing, setRemoving] = useState(false)
+  const [binding, setBinding] = useState(false)
+  const [query, setQuery] = useState('')
 
-  useEffect(() => {
-    Promise.all([
+  const loadAll = useCallback(() => {
+    return Promise.all([
       fetch('/data/repos.json', { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : []))
         .catch(() => []),
@@ -83,6 +87,9 @@ function RepoList() {
       setLoading(false)
     })
   }, [])
+
+  useEffect(() => { loadAll() }, [loadAll])
+  useConfigChanged(loadAll)
 
   const counts = useMemo(() => {
     const c = new Map<string, number>()
@@ -132,7 +139,16 @@ function RepoList() {
   }, [runs])
 
   const filtered = useMemo(() => {
-    const list = active === 'all' ? [...repos] : repos.filter(r => (r.platform || 'github') === active)
+    let list = active === 'all' ? [...repos] : repos.filter(r => (r.platform || 'github') === active)
+    const q = query.trim().toLowerCase()
+    if (q) {
+      list = list.filter(r =>
+        r.full_name.toLowerCase().includes(q) ||
+        (r.local_path || '').toLowerCase().includes(q) ||
+        (r.base_branch || '').toLowerCase().includes(q) ||
+        (r.bound_machine || '').toLowerCase().includes(q),
+      )
+    }
     list.sort((a, b) => {
       const ta = lastActivityMap[a.full_name] || ''
       const tb = lastActivityMap[b.full_name] || ''
@@ -140,7 +156,7 @@ function RepoList() {
       return a.full_name.localeCompare(b.full_name)
     })
     return list
-  }, [repos, active, lastActivityMap])
+  }, [repos, active, lastActivityMap, query])
 
   // Clear selection when filter changes (so stale selections from another tab don't linger)
   useEffect(() => {
@@ -192,6 +208,29 @@ function RepoList() {
     }
   }, [selected])
 
+  const handleBatchBind = useCallback(async (bind: boolean) => {
+    if (selected.size === 0 || binding) return
+    setBinding(true)
+    try {
+      const resp = await fetch('/api/repo/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repos: Array.from(selected), bind }),
+      })
+      if (resp.ok) {
+        const data = await resp.json()
+        const results: Record<string, string> = data.results || {}
+        setRepos(prev => prev.map(r =>
+          selected.has(r.full_name)
+            ? { ...r, bound_machine: results[r.full_name] || undefined }
+            : r
+        ))
+        setSelected(new Set())
+      }
+    } catch { /* ignore */ }
+    finally { setBinding(false) }
+  }, [selected, binding])
+
   const repoMap = useMemo<RepoInfoMap>(() => {
     const m: RepoInfoMap = {}
     for (const r of repos) {
@@ -208,7 +247,7 @@ function RepoList() {
   const showTabs = repos.length > 0 && platformKeys.length > 1
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6">
+    <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Monitored repos</h1>
@@ -218,6 +257,28 @@ function RepoList() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {selected.size > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => handleBatchBind(true)}
+                disabled={binding}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
+              >
+                <Link2 className="w-4 h-4" />
+                {binding ? 'Binding…' : `Bind (${selected.size})`}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleBatchBind(false)}
+                disabled={binding}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-secondary text-foreground rounded-lg text-sm font-semibold hover:bg-secondary/80 transition-colors disabled:opacity-50"
+              >
+                <Link2Off className="w-4 h-4" />
+                {binding ? 'Unbinding…' : `Unbind (${selected.size})`}
+              </button>
+            </>
+          )}
           {selected.size > 0 && (
             <button
               type="button"
@@ -239,17 +300,47 @@ function RepoList() {
         </div>
       </div>
 
-      {showTabs && (
-        <div className="inline-flex bg-card border border-border rounded-xl overflow-hidden mb-4">
-          <TabButton active={active === 'all'} onClick={() => pickProvider('all')}>
-            All <span className="ml-1 text-xs opacity-60 tabular-nums">{repos.length}</span>
-          </TabButton>
-          {platformKeys.map(p => (
-            <TabButton key={p} active={active === p} onClick={() => pickProvider(p)}>
-              <span className="capitalize">{p}</span>
-              <span className="ml-1 text-xs opacity-60 tabular-nums">{counts.get(p)}</span>
-            </TabButton>
-          ))}
+      {(showTabs || repos.length > 0) && (
+        <div className="flex items-center gap-3 mb-4 flex-wrap">
+          {showTabs && (
+            <div className="inline-flex bg-card border border-border rounded-xl overflow-hidden">
+              <TabButton active={active === 'all'} onClick={() => pickProvider('all')}>
+                All <span className="ml-1 text-xs opacity-60 tabular-nums">{repos.length}</span>
+              </TabButton>
+              {platformKeys.map(p => (
+                <TabButton key={p} active={active === p} onClick={() => pickProvider(p)}>
+                  <span className="capitalize">{p}</span>
+                  <span className="ml-1 text-xs opacity-60 tabular-nums">{counts.get(p)}</span>
+                </TabButton>
+              ))}
+            </div>
+          )}
+          <div className="relative flex-1 min-w-[200px] max-w-sm">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+            <input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search repo, branch, path…"
+              aria-label="Search repos"
+              className="w-full bg-card border border-border rounded-lg pl-8 pr-8 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          {query && (
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {filtered.length} match{filtered.length === 1 ? '' : 'es'}
+            </span>
+          )}
         </div>
       )}
 
@@ -263,13 +354,20 @@ function RepoList() {
         </div>
       ) : filtered.length === 0 ? (
         <div className="bg-card border border-border rounded-xl p-8 text-center">
-          <p className="text-sm text-muted-foreground">
-            No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{active}</code> repos. Pick another tab or add one with{' '}
-            <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow repo add</code>.
-          </p>
+          {query ? (
+            <p className="text-sm text-muted-foreground">
+              No repos match <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{query}</code>.{' '}
+              <button type="button" onClick={() => setQuery('')} className="underline hover:text-foreground">Clear search</button>
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{active}</code> repos. Pick another tab or add one with{' '}
+              <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow repo add</code>.
+            </p>
+          )}
         </div>
       ) : (
-        <div className="bg-card border border-border rounded-xl overflow-hidden">
+        <div className="bg-card border border-border rounded-xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
               <tr>
@@ -289,6 +387,7 @@ function RepoList() {
                 <th className="text-left px-4 py-2 font-semibold">Enabled</th>
                 <th className="text-left px-4 py-2 font-semibold">Auto-approve</th>
                 <th className="text-left px-4 py-2 font-semibold">Auto-merge</th>
+                <th className="text-left px-4 py-2 font-semibold">Bound</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
@@ -345,6 +444,23 @@ function RepoList() {
                   </td>
                   <td className="px-4 py-2">
                     <Pill on={r.auto_merge}>{r.auto_merge ? 'on' : 'off'}</Pill>
+                  </td>
+                  <td className="px-4 py-2">
+                    {r.bound_machine ? (
+                      <span
+                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border bg-blue-100 text-blue-700 border-blue-200 truncate max-w-[120px]"
+                        title={r.bound_machine}
+                      >
+                        {r.bound_machine}
+                      </span>
+                    ) : (
+                      <span
+                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] border border-dashed border-muted-foreground/40 text-muted-foreground"
+                        title="Not bound to any machine"
+                      >
+                        unbound
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}

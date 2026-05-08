@@ -240,7 +240,10 @@ type RunMeta struct {
 	// would carry "0001-01-01T00:00:00Z" and the dashboard's duration math
 	// would render it as a giant negative offset.
 	EndedAt     *time.Time `json:"ended_at,omitempty"`
-	// Status is one of "running", "success", "failed", "skipped".
+	// Status is one of "running", "success", "failed", "skipped", "cancelled".
+	// "cancelled" is set only by /api/run/cancel after the runner process
+	// is killed — it lets the dashboard distinguish a user-initiated kill
+	// from an organic crash ("failed").
 	Status  string `json:"status"`
 	PRUrl   string `json:"pr_url,omitempty"`
 	Error   string `json:"error,omitempty"`
@@ -649,6 +652,62 @@ func WriteRunMeta(runDir string, m RunMeta) error {
 		m.StartedAt = time.Now().UTC()
 	}
 	return writeJSON(filepath.Join(runDir, "meta.json"), m)
+}
+
+// MarkRunningAsCancelled finds any in-flight run for (repo, issue) — i.e. a
+// run dir whose meta.json has Status="running" — and rewrites it to
+// Status="cancelled" with Error="<reason>" and EndedAt=now. Returns the
+// number of runs flipped (normally 0 or 1; the lock guarantees at most
+// one running run per (repo, issue), but stray rows from prior crashes
+// would also be reaped here).
+//
+// Called from /api/run/cancel after the process tree is killed and the
+// lock released, so the dashboard's runs.json reflects the cancellation
+// on the next poll instead of waiting for the per-operator quiet-window
+// reconciler to fire (up to 10 min for "implement").
+func MarkRunningAsCancelled(repo string, issueNum int, reason string) int {
+	issueRoot := filepath.Join(
+		DataDir(),
+		"runs",
+		strings.ReplaceAll(repo, "/", "__"),
+		fmt.Sprintf("issue-%d", issueNum),
+	)
+	entries, err := os.ReadDir(issueRoot)
+	if err != nil {
+		return 0
+	}
+	now := time.Now().UTC()
+	var fixed int
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		runDir := filepath.Join(issueRoot, e.Name())
+		metaPath := filepath.Join(runDir, "meta.json")
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue
+		}
+		var m RunMeta
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		if m.Status != "running" {
+			continue
+		}
+		m.Status = "cancelled"
+		if reason != "" {
+			m.Error = reason
+		} else {
+			m.Error = "cancelled by user"
+		}
+		end := now
+		m.EndedAt = &end
+		if err := WriteRunMeta(runDir, m); err == nil {
+			fixed++
+		}
+	}
+	return fixed
 }
 
 // RunIndexEntry is a flattened row for the dashboard's "recent runs" list.

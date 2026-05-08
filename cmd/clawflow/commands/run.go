@@ -216,6 +216,10 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 			debugf("repo %s is bound to %s, skipping (current machine: %s)", fullName, repoCfg.BoundMachine, hostname)
 			continue
 		}
+		if cfg.Settings.RequireBinding && repoCfg.BoundMachine == "" && hostname != "" {
+			debugf("repo %s has no bound_machine and require_binding is set, skipping", fullName)
+			continue
+		}
 		executeHere := onlyRepo == "" || onlyRepo == fullName
 		repoPending, repoJobs, err := scanRepoOnce(reg, fullName, repoCfg, executeHere, onlyIssue, &globalIssues)
 		if err != nil {
@@ -314,6 +318,38 @@ type firedKey struct {
 	Operator    string
 }
 
+// deterministicSkip reports whether `op` is guaranteed to be skipped at
+// execution time on `repoCfg` no matter what the issue's labels look like.
+// Used both to suppress the matched-but-unrunnable entry from pending.json
+// (so the dashboard doesn't pile up forever-queued rows) and to short-
+// circuit firstMatch execution. Both call sites must agree, otherwise a
+// pending entry would re-appear on every scan.
+//
+// Currently the only deterministic-skip case is `implement` against a repo
+// with no local clone (worktree add needs a working tree on disk). Other
+// skips — locked by another process, rate-limited, label-state changes —
+// are state-dependent and may resolve on the next pass, so they belong in
+// pending and are filtered out elsewhere.
+func deterministicSkip(op *operator.Operator, repoCfg config.Repo) bool {
+	if op == nil {
+		return false
+	}
+	if op.Name == "implement" && repoCfg.LocalPath == "" {
+		return true
+	}
+	return false
+}
+
+// deterministicSkipReason returns a human-readable explanation for the
+// matching deterministicSkip case. Empty string if the op would not be
+// skipped — callers should gate this behind a deterministicSkip check.
+func deterministicSkipReason(op *operator.Operator, repoCfg config.Repo) string {
+	if op != nil && op.Name == "implement" && repoCfg.LocalPath == "" {
+		return "implement requires local_path but it's empty"
+	}
+	return ""
+}
+
 // scanRepoOnce lists every open issue in the repo and returns the full
 // set of (issue × matching-operator) pending entries plus the runJobs
 // that the executor should fire (at most one per issue, the first
@@ -393,6 +429,15 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 				debugf("  ✗ %s: %s", op.Name, reason)
 				continue
 			}
+			// Drop "deterministic skip" cases from pending so they don't
+			// pile up forever in the dashboard. The execution path below
+			// has the same skip for firstMatch (see "Pre-flight: skip
+			// deterministic failures early"); both must agree, otherwise
+			// matched-but-unrunnable operators stay queued indefinitely.
+			if deterministicSkip(op, repoCfg) {
+				debugf("  ⊘ %s matches but config makes it unrunnable, skipping pending", op.Name)
+				continue
+			}
 			debugf("  ✓ %s matches", op.Name)
 			pending = append(pending, snapshot.PendingEntry{
 				Repo:        fullName,
@@ -424,8 +469,8 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 		if firstMatch != nil {
 			// Pre-flight: skip deterministic failures early. implement
 			// needs a local clone but the repo may not have local_path set.
-			if firstMatch.Name == "implement" && repoCfg.LocalPath == "" {
-				debugf("  · skipping %s on #%d: implement requires local_path but it's empty", fullName, iss.Number)
+			if deterministicSkip(firstMatch, repoCfg) {
+				debugf("  · skipping %s on #%d: %s", firstMatch.Name, iss.Number, deterministicSkipReason(firstMatch, repoCfg))
 				continue
 			}
 			// Skip issues already locked by another process.

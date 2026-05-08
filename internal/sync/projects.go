@@ -102,15 +102,20 @@ func DiscoverProjectAssets() (map[string]string, error) {
 	return result, nil
 }
 
-// ApplyProjectAssets writes project asset files received from the Gist back
-// to their correct local paths under ~/.clawflow/projects/.
+// ApplyProjectAssets writes synced asset files received from the Gist back
+// to their correct local paths under ~/.clawflow/.
 //
 // gistFiles is the full map of filename → content from the fetched Gist.
-// Only entries whose filename passes IsProjectAssetFilename are processed;
-// all others are silently ignored.
+// Only entries whose filename passes DecodeGistFilename (currently project
+// assets prefixed "projects--" and user skill assets prefixed "skills--")
+// are processed; all others are silently ignored, so it is safe to pass the
+// raw Gist file map including config.yaml.
 //
 // Directories are created as needed. Existing files are overwritten
 // (cloud-wins merge strategy, matching config.yaml behaviour).
+//
+// The name retains "ProjectAssets" for backwards compatibility; the
+// implementation has been generalised to all synced asset prefixes.
 func ApplyProjectAssets(gistFiles map[string]GistFileContent) error {
 	home, err := os.UserHomeDir()
 	if err != nil {

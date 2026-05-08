@@ -15,6 +15,7 @@ import {
   type Run,
 } from '../components/IssueList'
 import { useRepoInfoMap } from '../lib/vcsUrls'
+import { useConfigChanged } from '../lib/configEvents'
 
 // Long claude -p run (typically 30s–2min). The job runs server-side
 // so the user is free to navigate away — re-opening the page resumes
@@ -239,6 +240,11 @@ function ProjectDetail() {
       .catch(() => { /* idle */ })
     return () => { stopPolling(); stopDeploymentPolling() }
   }, [name])
+  useConfigChanged(() => {
+    fetchProject()
+    fetchAvailableRepos()
+    fetchBacklog()
+  })
 
   function fetchAvailableRepos() {
     fetch('/data/repos.json', { cache: 'no-store' })

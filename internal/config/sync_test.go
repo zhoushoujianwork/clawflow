@@ -255,9 +255,10 @@ settings:
 	}
 }
 
-// TestMarshalForGist_ExcludesBoundMachine verifies that bound_machine is
-// stripped from the Gist payload (machine-specific, like local_path).
-func TestMarshalForGist_ExcludesBoundMachine(t *testing.T) {
+// TestMarshalForGist_IncludesBoundMachine verifies that bound_machine IS
+// included in the Gist payload — it's a fleet-wide directive about which
+// machine should run a repo, not a per-machine local fact.
+func TestMarshalForGist_IncludesBoundMachine(t *testing.T) {
 	cfg := &config.Config{
 		Repos: map[string]config.Repo{
 			"owner/repo": {
@@ -275,34 +276,36 @@ func TestMarshalForGist_ExcludesBoundMachine(t *testing.T) {
 	}
 
 	payload := string(data)
-	if strings.Contains(payload, "my-laptop") {
-		t.Error("bound_machine value should not appear in Gist payload")
+	if !strings.Contains(payload, "bound_machine") {
+		t.Error("bound_machine key should appear in Gist payload")
 	}
-	if strings.Contains(payload, "bound_machine") {
-		t.Error("bound_machine key should not appear in Gist payload")
+	if !strings.Contains(payload, "my-laptop") {
+		t.Error("bound_machine value should appear in Gist payload")
 	}
 }
 
-// TestMergeConfigs_BoundMachinePreserved verifies that bound_machine is never
-// overwritten by the remote config (local wins, same as local_path).
-func TestMergeConfigs_BoundMachinePreserved(t *testing.T) {
+// TestMergeConfigs_BoundMachineCloudWins verifies that bound_machine on the
+// remote overwrites the local value, like every other repo field besides
+// local_path. This makes "transfer the binding from machine A to machine B"
+// a single push from B + pull on A.
+func TestMergeConfigs_BoundMachineCloudWins(t *testing.T) {
 	local := &config.Config{
 		Repos: map[string]config.Repo{
 			"owner/repo": {
 				Enabled:      true,
 				BaseBranch:   "main",
 				LocalPath:    "/home/user/repo",
-				BoundMachine: "my-laptop",
+				BoundMachine: "old-laptop",
 			},
 		},
 	}
 
-	// Remote has no bound_machine (stripped on push).
 	remoteYAML := `
 repos:
   owner/repo:
     enabled: true
     base_branch: develop
+    bound_machine: new-laptop
 `
 
 	merged, err := config.MergeConfigs(local, []byte(remoteYAML))
@@ -311,13 +314,51 @@ repos:
 	}
 
 	repo := merged.Repos["owner/repo"]
-	if repo.BoundMachine != "my-laptop" {
-		t.Errorf("bound_machine should be preserved: got %q, want %q", repo.BoundMachine, "my-laptop")
+	if repo.BoundMachine != "new-laptop" {
+		t.Errorf("bound_machine should follow remote: got %q, want %q", repo.BoundMachine, "new-laptop")
+	}
+	// local_path is still the one preserved-locally field.
+	if repo.LocalPath != "/home/user/repo" {
+		t.Errorf("local_path should be preserved: got %q, want %q", repo.LocalPath, "/home/user/repo")
+	}
+}
+
+// TestMergeConfigs_BoundMachineClearedByRemote verifies that an explicit
+// empty bound_machine on the remote also wins — i.e. unbinding a repo on
+// one machine propagates to the rest of the fleet via push/pull.
+func TestMergeConfigs_BoundMachineClearedByRemote(t *testing.T) {
+	local := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/repo": {
+				Enabled:      true,
+				BaseBranch:   "main",
+				BoundMachine: "old-laptop",
+			},
+		},
+	}
+
+	// Remote omits bound_machine entirely (omitempty on push when empty).
+	remoteYAML := `
+repos:
+  owner/repo:
+    enabled: true
+    base_branch: main
+`
+
+	merged, err := config.MergeConfigs(local, []byte(remoteYAML))
+	if err != nil {
+		t.Fatalf("MergeConfigs error: %v", err)
+	}
+
+	repo := merged.Repos["owner/repo"]
+	if repo.BoundMachine != "" {
+		t.Errorf("bound_machine should be cleared by remote, got %q", repo.BoundMachine)
 	}
 }
 
 // TestMergeConfigs_BoundMachineEmptyForNewRepo verifies that a repo arriving
-// only from the remote gets an empty bound_machine (not inherited).
+// only from the remote with no bound_machine field set has it empty — no
+// inheritance, no implicit binding.
 func TestMergeConfigs_BoundMachineEmptyForNewRepo(t *testing.T) {
 	local := &config.Config{
 		Repos: map[string]config.Repo{},

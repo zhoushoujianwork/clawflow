@@ -61,6 +61,12 @@ type settingsView struct {
 		GitLabURL           string   `json:"gitlab_url,omitempty"`
 		Terminal            string   `json:"terminal,omitempty"`
 		DefaultIDE          string   `json:"default_ide,omitempty"`
+		RequireBinding      bool     `json:"require_binding"`
+		// Hostname is this machine's identifier — the same string the
+		// /api/repo/bind endpoint writes into bound_machine. Exposed so
+		// the dashboard can decide whether a given repo is "mine"
+		// without round-tripping through the bind endpoint.
+		Hostname            string   `json:"hostname,omitempty"`
 	} `json:"global"`
 }
 
@@ -96,9 +102,18 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	v.Tokens.GitlabSet = creds.GitLabToken != ""
 	v.Tokens.GitlabHint = lastFour(creds.GitLabToken)
 	v.Global.PollInterval = cfg.Settings.PollInterval
+	if v.Global.PollInterval <= 0 {
+		v.Global.PollInterval = 30
+	}
 	v.Global.ConfidenceThreshold = cfg.Settings.ConfidenceThreshold
 	v.Global.AgentTimeout = cfg.Settings.AgentTimeout
+	if v.Global.AgentTimeout <= 0 {
+		v.Global.AgentTimeout = 3600
+	}
 	v.Global.MaxConcurrentAgents = cfg.Settings.MaxConcurrentAgents
+	if v.Global.MaxConcurrentAgents <= 0 {
+		v.Global.MaxConcurrentAgents = 4
+	}
 	v.Global.RunIntervalMinutes = cfg.Settings.RunIntervalMinutes
 	v.Global.GithubCloneDir = cfg.Settings.GithubCloneDir
 	v.Global.GitlabCloneDir = cfg.Settings.GitlabCloneDir
@@ -107,6 +122,10 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Global.Terminal = cfg.Settings.Terminal
 	v.Global.DefaultIDE = cfg.Settings.DefaultIDE
+	v.Global.RequireBinding = cfg.Settings.RequireBinding
+	if h, hErr := os.Hostname(); hErr == nil {
+		v.Global.Hostname = h
+	}
 
 	writeJSON(w, 200, v)
 }
@@ -249,6 +268,7 @@ type globalUpdate struct {
 	GitLabURL           *string `json:"gitlab_url,omitempty"`
 	Terminal            *string `json:"terminal,omitempty"`
 	DefaultIDE          *string `json:"default_ide,omitempty"`
+	RequireBinding      *bool   `json:"require_binding,omitempty"`
 }
 
 // HandleUpdateGlobalSettings handles POST /api/settings/global.
@@ -309,6 +329,9 @@ func HandleUpdateGlobalSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DefaultIDE != nil {
 		cfg.Settings.DefaultIDE = strings.TrimSpace(*req.DefaultIDE)
+	}
+	if req.RequireBinding != nil {
+		cfg.Settings.RequireBinding = *req.RequireBinding
 	}
 	if err := cfg.Save(); err != nil {
 		writeErr(w, err)

@@ -2,6 +2,7 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { FolderKanban, ChevronRight, Plus, Loader2, X } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { useConfigChanged } from '../lib/configEvents'
 
 interface Project {
   name: string
@@ -47,6 +48,7 @@ function ProjectList() {
   useEffect(() => {
     fetchProjects()
   }, [])
+  useConfigChanged(fetchProjects)
 
   async function handleCreate() {
     const name = createName.trim()

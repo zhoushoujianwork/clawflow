@@ -5,6 +5,7 @@ import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 import { useChatDrawer } from '../lib/chatContext'
+import { useConfigChanged } from '../lib/configEvents'
 import {
   IssueList,
   REPO_SECTIONS,
@@ -48,6 +49,7 @@ function RepoDetail() {
   const [syncing, setSyncing] = useState(false)
   const [binding, setBinding] = useState(false)
   const [allIssues, setAllIssues] = useState<IssueEntry[]>([])
+  const [hostname, setHostname] = useState<string>('')
 
   const cloneNow = useCallback(() => {
     if (!repo || cloning) return
@@ -80,12 +82,14 @@ function RepoDetail() {
       fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
       fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
       fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-    ]).then(([repos, allRuns, allPending, allIssuesData]) => {
+      fetch('/api/settings', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
+    ]).then(([repos, allRuns, allPending, allIssuesData, settings]) => {
       const match = (Array.isArray(repos) ? repos : []).find((x: Repo) => x.full_name === fullName) || null
       setRepo(match)
       setRuns((Array.isArray(allRuns) ? allRuns : []).filter((r: Run) => r.repo === fullName))
       setPending((Array.isArray(allPending) ? allPending : []).filter((p: PendingEntry) => p.repo === fullName))
       setAllIssues((Array.isArray(allIssuesData) ? allIssuesData : []).filter((i: IssueEntry) => i.repo === fullName))
+      if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
     })
   }, [fullName])
 
@@ -149,6 +153,7 @@ function RepoDetail() {
   useEffect(() => {
     refreshData().then(() => setLoading(false))
   }, [fullName, refreshData])
+  useConfigChanged(refreshData)
 
   const repoMap = useMemo<RepoInfoMap>(() => {
     if (!repo) return {}
@@ -165,6 +170,13 @@ function RepoDetail() {
   const repoVcsUrl = repo ? repoUrl(repo.full_name, repoMap) : null
 
   const slug = fullName.replace(/\//g, '__')
+
+  // "Mine" = bound to the hostname this dashboard is running on. Until
+  // hostname has loaded we err on "mine" so the page doesn't briefly
+  // flash a disabled state for repos that are in fact bound here.
+  const boundToMe = !hostname || (!!repo?.bound_machine && repo.bound_machine === hostname)
+  const claimedByOther = !!repo?.bound_machine && !!hostname && repo.bound_machine !== hostname
+  const inactive = !boundToMe
 
   // Merge runs / pending / issues into per-issue groups via the shared
   // hook. Single-repo page → no extra filtering needed (the `setX`
@@ -241,9 +253,9 @@ function RepoDetail() {
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 mb-6">
-            <ToggleCard label="Status" enabled={repo.enabled} onToggle={() => toggleConfig('enabled')} disabled={saving} />
-            <ToggleCard label="Auto-approve" enabled={repo.auto_approve} onToggle={() => toggleConfig('auto_approve')} disabled={saving} />
-            <ToggleCard label="Auto-merge" enabled={repo.auto_merge} onToggle={() => toggleConfig('auto_merge')} disabled={saving} />
+            <ToggleCard label="Status" enabled={repo.enabled} onToggle={() => toggleConfig('enabled')} disabled={saving || inactive} />
+            <ToggleCard label="Auto-approve" enabled={repo.auto_approve} onToggle={() => toggleConfig('auto_approve')} disabled={saving || inactive} />
+            <ToggleCard label="Auto-merge" enabled={repo.auto_merge} onToggle={() => toggleConfig('auto_merge')} disabled={saving || inactive} />
             <div className="bg-card border border-border rounded-xl p-3 min-w-0">
               <div className="text-xs text-muted-foreground">Local path</div>
               {repo.local_path ? (
@@ -317,53 +329,92 @@ function RepoDetail() {
             </button>
           </div>
 
-          <section>
-            <div className="flex items-baseline gap-2 mb-2">
-              <h2 className="text-sm font-semibold text-foreground">
-                Issues <span className="font-normal text-muted-foreground">({issueGroups.length})</span>
-              </h2>
-              <span className="text-xs text-muted-foreground">
-                {sectionCounts.running} running · {sectionCounts.pending} pending · {sectionCounts.done} done · {sectionCounts.closed} closed
-              </span>
+          {inactive ? (
+            <div className="bg-card border border-dashed border-border rounded-xl p-6 text-center">
+              <Link2Off className="w-5 h-5 text-muted-foreground/60 mx-auto mb-2" />
+              <p className="text-sm text-foreground font-medium">
+                {claimedByOther
+                  ? `This repo is bound to ${repo.bound_machine}.`
+                  : 'This repo is not bound to any machine.'}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1 mb-4">
+                {claimedByOther
+                  ? `Issue activity is hidden here so it doesn't compete with ${repo.bound_machine}.`
+                  : `Bind it to ${hostname || 'this machine'} to start running operators on it from here.`}
+              </p>
               <button
-                onClick={syncNow}
-                disabled={syncing}
-                title="Sync all issues including pending"
+                onClick={toggleBind}
+                disabled={binding}
                 className={cn(
-                  'ml-auto inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border transition-colors',
-                  syncing
-                    ? 'border-border text-muted-foreground bg-secondary/30'
-                    : 'border-border text-foreground hover:bg-secondary/50',
+                  'inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors',
+                  binding
+                    ? 'bg-secondary text-muted-foreground cursor-not-allowed'
+                    : 'bg-blue-600 text-white hover:bg-blue-700',
                 )}
               >
-                {syncing ? (
+                {binding ? (
                   <>
-                    <Loader2 className="w-3 h-3 animate-spin" /> syncing…
+                    <Loader2 className="w-4 h-4 animate-spin" /> Binding…
                   </>
                 ) : (
                   <>
-                    <RotateCw className="w-3 h-3" /> Sync
+                    <Link2 className="w-4 h-4" />
+                    {claimedByOther
+                      ? `Take over (bind to ${hostname || 'this machine'})`
+                      : `Bind to ${hostname || 'this machine'}`}
                   </>
                 )}
               </button>
             </div>
+          ) : (
+            <section>
+              <div className="flex items-baseline gap-2 mb-2">
+                <h2 className="text-sm font-semibold text-foreground">
+                  Issues <span className="font-normal text-muted-foreground">({issueGroups.length})</span>
+                </h2>
+                <span className="text-xs text-muted-foreground">
+                  {sectionCounts.running} running · {sectionCounts.pending} pending · {sectionCounts.done} done · {sectionCounts.closed} closed
+                </span>
+                <button
+                  onClick={syncNow}
+                  disabled={syncing}
+                  title="Sync all issues including pending"
+                  className={cn(
+                    'ml-auto inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border transition-colors',
+                    syncing
+                      ? 'border-border text-muted-foreground bg-secondary/30'
+                      : 'border-border text-foreground hover:bg-secondary/50',
+                  )}
+                >
+                  {syncing ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin" /> syncing…
+                    </>
+                  ) : (
+                    <>
+                      <RotateCw className="w-3 h-3" /> Sync
+                    </>
+                  )}
+                </button>
+              </div>
 
-            {issueGroups.length === 0 ? (
-              <p className="text-sm text-muted-foreground py-4">
-                No activity yet for this repo. Run <code className="px-1 py-0.5 bg-secondary rounded font-mono">clawflow run --repo {repo.full_name}</code>.
-              </p>
-            ) : (
-              <IssueList
-                groups={issueGroups}
-                sections={REPO_SECTIONS}
-                showRepo={false}
-                repoMap={repoMap}
-                slug={slug}
-                expanded={expanded}
-                onToggle={toggle}
-              />
-            )}
-          </section>
+              {issueGroups.length === 0 ? (
+                <p className="text-sm text-muted-foreground py-4">
+                  No activity yet for this repo. Run <code className="px-1 py-0.5 bg-secondary rounded font-mono">clawflow run --repo {repo.full_name}</code>.
+                </p>
+              ) : (
+                <IssueList
+                  groups={issueGroups}
+                  sections={REPO_SECTIONS}
+                  showRepo={false}
+                  repoMap={repoMap}
+                  slug={slug}
+                  expanded={expanded}
+                  onToggle={toggle}
+                />
+              )}
+            </section>
+          )}
         </>
       )}
     </div>

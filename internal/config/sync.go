@@ -18,6 +18,11 @@ const GistDescription = "clawflow-config"
 
 // syncableRepo is a Repo with local_path stripped for upload.
 // We keep the same field tags so it round-trips cleanly through YAML.
+//
+// bound_machine IS synced: it's a fleet-wide directive ("only machine X
+// should process this repo"), not a per-machine local fact. Without sync,
+// every machine in the fleet would have to be re-bound by hand, which
+// defeats the purpose of the binding.
 type syncableRepo struct {
 	Enabled               bool              `yaml:"enabled"`
 	Platform              string            `yaml:"platform,omitempty"`
@@ -34,7 +39,9 @@ type syncableRepo struct {
 	AutoMerge             bool              `yaml:"auto_merge,omitempty"`
 	AutoApprove           bool              `yaml:"auto_approve,omitempty"`
 	AutoEvaluateAllIssues bool              `yaml:"auto_evaluate_all_issues,omitempty"`
-	// local_path and bound_machine are intentionally absent — machine-specific, never synced.
+	BoundMachine          string            `yaml:"bound_machine,omitempty"`
+	// local_path is intentionally absent — genuinely machine-local
+	// (paths differ across OSes and home dirs).
 }
 
 // toSyncable converts a Repo to its syncable representation (strips local_path).
@@ -55,12 +62,13 @@ func toSyncable(r Repo) syncableRepo {
 		AutoMerge:             r.AutoMerge,
 		AutoApprove:           r.AutoApprove,
 		AutoEvaluateAllIssues: r.AutoEvaluateAllIssues,
+		BoundMachine:          r.BoundMachine,
 	}
 }
 
 // fromSyncable converts a syncableRepo back to a Repo, preserving the given
-// local_path and bound_machine (both are machine-specific and never synced).
-func fromSyncable(s syncableRepo, localPath, boundMachine string) Repo {
+// local_path (the only genuinely machine-local field).
+func fromSyncable(s syncableRepo, localPath string) Repo {
 	return Repo{
 		Enabled:               s.Enabled,
 		Platform:              s.Platform,
@@ -78,7 +86,7 @@ func fromSyncable(s syncableRepo, localPath, boundMachine string) Repo {
 		AutoMerge:             s.AutoMerge,
 		AutoApprove:           s.AutoApprove,
 		AutoEvaluateAllIssues: s.AutoEvaluateAllIssues,
-		BoundMachine:          boundMachine,
+		BoundMachine:          s.BoundMachine,
 	}
 }
 
@@ -107,7 +115,8 @@ func MarshalForGist(cfg *Config) ([]byte, error) {
 //   - settings.*   → cloud wins (remote overwrites local)
 //   - repos list   → union merge: remote repos are added/updated; repos that
 //     exist only locally are preserved; per-repo local_path always
-//     comes from the local copy (local wins for that field).
+//     comes from the local copy (local wins for that one field).
+//     bound_machine is treated like every other config field — cloud wins.
 //
 // The returned Config is the merged result; it is NOT saved to disk.
 // Call cfg.Save() to persist.
@@ -128,14 +137,13 @@ func MergeConfigs(local *Config, remoteYAML []byte) (*Config, error) {
 		merged.Repos[k] = v
 	}
 
-	// Apply remote repos: union merge, local_path and bound_machine preserved from local copy.
+	// Apply remote repos: union merge, only local_path preserved from local copy.
 	for k, remoteRepo := range remote.Repos {
-		var localPath, boundMachine string
+		var localPath string
 		if existing, ok := local.Repos[k]; ok {
 			localPath = existing.LocalPath
-			boundMachine = existing.BoundMachine
 		}
-		merged.Repos[k] = fromSyncable(remoteRepo, localPath, boundMachine)
+		merged.Repos[k] = fromSyncable(remoteRepo, localPath)
 	}
 
 	return merged, nil

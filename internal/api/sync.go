@@ -5,13 +5,63 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	clawsync "github.com/zhoushoujianwork/clawflow/internal/sync"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
+
+// refreshSnapshotsAfterPull rewrites the static JSON snapshots the dashboard
+// reads (/data/repos.json, /data/projects.json, /data/operators.json) so the
+// frontend's next fetch reflects the freshly merged config and any custom
+// skills restored from the Gist. Best-effort: failures are logged but never
+// abort the surrounding pull.
+func refreshSnapshotsAfterPull() {
+	if cfg, err := config.Load(); err == nil {
+		if werr := snapshot.WriteRepos(cfg); werr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ sync pull: refresh repos.json: %v\n", werr)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "⚠ sync pull: reload config for snapshot: %v\n", err)
+	}
+	if werr := snapshot.WriteProjects(); werr != nil {
+		fmt.Fprintf(os.Stderr, "⚠ sync pull: refresh projects.json: %v\n", werr)
+	}
+	if reg, err := loadOperatorRegistry(); err == nil {
+		if werr := snapshot.WriteOperators(reg); werr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ sync pull: refresh operators.json: %v\n", werr)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "⚠ sync pull: rebuild operator registry: %v\n", err)
+	}
+}
+
+// loadOperatorRegistry mirrors the loadRegistry helper used by `clawflow
+// run` and `clawflow web` startup: embedded operators first, then any user
+// overrides under ~/.clawflow/skills/. Duplicated here (rather than imported)
+// because that helper lives in the cmd/clawflow package which cannot be
+// reached from internal/api.
+func loadOperatorRegistry() (*operator.Registry, error) {
+	reg := operator.NewRegistry()
+	if err := reg.LoadEmbedded(rootmod.EmbeddedSkills, "skills"); err != nil {
+		return nil, fmt.Errorf("load embedded operators: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return reg, nil // no user dir reachable — embedded is enough
+	}
+	userDir := filepath.Join(home, ".clawflow", "skills")
+	if err := reg.LoadUserDir(userDir); err != nil {
+		return nil, fmt.Errorf("load user operators from %s: %w", userDir, err)
+	}
+	return reg, nil
+}
 
 // syncStatusResponse is returned by GET /api/sync/status.
 // Credentials and local_path are intentionally absent.
@@ -138,6 +188,12 @@ func HandleSyncPull(w http.ResponseWriter, r *http.Request) {
 		// Non-fatal: config was already applied; surface as a warning in the response.
 		fmt.Fprintf(os.Stderr, "⚠ sync pull: could not restore project assets: %v\n", err)
 	}
+
+	// Rewrite the snapshot files so the dashboard's next /data/*.json
+	// fetch reflects the merged config (otherwise the UI would still
+	// show the pre-pull repo/project list until clawflow run or a
+	// subsequent config-mutating API call rewrites the snapshots).
+	refreshSnapshotsAfterPull()
 
 	// Record the sync timestamp.
 	_ = recordLastSynced()

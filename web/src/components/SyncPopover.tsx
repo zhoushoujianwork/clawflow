@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Cloud, Loader2, RefreshCw } from 'lucide-react'
+import { emitConfigChanged } from '../lib/configEvents'
 
 interface SyncStatus {
   gist_id: string
@@ -104,6 +105,7 @@ export function SyncPopover() {
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`)
       setPullState('success')
       await fetchStatus()
+      emitConfigChanged()
     } catch (e) {
       setPullState('error')
       setPullError(e instanceof Error ? e.message : 'pull failed')
@@ -127,6 +129,9 @@ export function SyncPopover() {
       setLoginState('success')
       setToken('')
       await fetchStatus()
+      // login may have discovered an existing Gist and merged its config
+      // into local — refresh open views so they pick up the new state.
+      emitConfigChanged()
     } catch (e) {
       setLoginState('error')
       setLoginError(e instanceof Error ? e.message : 'login failed')

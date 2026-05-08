@@ -12,6 +12,7 @@ import {
   Clock,
   Play,
   Pause,
+  Square,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
@@ -30,7 +31,7 @@ interface Run {
   issue_state?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
   summary?: string
   pr_url?: string
   error?: string
@@ -48,6 +49,11 @@ interface Repo {
   platform?: Platform
   base_url?: string
   enabled: boolean
+  /** Hostname this repo is pinned to. Empty means "any machine". When set
+   *  and != current hostname, the dashboard hides activity from this view
+   *  so it doesn't show queued/running rows that this machine will never
+   *  actually execute. */
+  bound_machine?: string
 }
 
 /**
@@ -65,13 +71,14 @@ interface Pending {
   captured_at: string
 }
 
-type StatusFilter = 'all' | 'success' | 'failed' | 'skipped' | 'running'
+type StatusFilter = 'all' | 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
 
 const statusPill: Record<Run['status'], { label: string; cls: string; Icon: typeof CheckCircle2 }> = {
-  success: { label: 'success', cls: 'bg-green-100 text-green-700 border-green-200', Icon: CheckCircle2 },
-  running: { label: 'running', cls: 'bg-blue-100 text-blue-700 border-blue-200', Icon: Loader2 },
-  failed:  { label: 'failed',  cls: 'bg-red-100 text-red-700 border-red-200',     Icon: XCircle },
-  skipped: { label: 'skipped', cls: 'bg-muted text-muted-foreground border-border', Icon: SkipForward },
+  success:   { label: 'success',   cls: 'bg-green-100 text-green-700 border-green-200',   Icon: CheckCircle2 },
+  running:   { label: 'running',   cls: 'bg-blue-100 text-blue-700 border-blue-200',      Icon: Loader2 },
+  failed:    { label: 'failed',    cls: 'bg-red-100 text-red-700 border-red-200',         Icon: XCircle },
+  skipped:   { label: 'skipped',   cls: 'bg-muted text-muted-foreground border-border',   Icon: SkipForward },
+  cancelled: { label: 'cancelled', cls: 'bg-amber-50 text-amber-700 border-amber-200',    Icon: Square },
 }
 
 function StatusChip({ status }: { status: Run['status'] }) {
@@ -149,13 +156,22 @@ function Dashboard() {
   const [query, setQuery] = useState('')
   const [repoFilter, setRepoFilter] = useState<string>('all')
   const [visibleCount, setVisibleCount] = useState(20)
+  // Bumping this counter forces the data-fetch effect to re-run, used after
+  // the Cancel button so the dashboard reflects the killed run immediately
+  // instead of waiting up to 5s for the next polling tick.
+  const [refreshTick, setRefreshTick] = useState(0)
+  // Per-row "cancel in flight" state so we can disable the button and show
+  // a spinner while the kill is in progress, and so a double-click doesn't
+  // fire two POSTs against the same lock.
+  const [cancellingKey, setCancellingKey] = useState<string | null>(null)
+  const [hostname, setHostname] = useState<string>('')
 
   useEffect(() => {
     let cancelled = false
 
     const refetch = async (initial: boolean) => {
       if (initial) setLoading(true)
-      const [r, m, rp, pd] = await Promise.all([
+      const [r, m, rp, pd, settings] = await Promise.all([
         fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
         fetch('/data/meta.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
         fetch('/data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
@@ -163,12 +179,14 @@ function Dashboard() {
         // queue; missing file is normal on older installs and renders as no
         // pending section.
         fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+        fetch('/api/settings', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
       ])
       if (cancelled) return
       setRuns(Array.isArray(r) ? r : [])
       setMeta(m)
       setRepos(Array.isArray(rp) ? rp : [])
       setPending(Array.isArray(pd) ? pd : [])
+      if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
       setLoading(false)
     }
 
@@ -181,7 +199,7 @@ function Dashboard() {
       cancelled = true
       clearInterval(id)
     }
-  }, [])
+  }, [refreshTick])
 
   // Poll run status — also picks up the auto-run scheduler state
   // (interval, paused, next fire time) so we render everything in one
@@ -226,6 +244,29 @@ function Dashboard() {
       .catch(() => setRunBusy(false))
   }, [])
 
+  const cancelRun = useCallback((repo: string, issue: number) => {
+    // Key on (repo, issue) since that's what the lock + the cancel API
+    // are keyed by; multiple operators on one issue share a lock so they
+    // collapse to a single in-flight cancel.
+    const key = `${repo}#${issue}`
+    setCancellingKey(key)
+    fetch('/api/run/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo, issue }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .catch(() => null)
+      .finally(() => {
+        setCancellingKey(null)
+        // Force an immediate refetch so the killed row drops out of the
+        // Running section and any matching pending re-appears (next run
+        // will rebuild it). Without this the row sits on screen for up
+        // to 5s, which feels broken.
+        setRefreshTick(t => t + 1)
+      })
+  }, [])
+
   const togglePause = useCallback(() => {
     const next = !paused
     setPauseBusy(true)
@@ -244,8 +285,10 @@ function Dashboard() {
 
 
   const counts = useMemo(() => {
-    const c = { total: runs.length, success: 0, failed: 0, skipped: 0, running: 0 }
-    for (const r of runs) c[r.status]++
+    const c = { total: runs.length, success: 0, failed: 0, skipped: 0, running: 0, cancelled: 0 }
+    for (const r of runs) {
+      if (r.status in c) c[r.status]++
+    }
     return c
   }, [runs])
 
@@ -301,16 +344,34 @@ function Dashboard() {
     return s
   }, [runs])
 
+  // Map repo full_name → bound_machine for the bound-machine filter below.
+  // Repos with no bound_machine are processed by every machine (the common
+  // case) so we treat missing as "mine".
+  const repoBoundMap = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of repos) {
+      if (r.bound_machine) m.set(r.full_name, r.bound_machine)
+    }
+    return m
+  }, [repos])
+
   const filteredPending = useMemo(() => {
     const q = query.trim().toLowerCase()
     return pending.filter(p => {
       if (p.issue_state === 'closed') return false
       if (activeRunKeys.has(`${p.repo}#${p.issue_number}/${p.operator}`)) return false
+      // Hide pending entries for repos pinned to a different machine —
+      // this machine will never run them, so showing "queued" is misleading.
+      // Empty bound_machine = any machine = always show. If we don't know
+      // hostname yet (first paint), don't filter so we don't briefly hide
+      // legitimate rows.
+      const bound = repoBoundMap.get(p.repo)
+      if (bound && hostname && bound !== hostname) return false
       if (repoFilter !== 'all' && p.repo !== repoFilter) return false
       if (q && !(p.issue_title || '').toLowerCase().includes(q) && !String(p.issue_number).includes(q) && !p.operator.toLowerCase().includes(q)) return false
       return true
     })
-  }, [pending, repoFilter, query, activeRunKeys])
+  }, [pending, repoFilter, query, activeRunKeys, repoBoundMap, hostname])
 
   // Build the per-repo URL map from the same repos.json the dashboard already
   // pulls — no extra fetch needed.
@@ -370,12 +431,13 @@ function Dashboard() {
       )}
 
 
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-4">
-        <StatCard label="Total"   value={counts.total}   filter="all"     active={statusFilter === 'all'}     onClick={setStatusFilter} tone="neutral" />
-        <StatCard label="Running" value={counts.running} filter="running" active={statusFilter === 'running'} onClick={setStatusFilter} tone="blue" />
-        <StatCard label="Success" value={counts.success} filter="success" active={statusFilter === 'success'} onClick={setStatusFilter} tone="green" />
-        <StatCard label="Failed"  value={counts.failed}  filter="failed"  active={statusFilter === 'failed'}  onClick={setStatusFilter} tone="red" />
-        <StatCard label="Skipped" value={counts.skipped} filter="skipped" active={statusFilter === 'skipped'} onClick={setStatusFilter} tone="muted" />
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-4">
+        <StatCard label="Total"     value={counts.total}     filter="all"       active={statusFilter === 'all'}       onClick={setStatusFilter} tone="neutral" />
+        <StatCard label="Running"   value={counts.running}   filter="running"   active={statusFilter === 'running'}   onClick={setStatusFilter} tone="blue" />
+        <StatCard label="Success"   value={counts.success}   filter="success"   active={statusFilter === 'success'}   onClick={setStatusFilter} tone="green" />
+        <StatCard label="Failed"    value={counts.failed}    filter="failed"    active={statusFilter === 'failed'}    onClick={setStatusFilter} tone="red" />
+        <StatCard label="Cancelled" value={counts.cancelled} filter="cancelled" active={statusFilter === 'cancelled'} onClick={setStatusFilter} tone="amber" />
+        <StatCard label="Skipped"   value={counts.skipped}   filter="skipped"   active={statusFilter === 'skipped'}   onClick={setStatusFilter} tone="muted" />
       </div>
 
       <div className="flex gap-2 mb-3 flex-wrap">
@@ -435,7 +497,15 @@ function Dashboard() {
             <span className="font-normal text-xs text-muted-foreground ml-1">— live</span>
           </h2>
           <div className="bg-card border border-blue-200 rounded-xl shadow-sm divide-y divide-border overflow-hidden">
-            {filteredRunning.map(r => <Row key={r.path} r={r} repoMap={repoMap} />)}
+            {filteredRunning.map(r => (
+              <Row
+                key={r.path}
+                r={r}
+                repoMap={repoMap}
+                onCancel={cancelRun}
+                cancelling={cancellingKey === `${r.repo}#${r.issue_number}`}
+              />
+            ))}
           </div>
         </section>
       )}
@@ -456,7 +526,15 @@ function Dashboard() {
             <p className="text-sm text-muted-foreground text-center py-6">No runs match the current filters.</p>
           ) : (
             <>
-              {filteredHistory.slice(0, visibleCount).map(r => <Row key={r.path} r={r} repoMap={repoMap} />)}
+              {filteredHistory.slice(0, visibleCount).map(r => (
+                <Row
+                  key={r.path}
+                  r={r}
+                  repoMap={repoMap}
+                  onCancel={r.status === 'running' ? cancelRun : undefined}
+                  cancelling={r.status === 'running' && cancellingKey === `${r.repo}#${r.issue_number}`}
+                />
+              ))}
               {visibleCount < filteredHistory.length && (
                 <button
                   onClick={() => setVisibleCount(c => c + 20)}
@@ -598,7 +676,7 @@ function StatCard({
   filter: StatusFilter
   active: boolean
   onClick: (f: StatusFilter) => void
-  tone: 'neutral' | 'blue' | 'green' | 'red' | 'muted'
+  tone: 'neutral' | 'blue' | 'green' | 'red' | 'muted' | 'amber'
 }) {
   const toneCls = {
     neutral: 'text-foreground',
@@ -606,6 +684,7 @@ function StatCard({
     green: 'text-green-600',
     red: 'text-red-600',
     muted: 'text-muted-foreground',
+    amber: 'text-amber-600',
   }[tone]
   return (
     <button
@@ -621,7 +700,17 @@ function StatCard({
   )
 }
 
-function Row({ r, repoMap }: { r: Run; repoMap: RepoInfoMap }) {
+function Row({
+  r,
+  repoMap,
+  onCancel,
+  cancelling,
+}: {
+  r: Run
+  repoMap: RepoInfoMap
+  onCancel?: (repo: string, issue: number) => void
+  cancelling?: boolean
+}) {
   const dur = durationStr(r.started_at, r.ended_at)
   const runHref = `/runs/${repoSlug(r.repo)}/issue-${r.issue_number}/${runIdFromPath(r.path)}`
   return (
@@ -666,6 +755,35 @@ function Row({ r, repoMap }: { r: Run; repoMap: RepoInfoMap }) {
         </a>
       )}
       <span className="text-xs text-muted-foreground shrink-0 w-16 text-right">{timeAgo(r.started_at)}</span>
+      {onCancel && (
+        <button
+          type="button"
+          // No confirm() — the button is small but explicit ("cancel"
+          // label + red border) and the misclick risk doesn't justify
+          // a modal interrupt. The row reverts to "failed" on the next
+          // poll, which is recoverable enough to forgive a stray click.
+          onClick={e => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (cancelling) return
+            onCancel(r.repo, r.issue_number)
+          }}
+          disabled={cancelling}
+          title={`Kill ${r.operator} on ${r.repo} #${r.issue_number}`}
+          className={cn(
+            'inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium border shrink-0 transition-colors',
+            cancelling
+              ? 'bg-muted text-muted-foreground border-border cursor-not-allowed'
+              : 'bg-card text-red-700 border-red-200 hover:bg-red-50',
+          )}
+        >
+          {cancelling ? (
+            <><Loader2 className="w-3 h-3 animate-spin" /> killing…</>
+          ) : (
+            <><Square className="w-3 h-3" /> cancel</>
+          )}
+        </button>
+      )}
       <ChevronRight className="w-4 h-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
     </a>
   )

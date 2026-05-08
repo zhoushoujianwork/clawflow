@@ -51,9 +51,9 @@ func BuildGistContent() (string, error) {
 }
 
 // BuildAllGistFiles returns the complete set of files to upload to the Gist:
-// config.yaml plus all eligible project asset files discovered under
-// ~/.clawflow/projects/. The map key is the Gist filename; the value is the
-// file content.
+// config.yaml plus all eligible asset files discovered under
+// ~/.clawflow/projects/ and ~/.clawflow/skills/. The map key is the Gist
+// filename; the value is the file content.
 func BuildAllGistFiles() (map[string]string, error) {
 	configContent, err := BuildGistContent()
 	if err != nil {
@@ -74,6 +74,16 @@ func BuildAllGistFiles() (map[string]string, error) {
 		}
 	}
 
+	skillFiles, err := DiscoverSkillAssets()
+	if err != nil {
+		// Non-fatal: a malformed skills dir shouldn't block the rest of the push.
+		fmt.Fprintf(os.Stderr, "⚠ sync: cannot discover skill assets: %v\n", err)
+	} else {
+		for k, v := range skillFiles {
+			files[k] = v
+		}
+	}
+
 	return files, nil
 }
 
@@ -90,13 +100,17 @@ func FetchGistContent(gh *github.Client, gistID string) ([]byte, error) {
 	return []byte(f.Content), nil
 }
 
-// FetchAndApplyProjectAssets fetches the Gist and writes any project asset
-// files (those whose filename matches the "projects--*" convention) back to
-// their correct local paths under ~/.clawflow/projects/. Directories are
-// created as needed. Existing files are overwritten (cloud-wins).
+// FetchAndApplyProjectAssets fetches the Gist and writes any synced asset
+// files — project assets (projects--*) and user-defined operator skills
+// (skills--*) — back to their correct local paths under ~/.clawflow/.
+// Directories are created as needed. Existing files are overwritten
+// (cloud-wins, matching config.yaml behaviour).
 //
-// This is called alongside FetchGistContent + ApplyGistConfig during pull so
-// that project knowledge assets are restored on a new machine.
+// Called alongside FetchGistContent + ApplyGistConfig during pull so that
+// both project knowledge and custom operators are restored on a new machine.
+//
+// The name retains "ProjectAssets" for backwards compatibility; the
+// underlying ApplyProjectAssets handles both prefixes.
 func FetchAndApplyProjectAssets(gh *github.Client, gistID string) error {
 	gist, err := gh.GetGist(gistID)
 	if err != nil {

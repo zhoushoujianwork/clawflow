@@ -106,6 +106,12 @@ type Settings struct {
 	// the same (repo, issue) before the runner auto-adds `agent-failed`
 	// to stop retrying. 0 or unset defaults to 3.
 	MaxConsecutiveFailures int `yaml:"max_consecutive_failures,omitempty"`
+
+	// RequireBinding, when true, causes `clawflow run` to skip repos
+	// whose BoundMachine is empty. This prevents newly synced repos from
+	// being processed by all machines simultaneously — they must be
+	// explicitly bound first. Synced via Gist as a shared fleet policy.
+	RequireBinding bool `yaml:"require_binding,omitempty"`
 }
 
 // ResolveGithubCloneDir returns the configured GitHub clone directory, defaulting to ~/github.

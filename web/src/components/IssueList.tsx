@@ -25,7 +25,7 @@ export interface Run {
   issue_title?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
   summary?: string
   path: string
   pr_url?: string
@@ -551,6 +551,7 @@ export function StatusBadge({ status, runnerAlive }: { status: Run['status']; ru
           status === 'failed' && 'bg-red-100 text-red-700 border-red-200',
           status === 'skipped' && 'bg-muted text-muted-foreground border-border',
           status === 'running' && 'bg-blue-100 text-blue-700 border-blue-200',
+          status === 'cancelled' && 'bg-amber-50 text-amber-700 border-amber-200',
         )}
       >
         {status}

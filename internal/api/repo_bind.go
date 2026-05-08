@@ -10,19 +10,21 @@ import (
 )
 
 type repoBindRequest struct {
-	Repo string `json:"repo"`
-	Bind bool   `json:"bind"`
+	Repo  string   `json:"repo"`
+	Repos []string `json:"repos,omitempty"`
+	Bind  bool     `json:"bind"`
 }
 
 type repoBindResponse struct {
-	Status       string `json:"status"`
-	BoundMachine string `json:"bound_machine,omitempty"`
+	Status       string            `json:"status"`
+	BoundMachine string            `json:"bound_machine,omitempty"`
+	Results      map[string]string `json:"results,omitempty"`
 }
 
 // HandleRepoBind handles POST /api/repo/bind.
 // When bind=true, sets BoundMachine to the current machine's hostname.
 // When bind=false, clears BoundMachine (unbinds the repo).
-// BoundMachine is machine-specific and intentionally excluded from cloud sync.
+// Supports both single-repo (repo field) and batch (repos field) modes.
 func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -34,9 +36,15 @@ func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if req.Repo == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo is required"})
-		return
+
+	// Normalize: single-repo mode → batch of one
+	targets := req.Repos
+	if len(targets) == 0 {
+		if req.Repo == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo or repos is required"})
+			return
+		}
+		targets = []string{req.Repo}
 	}
 
 	cfg, err := config.Load()
@@ -45,36 +53,51 @@ func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repo, ok := cfg.Repos[req.Repo]
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "repo not found in config"})
-		return
-	}
-
+	hostname := ""
 	if req.Bind {
-		hostname, err := os.Hostname()
+		h, err := os.Hostname()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot determine hostname: " + err.Error()})
 			return
 		}
-		repo.BoundMachine = hostname
-	} else {
-		repo.BoundMachine = ""
+		hostname = h
 	}
 
-	cfg.Repos[req.Repo] = repo
+	results := make(map[string]string, len(targets))
+	for _, name := range targets {
+		repo, ok := cfg.Repos[name]
+		if !ok {
+			continue
+		}
+		if req.Bind {
+			repo.BoundMachine = hostname
+		} else {
+			repo.BoundMachine = ""
+		}
+		cfg.Repos[name] = repo
+		results[name] = repo.BoundMachine
+	}
+
 	if err := cfg.Save(); err != nil {
 		writeErr(w, err)
 		return
 	}
-	// Refresh repos.json so the frontend sees the updated binding state.
 	if err := snapshot.WriteRepos(cfg); err != nil {
 		writeErr(w, err)
 		return
 	}
 
+	// Single-repo mode: backward-compatible response shape
+	if req.Repo != "" && len(req.Repos) == 0 {
+		writeJSON(w, http.StatusOK, repoBindResponse{
+			Status:       "ok",
+			BoundMachine: results[req.Repo],
+		})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, repoBindResponse{
-		Status:       "ok",
-		BoundMachine: repo.BoundMachine,
+		Status:  "ok",
+		Results: results,
 	})
 }

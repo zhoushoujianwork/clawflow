@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
 import { Check, Loader2, AlertCircle, X, Eye, EyeOff, Folder, ChevronRight, Home, Copy, ExternalLink, RefreshCw, Upload, Download, LogOut } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { emitConfigChanged, useConfigChanged } from '../lib/configEvents'
 
 interface SettingsView {
   claude: {
@@ -27,6 +28,7 @@ interface SettingsView {
     gitlab_url?: string
     terminal?: string
     default_ide?: string
+    require_binding?: boolean
   }
 }
 
@@ -68,6 +70,7 @@ function SettingsPage() {
   }, [])
 
   useEffect(() => { refresh() }, [refresh])
+  useConfigChanged(refresh)
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
@@ -499,6 +502,7 @@ function GlobalSection({
   const [gitlabURL, setGitlabURL] = useState(view.gitlab_url ?? '')
   const [terminal, setTerminal] = useState(view.terminal ?? '')
   const [defaultIDE, setDefaultIDE] = useState(view.default_ide ?? '')
+  const [requireBinding, setRequireBinding] = useState(view.require_binding ?? false)
   const [busy, setBusy] = useState(false)
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
@@ -514,6 +518,7 @@ function GlobalSection({
     setGitlabURL(view.gitlab_url ?? '')
     setTerminal(view.terminal ?? '')
     setDefaultIDE(view.default_ide ?? '')
+    setRequireBinding(view.require_binding ?? false)
   }, [view])
 
   const dirty =
@@ -526,7 +531,8 @@ function GlobalSection({
     glDir !== (view.gitlab_clone_dir ?? '') ||
     gitlabURL !== (view.gitlab_url ?? '') ||
     terminal !== (view.terminal ?? '') ||
-    defaultIDE !== (view.default_ide ?? '')
+    defaultIDE !== (view.default_ide ?? '') ||
+    requireBinding !== (view.require_binding ?? false)
 
   const save = () => {
     setBusy(true); setSaveMsg(null)
@@ -544,6 +550,7 @@ function GlobalSection({
         gitlab_url: gitlabURL,
         terminal: terminal,
         default_ide: defaultIDE,
+        require_binding: requireBinding,
       }),
     })
       .then(async r => {
@@ -618,6 +625,14 @@ function GlobalSection({
           <option value="qoder">Qoder</option>
           <option value="vscode-insiders">VS Code Insiders</option>
         </select>
+      </Row>
+      <Row label="Require binding" hint="When enabled, repos with no bound machine are skipped during runs.">
+        <input
+          type="checkbox"
+          checked={requireBinding}
+          onChange={e => setRequireBinding(e.target.checked)}
+          className="rounded border-border w-4 h-4"
+        />
       </Row>
 
       <div className="flex items-center gap-2 pt-2">
@@ -699,6 +714,7 @@ function SyncSection() {
           setGhLogin(d.login)
           setToken('')
           loadStatus()
+          emitConfigChanged()
         } else {
           setLoginMsg({ ok: false, text: d.error || 'Login failed' })
         }
@@ -731,6 +747,7 @@ function SyncSection() {
         if (d.status === 'ok') {
           setPullMsg({ ok: true, text: 'Config pulled and merged' })
           loadStatus()
+          emitConfigChanged()
         } else {
           setPullMsg({ ok: false, text: d.error || 'Pull failed' })
         }
