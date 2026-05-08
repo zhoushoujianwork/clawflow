@@ -717,6 +717,94 @@ func TestReconcileStaleRuns_ErrorResult_ReconciledAsFailed(t *testing.T) {
 	}
 }
 
+// TestReconcileStaleRuns_Finalizing_PromotedToSuccess verifies that a run
+// stuck in "finalizing" (process killed after operator.Run() completed VCS
+// side-effects but before WriteRunMeta wrote the terminal status) is promoted
+// to "success" by the reconciler without re-queuing the issue.
+func TestReconcileStaleRuns_Finalizing_PromotedToSuccess(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-5 * time.Minute)
+	stuck := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 55,
+		StartedAt:   start,
+		Status:      "finalizing",
+		Summary:     "PR opened at https://github.com/owner/repo/pull/42",
+	}
+	events := `{"type":"system","subtype":"init"}` + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"duration_ms":60000,"num_turns":3,"result":"done","total_cost_usd":0.20,"usage":{"input_tokens":2000,"output_tokens":200,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"modelUsage":{}}` + "\n"
+
+	dir := makeRunDir(t, root, "owner__repo", 55, start, stuck, events)
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("fixed=%d, want 1 (finalizing run with dead runner should be promoted)", n)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var m RunMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m.Status != "success" {
+		t.Errorf("status=%q, want \"success\"", m.Status)
+	}
+	if m.EndedAt == nil {
+		t.Error("EndedAt should be populated after reconciliation")
+	}
+	if m.Usage == nil {
+		t.Error("expected usage to be backfilled from events.jsonl")
+	}
+	if m.Error == "" {
+		t.Error("Error field should describe the reconciliation reason")
+	}
+}
+
+// TestReconcileStaleRuns_Finalizing_RunnerAlive_Untouched verifies that a
+// "finalizing" run whose runner PID is still alive is left alone — the runner
+// is still in the process of writing the terminal meta.
+func TestReconcileStaleRuns_Finalizing_RunnerAlive_Untouched(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-1 * time.Minute)
+
+	stuck := &RunMeta{
+		Operator:    "implement",
+		Repo:        "owner/repo",
+		IssueNumber: 55,
+		StartedAt:   start,
+		Status:      "finalizing",
+	}
+	dir := makeRunDir(t, root, "owner__repo", 55, start, stuck, `{"type":"system","subtype":"init"}`+"\n")
+
+	prev := runnerStillAlive
+	t.Cleanup(func() { runnerStillAlive = prev })
+	runnerStillAlive = func(repo string, issueNum int, metaStart time.Time) bool {
+		return repo == "owner/repo" && issueNum == 55
+	}
+
+	n, err := reconcileStaleRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("fixed=%d, want 0 (finalizing run with live runner should be left alone)", n)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
+	var got RunMeta
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	if got.Status != "finalizing" {
+		t.Errorf("status=%q, want finalizing (untouched)", got.Status)
+	}
+}
 
 // --- MigrateLegacyDataDir tests ----------------------------------------
 

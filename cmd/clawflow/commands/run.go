@@ -722,6 +722,29 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		_ = eventsFile.Close()
 	}
 
+	// Write status=finalizing immediately after operator.Run() returns
+	// successfully. This is the first post-claude action, before usage
+	// extraction, worktree cleanup, or any other work. If the process is
+	// killed in the window between here and the final WriteRunMeta below,
+	// the reconciler will see "finalizing" (not "running") and know that
+	// VCS side-effects already completed — it will promote to "success"
+	// without re-queuing the issue for a duplicate run.
+	if runErr == nil && output != "" {
+		finalizingMeta := snapshot.RunMeta{
+			Operator:    j.op.Name,
+			Repo:        j.repo,
+			IssueNumber: j.sub.Number,
+			IssueTitle:  j.sub.Title,
+			IssueState:  j.sub.State,
+			StartedAt:   startedAt.UTC(),
+			Status:      "finalizing",
+			Summary:     output,
+		}
+		if err := snapshot.WriteRunMeta(runDir, finalizingMeta); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ finalizing meta: %v\n", prefix, err)
+		}
+	}
+
 	// Detect transient rate-limit errors before deciding on the run status.
 	// A rate-limited run is NOT a permanent failure: the issue keeps its
 	// trigger labels and will be retried on the next pass. We also signal
