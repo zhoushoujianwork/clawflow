@@ -7,8 +7,21 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
-// BuildIssueContext assembles the system prompt for issue-level chat.
+// BuildIssueContext assembles the system prompt for issue-level chat in
+// edit mode — the AI can read AND modify files in the repo working tree.
 func BuildIssueContext(repo string, issue vcs.Issue, comments []vcs.IssueComment) string {
+	return buildIssueContext(repo, issue, comments, "edit")
+}
+
+// BuildIssueModeContext assembles the system prompt for issue-level chat
+// in issue mode — the AI is restricted to discussion and issue-tracker
+// operations; file editing is disallowed at the claude CLI level.
+func BuildIssueModeContext(repo string, issue vcs.Issue, comments []vcs.IssueComment) string {
+	return buildIssueContext(repo, issue, comments, "issue")
+}
+
+// buildIssueContext is the shared builder. mode is "issue" or "edit".
+func buildIssueContext(repo string, issue vcs.Issue, comments []vcs.IssueComment, mode string) string {
 	var b strings.Builder
 
 	fmt.Fprintln(&b, "# Chat Context")
@@ -37,14 +50,26 @@ func BuildIssueContext(repo string, issue vcs.Issue, comments []vcs.IssueComment
 
 	fmt.Fprintln(&b, "---")
 	fmt.Fprintln(&b)
-	fmt.Fprintf(&b, "## Your role\n\n")
-	fmt.Fprintf(&b, "You are a hands-on development assistant focused EXCLUSIVELY on\n")
-	fmt.Fprintf(&b, "issue #%d in repo %s. You can directly read, analyze, AND fix\n", issue.Number, repo)
-	fmt.Fprintf(&b, "code in this repository. This is the hot-fix path: the user chose\n")
-	fmt.Fprintf(&b, "issue-level chat to resolve this specific issue interactively\n")
-	fmt.Fprintf(&b, "without going through the full `clawflow run` pipeline.\n\n")
 
-	fmt.Fprintln(&b, `## Scope: THIS issue only
+	if mode == "edit" {
+		buildEditModeRole(&b, repo, issue)
+	} else {
+		buildIssueModeRole(&b, repo, issue)
+	}
+
+	return b.String()
+}
+
+// buildEditModeRole writes the "edit mode" role section — full file access.
+func buildEditModeRole(b *strings.Builder, repo string, issue vcs.Issue) {
+	fmt.Fprintf(b, "## Your role\n\n")
+	fmt.Fprintf(b, "You are a hands-on development assistant focused EXCLUSIVELY on\n")
+	fmt.Fprintf(b, "issue #%d in repo %s. You can directly read, analyze, AND fix\n", issue.Number, repo)
+	fmt.Fprintf(b, "code in this repository. This is the hot-fix path: the user chose\n")
+	fmt.Fprintf(b, "issue-level chat to resolve this specific issue interactively\n")
+	fmt.Fprintf(b, "without going through the full `clawflow run` pipeline.\n\n")
+
+	fmt.Fprintln(b, `## Scope: THIS issue only
 
 Your entire focus is issue #`+fmt.Sprint(issue.Number)+`. Do NOT:
 - Create new issues
@@ -100,9 +125,77 @@ than #`+fmt.Sprint(issue.Number)+`.
 After running a command, read the real stdout/stderr and report what
 actually happened. The command's exit status is the only source of
 truth.`)
-
-	return b.String()
 }
+
+// buildIssueModeRole writes the "issue mode" role section — discussion and
+// issue-tracker operations only; file editing is blocked at the CLI level.
+func buildIssueModeRole(b *strings.Builder, repo string, issue vcs.Issue) {
+	fmt.Fprintf(b, "## Your role\n\n")
+	fmt.Fprintf(b, "You are a planning and discussion assistant focused EXCLUSIVELY on\n")
+	fmt.Fprintf(b, "issue #%d in repo %s. Your job is to help the user think through\n", issue.Number, repo)
+	fmt.Fprintf(b, "requirements, scope, and next steps — then land every concrete\n")
+	fmt.Fprintf(b, "conclusion on the issue tracker (comment, label, sub-issue).\n\n")
+	fmt.Fprintf(b, "**File editing is disabled in this session.** You cannot invoke\n")
+	fmt.Fprintf(b, "Edit, Write, or NotebookEdit tools. Code snippets in comments are\n")
+	fmt.Fprintf(b, "fine; actually writing files is not.\n\n")
+
+	fmt.Fprintln(b, `## Scope: THIS issue only
+
+Your entire focus is issue #`+fmt.Sprint(issue.Number)+`. Do NOT:
+- Discuss or work on other issues
+- Suggest creating unrelated follow-up issues
+
+If the user asks about something unrelated, remind them this chat
+is scoped to issue #`+fmt.Sprint(issue.Number)+` and suggest they open a
+separate chat for other topics.
+
+## What you CAN do
+
+- **Read code**: grep, cat, git log, git diff — anything read-only.
+  You can suggest code changes in comments, but not write them to disk.
+- **Analyze and discuss**: requirements, design, edge cases, scope.
+- **Label/comment on THIS issue**: update labels or post a comment
+  on issue #`+fmt.Sprint(issue.Number)+` via `+"`"+`clawflow`+"`"+` CLI (see below).
+
+## Lock conclusions into the issue tracker
+
+Whenever the conversation reaches a concrete conclusion (scope decided,
+repro nailed down, fix direction agreed, acceptance criteria clarified),
+that conclusion MUST be persisted on the issue tracker — not just held
+in chat memory. Two valid landing spots:
+
+1. **Post a comment** summarising the conclusion on issue #`+fmt.Sprint(issue.Number)+`.
+   If the conclusion changes scope, restate the new scope so
+   `+"`"+`clawflow run`+"`"+` reads the latest intent.
+2. **Update labels** — add/remove labels to reflect the current state
+   (e.g. `+"`"+`ready-for-agent`+"`"+` when the issue is fully scoped and ready
+   for automated implementation).
+
+Do NOT propose to "go implement this now" from chat. Code changes go
+through `+"`"+`clawflow run`+"`"+` consuming a labeled issue; anything you'd write
+here as code would be discarded by that flow.
+
+## Hard constraints
+
+- Do NOT run `+"`"+`git add`+"`"+`, `+"`"+`git commit`+"`"+`, `+"`"+`git push`+"`"+`, or any tree-mutating
+  git command.
+- Do NOT edit, create, or delete files. Read-only inspection
+  (cat, ls, grep, `+"`"+`git log`+"`"+`, `+"`"+`git diff`+"`"+`) is fine.
+- Do NOT create new issues (`+"`"+`clawflow issue create`+"`"+` is forbidden).
+- Do NOT operate on other issue numbers.
+
+## Allowed VCS commands (THIS issue only)
+
+- Add a label:    `+"`"+`clawflow label add --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --label <name>`+"`"+`
+- Remove a label: `+"`"+`clawflow label remove --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --label <name>`+"`"+`
+- Post a comment: `+"`"+`clawflow issue comment --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --body "<text>"`+"`"+`
+- Close issue:    `+"`"+`clawflow issue close --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+"`"+`
+
+After running a command, read the real stdout/stderr and report what
+actually happened. The command's exit status is the only source of
+truth.`)
+}
+
 
 // BuildRepoContext assembles the system prompt for repo-level chat.
 func BuildRepoContext(repo string, platform string, baseBranch string, issues []vcs.Issue) string {

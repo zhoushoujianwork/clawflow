@@ -212,6 +212,13 @@ type Credentials struct {
 	// credentials.yaml (alongside GistID) because it is machine-specific
 	// metadata, not part of the synced config payload itself.
 	LastSyncedAt string `yaml:"last_synced_at,omitempty"`
+
+	// ChatDefaultMode controls the default mode for issue-level chat sessions.
+	// Valid values: "issue" (default) — disallows Edit/Write/NotebookEdit and
+	// prompts the AI to land conclusions in the issue tracker; "edit" — allows
+	// full file editing (the historical behaviour). The --mode flag on
+	// `clawflow chat` overrides this per-session.
+	ChatDefaultMode string `yaml:"chat_default_mode,omitempty"`
 }
 
 // Default model identifiers used when the corresponding Credentials
@@ -236,6 +243,17 @@ const (
 	DefaultEvalModel     = "opus"
 	DefaultOperatorModel = "sonnet"
 )
+
+// EffectiveChatDefaultMode returns the configured default chat mode for
+// issue-level sessions. Valid values are "issue" and "edit"; anything
+// else (including empty) falls back to "issue" — the safer default that
+// prevents accidental file edits.
+func (c *Credentials) EffectiveChatDefaultMode() string {
+	if c != nil && c.ChatDefaultMode == "edit" {
+		return "edit"
+	}
+	return "issue"
+}
 
 // EffectiveChatModel returns the configured chat model, or the
 // built-in default if unset.

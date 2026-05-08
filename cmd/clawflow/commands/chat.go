@@ -19,6 +19,7 @@ func NewChatCmd() *cobra.Command {
 		repo  string
 		issue int
 		model string
+		mode  string
 	)
 	cmd := &cobra.Command{
 		Use:   "chat",
@@ -31,15 +32,33 @@ lives in the user's native terminal (no clawflow-side destroy hook),
 and resuming would either strand stale issue data or have two claude
 processes fighting over the same transcript file.
 
+Issue-level chat supports two modes (--mode flag):
+  issue  (default) — discussion and issue-tracker operations only.
+                     Edit/Write/NotebookEdit are disabled. The AI is
+                     prompted to land conclusions as comments, labels,
+                     or sub-issues. Safer default: prevents accidental
+                     file edits during requirements discussions.
+  edit             — full file-editing access (historical behaviour).
+                     Use when you want to hot-fix the issue directly
+                     without going through clawflow run.
+
+The default mode can be persisted in ~/.clawflow/config/credentials.yaml
+as chat_default_mode: issue|edit. The --mode flag overrides it per session.
+
 Examples:
   clawflow chat --repo owner/repo
   clawflow chat --repo owner/repo --issue 42
+  clawflow chat --repo owner/repo --issue 42 --mode edit
   clawflow chat --repo owner/repo --issue 42 --model sonnet`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if repo == "" {
 				return fmt.Errorf("--repo is required")
 			}
-			return runChat(cmd.Context(), repo, issue, model)
+			// Validate --mode when explicitly provided.
+			if mode != "" && mode != "issue" && mode != "edit" {
+				return fmt.Errorf("--mode must be 'issue' or 'edit', got %q", mode)
+			}
+			return runChat(cmd.Context(), repo, issue, model, mode)
 		},
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "repository (owner/repo)")
@@ -48,10 +67,15 @@ Examples:
 	// resolved below via Credentials.EffectiveChatModel(). An explicit
 	// --model on the CLI still wins.
 	cmd.Flags().StringVar(&model, "model", "", "claude model to use (default: settings → chat_model, falls back to haiku)")
+	// Empty default means "use chat_default_mode from credentials.yaml" —
+	// resolved below via Credentials.EffectiveChatDefaultMode(). Only
+	// applies to issue-level chat (--issue N); repo-level chat is always
+	// read-only regardless of this flag.
+	cmd.Flags().StringVar(&mode, "mode", "", "issue chat mode: 'issue' (default, no file edits) or 'edit' (full access)")
 	return cmd
 }
 
-func runChat(_ context.Context, repo string, issueNum int, model string) error {
+func runChat(_ context.Context, repo string, issueNum int, model string, modeFlag string) error {
 	client, repoCfg, err := newVCSClientForRepo(repo)
 	if err != nil {
 		return err
@@ -93,23 +117,33 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 		model = creds.EffectiveChatModel()
 	}
 
+	// Resolve the issue chat mode: explicit --mode > credentials.yaml
+	// chat_default_mode > built-in default ("issue").
+	// Mode only applies to issue-level chat; repo-level is always read-only.
+	if modeFlag == "" && issueNum > 0 {
+		creds, _ := config.LoadCredentials()
+		modeFlag = creds.EffectiveChatDefaultMode()
+	}
+
 	// Hard-block file mutations and notebook edits for REPO-level chat.
 	// Repo chat is strictly an analysis / planning assistant — code changes
 	// go through `clawflow run` (the implement operator) on a labeled issue.
 	//
-	// ISSUE-level chat (issueNum > 0) is allowed to edit files for hot-fixes:
-	// the user explicitly targeted a specific issue and wants to fix it
-	// directly without going through the full clawflow run pipeline.
-	// The working directory is already pinned to the repo's local clone,
-	// so edits are scoped to that repo. --dangerously-skip-permissions
-	// removes the per-Bash confirmation prompt for both modes.
+	// ISSUE-level chat behaviour depends on mode:
+	//   issue mode (default) — also disallows Edit/Write/NotebookEdit.
+	//     The AI is prompted to land conclusions in the issue tracker.
+	//   edit mode — allows full file editing for hot-fixes without going
+	//     through the full clawflow run pipeline.
+	//
+	// --dangerously-skip-permissions removes the per-Bash confirmation
+	// prompt for both modes.
 	args := []string{
 		"--model", model,
 		"--name", name,
 		"--dangerously-skip-permissions",
 	}
-	if issueNum == 0 {
-		// Repo-level chat: read-only, no file edits
+	if issueNum == 0 || modeFlag != "edit" {
+		// Repo-level chat and issue-mode both block file edits.
 		args = append(args, "--disallowedTools", "Edit,Write,NotebookEdit")
 	}
 	// When the user has explicitly configured an API key in clawflow's
@@ -134,7 +168,7 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	// above for the full rationale.
 	var systemCtx string
 	if issueNum > 0 {
-		systemCtx, err = buildIssueChatContext(client, repo, issueNum)
+		systemCtx, err = buildIssueChatContext(client, repo, issueNum, modeFlag)
 	} else {
 		systemCtx, err = buildRepoChatContext(client, repo, repoCfg.Platform, repoCfg.BaseBranch)
 	}
@@ -190,7 +224,11 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	if useBare {
 		bareNote = " --bare (forced, API key takes priority over claude.ai login)"
 	}
-	fmt.Fprintf(os.Stderr, "[clawflow] chat → model=%s key=%s base_url=%s%s\n", model, keyHint, urlHint, bareNote)
+	modeNote := ""
+	if issueNum > 0 {
+		modeNote = fmt.Sprintf(" mode=%s", modeFlag)
+	}
+	fmt.Fprintf(os.Stderr, "[clawflow] chat → model=%s key=%s base_url=%s%s%s\n", model, keyHint, urlHint, bareNote, modeNote)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -198,7 +236,7 @@ func runChat(_ context.Context, repo string, issueNum int, model string) error {
 	return cmd.Run()
 }
 
-func buildIssueChatContext(client vcs.Client, repo string, issueNum int) (string, error) {
+func buildIssueChatContext(client vcs.Client, repo string, issueNum int, mode string) (string, error) {
 	issues, err := client.ListOpenIssues(repo)
 	if err != nil {
 		return "", err
@@ -230,7 +268,10 @@ func buildIssueChatContext(client vcs.Client, repo string, issueNum int) (string
 	}
 
 	comments, _ := client.ListIssueCommentsDetail(repo, issueNum)
-	return chat.BuildIssueContext(repo, issue, comments), nil
+	if mode == "edit" {
+		return chat.BuildIssueContext(repo, issue, comments), nil
+	}
+	return chat.BuildIssueModeContext(repo, issue, comments), nil
 }
 
 func buildRepoChatContext(client vcs.Client, repo, platform, baseBranch string) (string, error) {
