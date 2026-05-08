@@ -130,6 +130,10 @@ func BuildProjectChatContext(name string, repos []ProjectChatRepo, contextMD, te
 	fmt.Fprintln(&b, "- **WebFetch** — for issue/PR refs, docs, external context.")
 	fmt.Fprintln(&b)
 
+	// ClawFlow automation model — single source shared with BuildPilotContext
+	fmt.Fprintln(&b, prompts.AutomationModel())
+	fmt.Fprintln(&b)
+
 	// Single-source CLI cheatsheet — ScopeFull includes add-sub/list-sub
 	fmt.Fprintln(&b, prompts.CLICheatsheet(prompts.ScopeFull))
 	fmt.Fprintln(&b)
