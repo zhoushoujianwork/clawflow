@@ -451,6 +451,70 @@ func TestRun_OutcomeAgentClosed_ClosesIssue(t *testing.T) {
 	}
 }
 
+// TestRun_WriteBackTimeout verifies that when the VCS write-back phase stalls
+// (simulating a hung GitHub/GitLab API call), Run returns an error within the
+// deadline rather than blocking indefinitely. This is the regression test for
+// issue #117, where a stalled TCP read in the finalization block caused the
+// runner to hang for ~47–53 min until an external 60-min process kill fired.
+func TestRun_WriteBackTimeout(t *testing.T) {
+	op := &Operator{
+		Name:      "evaluate-bug",
+		LockLabel: "agent-running",
+		Outcomes:  []string{"agent-evaluated"},
+	}
+	sub := &Subject{Number: 99, Labels: []string{"bug"}}
+
+	// blockingVCS blocks forever on PostIssueComment to simulate a stalled
+	// GitHub API call (TCP connection established, no response received).
+	blockingVCS := &blockingCommentVCS{block: make(chan struct{})}
+	defer close(blockingVCS.block) // unblock goroutine when test exits
+
+	body := "## Eval\n\nRepro: 9/10\n\n<!-- clawflow:outcome=agent-evaluated -->\n"
+
+	// Use a very short timeout so the test completes quickly.
+	origTimeout := writeBackTimeout
+	writeBackTimeout = 100 * time.Millisecond
+	defer func() { writeBackTimeout = origTimeout }()
+
+	start := time.Now()
+	_, _, err := Run(context.Background(), op, sub, blockingVCS, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return body, nil
+		},
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want error when write-back times out, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want context.DeadlineExceeded in error chain, got: %v", err)
+	}
+	// Should return well within 2× the timeout, not after the full external kill window.
+	if elapsed > 2*time.Second {
+		t.Errorf("Run took %v, want < 2s (write-back timeout not enforced)", elapsed)
+	}
+}
+
+// blockingCommentVCS is a VCS stub whose PostIssueComment blocks until the
+// block channel is closed, simulating a stalled HTTP read.
+type blockingCommentVCS struct {
+	block chan struct{}
+}
+
+func (b *blockingCommentVCS) AddLabel(repo string, issueNumber int, labels ...string) error {
+	return nil
+}
+func (b *blockingCommentVCS) RemoveLabel(repo string, issueNumber int, labels ...string) error {
+	return nil
+}
+func (b *blockingCommentVCS) PostIssueComment(repo string, issueNumber int, body string) error {
+	<-b.block // block until test cleanup closes the channel
+	return nil
+}
+func (b *blockingCommentVCS) CloseIssue(repo string, issueNumber int) error { return nil }
+
 func TestParseOutcome_Direct(t *testing.T) {
 	cases := []struct {
 		name     string
