@@ -240,10 +240,14 @@ type RunMeta struct {
 	// would carry "0001-01-01T00:00:00Z" and the dashboard's duration math
 	// would render it as a giant negative offset.
 	EndedAt     *time.Time `json:"ended_at,omitempty"`
-	// Status is one of "running", "success", "failed", "skipped", "cancelled".
+	// Status is one of "running", "finalizing", "success", "failed", "skipped", "cancelled".
 	// "cancelled" is set only by /api/run/cancel after the runner process
 	// is killed — it lets the dashboard distinguish a user-initiated kill
 	// from an organic crash ("failed").
+	// "finalizing" is written immediately after operator.Run() returns
+	// successfully, before usage extraction and meta cleanup. If the process
+	// is killed in this window, the reconciler treats it as completed (not
+	// stale) and promotes it to "success" without re-queuing the issue.
 	Status  string `json:"status"`
 	PRUrl   string `json:"pr_url,omitempty"`
 	Error   string `json:"error,omitempty"`
@@ -692,7 +696,7 @@ func MarkRunningAsCancelled(repo string, issueNum int, reason string) int {
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
-		if m.Status != "running" {
+		if m.Status != "running" && m.Status != "finalizing" {
 			continue
 		}
 		m.Status = "cancelled"
@@ -984,6 +988,31 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 			if err := json.Unmarshal(data, &m); err != nil {
 				return nil
 			}
+
+			// A run stuck in "finalizing" means operator.Run() completed
+			// (VCS side-effects done: comment posted, outcome label applied,
+			// trigger labels removed) but the process was killed before
+			// WriteRunMeta could record the terminal status. The issue will
+			// not re-trigger because its trigger labels are already gone.
+			// Just backfill usage and promote to "success".
+			if m.Status == "finalizing" {
+				if !runnerStillAlive(m.Repo, m.IssueNumber, m.StartedAt) {
+					if u, uErr := ExtractUsage(eventsPath); uErr == nil && u != nil {
+						m.Usage = u
+					}
+					m.Status = "success"
+					if m.EndedAt == nil || m.EndedAt.IsZero() {
+						t := time.Now().UTC()
+						m.EndedAt = &t
+					}
+					m.Error = "reconciled: runner exited after finalizing VCS side-effects but before writing terminal meta"
+					if err := WriteRunMeta(path, m); err == nil {
+						fixed++
+					}
+				}
+				return nil
+			}
+
 			if m.Status != "running" {
 				return nil
 			}
@@ -1168,7 +1197,7 @@ func ConsecutiveFailures(repo string, issueNum int) int {
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
-		if m.Status == "running" {
+		if m.Status == "running" || m.Status == "finalizing" {
 			continue
 		}
 		runs = append(runs, runEntry{startedAt: m.StartedAt, status: m.Status})
@@ -1236,7 +1265,7 @@ func collectRunEntries(root string) []RunIndexEntry {
 		// Backfill Usage on terminated runs so historical data on disk gets
 		// reflected in /usage on the next refresh. Best-effort: any error
 		// here is non-fatal — we still want the index entry.
-		if m.Usage == nil && m.Status != "" && m.Status != "running" {
+		if m.Usage == nil && m.Status != "" && m.Status != "running" && m.Status != "finalizing" {
 			runDir := filepath.Dir(path)
 			if u, err := ExtractUsage(filepath.Join(runDir, "events.jsonl")); err == nil && u != nil {
 				m.Usage = u
@@ -1252,7 +1281,7 @@ func collectRunEntries(root string) []RunIndexEntry {
 		// at index time. The dashboard renders this as a green "live"
 		// badge so users can distinguish "actively running, just quietly
 		// retrying upstream" from "frozen, will be reconciled soon".
-		if m.Status == "running" && runnerStillAlive(m.Repo, m.IssueNumber, m.StartedAt) {
+		if (m.Status == "running" || m.Status == "finalizing") && runnerStillAlive(m.Repo, m.IssueNumber, m.StartedAt) {
 			alive := true
 			entry.RunnerAlive = &alive
 		}
@@ -1432,7 +1461,7 @@ func collectPilotRunEntries(root string) []PilotRunIndexEntry {
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil
 		}
-		if m.Usage == nil && m.Status != "" && m.Status != "running" {
+		if m.Usage == nil && m.Status != "" && m.Status != "running" && m.Status != "finalizing" {
 			runDir := filepath.Dir(path)
 			if u, err := ExtractUsage(filepath.Join(runDir, "events.jsonl")); err == nil && u != nil {
 				m.Usage = u
