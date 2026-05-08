@@ -71,9 +71,37 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 		return 0, nil
 	}
 
+	// Resolve the current machine's hostname once. Used to skip projects
+	// bound to a different machine. Non-fatal: an empty hostname means no
+	// projects will be skipped by the binding check (conservative / safe).
+	hostname, _ := os.Hostname()
+
+	cfg, err := config.Load()
+	if err != nil {
+		return 0, fmt.Errorf("load config: %w", err)
+	}
+	creds, _ := config.LoadCredentials()
+
 	now := time.Now()
 	var ready []*project.Project
 	for _, p := range projects {
+		// Skip projects bound to a different machine. A project with no
+		// BoundMachine (empty string) is processed by every machine —
+		// the common case. When hostname resolution failed (empty string),
+		// we conservatively process all projects so a misconfigured machine
+		// doesn't silently drop work.
+		if p.Automation.BoundMachine != "" && hostname != "" && p.Automation.BoundMachine != hostname {
+			fmt.Fprintf(os.Stderr, "[pilot] %s: bound to %s, skipping (current machine: %s)\n",
+				p.Name, p.Automation.BoundMachine, hostname)
+			continue
+		}
+		// When require_binding is set globally, skip projects that have no
+		// BoundMachine configured. Mirrors the repo-level RequireBinding
+		// behaviour in run.go.
+		if cfg.Settings.RequireBinding && p.Automation.BoundMachine == "" && hostname != "" {
+			fmt.Fprintf(os.Stderr, "[pilot] %s: no bound_machine and require_binding is set, skipping\n", p.Name)
+			continue
+		}
 		if rem := p.CooldownRemaining(now); rem > 0 {
 			fmt.Fprintf(os.Stderr, "[pilot] %s: cooldown %s remaining — skip\n", p.Name, rem.Round(time.Second))
 			continue
@@ -83,12 +111,6 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 	if len(ready) == 0 {
 		return 0, nil
 	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		return 0, fmt.Errorf("load config: %w", err)
-	}
-	creds, _ := config.LoadCredentials()
 
 	woken := 0
 	for _, p := range ready {

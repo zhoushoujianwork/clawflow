@@ -41,10 +41,18 @@ type Project struct {
 // LastWokenAt is the RFC3339 UTC timestamp of the last PM invocation;
 // the runner stamps it after each wake (success or failure) to anchor
 // the next cooldown window.
+//
+// BoundMachine, when non-empty, restricts Pilot wakeups to the machine
+// whose hostname matches this value. An empty BoundMachine means any
+// machine may wake the Pilot (the default, backward-compatible behaviour).
+// This mirrors the repo-level BoundMachine in RepoConfig and is the
+// recommended way to prevent duplicate Pilot wakeups in multi-machine
+// deployments.
 type Automation struct {
 	Enabled         bool   `yaml:"enabled"`
 	CooldownMinutes int    `yaml:"cooldown_minutes,omitempty"`
 	LastWokenAt     string `yaml:"last_woken_at,omitempty"`
+	BoundMachine    string `yaml:"bound_machine,omitempty"`
 }
 
 // ProjectsRoot returns ~/.clawflow/projects.
@@ -424,6 +432,20 @@ func SetAutomation(name string, enabled bool, cooldownMinutes int) error {
 	if cooldownMinutes >= 0 {
 		p.Automation.CooldownMinutes = cooldownMinutes
 	}
+	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return save(p)
+}
+
+// SetAutomationBoundMachine sets or clears the BoundMachine for a project's
+// automation. Pass an empty string to clear the binding (any machine may wake
+// the Pilot). This is a separate function from SetAutomation so callers can
+// update the binding without touching the enabled/cooldown state.
+func SetAutomationBoundMachine(name, boundMachine string) error {
+	p, err := Get(name)
+	if err != nil {
+		return err
+	}
+	p.Automation.BoundMachine = boundMachine
 	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	return save(p)
 }
