@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/zhoushoujianwork/clawflow/internal/chat/prompts"
 )
 
 // PilotRepoDigest is one repo's snapshot at the moment the Pilot
@@ -82,6 +84,10 @@ func BuildPilotContext(
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "Member repos and your working files are described in this directory's")
 	fmt.Fprintln(&b, "CLAUDE.md (already loaded). The sections below are per-wake state.")
+	fmt.Fprintln(&b)
+
+	// ClawFlow automation model — single source shared with BuildProjectChatContext
+	fmt.Fprintln(&b, prompts.AutomationModel())
 	fmt.Fprintln(&b)
 
 	fmt.Fprintln(&b, "## Project context (context.md — your own memory)")

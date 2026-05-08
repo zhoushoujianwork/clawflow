@@ -279,6 +279,77 @@ func TestBuildPilotContext_StandardPlays(t *testing.T) {
 	}
 }
 
+func TestBuildProjectChatContext_AutomationModel(t *testing.T) {
+	repos := []ProjectChatRepo{{Name: "owner/repo-a", LocalPath: "/tmp/repo-a"}}
+	ctx := BuildProjectChatContext("my-proj", repos, "", "")
+
+	// Core automation model concepts must be present
+	if !containsStr(ctx, "ClawFlow automation model") {
+		t.Error("missing automation model section header")
+	}
+	if !containsStr(ctx, "label-driven") {
+		t.Error("missing label-driven description")
+	}
+	if !containsStr(ctx, "ready-for-agent") {
+		t.Error("missing ready-for-agent label in automation model")
+	}
+	if !containsStr(ctx, "agent-running") {
+		t.Error("missing agent-running label in automation model")
+	}
+	if !containsStr(ctx, "agent-evaluated") {
+		t.Error("missing agent-evaluated label in automation model")
+	}
+	if !containsStr(ctx, "agent-failed") {
+		t.Error("missing agent-failed label in automation model")
+	}
+	if !containsStr(ctx, "Execution lifecycle") {
+		t.Error("missing execution lifecycle section")
+	}
+	if !containsStr(ctx, "Standard pipeline") {
+		t.Error("missing standard pipeline section")
+	}
+	// Automation model must appear before the CLI cheatsheet
+	automationIdx := indexStr(ctx, "ClawFlow automation model")
+	cheatsheetIdx := indexStr(ctx, "clawflow CLI cheatsheet")
+	if automationIdx < 0 || cheatsheetIdx < 0 {
+		t.Fatal("automation model or CLI cheatsheet section not found")
+	}
+	if automationIdx > cheatsheetIdx {
+		t.Error("automation model must appear before CLI cheatsheet")
+	}
+}
+
+func TestBuildPilotContext_AutomationModel(t *testing.T) {
+	repos := []PilotRepoDigest{}
+	prompt := BuildPilotContext("my-proj", "", "", "", nil, repos)
+
+	// Core automation model concepts must be present
+	if !containsStr(prompt, "ClawFlow automation model") {
+		t.Error("missing automation model section header in Pilot prompt")
+	}
+	if !containsStr(prompt, "ready-for-agent") {
+		t.Error("missing ready-for-agent label in Pilot automation model")
+	}
+	if !containsStr(prompt, "agent-running") {
+		t.Error("missing agent-running label in Pilot automation model")
+	}
+	if !containsStr(prompt, "Diagnosing a stuck issue") {
+		t.Error("missing stuck-issue diagnosis guide in Pilot automation model")
+	}
+	if !containsStr(prompt, "Standard pipeline") {
+		t.Error("missing standard pipeline section in Pilot automation model")
+	}
+}
+
+func indexStr(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
+
 func containsStr(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
