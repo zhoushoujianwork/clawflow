@@ -7,6 +7,38 @@ description: "Use the `clawflow` CLI to manage GitHub/GitLab projects locally: v
 
 A CLI for managing GitHub/GitLab projects from your local terminal. View issues, create PRs, manage labels, and operate on multiple repos without context switching.
 
+## Preflight (first use on a machine)
+
+Before invoking any `clawflow` subcommand, run these two checks. If either fails, surface the exact command to the user — do not guess or bypass.
+
+### 1. Binary check
+
+Run `command -v clawflow`. If not found, the user hasn't installed it yet. Ask them to run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhoushoujianwork/clawflow/main/get.sh | bash
+```
+
+Supports macOS (arm64/amd64) and Linux (amd64/arm64). The installer drops the binary into `/usr/local/bin` (or `~/.local/bin` if no write perm) and creates `~/.clawflow/config/`.
+
+### 2. Token check
+
+Run `clawflow config show`. The output lists `GH Token:` and `GitLab Token:` — each either has a masked value like `set (***abcd)` or is unset.
+
+If the GitHub token is unset (and the user works with GitHub repos), ask them to run:
+
+```bash
+clawflow config set-token <ghp_...>        # scope: repo, read:org
+```
+
+For GitLab:
+
+```bash
+clawflow config set-gitlab-token <glpat_...>   # scope: api
+```
+
+Env vars `GH_TOKEN` / `GITLAB_TOKEN` take priority over the stored file. Tokens live in `~/.clawflow/config/credentials.yaml` (mode 0600).
+
 ## Core commands
 
 ### Issue / PR / Label operations

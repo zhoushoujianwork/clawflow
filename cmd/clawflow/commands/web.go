@@ -2,13 +2,18 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -348,6 +353,44 @@ here — run 'clawflow run' first if you want fresh data.`,
 				}()
 			}
 
+			// Bind the port up-front (instead of letting srv.ListenAndServe
+			// do it) so we can translate the raw "address already in use"
+			// kernel error into something the user can actually act on —
+			// most often, the port is held by a previous `clawflow web`
+			// they forgot about and the right fix is `clawflow web restart`.
+			ln, err := net.Listen("tcp", addr)
+			if err != nil {
+				if isAddrInUseErr(err) {
+					if info, ok := readWebPid(); ok && pidAlive(info.PID) && isClawflowProcess(info.PID) {
+						return fmt.Errorf("clawflow web is already running (pid %d on %s:%d)\n  run `clawflow web restart` to replace it, or pass --port to run a second instance", info.PID, info.Host, info.Port)
+					}
+					return fmt.Errorf("%s is in use by another process (not clawflow)\n  free the port or pass --port", addr)
+				}
+				return err
+			}
+
+			// Record this instance in the pid file so `clawflow web restart`
+			// (and future invocations that hit a busy port) know who owns
+			// the dashboard. Best-effort — a write failure shouldn't block
+			// serving, it just degrades the restart UX.
+			if err := writeWebPid(webPidInfo{PID: os.Getpid(), Host: host, Port: port, StartedAt: time.Now()}); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠ write pid file: %v\n", err)
+			}
+			defer removeWebPid()
+
+			// Install signal handler so Ctrl-C / SIGTERM trigger graceful
+			// shutdown, which in turn lets defers (notably pid file
+			// cleanup above) run. Without this, Go's default SIGINT
+			// handler just os.Exit(2)s and the pid file gets stranded.
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			go func() {
+				<-sigCh
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = srv.Shutdown(ctx)
+			}()
+
 			fmt.Printf("ClawFlow dashboard → %s\n", url)
 			fmt.Printf("  data dir: %s\n", snapshot.DataDir())
 			fmt.Printf("  Ctrl-C to stop.\n\n")
@@ -355,7 +398,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			if openFlag {
 				go openBrowser(url)
 			}
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				return err
 			}
 			return nil
@@ -364,6 +407,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 	cmd.Flags().IntVar(&port, "port", 8090, "TCP port to bind")
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host/IP to bind — 127.0.0.1 by default so the dashboard stays off the LAN")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the dashboard in your default browser")
+	cmd.AddCommand(newWebRestartCmd())
 	return cmd
 }
 
@@ -453,4 +497,160 @@ func openBrowser(url string) {
 		return
 	}
 	_ = cmd.Start()
+}
+
+// webPidInfo is the on-disk record of the currently-running `clawflow web`
+// instance. Written at startup (once bind succeeds) and removed on graceful
+// shutdown. `clawflow web restart` and a fresh `clawflow web` hitting an
+// in-use port read it to figure out whether the process holding the port
+// is our own — in which case replacing it is safe.
+type webPidInfo struct {
+	PID       int       `json:"pid"`
+	Host      string    `json:"host"`
+	Port      int       `json:"port"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// webPidPath is the single source of truth for the pid file location.
+// Lives under ~/.clawflow/data/ so it rides along with the rest of the
+// runtime state and doesn't need a new directory.
+func webPidPath() string {
+	return filepath.Join(snapshot.DataDir(), "web.pid")
+}
+
+func writeWebPid(info webPidInfo) error {
+	if err := os.MkdirAll(snapshot.DataDir(), 0o755); err != nil {
+		return err
+	}
+	buf, err := json.Marshal(info)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(webPidPath(), buf, 0o644)
+}
+
+func readWebPid() (webPidInfo, bool) {
+	var info webPidInfo
+	buf, err := os.ReadFile(webPidPath())
+	if err != nil {
+		return info, false
+	}
+	if err := json.Unmarshal(buf, &info); err != nil {
+		return info, false
+	}
+	return info, info.PID > 0
+}
+
+func removeWebPid() {
+	_ = os.Remove(webPidPath())
+}
+
+// pidAlive returns true if signal 0 can be delivered to pid — the portable
+// POSIX existence check. Mirrors the helper in internal/snapshot/lock.go;
+// duplicated here to avoid widening the snapshot package's API surface
+// for a single caller.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// isClawflowProcess confirms pid actually names a clawflow binary before we
+// signal it. Without this check a stale pid file whose PID got recycled by
+// the OS (same PID, unrelated process) would make `web restart` kill the
+// wrong thing. Best-effort via `ps` — on a platform where the command
+// fails we conservatively return false, which only means the user sees
+// the "not clawflow" branch of the error and has to free the port by hand.
+func isClawflowProcess(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "clawflow")
+}
+
+// isAddrInUseErr peels back the net.OpError / os.SyscallError wrappers to
+// check for EADDRINUSE specifically — other listen failures (permission
+// denied, invalid host) should surface as-is rather than being misreported
+// as a stale web instance.
+func isAddrInUseErr(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+// newWebRestartCmd replaces the currently-running `clawflow web` with a
+// fresh instance. Intended as the "my port is stuck" escape hatch when
+// the user has lost the original terminal. Safe by design: we only signal
+// a PID that (a) appears in our own pid file and (b) still identifies a
+// clawflow binary, so an unrelated process that happened to grab 8090
+// will never be killed.
+func newWebRestartCmd() *cobra.Command {
+	var waitSeconds int
+	cmd := &cobra.Command{
+		Use:   "restart",
+		Short: "Stop the running clawflow web instance and start a new one",
+		Long: `Finds the current clawflow web process via its pid file, sends SIGTERM,
+waits for the port to free, and re-execs 'clawflow web' with the same host
+and port. If no pid file exists or the recorded process is gone, just starts
+a fresh web instance.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			info, ok := readWebPid()
+			if !ok {
+				fmt.Fprintln(os.Stderr, "no running clawflow web found (no pid file); starting a fresh instance")
+				return execSelfWeb("127.0.0.1", 8090)
+			}
+			if !pidAlive(info.PID) {
+				fmt.Fprintf(os.Stderr, "pid file points at pid %d but it is not running; cleaning up and starting fresh\n", info.PID)
+				removeWebPid()
+				return execSelfWeb(info.Host, info.Port)
+			}
+			if !isClawflowProcess(info.PID) {
+				return fmt.Errorf("pid %d in pid file is not a clawflow process; refusing to signal it\n  remove %s manually if you're sure it's stale", info.PID, webPidPath())
+			}
+
+			fmt.Fprintf(os.Stderr, "stopping clawflow web (pid %d) on %s:%d...\n", info.PID, info.Host, info.Port)
+			if err := syscall.Kill(info.PID, syscall.SIGTERM); err != nil {
+				return fmt.Errorf("send SIGTERM to pid %d: %w", info.PID, err)
+			}
+
+			addr := fmt.Sprintf("%s:%d", info.Host, info.Port)
+			deadline := time.Now().Add(time.Duration(waitSeconds) * time.Second)
+			for time.Now().Before(deadline) {
+				if !pidAlive(info.PID) {
+					ln, err := net.Listen("tcp", addr)
+					if err == nil {
+						_ = ln.Close()
+						break
+					}
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			if pidAlive(info.PID) {
+				return fmt.Errorf("pid %d still alive after %ds; not starting a replacement\n  check with `ps -p %d` and escalate manually", info.PID, waitSeconds, info.PID)
+			}
+			return execSelfWeb(info.Host, info.Port)
+		},
+	}
+	cmd.Flags().IntVar(&waitSeconds, "wait", 10, "seconds to wait for the old instance to release the port before giving up")
+	return cmd
+}
+
+// execSelfWeb re-execs the current binary as `clawflow web --host H --port P`,
+// replacing this process in place via syscall.Exec. The user sees one
+// continuous process lineage rather than `web restart` exiting and them
+// having to relaunch `web`.
+func execSelfWeb(host string, port int) error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	argv := []string{"clawflow", "web", "--host", host, "--port", strconv.Itoa(port)}
+	return syscall.Exec(self, argv, os.Environ())
 }
