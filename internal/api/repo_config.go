@@ -76,8 +76,8 @@ func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
 	// Push to Gist so the next AutoPull (any machine) can't silently
 	// revert this toggle. Without this, auto_approve / auto_merge /
 	// enabled flips made via the dashboard would be wiped on the next
-	// clawflow run start. Best-effort, async.
-	go AutoPush()
+	// clawflow run start.
+	AutoPush()
 
 	writeJSON(w, 200, repoConfigResponse{
 		Status:      "ok",
