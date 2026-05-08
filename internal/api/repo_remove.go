@@ -66,6 +66,9 @@ func HandleRepoRemove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Push to Gist so the removal sticks across machines. Otherwise
+	// the next AutoPull would re-add the repo from cloud state.
+	go AutoPush()
 
 	writeJSON(w, 200, repoRemoveResponse{
 		Status:  "ok",
