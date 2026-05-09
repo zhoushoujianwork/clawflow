@@ -23,6 +23,8 @@ interface RunEntry {
   started_at: string
 }
 
+const PROVIDER_KEY = 'clawflow.repos.provider'
+
 function timeAgo(iso: string): string {
   if (!iso) return '—'
   const t = new Date(iso).getTime()
@@ -35,16 +37,25 @@ function timeAgo(iso: string): string {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
+type RepoSearch = { provider?: string }
+
 export const Route = createFileRoute('/_app/repos/')({
   component: RepoList,
+  validateSearch: (s: Record<string, unknown>): RepoSearch => {
+    return typeof s.provider === 'string' ? { provider: s.provider } : {}
+  },
 })
 
 function RepoList() {
+  const { provider } = Route.useSearch()
+  const navigate = Route.useNavigate()
+
   const [repos, setRepos] = useState<Repo[]>([])
   const [runs, setRuns] = useState<RunEntry[]>([])
   const [ideScheme, setIdeScheme] = useState('vscode://file/')
   const [hostname, setHostname] = useState<string>('')
   const [loading, setLoading] = useState(true)
+  const [didApplyDefault, setDidApplyDefault] = useState(false)
   const [query, setQuery] = useState('')
   // Per-row "work in progress" indicators, keyed by full_name + field.
   // Kept as a Set so toggling one repo doesn't block the rest.
@@ -83,6 +94,41 @@ function RepoList() {
   useEffect(() => { loadAll() }, [loadAll])
   useConfigChanged(loadAll)
 
+  const counts = useMemo(() => {
+    const c = new Map<string, number>()
+    for (const r of repos) {
+      const p = r.platform || 'github'
+      c.set(p, (c.get(p) || 0) + 1)
+    }
+    return c
+  }, [repos])
+
+  const platformKeys = useMemo(() => Array.from(counts.keys()).sort(), [counts])
+
+  // Apply persisted default once after data loads, only if URL has no
+  // explicit provider. If the stored value points to a platform that no
+  // longer has any repos, we silently fall through to "all".
+  useEffect(() => {
+    if (loading || didApplyDefault) return
+    setDidApplyDefault(true)
+    if (provider !== undefined) return
+    if (typeof window === 'undefined') return
+    const stored = window.localStorage.getItem(PROVIDER_KEY)
+    if (!stored) return
+    if (stored === 'all' || counts.has(stored)) {
+      navigate({ search: { provider: stored }, replace: true })
+    }
+  }, [loading, didApplyDefault, provider, counts, navigate])
+
+  const active = provider || 'all'
+
+  function pickProvider(next: string) {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(PROVIDER_KEY, next)
+    }
+    navigate({ search: { provider: next } })
+  }
+
   // Build a map of repo → most recent run timestamp
   const lastActivityMap = useMemo<Record<string, string>>(() => {
     const m: Record<string, string> = {}
@@ -108,8 +154,8 @@ function RepoList() {
   }, [repos, hostname])
 
   const filtered = useMemo(() => {
+    let list = active === 'all' ? [...repos] : repos.filter(r => (r.platform || 'github') === active)
     const q = query.trim().toLowerCase()
-    let list = [...repos]
     if (q) {
       list = list.filter(r =>
         r.full_name.toLowerCase().includes(q) ||
@@ -125,7 +171,9 @@ function RepoList() {
       return a.full_name.localeCompare(b.full_name)
     })
     return list
-  }, [repos, lastActivityMap, query])
+  }, [repos, active, lastActivityMap, query])
+
+  const showTabs = repos.length > 0 && platformKeys.length > 1
 
   const markBusy = useCallback((key: string, on: boolean) => {
     setBusy(prev => {
@@ -245,6 +293,19 @@ function RepoList() {
 
       {repos.length > 0 && (
         <div className="flex items-center gap-3 mb-4 flex-wrap">
+          {showTabs && (
+            <div className="inline-flex bg-card border border-border rounded-xl overflow-hidden">
+              <TabButton active={active === 'all'} onClick={() => pickProvider('all')}>
+                All <span className="ml-1 text-xs opacity-60 tabular-nums">{repos.length}</span>
+              </TabButton>
+              {platformKeys.map(p => (
+                <TabButton key={p} active={active === p} onClick={() => pickProvider(p)}>
+                  <span className="capitalize">{p}</span>
+                  <span className="ml-1 text-xs opacity-60 tabular-nums">{counts.get(p)}</span>
+                </TabButton>
+              ))}
+            </div>
+          )}
           <div className="relative flex-1 min-w-[200px] max-w-sm">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
             <input
@@ -287,10 +348,17 @@ function RepoList() {
         </div>
       ) : filtered.length === 0 ? (
         <div className="bg-card border border-border rounded-xl p-8 text-center">
-          <p className="text-sm text-muted-foreground">
-            No repos match <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{query}</code>.{' '}
-            <button type="button" onClick={() => setQuery('')} className="underline hover:text-foreground">Clear search</button>
-          </p>
+          {query ? (
+            <p className="text-sm text-muted-foreground">
+              No repos match <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{query}</code>.{' '}
+              <button type="button" onClick={() => setQuery('')} className="underline hover:text-foreground">Clear search</button>
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{active}</code> repos. Pick another tab or add one with{' '}
+              <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow repo add</code>.
+            </p>
+          )}
         </div>
       ) : (
         <div className="bg-card border border-border rounded-xl overflow-x-auto">
@@ -554,6 +622,29 @@ function MenuItem({
         'w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-secondary/60 transition-colors',
         active && 'bg-secondary/40',
         danger ? 'text-destructive hover:bg-destructive/10' : 'text-foreground',
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+function TabButton({
+  active, onClick, children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'px-3 py-1.5 text-sm border-r border-border last:border-r-0 transition-colors',
+        active
+          ? 'bg-secondary text-foreground font-semibold'
+          : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50',
       )}
     >
       {children}
