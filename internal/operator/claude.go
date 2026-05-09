@@ -123,9 +123,24 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 		return "", fmt.Errorf("claude start: %w", err)
 	}
 
+	// Guard: if the context fires while we're reading (e.g. orphaned child
+	// processes keep the pipe open after the main claude process is killed),
+	// close stdout to unblock the scanner. exec.CommandContext kills the
+	// direct child but not its grandchildren, so without this the scanner
+	// can block indefinitely past the deadline.
+	pipeGuardDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stdout.Close()
+		case <-pipeGuardDone:
+		}
+	}()
+
 	// Parse stream line-by-line so we can tee to events.jsonl and extract
 	// text deltas for user-facing progress.
 	result, parseErr := parseClaudeStream(stdout, events)
+	close(pipeGuardDone) // stop the guard goroutine whether we timed out or not
 	if err := cmd.Wait(); err != nil {
 		// Wrap transient rate-limit exits with ErrRateLimit so callers can
 		// distinguish them from permanent failures and avoid cascading the

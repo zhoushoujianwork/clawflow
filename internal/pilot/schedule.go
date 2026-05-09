@@ -146,6 +146,18 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 // Each wake is persisted to ~/.clawflow/data/pilot-runs/<project>/<ts>/
 // with meta.json + events.jsonl so the dashboard can show Pilot activity.
 func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *config.Credentials, timeout time.Duration) error {
+	// Bound the ENTIRE wake — including pre-claude digest fetches and
+	// post-claude finalization — to the configured timeout. Without this,
+	// the deadline only covers the `claude -p` subprocess; any blocking
+	// downstream call (context.md write, snapshot index, VCS digest fetch)
+	// can hang indefinitely after claude exits. This is the same class of
+	// bug fixed for the operator runner in #117.
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
 	// Pilot wakes happen inside `clawflow run` (process owns the run.log
 	// handle) but emitting them on a separate "pilot" log keeps the run
 	// tail readable. Open per-wake — wakes are tens of seconds apart and
@@ -200,6 +212,14 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	if err != nil {
 		meta.Status = "failed"
 		meta.Error = err.Error()
+		// When the top-level deadline fires, resultLine is empty because
+		// claude never emitted a PILOT-RESULT. Fill it with a diagnostic
+		// message so pilot/end is never logged with result="" on timeout.
+		if resultLine == "" && ctx.Err() != nil {
+			elapsed := endedAt.Sub(startedAt).Round(time.Second)
+			resultLine = fmt.Sprintf("PILOT-RESULT: pilot deadline exceeded after %s (configured timeout=%s)", elapsed, timeout)
+			meta.Result = resultLine
+		}
 	} else {
 		meta.Status = "success"
 		// On success, look for an updated context.md in the output and
