@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { FolderOpen, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
@@ -519,24 +520,42 @@ function BindButton({
   onBind: (machine: string | null) => void
 }) {
   const boundToMe = !!bound && bound === hostname
-  const ref = useRef<HTMLDivElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
 
-  // Close on outside click via the shared fullscreen overlay trick used
-  // elsewhere in the dashboard (e.g. projects.$name automation popover).
-  // Not using native details/summary here because we want keyboard-esc
-  // to also close it.
+  // Menu is rendered via portal with position:fixed so the parent
+  // table's overflow-x-auto can't clip it onto the next row. We
+  // compute the anchor rect on open and on scroll/resize; close on
+  // Esc or outside click.
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      setPos(null)
+      return
+    }
+    function place() {
+      const el = btnRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      setPos({ top: r.bottom + 4, right: window.innerWidth - r.right })
+    }
+    place()
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
   }, [open, onClose])
 
   return (
-    <div className="relative inline-block" ref={ref}>
+    <div className="relative inline-block">
       <button
+        ref={btnRef}
         type="button"
         onClick={onOpen}
         disabled={busy}
@@ -557,14 +576,14 @@ function BindButton({
         <span className="truncate">{bound || 'unbound'}</span>
       </button>
 
-      {open && (
+      {open && pos && typeof document !== 'undefined' && createPortal(
         <>
-          {/* click-outside catcher */}
-          <div className="fixed inset-0 z-10" onClick={onClose} />
+          <div className="fixed inset-0 z-40" onClick={onClose} />
           <div
             role="menu"
             aria-label={`Bind ${repo}`}
-            className="absolute z-20 mt-1 right-0 min-w-[220px] bg-card border border-border rounded-lg shadow-lg py-1"
+            style={{ top: pos.top, right: pos.right }}
+            className="fixed z-50 min-w-[220px] bg-card border border-border rounded-lg shadow-lg py-1"
           >
             <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
               Bind to machine
@@ -599,7 +618,8 @@ function BindButton({
               </>
             )}
           </div>
-        </>
+        </>,
+        document.body,
       )}
     </div>
   )
