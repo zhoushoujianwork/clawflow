@@ -1,8 +1,10 @@
 package config_test
 
 import (
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
@@ -399,5 +401,226 @@ func TestMergeConfigs_EmptyRemote(t *testing.T) {
 
 	if _, ok := merged.Repos["owner/repo"]; !ok {
 		t.Error("local repo should be preserved when remote is empty")
+	}
+}
+
+// ── LWW merge tests ──────────────────────────────────────────────────────────
+
+// TestMergeConfigs_LWW_RemoteNewer verifies that when the remote entry has a
+// newer updated_at, the remote entry replaces the local one wholesale.
+func TestMergeConfigs_LWW_RemoteNewer(t *testing.T) {
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	local := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/repo": {
+				Enabled:    false,
+				BaseBranch: "main",
+				LocalPath:  "/home/user/repo",
+				UpdatedAt:  older,
+				UpdatedBy:  "machine-a",
+			},
+		},
+	}
+
+	remoteYAML := `
+repos:
+  owner/repo:
+    enabled: true
+    base_branch: develop
+    updated_at: "` + newer.Format(time.RFC3339) + `"
+    updated_by: machine-b
+`
+
+	merged, err := config.MergeConfigs(local, []byte(remoteYAML))
+	if err != nil {
+		t.Fatalf("MergeConfigs error: %v", err)
+	}
+
+	repo := merged.Repos["owner/repo"]
+	if !repo.Enabled {
+		t.Error("remote (newer) entry should win: enabled should be true")
+	}
+	if repo.BaseBranch != "develop" {
+		t.Errorf("remote (newer) entry should win: base_branch should be develop, got %q", repo.BaseBranch)
+	}
+	// local_path must always be preserved from local copy
+	if repo.LocalPath != "/home/user/repo" {
+		t.Errorf("local_path should be preserved: got %q", repo.LocalPath)
+	}
+}
+
+// TestMergeConfigs_LWW_LocalNewer verifies that when the local entry has a
+// newer updated_at, the local entry is kept and the remote is ignored.
+func TestMergeConfigs_LWW_LocalNewer(t *testing.T) {
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	local := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/repo": {
+				Enabled:    true,
+				BaseBranch: "main",
+				LocalPath:  "/home/user/repo",
+				UpdatedAt:  newer,
+				UpdatedBy:  "machine-a",
+			},
+		},
+	}
+
+	remoteYAML := `
+repos:
+  owner/repo:
+    enabled: false
+    base_branch: develop
+    updated_at: "` + older.Format(time.RFC3339) + `"
+    updated_by: machine-b
+`
+
+	merged, err := config.MergeConfigs(local, []byte(remoteYAML))
+	if err != nil {
+		t.Fatalf("MergeConfigs error: %v", err)
+	}
+
+	repo := merged.Repos["owner/repo"]
+	if !repo.Enabled {
+		t.Error("local (newer) entry should win: enabled should remain true")
+	}
+	if repo.BaseBranch != "main" {
+		t.Errorf("local (newer) entry should win: base_branch should remain main, got %q", repo.BaseBranch)
+	}
+}
+
+// TestMergeConfigs_LWW_SameTimestampSameContent verifies that identical
+// entries with the same timestamp produce no conflict and no error.
+func TestMergeConfigs_LWW_SameTimestampSameContent(t *testing.T) {
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	local := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/repo": {
+				Enabled:    true,
+				BaseBranch: "main",
+				UpdatedAt:  ts,
+				UpdatedBy:  "machine-a",
+			},
+		},
+	}
+
+	remoteYAML := `
+repos:
+  owner/repo:
+    enabled: true
+    base_branch: main
+    updated_at: "` + ts.Format(time.RFC3339) + `"
+    updated_by: machine-a
+`
+
+	_, err := config.MergeConfigs(local, []byte(remoteYAML))
+	if err != nil {
+		t.Errorf("identical entries with same timestamp should not produce an error: %v", err)
+	}
+}
+
+// TestMergeConfigs_LWW_SameTimestampDifferentContent verifies that entries
+// with the same timestamp but different content produce a conflict error and
+// write config.conflict.yaml.
+func TestMergeConfigs_LWW_SameTimestampDifferentContent(t *testing.T) {
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	local := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/repo": {
+				Enabled:    true,
+				BaseBranch: "main",
+				UpdatedAt:  ts,
+				UpdatedBy:  "machine-a",
+			},
+		},
+	}
+
+	remoteYAML := `
+repos:
+  owner/repo:
+    enabled: false
+    base_branch: develop
+    updated_at: "` + ts.Format(time.RFC3339) + `"
+    updated_by: machine-b
+`
+
+	_, err := config.MergeConfigs(local, []byte(remoteYAML))
+	if err == nil {
+		t.Error("same timestamp with different content should return an error")
+	}
+	// Conflict file should have been written.
+	if _, statErr := os.Stat(config.ConflictPath()); statErr != nil {
+		t.Errorf("config.conflict.yaml should exist after a conflict: %v", statErr)
+	}
+	// Clean up.
+	_ = os.Remove(config.ConflictPath())
+}
+
+// TestMergeConfigs_LWW_LegacyNoTimestamp verifies that legacy entries (zero
+// updated_at on both sides) fall back to remote-wins, matching the old
+// "cloud wins" behaviour.
+func TestMergeConfigs_LWW_LegacyNoTimestamp(t *testing.T) {
+	local := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/repo": {
+				Enabled:    true,
+				BaseBranch: "main",
+				LocalPath:  "/home/user/repo",
+				// UpdatedAt is zero — legacy entry
+			},
+		},
+	}
+
+	remoteYAML := `
+repos:
+  owner/repo:
+    enabled: false
+    base_branch: develop
+`
+
+	merged, err := config.MergeConfigs(local, []byte(remoteYAML))
+	if err != nil {
+		t.Fatalf("MergeConfigs error: %v", err)
+	}
+
+	repo := merged.Repos["owner/repo"]
+	// Remote wins when both sides have no timestamp.
+	if repo.Enabled {
+		t.Error("remote should win for legacy (no-timestamp) entries: enabled should be false")
+	}
+	if repo.BaseBranch != "develop" {
+		t.Errorf("remote should win for legacy entries: base_branch should be develop, got %q", repo.BaseBranch)
+	}
+	// local_path always preserved
+	if repo.LocalPath != "/home/user/repo" {
+		t.Errorf("local_path should be preserved: got %q", repo.LocalPath)
+	}
+}
+
+// TestMigrateTimestamps verifies that zero-time entries get stamped and
+// already-stamped entries are left alone.
+func TestMigrateTimestamps(t *testing.T) {
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cfg := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/legacy": {Enabled: true, BaseBranch: "main"},
+			"owner/stamped": {Enabled: true, BaseBranch: "main", UpdatedAt: ts},
+		},
+	}
+
+	migrated := config.MigrateTimestamps(cfg)
+	if !migrated {
+		t.Error("MigrateTimestamps should return true when at least one entry was stamped")
+	}
+	if cfg.Repos["owner/legacy"].UpdatedAt.IsZero() {
+		t.Error("legacy entry should have been stamped with a non-zero UpdatedAt")
+	}
+	if !cfg.Repos["owner/stamped"].UpdatedAt.Equal(ts) {
+		t.Error("already-stamped entry should not have its UpdatedAt changed")
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -40,6 +42,8 @@ type syncableRepo struct {
 	AutoApprove           bool              `yaml:"auto_approve,omitempty"`
 	AutoEvaluateAllIssues bool              `yaml:"auto_evaluate_all_issues,omitempty"`
 	BoundMachine          string            `yaml:"bound_machine,omitempty"`
+	UpdatedAt             time.Time         `yaml:"updated_at,omitempty"`
+	UpdatedBy             string            `yaml:"updated_by,omitempty"`
 	// local_path is intentionally absent — genuinely machine-local
 	// (paths differ across OSes and home dirs).
 }
@@ -63,6 +67,8 @@ func toSyncable(r Repo) syncableRepo {
 		AutoApprove:           r.AutoApprove,
 		AutoEvaluateAllIssues: r.AutoEvaluateAllIssues,
 		BoundMachine:          r.BoundMachine,
+		UpdatedAt:             r.UpdatedAt,
+		UpdatedBy:             r.UpdatedBy,
 	}
 }
 
@@ -87,6 +93,8 @@ func fromSyncable(s syncableRepo, localPath string) Repo {
 		AutoApprove:           s.AutoApprove,
 		AutoEvaluateAllIssues: s.AutoEvaluateAllIssues,
 		BoundMachine:          s.BoundMachine,
+		UpdatedAt:             s.UpdatedAt,
+		UpdatedBy:             s.UpdatedBy,
 	}
 }
 
@@ -99,7 +107,12 @@ type gistPayload struct {
 // MarshalForGist serialises the config into YAML bytes suitable for storing
 // in the sync Gist. Credentials and local_path fields are intentionally
 // excluded — only repos (without local paths) and settings are synced.
+// Any repo entry without an updated_at timestamp is stamped with the current
+// time before serialisation (one-shot migration for legacy configs).
 func MarshalForGist(cfg *Config) ([]byte, error) {
+	// Migrate any legacy entries in-place so the Gist always carries timestamps.
+	MigrateTimestamps(cfg)
+
 	payload := gistPayload{
 		Repos:    make(map[string]syncableRepo, len(cfg.Repos)),
 		Settings: cfg.Settings,
@@ -110,17 +123,39 @@ func MarshalForGist(cfg *Config) ([]byte, error) {
 	return yaml.Marshal(payload)
 }
 
-// MergeConfigs applies the field-level merge strategy defined in issue #90:
+// MergeResult summarises what the LWW merge did, for logging.
+type MergeResult struct {
+	Replaced   int // remote entry was newer → replaced local
+	Kept       int // local entry was newer → kept local
+	Added      int // entry only existed on one side → unioned in
+	Conflicted int // same timestamp but different content → conflict file written
+}
+
+// MergeConfigs applies the entry-level Last-Write-Wins (LWW) merge strategy:
 //
 //   - settings.*   → cloud wins (remote overwrites local)
-//   - repos list   → union merge: remote repos are added/updated; repos that
-//     exist only locally are preserved; per-repo local_path always
-//     comes from the local copy (local wins for that one field).
-//     bound_machine is treated like every other config field — cloud wins.
+//   - repos list   → per-entry LWW using updated_at:
+//     • Gist newer  → replace local entry wholesale
+//     • local newer → keep local entry (will be pushed next time)
+//     • same ts, same content → no-op
+//     • same ts, different content → write config.conflict.yaml, return error
+//     • entry only on one side → union in (preserve)
+//     • local_path always comes from the local copy
+//
+// Entries without updated_at (zero time) are treated as "oldest possible" so
+// any timestamped entry wins over them. This handles legacy configs gracefully.
 //
 // The returned Config is the merged result; it is NOT saved to disk.
 // Call cfg.Save() to persist.
 func MergeConfigs(local *Config, remoteYAML []byte) (*Config, error) {
+	return mergeConfigsInternal(local, remoteYAML, true)
+}
+
+// mergeConfigsInternal is the shared implementation. When conflictFatal is
+// true a same-timestamp divergence returns an error; when false it is
+// recorded in the MergeResult but does not block the merge (used by
+// DiffConfigs which only needs the merged view).
+func mergeConfigsInternal(local *Config, remoteYAML []byte, conflictFatal bool) (*Config, error) {
 	var remote gistPayload
 	if err := yaml.Unmarshal(remoteYAML, &remote); err != nil {
 		return nil, fmt.Errorf("cannot parse remote config: %w", err)
@@ -137,20 +172,150 @@ func MergeConfigs(local *Config, remoteYAML []byte) (*Config, error) {
 		merged.Repos[k] = v
 	}
 
-	// Apply remote repos: union merge, only local_path preserved from local copy.
+	var conflictKeys []string
+
+	// Apply remote repos using per-entry LWW.
 	for k, remoteRepo := range remote.Repos {
 		var localPath string
 		if existing, ok := local.Repos[k]; ok {
 			localPath = existing.LocalPath
 		}
-		merged.Repos[k] = fromSyncable(remoteRepo, localPath)
+
+		localEntry, localExists := local.Repos[k]
+
+		if !localExists {
+			// Entry only in remote → add it (union).
+			merged.Repos[k] = fromSyncable(remoteRepo, "")
+			continue
+		}
+
+		// Both sides have the entry — compare timestamps.
+		localTs := localEntry.UpdatedAt
+		remoteTs := remoteRepo.UpdatedAt
+
+		switch {
+		case remoteTs.IsZero() && localTs.IsZero():
+			// Neither side has a timestamp (legacy). Remote wins to match
+			// the old "cloud wins" behaviour and avoid silent local drift.
+			merged.Repos[k] = fromSyncable(remoteRepo, localPath)
+
+		case remoteTs.IsZero():
+			// Remote is legacy, local has a timestamp → local is newer.
+			// Keep local (already in merged.Repos from the seed loop).
+
+		case localTs.IsZero():
+			// Local is legacy, remote has a timestamp → remote wins.
+			merged.Repos[k] = fromSyncable(remoteRepo, localPath)
+
+		case remoteTs.After(localTs):
+			// Remote is newer → replace local entry wholesale.
+			merged.Repos[k] = fromSyncable(remoteRepo, localPath)
+
+		case localTs.After(remoteTs):
+			// Local is newer → keep local (already in merged.Repos).
+
+		default:
+			// Same timestamp. Check if content actually differs.
+			localSync := toSyncable(localEntry)
+			if syncableEqual(localSync, remoteRepo) {
+				// Identical — no-op.
+			} else {
+				// Same timestamp, different content → conflict.
+				conflictKeys = append(conflictKeys, k)
+				// Keep local as the tiebreaker (conservative).
+			}
+		}
+	}
+
+	if len(conflictKeys) > 0 {
+		// Write the conflict artifact regardless of conflictFatal so the
+		// user always has a file to inspect.
+		_ = writeConflictFile(conflictKeys, local, remote.Repos)
+		if conflictFatal {
+			return merged, fmt.Errorf(
+				"sync conflict: %d repo entry(ies) have the same updated_at but different content: %s — see %s",
+				len(conflictKeys), strings.Join(conflictKeys, ", "), ConflictPath(),
+			)
+		}
 	}
 
 	return merged, nil
 }
 
+// syncableEqual reports whether two syncableRepo values are semantically
+// identical (ignoring UpdatedAt/UpdatedBy which are the tiebreaker fields,
+// not content fields).
+func syncableEqual(a, b syncableRepo) bool {
+	// Marshal both to YAML and compare — simple, correct, and avoids a
+	// field-by-field comparison that would need updating every time a new
+	// field is added. We zero out the timestamp fields before comparing.
+	a.UpdatedAt = time.Time{}
+	a.UpdatedBy = ""
+	b.UpdatedAt = time.Time{}
+	b.UpdatedBy = ""
+	ab, _ := yaml.Marshal(a)
+	bb, _ := yaml.Marshal(b)
+	return string(ab) == string(bb)
+}
+
+// writeConflictFile writes a human-readable conflict artifact to
+// ~/.clawflow/config/config.conflict.yaml. The file contains both sides of
+// each conflicting entry so the user can decide which to keep.
+func writeConflictFile(keys []string, local *Config, remoteRepos map[string]syncableRepo) error {
+	var sb strings.Builder
+	sb.WriteString("# ClawFlow sync conflict — same updated_at but different content\n")
+	sb.WriteString("# Resolve by editing config.yaml and running 'clawflow sync push'.\n")
+	sb.WriteString("# This file is deleted automatically on the next successful conflict-free sync.\n\n")
+
+	for _, k := range keys {
+		sb.WriteString(fmt.Sprintf("# --- conflict: %s ---\n", k))
+		sb.WriteString("# LOCAL:\n")
+		if r, ok := local.Repos[k]; ok {
+			b, _ := yaml.Marshal(map[string]syncableRepo{k: toSyncable(r)})
+			for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+				sb.WriteString("#   " + line + "\n")
+			}
+		}
+		sb.WriteString("# REMOTE:\n")
+		if r, ok := remoteRepos[k]; ok {
+			b, _ := yaml.Marshal(map[string]syncableRepo{k: r})
+			for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+				sb.WriteString("#   " + line + "\n")
+			}
+		}
+		sb.WriteByte('\n')
+	}
+
+	path := ConflictPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(sb.String()), 0o644)
+}
+
+// MigrateTimestamps stamps any repo entry that has a zero UpdatedAt with the
+// current time and the current hostname. Returns true when at least one entry
+// was stamped (caller should push the normalised config to Gist).
+func MigrateTimestamps(cfg *Config) bool {
+	hostname, _ := os.Hostname()
+	now := time.Now().UTC()
+	migrated := false
+	for name, r := range cfg.Repos {
+		if r.UpdatedAt.IsZero() {
+			r.UpdatedAt = now
+			r.UpdatedBy = hostname
+			cfg.Repos[name] = r
+			migrated = true
+		}
+	}
+	return migrated
+}
+
 // ApplyGistConfig merges the YAML content pulled from the sync Gist into the
-// local config file and saves it. Uses MergeConfigs for the field-level strategy.
+// local config file and saves it. Uses LWW MergeConfigs for the merge strategy.
+// On a same-timestamp conflict, writes config.conflict.yaml and returns an error.
+// On success, deletes any stale config.conflict.yaml from a previous run and
+// records the pull timestamp so manual-edit detection has a fresh baseline.
 func ApplyGistConfig(content []byte) error {
 	// Load (or initialise) the local config.
 	local, err := Load()
@@ -160,18 +325,54 @@ func ApplyGistConfig(content []byte) error {
 		return fmt.Errorf("cannot load local config: %w", err)
 	}
 
-	merged, err := MergeConfigs(local, content)
+	// Migrate legacy entries (no updated_at) before merging so the LWW
+	// comparison has timestamps on both sides. If any entries were stamped,
+	// the caller should push the normalised config back to Gist — but we
+	// don't do that here (ApplyGistConfig is pull-only). The next AutoPush
+	// or manual push will propagate the normalised timestamps.
+	MigrateTimestamps(local)
+
+	merged, err := mergeConfigsInternal(local, content, true)
 	if err != nil {
 		return err
 	}
-	return merged.Save()
+
+	if saveErr := merged.Save(); saveErr != nil {
+		return saveErr
+	}
+
+	// Record the pull timestamp so manual-edit detection has a fresh baseline.
+	// Best-effort: a failure here doesn't undo the successful pull.
+	_ = RecordLastPulled()
+
+	// Clean up a stale conflict file from a previous run now that this
+	// pull completed without conflicts.
+	_ = os.Remove(ConflictPath())
+	return nil
+}
+
+// RecordLastPulled stamps the current UTC time into credentials.yaml as
+// LastPulledAt. Called after every successful pull so manual-edit detection
+// has a fresh baseline. Best-effort: callers should ignore the error.
+func RecordLastPulled() error {
+	creds, err := LoadCredentials()
+	if err != nil {
+		return err
+	}
+	if creds == nil {
+		creds = &Credentials{}
+	}
+	creds.LastPulledAt = time.Now().UTC().Format(time.RFC3339)
+	return SaveCredentials(creds)
 }
 
 // DiffConfigs produces a human-readable diff between the local config and the
 // result of merging in remoteYAML. Returns an empty string when there are no
 // changes. The diff is line-oriented and suitable for terminal display.
 func DiffConfigs(local *Config, remoteYAML []byte) (string, error) {
-	merged, err := MergeConfigs(local, remoteYAML)
+	// Use non-fatal merge so DiffConfigs can show the diff even when there
+	// are conflicts (the conflict file is still written as a side-effect).
+	merged, err := mergeConfigsInternal(local, remoteYAML, false)
 	if err != nil {
 		return "", err
 	}

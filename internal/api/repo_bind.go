@@ -81,17 +81,18 @@ func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 
 	results := make(map[string]string, len(targets))
 	for _, name := range targets {
-		repo, ok := cfg.Repos[name]
-		if !ok {
+		if _, ok := cfg.Repos[name]; !ok {
 			continue
 		}
-		if req.Bind {
-			repo.BoundMachine = hostname
-		} else {
-			repo.BoundMachine = ""
-		}
-		cfg.Repos[name] = repo
-		results[name] = repo.BoundMachine
+		config.TouchRepo(cfg, name, func(r config.Repo) config.Repo {
+			if req.Bind {
+				r.BoundMachine = hostname
+			} else {
+				r.BoundMachine = ""
+			}
+			return r
+		})
+		results[name] = cfg.Repos[name].BoundMachine
 	}
 
 	if err := cfg.Save(); err != nil {

@@ -127,6 +127,10 @@ func newRepoAddCmd() *cobra.Command {
 				},
 			}
 
+			// Stamp the new entry with the current time so LWW sync
+			// knows this machine created it.
+			config.TouchRepo(cfg, ownerRepo, func(r config.Repo) config.Repo { return r })
+
 			if err := cfg.Save(); err != nil {
 				return err
 			}
@@ -217,12 +221,13 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 	if err != nil {
 		return err
 	}
-	r, exists := cfg.Repos[ownerRepo]
-	if !exists {
+	if _, exists := cfg.Repos[ownerRepo]; !exists {
 		return fmt.Errorf("repo %q not found", ownerRepo)
 	}
-	r.Enabled = enabled
-	cfg.Repos[ownerRepo] = r
+	config.TouchRepo(cfg, ownerRepo, func(r config.Repo) config.Repo {
+		r.Enabled = enabled
+		return r
+	})
 	if err := cfg.Save(); err != nil {
 		return err
 	}
@@ -252,31 +257,44 @@ func newRepoSetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			r, exists := cfg.Repos[ownerRepo]
-			if !exists {
+			if _, exists := cfg.Repos[ownerRepo]; !exists {
 				return fmt.Errorf("repo %q not found", ownerRepo)
 			}
+			// Validate flags before mutating.
 			if autoApprove != "" {
 				switch autoApprove {
-				case "on", "true", "1":
-					r.AutoApprove = true
-				case "off", "false", "0":
-					r.AutoApprove = false
+				case "on", "true", "1", "off", "false", "0":
 				default:
 					return fmt.Errorf("--auto-approve must be on or off")
 				}
 			}
 			if autoMerge != "" {
 				switch autoMerge {
-				case "on", "true", "1":
-					r.AutoMerge = true
-				case "off", "false", "0":
-					r.AutoMerge = false
+				case "on", "true", "1", "off", "false", "0":
 				default:
 					return fmt.Errorf("--auto-merge must be on or off")
 				}
 			}
-			cfg.Repos[ownerRepo] = r
+			config.TouchRepo(cfg, ownerRepo, func(r config.Repo) config.Repo {
+				if autoApprove != "" {
+					switch autoApprove {
+					case "on", "true", "1":
+						r.AutoApprove = true
+					case "off", "false", "0":
+						r.AutoApprove = false
+					}
+				}
+				if autoMerge != "" {
+					switch autoMerge {
+					case "on", "true", "1":
+						r.AutoMerge = true
+					case "off", "false", "0":
+						r.AutoMerge = false
+					}
+				}
+				return r
+			})
+			r := cfg.Repos[ownerRepo]
 			if err := cfg.Save(); err != nil {
 				return err
 			}
