@@ -185,3 +185,99 @@ func processAlive(pid int) bool {
 	err = proc.Signal(syscall.Signal(0))
 	return err == nil
 }
+
+// RunLockInfo is the JSON payload written to the process-level run lockfile.
+type RunLockInfo struct {
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
+	Version   string    `json:"version"`
+}
+
+// RunLockPath returns the path to the global run lockfile
+// (~/.clawflow/locks/run.lock).
+func RunLockPath() string {
+	return filepath.Join(LockDir(), "run.lock")
+}
+
+// AcquireRunLock acquires the process-level single-instance lock for
+// `clawflow run`. Returns nil on success. If another live clawflow run
+// process holds the lock, returns an error containing the holder's PID
+// and start time so the caller can log a meaningful skip message.
+// Stale locks (owner PID is dead) are automatically reclaimed using the
+// same O_CREATE|O_EXCL + PID-liveness pattern as AcquireLock.
+func AcquireRunLock(version string) error {
+	path := RunLockPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir lock dir: %w", err)
+	}
+
+	info := RunLockInfo{
+		PID:       os.Getpid(),
+		StartedAt: time.Now().UTC(),
+		Version:   version,
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return err
+	}
+
+	// First attempt: O_CREATE|O_EXCL is atomic — only one caller wins.
+	if err := writeExclusive(path, data); err == nil {
+		return nil
+	} else if !os.IsExist(err) {
+		return fmt.Errorf("create run lockfile: %w", err)
+	}
+
+	// Lock file already exists. Check whether the owner is still alive.
+	existing, readErr := ReadRunLock()
+	if readErr != nil {
+		// Unreadable/corrupt lockfile — remove and retry once.
+		_ = os.Remove(path)
+		if err2 := writeExclusive(path, data); err2 != nil {
+			if os.IsExist(err2) {
+				return fmt.Errorf("run lock already held by another process")
+			}
+			return fmt.Errorf("create run lockfile: %w", err2)
+		}
+		return nil
+	}
+
+	if processAlive(existing.PID) {
+		return fmt.Errorf("another clawflow run is active (pid=%d, started=%s)",
+			existing.PID, existing.StartedAt.Format(time.RFC3339))
+	}
+
+	// Stale lock — owner is dead. Remove and re-acquire with O_EXCL so we
+	// don't race with another process doing the same reclaim.
+	_ = os.Remove(path)
+	if err2 := writeExclusive(path, data); err2 != nil {
+		if os.IsExist(err2) {
+			if info2, readErr2 := ReadRunLock(); readErr2 == nil {
+				return fmt.Errorf("another clawflow run is active (pid=%d, started=%s)",
+					info2.PID, info2.StartedAt.Format(time.RFC3339))
+			}
+			return fmt.Errorf("run lock already held by another process")
+		}
+		return fmt.Errorf("create run lockfile: %w", err2)
+	}
+	return nil
+}
+
+// ReleaseRunLock removes the process-level run lockfile. No-op if missing.
+func ReleaseRunLock() {
+	_ = os.Remove(RunLockPath())
+}
+
+// ReadRunLock parses the run lockfile. Returns an error if the file doesn't
+// exist or can't be parsed.
+func ReadRunLock() (*RunLockInfo, error) {
+	data, err := os.ReadFile(RunLockPath())
+	if err != nil {
+		return nil, err
+	}
+	var info RunLockInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
