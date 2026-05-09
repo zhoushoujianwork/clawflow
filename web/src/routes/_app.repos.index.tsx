@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useEffect, useMemo, useState, useCallback } from 'react'
-import { FolderOpen, Plus, Trash2, Link2, Link2Off, Search, X } from 'lucide-react'
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
+import { FolderOpen, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -23,8 +23,6 @@ interface RunEntry {
   started_at: string
 }
 
-const PROVIDER_KEY = 'clawflow.repos.provider'
-
 function timeAgo(iso: string): string {
   if (!iso) return '—'
   const t = new Date(iso).getTime()
@@ -37,28 +35,21 @@ function timeAgo(iso: string): string {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
-type RepoSearch = { provider?: string }
-
 export const Route = createFileRoute('/_app/repos/')({
   component: RepoList,
-  validateSearch: (s: Record<string, unknown>): RepoSearch => {
-    return typeof s.provider === 'string' ? { provider: s.provider } : {}
-  },
 })
 
 function RepoList() {
-  const { provider } = Route.useSearch()
-  const navigate = Route.useNavigate()
-
   const [repos, setRepos] = useState<Repo[]>([])
   const [runs, setRuns] = useState<RunEntry[]>([])
   const [ideScheme, setIdeScheme] = useState('vscode://file/')
+  const [hostname, setHostname] = useState<string>('')
   const [loading, setLoading] = useState(true)
-  const [didApplyDefault, setDidApplyDefault] = useState(false)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [removing, setRemoving] = useState(false)
-  const [binding, setBinding] = useState(false)
   const [query, setQuery] = useState('')
+  // Per-row "work in progress" indicators, keyed by full_name + field.
+  // Kept as a Set so toggling one repo doesn't block the rest.
+  const [busy, setBusy] = useState<Set<string>>(new Set())
+  const [bindMenuFor, setBindMenuFor] = useState<string | null>(null)
 
   const loadAll = useCallback(() => {
     return Promise.all([
@@ -84,47 +75,13 @@ function RepoList() {
         }
         setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
       }
+      if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
       setLoading(false)
     })
   }, [])
 
   useEffect(() => { loadAll() }, [loadAll])
   useConfigChanged(loadAll)
-
-  const counts = useMemo(() => {
-    const c = new Map<string, number>()
-    for (const r of repos) {
-      const p = r.platform || 'github'
-      c.set(p, (c.get(p) || 0) + 1)
-    }
-    return c
-  }, [repos])
-
-  const platformKeys = useMemo(() => Array.from(counts.keys()).sort(), [counts])
-
-  // Apply persisted default once after data loads, only if URL has no
-  // explicit provider. If the stored value points to a platform that no
-  // longer has any repos, we silently fall through to "all".
-  useEffect(() => {
-    if (loading || didApplyDefault) return
-    setDidApplyDefault(true)
-    if (provider !== undefined) return
-    if (typeof window === 'undefined') return
-    const stored = window.localStorage.getItem(PROVIDER_KEY)
-    if (!stored) return
-    if (stored === 'all' || counts.has(stored)) {
-      navigate({ search: { provider: stored }, replace: true })
-    }
-  }, [loading, didApplyDefault, provider, counts, navigate])
-
-  const active = provider || 'all'
-
-  function pickProvider(next: string) {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(PROVIDER_KEY, next)
-    }
-    navigate({ search: { provider: next } })
-  }
 
   // Build a map of repo → most recent run timestamp
   const lastActivityMap = useMemo<Record<string, string>>(() => {
@@ -138,9 +95,21 @@ function RepoList() {
     return m
   }, [runs])
 
+  // Known machines = union of every non-empty bound_machine seen across
+  // all repos. Powers the bind-dropdown so users can reassign a repo to
+  // another box without typing the hostname.
+  const knownMachines = useMemo<string[]>(() => {
+    const s = new Set<string>()
+    if (hostname) s.add(hostname)
+    for (const r of repos) {
+      if (r.bound_machine) s.add(r.bound_machine)
+    }
+    return Array.from(s).sort()
+  }, [repos, hostname])
+
   const filtered = useMemo(() => {
-    let list = active === 'all' ? [...repos] : repos.filter(r => (r.platform || 'github') === active)
     const q = query.trim().toLowerCase()
+    let list = [...repos]
     if (q) {
       list = list.filter(r =>
         r.full_name.toLowerCase().includes(q) ||
@@ -156,47 +125,54 @@ function RepoList() {
       return a.full_name.localeCompare(b.full_name)
     })
     return list
-  }, [repos, active, lastActivityMap, query])
+  }, [repos, lastActivityMap, query])
 
-  // Clear selection when filter changes (so stale selections from another tab don't linger)
-  useEffect(() => {
-    setSelected(new Set())
-  }, [active])
-
-  const toggleSelect = useCallback((name: string) => {
-    setSelected(prev => {
+  const markBusy = useCallback((key: string, on: boolean) => {
+    setBusy(prev => {
       const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
+      if (on) next.add(key); else next.delete(key)
       return next
     })
   }, [])
 
-  const toggleSelectAll = useCallback(() => {
-    setSelected(prev => {
-      if (prev.size === filtered.length) return new Set()
-      return new Set(filtered.map(r => r.full_name))
-    })
-  }, [filtered])
+  // POST /api/repo/config for a single field toggle. Optimistic UI:
+  // we update local state on success only so a network hiccup doesn't
+  // lie to the user.
+  const toggleField = useCallback(async (name: string, field: 'enabled' | 'auto_approve' | 'auto_merge') => {
+    const repo = repos.find(r => r.full_name === name)
+    if (!repo) return
+    const key = `${name}:${field}`
+    if (busy.has(key)) return
+    const nextVal = !repo[field]
+    markBusy(key, true)
+    try {
+      const resp = await fetch('/api/repo/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo: name, [field]: nextVal }),
+      })
+      if (resp.ok) {
+        setRepos(prev => prev.map(r => r.full_name === name ? { ...r, [field]: nextVal } : r))
+      }
+    } catch { /* ignore */ }
+    finally { markBusy(key, false) }
+  }, [repos, busy, markBusy])
 
-  const handleRemoveSelected = useCallback(async () => {
-    if (selected.size === 0) return
-    const names = Array.from(selected)
+  const handleRemove = useCallback(async (name: string) => {
     const confirmed = window.confirm(
-      `确认移除 ${names.length} 个仓库？\n\n${names.join('\n')}\n\n（仅从配置中移除，不会删除本地项目文件）`
+      `确认移除 ${name}？\n\n（仅从配置中移除，不会删除本地项目文件）`
     )
     if (!confirmed) return
-
-    setRemoving(true)
+    const key = `${name}:remove`
+    markBusy(key, true)
     try {
       const resp = await fetch('/api/repo/remove', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repos: names }),
+        body: JSON.stringify({ repos: [name] }),
       })
       if (resp.ok) {
-        setRepos(prev => prev.filter(r => !selected.has(r.full_name)))
-        setSelected(new Set())
+        setRepos(prev => prev.filter(r => r.full_name !== name))
       } else {
         const data = await resp.json().catch(() => ({}))
         alert(data.error || '移除失败')
@@ -204,32 +180,36 @@ function RepoList() {
     } catch {
       alert('网络错误，请重试')
     } finally {
-      setRemoving(false)
+      markBusy(key, false)
     }
-  }, [selected])
+  }, [markBusy])
 
-  const handleBatchBind = useCallback(async (bind: boolean) => {
-    if (selected.size === 0 || binding) return
-    setBinding(true)
+  const handleBind = useCallback(async (name: string, machine: string | null) => {
+    // machine=null  → unbind
+    // machine=''    → treat like null
+    // machine=<hn>  → bind to that hostname
+    const key = `${name}:bind`
+    markBusy(key, true)
+    setBindMenuFor(null)
     try {
       const resp = await fetch('/api/repo/bind', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repos: Array.from(selected), bind }),
+        body: JSON.stringify(
+          machine
+            ? { repo: name, bind: true, machine }
+            : { repo: name, bind: false }
+        ),
       })
       if (resp.ok) {
         const data = await resp.json()
-        const results: Record<string, string> = data.results || {}
         setRepos(prev => prev.map(r =>
-          selected.has(r.full_name)
-            ? { ...r, bound_machine: results[r.full_name] || undefined }
-            : r
+          r.full_name === name ? { ...r, bound_machine: data.bound_machine || undefined } : r
         ))
-        setSelected(new Set())
       }
     } catch { /* ignore */ }
-    finally { setBinding(false) }
-  }, [selected, binding])
+    finally { markBusy(key, false) }
+  }, [markBusy])
 
   const repoMap = useMemo<RepoInfoMap>(() => {
     const m: RepoInfoMap = {}
@@ -244,77 +224,27 @@ function RepoList() {
     return m
   }, [repos])
 
-  const showTabs = repos.length > 0 && platformKeys.length > 1
-
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Monitored repos</h1>
           <p className="text-xs text-muted-foreground mt-1">
-            Read-only view of <code className="px-1 py-0.5 bg-secondary rounded text-[10px]">~/.clawflow/config/config.yaml</code>.
-            Use <code className="px-1 py-0.5 bg-secondary rounded text-[10px]">clawflow repo add</code> to add more.
+            Click toggles and machine badges to edit directly. Source of truth is{' '}
+            <code className="px-1 py-0.5 bg-secondary rounded text-[10px]">~/.clawflow/config/config.yaml</code>.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {selected.size > 0 && (
-            <>
-              <button
-                type="button"
-                onClick={() => handleBatchBind(true)}
-                disabled={binding}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
-              >
-                <Link2 className="w-4 h-4" />
-                {binding ? 'Binding…' : `Bind (${selected.size})`}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleBatchBind(false)}
-                disabled={binding}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-secondary text-foreground rounded-lg text-sm font-semibold hover:bg-secondary/80 transition-colors disabled:opacity-50"
-              >
-                <Link2Off className="w-4 h-4" />
-                {binding ? 'Unbinding…' : `Unbind (${selected.size})`}
-              </button>
-            </>
-          )}
-          {selected.size > 0 && (
-            <button
-              type="button"
-              onClick={handleRemoveSelected}
-              disabled={removing}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-destructive text-destructive-foreground rounded-lg text-sm font-semibold hover:bg-destructive/90 transition-colors disabled:opacity-50"
-            >
-              <Trash2 className="w-4 h-4" />
-              {removing ? '移除中…' : `移除 (${selected.size})`}
-            </button>
-          )}
-          <Link
-            to="/repos/add"
-            className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            Add from VCS
-          </Link>
-        </div>
+        <Link
+          to="/repos/add"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          Add from VCS
+        </Link>
       </div>
 
-      {(showTabs || repos.length > 0) && (
+      {repos.length > 0 && (
         <div className="flex items-center gap-3 mb-4 flex-wrap">
-          {showTabs && (
-            <div className="inline-flex bg-card border border-border rounded-xl overflow-hidden">
-              <TabButton active={active === 'all'} onClick={() => pickProvider('all')}>
-                All <span className="ml-1 text-xs opacity-60 tabular-nums">{repos.length}</span>
-              </TabButton>
-              {platformKeys.map(p => (
-                <TabButton key={p} active={active === p} onClick={() => pickProvider(p)}>
-                  <span className="capitalize">{p}</span>
-                  <span className="ml-1 text-xs opacity-60 tabular-nums">{counts.get(p)}</span>
-                </TabButton>
-              ))}
-            </div>
-          )}
           <div className="relative flex-1 min-w-[200px] max-w-sm">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
             <input
@@ -341,6 +271,9 @@ function RepoList() {
               {filtered.length} match{filtered.length === 1 ? '' : 'es'}
             </span>
           )}
+          <span className="text-xs text-muted-foreground tabular-nums ml-auto">
+            {repos.length} repo{repos.length === 1 ? '' : 's'}
+          </span>
         </div>
       )}
 
@@ -354,54 +287,29 @@ function RepoList() {
         </div>
       ) : filtered.length === 0 ? (
         <div className="bg-card border border-border rounded-xl p-8 text-center">
-          {query ? (
-            <p className="text-sm text-muted-foreground">
-              No repos match <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{query}</code>.{' '}
-              <button type="button" onClick={() => setQuery('')} className="underline hover:text-foreground">Clear search</button>
-            </p>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{active}</code> repos. Pick another tab or add one with{' '}
-              <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow repo add</code>.
-            </p>
-          )}
+          <p className="text-sm text-muted-foreground">
+            No repos match <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{query}</code>.{' '}
+            <button type="button" onClick={() => setQuery('')} className="underline hover:text-foreground">Clear search</button>
+          </p>
         </div>
       ) : (
         <div className="bg-card border border-border rounded-xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
               <tr>
-                <th className="text-left px-4 py-2 w-10">
-                  <input
-                    type="checkbox"
-                    checked={filtered.length > 0 && selected.size === filtered.length}
-                    onChange={toggleSelectAll}
-                    className="rounded border-border"
-                    aria-label="Select all repos"
-                  />
-                </th>
                 <th className="text-left px-4 py-2 font-semibold">Repo</th>
                 <th className="text-left px-4 py-2 font-semibold">Last activity</th>
-                <th className="text-left px-4 py-2 font-semibold">Platform</th>
                 <th className="text-left px-4 py-2 font-semibold">Base</th>
                 <th className="text-left px-4 py-2 font-semibold">Enabled</th>
                 <th className="text-left px-4 py-2 font-semibold">Auto-approve</th>
                 <th className="text-left px-4 py-2 font-semibold">Auto-merge</th>
                 <th className="text-left px-4 py-2 font-semibold">Bound</th>
+                <th className="px-2 py-2 w-8"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
               {filtered.map(r => (
-                <tr key={r.full_name} className={cn("hover:bg-secondary/20", selected.has(r.full_name) && "bg-secondary/30")}>
-                  <td className="px-4 py-2">
-                    <input
-                      type="checkbox"
-                      checked={selected.has(r.full_name)}
-                      onChange={() => toggleSelect(r.full_name)}
-                      className="rounded border-border"
-                      aria-label={`Select ${r.full_name}`}
-                    />
-                  </td>
+                <tr key={r.full_name} className="hover:bg-secondary/20 group">
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2">
                       <Link
@@ -434,33 +342,64 @@ function RepoList() {
                   <td className="px-4 py-2 text-muted-foreground text-xs tabular-nums">
                     {lastActivityMap[r.full_name] ? timeAgo(lastActivityMap[r.full_name]) : '—'}
                   </td>
-                  <td className="px-4 py-2 text-muted-foreground">{r.platform || 'github'}</td>
                   <td className="px-4 py-2 text-muted-foreground font-mono text-xs">{r.base_branch}</td>
                   <td className="px-4 py-2">
-                    <Pill on={r.enabled}>{r.enabled ? 'enabled' : 'disabled'}</Pill>
+                    <TogglePill
+                      on={r.enabled}
+                      busy={busy.has(`${r.full_name}:enabled`)}
+                      onLabel="enabled"
+                      offLabel="disabled"
+                      onClick={() => toggleField(r.full_name, 'enabled')}
+                    />
                   </td>
                   <td className="px-4 py-2">
-                    <Pill on={r.auto_approve}>{r.auto_approve ? 'on' : 'off'}</Pill>
+                    <TogglePill
+                      on={r.auto_approve}
+                      busy={busy.has(`${r.full_name}:auto_approve`)}
+                      onLabel="on"
+                      offLabel="off"
+                      onClick={() => toggleField(r.full_name, 'auto_approve')}
+                    />
                   </td>
                   <td className="px-4 py-2">
-                    <Pill on={r.auto_merge}>{r.auto_merge ? 'on' : 'off'}</Pill>
+                    <TogglePill
+                      on={r.auto_merge}
+                      busy={busy.has(`${r.full_name}:auto_merge`)}
+                      onLabel="on"
+                      offLabel="off"
+                      onClick={() => toggleField(r.full_name, 'auto_merge')}
+                    />
                   </td>
                   <td className="px-4 py-2">
-                    {r.bound_machine ? (
-                      <span
-                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border bg-blue-100 text-blue-700 border-blue-200 truncate max-w-[120px]"
-                        title={r.bound_machine}
-                      >
-                        {r.bound_machine}
-                      </span>
-                    ) : (
-                      <span
-                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] border border-dashed border-muted-foreground/40 text-muted-foreground"
-                        title="Not bound to any machine"
-                      >
-                        unbound
-                      </span>
-                    )}
+                    <BindButton
+                      repo={r.full_name}
+                      bound={r.bound_machine || ''}
+                      hostname={hostname}
+                      knownMachines={knownMachines}
+                      busy={busy.has(`${r.full_name}:bind`)}
+                      open={bindMenuFor === r.full_name}
+                      onOpen={() => setBindMenuFor(bindMenuFor === r.full_name ? null : r.full_name)}
+                      onClose={() => setBindMenuFor(null)}
+                      onBind={(m) => handleBind(r.full_name, m)}
+                    />
+                  </td>
+                  <td className="px-2 py-2">
+                    <button
+                      type="button"
+                      onClick={() => handleRemove(r.full_name)}
+                      disabled={busy.has(`${r.full_name}:remove`)}
+                      title={`Remove ${r.full_name} from config`}
+                      className={cn(
+                        'inline-flex items-center justify-center w-7 h-7 rounded transition-all',
+                        'text-muted-foreground/60 opacity-0 group-hover:opacity-100',
+                        'hover:bg-destructive/10 hover:text-destructive',
+                        'disabled:opacity-50 disabled:cursor-not-allowed',
+                      )}
+                    >
+                      {busy.has(`${r.full_name}:remove`)
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Trash2 className="w-3.5 h-3.5" />}
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -472,38 +411,152 @@ function RepoList() {
   )
 }
 
-function TabButton({
-  active, onClick, children,
+function TogglePill({
+  on, busy, onLabel, offLabel, onClick,
 }: {
-  active: boolean
+  on: boolean
+  busy: boolean
+  onLabel: string
+  offLabel: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className={cn(
+        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold border transition-colors',
+        on ? 'bg-green-100 text-green-700 border-green-200 hover:bg-green-200' : 'bg-muted text-muted-foreground border-border hover:bg-secondary',
+        busy && 'opacity-60 cursor-wait',
+      )}
+    >
+      {busy && <Loader2 className="w-3 h-3 animate-spin" />}
+      {on ? onLabel : offLabel}
+    </button>
+  )
+}
+
+function BindButton({
+  repo, bound, hostname, knownMachines, busy, open, onOpen, onClose, onBind,
+}: {
+  repo: string
+  bound: string
+  hostname: string
+  knownMachines: string[]
+  busy: boolean
+  open: boolean
+  onOpen: () => void
+  onClose: () => void
+  onBind: (machine: string | null) => void
+}) {
+  const boundToMe = !!bound && bound === hostname
+  const ref = useRef<HTMLDivElement>(null)
+
+  // Close on outside click via the shared fullscreen overlay trick used
+  // elsewhere in the dashboard (e.g. projects.$name automation popover).
+  // Not using native details/summary here because we want keyboard-esc
+  // to also close it.
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  return (
+    <div className="relative inline-block" ref={ref}>
+      <button
+        type="button"
+        onClick={onOpen}
+        disabled={busy}
+        title={bound ? `Bound to ${bound} — click to change` : 'Unbound — click to assign a machine'}
+        className={cn(
+          'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold border transition-colors max-w-[160px]',
+          bound
+            ? boundToMe
+              ? 'bg-blue-100 text-blue-700 border-blue-200 hover:bg-blue-200'
+              : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+            : 'border-dashed border-muted-foreground/40 text-muted-foreground hover:bg-secondary',
+          busy && 'opacity-60 cursor-wait',
+        )}
+      >
+        {busy
+          ? <Loader2 className="w-3 h-3 animate-spin" />
+          : bound ? <Link2 className="w-3 h-3" /> : <Link2Off className="w-3 h-3" />}
+        <span className="truncate">{bound || 'unbound'}</span>
+      </button>
+
+      {open && (
+        <>
+          {/* click-outside catcher */}
+          <div className="fixed inset-0 z-10" onClick={onClose} />
+          <div
+            role="menu"
+            aria-label={`Bind ${repo}`}
+            className="absolute z-20 mt-1 right-0 min-w-[220px] bg-card border border-border rounded-lg shadow-lg py-1"
+          >
+            <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+              Bind to machine
+            </div>
+            {knownMachines.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">
+                No known machines yet.
+              </div>
+            ) : (
+              knownMachines.map(m => (
+                <MenuItem
+                  key={m}
+                  active={bound === m}
+                  onClick={() => onBind(m)}
+                >
+                  <Link2 className="w-3.5 h-3.5 text-muted-foreground" />
+                  <span className="font-mono text-xs truncate flex-1">{m}</span>
+                  {m === hostname && (
+                    <span className="text-[10px] text-blue-600 font-semibold">this</span>
+                  )}
+                  {bound === m && <Check className="w-3.5 h-3.5 text-blue-600" />}
+                </MenuItem>
+              ))
+            )}
+            {bound && (
+              <>
+                <div className="h-px bg-border my-1" />
+                <MenuItem onClick={() => onBind(null)} danger>
+                  <Link2Off className="w-3.5 h-3.5" />
+                  <span className="text-xs">Unbind</span>
+                </MenuItem>
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function MenuItem({
+  active, danger, onClick, children,
+}: {
+  active?: boolean
+  danger?: boolean
   onClick: () => void
   children: React.ReactNode
 }) {
   return (
     <button
       type="button"
+      role="menuitem"
       onClick={onClick}
       className={cn(
-        'px-3 py-1.5 text-sm border-r border-border last:border-r-0 transition-colors',
-        active
-          ? 'bg-secondary text-foreground font-semibold'
-          : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50',
+        'w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-secondary/60 transition-colors',
+        active && 'bg-secondary/40',
+        danger ? 'text-destructive hover:bg-destructive/10' : 'text-foreground',
       )}
     >
       {children}
     </button>
-  )
-}
-
-function Pill({ on, children }: { on: boolean; children: React.ReactNode }) {
-  return (
-    <span
-      className={cn(
-        'inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border',
-        on ? 'bg-green-100 text-green-700 border-green-200' : 'bg-muted text-muted-foreground border-border',
-      )}
-    >
-      {children}
-    </span>
   )
 }

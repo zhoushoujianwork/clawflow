@@ -13,6 +13,12 @@ type repoBindRequest struct {
 	Repo  string   `json:"repo"`
 	Repos []string `json:"repos,omitempty"`
 	Bind  bool     `json:"bind"`
+	// Machine, if non-empty AND bind=true, pins the repo to this
+	// specific hostname instead of the current machine. Lets the
+	// dashboard reassign ownership across a known fleet without
+	// SSH'ing into each box. Ignored when bind=false (unbind clears
+	// the field regardless).
+	Machine string `json:"machine,omitempty"`
 }
 
 type repoBindResponse struct {
@@ -22,8 +28,11 @@ type repoBindResponse struct {
 }
 
 // HandleRepoBind handles POST /api/repo/bind.
-// When bind=true, sets BoundMachine to the current machine's hostname.
-// When bind=false, clears BoundMachine (unbinds the repo).
+// When bind=true and machine is empty, sets BoundMachine to the current
+// machine's hostname. When bind=true and machine is non-empty, pins
+// BoundMachine to that value (used by the dashboard's bound-machine
+// dropdown to reassign repos across a known fleet). When bind=false,
+// clears BoundMachine (unbinds the repo).
 // Supports both single-repo (repo field) and batch (repos field) modes.
 func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -55,12 +64,19 @@ func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 
 	hostname := ""
 	if req.Bind {
-		h, err := os.Hostname()
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot determine hostname: " + err.Error()})
-			return
+		if req.Machine != "" {
+			// Explicit target machine — trust the caller. The dashboard
+			// only offers hostnames that already appear in existing
+			// bound_machine values, so typos are unlikely.
+			hostname = req.Machine
+		} else {
+			h, err := os.Hostname()
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot determine hostname: " + err.Error()})
+				return
+			}
+			hostname = h
 		}
-		hostname = h
 	}
 
 	results := make(map[string]string, len(targets))
