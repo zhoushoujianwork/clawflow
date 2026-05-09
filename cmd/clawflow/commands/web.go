@@ -261,6 +261,35 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/settings/claude/test", api.HandleTestClaude)
 			mux.HandleFunc("/api/settings/reveal", api.HandleRevealSecret)
 			mux.HandleFunc("/api/settings/verify-token", api.HandleVerifyToken)
+			// Provider management (multi-provider failover, issue #128)
+			mux.HandleFunc("/api/providers", func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					api.HandleListProviders(w, r)
+				case http.MethodPost:
+					api.HandleAddProvider(w, r)
+				default:
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				}
+			})
+			mux.HandleFunc("/api/providers/reorder", api.HandleReorderProviders)
+			mux.HandleFunc("/api/providers/", func(w http.ResponseWriter, r *http.Request) {
+				// Route /api/providers/{index}, /api/providers/{index}/test,
+				// /api/providers/{index}/reveal to the appropriate handler.
+				path := r.URL.Path
+				switch {
+				case strings.HasSuffix(path, "/test"):
+					api.HandleTestProvider(w, r)
+				case strings.HasSuffix(path, "/reveal"):
+					api.HandleRevealProviderKey(w, r)
+				case r.Method == http.MethodPut:
+					api.HandleUpdateProvider(w, r)
+				case r.Method == http.MethodDelete:
+					api.HandleDeleteProvider(w, r)
+				default:
+					http.Error(w, "not found", http.StatusNotFound)
+				}
+			})
 			mux.HandleFunc("/api/browse-directory", api.HandleBrowseDirectory)
 			mux.HandleFunc("/api/chat/spawn", api.HandleChatSpawn)
 			mux.HandleFunc("/api/chat/stream", api.HandleChatStream)

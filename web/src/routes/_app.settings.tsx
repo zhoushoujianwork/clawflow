@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Check, Loader2, AlertCircle, X, Eye, EyeOff, Folder, ChevronRight, Home, Copy, ExternalLink, RefreshCw, Upload, Download, LogOut } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { emitConfigChanged, useConfigChanged } from '../lib/configEvents'
+import { ProvidersSection } from '../components/ProvidersSection'
 
 interface SettingsView {
   claude: {
@@ -92,6 +93,7 @@ function SettingsPage() {
 
       {data && (
         <>
+          <ProvidersSection />
           <ClaudeSection view={data.claude} onSaved={refresh} />
           <TokensSection view={data.tokens} onSaved={refresh} />
           <GlobalSection view={data.global} onSaved={refresh} />
