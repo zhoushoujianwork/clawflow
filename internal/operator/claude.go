@@ -28,6 +28,9 @@ var ErrRateLimit = errors.New("claude rate limit")
 //   - Claude Code CLI Chinese locale: "您已达到限制" (unlikely but defensive)
 //   - HTTP 429 / API error codes surfaced in stderr
 //   - Anthropic credit/quota messages
+//
+// Deprecated: use config.DefaultFailoverPatterns for the canonical list.
+// This var is kept for backward-compat with IsRateLimitError callers.
 var rateLimitPatterns = []string{
 	"hit your limit",
 	"you've hit your limit",
@@ -57,11 +60,45 @@ func IsRateLimitError(err error, output string) bool {
 	return false
 }
 
+// isFailoverError reports whether the combined error + output text matches
+// any of the given failover patterns (case-insensitive substring match).
+// Returns true when the provider should be skipped and the next one tried.
+func isFailoverError(err error, output string, patterns []string) bool {
+	if err == nil {
+		return false
+	}
+	combined := strings.ToLower(err.Error() + " " + output)
+	for _, pat := range patterns {
+		if strings.Contains(combined, strings.ToLower(pat)) {
+			return true
+		}
+	}
+	return false
+}
+
+// providerAttempt records the result of a single provider invocation.
+type providerAttempt struct {
+	name   string
+	errMsg string // first line of error, api_key scrubbed
+}
+
+// scrubAPIKey removes any occurrence of apiKey from s. Used to prevent
+// accidental key leakage in error messages that some providers echo back.
+func scrubAPIKey(s, apiKey string) string {
+	if apiKey == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, apiKey, "***")
+}
+
 // RunClaude executes `claude -p --output-format stream-json` in a subprocess
-// and returns the final result text. If `events` is non-nil, every raw
-// stream-json line is teed to it so the dashboard can replay the run
-// post-mortem. Text deltas are also printed live to os.Stderr so the user
-// sees progress during long runs.
+// and returns the final result text. It iterates over enabled providers in
+// priority order, failing over to the next provider when a transient error
+// (rate limit, auth failure, network error, 5xx) is detected.
+//
+// If `events` is non-nil, every raw stream-json line is teed to it so the
+// dashboard can replay the run post-mortem. Text deltas are also printed live
+// to os.Stderr so the user sees progress during long runs.
 //
 // `model` is forwarded as `--model <model>`; the empty string skips the
 // flag and lets the claude CLI pick whatever ~/.claude/settings.json
@@ -78,15 +115,91 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 		defer cancel()
 	}
 
-	// API key / base URL come from credentials.yaml and flow through
-	// env (ANTHROPIC_*). Model is CLI-only because claude doesn't
-	// honor an env override for it.
 	creds, _ := config.LoadCredentials()
-	apiKey, baseURL := "", ""
-	if creds != nil {
-		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
+
+	// Build the ordered list of providers to try. If no providers are
+	// configured, fall back to the legacy single-provider behavior (empty
+	// apiKey + baseURL = OAuth/keychain).
+	providers := buildProviderList(creds)
+	failoverPatterns := creds.EffectiveFailoverPatterns()
+
+	var attempts []providerAttempt
+
+	for i, p := range providers {
+		output, err := runClaudeWithProvider(ctx, prompt, workdir, model, p.apiKey, p.baseURL, events, systemPrompt...)
+		if err == nil {
+			if i > 0 {
+				fmt.Fprintf(os.Stderr, "  ✓ provider %q succeeded (after %d failed attempt(s))\n", p.name, i)
+			}
+			return output, nil
+		}
+
+		// Determine whether this is a provider-level failure (failover) or
+		// a genuine operator failure (bail out immediately).
+		if isFailoverError(err, output, failoverPatterns) {
+			firstLine := firstLineOf(scrubAPIKey(err.Error(), p.apiKey))
+			attempts = append(attempts, providerAttempt{name: p.name, errMsg: firstLine})
+			fmt.Fprintf(os.Stderr, "  ⚠ provider %q failed (failover): %s\n", p.name, firstLine)
+			continue
+		}
+
+		// Non-failover error: treat as genuine operator failure. Wrap with
+		// ErrRateLimit if it matches the legacy rate-limit patterns so the
+		// upstream circuit breaker still works correctly.
+		wrapped := fmt.Errorf("claude: %w", err)
+		if IsRateLimitError(err, output) {
+			return output, fmt.Errorf("%w: %w", ErrRateLimit, wrapped)
+		}
+		return output, wrapped
 	}
 
+	// All providers exhausted.
+	if len(attempts) > 0 {
+		summary := buildFailureSummary(attempts)
+		return "", fmt.Errorf("%w: all %d provider(s) failed\n%s", ErrRateLimit, len(attempts), summary)
+	}
+
+	// No providers configured at all — this shouldn't happen after buildProviderList
+	// but guard defensively.
+	return "", fmt.Errorf("no Claude providers configured")
+}
+
+// providerEntry is the resolved (name, apiKey, baseURL) triple used during
+// a single RunClaude invocation. Constructed from config.ClaudeProvider or
+// the legacy single-provider fields.
+type providerEntry struct {
+	name    string
+	apiKey  string
+	baseURL string
+}
+
+// buildProviderList returns the ordered list of providers to try. When
+// ClaudeProviders is populated, only enabled entries are included. When the
+// list is empty (no providers configured, no legacy fields), a single
+// zero-value entry is returned so the caller falls through to OAuth/keychain.
+func buildProviderList(creds *config.Credentials) []providerEntry {
+	if creds == nil {
+		return []providerEntry{{name: "default"}}
+	}
+	enabled := creds.EnabledProviders()
+	if len(enabled) > 0 {
+		out := make([]providerEntry, len(enabled))
+		for i, p := range enabled {
+			out[i] = providerEntry{name: p.Name, apiKey: p.APIKey, baseURL: p.BaseURL}
+		}
+		return out
+	}
+	// No providers list — use legacy fields (may both be empty = OAuth).
+	return []providerEntry{{
+		name:    "default",
+		apiKey:  creds.ClaudeAPIKey,
+		baseURL: creds.ClaudeBaseURL,
+	}}
+}
+
+// runClaudeWithProvider executes a single claude subprocess with the given
+// provider credentials. It is the inner loop body extracted from RunClaude.
+func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, baseURL string, events io.Writer, systemPrompt ...string) (string, error) {
 	args := []string{
 		"-p",
 		"--dangerously-skip-permissions",
@@ -137,24 +250,37 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 		}
 	}()
 
-	// Parse stream line-by-line so we can tee to events.jsonl and extract
-	// text deltas for user-facing progress.
 	result, parseErr := parseClaudeStream(stdout, events)
-	close(pipeGuardDone) // stop the guard goroutine whether we timed out or not
+	close(pipeGuardDone)
 	if err := cmd.Wait(); err != nil {
-		// Wrap transient rate-limit exits with ErrRateLimit so callers can
-		// distinguish them from permanent failures and avoid cascading the
-		// error across the remaining job queue.
-		wrapped := fmt.Errorf("claude: %w", err)
-		if IsRateLimitError(err, result) {
-			return result, fmt.Errorf("%w: %w", ErrRateLimit, wrapped)
-		}
-		return result, wrapped
+		return result, err
 	}
 	if parseErr != nil {
 		return result, fmt.Errorf("parse stream: %w", parseErr)
 	}
 	return result, nil
+}
+
+// firstLineOf returns the first non-empty line of s, trimmed.
+func firstLineOf(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return s
+}
+
+// buildFailureSummary formats a human-readable list of provider attempts
+// for inclusion in the failure comment. API keys are never included.
+func buildFailureSummary(attempts []providerAttempt) string {
+	var sb strings.Builder
+	sb.WriteString("Providers tried:\n")
+	for i, a := range attempts {
+		sb.WriteString(fmt.Sprintf("  %d. %s — %s\n", i+1, a.name, a.errMsg))
+	}
+	return sb.String()
 }
 
 // streamEnvelope is the minimal shape we peek at inside each stream-json
@@ -208,8 +334,8 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	var finalResult string
-	var lastAssistantText string            // last assistant turn that emitted any text
-	var lastAssistantTextWithMarker string  // last assistant turn that contained an outcome marker
+	var lastAssistantText string           // last assistant turn that emitted any text
+	var lastAssistantTextWithMarker string // last assistant turn that contained an outcome marker
 	printedAnyDelta := false
 
 	for sc.Scan() {

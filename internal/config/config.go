@@ -175,6 +175,17 @@ type Config struct {
 	Settings Settings        `yaml:"settings"`
 }
 
+// ClaudeProvider represents a single Claude API configuration entry.
+// The order in the list defines priority (index 0 = highest).
+type ClaudeProvider struct {
+	Name     string `yaml:"name"`               // display name, e.g. "Anthropic Official"
+	BaseURL  string `yaml:"base_url,omitempty"` // e.g. "https://api.anthropic.com"
+	APIKey   string `yaml:"api_key,omitempty"`  // stored plaintext (like current behavior)
+	Model    string `yaml:"model,omitempty"`    // optional override, empty = use global default
+	Enabled  bool   `yaml:"enabled"`             // toggle for this provider
+	Position int    `yaml:"-"`                   // runtime order (not persisted)
+}
+
 // Credentials holds sensitive config.
 type Credentials struct {
 	GHToken     string `yaml:"gh_token,omitempty"`
@@ -191,11 +202,23 @@ type Credentials struct {
 	// spawns. Useful for routing through a proxy / relay or pinning
 	// to a specific account separate from the user's interactive
 	// Claude Code login.
+	// Deprecated: Use ClaudeProviders instead for multi-provider support.
 	ClaudeAPIKey string `yaml:"claude_api_key,omitempty"`
 
 	// ClaudeBaseURL, when set, is forwarded as ANTHROPIC_BASE_URL.
 	// Typically paired with ClaudeAPIKey when targeting a relay.
+	// Deprecated: Use ClaudeProviders instead for multi-provider support.
 	ClaudeBaseURL string `yaml:"claude_base_url,omitempty"`
+
+	// ClaudeProviders is the ordered list of Claude API configurations.
+	// The first enabled provider is used; on failure, the runner failover
+	// to the next enabled one. Empty list + legacy fields triggers migration.
+	ClaudeProviders []ClaudeProvider `yaml:"claude_providers,omitempty"`
+
+	// FailoverPatterns are regex patterns (as strings) that trigger
+	// automatic failover to the next provider. User patterns are merged
+	// with (not replace) the defaults.
+	FailoverPatterns []string `yaml:"failover_patterns,omitempty"`
 
 	// ClaudeChatModel / ClaudeEvalModel / ClaudeOperatorModel are
 	// the three claude `--model` overrides clawflow uses, scoped by
@@ -306,11 +329,93 @@ func CredentialsPath() string {
 	return filepath.Join(home, ".clawflow", "config", "credentials.yaml")
 }
 
+// MigrateLegacyProvider migrates the legacy single-provider fields
+// (ClaudeAPIKey + ClaudeBaseURL) into ClaudeProviders[0] when the list
+// is empty. This is idempotent: if ClaudeProviders is already populated
+// the function is a no-op. Returns true when a migration was performed
+// so callers can persist the updated credentials.
+func MigrateLegacyProvider(c *Credentials) bool {
+	if len(c.ClaudeProviders) > 0 {
+		return false // already migrated
+	}
+	if c.ClaudeAPIKey == "" && c.ClaudeBaseURL == "" {
+		return false // nothing to migrate
+	}
+	name := "Default"
+	if c.ClaudeBaseURL != "" {
+		name = "Legacy provider"
+	}
+	c.ClaudeProviders = []ClaudeProvider{
+		{
+			Name:    name,
+			BaseURL: c.ClaudeBaseURL,
+			APIKey:  c.ClaudeAPIKey,
+			Enabled: true,
+		},
+	}
+	return true
+}
+
+// EnabledProviders returns the subset of ClaudeProviders where Enabled == true,
+// in list order (index 0 = highest priority). The returned slice is a copy.
+func (c *Credentials) EnabledProviders() []ClaudeProvider {
+	if c == nil {
+		return nil
+	}
+	var out []ClaudeProvider
+	for _, p := range c.ClaudeProviders {
+		if p.Enabled {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// DefaultFailoverPatterns are the built-in substrings (case-insensitive)
+// that identify a provider as temporarily unavailable and trigger failover
+// to the next enabled provider. User-supplied FailoverPatterns are merged
+// with (not replace) this list.
+var DefaultFailoverPatterns = []string{
+	"hit your limit",
+	"you've hit your limit",
+	"usage limit reached",
+	"rate_limit_error",
+	"rate limit",
+	"429",
+	"quota exceeded",
+	"credit balance is too low",
+	"overloaded_error",
+	"401",
+	"invalid api key",
+	"invalid_api_key",
+	"connection refused",
+	"dial tcp",
+	"i/o timeout",
+	"tls handshake",
+	"http 5",
+	"status 5",
+}
+
+// EffectiveFailoverPatterns returns the merged set of default + user-supplied
+// failover patterns. Duplicates are not deduplicated (harmless for substring
+// matching).
+func (c *Credentials) EffectiveFailoverPatterns() []string {
+	patterns := make([]string, len(DefaultFailoverPatterns))
+	copy(patterns, DefaultFailoverPatterns)
+	if c != nil {
+		patterns = append(patterns, c.FailoverPatterns...)
+	}
+	return patterns
+}
+
 // LoadCredentials reads ~/.clawflow/config/credentials.yaml and merges env vars.
 // Priority: env > credentials.yaml
 // Supported env vars: GH_TOKEN, GITLAB_TOKEN, CLAWFLOW_CLAUDE_API_KEY,
 // CLAWFLOW_CLAUDE_BASE_URL (the CLAWFLOW_ prefix avoids conflict with
 // a user-set ANTHROPIC_API_KEY meant for their interactive shell).
+//
+// On load, if ClaudeProviders is empty but legacy single-provider fields are
+// set, they are automatically migrated into ClaudeProviders[0] and persisted.
 func LoadCredentials() (*Credentials, error) {
 	c := &Credentials{}
 	data, err := os.ReadFile(CredentialsPath())
@@ -329,6 +434,14 @@ func LoadCredentials() (*Credentials, error) {
 	c.ClaudeChatModel = envOrFile("CLAWFLOW_CLAUDE_CHAT_MODEL", c.ClaudeChatModel)
 	c.ClaudeEvalModel = envOrFile("CLAWFLOW_CLAUDE_EVAL_MODEL", c.ClaudeEvalModel)
 	c.ClaudeOperatorModel = envOrFile("CLAWFLOW_CLAUDE_OPERATOR_MODEL", c.ClaudeOperatorModel)
+
+	// Auto-migrate legacy single-provider fields to the providers list.
+	// Best-effort: a save failure is non-fatal — the migration will be
+	// retried on the next load.
+	if MigrateLegacyProvider(c) {
+		_ = SaveCredentials(c)
+	}
+
 	return c, nil
 }
 

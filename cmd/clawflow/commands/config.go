@@ -17,6 +17,7 @@ func NewConfigCmd() *cobra.Command {
 	cmd.AddCommand(newConfigSetGitLabTokenCmd())
 	cmd.AddCommand(newConfigSetBillingDayCmd())
 	cmd.AddCommand(newConfigShowCmd())
+	cmd.AddCommand(newConfigProviderCmd())
 	return cmd
 }
 
