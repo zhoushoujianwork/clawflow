@@ -323,6 +323,11 @@ func discoverOrCreateGistAPI(gh *github.Client, creds *config.Credentials) (stri
 // user interaction. Errors are non-fatal: if the Gist is unreachable or no
 // token is configured, we log and continue with the local config.
 // Returns true when the pull succeeded and the local config was updated.
+//
+// Manual-edit detection: if config.yaml's mtime is newer than the stored
+// LastPulledAt timestamp, the user edited the file directly since the last
+// pull. In that case we stamp the changed entries and push instead of pull,
+// so the local edits win and propagate to other machines.
 func AutoPull() bool {
 	gh, gistID, err := clawsync.Client()
 	if err != nil {
@@ -332,11 +337,19 @@ func AutoPull() bool {
 	if gistID == "" {
 		return false
 	}
+
+	// Manual-edit detection: compare config.yaml mtime against LastPulledAt.
+	if locallyEdited() {
+		fmt.Fprintf(os.Stderr, "⚠ auto-pull: local config.yaml was edited since last pull — pushing local changes instead\n")
+		return AutoPush()
+	}
+
 	remoteYAML, err := clawsync.FetchGistContent(gh, gistID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ auto-pull: fetch Gist: %v\n", err)
 		return false
 	}
+	// ApplyGistConfig records LastPulledAt on success.
 	if err := config.ApplyGistConfig(remoteYAML); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ auto-pull: apply config: %v\n", err)
 		return false
@@ -347,6 +360,25 @@ func AutoPull() bool {
 	}
 	_ = recordLastSynced()
 	return true
+}
+
+// locallyEdited reports whether config.yaml has been modified since the last
+// successful pull. Returns false (safe default) when the timestamp cannot be
+// determined.
+func locallyEdited() bool {
+	creds, err := config.LoadCredentials()
+	if err != nil || creds == nil || creds.LastPulledAt == "" {
+		return false
+	}
+	lastPulled, err := time.Parse(time.RFC3339, creds.LastPulledAt)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(config.ConfigPath())
+	if err != nil {
+		return false
+	}
+	return info.ModTime().After(lastPulled)
 }
 
 // AutoPush performs a best-effort config push to the sync Gist. It is

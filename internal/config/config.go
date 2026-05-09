@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -53,6 +54,17 @@ type Repo struct {
 	// Like local_path, this field is machine-specific and is intentionally
 	// excluded from cloud sync (see syncableRepo in sync.go).
 	BoundMachine string `yaml:"bound_machine,omitempty"`
+
+	// UpdatedAt is the RFC3339 UTC timestamp of the last write to this repo
+	// entry. Used by the LWW (Last-Write-Wins) merge strategy during Gist
+	// sync: the side with the newer timestamp wins the whole entry. A zero
+	// value means the entry predates LWW and is treated as "oldest possible"
+	// during migration.
+	UpdatedAt time.Time `yaml:"updated_at,omitempty"`
+
+	// UpdatedBy is the hostname of the machine that last wrote this entry.
+	// Informational only — the authoritative tiebreaker is UpdatedAt.
+	UpdatedBy string `yaml:"updated_by,omitempty"`
 }
 
 // Settings holds global ClawFlow settings.
@@ -212,6 +224,12 @@ type Credentials struct {
 	// credentials.yaml (alongside GistID) because it is machine-specific
 	// metadata, not part of the synced config payload itself.
 	LastSyncedAt string `yaml:"last_synced_at,omitempty"`
+
+	// LastPulledAt is the RFC3339 UTC timestamp of the last successful
+	// auto-pull or manual pull. Used by the manual-edit detection logic:
+	// if config.yaml's mtime is newer than LastPulledAt, the user edited
+	// the file directly and we should push instead of pull.
+	LastPulledAt string `yaml:"last_pulled_at,omitempty"`
 
 	// ChatDefaultMode controls the default mode for issue-level chat sessions.
 	// Valid values: "issue" (default) — disallows Edit/Write/NotebookEdit and
@@ -423,6 +441,29 @@ func WorktreePath(ownerRepo string, issueNumber int) string {
 // BranchName returns the standard branch name for an issue.
 func BranchName(issueNumber int) string {
 	return fmt.Sprintf("fix/issue-%d", issueNumber)
+}
+
+// TouchRepo runs mutFn against the named repo entry, stamps UpdatedAt = now
+// and UpdatedBy = hostname, then stores the result back into cfg.Repos.
+// It does NOT save the config to disk — call cfg.Save() after.
+//
+// All code paths that mutate a repo entry should go through TouchRepo so
+// the LWW timestamp is always current. If hostname resolution fails the
+// field is left empty (non-fatal).
+func TouchRepo(cfg *Config, name string, mutFn func(r Repo) Repo) {
+	r := cfg.Repos[name]
+	r = mutFn(r)
+	r.UpdatedAt = time.Now().UTC()
+	if h, err := os.Hostname(); err == nil {
+		r.UpdatedBy = h
+	}
+	cfg.Repos[name] = r
+}
+
+// ConflictPath returns the path to the conflict artifact file.
+func ConflictPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".clawflow", "config", "config.conflict.yaml")
 }
 
 // RepoInfo is the result of ParseRepoInput.

@@ -51,17 +51,19 @@ func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Enabled != nil {
-		repo.Enabled = *req.Enabled
-	}
-	if req.AutoApprove != nil {
-		repo.AutoApprove = *req.AutoApprove
-	}
-	if req.AutoMerge != nil {
-		repo.AutoMerge = *req.AutoMerge
-	}
-
-	cfg.Repos[req.Repo] = repo
+	config.TouchRepo(cfg, req.Repo, func(r config.Repo) config.Repo {
+		if req.Enabled != nil {
+			r.Enabled = *req.Enabled
+		}
+		if req.AutoApprove != nil {
+			r.AutoApprove = *req.AutoApprove
+		}
+		if req.AutoMerge != nil {
+			r.AutoMerge = *req.AutoMerge
+		}
+		return r
+	})
+	repo = cfg.Repos[req.Repo]
 	if err := cfg.Save(); err != nil {
 		writeErr(w, err)
 		return
