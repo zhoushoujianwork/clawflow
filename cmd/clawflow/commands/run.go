@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -114,6 +116,48 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if lg != nil {
 		snapshot.ReconcileLog = lg
 	}
+
+	// Single-instance lock: prevent concurrent clawflow run invocations
+	// (e.g. cron firing while a previous run is still active). On
+	// contention, log run/skip and exit cleanly so cron doesn't treat
+	// the skip as a failure. Stale locks from crashed processes are
+	// reclaimed automatically via PID-liveness check.
+	if err := snapshot.AcquireRunLock(Version); err != nil {
+		if holder, readErr := snapshot.ReadRunLock(); readErr == nil {
+			lg.Info("run/skip",
+				"pid", os.Getpid(),
+				"holder_pid", holder.PID,
+				"holder_started", holder.StartedAt.Format(time.RFC3339),
+			)
+			fmt.Fprintf(os.Stderr, "⚠ clawflow run already active (pid=%d, started=%s) — skipping\n",
+				holder.PID, holder.StartedAt.Format(time.RFC3339))
+		} else {
+			lg.Info("run/skip", "pid", os.Getpid(), "reason", err.Error())
+			fmt.Fprintf(os.Stderr, "⚠ %v — skipping\n", err)
+		}
+		return nil
+	}
+	// Release the run lock on normal exit. For unhandled signals (SIGINT/
+	// SIGTERM) the lock is also released explicitly before os.Exit so the
+	// next cron tick isn't blocked by a stale file. The PID-liveness check
+	// in AcquireRunLock handles any remaining crash scenarios.
+	defer snapshot.ReleaseRunLock()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sigDone := make(chan struct{})
+	go func() {
+		select {
+		case <-sigCh:
+			snapshot.ReleaseRunLock()
+			os.Exit(0)
+		case <-sigDone:
+		}
+	}()
+	defer func() {
+		signal.Stop(sigCh)
+		close(sigDone)
+	}()
+
 	lg.Info("run/start", "pid", os.Getpid(), "version", Version, "only_repo", onlyRepo, "only_issue", onlyIssue, "timeout", timeout)
 	defer lg.Info("run/exit", "pid", os.Getpid())
 
