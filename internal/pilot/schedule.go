@@ -48,6 +48,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot/budget"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -197,9 +198,33 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 
 	eventsFile, _ := os.Create(filepath.Join(runDir, "events.jsonl"))
 
+	// Per-wake VCS write budget: code-layer hard cap on the number of
+	// VCS mutations Pilot can make in a single wake. The budget file
+	// lives next to meta.json/events.jsonl so post-mortem inspection
+	// has all wake artifacts in one place. The env var is the activation
+	// signal for the wrapped vcs.Client decorator in
+	// cmd/clawflow/commands/vcs_client.go — any `clawflow` subcommand
+	// the Pilot shells out to will see it via os.Environ inheritance.
+	budgetPath := filepath.Join(runDir, "budget.json")
+	if err := budget.Init(budgetPath, budget.DefaultMax); err != nil {
+		fmt.Fprintf(os.Stderr, "[pilot] %s: budget init failed: %v — continuing without budget enforcement\n", p.Name, err)
+		budgetPath = ""
+	}
+	if budgetPath != "" {
+		_ = os.Setenv(budget.EnvPath, budgetPath)
+		defer os.Unsetenv(budget.EnvPath)
+	}
+
 	output, err := operator.RunClaude(ctx, prompt, workdir, timeout, eventsFile, model)
 	if eventsFile != nil {
 		_ = eventsFile.Close()
+	}
+
+	if budgetPath != "" {
+		if s, rerr := budget.Read(budgetPath); rerr == nil {
+			fmt.Fprintf(os.Stderr, "[pilot] %s: budget %d/%d ops used\n", p.Name, s.Used, s.Max)
+			lg.Info("pilot/budget", "project", p.Name, "used", s.Used, "max", s.Max)
+		}
 	}
 
 	endedAt := time.Now().UTC()
