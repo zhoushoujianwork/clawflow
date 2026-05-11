@@ -11,6 +11,10 @@ operator:
 
 Someone mentioned you in the issue above. Read the thread, find the latest comment that addresses you, and reply.
 
+## Source code context
+
+**Your working directory (`cwd`) is a snapshot of this repository's base branch at its latest commit.** If the question is about specific code, use `grep` or file-reading tools to look it up before answering — code-grounded replies are far more useful than guesses.
+
 ## Output contract (MUST follow)
 
 Your stdout IS the reply comment. ClawFlow posts it verbatim, then applies the outcome label declared by the marker line at the end. Three hard rules:
