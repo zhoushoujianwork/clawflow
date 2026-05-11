@@ -1,7 +1,7 @@
 package prompts
 
-// LanguageRule returns the language-matching directive. Previously only
-// goalschat.go included this; it is now injected into all chat kinds.
+// LanguageRule returns the language-matching directive injected into
+// all chat kinds.
 //
 // The rule: mirror the user's input language; default to Chinese when
 // the language cannot be determined yet.

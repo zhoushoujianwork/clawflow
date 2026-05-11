@@ -1430,7 +1430,6 @@ type ProjectView struct {
 	Name       string                `json:"name"`
 	Repos      []string              `json:"repos"`
 	Context    string                `json:"context_md,omitempty"`
-	Goals      string                `json:"goals_md,omitempty"`
 	Testing    string                `json:"testing_md,omitempty"`
 	Deployment string                `json:"deployment_md,omitempty"`
 	Automation ProjectAutomationView `json:"automation"`
@@ -1460,14 +1459,12 @@ func WriteProjects() error {
 	views := make([]ProjectView, 0, len(projects))
 	for _, p := range projects {
 		ctx, _ := project.ReadContext(p.Name)
-		goals, _ := project.ReadGoals(p.Name)
 		testing, _ := project.ReadTesting(p.Name)
 		deployment, _ := project.ReadDeployment(p.Name)
 		views = append(views, ProjectView{
 			Name:       p.Name,
 			Repos:      p.Repos,
 			Context:    ctx,
-			Goals:      goals,
 			Testing:    testing,
 			Deployment: deployment,
 			Automation: ProjectAutomationView{

@@ -1,6 +1,6 @@
 ---
 name: pilot-health-check
-description: "Project-level Pilot operator that audits each member repo's CLAUDE.md and the project's context.md / goals.md / testing.md / deployment.md against a 12-dimension rubric, then proposes concrete updates the user can apply with one click."
+description: "Project-level Pilot operator that audits each member repo's CLAUDE.md and the project's context.md / testing.md / deployment.md against a 12-dimension rubric, then proposes concrete updates the user can apply with one click."
 project_operator:
   trigger: manual
   outcomes: ["healthy", "changes-proposed"]
@@ -14,7 +14,6 @@ You do **not** run any tools. You produce text only. The runner owns all VCS sid
 
 - **Project name**
 - **Project context.md** — the Pilot's own evolving working memory (Pilot writes this at wake end via fenced blocks; you may propose updates but be aware it is normally Pilot-authored).
-- **Project goals.md** — User-maintained requirements / priorities. Read-only for the Pilot. **Your role here is audit, not authorship**: surface gaps and inconsistencies, never propose to write goals on the user's behalf.
 - **Project testing.md** — Local-environment SOP (start order, services, hardware/serial, E2E smoke).
 - **Project deployment.md** — Runtime env + log retrieval methods.
 - For **each member repo** in the project:
@@ -61,11 +60,6 @@ For **`context.md`** (Pilot's working memory), check whether it accurately refle
 
 Note: `context.md` is normally written by the Pilot itself at wake end. If it's empty or stale, **a propose-update is fine** — but explain in the health summary that the Pilot has not been accumulating memory yet (e.g., automation disabled, or wakes happening but never finding anything material to capture).
 
-For **`goals.md`** (user's requirements file), audit-only checks:
-- Is it empty? Note that the Pilot will fall back to general triage with no priorities.
-- Does it contradict the snapshot in `context.md`? (e.g., goal says "ship v1 by EOM" but context.md says "v1 already shipped") — surface the inconsistency in the health summary; **do not propose a rewrite** — that's the user's job.
-- Does it reference repos / features that don't exist anymore? Surface in summary.
-
 For **`testing.md`** (local SOP), check whether it covers:
 - Service start order across repos
 - Required env vars / credentials
@@ -88,8 +82,6 @@ For the **project-level files** you may write to (`context.md` / `testing.md` / 
 - If deployment topology or log retrieval methods are known but `deployment.md` is empty or missing key environments → propose an updated `deployment.md`.
 - Otherwise leave them alone.
 
-For `goals.md`: **never propose a write**. Only surface findings in the health summary.
-
 For project-level `CLAUDE.md`: **never propose a write**. It is clawflow-managed.
 
 ### Update style
@@ -109,7 +101,6 @@ Your stdout is parsed by the runner. Structure:
 - `<repo-id>` — <one sentence: what's missing/shallow, or "healthy">
 - `<repo-id>` — …
 - Project context.md — <one sentence>
-- Project goals.md — <one sentence: empty / consistent / inconsistency noted>
 - Project testing.md — <one sentence>
 - Project deployment.md — <one sentence>
 
@@ -152,8 +143,7 @@ All repos and project docs are healthy. No changes proposed.
 4. **Exactly one outcome marker** as the last non-empty line, either `changes-proposed` or `healthy`.
 5. Do not include attribution footers or AI-generated notices in proposed file content.
 6. Do not wrap the entire output in a code fence. The propose blocks above are markers, not Markdown code blocks.
-7. **Never propose a write to `goals.md`** — surface findings in the health summary only.
-8. **Never propose a write to the project-level `CLAUDE.md`** — it is auto-managed by clawflow.
+7. **Never propose a write to the project-level `CLAUDE.md`** — it is auto-managed by clawflow.
 
 ## Constraints
 

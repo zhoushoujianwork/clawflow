@@ -3,10 +3,10 @@ package prompts
 import "fmt"
 
 // OutputProtocol returns the fenced-block output protocol section for
-// chats that write back a document (context.md, testing.md, goals.md).
+// chats that write back a document (context.md, testing.md).
 //
 // tag is the fenced-block info string the dashboard scrapes, e.g.
-// "context.md", "testing.md", or "goals.md".
+// "context.md" or "testing.md".
 //
 // emitCondition describes when the model should emit the block, e.g.
 // "when the user signals the draft is ready" vs "when proposing a change".

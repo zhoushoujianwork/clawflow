@@ -5,25 +5,22 @@ import (
 	"testing"
 )
 
-// init() in kinds.go registers "goals" and "context" — these tests
-// rely on that baseline state.
+// init() in kinds.go registers "context" — these tests rely on that
+// baseline state.
 
 func TestGetKind_Known(t *testing.T) {
-	for _, name := range []string{"goals", "context"} {
-		k, ok := GetKind(name)
-		if !ok {
-			t.Errorf("GetKind(%q): not registered", name)
-			continue
-		}
-		if k.Name != name {
-			t.Errorf("GetKind(%q).Name = %q", name, k.Name)
-		}
-		if k.Builder == nil {
-			t.Errorf("GetKind(%q).Builder is nil", name)
-		}
-		if k.DraftTag == "" {
-			t.Errorf("GetKind(%q).DraftTag is empty", name)
-		}
+	k, ok := GetKind("context")
+	if !ok {
+		t.Fatal(`GetKind("context"): not registered`)
+	}
+	if k.Name != "context" {
+		t.Errorf(`GetKind("context").Name = %q`, k.Name)
+	}
+	if k.Builder == nil {
+		t.Error(`GetKind("context").Builder is nil`)
+	}
+	if k.DraftTag == "" {
+		t.Error(`GetKind("context").DraftTag is empty`)
 	}
 }
 
@@ -35,8 +32,8 @@ func TestGetKind_Unknown(t *testing.T) {
 
 func TestListKinds_Sorted(t *testing.T) {
 	kinds := ListKinds()
-	if len(kinds) < 2 {
-		t.Fatalf("ListKinds: expected >= 2 kinds, got %d", len(kinds))
+	if len(kinds) < 1 {
+		t.Fatalf("ListKinds: expected >= 1 kind, got %d", len(kinds))
 	}
 	names := make([]string, len(kinds))
 	for i, k := range kinds {
@@ -54,7 +51,7 @@ func TestRegisterKind_DuplicatePanics(t *testing.T) {
 		}
 	}()
 	RegisterKind(ChatKind{
-		Name:    "goals", // already registered in init()
+		Name:    "context", // already registered in init()
 		Builder: func(string, []ProjectChatRepo, string) string { return "" },
 	})
 }

@@ -99,15 +99,6 @@ func DeploymentPath(name string) string {
 	return filepath.Join(ProjectDir(name), "deployment.md")
 }
 
-// GoalsPath returns the goals.md path for a named project.
-//
-// goals.md is user-maintained: project objectives, current priorities,
-// and Pilot configuration (e.g. auto_approve). The Pilot reads it as
-// its "flight plan" but never writes to it.
-func GoalsPath(name string) string {
-	return filepath.Join(ProjectDir(name), "goals.md")
-}
-
 // Create creates a new project with the given name.
 func Create(name string) (*Project, error) {
 	if strings.TrimSpace(name) == "" {
@@ -130,19 +121,12 @@ func Create(name string) (*Project, error) {
 	if err := save(p); err != nil {
 		return nil, err
 	}
-	// Create empty context.md, goals.md, testing.md, and deployment.md
-	// so all four files always exist. context.md is the Pilot's own
-	// evolving memory; goals.md is the user's requirements file (read-
-	// only for the Pilot); testing.md is the local-environment SOP;
-	// deployment.md describes the runtime environment and log retrieval
-	// methods. context/testing/deployment get auto-injected into
-	// operator prompts via the project header. goals + context drive
-	// the Pilot's per-wake prompt.
+	// Create empty context.md, testing.md, and deployment.md so all three
+	// files always exist. context.md is the Pilot's own evolving memory;
+	// testing.md is the local-environment SOP; deployment.md describes
+	// the runtime environment and log retrieval methods.
 	if err := os.WriteFile(ContextPath(name), []byte(""), 0o644); err != nil {
 		return nil, fmt.Errorf("create context.md: %w", err)
-	}
-	if err := os.WriteFile(GoalsPath(name), []byte(""), 0o644); err != nil {
-		return nil, fmt.Errorf("create goals.md: %w", err)
 	}
 	if err := os.WriteFile(TestingPath(name), []byte(""), 0o644); err != nil {
 		return nil, fmt.Errorf("create testing.md: %w", err)
@@ -362,46 +346,6 @@ func ReadDeployment(name string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
-}
-
-// ReadGoals reads the project's goals.md. Returns "" if the file
-// doesn't exist (not an error — the user may not have created it yet).
-func ReadGoals(name string) (string, error) {
-	data, err := os.ReadFile(GoalsPath(name))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	return string(data), nil
-}
-
-// WriteGoals writes content to the project's goals.md.
-func WriteGoals(name, content string) error {
-	dir := ProjectDir(name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(GoalsPath(name), []byte(content), 0o644); err != nil {
-		return err
-	}
-	ensureGit(name)
-	if err := CommitChange(name, "update goals.md"); err != nil {
-		fmt.Fprintf(os.Stderr, "[project] git commit skipped: %v\n", err)
-	}
-	return nil
-}
-
-// ParseAutoApprove checks whether goals.md contains "auto_approve: true".
-func ParseAutoApprove(goalsMD string) bool {
-	for _, line := range strings.Split(goalsMD, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "auto_approve: true" {
-			return true
-		}
-	}
-	return false
 }
 
 // WriteDeployment writes content to the project's deployment.md.

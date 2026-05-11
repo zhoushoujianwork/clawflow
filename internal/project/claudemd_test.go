@@ -18,7 +18,7 @@ func TestRenderClaudeMD_NoRepos(t *testing.T) {
 	if !strings.Contains(got, "no repos in this project yet") {
 		t.Error("missing empty-repos fallback")
 	}
-	if !strings.Contains(got, "context.md") || !strings.Contains(got, "goals.md") {
+	if !strings.Contains(got, "context.md") || !strings.Contains(got, "deployment.md") {
 		t.Error("missing working-files section")
 	}
 	if !strings.Contains(got, "managed by clawflow") {

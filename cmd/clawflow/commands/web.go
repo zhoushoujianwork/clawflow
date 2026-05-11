@@ -303,7 +303,6 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/project/generate-deployment/status", api.HandleProjectGenerateDeploymentStatus)
 			mux.HandleFunc("/api/project/automation", api.HandleProjectAutomation)
 			mux.HandleFunc("/api/project/get", api.HandleProjectGet)
-			mux.HandleFunc("/api/project/write-goals", api.HandleProjectWriteGoals)
 			mux.HandleFunc("/api/project/health-check/run", api.HandleProjectHealthCheckRun)
 			mux.HandleFunc("/api/project/health-check/status", api.HandleProjectHealthCheckStatus)
 			mux.HandleFunc("/api/project/health-check/apply", api.HandleProjectHealthCheckApply)

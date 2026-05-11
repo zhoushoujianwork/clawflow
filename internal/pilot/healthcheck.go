@@ -81,9 +81,8 @@ func RunHealthCheck(ctx context.Context, p *project.Project, cfg *config.Config,
 	contextMD, _ := project.ReadContext(p.Name)
 	testingMD, _ := project.ReadTesting(p.Name)
 	deploymentMD, _ := project.ReadDeployment(p.Name)
-	goalsMD, _ := project.ReadGoals(p.Name)
 
-	prompt := buildHealthCheckPrompt(p.Name, contextMD, testingMD, deploymentMD, goalsMD, repos, skillBody)
+	prompt := buildHealthCheckPrompt(p.Name, contextMD, testingMD, deploymentMD, repos, skillBody)
 	workdir := project.ProjectDir(p.Name)
 
 	output, err := operator.RunClaude(ctx, prompt, workdir, timeout, nil, model)
@@ -145,7 +144,7 @@ func collectRepoInputs(p *project.Project, cfg *config.Config) []repoInput {
 // buildHealthCheckPrompt prepends a structured INPUT section to the
 // SKILL.md body. The operator reads this section verbatim — the
 // section headers must match what the SKILL.md prose describes
-// ("Project context.md", "Project goals.md", "Project testing.md",
+// ("Project context.md", "Project testing.md",
 // "Project deployment.md", per-repo blocks).
 //
 // Note: the project's own CLAUDE.md is intentionally NOT passed in.
@@ -153,7 +152,7 @@ func collectRepoInputs(p *project.Project, cfg *config.Config) []repoInput {
 // wake; auditing it would just propose changes that get clobbered
 // next wake. The skill body explicitly tells the operator to leave
 // it alone.
-func buildHealthCheckPrompt(projectName, contextMD, testingMD, deploymentMD, goalsMD string, repos []repoInput, skillBody string) string {
+func buildHealthCheckPrompt(projectName, contextMD, testingMD, deploymentMD string, repos []repoInput, skillBody string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# INPUT\n\n")
 	fmt.Fprintf(&b, "Project name: %s\n\n", projectName)
@@ -163,14 +162,6 @@ func buildHealthCheckPrompt(projectName, contextMD, testingMD, deploymentMD, goa
 		b.WriteString("(empty / not yet generated)\n\n")
 	} else {
 		b.WriteString(contextMD)
-		ensureTrailingBlank(&b)
-	}
-
-	fmt.Fprintf(&b, "## Project goals.md\n\n")
-	if strings.TrimSpace(goalsMD) == "" {
-		b.WriteString("(empty / not yet written by user)\n\n")
-	} else {
-		b.WriteString(goalsMD)
 		ensureTrailingBlank(&b)
 	}
 

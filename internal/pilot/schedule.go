@@ -188,11 +188,10 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 
 	digests := buildDigests(p, cfg, creds)
 	contextMD, _ := project.ReadContext(p.Name)
-	goalsMD, _ := project.ReadGoals(p.Name)
 	deploymentMD, _ := project.ReadDeployment(p.Name)
 	recent := pilotRecentSummaries(p.Name, 3)
 
-	prompt := chat.BuildPilotContext(p.Name, contextMD, goalsMD, deploymentMD, recent, digests)
+	prompt := chat.BuildPilotContext(p.Name, contextMD, deploymentMD, recent, digests)
 	model := creds.EffectiveOperatorModel()
 	workdir := project.ProjectDir(p.Name)
 

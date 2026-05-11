@@ -6,14 +6,14 @@ import { extractLastFencedBlock } from '../lib/extractFencedBlock'
 import { Markdown } from './Markdown'
 
 // ChatPanel — embedded streaming chat used to iterate on a project's
-// goals.md / context.md docs. The user types, the backend streams claude
+// context.md doc. The user types, the backend streams claude
 // stream-json over SSE, the assistant's text accumulates into a bubble on
 // the left, and any fenced code block tagged with `draftTag` (e.g.
-// "goals.md") is extracted and shown live as the right-pane "draft preview"
+// "context.md") is extracted and shown live as the right-pane "draft preview"
 // the user can save.
 
 export interface ChatPanelProps {
-  kind: 'goals' | 'context'
+  kind: 'context'
   project: string
   draftTag: string
   initialDraft?: string
@@ -89,11 +89,6 @@ function extractAssistantText(ev: StreamJsonEvent): string {
 }
 
 const KIND_META: Record<ChatPanelProps['kind'], { title: string; subtitle: string; icon: typeof Sparkles }> = {
-  goals: {
-    title: 'Draft your goals',
-    subtitle: 'Tell the Pilot what to focus on. It will interview you, then propose a draft you can save.',
-    icon: Sparkles,
-  },
   context: {
     title: 'Update project context',
     subtitle: 'Talk through architecture, conventions, and current state. Save the result to context.md.',
@@ -102,11 +97,6 @@ const KIND_META: Record<ChatPanelProps['kind'], { title: string; subtitle: strin
 }
 
 const SUGGESTIONS_BY_KIND: Record<ChatPanelProps['kind'], string[]> = {
-  goals: [
-    '帮我从零开始起草 goals.md，先问我优先级',
-    '本季重点是减少 agent-failed 率',
-    '我现在不想让 Pilot 动 PR 只让他理 issue',
-  ],
   context: [
     'Walk me through what is in the project right now',
     'Pull architecture from each member repo',
@@ -341,10 +331,8 @@ export function ChatPanel(props: ChatPanelProps): JSX.Element {
               {isEmpty && (
                 <EmptyState
                   icon={HeaderIcon}
-                  title={kind === 'goals' ? '先聊呀，AI 会问你优先级' : 'Tell me about the project'}
-                  subtitle={kind === 'goals'
-                    ? '列出本季你最在乎什么 / 什么必须避免 / 如果只能完成一项选哪项'
-                    : 'Walk me through architecture, conventions, current state.'}
+                  title="Tell me about the project"
+                  subtitle="Walk me through architecture, conventions, current state."
                   suggestions={SUGGESTIONS_BY_KIND[kind]}
                   onPick={s => { setInput(s); inputRef.current?.focus() }}
                 />
@@ -443,9 +431,7 @@ export function ChatPanel(props: ChatPanelProps): JSX.Element {
                   </div>
                   <p className="text-sm text-muted-foreground">No draft yet</p>
                   <p className="text-xs text-muted-foreground/70 mt-1 max-w-[260px]">
-                    {kind === 'goals'
-                      ? '聊到可以落定的时候说一句“起草一份”，AI 会把最终内容放进一个 fenced 块'
-                      : 'When ready, ask the assistant to emit the final document in a fenced block.'}
+                    When ready, ask the assistant to emit the final document in a fenced block.
                   </p>
                 </div>
               )}
@@ -458,7 +444,7 @@ export function ChatPanel(props: ChatPanelProps): JSX.Element {
                     Saved
                   </span>
                 ) : draftDirty ? (
-                  'Click Save to write goals.md and commit'
+                  `Click Save to write ${draftTag} and commit`
                 ) : currentDraft ? (
                   'No new changes'
                 ) : (

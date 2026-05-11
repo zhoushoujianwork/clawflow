@@ -4,7 +4,6 @@ import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, Message
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
-import { ChatPanel } from '../components/ChatPanel'
 import { useHealthCheck } from '../components/HealthCheckCard'
 import {
   IssueList,
@@ -29,7 +28,6 @@ interface Project {
   context_md?: string
   testing_md?: string
   deployment_md?: string
-  goals_md?: string
   automation?: ProjectAutomation
 }
 
@@ -148,8 +146,6 @@ function ProjectDetail() {
   const [contextOpen, setContextOpen] = useState(false)
   const [testingOpen, setTestingOpen] = useState(false)
   const [deploymentOpen, setDeploymentOpen] = useState(false)
-  const [goalsOpen, setGoalsOpen] = useState(false)
-  const [goalsChatOpen, setGoalsChatOpen] = useState(false)
 
   // Generate deployment state — mirrors the context generation pattern.
   const [generatingDeployment, setGeneratingDeployment] = useState(false)
@@ -306,27 +302,6 @@ function ProjectDetail() {
       .then(r => (r.ok ? r.json() : []))
       .catch(() => [])
       .then(data => setPilotRuns(Array.isArray(data) ? data : []))
-  }
-
-  // Persist a goals.md draft produced in the ChatPanel. Refetches the
-  // project on success so the card re-renders with the new content
-  // immediately (rather than waiting for the next page load).
-  async function saveGoals(content: string) {
-    const r = await fetch('/api/project/write-goals', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project: name, content }),
-    })
-    const d = await r.json().catch(() => ({}))
-    if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
-    // Best-effort refresh; if the refetch fails the user can still see
-    // the card update on next navigation.
-    fetch(`/api/project/get?name=${encodeURIComponent(name)}`, { cache: 'no-store' })
-      .then(res => (res.ok ? res.json() : null))
-      .then(data => {
-        if (data && !data.error) setProject(data as Project)
-      })
-      .catch(() => {})
   }
 
   async function handleDelete() {
@@ -896,17 +871,6 @@ function ProjectDetail() {
 
           {pilotRunDetail && <PilotRunDetailModal run={pilotRunDetail} onClose={() => setPilotRunDetail(null)} />}
 
-          {goalsChatOpen && (
-            <ChatPanel
-              kind="goals"
-              project={name}
-              draftTag="goals.md"
-              initialDraft={project.goals_md ?? ''}
-              onSave={async content => { await saveGoals(content); setGoalsChatOpen(false) }}
-              onClose={() => setGoalsChatOpen(false)}
-            />
-          )}
-
           {/* Member repos — moved above automation/health-check so the
               user sees the repo list before the config controls. */}
           <section className="mb-6">
@@ -1152,73 +1116,6 @@ function ProjectDetail() {
                   {generating && (
                     <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
                   )}
-                </div>
-              </>
-            )}
-          </section>
-
-          {/* Goals.md — collapsible. The user's requirements file:
-              priorities, objectives, constraints. Read-only for the
-              Pilot, who reads it as its "flight plan". Edit flow uses
-              the embedded ChatPanel (Draft with AI) — never auto-
-              generated since the user owns these priorities. */}
-          <section className="mb-3">
-            {project.goals_md ? (
-              <div className="bg-card border border-border rounded-xl overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setGoalsOpen(o => !o)}
-                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
-                  aria-expanded={goalsOpen}
-                >
-                  {goalsOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                  <span className="text-sm font-semibold text-foreground">Goals & priorities</span>
-                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
-                    {(project.goals_md.length / 1024).toFixed(1)}kb
-                  </span>
-                  {!goalsOpen && (
-                    <span className="text-xs text-muted-foreground truncate">
-                      · {previewMD(project.goals_md)}
-                    </span>
-                  )}
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    onClick={e => { e.stopPropagation(); setGoalsChatOpen(true) }}
-                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setGoalsChatOpen(true) } }}
-                    className="ml-auto text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 shrink-0 px-2 py-0.5 rounded hover:bg-secondary/50 transition-colors cursor-pointer"
-                  >
-                    <MessageSquare className="w-3 h-3" />
-                    Edit with AI
-                  </span>
-                </button>
-                {goalsOpen && (
-                  <div className="px-4 pb-4 pt-0 border-t border-border">
-                    <Markdown>{project.goals_md}</Markdown>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-sm font-semibold text-foreground">Goals & priorities</h2>
-                  <span className="text-xs text-muted-foreground">
-                    What you want the Pilot to focus on; constraints; current priorities
-                  </span>
-                </div>
-                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
-                  <p className="text-sm text-muted-foreground">
-                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">goals.md</code> yet.
-                    Tell the Pilot what's important — chat with AI to draft your priorities and constraints.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setGoalsChatOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    Draft with AI
-                  </button>
                 </div>
               </>
             )}

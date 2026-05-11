@@ -139,7 +139,7 @@ func TestBuildPilotContext_WithDeployment(t *testing.T) {
 	}
 	deploymentMD := "## Logs\n\n```bash\nssh prod 'journalctl -u myapp -n 200'\n```"
 
-	prompt := BuildPilotContext("my-proj", "# Context\n\nSome overview.", "", deploymentMD, nil, repos)
+	prompt := BuildPilotContext("my-proj", "# Context\n\nSome overview.", deploymentMD, nil, repos)
 
 	if !containsStr(prompt, "Deployment & runtime health") {
 		t.Error("missing 'Deployment & runtime health' section")
@@ -167,7 +167,7 @@ func TestBuildPilotContext_WithDeployment(t *testing.T) {
 func TestBuildPilotContext_NoDeployment(t *testing.T) {
 	repos := []PilotRepoDigest{}
 
-	prompt := BuildPilotContext("empty-proj", "", "", "", nil, repos)
+	prompt := BuildPilotContext("empty-proj", "", "", nil, repos)
 
 	if !containsStr(prompt, "Deployment & runtime health") {
 		t.Error("missing 'Deployment & runtime health' section even when empty")
@@ -178,32 +178,21 @@ func TestBuildPilotContext_NoDeployment(t *testing.T) {
 	if !containsStr(prompt, "AT MOST 2 new issues") {
 		t.Error("missing issue filing budget even without deployment.md")
 	}
-	// goals.md fallback when empty
-	if !containsStr(prompt, "no explicit user goals") {
-		t.Error("missing goals.md fallback message when empty")
-	}
 	// recent wakes fallback when empty
 	if !containsStr(prompt, "first Pilot run") {
 		t.Error("missing recent-wakes fallback when none on file")
 	}
 }
 
-func TestBuildPilotContext_GoalsAndRecent(t *testing.T) {
+func TestBuildPilotContext_RecentHistory(t *testing.T) {
 	repos := []PilotRepoDigest{}
-	goals := "## Priorities\n- ship v1 by EOM\n- no flaky tests"
 	recent := []PilotWakeSummary{
 		{StartedAt: "2026-05-06T12:00:00Z", Status: "success", Result: "PILOT-RESULT: 2 actions — labeled api#7, closed api#3"},
 		{StartedAt: "2026-05-05T12:00:00Z", Status: "success", Result: "PILOT-RESULT: no-action — backlog coherent"},
 	}
 
-	prompt := BuildPilotContext("my-proj", "", goals, "", recent, repos)
+	prompt := BuildPilotContext("my-proj", "", "", recent, repos)
 
-	if !containsStr(prompt, "User goals (goals.md") {
-		t.Error("missing User goals section header")
-	}
-	if !containsStr(prompt, "ship v1 by EOM") {
-		t.Error("missing goals.md content in prompt")
-	}
 	if !containsStr(prompt, "Recent wake history") {
 		t.Error("missing Recent wake history section")
 	}
@@ -224,7 +213,7 @@ func TestBuildPilotContext_GoalsAndRecent(t *testing.T) {
 
 func TestBuildPilotContext_StandardPlays(t *testing.T) {
 	repos := []PilotRepoDigest{}
-	prompt := BuildPilotContext("p", "", "", "", nil, repos)
+	prompt := BuildPilotContext("p", "", "", nil, repos)
 
 	// Section header present
 	if !containsStr(prompt, "Standard plays") {
@@ -321,7 +310,7 @@ func TestBuildProjectChatContext_AutomationModel(t *testing.T) {
 
 func TestBuildPilotContext_AutomationModel(t *testing.T) {
 	repos := []PilotRepoDigest{}
-	prompt := BuildPilotContext("my-proj", "", "", "", nil, repos)
+	prompt := BuildPilotContext("my-proj", "", "", nil, repos)
 
 	// Core automation model concepts must be present
 	if !containsStr(prompt, "ClawFlow automation model") {

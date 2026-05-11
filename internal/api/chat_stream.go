@@ -214,12 +214,10 @@ func HandleChatStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // readCurrentForKind reads the current file content the chat is
-// editing — goals.md or context.md depending on kind. Empty on
-// missing files (treated by the prompt as "fresh draft").
+// editing — context.md is the only kind currently. Empty on missing
+// files (treated by the prompt as "fresh draft").
 func readCurrentForKind(kind, projectName string) (string, error) {
 	switch kind {
-	case "goals":
-		return project.ReadGoals(projectName)
 	case "context":
 		return project.ReadContext(projectName)
 	default:

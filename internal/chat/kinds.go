@@ -13,7 +13,7 @@ import (
 type ChatKind struct {
 	Name        string
 	Description string
-	DraftTag    string                                                                   // fenced info string, e.g. "goals.md"
+	DraftTag    string                                                                   // fenced info string, e.g. "context.md"
 	Builder     func(projectName string, repos []ProjectChatRepo, current string) string // system prompt
 }
 
@@ -63,12 +63,6 @@ func ListKinds() []ChatKind {
 }
 
 func init() {
-	RegisterKind(ChatKind{
-		Name:        "goals",
-		Description: "Co-draft the project's goals.md (user requirements).",
-		DraftTag:    "goals.md",
-		Builder:     BuildGoalsChatContext,
-	})
 	// "context" reuses BuildProjectChatContext, which takes both
 	// contextMD and testingMD. The dashboard's context kind only
 	// edits context.md, so testingMD is passed empty.

@@ -51,10 +51,10 @@ type PilotWakeSummary struct {
 }
 
 // BuildPilotContext builds the per-wake system prompt. The prompt
-// carries the things that change every wake — context.md, goals.md,
-// recent history, the current backlog snapshot, the wake-specific
-// job. Stable identity (which repos belong, where they live, what
-// the Pilot's working files are) lives in the project's CLAUDE.md,
+// carries the things that change every wake — context.md, recent
+// history, the current backlog snapshot, the wake-specific job.
+// Stable identity (which repos belong, where they live, what the
+// Pilot's working files are) lives in the project's CLAUDE.md,
 // auto-loaded by `claude -p` from the workdir.
 //
 // Pilot is the project's TRIAGE manager. It works at the EDGES of
@@ -69,7 +69,6 @@ type PilotWakeSummary struct {
 func BuildPilotContext(
 	name string,
 	contextMD string,
-	goalsMD string,
 	deploymentMD string,
 	recent []PilotWakeSummary,
 	repos []PilotRepoDigest,
@@ -96,15 +95,6 @@ func BuildPilotContext(
 		fmt.Fprintln(&b, "_(empty — you haven't accumulated any project knowledge yet. Build it up via the update protocol below as you learn things.)_")
 	} else {
 		fmt.Fprintln(&b, contextMD)
-	}
-	fmt.Fprintln(&b)
-
-	fmt.Fprintln(&b, "## User goals (goals.md — read-only)")
-	fmt.Fprintln(&b)
-	if strings.TrimSpace(goalsMD) == "" {
-		fmt.Fprintln(&b, "_(empty — no explicit user goals on file. Triage by general project health.)_")
-	} else {
-		fmt.Fprintln(&b, goalsMD)
 	}
 	fmt.Fprintln(&b)
 
@@ -208,7 +198,7 @@ Common moves:
 ## Standard plays (built-in maintenance)
 
 Baseline maintenance you know how to do regardless of what's in
-context.md or goals.md. Each play has a **specific trigger** and a
+context.md. Each play has a **specific trigger** and a
 **bounded action set** — don't generalize them. Together they make sure
 project hygiene doesn't depend on the user filling in every doc.
 

@@ -15,7 +15,7 @@ import (
 // the project directory. It serves as the Pilot's "persistent
 // identity" — telling the Pilot which member repos belong to this
 // project, where they live on local disk, and where its working
-// files (context.md / goals.md / deployment.md) are.
+// files (context.md / deployment.md) are.
 //
 // CLAUDE.md is owned by clawflow: regenerated from project.yaml
 // every time member repos change (Create/AddRepo/RemoveRepo) and
@@ -95,7 +95,6 @@ func renderClaudeMD(p *Project, cfg *config.Config) string {
 	fmt.Fprintln(&b, "## Your working files (in this directory)")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "- `context.md` — your own evolving understanding of this project. Read at wake start. Update at wake end via a fenced ```context.md``` block when something material was learned.")
-	fmt.Fprintln(&b, "- `goals.md` — user-maintained objectives and priorities. Read-only for you.")
 	fmt.Fprintln(&b, "- `deployment.md` — runtime health / log-retrieval commands. Read on demand.")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "_Per-wake state — backlog snapshot, recent wake history, this wake's job — arrives in the system prompt at each wake._")

@@ -242,13 +242,12 @@ When on, every `clawflow run` pass — after operators finish — wakes a per-pr
 |---|---|---|
 | `CLAUDE.md` | clawflow (auto-generated) | Member repo loader. Refreshed from `project.yaml` on every wake; auto-loaded by `claude -p` so the Pilot always knows which repos belong and where they live locally. Don't hand-edit — your changes get overwritten. |
 | `context.md` | **the Pilot itself** | The Pilot's evolving working memory. Read at wake start. The Pilot may rewrite it at wake end via a fenced ` ```context.md ``` ` block when something material was learned. Versioned by the project-level git repo. |
-| `goals.md` | **you** | User-maintained objectives, priorities, and Pilot configuration (e.g. `auto_approve: true`). Read-only for the Pilot. Edit it to steer triage. |
 | `deployment.md` | you | Optional: log-retrieval / health-check commands. When present, the Pilot inspects logs before triaging the backlog (production errors take priority over tracker work). |
 | `testing.md` | you | Optional: local-environment SOP. Used by the `implement` operator, not the Pilot. |
 
 #### What the Pilot wakes with
 
-Each wake's prompt carries: `context.md` (own memory), `goals.md` (your requirements), `deployment.md` (if present), the **last 3 wakes' `PILOT-RESULT` lines** (short-term memory — prevents the Pilot from re-doing what it already did), and the current backlog snapshot (open issues + PRs across all member repos).
+Each wake's prompt carries: `context.md` (own memory), `deployment.md` (if present), the **last 3 wakes' `PILOT-RESULT` lines** (short-term memory — prevents the Pilot from re-doing what it already did), and the current backlog snapshot (open issues + PRs across all member repos).
 
 #### Closed loop
 
@@ -256,7 +255,7 @@ Each wake's prompt carries: `context.md` (own memory), `goals.md` (your requirem
 clawflow run
   → operators process labeled issues
   → Pilot wakes (cooldown-gated, per project)
-      → reads context.md / goals.md / recent history / live backlog
+      → reads context.md / recent history / live backlog
       → triages: file/label/close/comment (≤2 new issues per wake)
       → optionally rewrites context.md
   → next clawflow run pass executes the changes
@@ -280,7 +279,6 @@ clawflow run
 │       ├── project.yaml              ← member repos + automation config
 │       ├── CLAUDE.md                 ← auto-gen Pilot repo loader
 │       ├── context.md                ← Pilot's evolving memory (Pilot writes)
-│       ├── goals.md                  ← user-maintained requirements
 │       ├── deployment.md             ← optional: log/health commands
 │       └── testing.md                ← optional: local-env SOP
 └── skills/                           ← user-custom operators (override built-ins by name)
