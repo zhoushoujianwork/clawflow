@@ -12,6 +12,43 @@ interface Operator {
   source: string
 }
 
+// Maps built-in operator names to their pipeline stage.
+// TODO: when SKILL.md frontmatter gains a `stage:` field, use that as the
+// primary source and fall back to this map for operators that don't declare one.
+type Stage = 'triage' | 'evaluation' | 'execution' | 'interaction' | 'custom'
+
+const STAGE_MAP: Record<string, Stage> = {
+  classify: 'triage',
+  'evaluate-bug': 'evaluation',
+  'evaluate-feat': 'evaluation',
+  decompose: 'execution',
+  implement: 'execution',
+  'track-progress': 'execution',
+  'reply-comment': 'interaction',
+  'reply-question': 'interaction',
+}
+
+// Explicit ordering within each stage so the natural flow is preserved
+// (e.g. decompose → implement → track-progress for Execution).
+const STAGE_ORDER: Record<string, number> = {
+  classify: 0,
+  'evaluate-bug': 0,
+  'evaluate-feat': 1,
+  decompose: 0,
+  implement: 1,
+  'track-progress': 2,
+  'reply-comment': 0,
+  'reply-question': 1,
+}
+
+const STAGES: { key: Stage; title: string; blurb: string }[] = [
+  { key: 'triage',      title: '1. Triage',      blurb: 'Route incoming issues to the right evaluator.' },
+  { key: 'evaluation',  title: '2. Evaluation',  blurb: 'Score bugs and features and decide if they are ready for an agent.' },
+  { key: 'execution',   title: '3. Execution',   blurb: 'Break down, implement, and track the work.' },
+  { key: 'interaction', title: '4. Interaction', blurb: 'Reply to human comments and questions on issues and PRs.' },
+  { key: 'custom',      title: 'Custom / Other', blurb: 'Operators not mapped to a built-in pipeline stage.' },
+]
+
 export const Route = createFileRoute('/_app/operators')({
   component: OperatorsList,
 })
@@ -27,6 +64,14 @@ function OperatorsList() {
       .catch(() => setOps([]))
       .finally(() => setLoading(false))
   }, [])
+
+  // Group operators by stage, preserving explicit intra-stage order.
+  const grouped = STAGES.map(stage => ({
+    ...stage,
+    items: ops
+      .filter(op => (STAGE_MAP[op.name] ?? 'custom') === stage.key)
+      .sort((a, b) => (STAGE_ORDER[a.name] ?? 99) - (STAGE_ORDER[b.name] ?? 99)),
+  })).filter(group => group.items.length > 0)
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
@@ -45,33 +90,49 @@ function OperatorsList() {
           <p className="text-sm text-muted-foreground">No operators registered.</p>
         </div>
       ) : (
-        <div className="grid gap-3">
-          {ops.map(op => (
-            <div key={op.name} className="bg-card border border-border rounded-xl p-4">
-              <div className="flex items-start justify-between gap-3 mb-2">
-                <div>
-                  <h3 className="text-sm font-semibold text-foreground font-mono">{op.name}</h3>
-                  <p className="text-xs text-muted-foreground mt-0.5">{op.description}</p>
-                </div>
-                <span className={cn(
-                  'shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border',
-                  op.target === 'issue' ? 'bg-blue-100 text-blue-700 border-blue-200' : 'bg-purple-100 text-purple-700 border-purple-200',
-                )}>
-                  {op.target}
-                </span>
+        <div className="space-y-8">
+          {grouped.map(group => (
+            <section key={group.key}>
+              <div className="mb-3">
+                <h2 className="text-base font-semibold text-foreground">{group.title}</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">{group.blurb}</p>
               </div>
-              <div className="flex flex-wrap gap-3 text-[11px] items-baseline">
-                <LabelList title="requires" labels={op.labels_required} tone="green" />
-                <LabelList title="excludes" labels={op.labels_excluded} tone="red" />
-                <LabelList title="lock" labels={[op.lock_label]} tone="amber" />
+              <div className="grid gap-3">
+                {group.items.map(op => (
+                  <OperatorCard key={op.name} op={op} />
+                ))}
               </div>
-              <div className="mt-2 text-[10px] text-muted-foreground font-mono truncate" title={op.source}>
-                source: {op.source}
-              </div>
-            </div>
+            </section>
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function OperatorCard({ op }: { op: Operator }) {
+  return (
+    <div className="bg-card border border-border rounded-xl p-4">
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground font-mono">{op.name}</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">{op.description}</p>
+        </div>
+        <span className={cn(
+          'shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border',
+          op.target === 'issue' ? 'bg-blue-100 text-blue-700 border-blue-200' : 'bg-purple-100 text-purple-700 border-purple-200',
+        )}>
+          {op.target}
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-3 text-[11px] items-baseline">
+        <LabelList title="requires" labels={op.labels_required} tone="green" />
+        <LabelList title="excludes" labels={op.labels_excluded} tone="red" />
+        <LabelList title="lock" labels={[op.lock_label]} tone="amber" />
+      </div>
+      <div className="mt-2 text-[10px] text-muted-foreground font-mono truncate" title={op.source}>
+        source: {op.source}
+      </div>
     </div>
   )
 }
