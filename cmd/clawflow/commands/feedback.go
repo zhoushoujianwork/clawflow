@@ -28,14 +28,15 @@ func NewFeedbackCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "feedback",
 		Short: "File a bug or feature request about ClawFlow itself",
-		Long: `Launch an interactive Claude session that helps you file an issue on
+		Long: `Launch an interactive Claude session that helps you file one or more issues on
 https://github.com/zhoushoujianwork/clawflow.
 
 Claude asks a few questions to turn your description into a clear title +
-body, then files the issue using your locally-stored GitHub token. If your
-terminal supports pasting images (VS Code integrated terminal, iTerm2,
-Claude Code's native terminal), Claude will see the screenshot and describe
-it in the issue body.`,
+body, then files the issue using your locally-stored GitHub token. After each
+submission Claude asks if you have more feedback — you can file multiple issues
+in a single session without restarting. If your terminal supports pasting
+images (VS Code integrated terminal, iTerm2, Claude Code's native terminal),
+Claude will see the screenshot and describe it in the issue body.`,
 		Example: "  clawflow feedback",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runFeedback(cmd.Context())
@@ -109,7 +110,7 @@ func runFeedback(_ context.Context) error {
 }
 
 func buildFeedbackSystemPrompt() string {
-	return `You are helping the user file a GitHub issue on the ClawFlow repository:
+	return `You are helping the user file GitHub issues on the ClawFlow repository:
 https://github.com/` + feedbackTargetRepo + `
 
 ## Your job
@@ -129,7 +130,11 @@ https://github.com/` + feedbackTargetRepo + `
 4. Once you have a clear title and body, summarise them back to the user
    in one message and ask for confirmation before filing.
 5. On confirmation, call ` + "`clawflow feedback submit --title '...' --body '...'`" + `
-   **once** via Bash. Print the resulting issue URL to the user.
+   via Bash. Print the resulting issue URL to the user.
+6. After a successful submit, ask the user: "Is there anything else you'd
+   like to file?" If yes, go back to step 2 and treat it as a fresh issue —
+   do not carry over the previous issue's title or body unless the user
+   explicitly references them. If no, thank the user and end the session.
 
 ## Rules
 
@@ -142,8 +147,9 @@ https://github.com/` + feedbackTargetRepo + `
 - The body should use GitHub-flavoured markdown. For bug reports, include
   sections for **Steps to reproduce**, **Expected**, **Actual**, and
   **Environment** when applicable.
-- Do not file the issue without explicit user confirmation.
-- Do not open more than one issue per session.
+- Do not file any issue without explicit user confirmation.
+- Treat each issue independently — screenshots or details from a previous
+  issue in this session do not apply to the next unless the user says so.
 - If the submit command fails, show the error to the user and offer to
   retry or adjust the title/body.`
 }
