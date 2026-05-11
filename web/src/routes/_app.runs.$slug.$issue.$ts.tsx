@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, ChevronsUp, ChevronsDown } from 'lucide-react'
+import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, ChevronsUp, ChevronsDown, Square } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -32,7 +32,7 @@ interface RunMeta {
   issue_title?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
   summary?: string
   pr_url?: string
   error?: string
@@ -377,6 +377,27 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
     )
   }
 
+  if (meta.status === 'cancelled') {
+    return (
+      <section className="mb-6">
+        <h2 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--text-high))' }}>
+          Conclusion · cancelled
+        </h2>
+        <div
+          className="rounded-lg p-4 text-sm inline-flex items-center gap-2"
+          style={{
+            background: 'hsl(var(--bg-secondary))',
+            border: '1px solid hsl(var(--border))',
+            borderLeft: '3px solid #d97706',
+            color: 'hsl(var(--text-normal))',
+          }}
+        >
+          <Square className="w-4 h-4 text-amber-600" /> Cancelled by user — trace below shows progress up to the point of cancellation.
+        </div>
+      </section>
+    )
+  }
+
   if (meta.status === 'running') {
     return (
       <section className="mb-6">
@@ -508,11 +529,12 @@ function msToShort(ms: number): string {
 
 function StatusBadge({ status }: { status: RunMeta['status'] }) {
   const cfg = {
-    success: { cls: 'bg-green-100 text-green-700 border-green-200', Icon: CheckCircle2 },
-    running: { cls: 'bg-blue-100 text-blue-700 border-blue-200', Icon: Loader2 },
-    failed:  { cls: 'bg-red-100 text-red-700 border-red-200', Icon: XCircle },
-    skipped: { cls: 'bg-muted text-muted-foreground border-border', Icon: SkipForward },
-  }[status]
+    success:   { cls: 'bg-green-100 text-green-700 border-green-200',  Icon: CheckCircle2 },
+    running:   { cls: 'bg-blue-100 text-blue-700 border-blue-200',     Icon: Loader2 },
+    failed:    { cls: 'bg-red-100 text-red-700 border-red-200',        Icon: XCircle },
+    skipped:   { cls: 'bg-muted text-muted-foreground border-border',  Icon: SkipForward },
+    cancelled: { cls: 'bg-amber-50 text-amber-700 border-amber-200',   Icon: Square },
+  }[status] ?? { cls: 'bg-muted text-muted-foreground border-border', Icon: SkipForward }
   const Icon = cfg.Icon
   return (
     <span className={cn('inline-flex items-center gap-1 border px-1.5 py-0.5 rounded text-[11px] font-semibold', cfg.cls)}>
