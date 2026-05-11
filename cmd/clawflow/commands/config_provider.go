@@ -259,12 +259,17 @@ func newProviderTestCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			probeArgs := []string{
-				"-p", "--bare",
+			probeArgs := []string{"-p"}
+			// Only force --bare when an explicit API key is set. Empty key
+			// means OAuth/keychain, and --bare would skip that lookup.
+			if p.APIKey != "" {
+				probeArgs = append(probeArgs, "--bare")
+			}
+			probeArgs = append(probeArgs,
 				"--model", config.DefaultChatModel,
 				"--output-format", "text",
 				"say PONG",
-			}
+			)
 			c := exec.CommandContext(ctx, claude.Resolve(), probeArgs...)
 			c.Env = claude.EnvWithCredentials(os.Environ(), p.APIKey, p.BaseURL)
 			var stdout, stderr bytes.Buffer

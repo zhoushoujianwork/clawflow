@@ -9,6 +9,93 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TestSeedDefaultProvider verifies that the built-in OAuth fallback entry
+// is seeded exactly once and is disabled by default.
+func TestSeedDefaultProvider(t *testing.T) {
+	t.Run("seeds default provider on first load", func(t *testing.T) {
+		c := &config.Credentials{}
+		seeded := config.SeedDefaultProvider(c)
+		if !seeded {
+			t.Fatal("expected seeding to occur on fresh credentials")
+		}
+		if !c.DefaultProviderSeeded {
+			t.Error("expected DefaultProviderSeeded flag to be set")
+		}
+		if len(c.ClaudeProviders) != 1 {
+			t.Fatalf("expected 1 provider, got %d", len(c.ClaudeProviders))
+		}
+		p := c.ClaudeProviders[0]
+		if p.Name != config.DefaultProviderName {
+			t.Errorf("Name: got %q, want %q", p.Name, config.DefaultProviderName)
+		}
+		if p.APIKey != "" || p.BaseURL != "" {
+			t.Errorf("seeded provider should have empty key/base_url, got key=%q base=%q", p.APIKey, p.BaseURL)
+		}
+		if p.Enabled {
+			t.Error("seeded provider should be disabled by default")
+		}
+	})
+
+	t.Run("does not re-seed after user deletes entry", func(t *testing.T) {
+		c := &config.Credentials{DefaultProviderSeeded: true}
+		seeded := config.SeedDefaultProvider(c)
+		if seeded {
+			t.Fatal("expected no seeding when DefaultProviderSeeded is true")
+		}
+		if len(c.ClaudeProviders) != 0 {
+			t.Errorf("expected providers to remain empty, got %d", len(c.ClaudeProviders))
+		}
+	})
+
+	t.Run("marks seeded without duplicating existing entry", func(t *testing.T) {
+		c := &config.Credentials{
+			ClaudeProviders: []config.ClaudeProvider{
+				{Name: config.DefaultProviderName, Enabled: true},
+			},
+		}
+		seeded := config.SeedDefaultProvider(c)
+		if !seeded {
+			t.Fatal("expected SeedDefaultProvider to return true (flag flipped)")
+		}
+		if !c.DefaultProviderSeeded {
+			t.Error("expected DefaultProviderSeeded to be set")
+		}
+		if len(c.ClaudeProviders) != 1 {
+			t.Errorf("expected no duplicate entry, got %d providers", len(c.ClaudeProviders))
+		}
+	})
+
+	t.Run("coexists with migrated legacy provider", func(t *testing.T) {
+		c := &config.Credentials{
+			ClaudeAPIKey:  "sk-legacy",
+			ClaudeBaseURL: "https://legacy.example.com",
+		}
+		// Simulate LoadCredentials: migrate first, then seed.
+		if !config.MigrateLegacyProvider(c) {
+			t.Fatal("legacy migration should have occurred")
+		}
+		if !config.SeedDefaultProvider(c) {
+			t.Fatal("seeding should have occurred")
+		}
+		if len(c.ClaudeProviders) != 2 {
+			t.Fatalf("expected 2 providers (legacy + seeded), got %d", len(c.ClaudeProviders))
+		}
+		// Legacy keeps index 0 so it stays the primary.
+		if c.ClaudeProviders[0].APIKey != "sk-legacy" {
+			t.Errorf("index 0 should be migrated legacy, got %q", c.ClaudeProviders[0].APIKey)
+		}
+		if !c.ClaudeProviders[0].Enabled {
+			t.Error("legacy provider should remain enabled after seeding")
+		}
+		if c.ClaudeProviders[1].Name != config.DefaultProviderName {
+			t.Errorf("index 1 should be seeded default, got %q", c.ClaudeProviders[1].Name)
+		}
+		if c.ClaudeProviders[1].Enabled {
+			t.Error("seeded default should be disabled")
+		}
+	})
+}
+
 // TestMigrateLegacyProvider verifies that legacy single-provider fields are
 // migrated into ClaudeProviders[0] and that the migration is idempotent.
 func TestMigrateLegacyProvider(t *testing.T) {

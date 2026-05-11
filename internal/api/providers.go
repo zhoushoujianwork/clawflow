@@ -311,13 +311,19 @@ func HandleTestProvider(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), testClaudeTimeout)
 	defer cancel()
 
-	probeArgs := []string{
-		"-p",
-		"--bare",
+	probeArgs := []string{"-p"}
+	// Only force --bare when an explicit API key is configured. Empty key
+	// means the entry is the built-in OAuth fallback (seeded default) or a
+	// user-defined keychain-based entry — in both cases --bare would skip
+	// the claude CLI's keychain lookup and falsely fail the probe.
+	if p.APIKey != "" {
+		probeArgs = append(probeArgs, "--bare")
+	}
+	probeArgs = append(probeArgs,
 		"--model", config.DefaultChatModel,
 		"--output-format", "text",
 		"say PONG",
-	}
+	)
 	cmd := exec.CommandContext(ctx, claude.Resolve(), probeArgs...)
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), p.APIKey, p.BaseURL)
 

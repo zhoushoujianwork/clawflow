@@ -220,6 +220,14 @@ type Credentials struct {
 	// with (not replace) the defaults.
 	FailoverPatterns []string `yaml:"failover_patterns,omitempty"`
 
+	// DefaultProviderSeeded marks whether clawflow has already seeded the
+	// built-in "Anthropic Official (OAuth)" fallback entry into
+	// ClaudeProviders. Persisted so the seed is a one-shot operation: if
+	// the user deletes the seeded entry we must NOT re-create it on the
+	// next load. Default false means "seed on next load", which is the
+	// desired behaviour for existing users who upgrade into the feature.
+	DefaultProviderSeeded bool `yaml:"default_provider_seeded,omitempty"`
+
 	// ClaudeChatModel / ClaudeEvalModel / ClaudeOperatorModel are
 	// the three claude `--model` overrides clawflow uses, scoped by
 	// what the subprocess does. Stored in credentials.yaml because
@@ -329,6 +337,48 @@ func CredentialsPath() string {
 	return filepath.Join(home, ".clawflow", "config", "credentials.yaml")
 }
 
+// DefaultProviderName is the display name of the built-in OAuth fallback
+// provider seeded by SeedDefaultProvider. Kept as a constant so CLI / UI
+// can special-case the entry (e.g. render a helpful "run `claude /login`
+// first" hint) without string-matching duplicates.
+const DefaultProviderName = "Anthropic Official (OAuth)"
+
+// SeedDefaultProvider appends a built-in "Anthropic Official (OAuth)" entry
+// to ClaudeProviders when DefaultProviderSeeded is false. The seeded entry
+// carries no api_key and no base_url — empty values cause the runner to
+// leave ANTHROPIC_* env vars untouched, which in turn lets the claude CLI
+// fall back to the OAuth/keychain login the user completed via
+// `claude /login`. The entry is added with Enabled=false so fresh installs
+// with no usable credentials don't surface unexpected failover attempts;
+// the user flips the toggle in Settings once they've logged in.
+//
+// The function is idempotent: DefaultProviderSeeded guards against
+// re-creating the entry after the user deletes it. Returns true when a
+// seed was performed so callers can persist the updated credentials.
+func SeedDefaultProvider(c *Credentials) bool {
+	if c == nil || c.DefaultProviderSeeded {
+		return false
+	}
+	// Even if providers is empty right now, mark as seeded so we won't
+	// re-seed after the user deletes the entry later.
+	c.DefaultProviderSeeded = true
+	// Skip the append when a provider with the same name already exists
+	// (e.g. user manually created one). Still mark seeded so we don't try
+	// again later.
+	for _, p := range c.ClaudeProviders {
+		if p.Name == DefaultProviderName {
+			return true
+		}
+	}
+	c.ClaudeProviders = append(c.ClaudeProviders, ClaudeProvider{
+		Name:    DefaultProviderName,
+		BaseURL: "", // empty = use claude CLI default (api.anthropic.com)
+		APIKey:  "", // empty = fall back to OAuth/keychain via `claude /login`
+		Enabled: false,
+	})
+	return true
+}
+
 // MigrateLegacyProvider migrates the legacy single-provider fields
 // (ClaudeAPIKey + ClaudeBaseURL) into ClaudeProviders[0] when the list
 // is empty. This is idempotent: if ClaudeProviders is already populated
@@ -435,10 +485,15 @@ func LoadCredentials() (*Credentials, error) {
 	c.ClaudeEvalModel = envOrFile("CLAWFLOW_CLAUDE_EVAL_MODEL", c.ClaudeEvalModel)
 	c.ClaudeOperatorModel = envOrFile("CLAWFLOW_CLAUDE_OPERATOR_MODEL", c.ClaudeOperatorModel)
 
-	// Auto-migrate legacy single-provider fields to the providers list.
-	// Best-effort: a save failure is non-fatal — the migration will be
-	// retried on the next load.
-	if MigrateLegacyProvider(c) {
+	// Auto-migrate legacy single-provider fields to the providers list,
+	// then seed the built-in OAuth fallback entry on first load. Both are
+	// idempotent; a save failure is non-fatal because the operation will
+	// be retried on the next load.
+	mutated := MigrateLegacyProvider(c)
+	if SeedDefaultProvider(c) {
+		mutated = true
+	}
+	if mutated {
 		_ = SaveCredentials(c)
 	}
 
