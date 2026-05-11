@@ -29,12 +29,13 @@ import (
 // Repo/Issue. Action is "chat" or "generate"; the spawned command is
 // `clawflow project <action> <name>`.
 type chatSpawnRequest struct {
-	Repo    string `json:"repo,omitempty"`
-	Issue   int    `json:"issue,omitempty"`
-	Model   string `json:"model,omitempty"`
-	Mode    string `json:"mode,omitempty"`   // "issue" or "edit" — issue-level chat only
-	Project string `json:"project,omitempty"`
-	Action  string `json:"action,omitempty"` // "generate" or "chat" (project-scoped)
+	Repo     string `json:"repo,omitempty"`
+	Issue    int    `json:"issue,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Mode     string `json:"mode,omitempty"`    // "issue" or "edit" — issue-level chat only
+	Project  string `json:"project,omitempty"`
+	Action   string `json:"action,omitempty"`  // "generate" or "chat" (project-scoped)
+	Feedback bool   `json:"feedback,omitempty"` // spawn `clawflow feedback` (report issue to upstream repo)
 }
 
 // HandleChatSpawn POSTs spawn a clawflow-chat session in the user's
@@ -58,11 +59,11 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Require either a repo or a project target.
+	// Require either a repo, a project, or a feedback target.
 	hasRepo := strings.TrimSpace(req.Repo) != ""
 	hasProject := strings.TrimSpace(req.Project) != ""
-	if !hasRepo && !hasProject {
-		writeJSON(w, 400, map[string]string{"error": "repo or project is required"})
+	if !hasRepo && !hasProject && !req.Feedback {
+		writeJSON(w, 400, map[string]string{"error": "repo, project, or feedback is required"})
 		return
 	}
 
@@ -76,14 +77,20 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var parts []string
-	if hasProject {
+	switch {
+	case req.Feedback:
+		// Feedback-scoped spawn: `clawflow feedback`. No repo/issue/model
+		// plumbing — the feedback command hardcodes its target and pulls
+		// the model from credentials.yaml. --model is still honored if set.
+		parts = []string{shellEscape(self), "feedback"}
+	case hasProject:
 		// Project-scoped spawn: `clawflow project <action> <name>`
 		action := req.Action
 		if action != "generate" {
 			action = "chat" // default to chat
 		}
 		parts = []string{shellEscape(self), "project", action, shellEscape(req.Project)}
-	} else {
+	default:
 		// Repo-scoped spawn: `clawflow chat --repo <r> [--issue <n>] [--mode <m>]`
 		parts = []string{shellEscape(self), "chat", "--repo", shellEscape(req.Repo)}
 		if req.Issue > 0 {
@@ -94,7 +101,7 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if req.Model != "" {
+	if req.Model != "" && !req.Feedback {
 		parts = append(parts, "--model", shellEscape(req.Model))
 	}
 	cmdLine := strings.Join(parts, " ")

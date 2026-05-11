@@ -7,6 +7,7 @@ interface ChatTarget {
   mode?: 'issue' | 'edit'
   project?: string
   action?: 'generate' | 'chat'
+  feedback?: boolean
 }
 
 // SpawnError describes a chat-spawn failure. The drawer opens

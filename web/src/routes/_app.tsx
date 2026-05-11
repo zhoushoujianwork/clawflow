@@ -2,7 +2,7 @@ import { createFileRoute, Outlet, Link } from '@tanstack/react-router'
 import { Loader2 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { useTheme } from '../lib/useTheme'
-import { ChatProvider } from '../lib/chatContext'
+import { ChatProvider, useChatDrawer } from '../lib/chatContext'
 import { ChatDrawer } from '../components/ChatDrawer'
 import { SyncPopover } from '../components/SyncPopover'
 
@@ -194,6 +194,7 @@ function AppLayout() {
           </div>
 
           <div className="flex items-center gap-2">
+            <ReportIssueButton />
             <a
               href="https://github.com/zhoushoujianwork/clawflow"
               target="_blank"
@@ -232,5 +233,36 @@ function AppLayout() {
         <ChatDrawer />
       </div>
     </ChatProvider>
+  )
+}
+
+// ReportIssueButton sits in the top bar and spawns a `clawflow feedback`
+// session in the user's native terminal. The actual issue gets filed on
+// zhoushoujianwork/clawflow by Claude during the chat — we only launch it here.
+function ReportIssueButton() {
+  const { open } = useChatDrawer()
+  return (
+    <button
+      onClick={() => { void open({ feedback: true }) }}
+      className="w-7 h-7 flex items-center justify-center rounded-sm transition-colors hover:opacity-80"
+      style={{ background: 'hsl(var(--bg-panel))', color: 'hsl(var(--text-low))' }}
+      aria-label="Report an issue"
+      title="Report an issue"
+    >
+      <svg
+        viewBox="0 0 16 16"
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M14 9.5a1.5 1.5 0 0 1-1.5 1.5h-6L3 14V4.5A1.5 1.5 0 0 1 4.5 3h8A1.5 1.5 0 0 1 14 4.5v5z" />
+        <path d="M8 5.5v3" />
+        <path d="M6.5 7h3" />
+      </svg>
+    </button>
   )
 }
