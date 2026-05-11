@@ -618,6 +618,23 @@ func (c *Client) MergePR(repo string, prNumber int) error {
 	return nil
 }
 
+// DeleteBranch removes a branch via DELETE /projects/:id/repository/branches/:branch.
+// Treats 404 as success (already gone) for idempotency.
+func (c *Client) DeleteBranch(repo string, branch string) error {
+	if branch == "" {
+		return fmt.Errorf("gitlab delete branch: empty branch name")
+	}
+	path := fmt.Sprintf("/projects/%s/repository/branches/%s", projectID(repo), url.PathEscape(branch))
+	data, status, err := c.doJSON("DELETE", path, nil)
+	if err != nil {
+		return err
+	}
+	if status == 204 || status == 404 {
+		return nil
+	}
+	return fmt.Errorf("gitlab delete branch: HTTP %d: %s", status, data)
+}
+
 func (c *Client) GetPRMergeability(repo string, prNumber int) (vcs.MergeStatus, error) {
 	path := fmt.Sprintf("/projects/%s/merge_requests/%d", projectID(repo), prNumber)
 	data, status, err := c.doJSON("GET", path, nil)

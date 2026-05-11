@@ -130,6 +130,11 @@ type Client interface {
 	// Merge
 	MergePR(repo string, prNumber int) error
 	GetPRMergeability(repo string, prNumber int) (MergeStatus, error)
+
+	// Branches
+	// DeleteBranch removes a branch from the remote. Implementations should
+	// treat "branch already gone" as a non-error (idempotent).
+	DeleteBranch(repo string, branch string) error
 }
 
 // MergeStatus represents whether a PR can be merged.

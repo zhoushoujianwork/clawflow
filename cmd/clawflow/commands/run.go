@@ -1004,6 +1004,22 @@ func runPostAutomation(j *runJob, outcome, output, prefix string) {
 		// is already shown in GitHub/GitLab UI. Adding a comment on
 		// top was redundant noise.
 		fmt.Fprintf(os.Stderr, "%s ✓ auto-merged PR #%d\n", prefix, prNum)
+
+		// Clean up the remote head branch once the merge lands. We read
+		// the PR again instead of reusing an earlier fetch because the
+		// mergeability check happened before merge and the branch name
+		// lives on the PR object anyway. Failures here are non-fatal:
+		// the merge already succeeded, and stale branches are a minor
+		// housekeeping issue, not something worth surfacing on the issue.
+		if pr, err := j.client.GetPR(j.repo, prNum); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ branch cleanup: lookup PR failed: %v\n", prefix, err)
+		} else if head := pr.HeadBranch; head != "" && head != j.repoCfg.BaseBranch {
+			if err := j.client.DeleteBranch(j.repo, head); err != nil {
+				fmt.Fprintf(os.Stderr, "%s ⚠ branch cleanup: delete %s failed: %v\n", prefix, head, err)
+			} else {
+				fmt.Fprintf(os.Stderr, "%s ✓ deleted branch %s\n", prefix, head)
+			}
+		}
 	}
 
 	// Tracking issue: after decompose creates sub-issues, add progress-check

@@ -703,6 +703,27 @@ func (c *Client) MergePRDetailed(repo string, prNumber int) (string, error) {
 	return raw.SHA, nil
 }
 
+// DeleteBranch removes a branch via DELETE /repos/:owner/:name/git/refs/heads/:branch.
+// Treats 404/422 as success (already gone) for idempotency.
+func (c *Client) DeleteBranch(repo string, branch string) error {
+	if branch == "" {
+		return fmt.Errorf("github delete branch: empty branch name")
+	}
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/git/refs/heads/%s", owner, name, branch)
+	data, status, err := c.do("DELETE", path, nil)
+	if err != nil {
+		return err
+	}
+	if status == 204 || status == 404 || status == 422 {
+		return nil
+	}
+	return fmt.Errorf("github delete branch: HTTP %d: %s", status, data)
+}
+
 // PRReview is a single review on a pull request, as returned by
 // GET /repos/:owner/:repo/pulls/:number/reviews.
 type PRReview struct {
