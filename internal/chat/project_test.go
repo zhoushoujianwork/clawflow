@@ -334,6 +334,52 @@ func TestBuildPilotContext_StandardPlays(t *testing.T) {
 	}
 }
 
+func TestBuildPilotContext_SOPDriftAndDeploymentUpdate(t *testing.T) {
+	repos := []PilotRepoDigest{}
+	prompt := BuildPilotContext("p", "", "## Logs\n\n```bash\ncat /tmp/old.log\n```", nil, repos)
+
+	// 4th PATROL output must be present
+	if !containsStr(prompt, "PATROL: SOP drift") {
+		t.Error("missing 4th PATROL output (SOP drift) in Play 3 contract")
+	}
+	if !containsStr(prompt, "web.pid") {
+		t.Error("missing web.pid activity signal in SOP drift detection rubric")
+	}
+	if !containsStr(prompt, "runs.json") {
+		t.Error("missing runs.json activity signal in SOP drift detection rubric")
+	}
+	if !containsStr(prompt, "pilot-runs/") {
+		t.Error("missing pilot-runs/ activity signal in SOP drift detection rubric")
+	}
+
+	// deployment.md update protocol section must be present
+	if !containsStr(prompt, "Updating the project's runtime SOP (deployment.md)") {
+		t.Error("missing 'Updating the project's runtime SOP (deployment.md)' section")
+	}
+	if !containsStr(prompt, "```deployment.md") {
+		t.Error("missing fenced deployment.md block in update protocol")
+	}
+	if !containsStr(prompt, "verified") {
+		t.Error("missing verification requirement in deployment.md update protocol")
+	}
+	// Must note that this is a monitoring duty action, not doc_sync
+	if !containsStr(prompt, "monitoring") {
+		t.Error("missing monitoring duty reference in deployment.md update protocol")
+	}
+}
+
+func TestBuildPilotContext_DeploymentUpdateProtocolAlwaysPresent(t *testing.T) {
+	// The deployment.md update protocol section should appear even when
+	// deployment.md is empty — Pilot may discover the file is missing and
+	// create it from scratch.
+	prompt := BuildPilotContext("p", "", "", nil, []PilotRepoDigest{})
+
+	if !containsStr(prompt, "Updating the project's runtime SOP (deployment.md)") {
+		t.Error("deployment.md update protocol section must be present even when deployment.md is empty")
+	}
+}
+
+
 func TestBuildProjectChatContext_AutomationModel(t *testing.T) {
 	repos := []ProjectChatRepo{{Name: "owner/repo-a", LocalPath: "/tmp/repo-a"}}
 	ctx := BuildProjectChatContext("my-proj", repos, "", "")

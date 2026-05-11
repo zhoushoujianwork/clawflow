@@ -369,6 +369,19 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 				fmt.Fprintf(os.Stderr, "[pilot] %s: context.md updated by Pilot\n", p.Name)
 			}
 		}
+		// On success, look for an updated deployment.md in the output and
+		// persist it. Symmetric to context.md: Pilot may rewrite the runtime
+		// SOP when Play 3 detects that the existing log commands don't match
+		// the project's actual log layout (SOP drift). Only honour writes on
+		// a successful wake — a failed wake's view of the environment may be
+		// inconsistent.
+		if updated := chat.ExtractFencedBlock(output, "deployment.md"); updated != "" && strings.TrimSpace(updated) != strings.TrimSpace(deploymentMD) {
+			if werr := project.WriteDeployment(p.Name, updated); werr != nil {
+				fmt.Fprintf(os.Stderr, "[pilot] %s: write deployment.md: %v\n", p.Name, werr)
+			} else {
+				fmt.Fprintf(os.Stderr, "[pilot] %s: deployment.md updated by Pilot\n", p.Name)
+			}
+		}
 	}
 
 	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil {
