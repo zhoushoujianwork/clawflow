@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Sparkles, Loader2, X } from 'lucide-react'
+import { Sparkles, Loader2, X, Info } from 'lucide-react'
 import { cn } from '../lib/utils'
 
 // useDocUpdater is the "Update with AI" affordance shared by the three
@@ -40,11 +40,17 @@ export function useDocUpdater({ project, file, onUpdated }: UseDocUpdaterProps):
   const [instructions, setInstructions] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // noChangeReason is set when claude explicitly responds with the
+  // NO-CHANGE marker (audit path) — the doc wasn't written and we
+  // surface the model's one-line explanation instead of treating it
+  // as an error. Cleared on next open/submit.
+  const [noChangeReason, setNoChangeReason] = useState<string | null>(null)
 
   function close() {
     setOpen(false)
     setInstructions('')
     setError(null)
+    setNoChangeReason(null)
   }
 
   async function submit() {
@@ -52,16 +58,33 @@ export function useDocUpdater({ project, file, onUpdated }: UseDocUpdaterProps):
     if (!text || submitting) return
     setSubmitting(true)
     setError(null)
+    setNoChangeReason(null)
     try {
       const r = await fetch('/api/project/update-doc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project, file, instructions: text }),
       })
-      const d = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string }
+      const d = (await r.json().catch(() => ({}))) as {
+        ok?: boolean
+        action?: 'updated' | 'no_change'
+        no_change_reason?: string
+        error?: string
+      }
       if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
-      close()
-      onUpdated()
+      if (d.action === 'no_change') {
+        // Audit path: doc unchanged, show claude's reason inline. Form
+        // stays open so the user can refine instructions and try again
+        // ("no, definitely update X anyway").
+        setNoChangeReason(d.no_change_reason || 'Claude reviewed and found no changes warranted.')
+        setInstructions('')
+      } else {
+        // Rewrite path: doc was overwritten on the server. Close the
+        // form and trigger a refetch so the new content shows up in
+        // the markdown panel above.
+        close()
+        onUpdated()
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'update failed')
     } finally {
@@ -127,11 +150,20 @@ export function useDocUpdater({ project, file, onUpdated }: UseDocUpdaterProps):
         value={instructions}
         onChange={e => setInstructions(e.target.value)}
         onKeyDown={onKeyDown}
-        placeholder={`What should change in ${file}? e.g. "add a section about deployment to staging", "remove outdated Foo references", "make the testing steps more concise"`}
+        placeholder={`What should change in ${file}? e.g. "add a section about deployment to staging", "remove outdated Foo references", "看下要不要更新"`}
         rows={3}
         disabled={submitting}
         className="w-full resize-none text-xs font-sans px-3 py-2 rounded-lg bg-card border border-border focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
       />
+      {noChangeReason && (
+        <div className="text-xs text-blue-800 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 rounded-lg px-3 py-2 flex items-start gap-2">
+          <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
+          <div className="flex-1 min-w-0">
+            <div className="font-medium mb-0.5">No change needed</div>
+            <div className="text-blue-700 dark:text-blue-400 break-words">{noChangeReason}</div>
+          </div>
+        </div>
+      )}
       {error && <p className="text-xs text-red-600 dark:text-red-400 break-all">{error}</p>}
       <div className="flex items-center justify-between gap-2">
         <span className="text-[11px] text-muted-foreground">

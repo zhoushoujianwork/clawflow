@@ -210,13 +210,41 @@ func ExtractLastContextMD(output string) string {
 	return extractFencedBlock(collectAssistantText(output), "context.md")
 }
 
-// ExtractFencedDoc is the generic form: scans a stream-json output and
-// returns the content of the last fenced block whose info string equals
-// tag (e.g. "context.md", "testing.md", "deployment.md"). Returns "" if
-// none found. Used by the /api/project/update-doc handler where the
-// target filename is supplied by the caller.
-func ExtractFencedDoc(output, tag string) string {
-	return extractFencedBlock(collectAssistantText(output), tag)
+// ExtractFencedBlock is the plain-text form of the extractor: scans
+// text directly (no stream-json JSON-per-line parsing) and returns the
+// content of the last fenced block whose info string equals tag (e.g.
+// "context.md", "testing.md", "deployment.md"). Returns "" if none
+// found.
+//
+// Use this when the input is already a plain assistant-text string —
+// e.g. the value returned by operator.RunClaude, which internally
+// parses claude's stream-json and hands back just the final text. The
+// stream-json-aware variants (ExtractLastContextMD / ExtractLastTestingMD)
+// are for callers that captured raw stream-json themselves (the CLI
+// `clawflow project chat` path).
+func ExtractFencedBlock(text, tag string) string {
+	return extractFencedBlock(text, tag)
+}
+
+// ExtractNoChangeMarker scans plain assistant text for a line shaped
+// like `NO-CHANGE: <reason>` and returns the reason (trimmed). Empty
+// when no such line is found. The doc-update flow accepts this marker
+// as an alternative to a fenced block: the user might ask a question
+// ("does this still apply?") rather than an edit ("add a section on
+// X"); claude is allowed to decline the rewrite and explain why.
+//
+// Only the FIRST such line is honoured — a model that emits both a
+// fenced block AND a NO-CHANGE marker is contradictory, and the doc
+// handler treats the fenced block as the authoritative outcome.
+func ExtractNoChangeMarker(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		const prefix = "NO-CHANGE:"
+		if strings.HasPrefix(trimmed, prefix) {
+			return strings.TrimSpace(trimmed[len(prefix):])
+		}
+	}
+	return ""
 }
 
 // ExtractLastTestingMD is the same as ExtractLastContextMD but for the

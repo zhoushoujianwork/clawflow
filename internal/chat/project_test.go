@@ -103,6 +103,72 @@ func TestExtractLastContextMD(t *testing.T) {
 	}
 }
 
+func TestExtractFencedBlock_ExportedSmoke(t *testing.T) {
+	// The exported ExtractFencedBlock is a plain-text wrapper used by
+	// the /api/project/update-doc handler whose input is already-parsed
+	// assistant text (not raw stream-json). Smoke-test that it routes
+	// to the same extractor as the unexported variant.
+	input := "Some preamble\n```deployment.md\n# Deploy\n\nSSH then journalctl.\n```\nA trailing comment."
+	got := ExtractFencedBlock(input, "deployment.md")
+	want := "# Deploy\n\nSSH then journalctl."
+	if got != want {
+		t.Errorf("ExtractFencedBlock() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractNoChangeMarker(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "marker on its own line",
+			input: "NO-CHANGE: doc already covers #117 and #128",
+			want:  "doc already covers #117 and #128",
+		},
+		{
+			name:  "marker with surrounding whitespace",
+			input: "\n   NO-CHANGE: nothing material shipped since last update   \n",
+			want:  "nothing material shipped since last update",
+		},
+		{
+			name:  "marker mixed with prose",
+			input: "Here is my review:\n\nNO-CHANGE: still accurate\n\nThanks.",
+			want:  "still accurate",
+		},
+		{
+			name:  "first marker wins when duplicated",
+			input: "NO-CHANGE: first reason\n\nNO-CHANGE: second reason",
+			want:  "first reason",
+		},
+		{
+			name:  "no marker present",
+			input: "Some discussion text\nwith no marker line",
+			want:  "",
+		},
+		{
+			name:  "marker requires leading prefix — not a substring",
+			input: "the user said NO-CHANGE: foo in passing",
+			want:  "",
+		},
+		{
+			name:  "empty input",
+			input: "",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractNoChangeMarker(tt.input)
+			if got != tt.want {
+				t.Errorf("ExtractNoChangeMarker() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildProjectChatContext(t *testing.T) {
 	repos := []ProjectChatRepo{
 		{Name: "owner/repo-a", LocalPath: "/tmp/repo-a"},

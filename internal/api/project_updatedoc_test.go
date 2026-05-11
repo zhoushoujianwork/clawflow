@@ -27,6 +27,27 @@ func TestBuildDocUpdatePrompt_IncludesCurrentAndInstructions(t *testing.T) {
 	}
 }
 
+func TestBuildDocUpdatePrompt_OffersBothOutcomes(t *testing.T) {
+	// The prompt must teach claude that it has two valid responses —
+	// rewrite (fenced block) for edit commands, NO-CHANGE marker for
+	// audit questions where the doc is already accurate. Without the
+	// no-change escape hatch, audit-style requests (the user's
+	// "看下要不要更新" case) always fail validation.
+	prompt := buildDocUpdatePrompt("p", "context.md", "ctx", "is this still accurate?")
+
+	for _, want := range []string{
+		"Rewrite path",
+		"No-change path",
+		"NO-CHANGE:",
+		"Picking between A and B",
+		"Never both. Never neither",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q — two-outcome protocol not advertised\n--- prompt ---\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildDocUpdatePrompt_EmptyCurrentFlagged(t *testing.T) {
 	prompt := buildDocUpdatePrompt("p", "deployment.md", "", "Add SSH log retrieval")
 

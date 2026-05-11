@@ -38,9 +38,19 @@ type projectUpdateDocRequest struct {
 }
 
 type projectUpdateDocResponse struct {
-	OK         bool   `json:"ok"`
-	NewContent string `json:"new_content"`
-	CharCount  int    `json:"char_count"`
+	OK bool `json:"ok"`
+	// Action is the outcome the model chose: "updated" when claude
+	// emitted a fenced block (file was rewritten) or "no_change" when
+	// claude responded that no edits are warranted (file left as-is).
+	Action string `json:"action"`
+	// NewContent is the file's content AFTER the write — only populated
+	// when Action=="updated". For "no_change" it is empty since the
+	// file wasn't touched and the frontend already has the value.
+	NewContent string `json:"new_content,omitempty"`
+	CharCount  int    `json:"char_count,omitempty"`
+	// NoChangeReason is the one-line explanation claude gave for not
+	// updating. Only populated when Action=="no_change".
+	NoChangeReason string `json:"no_change_reason,omitempty"`
 }
 
 // HandleProjectUpdateDoc rewrites one project-level markdown file
@@ -51,8 +61,8 @@ type projectUpdateDocResponse struct {
 //
 // The blocking design is deliberate — users explicitly asked for the
 // simplest possible flow, and the doc-update task is short (one claude
-// turn producing a 1-5KB fenced block). Background-job tracking like
-// HealthCheck has would be overkill here.
+// turn producing a 1-5KB fenced block). Background-job tracking and a
+// polling status endpoint would be overkill for this shape of work.
 func HandleProjectUpdateDoc(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -113,25 +123,38 @@ func HandleProjectUpdateDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newContent := chat.ExtractFencedDoc(output, file)
-	if strings.TrimSpace(newContent) == "" {
-		writeJSON(w, 502, map[string]string{
-			"error": fmt.Sprintf("claude did not emit a fenced ```%s block; raw output: %s", file, truncate(output, 800)),
+	// Two valid outcomes — try fenced block first (rewrite path), then
+	// the NO-CHANGE marker (audit path). The fenced block wins if both
+	// are present, since a model that actually emitted new content is
+	// asserting the doc needed updating regardless of any marker it
+	// also wrote.
+	newContent := chat.ExtractFencedBlock(output, file)
+	if strings.TrimSpace(newContent) != "" {
+		if err := writeDocFile(name, file, newContent); err != nil {
+			writeJSON(w, 500, map[string]string{"error": "write doc: " + err.Error()})
+			return
+		}
+		_ = snapshot.WriteProjects()
+		writeJSON(w, 200, projectUpdateDocResponse{
+			OK:         true,
+			Action:     "updated",
+			NewContent: newContent,
+			CharCount:  len(newContent),
 		})
 		return
 	}
 
-	if err := writeDocFile(name, file, newContent); err != nil {
-		writeJSON(w, 500, map[string]string{"error": "write doc: " + err.Error()})
+	if reason := chat.ExtractNoChangeMarker(output); reason != "" {
+		writeJSON(w, 200, projectUpdateDocResponse{
+			OK:             true,
+			Action:         "no_change",
+			NoChangeReason: reason,
+		})
 		return
 	}
 
-	_ = snapshot.WriteProjects()
-
-	writeJSON(w, 200, projectUpdateDocResponse{
-		OK:         true,
-		NewContent: newContent,
-		CharCount:  len(newContent),
+	writeJSON(w, 502, map[string]string{
+		"error": fmt.Sprintf("claude emitted neither a fenced ```%s block nor a `NO-CHANGE:` marker; raw output: %s", file, truncate(output, 800)),
 	})
 }
 
@@ -189,9 +212,14 @@ func buildDocUpdatePrompt(projectName, file, current, instructions string) strin
 
 	fmt.Fprintln(&b, "## Output protocol")
 	fmt.Fprintln(&b)
-	fmt.Fprintf(&b, "Apply the user's instructions to the current content. Emit the COMPLETE\n")
-	fmt.Fprintf(&b, "updated document inside a fenced code block whose info string is\n")
-	fmt.Fprintf(&b, "**literally** `%s`:\n\n", file)
+	fmt.Fprintln(&b, "The user's request might be a direct edit command (\"add a section")
+	fmt.Fprintln(&b, "about X\", \"remove Y\") OR an audit question (\"is this still accurate?\",")
+	fmt.Fprintln(&b, "\"看下要不要更新\"). You have TWO valid responses; pick exactly one.")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "### A) Rewrite path — when changes are warranted")
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "Emit the COMPLETE updated document inside a fenced code block whose\n")
+	fmt.Fprintf(&b, "info string is **literally** `%s`:\n\n", file)
 	fmt.Fprintf(&b, "    ```%s\n", file)
 	fmt.Fprintln(&b, "    <full updated document content>")
 	fmt.Fprintln(&b, "    ```")
@@ -203,7 +231,26 @@ func buildDocUpdatePrompt(projectName, file, current, instructions string) strin
 	fmt.Fprintln(&b, "- Preserve correct existing content. Only change what the user asked")
 	fmt.Fprintln(&b, "  for, plus minimal edits needed for consistency.")
 	fmt.Fprintln(&b, "- Emit at most ONE fenced block per response.")
-	fmt.Fprintln(&b, "- Do not add commentary outside the block.")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "### B) No-change path — when the doc is already accurate")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "If after reviewing the current content against the request you find")
+	fmt.Fprintln(&b, "no edits are warranted, emit a single line and nothing else:")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "    NO-CHANGE: <one-sentence reason>")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "Example: `NO-CHANGE: context.md already covers #117 and #128; nothing")
+	fmt.Fprintln(&b, "material has shipped since the last update`.")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "### Picking between A and B")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "- If the user's instruction is a clear edit command — use A.")
+	fmt.Fprintln(&b, "- If the user is asking whether the doc needs updating AND after a")
+	fmt.Fprintln(&b, "  fair review the doc is already accurate — use B.")
+	fmt.Fprintln(&b, "- If the user is asking whether the doc needs updating AND you find")
+	fmt.Fprintln(&b, "  gaps worth filling — use A (with the new content).")
+	fmt.Fprintln(&b, "- Never both. Never neither. Do not add commentary outside the")
+	fmt.Fprintln(&b, "  chosen output (the runner ignores it and will reject the response).")
 
 	return b.String()
 }
