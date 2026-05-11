@@ -5,7 +5,6 @@ import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
 import { useDocUpdater } from '../components/DocUpdater'
-import { useHealthCheck } from '../components/HealthCheckCard'
 import {
   IssueList,
   PROJECT_SECTIONS,
@@ -84,11 +83,6 @@ function ProjectDetail() {
   const navigate = useNavigate()
   const chatDrawer = useChatDrawer()
 
-  // Health-check state lives in the parent so the compact summary
-  // card (status row) and the full-width review panel (under the
-  // repo list) can both consume the same hook instance.
-  const healthCheck = useHealthCheck(name)
-
   const [project, setProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -121,8 +115,6 @@ function ProjectDetail() {
 
   // Automation popover
   const [automationPopoverOpen, setAutomationPopoverOpen] = useState(false)
-  // Health check popover
-  const [healthCheckPopoverOpen, setHealthCheckPopoverOpen] = useState(false)
 
   // Generate context state. Used only by the empty-state Initialize
   // button — once context.md exists, all further edits go through
@@ -537,17 +529,13 @@ function ProjectDetail() {
                 >
                   <MessageSquare className="w-3 h-3" /> chat
                 </button>
-                {/* At-a-glance status pills: Pilot scheduling state and
-                    latest health-check outcome. They duplicate info
-                    surfaced lower on the page on purpose — the user
-                    might be looking at the repo list far from those
-                    sections and still want a quick read on whether
-                    automation is on and whether the docs are healthy. */}
+                {/* At-a-glance Pilot scheduling pill — a quick read on
+                    whether automation is on without scrolling down. */}
                 <span>·</span>
                 <div className="relative">
                   <button
                     type="button"
-                    onClick={() => { setAutomationPopoverOpen(o => !o); setHealthCheckPopoverOpen(false) }}
+                    onClick={() => setAutomationPopoverOpen(o => !o)}
                     className={cn(
                       'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium transition-colors',
                       project.automation?.enabled
@@ -626,94 +614,6 @@ function ProjectDetail() {
                           </button>
                         </div>
                         {automationError && <p className="mt-2 text-xs text-red-600">{automationError}</p>}
-                      </div>
-                    </>
-                  )}
-                </div>
-                <div className="relative">
-                  {healthCheck.status === 'done' && healthCheck.result?.outcome === 'healthy' && (
-                    <button
-                      type="button"
-                      onClick={() => { setHealthCheckPopoverOpen(o => !o); setAutomationPopoverOpen(false) }}
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-950/60 transition-colors"
-                    >
-                      ✓ healthy
-                      <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
-                    </button>
-                  )}
-                  {healthCheck.status === 'done' && healthCheck.result?.outcome === 'changes-proposed' && (
-                    <button
-                      type="button"
-                      onClick={() => { setHealthCheckPopoverOpen(o => !o); setAutomationPopoverOpen(false) }}
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-950/60 transition-colors"
-                    >
-                      ⚠ {healthCheck.result.changes.length} pending
-                      <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
-                    </button>
-                  )}
-                  {healthCheck.status === 'running' && (
-                    <button
-                      type="button"
-                      onClick={() => { setHealthCheckPopoverOpen(o => !o); setAutomationPopoverOpen(false) }}
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-950/60 transition-colors"
-                    >
-                      <Loader2 className="w-2.5 h-2.5 animate-spin" /> running
-                    </button>
-                  )}
-                  {healthCheck.status === 'idle' && (
-                    <button
-                      type="button"
-                      onClick={() => { setHealthCheckPopoverOpen(o => !o); setAutomationPopoverOpen(false) }}
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700/60 transition-colors"
-                    >
-                      health check
-                      <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
-                    </button>
-                  )}
-                  {healthCheckPopoverOpen && (
-                    <>
-                      <div className="fixed inset-0 z-10" onClick={() => setHealthCheckPopoverOpen(false)} />
-                      <div className="absolute left-0 top-full mt-2 z-20 w-80 bg-card border border-border rounded-xl shadow-lg p-4">
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="text-sm font-semibold text-foreground">Health Check</span>
-                          <button type="button" onClick={() => setHealthCheckPopoverOpen(false)} className="text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5" /></button>
-                        </div>
-                        <p className="text-xs text-muted-foreground mb-3">
-                          Audits each repo's CLAUDE.md and project docs against a 12-dimension rubric.
-                        </p>
-                        {healthCheck.status === 'done' && healthCheck.endedAt && (
-                          <p className="text-[11px] text-muted-foreground mb-3 tabular-nums">
-                            Last run {new Date(healthCheck.endedAt).toLocaleString()}
-                          </p>
-                        )}
-                        {healthCheck.error && (
-                          <div className="mb-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
-                            {healthCheck.error}
-                          </div>
-                        )}
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => { healthCheck.handleRun(); setHealthCheckPopoverOpen(false) }}
-                            disabled={healthCheck.status === 'running'}
-                            className={cn(
-                              'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
-                              'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
-                            )}
-                          >
-                            {healthCheck.status === 'running' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5" />}
-                            {healthCheck.status === 'running' ? 'Running…' : healthCheck.status === 'done' ? 'Re-run' : 'Run'}
-                          </button>
-                          {healthCheck.result?.outcome === 'changes-proposed' && (
-                            <button
-                              type="button"
-                              onClick={() => setHealthCheckPopoverOpen(false)}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
-                            >
-                              View changes
-                            </button>
-                          )}
-                        </div>
                       </div>
                     </>
                   )}
@@ -879,7 +779,7 @@ function ProjectDetail() {
 
           {pilotRunDetail && <PilotRunDetailModal run={pilotRunDetail} onClose={() => setPilotRunDetail(null)} />}
 
-          {/* Member repos — moved above automation/health-check so the
+          {/* Member repos — moved above the doc sections so the
               user sees the repo list before the config controls. */}
           <section className="mb-6">
             <div className="flex items-center justify-between mb-2">

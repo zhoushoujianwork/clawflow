@@ -122,7 +122,6 @@ func TestIsExcludedProjectFile(t *testing.T) {
 		name string
 		want bool
 	}{
-		{"health-check.json", true},
 		{"generate-context.json", true},
 		{"generate-foo.json", true},
 		{"context.md", false},
@@ -148,7 +147,6 @@ func TestIsSyncableProjectFile(t *testing.T) {
 		{"project.yaml", true},
 		{"testing.md", true},
 		{"README.MD", true}, // case-insensitive extension check
-		{"health-check.json", false},
 		{"binary", false},
 		{"data.json", false},
 	}
@@ -168,8 +166,7 @@ func TestDiscoverProjectAssets(t *testing.T) {
 	//   myapp/
 	//     context.md          ← should be included
 	//     project.yaml        ← should be included
-	//     health-check.json   ← excluded (static list)
-	//     generate-ctx.json   ← excluded (pattern)
+	//     generate-ctx.json   ← excluded (generate-* pattern)
 	//   bbclaw/
 	//     testing.md          ← should be included
 	//     deployment.md       ← should be included
@@ -189,7 +186,6 @@ func TestDiscoverProjectAssets(t *testing.T) {
 
 	writeFile(tmpRoot, "myapp", "context.md")
 	writeFile(tmpRoot, "myapp", "project.yaml")
-	writeFile(tmpRoot, "myapp", "health-check.json")
 	writeFile(tmpRoot, "myapp", "generate-ctx.json")
 	writeFile(tmpRoot, "bbclaw", "testing.md")
 	writeFile(tmpRoot, "bbclaw", "deployment.md")
@@ -236,7 +232,6 @@ func TestDiscoverProjectAssets(t *testing.T) {
 	}
 	// Ensure excluded files are absent.
 	for _, excluded := range []string{
-		"projects--myapp--health-check.json",
 		"projects--myapp--generate-ctx.json",
 		"projects--bbclaw--data.bin",
 	} {

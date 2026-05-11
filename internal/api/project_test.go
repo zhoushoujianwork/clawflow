@@ -9,8 +9,7 @@ import (
 
 // TestSaveLoadGenerateJob_Roundtrip locks the on-disk shape of a
 // persisted generate-context job and verifies load returns the same
-// fields. Same pattern as TestSaveLoadHealthCheckJob_Roundtrip — kept
-// separate per package boundary.
+// fields after a fresh process boot.
 func TestSaveLoadGenerateJob_Roundtrip(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)

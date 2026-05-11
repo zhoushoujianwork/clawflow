@@ -975,7 +975,7 @@ function SyncSection() {
         <p>
           <span className="font-medium text-muted-foreground">Never synced:</span>{' '}
           credentials (tokens, API keys), <code className="text-[10px] bg-secondary px-1 rounded">local_path</code> overrides,
-          and runtime caches (<code className="text-[10px] bg-secondary px-1 rounded">health-check.json</code>, <code className="text-[10px] bg-secondary px-1 rounded">generate-*.json</code>).
+          and runtime caches (<code className="text-[10px] bg-secondary px-1 rounded">generate-*.json</code>).
         </p>
         <details className="pt-1">
           <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">How it works</summary>

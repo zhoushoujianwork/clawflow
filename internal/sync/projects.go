@@ -9,26 +9,12 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 )
 
-// excludedProjectFiles is the set of filenames inside a project directory
-// that must never be synced to the Gist. These are runtime artefacts or
-// generated caches that are machine-specific and meaningless on another
-// machine.
-var excludedProjectFiles = map[string]bool{
-	"health-check.json": true,
-}
-
 // isExcludedProjectFile reports whether a filename (base name only) should
-// be excluded from sync. In addition to the static exclusion list, any file
-// matching the "generate-*.json" pattern is excluded.
+// be excluded from sync. Any file matching the "generate-*.json" pattern
+// is excluded — those are async-job state caches that are machine-specific
+// and meaningless on another machine.
 func isExcludedProjectFile(name string) bool {
-	if excludedProjectFiles[name] {
-		return true
-	}
-	// Exclude generate-*.json cache files.
-	if strings.HasPrefix(name, "generate-") && strings.HasSuffix(name, ".json") {
-		return true
-	}
-	return false
+	return strings.HasPrefix(name, "generate-") && strings.HasSuffix(name, ".json")
 }
 
 // isSyncableProjectFile reports whether a file inside a project directory

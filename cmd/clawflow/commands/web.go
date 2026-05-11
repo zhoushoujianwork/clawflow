@@ -303,9 +303,6 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/project/automation", api.HandleProjectAutomation)
 			mux.HandleFunc("/api/project/get", api.HandleProjectGet)
 			mux.HandleFunc("/api/project/update-doc", api.HandleProjectUpdateDoc)
-			mux.HandleFunc("/api/project/health-check/run", api.HandleProjectHealthCheckRun)
-			mux.HandleFunc("/api/project/health-check/status", api.HandleProjectHealthCheckStatus)
-			mux.HandleFunc("/api/project/health-check/apply", api.HandleProjectHealthCheckApply)
 			mux.HandleFunc("/api/project/pilot-runs", api.HandleProjectPilotRuns)
 			mux.HandleFunc("/api/project/pm-runs", api.HandleProjectPilotRuns) // deprecated alias
 			mux.HandleFunc("/api/sync/status", api.HandleSyncStatus)

@@ -47,9 +47,9 @@ var (
 )
 
 // generateJobStorePath is the on-disk JSON for the most recent
-// completed generate-context run. Sits next to context.md /
-// testing.md / health-check.json under the project directory so all
-// per-project state cleans up together when the project is deleted.
+// completed generate-context run. Sits next to context.md / testing.md
+// under the project directory so all per-project state cleans up
+// together when the project is deleted.
 func generateJobStorePath(projectName string) string {
 	return filepath.Join(project.ProjectDir(projectName), "generate-context.json")
 }

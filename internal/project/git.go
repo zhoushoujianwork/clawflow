@@ -9,7 +9,7 @@ import (
 )
 
 // projectGitignore is written to .gitignore on git init. JSON files are
-// runtime state (health-check results, generate job status) that change
+// runtime state (generate-job status, transient caches) that change
 // frequently and carry no value in version history. Only the markdown
 // docs and project.yaml are worth tracking.
 const projectGitignore = `# Runtime state — not worth versioning
