@@ -316,9 +316,9 @@ export function ChatPanel(props: ChatPanelProps): JSX.Element {
                     {draftTag}
                   </span>
                   <span className="text-xs text-muted-foreground">·</span>
-                  <span className="text-xs font-mono text-muted-foreground truncate">{project}</span>
+                  <span className="text-xs font-mono text-muted-foreground truncate" title={project}>{project}</span>
                 </div>
-                <p className="text-xs text-muted-foreground mt-0.5 truncate">{meta.subtitle}</p>
+                <p className="text-xs text-muted-foreground mt-0.5 truncate" title={meta.subtitle}>{meta.subtitle}</p>
               </div>
             </div>
             <button
@@ -417,7 +417,7 @@ export function ChatPanel(props: ChatPanelProps): JSX.Element {
             <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0">
               <div className="flex items-center gap-2 min-w-0">
                 <FileText className="w-4 h-4 text-muted-foreground shrink-0" />
-                <span className="text-sm font-semibold text-foreground truncate">{draftTag}</span>
+                <span className="text-sm font-semibold text-foreground truncate" title={draftTag}>{draftTag}</span>
                 {extractedDraft && (
                   <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
                     · {extractedDraft.split('\n').length} lines · {(extractedDraft.length / 1024).toFixed(1)}kb

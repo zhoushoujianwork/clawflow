@@ -418,7 +418,7 @@ function AddRemoteRepo() {
                                     }}
                                     className="w-4 h-4 text-muted-foreground shrink-0"
                                   />
-                                  <h3 className="font-mono text-sm font-semibold text-foreground truncate">
+                                  <h3 className="font-mono text-sm font-semibold text-foreground truncate" title={repoName}>
                                     {repoName}
                                   </h3>
                                   <a

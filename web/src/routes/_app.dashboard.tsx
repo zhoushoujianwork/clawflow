@@ -650,7 +650,7 @@ function PendingRow({ p, repoMap }: { p: Pending; repoMap: RepoInfoMap }) {
       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono bg-secondary text-foreground border border-border shrink-0">
         {p.operator}
       </span>
-      <span className="text-sm text-foreground truncate flex-1">
+      <span className="text-sm text-foreground truncate flex-1" title={p.issue_title || '(no title)'}>
         {p.issue_title || '(no title)'}
       </span>
       <Link
@@ -734,7 +734,7 @@ function Row({
       >
         #{r.issue_number}
       </a>
-      <span className="text-sm text-foreground truncate flex-1">
+      <span className="text-sm text-foreground truncate flex-1" title={`${r.operator} · ${r.issue_title || '(no title)'}`}>
         {r.operator} · {r.issue_title || '(no title)'}
       </span>
       <Link

@@ -424,6 +424,7 @@ function IssueRow({
             'text-sm truncate flex-1',
             group.state === 'closed' && 'line-through text-muted-foreground',
           )}
+          title={group.issue_title || '(no title)'}
         >
           {group.issue_title || '(no title)'}
         </span>

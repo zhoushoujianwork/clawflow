@@ -65,7 +65,7 @@ function OperatorsList() {
                 <LabelList title="excludes" labels={op.labels_excluded} tone="red" />
                 <LabelList title="lock" labels={[op.lock_label]} tone="amber" />
               </div>
-              <div className="mt-2 text-[10px] text-muted-foreground font-mono truncate">
+              <div className="mt-2 text-[10px] text-muted-foreground font-mono truncate" title={op.source}>
                 source: {op.source}
               </div>
             </div>

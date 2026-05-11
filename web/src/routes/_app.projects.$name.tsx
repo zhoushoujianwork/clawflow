@@ -793,7 +793,10 @@ function ProjectDetail() {
                   </span>
                 )}
                 {!pilotRunsOpen && pilotRuns[0]?.result && (
-                  <span className="text-xs text-muted-foreground truncate ml-1">
+                  <span
+                    className="text-xs text-muted-foreground truncate ml-1"
+                    title={pilotRuns[0].result.replace(/^PILOT-RESULT:\s*/, '')}
+                  >
                     · {pilotRuns[0].result.replace(/^PILOT-RESULT:\s*/, '')}
                   </span>
                 )}
@@ -867,11 +870,11 @@ function ProjectDetail() {
                           )}
                         </div>
                         {run.result ? (
-                          <p className="text-sm text-foreground truncate">
+                          <p className="text-sm text-foreground truncate" title={run.result.replace(/^PILOT-RESULT:\s*/, '')}>
                             {run.result.replace(/^PILOT-RESULT:\s*/, '')}
                           </p>
                         ) : run.error ? (
-                          <p className="text-sm text-red-600 font-mono text-xs truncate">{run.error}</p>
+                          <p className="text-sm text-red-600 font-mono text-xs truncate" title={run.error}>{run.error}</p>
                         ) : (
                           <p className="text-xs text-muted-foreground italic">no result line</p>
                         )}
@@ -1031,6 +1034,7 @@ function ProjectDetail() {
                           to="/repos/$repoName"
                           params={{ repoName: encodeURIComponent(repo) }}
                           className="font-mono text-sm text-foreground hover:underline truncate"
+                          title={repo}
                         >
                           {repo}
                         </Link>

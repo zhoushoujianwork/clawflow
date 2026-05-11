@@ -573,7 +573,7 @@ function BindButton({
         {busy
           ? <Loader2 className="w-3 h-3 animate-spin" />
           : bound ? <Link2 className="w-3 h-3" /> : <Link2Off className="w-3 h-3" />}
-        <span className="truncate">{bound || 'unbound'}</span>
+        <span className="truncate" title={bound || 'unbound'}>{bound || 'unbound'}</span>
       </button>
 
       {open && pos && typeof document !== 'undefined' && createPortal(
@@ -600,7 +600,7 @@ function BindButton({
                   onClick={() => onBind(m)}
                 >
                   <Link2 className="w-3.5 h-3.5 text-muted-foreground" />
-                  <span className="font-mono text-xs truncate flex-1">{m}</span>
+                  <span className="font-mono text-xs truncate flex-1" title={m}>{m}</span>
                   {m === hostname && (
                     <span className="text-[10px] text-blue-600 font-semibold">this</span>
                   )}

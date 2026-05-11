@@ -144,7 +144,7 @@ function SystemInitCard({ event, timestamp, showRaw }: { event: RawEvent; timest
       showRaw={showRaw}
     >
       <div className="text-[11px] text-slate-500 space-y-0.5">
-        {event.cwd && <div className="font-mono truncate">📂 {event.cwd}</div>}
+        {event.cwd && <div className="font-mono truncate" title={event.cwd}>📂 {event.cwd}</div>}
         {counts && <div>{counts}</div>}
         {event.permissionMode && <div>mode: <span className="text-slate-400">{event.permissionMode}</span></div>}
       </div>
@@ -371,7 +371,7 @@ function SubagentGroup({ entries, showRaw }: { entries: LogEntry[]; showRaw: boo
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2 flex-wrap">
-            <div className="text-[13px] font-medium text-slate-200 truncate">
+            <div className="text-[13px] font-medium text-slate-200 truncate" title={started.description || 'Subagent task'}>
               {started.description || 'Subagent task'}
             </div>
             {started.task_type && <div className="text-[11px] text-slate-500">{started.task_type}</div>}
@@ -382,7 +382,7 @@ function SubagentGroup({ entries, showRaw }: { entries: LogEntry[]; showRaw: boo
             </div>
           </div>
           {!open && latestText && (
-            <div className="mt-1 text-[12px] text-slate-400 truncate">{latestText}</div>
+            <div className="mt-1 text-[12px] text-slate-400 truncate" title={latestText}>{latestText}</div>
           )}
           {!open && finished && last.summary && (
             <div className="mt-1 text-[12px] text-slate-400 break-words">{last.summary}</div>

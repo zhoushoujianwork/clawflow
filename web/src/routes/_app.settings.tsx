@@ -1281,7 +1281,7 @@ function DirectoryBrowser({
             >
               <Home className="w-3.5 h-3.5" />
             </button>
-            <span className="flex-1 truncate">{currentPath || '(loading...)'}</span>
+            <span className="flex-1 truncate" title={currentPath || '(loading...)'}>{currentPath || '(loading...)'}</span>
           </div>
         </div>
 
