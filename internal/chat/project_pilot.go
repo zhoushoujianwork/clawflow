@@ -275,12 +275,33 @@ signal:
 - ` + "`PATROL: clean — last 200 lines normal`" + `
 - ` + "`PATROL: 3 unique error patterns → filed bug api#42, api#43`" + `
 - ` + "`PATROL: SSH unreachable, skipped — see deployment.md`" + `
+- ` + "`PATROL: SOP drift — deployment.md commands returned no meaningful logs but project is active (recent runs/, web.pid exists) → updated deployment.md`" + `
 
 Errors observed but not yet tracked → file a bug (counts against the
 2-issue budget). Performance regressions or recurring nuisance log-spam
 → file as feature/improvement. This is the positive-feedback loop:
 production reality flows back into the backlog without anyone manually
 filing.
+
+**SOP drift detection:** After running the deployment.md log commands,
+if the returned signal is near-empty (e.g. only a handful of entries or
+no output at all) but the project shows signs of activity — any of:
+` + "`~/.clawflow/data/runs.json`" + ` has entries from the last 24h,
+` + "`~/.clawflow/data/web.pid`" + ` exists, or recent entries exist under
+` + "`~/.clawflow/data/pilot-runs/`" + ` — treat this as SOP drift. When drift is
+detected:
+1. Actively scan ` + "`~/.clawflow/logs/`" + ` and ` + "`~/.clawflow/data/`" + ` to find
+   the real log sources.
+2. Verify the corrected commands actually return meaningful data (run
+   them via Bash before committing to the update).
+3. Emit an updated ` + "`deployment.md`" + ` via the fenced block protocol below.
+4. Record the update in the ` + "`monitoring`" + ` duty's ` + "`actions`" + ` list, e.g.
+   ` + "`\"refreshed deployment.md — pointed log patrol at ~/.clawflow/logs/run.log\"`" + `.
+
+Be conservative: require at least one strong positive signal (e.g.
+` + "`runs.json`" + ` has entries from the last 24h) before emitting SOP-drift.
+A genuinely idle project with no recent runs should still write
+` + "`PATROL: clean`" + `, not trigger a false drift alarm.
 
 ## Hard rules
 
@@ -328,6 +349,29 @@ context.md in a fenced block:
 Emit the full file each time (the runner replaces, doesn't merge). Omit
 the block when nothing material changed. The runner only persists when
 the block is present and differs from the current file.
+
+## Updating the project's runtime SOP (deployment.md)
+
+When Play 3 reveals that deployment.md's log-retrieval commands don't
+match the project's actual log layout (SOP drift), output the complete
+updated deployment.md in a fenced block:
+
+    ` + "```deployment.md" + `
+    # Deployment
+    ... full document ...
+    ` + "```" + `
+
+Rules:
+- Only emit this block when you have **verified** the corrected commands
+  return real log data (run them via Bash first — don't speculate).
+- Emit the full file each time (the runner replaces, doesn't merge).
+- The runner only persists when the block is present and differs from
+  the current file, and only on a successful wake.
+- deployment.md is user-visible; only overwrite it when the new version
+  is a strict improvement (better log sources, corrected paths). Don't
+  rewrite for style.
+- Note the update in the ` + "`monitoring`" + ` duty's ` + "`actions`" + ` list (not
+  ` + "`doc_sync`" + ` — this is a Play 3 companion action).
 
 ## Output contract
 
