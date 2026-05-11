@@ -1064,15 +1064,14 @@ func waitForCI(client vcs.Client, repo string, prNum int, timeoutSec int, prefix
 }
 
 // resolveWorkdir picks the cwd for the claude subprocess and returns a
-// cleanup callback. For operators that write code (implement) or target
-// PRs, the workdir must be a git worktree backed by the repo's local
-// clone — that way the operator's branch/commit/checkout commands don't
-// stomp on whatever the user has open in their primary clone. For
-// read-only operators, a tempdir is fine and gets RemoveAll'd on cleanup.
+// cleanup callback.
+//
+//   - implement / pr-target → per-issue mutable worktree (setupWorktree)
+//   - all other operators with local_path → persistent analysis worktree
+//     (ensureAnalysisWorktree) reset to origin/<base> before each run
+//   - all other operators without local_path → ephemeral tempdir + warning
 func resolveWorkdir(op *operator.Operator, repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time) (worktreeResult, func(), error) {
-	// Pragmatic heuristic: "implement" and any pr-target operator need the
-	// repo. Everything else gets an ephemeral tempdir. A future schema field
-	// (e.g. operator.requires_workdir: true) can replace this.
+	// implement and pr-target operators need a mutable per-issue worktree.
 	needsRepo := op.Name == "implement" || op.Trigger.Target == "pr"
 	if needsRepo {
 		if repoCfg.LocalPath == "" {
@@ -1080,11 +1079,131 @@ func resolveWorkdir(op *operator.Operator, repoCfg config.Repo, fullName string,
 		}
 		return setupWorktree(repoCfg, fullName, issueNum, startedAt)
 	}
+
+	// Analysis operators need read access to the repo source so the LLM can
+	// grep/read actual code rather than guessing from issue text alone.
+	// Use a persistent analysis worktree that is always reset to origin/<base>
+	// before use so the operator sees the latest committed code.
+	if repoCfg.LocalPath != "" {
+		return ensureAnalysisWorktree(repoCfg, fullName)
+	}
+
+	// No local_path configured: fall back to an empty tempdir. Analysis quality
+	// will be limited since the operator cannot read source code.
+	fmt.Fprintf(os.Stderr, "  ⚠ no local_path configured for %s — operator %q will run without source code context (configure local_path for better analysis quality)\n", fullName, op.Name)
 	dir, err := os.MkdirTemp("", "clawflow-op-")
 	if err != nil {
 		return worktreeResult{}, func() {}, err
 	}
 	return worktreeResult{Path: dir}, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// analysisWorktreeLocks serializes setup/refresh of analysis worktrees per
+// (slug, base) within a single process. Cross-process races are benign since
+// fetch+reset is idempotent.
+var analysisWorktreeLocks sync.Map // key "slug/base" → *sync.Mutex
+
+func getAnalysisWorktreeLock(slug, base string) *sync.Mutex {
+	key := slug + "/" + base
+	v, _ := analysisWorktreeLocks.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// ensureAnalysisWorktree provisions or refreshes a persistent read-only
+// analysis worktree at ~/.clawflow/worktrees/<slug>/analysis-<base>.
+//
+// Unlike setupWorktree (which creates a per-issue ephemeral worktree for
+// implement), this worktree is long-lived and shared across all analysis
+// operators for the same repo+branch. It is always reset to origin/<base>
+// before use so the operator sees the latest committed code.
+//
+// Fetch failure blocks the operator — we refuse to run analysis on stale or
+// absent code rather than silently producing low-quality output.
+//
+// The returned cleanup is a no-op: the worktree persists for future runs.
+func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResult, func(), error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return worktreeResult{}, func() {}, fmt.Errorf("home dir: %w", err)
+	}
+
+	base := repoCfg.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	slug := strings.ReplaceAll(fullName, "/", "__")
+	localPath := repoCfg.LocalPath
+	wtPath := filepath.Join(home, ".clawflow", "worktrees", slug, "analysis-"+base)
+
+	// Serialize setup/refresh within this process so concurrent analysis
+	// operators on the same repo don't race on fetch+reset.
+	mu := getAnalysisWorktreeLock(slug, base)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Check whether the worktree already exists (has a .git pointer file).
+	_, statErr := os.Stat(filepath.Join(wtPath, ".git"))
+	worktreeExists := statErr == nil
+
+	if !worktreeExists {
+		// First time: fetch then create the worktree.
+		if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+			return worktreeResult{}, func() {}, fmt.Errorf("mkdir analysis worktree parent: %w", err)
+		}
+
+		fmt.Fprintf(os.Stderr, "  → analysis worktree: initializing at %s\n", wtPath)
+		fmt.Fprintf(os.Stderr, "  → analysis worktree: fetching origin/%s\n", base)
+		fetchCmd := exec.Command("git", "-C", localPath, "fetch", "origin", base)
+		fetchCmd.Stdout = os.Stderr
+		fetchCmd.Stderr = os.Stderr
+		if err := fetchCmd.Run(); err != nil {
+			return worktreeResult{}, func() {}, fmt.Errorf("git fetch origin/%s: %w — cannot initialize analysis worktree without network access", base, err)
+		}
+
+		addCmd := exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
+		addCmd.Stdout = os.Stderr
+		addCmd.Stderr = os.Stderr
+		if err := addCmd.Run(); err != nil {
+			// Fall back to the local base branch ref (e.g. brand-new clone
+			// that hasn't pushed yet and has no origin/<base> remote ref).
+			fmt.Fprintf(os.Stderr, "  ⚠ worktree add origin/%s failed, falling back to local %s\n", base, base)
+			addLocal := exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
+			addLocal.Stdout = os.Stderr
+			addLocal.Stderr = os.Stderr
+			if err2 := addLocal.Run(); err2 != nil {
+				return worktreeResult{}, func() {}, fmt.Errorf("git worktree add failed (origin/%s: %v; %s: %w)", base, err, base, err2)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "  ✓ analysis worktree initialized (detached HEAD at origin/%s)\n", base)
+	} else {
+		// Existing worktree: fetch + reset to latest origin/<base>.
+		fmt.Fprintf(os.Stderr, "  → analysis worktree: refreshing to origin/%s\n", base)
+		fetchCmd := exec.Command("git", "-C", localPath, "fetch", "origin", base)
+		fetchCmd.Stdout = os.Stderr
+		fetchCmd.Stderr = os.Stderr
+		if err := fetchCmd.Run(); err != nil {
+			return worktreeResult{}, func() {}, fmt.Errorf("git fetch origin/%s: %w — analysis blocked to avoid stale-code evaluation", base, err)
+		}
+
+		resetCmd := exec.Command("git", "-C", wtPath, "reset", "--hard", "origin/"+base)
+		resetCmd.Stdout = os.Stderr
+		resetCmd.Stderr = os.Stderr
+		if err := resetCmd.Run(); err != nil {
+			return worktreeResult{}, func() {}, fmt.Errorf("git reset --hard origin/%s: %w", base, err)
+		}
+
+		cleanCmd := exec.Command("git", "-C", wtPath, "clean", "-fdx")
+		cleanCmd.Stdout = os.Stderr
+		cleanCmd.Stderr = os.Stderr
+		if err := cleanCmd.Run(); err != nil {
+			// Non-fatal: untracked files left behind won't affect analysis.
+			fmt.Fprintf(os.Stderr, "  ⚠ git clean -fdx (non-fatal): %v\n", err)
+		}
+		fmt.Fprintf(os.Stderr, "  ✓ analysis worktree refreshed (origin/%s)\n", base)
+	}
+
+	// No cleanup: the analysis worktree is persistent across runs.
+	return worktreeResult{Path: wtPath}, func() {}, nil
 }
 
 // worktreeResult holds the outcome of setupWorktree so the caller knows
