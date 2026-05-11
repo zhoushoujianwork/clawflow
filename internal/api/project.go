@@ -483,6 +483,9 @@ func HandleProjectGet(w http.ResponseWriter, r *http.Request) {
 			Enabled:         p.Automation.Enabled,
 			CooldownMinutes: p.Automation.CooldownMinutes,
 			LastWokenAt:     p.Automation.LastWokenAt,
+			BoundMachine:    p.Automation.BoundMachine,
+			LastSkipReason:  p.Automation.LastSkipReason,
+			LastSkipAt:      p.Automation.LastSkipAt,
 		},
 		CreatedAt: p.CreatedAt,
 		UpdatedAt: p.UpdatedAt,
@@ -532,6 +535,67 @@ func HandleProjectAutomation(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = snapshot.WriteProjects()
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// projectBindRequest mirrors repoBindRequest for project-level Pilot
+// binding. Machine, when non-empty AND bind=true, pins to that hostname
+// instead of the current machine — same UX as repo bind, useful when
+// the dashboard is opened from a different machine than where Pilot
+// should run.
+type projectBindRequest struct {
+	Project string `json:"project"`
+	Bind    bool   `json:"bind"`
+	Machine string `json:"machine,omitempty"`
+}
+
+type projectBindResponse struct {
+	Status       string `json:"status"`
+	BoundMachine string `json:"bound_machine,omitempty"`
+}
+
+// HandleProjectBind handles POST /api/project/bind. Mirrors the
+// repo-level /api/repo/bind ergonomics but writes
+// project.Automation.BoundMachine instead of repo.BoundMachine.
+//
+// Unlike repo bind, project state lives only in
+// ~/.clawflow/projects/<name>/project.yaml (not in the Gist), so there
+// is no AutoPush — the change is local-only by design.
+func HandleProjectBind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req projectBindRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	name := strings.TrimSpace(req.Project)
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
+		return
+	}
+
+	machine := ""
+	if req.Bind {
+		if req.Machine != "" {
+			machine = req.Machine
+		} else {
+			h, err := os.Hostname()
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot determine hostname: " + err.Error()})
+				return
+			}
+			machine = h
+		}
+	}
+
+	if err := project.SetAutomationBoundMachine(name, machine); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	_ = snapshot.WriteProjects()
+	writeJSON(w, http.StatusOK, projectBindResponse{Status: "ok", BoundMachine: machine})
 }
 
 func HandleProjectRemoveRepo(w http.ResponseWriter, r *http.Request) {

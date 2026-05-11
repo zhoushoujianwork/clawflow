@@ -83,6 +83,24 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 	}
 	creds, _ := config.LoadCredentials()
 
+	// Open the pilot log here (in addition to inside wake) so binding /
+	// require_binding skips — which never reach wake — are still visible
+	// in pilot.log. Without this, a project that is silently skipped on
+	// every pass leaves no trace anywhere except stderr, which is where
+	// the original "Pilot on but two days no activity" bug came from.
+	skipLog, _ := clog.Open("pilot")
+	defer skipLog.Close()
+
+	// Refresh projects.json on exit so the dashboard picks up any
+	// MarkSkipped / MarkWoken changes from this pass. Best-effort: the
+	// snapshot is a convenience for the UI, never a source of truth, so
+	// an error here doesn't fail the Schedule.
+	defer func() {
+		if err := snapshot.WriteProjects(); err != nil {
+			fmt.Fprintf(os.Stderr, "[pilot] snapshot WriteProjects: %v\n", err)
+		}
+	}()
+
 	now := time.Now()
 	var ready []*project.Project
 	for _, p := range projects {
@@ -92,19 +110,33 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 		// we conservatively process all projects so a misconfigured machine
 		// doesn't silently drop work.
 		if p.Automation.BoundMachine != "" && hostname != "" && p.Automation.BoundMachine != hostname {
-			fmt.Fprintf(os.Stderr, "[pilot] %s: bound to %s, skipping (current machine: %s)\n",
-				p.Name, p.Automation.BoundMachine, hostname)
+			reason := fmt.Sprintf("bound to %s (current machine: %s)", p.Automation.BoundMachine, hostname)
+			fmt.Fprintf(os.Stderr, "[pilot] %s: %s — skip\n", p.Name, reason)
+			skipLog.Info("pilot/skip", "project", p.Name, "reason", reason)
+			if err := project.MarkSkipped(p.Name, reason); err != nil {
+				fmt.Fprintf(os.Stderr, "[pilot] %s: mark-skipped failed: %v\n", p.Name, err)
+			}
 			continue
 		}
 		// When require_binding is set globally, skip projects that have no
 		// BoundMachine configured. Mirrors the repo-level RequireBinding
 		// behaviour in run.go.
 		if cfg.Settings.RequireBinding && p.Automation.BoundMachine == "" && hostname != "" {
-			fmt.Fprintf(os.Stderr, "[pilot] %s: no bound_machine and require_binding is set, skipping\n", p.Name)
+			reason := "no bound_machine and require_binding=true"
+			fmt.Fprintf(os.Stderr, "[pilot] %s: %s — skip\n", p.Name, reason)
+			skipLog.Info("pilot/skip", "project", p.Name, "reason", reason)
+			if err := project.MarkSkipped(p.Name, reason); err != nil {
+				fmt.Fprintf(os.Stderr, "[pilot] %s: mark-skipped failed: %v\n", p.Name, err)
+			}
 			continue
 		}
+		// Cooldown is intentionally NOT persisted via MarkSkipped: it is
+		// expected, transient, and changes every pass. Logging to pilot.log
+		// is enough for post-mortem; persisting it would just churn yaml
+		// and bury the *real* skip reasons (bound_machine / require_binding).
 		if rem := p.CooldownRemaining(now); rem > 0 {
 			fmt.Fprintf(os.Stderr, "[pilot] %s: cooldown %s remaining — skip\n", p.Name, rem.Round(time.Second))
+			skipLog.Info("pilot/skip", "project", p.Name, "reason", "cooldown", "remaining", rem.Round(time.Second).String())
 			continue
 		}
 		ready = append(ready, p)
@@ -137,6 +169,72 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 		woken++
 	}
 	return woken, nil
+}
+
+// WakeOne triggers a Pilot wake for a single project on demand. Used by
+// the dashboard's "Wake now" button (and the `clawflow pilot wake` CLI
+// subcommand it spawns).
+//
+// Differences from Schedule:
+//
+//   - Cooldown is intentionally ignored — the click IS the override. The
+//     wake updates LastWokenAt via MarkWoken, so the cooldown clock
+//     restarts from this wake's start time, exactly like a scheduled
+//     wake. The user's mental model: "wake now, then leave it alone for
+//     <cooldown> minutes".
+//   - bound_machine + require_binding are still enforced. A click from
+//     a non-Pilot machine should fail clearly rather than run claude
+//     with the wrong credentials / clones. If the user wants to wake on
+//     a different machine, they should change the binding first.
+//   - Automation.Enabled is still checked. A disabled project should
+//     not be wake-able via the dashboard either — the toggle is the
+//     single source of truth.
+//
+// Returns nil on a successful wake, error on any pre-flight failure or
+// on wake() itself failing.
+func WakeOne(ctx context.Context, projectName string, timeout time.Duration) error {
+	p, err := project.Get(projectName)
+	if err != nil {
+		return fmt.Errorf("get project: %w", err)
+	}
+	if !p.Automation.Enabled {
+		return fmt.Errorf("automation disabled for project %q — enable it first", projectName)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	creds, _ := config.LoadCredentials()
+
+	hostname, _ := os.Hostname()
+	if p.Automation.BoundMachine != "" && hostname != "" && p.Automation.BoundMachine != hostname {
+		return fmt.Errorf("project %q is bound to %s, current machine is %s — wake from there or rebind",
+			projectName, p.Automation.BoundMachine, hostname)
+	}
+	if cfg.Settings.RequireBinding && p.Automation.BoundMachine == "" && hostname != "" {
+		return fmt.Errorf("project %q has no bound_machine and require_binding=true — bind it first", projectName)
+	}
+
+	// Refresh projects.json on exit so the dashboard reflects the new
+	// LastWokenAt / cleared skip reason without waiting for the next
+	// `clawflow run` pass.
+	defer func() {
+		if werr := snapshot.WriteProjects(); werr != nil {
+			fmt.Fprintf(os.Stderr, "[pilot] snapshot WriteProjects: %v\n", werr)
+		}
+	}()
+
+	// Stamp before the wake, same as Schedule, so a slow wake doesn't
+	// get re-fired by an impatient click. MarkWoken also clears
+	// LastSkipReason — a manual wake is unambiguous proof the prior
+	// skip no longer applies.
+	if err := project.MarkWoken(p.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "[pilot] %s: mark-woken failed: %v — continuing anyway\n", p.Name, err)
+	}
+
+	fmt.Fprintf(os.Stderr, "[pilot] manual wake project=%q\n", p.Name)
+	return wake(ctx, p, cfg, creds, timeout)
 }
 
 // wake builds the digest for one project, constructs the Pilot prompt,

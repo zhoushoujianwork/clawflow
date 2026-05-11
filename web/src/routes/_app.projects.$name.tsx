@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Copy, Check, Settings2 } from 'lucide-react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Copy, Check, Settings2, Zap } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
@@ -35,6 +35,18 @@ interface ProjectAutomation {
   enabled: boolean
   cooldown_minutes: number
   last_woken_at?: string
+  // bound_machine pins the Pilot wake to a specific hostname. Empty =
+  // any machine. Independent from repo.bound_machine (which gates the
+  // operator/run path) — a project's Pilot may legitimately run on a
+  // machine where none of its repos are cloned, since Pilot only does
+  // API-layer triage.
+  bound_machine?: string
+  // last_skip_reason explains why the most recent Schedule pass declined
+  // to wake the Pilot. Surfaces the "Pilot on but no recent activity"
+  // failure mode (most often: bound_machine mismatch, or
+  // require_binding=on with no bound_machine).
+  last_skip_reason?: string
+  last_skip_at?: string
 }
 
 interface RepoEntry {
@@ -42,6 +54,7 @@ interface RepoEntry {
   auto_approve?: boolean
   auto_merge?: boolean
   enabled?: boolean
+  bound_machine?: string
 }
 
 interface PilotRun {
@@ -115,6 +128,12 @@ function ProjectDetail() {
 
   // Automation popover
   const [automationPopoverOpen, setAutomationPopoverOpen] = useState(false)
+
+  // Hostname the dashboard is running on. Used by the bind-to-this-machine
+  // button so the label reads "Bind to <hostname>" rather than a generic
+  // "Bind here". Comes from /api/settings.global.hostname — same source
+  // the per-repo page uses, so the UX feels uniform.
+  const [hostname, setHostname] = useState<string>('')
 
   // Generate context state. Used only by the empty-state Initialize
   // button — once context.md exists, all further edits go through
@@ -205,6 +224,62 @@ function ProjectDetail() {
     }
   }
 
+  // Manual-wake state. wakeStarting covers the click → 200 round-trip
+  // only — once the subprocess is spawned the button switches to a
+  // "Waking…" affordance backed by pilot-runs polling so the user sees
+  // when the wake actually completes (minutes later).
+  const [wakeStarting, setWakeStarting] = useState(false)
+  const [wakeError, setWakeError] = useState<string | null>(null)
+  const [wakeMessage, setWakeMessage] = useState<string | null>(null)
+
+  async function triggerWake() {
+    setWakeStarting(true)
+    setWakeError(null)
+    setWakeMessage(null)
+    try {
+      const r = await fetch('/api/project/pilot/wake', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok || d.error) throw new Error(d.error || d.message || `HTTP ${r.status}`)
+      setWakeMessage('Wake started — refreshing pilot activity…')
+      // Light refresh so the popover's "Last woken" timestamp jumps
+      // immediately; the heavy pilot-runs activity stream below the
+      // header keeps polling on its own and will show the run when it
+      // completes.
+      fetchProject()
+      fetchPilotRuns()
+    } catch (e) {
+      setWakeError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setWakeStarting(false)
+    }
+  }
+
+  // saveBoundMachine binds the project Pilot to a specific hostname (or
+  // unbinds when machine is empty). Server resolves "this machine" when
+  // bind=true and machine is omitted — matches /api/repo/bind ergonomics.
+  async function saveBoundMachine(bind: boolean, machine?: string) {
+    setAutomationSaving(true)
+    setAutomationError(null)
+    try {
+      const r = await fetch('/api/project/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name, bind, ...(machine ? { machine } : {}) }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
+      fetchProject()
+    } catch (e) {
+      setAutomationError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setAutomationSaving(false)
+    }
+  }
+
   useEffect(() => {
     fetchProject()
     // Always fetch repo metadata on mount so the member-repo list can
@@ -213,6 +288,15 @@ function ProjectDetail() {
     fetchAvailableRepos()
     fetchPilotRuns()
     fetchBacklog()
+    // Pull the current machine's hostname once so the bind button can
+    // render the actual name. Best-effort: failing leaves the label as
+    // "this machine" — the API will still resolve correctly on submit.
+    fetch('/api/settings', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : null))
+      .catch(() => null)
+      .then(settings => {
+        if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+      })
     // Check if a generate job is already running for this project so
     // navigating away mid-run and coming back resumes the spinner.
     fetch(`/api/project/generate-context/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
@@ -487,6 +571,36 @@ function ProjectDetail() {
     .filter(r => !project?.repos?.includes(r))
     .filter(r => !repoSearch || r.toLowerCase().includes(repoSearch.toLowerCase()))
 
+  // Aggregate bound_machine across this project's member repos. Shown
+  // inside the Pilot popover so the user can see where the *execution*
+  // half of automation lives (repos) alongside where the *triage* half
+  // lives (Pilot). Repos with no bound_machine are bucketed as "unbound".
+  // The two layers are independent on purpose, but seeing them
+  // side-by-side is the easiest way to spot misconfigurations.
+  const repoBoundSummary = useMemo(() => {
+    const counts = new Map<string, number>()
+    let unbound = 0
+    for (const repo of project?.repos ?? []) {
+      const meta = repoMeta[repo]
+      const bm = meta?.bound_machine?.trim() || ''
+      if (!bm) {
+        unbound++
+      } else {
+        counts.set(bm, (counts.get(bm) ?? 0) + 1)
+      }
+    }
+    return { counts, unbound }
+  }, [project?.repos, repoMeta])
+
+  // pilotBound = whether this project has any project-level binding.
+  // pilotBoundHere = bound to the dashboard's own machine.
+  const pilotBound = !!project?.automation?.bound_machine
+  const pilotBoundHere = pilotBound && !!hostname && project?.automation?.bound_machine === hostname
+  // Skip-reason is set by the runner whenever Schedule refuses to wake.
+  // When automation is on AND a skip reason exists, the popover surfaces
+  // an amber banner so the user sees the obstacle without grepping logs.
+  const pilotSkipReason = (project?.automation?.last_skip_reason ?? '').trim()
+
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
       <Link
@@ -538,19 +652,29 @@ function ProjectDetail() {
                     onClick={() => setAutomationPopoverOpen(o => !o)}
                     className={cn(
                       'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium transition-colors',
-                      project.automation?.enabled
-                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-950/60'
-                        : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700/60',
+                      // Amber state: automation is on but Schedule recorded
+                      // a skip last pass — clearest signal that the pill's
+                      // "on" claim is currently a lie. Take precedence over
+                      // the green "enabled" colouring.
+                      project.automation?.enabled && pilotSkipReason
+                        ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-950/60'
+                        : project.automation?.enabled
+                          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-950/60'
+                          : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700/60',
                     )}
-                    title="Automation settings"
+                    title={pilotSkipReason ? `Pilot enabled but last pass skipped: ${pilotSkipReason}` : 'Automation settings'}
                   >
                     <span
                       className={cn(
                         'inline-block w-1.5 h-1.5 rounded-full',
-                        project.automation?.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400',
+                        project.automation?.enabled && pilotSkipReason
+                          ? 'bg-amber-500'
+                          : project.automation?.enabled
+                            ? 'bg-emerald-500 animate-pulse'
+                            : 'bg-slate-400',
                       )}
                     />
-                    Pilot {project.automation?.enabled ? 'on' : 'off'}
+                    Pilot {project.automation?.enabled ? (pilotSkipReason ? 'skipped' : 'on') : 'off'}
                     <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
                   </button>
                   {automationPopoverOpen && (
@@ -591,6 +715,91 @@ function ProjectDetail() {
                             Last woken {new Date(project.automation.last_woken_at).toLocaleString()}
                           </p>
                         )}
+
+                        {/* Pilot skip banner — only when Schedule recorded a
+                            reason on the last pass. This is the "Pilot on
+                            but nothing happening" signal made visible. The
+                            most common cases (bound_machine mismatch /
+                            require_binding=true with no binding) point the
+                            user at the bind row immediately below. */}
+                        {pilotSkipReason && (
+                          <div className="mb-3 px-2 py-1.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800 dark:bg-amber-950/30 dark:border-amber-900 dark:text-amber-300 text-[11px] leading-snug">
+                            <div className="font-medium">Last pass skipped</div>
+                            <div className="opacity-90">{pilotSkipReason}</div>
+                            {project.automation?.last_skip_at && (
+                              <div className="opacity-70 tabular-nums mt-0.5">
+                                {new Date(project.automation.last_skip_at).toLocaleString()}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Triage binding — which machine wakes the Pilot.
+                            Independent from repo bindings shown below;
+                            useful in multi-machine deployments to prevent
+                            duplicate Pilot wakes on cron. */}
+                        <div className="mb-3">
+                          <div className="text-xs text-muted-foreground mb-1.5">Triage on</div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {pilotBound ? (
+                              <span
+                                className={cn(
+                                  'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono border',
+                                  pilotBoundHere
+                                    ? 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-950/30 dark:border-blue-900 dark:text-blue-300'
+                                    : 'bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-950/30 dark:border-amber-900 dark:text-amber-300',
+                                )}
+                              >
+                                {project.automation?.bound_machine}
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono border border-border text-muted-foreground">
+                                unbound — any machine
+                              </span>
+                            )}
+                            {pilotBoundHere ? (
+                              <button
+                                type="button"
+                                onClick={() => saveBoundMachine(false)}
+                                disabled={automationSaving}
+                                className="text-[11px] px-1.5 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 disabled:opacity-50"
+                              >
+                                Unbind
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => saveBoundMachine(true)}
+                                disabled={automationSaving}
+                                className="text-[11px] px-1.5 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 disabled:opacity-50"
+                                title={pilotBound ? `Take over from ${project.automation?.bound_machine}` : 'Bind Pilot to this machine'}
+                              >
+                                {pilotBound ? `Take over (bind ${hostname || 'here'})` : `Bind to ${hostname || 'this machine'}`}
+                              </button>
+                            )}
+                          </div>
+                          {/* Aggregate view of repo-level bindings so the
+                              user can see the relationship between where
+                              Pilot triages and where operators execute. */}
+                          {(project.repos?.length ?? 0) > 0 && (
+                            <div className="mt-2 text-[11px] text-muted-foreground">
+                              Repos run on:{' '}
+                              {Array.from(repoBoundSummary.counts.entries()).map(([m, n], i) => (
+                                <span key={m}>
+                                  {i > 0 && ', '}
+                                  <span className="font-mono">{m}</span> ({n})
+                                </span>
+                              ))}
+                              {repoBoundSummary.unbound > 0 && (
+                                <span>
+                                  {repoBoundSummary.counts.size > 0 && ', '}
+                                  unbound ({repoBoundSummary.unbound})
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
                         <div className="flex items-center gap-2">
                           <label className="text-xs text-muted-foreground shrink-0">Cooldown (min)</label>
                           <input
@@ -613,6 +822,35 @@ function ProjectDetail() {
                             Save
                           </button>
                         </div>
+
+                        {/* Manual wake. Click resets the cooldown clock
+                            (LastWokenAt = now) so the next auto-wake is
+                            cooldown_minutes from this click — matches
+                            the scheduled-wake semantics, no special
+                            case to learn. Disabled while automation is
+                            off; the server also enforces, so this is
+                            just a UX hint. */}
+                        <div className="mt-3 pt-3 border-t border-border flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={triggerWake}
+                            disabled={wakeStarting || !project.automation?.enabled || automationSaving}
+                            className={cn(
+                              'inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+                              'border-emerald-300 text-emerald-700 hover:bg-emerald-50 dark:border-emerald-900 dark:text-emerald-300 dark:hover:bg-emerald-950/40',
+                            )}
+                            title="Trigger a Pilot wake now, ignoring cooldown. The cooldown clock restarts from this wake."
+                          >
+                            {wakeStarting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                            Wake now
+                          </button>
+                          <span className="text-[11px] text-muted-foreground">
+                            Triggers immediately, resets the cooldown clock
+                          </span>
+                        </div>
+                        {wakeMessage && <p className="mt-2 text-xs text-emerald-700 dark:text-emerald-400">{wakeMessage}</p>}
+                        {wakeError && <p className="mt-2 text-xs text-red-600">{wakeError}</p>}
+
                         {automationError && <p className="mt-2 text-xs text-red-600">{automationError}</p>}
                       </div>
                     </>
@@ -977,7 +1215,7 @@ function ProjectDetail() {
                   aria-expanded={contextOpen}
                 >
                   {contextOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                  <span className="text-sm font-semibold text-foreground">Context</span>
+                  <span className="text-sm font-semibold text-foreground font-mono">context.md</span>
                   <span className="text-xs text-muted-foreground tabular-nums shrink-0">
                     {(project.context_md.length / 1024).toFixed(1)}kb
                   </span>
@@ -998,7 +1236,7 @@ function ProjectDetail() {
             ) : (
               <>
                 <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-sm font-semibold text-foreground">Context</h2>
+                  <h2 className="text-sm font-semibold text-foreground font-mono">context.md</h2>
                 </div>
                 <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
                   <p className="text-sm text-muted-foreground">
@@ -1041,7 +1279,7 @@ function ProjectDetail() {
                   aria-expanded={testingOpen}
                 >
                   {testingOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                  <span className="text-sm font-semibold text-foreground">Local environment SOP</span>
+                  <span className="text-sm font-semibold text-foreground font-mono">testing.md</span>
                   <span className="text-xs text-muted-foreground tabular-nums shrink-0">
                     {(project.testing_md.length / 1024).toFixed(1)}kb
                   </span>
@@ -1062,7 +1300,7 @@ function ProjectDetail() {
             ) : (
               <>
                 <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-sm font-semibold text-foreground">Local environment SOP</h2>
+                  <h2 className="text-sm font-semibold text-foreground font-mono">testing.md</h2>
                   <span className="text-xs text-muted-foreground">
                     How to bring up the local runtime — startup order, services, hardware
                   </span>
@@ -1108,7 +1346,7 @@ function ProjectDetail() {
                   aria-expanded={deploymentOpen}
                 >
                   {deploymentOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                  <span className="text-sm font-semibold text-foreground">Deployment</span>
+                  <span className="text-sm font-semibold text-foreground font-mono">deployment.md</span>
                   <span className="text-xs text-muted-foreground tabular-nums shrink-0">
                     {(project.deployment_md.length / 1024).toFixed(1)}kb
                   </span>
@@ -1129,7 +1367,7 @@ function ProjectDetail() {
             ) : (
               <>
                 <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-sm font-semibold text-foreground">Deployment</h2>
+                  <h2 className="text-sm font-semibold text-foreground font-mono">deployment.md</h2>
                   <span className="text-xs text-muted-foreground">
                     Runtime environment, log retrieval, health indicators
                   </span>

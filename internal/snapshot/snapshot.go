@@ -1444,6 +1444,9 @@ type ProjectAutomationView struct {
 	Enabled         bool   `json:"enabled"`
 	CooldownMinutes int    `json:"cooldown_minutes"`
 	LastWokenAt     string `json:"last_woken_at,omitempty"`
+	BoundMachine    string `json:"bound_machine,omitempty"`
+	LastSkipReason  string `json:"last_skip_reason,omitempty"`
+	LastSkipAt      string `json:"last_skip_at,omitempty"`
 }
 
 // WriteProjects writes data/projects.json from the on-disk project store.
@@ -1471,6 +1474,9 @@ func WriteProjects() error {
 				Enabled:         p.Automation.Enabled,
 				CooldownMinutes: p.Automation.CooldownMinutes,
 				LastWokenAt:     p.Automation.LastWokenAt,
+				BoundMachine:    p.Automation.BoundMachine,
+				LastSkipReason:  p.Automation.LastSkipReason,
+				LastSkipAt:      p.Automation.LastSkipAt,
 			},
 			CreatedAt: p.CreatedAt,
 			UpdatedAt: p.UpdatedAt,

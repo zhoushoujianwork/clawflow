@@ -48,11 +48,20 @@ type Project struct {
 // This mirrors the repo-level BoundMachine in RepoConfig and is the
 // recommended way to prevent duplicate Pilot wakeups in multi-machine
 // deployments.
+//
+// LastSkipReason / LastSkipAt record why the most recent Schedule pass
+// declined to wake this project's Pilot (e.g. bound to a different
+// machine, or require_binding=true with no bound_machine). Persisted so
+// the dashboard can explain a "Pilot on but no recent activity" state
+// without forcing the user to grep stderr. Cleared on a successful
+// MarkWoken so the field reflects the *current* obstacle, not history.
 type Automation struct {
 	Enabled         bool   `yaml:"enabled"`
 	CooldownMinutes int    `yaml:"cooldown_minutes,omitempty"`
 	LastWokenAt     string `yaml:"last_woken_at,omitempty"`
 	BoundMachine    string `yaml:"bound_machine,omitempty"`
+	LastSkipReason  string `yaml:"last_skip_reason,omitempty"`
+	LastSkipAt      string `yaml:"last_skip_at,omitempty"`
 }
 
 // ProjectsRoot returns ~/.clawflow/projects.
@@ -384,12 +393,23 @@ func SetAutomation(name string, enabled bool, cooldownMinutes int) error {
 // automation. Pass an empty string to clear the binding (any machine may wake
 // the Pilot). This is a separate function from SetAutomation so callers can
 // update the binding without touching the enabled/cooldown state.
+//
+// Also clears any LastSkipReason / LastSkipAt: the binding is the most
+// common reason Schedule refuses to wake (bound_machine mismatch or
+// require_binding=true with no binding), so a user explicitly changing
+// the binding is implicitly saying "the prior obstacle no longer applies
+// — reset the status display". If the next Schedule pass still skips for
+// a different reason (e.g. cooldown), MarkSkipped will repopulate the
+// field; until then, the dashboard shows a clean state instead of an
+// amber banner that's already stale.
 func SetAutomationBoundMachine(name, boundMachine string) error {
 	p, err := Get(name)
 	if err != nil {
 		return err
 	}
 	p.Automation.BoundMachine = boundMachine
+	p.Automation.LastSkipReason = ""
+	p.Automation.LastSkipAt = ""
 	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	return save(p)
 }
@@ -398,13 +418,41 @@ func SetAutomationBoundMachine(name, boundMachine string) error {
 // before invoking the PM so cooldown accounting starts immediately —
 // a PM that takes 20 minutes to think doesn't get re-fired the
 // instant it returns.
+//
+// Also clears any stale LastSkipReason / LastSkipAt — the reason this
+// wake is happening is that whatever obstacle the prior pass recorded
+// no longer applies. Leaving the field would lie to the dashboard.
 func MarkWoken(name string) error {
 	p, err := Get(name)
 	if err != nil {
 		return err
 	}
 	p.Automation.LastWokenAt = time.Now().UTC().Format(time.RFC3339)
+	p.Automation.LastSkipReason = ""
+	p.Automation.LastSkipAt = ""
 	p.UpdatedAt = p.Automation.LastWokenAt
+	return save(p)
+}
+
+// MarkSkipped records why the most recent Schedule pass declined to
+// wake this project's Pilot. Persisted so the dashboard can show
+// "skipped: <reason>" instead of "no recent activity (silent)".
+//
+// Idempotent on identical reasons: if the prior skip recorded the same
+// text we skip the write to avoid yaml churn (Schedule may fire every
+// few minutes via cron and a stuck-binding project would otherwise
+// rewrite project.yaml on every pass).
+func MarkSkipped(name, reason string) error {
+	p, err := Get(name)
+	if err != nil {
+		return err
+	}
+	if p.Automation.LastSkipReason == reason {
+		return nil
+	}
+	p.Automation.LastSkipReason = reason
+	p.Automation.LastSkipAt = time.Now().UTC().Format(time.RFC3339)
+	p.UpdatedAt = p.Automation.LastSkipAt
 	return save(p)
 }
 
