@@ -4,6 +4,10 @@
 >
 > ClawFlow polls the repositories you configure, matches each open issue/PR against a set of **operators** (self-contained `SKILL.md` files), and runs the matching operator through `claude -p`. State lives entirely in VCS labels and comments — there is no database, no SaaS backend, and no orchestrator service. Run it once, run it on cron, run it from your editor — it's the same binary either way.
 
+![ClawFlow dashboard](dashbroad.png)
+
+The local dashboard (`clawflow web`) gives you a filterable timeline of every operator run across every monitored repo — status, duration, PR links, and a full replay of the underlying `claude -p` event stream for any past run.
+
 ---
 
 ## Install

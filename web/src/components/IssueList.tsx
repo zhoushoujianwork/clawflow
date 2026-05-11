@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronRight, ExternalLink, MessageSquare, Code } from 'lucide-react'
 import { Link } from '@tanstack/react-router'
 import { cn } from '../lib/utils'
@@ -379,6 +379,25 @@ function IssueRow({
   const k = rowKey(group)
   // Mode picker state: null = picker hidden, 'issue'|'edit' = picker shown
   const [showModePicker, setShowModePicker] = useState(false)
+  const modePickerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!showModePicker) return
+    const handlePointerDown = (e: MouseEvent) => {
+      if (modePickerRef.current && !modePickerRef.current.contains(e.target as Node)) {
+        setShowModePicker(false)
+      }
+    }
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowModePicker(false)
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [showModePicker])
 
   const openChat = (mode: 'issue' | 'edit') => {
     setShowModePicker(false)
@@ -449,7 +468,7 @@ function IssueRow({
           {group.runs.length} {group.runs.length === 1 ? 'run' : 'runs'}
         </span>
         {/* Chat button with mode picker */}
-        <div className="relative shrink-0" onClick={e => e.stopPropagation()}>
+        <div ref={modePickerRef} className="relative shrink-0" onClick={e => e.stopPropagation()}>
           <button
             onClick={() => setShowModePicker(v => !v)}
             className="text-muted-foreground hover:text-foreground"
