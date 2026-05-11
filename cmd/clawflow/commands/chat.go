@@ -102,12 +102,6 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 		workdir = os.TempDir()
 	}
 
-	// Session display name
-	name := fmt.Sprintf("clawflow: %s", repo)
-	if issueNum > 0 {
-		name = fmt.Sprintf("clawflow: %s #%d", repo, issueNum)
-	}
-
 	// Resolve the model: explicit --model > settings (chat slot) >
 	// built-in default. We resolve here rather than at flag-parse time
 	// so a settings-page change takes effect on the next chat without
@@ -118,11 +112,23 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 	}
 
 	// Resolve the issue chat mode: explicit --mode > credentials.yaml
-	// chat_default_mode > built-in default ("issue").
-	// Mode only applies to issue-level chat; repo-level is always read-only.
-	if modeFlag == "" && issueNum > 0 {
+	// chat_default_mode > built-in default ("issue"). Resolved for both
+	// issue- and repo-level chat so the title can show the value — note
+	// that for repo-level chat the flag has no effect on behaviour (repo
+	// chat is always read-only; see --disallowedTools logic below).
+	if modeFlag == "" {
 		creds, _ := config.LoadCredentials()
 		modeFlag = creds.EffectiveChatDefaultMode()
+	}
+
+	// Session display name — rendered by claude as the terminal window
+	// title via --name. Tag the scope + --mode value so the user can
+	// tell at a glance what this window is.
+	var name string
+	if issueNum > 0 {
+		name = fmt.Sprintf("clawflow: %s #%d [%s]", repo, issueNum, modeFlag)
+	} else {
+		name = fmt.Sprintf("clawflow: %s [repo · %s]", repo, modeFlag)
 	}
 
 	// Hard-block file mutations and notebook edits for REPO-level chat.

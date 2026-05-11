@@ -449,7 +449,7 @@ func runProjectChat(name, model string) error {
 	systemCtx := chat.BuildProjectChatContext(name, chatRepos, originalCtx, originalTesting)
 
 	sessionID := chat.NewSessionID("project/"+name, 0)
-	sessionName := fmt.Sprintf("clawflow: project/%s", name)
+	sessionName := fmt.Sprintf("clawflow: project/%s [project]", name)
 
 	// Workdir: the project's own metadata dir
 	// (~/.clawflow/projects/<name>/). Stable, neutral across member
