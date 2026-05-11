@@ -66,6 +66,8 @@ func HandleRepoRefreshIssues(w http.ResponseWriter, r *http.Request) {
 			Labels:      append([]string(nil), iss.Labels...),
 			State:       iss.State,
 			CapturedAt:  capturedAt,
+			CreatedAt:   iss.CreatedAt,
+			ClosedAt:    iss.ClosedAt,
 		})
 	}
 

@@ -336,17 +336,83 @@ end with this signature line (on its own line, blank line before):
 
 ` + "`— ClawFlow Pilot · " + name + "`" + `
 
-End your turn with a one-line summary on its own line:
+### 1. Duties block (required, structured)
 
-- ` + "`PILOT-RESULT: no-action — <reason>`" + ` if you took no actions
-- ` + "`PILOT-RESULT: <N> actions — <brief breakdown>`" + ` if you did
+Before any free-form prose, emit a fenced block describing what you
+did across the five standing duties. The runner parses this block
+into the dashboard; missing or malformed → falls back to prose.
+
+    ` + "```pilot-duties" + `
+    duties:
+      pr_triage:
+        status: ok               # ok | action_taken | flagged | error
+        actions: []              # populate when status=action_taken
+        note: ""                 # populate when status=flagged or error
+      monitoring:
+        status: ok
+        actions: []
+        note: ""
+      doc_sync:
+        status: ok
+        actions: []
+        note: ""
+      issue_digest:
+        summary: |
+          3-5 sentences describing what happened in member repos'
+          issues since the last wake. Mention concrete issue numbers,
+          themes, anything a human glancing at the dashboard should
+          notice. PASSIVE: no judgement, no action.
+      backlog_hygiene:
+        status: ok
+        actions: []
+        note: ""
+    ` + "```" + `
+
+**Duty meanings:**
+
+- ` + "`pr_triage`" + ` — did you scan open PRs and self-fix what you can
+  (Play 1 stale branches, Play 2 conflicts, missing trigger labels)?
+- ` + "`monitoring`" + ` — did you scan logs/run history (Play 3 patrol) and
+  file new issues for un-tracked error patterns?
+- ` + "`doc_sync`" + ` — did member repos drift enough that CLAUDE.md /
+  README.md / context.md needs updating? **Open a PR for repo-level docs
+  (CLAUDE.md / README.md); don't push directly.** context.md updates
+  via the fenced block above are still in-band.
+- ` + "`issue_digest`" + ` — PASSIVE summary of recent issue activity for the
+  user. Do NOT include counts (new/closed/labeled/commented) — the
+  runner injects exact numbers; you only write the prose summary.
+- ` + "`backlog_hygiene`" + ` — stale labels, lock leaks, orphan branches,
+  ` + "`agent-failed`" + ` / ` + "`agent-skipped`" + ` recovery removals.
+
+**Status vocabulary** (use exactly):
+- ` + "`ok`" + ` — checked, nothing to do
+- ` + "`action_taken`" + ` — you did something; list it in ` + "`actions`" + `
+- ` + "`flagged`" + ` — found something a human should see; explain in ` + "`note`" + `
+- ` + "`error`" + ` — could not check (e.g. SSH unreachable); explain in ` + "`note`" + `
+
+Action strings should be tight and concrete:
+` + "`opened PR #134: refresh CLAUDE.md`" + `, ` + "`closed #9 dup of #15`" + `,
+` + "`filed api#42 from log error pattern X`" + `.
+
+### 2. Free-form prose (optional)
+
+After the duties block, write any reasoning / context the YAML can't
+hold — why you flagged something, why you chose between two plays,
+caveats. Skip when there's nothing to add.
+
+### 3. PILOT-RESULT line (required, one line)
+
+End your turn with a one-line verdict on its own line:
+
+- ` + "`PILOT-RESULT: no-action — <reason>`" + ` if no actions across any duty
+- ` + "`PILOT-RESULT: <N> actions — <brief breakdown>`" + ` otherwise
 
 Examples:
-- ` + "`PILOT-RESULT: no-action — backlog coherent, nothing stale or mislabeled`" + `
-- ` + "`PILOT-RESULT: 3 actions — created 1 (frontend#42), labeled 1 (api#17 bug), closed 1 (api#9 dup of #15)`" + `
+- ` + "`PILOT-RESULT: no-action — backlog coherent, no doc drift, logs clean`" + `
+- ` + "`PILOT-RESULT: 3 actions — filed api#42 from log, opened PR #134 to refresh CLAUDE.md, closed #9 dup`" + `
 
-The runner logs this line and uses it as your next wake's recent-history
-entry. Make it specific.`)
+The runner uses this line as your next wake's short-term memory entry.
+Make it specific.`)
 
 	return b.String()
 }

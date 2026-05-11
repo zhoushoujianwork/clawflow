@@ -80,6 +80,7 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 		Body        string    `json:"body"`
 		CreatedAt   string    `json:"created_at"`
 		UpdatedAt   string    `json:"updated_at"`
+		ClosedAt    string    `json:"closed_at"`
 		PullRequest *struct{} `json:"pull_request"`
 		Labels      []struct {
 			Name string `json:"name"`
@@ -93,7 +94,7 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 		if r.PullRequest != nil {
 			continue // GitHub returns PRs in /issues — skip them
 		}
-		issue := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		issue := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
 		for _, l := range r.Labels {
 			issue.Labels = append(issue.Labels, l.Name)
 		}
@@ -393,6 +394,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		State       string    `json:"state"`
 		CreatedAt   string    `json:"created_at"`
 		UpdatedAt   string    `json:"updated_at"`
+		ClosedAt    string    `json:"closed_at"`
 		PullRequest *struct{} `json:"pull_request"`
 		Labels      []struct {
 			Name string `json:"name"`
@@ -406,7 +408,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		if r.PullRequest != nil {
 			continue
 		}
-		issue := vcs.Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		issue := vcs.Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
 		for _, l := range r.Labels {
 			issue.Labels = append(issue.Labels, l.Name)
 		}

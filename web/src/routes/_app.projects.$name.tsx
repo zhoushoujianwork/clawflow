@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Copy, Check, Settings2, Zap } from 'lucide-react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Settings2, Zap } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
@@ -15,6 +15,13 @@ import {
 } from '../components/IssueList'
 import { useRepoInfoMap } from '../lib/vcsUrls'
 import { useConfigChanged } from '../lib/configEvents'
+import {
+  type PilotRun,
+  DUTY_KEYS,
+  DUTY_LABELS,
+  dutyStatusColour,
+  PilotRunDetailModal,
+} from '../components/PilotRun'
 
 // Long claude -p run (typically 30s–2min). The job runs server-side
 // so the user is free to navigate away — re-opening the page resumes
@@ -55,23 +62,6 @@ interface RepoEntry {
   auto_merge?: boolean
   enabled?: boolean
   bound_machine?: string
-}
-
-interface PilotRun {
-  project: string
-  started_at: string
-  ended_at?: string
-  status: string
-  result?: string
-  error?: string
-  summary?: string
-  usage?: {
-    duration_ms: number
-    num_turns: number
-    total_cost_usd: number
-    input_tokens: number
-    output_tokens: number
-  }
 }
 
 // previewMD returns a one-line preview suitable for a collapsed-card
@@ -119,12 +109,13 @@ function ProjectDetail() {
   // Remove repo state
   const [removingRepo, setRemovingRepo] = useState<string | null>(null)
 
-  // Pilot runs state
+  // Pilot runs state. We only keep the modal-detail state on the
+  // project page now — the full Pilot wake history lives on
+  // /projects/$name/pilot-runs. pilotRuns is still fetched so the
+  // "Latest wake" card and the "N wakes" link can read counts +
+  // the newest entry without bouncing to the history page.
   const [pilotRuns, setPilotRuns] = useState<PilotRun[]>([])
-  const [pilotRunsOpen, setPilotRunsOpen] = useState(false)
-  const [pilotRunsVisible, setPilotRunsVisible] = useState(5)
   const [pilotRunDetail, setPilotRunDetail] = useState<PilotRun | null>(null)
-  const [pilotCopied, setPilotCopied] = useState(false)
 
   // Automation popover
   const [automationPopoverOpen, setAutomationPopoverOpen] = useState(false)
@@ -592,6 +583,19 @@ function ProjectDetail() {
     return { counts, unbound }
   }, [project?.repos, repoMeta])
 
+  // latestWakeWithDuties = the most recent Pilot wake whose output had
+  // a parseable duties block. Used to render the project-page digest
+  // card (Layer 1) and the duty-status chips strip (Layer 2). When no
+  // such wake exists yet (first wakes after upgrade, or all failures),
+  // both surfaces stay hidden — the legacy Pilot Activity card below
+  // still shows the run history regardless.
+  const latestWakeWithDuties = useMemo<PilotRun | null>(() => {
+    for (const r of pilotRuns) {
+      if (r.status === 'success' && r.duties) return r
+    }
+    return null
+  }, [pilotRuns])
+
   // pilotBound = whether this project has any project-level binding.
   // pilotBoundHere = bound to the dashboard's own machine.
   const pilotBound = !!project?.automation?.bound_machine
@@ -890,130 +894,125 @@ function ProjectDetail() {
             )}
           </div>
 
-          {/* Pilot Activity — collapsible log of recent Pilot wakes with
-              their PILOT-RESULT summaries, cost, and duration. Always
-              rendered (even with 0 runs) so the board is discoverable;
-              empty state explains why there's nothing yet. */}
-          <section className="mb-6">
-            <div className="bg-card border border-border rounded-xl overflow-hidden">
-              <button
-                type="button"
-                onClick={() => setPilotRunsOpen(o => !o)}
-                className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
-                aria-expanded={pilotRunsOpen}
-              >
-                {pilotRunsOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
-                <Activity className="w-4 h-4 text-muted-foreground" />
-                <span className="text-sm font-semibold text-foreground">Pilot Activity</span>
-                <span className="text-xs text-muted-foreground tabular-nums">
-                  {pilotRuns.length} run{pilotRuns.length !== 1 ? 's' : ''}
-                </span>
-                {!pilotRunsOpen && pilotRuns.length === 0 && (
-                  <span className="text-xs text-muted-foreground truncate ml-1">
-                    · no wakes yet
+          {/* Single Pilot status card — consolidates the digest + duty
+              chips into one bordered surface so the project page reads
+              as "one Pilot panel" instead of three stacked widgets.
+              Header line: latest wake time + verdict, clickable into
+              the full run modal. Chip row: only renders text when the
+              status is NOT ok (ok-everywhere = quiet by design). */}
+          {latestWakeWithDuties?.duties && (
+            <section className="mb-6">
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setPilotRunDetail(latestWakeWithDuties)}
+                  className="w-full flex items-center gap-2 px-4 py-2.5 border-b border-border hover:bg-secondary/30 transition-colors text-left"
+                  title="Open full pilot run"
+                >
+                  <Activity className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-sm font-semibold text-foreground">Latest Pilot wake</span>
+                  <span className="text-[11px] text-muted-foreground tabular-nums">
+                    {new Date(latestWakeWithDuties.started_at).toLocaleString()}
                   </span>
-                )}
-                {!pilotRunsOpen && pilotRuns[0]?.result && (
-                  <span
-                    className="text-xs text-muted-foreground truncate ml-1"
-                    title={pilotRuns[0].result.replace(/^PILOT-RESULT:\s*/, '')}
-                  >
-                    · {pilotRuns[0].result.replace(/^PILOT-RESULT:\s*/, '')}
-                  </span>
-                )}
-                {pilotRunsOpen && pilotRuns.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={e => {
-                      e.stopPropagation()
-                      const text = pilotRuns.map(r => {
-                        const ts = new Date(r.started_at).toLocaleString()
-                        const result = r.result ? r.result.replace(/^PILOT-RESULT:\s*/, '') : r.error ?? 'no result'
-                        const cost = r.usage ? ` $${r.usage.total_cost_usd.toFixed(2)}` : ''
-                        return `[${ts}]${cost} ${result}`
-                      }).join('\n')
-                      navigator.clipboard.writeText(text).then(() => {
-                        setPilotCopied(true)
-                        setTimeout(() => setPilotCopied(false), 2000)
-                      })
-                    }}
-                    className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors shrink-0"
-                    title="Copy all activity"
-                  >
-                    {pilotCopied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-                    {pilotCopied ? 'Copied' : 'Copy'}
-                  </button>
-                )}
-              </button>
-              {pilotRunsOpen && pilotRuns.length === 0 && (
-                <div className="border-t border-border px-4 py-6 text-center">
-                  <p className="text-sm text-muted-foreground mb-1">No Pilot wakes recorded yet.</p>
-                  <p className="text-xs text-muted-foreground">
-                    {project.automation?.enabled
-                      ? 'Wait for the next clawflow run pass — the Pilot wakes after operators finish.'
-                      : 'Enable Pilot scheduling above to start. Each clawflow run pass will record a wake here.'}
-                  </p>
-                </div>
-              )}
-              {pilotRunsOpen && pilotRuns.length > 0 && (
-                <div className="border-t border-border divide-y divide-border">
-                  {pilotRuns.slice(0, pilotRunsVisible).map((run, i) => (
+                  {latestWakeWithDuties.result && (
+                    <span className="text-[11px] text-muted-foreground truncate ml-1">
+                      · {latestWakeWithDuties.result.replace(/^PILOT-RESULT:\s*/, '')}
+                    </span>
+                  )}
+                </button>
+
+                {/* Duty chip row. Each chip is a colored pill; when the
+                    status is "ok" we elide any text and just show the
+                    duty name — green pill alone communicates the state.
+                    Non-ok statuses get their text label appended so the
+                    user knows where to look. */}
+                <div className="px-4 py-2.5 flex items-center gap-1.5 flex-wrap border-b border-border">
+                  {DUTY_KEYS.map(key => {
+                    const duty = latestWakeWithDuties.duties![key]
+                    if (!duty) return null
+                    const isOk = duty.status === 'ok'
+                    const actCount = duty.actions?.length ?? 0
+                    return (
                       <button
-                        key={i}
+                        key={key}
                         type="button"
-                        onClick={() => setPilotRunDetail(run)}
-                        className="w-full text-left px-4 py-3 hover:bg-secondary/20 transition-colors"
+                        onClick={() => setPilotRunDetail(latestWakeWithDuties)}
+                        className={cn(
+                          'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium border transition-colors hover:brightness-95',
+                          dutyStatusColour(duty.status),
+                        )}
+                        title={duty.note || (actCount > 0 ? duty.actions!.join('; ') : DUTY_LABELS[key])}
                       >
-                        <div className="flex items-center gap-2 mb-1">
-                          <span
-                            className={cn(
-                              'inline-block w-2 h-2 rounded-full shrink-0',
-                              run.status === 'success' ? 'bg-emerald-500' : run.status === 'failed' ? 'bg-red-500' : 'bg-amber-500 animate-pulse',
-                            )}
-                          />
-                          <span className="text-xs text-muted-foreground tabular-nums">
-                            {new Date(run.started_at).toLocaleString()}
+                        <span>{DUTY_LABELS[key]}</span>
+                        {!isOk && (
+                          <span className="text-[10px] opacity-80 tabular-nums">
+                            {duty.status === 'action_taken' ? `${actCount}` : duty.status}
                           </span>
-                          {run.ended_at && (
-                            <span className="text-xs text-muted-foreground tabular-nums">
-                              · {Math.round((new Date(run.ended_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s
-                            </span>
-                          )}
-                          {run.usage && (
-                            <span className="text-xs text-muted-foreground tabular-nums">
-                              · ${run.usage.total_cost_usd.toFixed(2)}
-                            </span>
-                          )}
-                          {run.usage && (
-                            <span className="text-xs text-muted-foreground tabular-nums">
-                              · {run.usage.num_turns} turns
-                            </span>
-                          )}
-                        </div>
-                        {run.result ? (
-                          <p className="text-sm text-foreground truncate" title={run.result.replace(/^PILOT-RESULT:\s*/, '')}>
-                            {run.result.replace(/^PILOT-RESULT:\s*/, '')}
-                          </p>
-                        ) : run.error ? (
-                          <p className="text-sm text-red-600 font-mono text-xs truncate" title={run.error}>{run.error}</p>
-                        ) : (
-                          <p className="text-xs text-muted-foreground italic">no result line</p>
                         )}
                       </button>
-                    ))}
-                    {pilotRuns.length > pilotRunsVisible && (
-                      <button
-                        type="button"
-                        onClick={() => setPilotRunsVisible(v => v + 10)}
-                        className="w-full px-4 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/20 transition-colors text-center"
-                      >
-                        Show {Math.min(10, pilotRuns.length - pilotRunsVisible)} more ({pilotRuns.length - pilotRunsVisible} remaining)
-                      </button>
-                    )}
+                    )
+                  })}
                 </div>
-              )}
-            </div>
-          </section>
+
+                {/* Issue digest — the passive review duty. Embedded here
+                    rather than its own card so the user sees the prose
+                    summary right where they expect Pilot status, not
+                    scattered across the page. */}
+                {latestWakeWithDuties.duties.issue_digest && (
+                  <div className="px-4 py-3">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <ListTodo className="w-3.5 h-3.5 text-muted-foreground" />
+                      <span className="text-xs font-semibold text-foreground">Issue digest</span>
+                      {latestWakeWithDuties.duties.issue_digest.since_hours ? (
+                        <span className="text-[10px] text-muted-foreground tabular-nums">past {latestWakeWithDuties.duties.issue_digest.since_hours}h</span>
+                      ) : null}
+                      <span className="text-[11px] text-muted-foreground tabular-nums ml-auto">
+                        +{latestWakeWithDuties.duties.issue_digest.new ?? 0} new
+                        {' · '}
+                        −{latestWakeWithDuties.duties.issue_digest.closed ?? 0} closed
+                      </span>
+                    </div>
+                    {latestWakeWithDuties.duties.issue_digest.summary && (
+                      <div className="text-xs text-foreground/85 whitespace-pre-wrap leading-relaxed">
+                        {latestWakeWithDuties.duties.issue_digest.summary}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* History footer — drop the full wake-list off the
+                    project page (it had grown into a competing 5-row
+                    card right below this one). Single link to the
+                    dedicated history page; the count makes it
+                    discoverable without forcing a click to see scale. */}
+                <Link
+                  to="/projects/$name/pilot-runs"
+                  params={{ name }}
+                  className="block px-4 py-2 border-t border-border text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary/30 transition-colors text-center"
+                >
+                  View all {pilotRuns.length} wake{pilotRuns.length !== 1 ? 's' : ''} →
+                </Link>
+              </div>
+            </section>
+          )}
+
+          {/* When no wake has duties yet (fresh project, or all wakes
+              pre-upgrade) the Latest card is hidden but the user still
+              wants a way into the history. Show a thin fallback link
+              so /pilot-runs is never orphaned. */}
+          {!latestWakeWithDuties && pilotRuns.length > 0 && (
+            <section className="mb-6">
+              <Link
+                to="/projects/$name/pilot-runs"
+                params={{ name }}
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <Activity className="w-3.5 h-3.5" />
+                View {pilotRuns.length} Pilot wake{pilotRuns.length !== 1 ? 's' : ''} →
+              </Link>
+            </section>
+          )}
+
 
           {pilotRunDetail && <PilotRunDetailModal run={pilotRunDetail} onClose={() => setPilotRunDetail(null)} />}
 
@@ -1571,98 +1570,3 @@ function BacklogSection({
   )
 }
 
-function PilotRunDetailModal({ run, onClose }: { run: PilotRun; onClose: () => void }) {
-  useEffect(() => {
-    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', handleEsc)
-    return () => document.removeEventListener('keydown', handleEsc)
-  }, [onClose])
-
-  const duration = run.ended_at
-    ? Math.round((new Date(run.ended_at).getTime() - new Date(run.started_at).getTime()) / 1000)
-    : null
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-    >
-      <div className="relative w-full max-w-2xl max-h-[80vh] mx-4 bg-card border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
-          <div className="flex items-center gap-2">
-            <span
-              className={cn(
-                'inline-block w-2.5 h-2.5 rounded-full shrink-0',
-                run.status === 'success' ? 'bg-emerald-500' : run.status === 'failed' ? 'bg-red-500' : 'bg-amber-500 animate-pulse',
-              )}
-            />
-            <h2 className="text-sm font-semibold text-foreground">Pilot Run Detail</h2>
-            <span className="text-xs text-muted-foreground tabular-nums">
-              {new Date(run.started_at).toLocaleString()}
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-          <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-            {duration !== null && (
-              <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
-                Duration: {duration}s
-              </span>
-            )}
-            {run.usage && (
-              <>
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
-                  Cost: ${run.usage.total_cost_usd.toFixed(3)}
-                </span>
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
-                  Turns: {run.usage.num_turns}
-                </span>
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
-                  Input: {(run.usage.input_tokens / 1000).toFixed(1)}k tokens
-                </span>
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
-                  Output: {(run.usage.output_tokens / 1000).toFixed(1)}k tokens
-                </span>
-              </>
-            )}
-          </div>
-
-          {run.result && (
-            <div>
-              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Result</h3>
-              <div className="text-sm text-foreground bg-secondary/40 rounded-lg px-4 py-3 whitespace-pre-wrap">
-                {run.result.replace(/^PILOT-RESULT:\s*/, '')}
-              </div>
-            </div>
-          )}
-
-          {run.summary && (
-            <div>
-              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Summary</h3>
-              <div className="text-sm text-foreground bg-secondary/40 rounded-lg px-4 py-3 whitespace-pre-wrap">
-                {run.summary}
-              </div>
-            </div>
-          )}
-
-          {run.error && (
-            <div>
-              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Error</h3>
-              <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-3 font-mono whitespace-pre-wrap dark:bg-red-950/30 dark:border-red-900">
-                {run.error}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}

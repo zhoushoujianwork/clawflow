@@ -25,6 +25,12 @@ type Issue struct {
 	State     string   `json:"state"`
 	CreatedAt string   `json:"created_at,omitempty"`
 	UpdatedAt string   `json:"updated_at,omitempty"`
+	// ClosedAt is populated only when State == "closed". GitHub /
+	// GitLab both return null when open; clients normalize to "" here.
+	// Used by Pilot's issue_digest to count "closed in last 24h"
+	// without abusing CapturedAt (which the scanner rewrites every
+	// pass and thus is not a real close timestamp).
+	ClosedAt string `json:"closed_at,omitempty"`
 }
 
 // HasLabel reports whether the issue has a given label.

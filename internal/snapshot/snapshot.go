@@ -808,6 +808,11 @@ type PendingEntry struct {
 // IssueEntry represents a single issue from the repository, regardless of
 // whether it has pending operators. Used by the dashboard to show all issues
 // with their current state and labels.
+//
+// CreatedAt is the RFC3339 timestamp the issue was opened on the
+// upstream VCS. Optional in the wire format (older snapshots don't
+// have it) but always populated by the scanner — consumed by Pilot's
+// issue_digest to compute "new in last 24h" without an extra API call.
 type IssueEntry struct {
 	Repo        string    `json:"repo"`
 	IssueNumber int       `json:"issue_number"`
@@ -815,6 +820,8 @@ type IssueEntry struct {
 	Labels      []string  `json:"labels,omitempty"`
 	State       string    `json:"state"` // "open" | "closed"
 	CapturedAt  time.Time `json:"captured_at"`
+	CreatedAt   string    `json:"created_at,omitempty"`
+	ClosedAt    string    `json:"closed_at,omitempty"`
 }
 
 // WriteIssues writes data/issues.json with all issues from monitored repos.
@@ -1489,15 +1496,59 @@ func WriteProjects() error {
 
 // PilotRunMeta describes one Pilot wake. Stored alongside operator
 // runs so the dashboard can show Pilot activity on the project detail page.
+//
+// Duties is the structured, duty-shaped view of what Pilot did this
+// wake — populated by parsing the YAML front-matter block at the top
+// of Pilot's stdout. Absent on legacy / failed-to-parse runs, in which
+// case the UI falls back to the free-form Summary.
 type PilotRunMeta struct {
-	Project   string     `json:"project"`
-	StartedAt time.Time  `json:"started_at"`
-	EndedAt   *time.Time `json:"ended_at,omitempty"`
-	Status    string     `json:"status"` // "running", "success", "failed"
-	Result    string     `json:"result,omitempty"`
-	Error     string     `json:"error,omitempty"`
-	Summary   string     `json:"summary,omitempty"`
-	Usage     *Usage     `json:"usage,omitempty"`
+	Project   string        `json:"project"`
+	StartedAt time.Time     `json:"started_at"`
+	EndedAt   *time.Time    `json:"ended_at,omitempty"`
+	Status    string        `json:"status"` // "running", "success", "failed"
+	Result    string        `json:"result,omitempty"`
+	Error     string        `json:"error,omitempty"`
+	Summary   string        `json:"summary,omitempty"`
+	Usage     *Usage        `json:"usage,omitempty"`
+	Duties    *PilotDuties  `json:"duties,omitempty"`
+	Verdict   string        `json:"verdict,omitempty"`
+}
+
+// PilotDuty is the shape every actionable duty (pr_triage, monitoring,
+// doc_sync, backlog_hygiene) returns. Status is one of:
+//
+//	"ok"           — checked, nothing to do
+//	"action_taken" — checked, did something (Actions populated)
+//	"flagged"      — checked, found something a human should see (Note populated)
+//	"error"        — could not check (Note carries the reason)
+type PilotDuty struct {
+	Status  string   `json:"status"`
+	Actions []string `json:"actions,omitempty"`
+	Note    string   `json:"note,omitempty"`
+}
+
+// PilotIssueDigest is the passive-review duty: a human-readable
+// summary of recent issue activity. Counts are computed by the runner
+// from issues.json / runs.json (Pilot is not asked to count), so they
+// are always accurate; Summary is the prose Pilot writes.
+type PilotIssueDigest struct {
+	SinceHours int    `json:"since_hours"` // window the summary covers (typically 24)
+	New        int    `json:"new"`
+	Closed     int    `json:"closed"`
+	Labeled    int    `json:"labeled"`
+	Commented  int    `json:"commented"`
+	Summary    string `json:"summary,omitempty"`
+}
+
+// PilotDuties is the full duty rollup for one wake. Each field maps
+// to one of Pilot's standing responsibilities — see internal/chat
+// pilot prompt for the contract Pilot agrees to honour.
+type PilotDuties struct {
+	PRTriage        PilotDuty        `json:"pr_triage"`
+	Monitoring      PilotDuty        `json:"monitoring"`
+	DocSync         PilotDuty        `json:"doc_sync"`
+	IssueDigest     PilotIssueDigest `json:"issue_digest"`
+	BacklogHygiene  PilotDuty        `json:"backlog_hygiene"`
 }
 
 // PilotRunDir returns the directory for a single Pilot run.

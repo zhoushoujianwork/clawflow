@@ -329,7 +329,21 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 
 	resultLine := extractResult(output)
 	meta.Result = resultLine
-	meta.Summary = output
+	// Parse the duties YAML block first, then strip it from Summary so
+	// the dashboard's free-form Detail view doesn't show raw fenced
+	// YAML below the structured cards. Legacy / failed-to-parse runs
+	// leave meta.Duties nil; UI falls back to the full output.
+	if duties := ExtractDuties(output); duties != nil {
+		// Runner is authoritative for the digest counts — Pilot only
+		// writes the prose summary. This keeps the YAML short and the
+		// numbers reliable (Pilot can't drift, miscount, or hallucinate).
+		FillIssueDigestCounts(duties, p.Repos)
+		meta.Duties = duties
+		meta.Verdict = resultLine
+		meta.Summary = strings.TrimSpace(StripDutiesBlock(output))
+	} else {
+		meta.Summary = output
+	}
 
 	if err != nil {
 		meta.Status = "failed"

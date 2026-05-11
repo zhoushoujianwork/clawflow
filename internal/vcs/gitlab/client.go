@@ -103,13 +103,14 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 		Labels    []string `json:"labels"`
 		CreatedAt string   `json:"created_at"`
 		UpdatedAt string   `json:"updated_at"`
+		ClosedAt  string   `json:"closed_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
 	issues := make([]vcs.Issue, len(raw))
 	for i, r := range raw {
-		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
 	}
 	return issues, nil
 }
