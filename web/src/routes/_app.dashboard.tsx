@@ -717,47 +717,52 @@ function Row({
   const dur = durationStr(r.started_at, r.ended_at)
   const runHref = `/runs/${repoSlug(r.repo)}/issue-${r.issue_number}/${runIdFromPath(r.path)}`
   return (
-    <a
-      href={runHref}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="flex items-center gap-3 px-4 py-2.5 hover:bg-secondary/50 transition-colors group"
-    >
-      <StatusChip status={r.status} />
-      <VcsIcon repo={r.repo} map={repoMap} className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+    // Outer div instead of <a> to avoid nesting interactive elements
+    // (<button> and <a>) inside an anchor, which is invalid HTML5 and
+    // causes browsers to misfire the outer navigation on cancel clicks.
+    <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-secondary/50 transition-colors group">
+      {/* Navigable region — clicking anywhere in this flex-1 area opens the run detail */}
+      <a
+        href={runHref}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center gap-3 flex-1 min-w-0"
+      >
+        <StatusChip status={r.status} />
+        <VcsIcon repo={r.repo} map={repoMap} className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+        <span className="text-sm text-foreground truncate flex-1" title={`${r.operator} · ${r.issue_title || '(no title)'}`}>
+          {r.operator} · {r.issue_title || '(no title)'}
+        </span>
+        {dur && <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-14 text-right">{dur}</span>}
+        <span className="text-xs text-muted-foreground shrink-0 w-16 text-right">{timeAgo(r.started_at)}</span>
+        <ChevronRight className="w-4 h-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
+      </a>
+      {/* Standalone interactive elements — siblings of the anchor, not descendants */}
       <a
         href={issueUrl(r.repo, r.issue_number, repoMap)}
         target="_blank"
         rel="noopener noreferrer"
-        onClick={e => e.stopPropagation()}
         className={`font-mono text-xs hover:text-foreground hover:underline shrink-0 ${r.issue_state === 'closed' ? 'text-muted-foreground/50 line-through' : 'text-muted-foreground'}`}
       >
         #{r.issue_number}
       </a>
-      <span className="text-sm text-foreground truncate flex-1" title={`${r.operator} · ${r.issue_title || '(no title)'}`}>
-        {r.operator} · {r.issue_title || '(no title)'}
-      </span>
       <Link
         to="/repos/$repoName"
         params={{ repoName: encodeURIComponent(r.repo) }}
-        onClick={e => e.stopPropagation()}
         className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 hidden sm:inline"
       >
         {r.repo}
       </Link>
-      {dur && <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-14 text-right">{dur}</span>}
       {r.pr_url && (
         <a
           href={r.pr_url}
           target="_blank"
           rel="noopener noreferrer"
-          onClick={e => e.stopPropagation()}
           className="inline-flex items-center gap-0.5 text-xs text-foreground hover:underline shrink-0"
         >
           PR <ExternalLink className="w-3 h-3" />
         </a>
       )}
-      <span className="text-xs text-muted-foreground shrink-0 w-16 text-right">{timeAgo(r.started_at)}</span>
       {onCancel && (
         <button
           type="button"
@@ -765,9 +770,7 @@ function Row({
           // label + red border) and the misclick risk doesn't justify
           // a modal interrupt. The row reverts to "failed" on the next
           // poll, which is recoverable enough to forgive a stray click.
-          onClick={e => {
-            e.preventDefault()
-            e.stopPropagation()
+          onClick={() => {
             if (cancelling) return
             onCancel(r.repo, r.issue_number)
           }}
@@ -787,7 +790,6 @@ function Row({
           )}
         </button>
       )}
-      <ChevronRight className="w-4 h-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
-    </a>
+    </div>
   )
 }
