@@ -210,6 +210,15 @@ func ExtractLastContextMD(output string) string {
 	return extractFencedBlock(collectAssistantText(output), "context.md")
 }
 
+// ExtractFencedDoc is the generic form: scans a stream-json output and
+// returns the content of the last fenced block whose info string equals
+// tag (e.g. "context.md", "testing.md", "deployment.md"). Returns "" if
+// none found. Used by the /api/project/update-doc handler where the
+// target filename is supplied by the caller.
+func ExtractFencedDoc(output, tag string) string {
+	return extractFencedBlock(collectAssistantText(output), tag)
+}
+
 // ExtractLastTestingMD is the same as ExtractLastContextMD but for the
 // "testing.md" tag — used by the project-chat write-back path so the
 // AI can update both docs in one session and have each save offered

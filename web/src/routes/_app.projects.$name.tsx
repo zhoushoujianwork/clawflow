@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, Message
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
+import { useDocUpdater } from '../components/DocUpdater'
 import { useHealthCheck } from '../components/HealthCheckCard'
 import {
   IssueList,
@@ -146,6 +147,13 @@ function ProjectDetail() {
   const [contextOpen, setContextOpen] = useState(false)
   const [testingOpen, setTestingOpen] = useState(false)
   const [deploymentOpen, setDeploymentOpen] = useState(false)
+
+  // "Update with AI" affordances for the three project-level docs.
+  // The hook returns { trigger, form } per doc — trigger goes inline in
+  // the card header row, form renders below when open.
+  const contextUpdater = useDocUpdater({ project: name, file: 'context.md', onUpdated: fetchProject })
+  const testingUpdater = useDocUpdater({ project: name, file: 'testing.md', onUpdated: fetchProject })
+  const deploymentUpdater = useDocUpdater({ project: name, file: 'deployment.md', onUpdated: fetchProject })
 
   // Generate deployment state — mirrors the context generation pattern.
   const [generatingDeployment, setGeneratingDeployment] = useState(false)
@@ -1078,16 +1086,14 @@ function ProjectDetail() {
                       · {previewMD(project.context_md)}
                     </span>
                   )}
-                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
-                    <MessageSquare className="w-3 h-3" />
-                    Edit via chat
-                  </span>
+                  {contextUpdater.trigger}
                 </button>
                 {contextOpen && (
                   <div className="px-4 pb-4 pt-0 border-t border-border">
                     <Markdown>{project.context_md}</Markdown>
                   </div>
                 )}
+                {contextUpdater.form}
               </div>
             ) : (
               <>
@@ -1144,16 +1150,14 @@ function ProjectDetail() {
                       · {previewMD(project.testing_md)}
                     </span>
                   )}
-                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
-                    <MessageSquare className="w-3 h-3" />
-                    Edit via chat
-                  </span>
+                  {testingUpdater.trigger}
                 </button>
                 {testingOpen && (
                   <div className="px-4 pb-4 pt-0 border-t border-border">
                     <Markdown>{project.testing_md}</Markdown>
                   </div>
                 )}
+                {testingUpdater.form}
               </div>
             ) : (
               <>
@@ -1213,16 +1217,14 @@ function ProjectDetail() {
                       · {previewMD(project.deployment_md)}
                     </span>
                   )}
-                  <span className="ml-auto text-xs text-muted-foreground inline-flex items-center gap-1 shrink-0">
-                    <MessageSquare className="w-3 h-3" />
-                    Edit via chat
-                  </span>
+                  {deploymentUpdater.trigger}
                 </button>
                 {deploymentOpen && (
                   <div className="px-4 pb-4 pt-0 border-t border-border">
                     <Markdown>{project.deployment_md}</Markdown>
                   </div>
                 )}
+                {deploymentUpdater.form}
               </div>
             ) : (
               <>
