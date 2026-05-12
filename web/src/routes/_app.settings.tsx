@@ -83,104 +83,12 @@ function SettingsPage() {
       {data && (
         <>
           <ProvidersSection />
-          <ClaudeSection view={data.claude} onSaved={refresh} />
           <TokensSection view={data.tokens} onSaved={refresh} />
           <GlobalSection view={data.global} onSaved={refresh} />
           <SyncSection />
         </>
       )}
     </div>
-  )
-}
-
-// -----------------------------------------------------------------------------
-// Claude Models (global per-role model defaults)
-// -----------------------------------------------------------------------------
-
-function ClaudeSection({
-  view, onSaved,
-}: { view: SettingsView['claude']; onSaved: () => void }) {
-  const [chatModel, setChatModel] = useState(view.chat_model ?? '')
-  const [evalModel, setEvalModel] = useState(view.eval_model ?? '')
-  const [operatorModel, setOperatorModel] = useState(view.operator_model ?? '')
-  const [busy, setBusy] = useState(false)
-  const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
-
-  // Keep server-backed fields in sync when the parent reloads.
-  useEffect(() => { setChatModel(view.chat_model ?? '') }, [view.chat_model])
-  useEffect(() => { setEvalModel(view.eval_model ?? '') }, [view.eval_model])
-  useEffect(() => { setOperatorModel(view.operator_model ?? '') }, [view.operator_model])
-
-  const dirty =
-    chatModel !== (view.chat_model ?? '') ||
-    evalModel !== (view.eval_model ?? '') ||
-    operatorModel !== (view.operator_model ?? '')
-
-  const save = () => {
-    setBusy(true); setSaveMsg(null)
-    const body: Record<string, string> = {}
-    if (chatModel !== (view.chat_model ?? '')) body.chat_model = chatModel
-    if (evalModel !== (view.eval_model ?? '')) body.eval_model = evalModel
-    if (operatorModel !== (view.operator_model ?? '')) body.operator_model = operatorModel
-    fetch('/api/settings/claude', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-      .then(async r => {
-        const d = await r.json().catch(() => null)
-        if (!r.ok) throw new Error((d && d.error) || `HTTP ${r.status}`)
-      })
-      .then(() => {
-        setSaveMsg({ ok: true, text: 'Saved' })
-        onSaved()
-      })
-      .catch(e => setSaveMsg({ ok: false, text: String(e.message || e) }))
-      .finally(() => setBusy(false))
-  }
-
-  return (
-    <Card title="Claude Models" hint="Global per-role model defaults passed as --model to spawned claude subprocesses. A provider-level model override takes precedence when set on the active provider.">
-      <ModelRow
-        label="Chat model"
-        hint="Used by the dashboard's chat drawer (clawflow chat)."
-        value={chatModel}
-        defaultValue={view.chat_model_default}
-        onChange={setChatModel}
-      />
-      <ModelRow
-        label="Eval model"
-        hint="Used by evaluate-* operators (evaluate-bug, evaluate-feat)."
-        value={evalModel}
-        defaultValue={view.eval_model_default}
-        onChange={setEvalModel}
-      />
-      <ModelRow
-        label="Operator model"
-        hint="Used by every other operator (implement, reply-comment, custom skills)."
-        value={operatorModel}
-        defaultValue={view.operator_model_default}
-        onChange={setOperatorModel}
-      />
-
-      <div className="flex items-center gap-2 pt-2">
-        <button
-          type="button"
-          onClick={save}
-          disabled={!dirty || busy}
-          className={cn(
-            'text-sm px-3 py-1 rounded border',
-            dirty && !busy
-              ? 'bg-secondary hover:bg-secondary/70 border-border text-foreground'
-              : 'bg-muted text-muted-foreground border-border cursor-not-allowed',
-          )}
-        >
-          {busy ? <Loader2 className="w-3 h-3 animate-spin inline mr-1" /> : null}
-          Save
-        </button>
-        {saveMsg && <Status ok={saveMsg.ok} text={saveMsg.text} />}
-      </div>
-    </Card>
   )
 }
 
@@ -974,40 +882,6 @@ export const MODEL_PRESETS = [
   'claude-opus-4.6',
 ] as const
 
-function ModelRow({
-  label, hint, value, defaultValue, onChange,
-}: {
-  label: string
-  hint: string
-  value: string
-  defaultValue: string
-  onChange: (v: string) => void
-}) {
-  // If the saved value isn't in MODEL_PRESETS, surface it as a custom
-  // option at the top of the dropdown so the user can see what's
-  // currently in effect without us silently dropping their pin.
-  const inPresets = (MODEL_PRESETS as readonly string[]).includes(value)
-  const showCustom = value !== '' && !inPresets
-
-  return (
-    <Row label={label}>
-      <div className="flex-1 flex flex-col gap-0.5">
-        <select
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          className="text-sm font-mono px-2 py-1 border border-border rounded bg-background"
-        >
-          <option value="">(default — {defaultValue})</option>
-          {showCustom && <option value={value}>{value} (custom)</option>}
-          {MODEL_PRESETS.map(m => (
-            <option key={m} value={m}>{m}</option>
-          ))}
-        </select>
-        <span className="text-[11px] text-muted-foreground">{hint}</span>
-      </div>
-    </Row>
-  )
-}
 
 function Status({ ok, text }: { ok: boolean; text: string }) {
   return (
