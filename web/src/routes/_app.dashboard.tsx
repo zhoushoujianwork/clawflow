@@ -31,7 +31,7 @@ interface Run {
   issue_state?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'skipped-empty'
   summary?: string
   pr_url?: string
   error?: string
@@ -74,11 +74,13 @@ interface Pending {
 type StatusFilter = 'all' | 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
 
 const statusPill: Record<Run['status'], { label: string; cls: string; Icon: typeof CheckCircle2 }> = {
-  success:   { label: 'success',   cls: 'bg-green-100 text-green-700 border-green-200',   Icon: CheckCircle2 },
-  running:   { label: 'running',   cls: 'bg-blue-100 text-blue-700 border-blue-200',      Icon: Loader2 },
-  failed:    { label: 'failed',    cls: 'bg-red-100 text-red-700 border-red-200',         Icon: XCircle },
-  skipped:   { label: 'skipped',   cls: 'bg-muted text-muted-foreground border-border',   Icon: SkipForward },
-  cancelled: { label: 'cancelled', cls: 'bg-amber-50 text-amber-700 border-amber-200',    Icon: Square },
+  success:       { label: 'success',      cls: 'bg-green-100 text-green-700 border-green-200',   Icon: CheckCircle2 },
+  running:       { label: 'running',      cls: 'bg-blue-100 text-blue-700 border-blue-200',      Icon: Loader2 },
+  failed:        { label: 'failed',       cls: 'bg-red-100 text-red-700 border-red-200',         Icon: XCircle },
+  skipped:       { label: 'skipped',      cls: 'bg-muted text-muted-foreground border-border',   Icon: SkipForward },
+  cancelled:     { label: 'cancelled',    cls: 'bg-amber-50 text-amber-700 border-amber-200',    Icon: Square },
+  'no-marker':   { label: 'no marker',    cls: 'bg-orange-100 text-orange-700 border-orange-200', Icon: XCircle },
+  'skipped-empty': { label: 'empty',      cls: 'bg-orange-50 text-orange-600 border-orange-200', Icon: SkipForward },
 }
 
 function StatusChip({ status }: { status: Run['status'] }) {
@@ -287,7 +289,10 @@ function Dashboard() {
   const counts = useMemo(() => {
     const c = { total: runs.length, success: 0, failed: 0, skipped: 0, running: 0, cancelled: 0 }
     for (const r of runs) {
-      if (r.status in c) c[r.status]++
+      // no-marker and skipped-empty are label-state-machine failures: bucket
+      // them under "failed" for the stat cards so they surface as actionable.
+      const bucket = (r.status === 'no-marker' || r.status === 'skipped-empty') ? 'failed' : r.status
+      if (bucket in c) c[bucket as keyof typeof c]++
     }
     return c
   }, [runs])
@@ -308,7 +313,12 @@ function Dashboard() {
   const { filteredRunning, filteredHistory } = useMemo(() => {
     const q = query.trim().toLowerCase()
     const passesFilters = (r: Run) => {
-      if (statusFilter !== 'all' && r.status !== statusFilter) return false
+      if (statusFilter !== 'all') {
+        // "failed" filter also captures no-marker and skipped-empty since they
+        // are bucketed under failed in the stat cards (issue #143).
+        const effectiveStatus = (r.status === 'no-marker' || r.status === 'skipped-empty') ? 'failed' : r.status
+        if (effectiveStatus !== statusFilter) return false
+      }
       if (repoFilter !== 'all' && r.repo !== repoFilter) return false
       if (q && !(r.issue_title || '').toLowerCase().includes(q) && !String(r.issue_number).includes(q)) return false
       return true

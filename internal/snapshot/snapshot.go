@@ -240,7 +240,8 @@ type RunMeta struct {
 	// would carry "0001-01-01T00:00:00Z" and the dashboard's duration math
 	// would render it as a giant negative offset.
 	EndedAt     *time.Time `json:"ended_at,omitempty"`
-	// Status is one of "running", "finalizing", "success", "failed", "skipped", "cancelled".
+	// Status is one of "running", "finalizing", "success", "failed", "skipped",
+	// "cancelled", "no-marker", "skipped-empty".
 	// "cancelled" is set only by /api/run/cancel after the runner process
 	// is killed — it lets the dashboard distinguish a user-initiated kill
 	// from an organic crash ("failed").
@@ -248,6 +249,9 @@ type RunMeta struct {
 	// successfully, before usage extraction and meta cleanup. If the process
 	// is killed in this window, the reconciler treats it as completed (not
 	// stale) and promotes it to "success" without re-queuing the issue.
+	// "no-marker" means claude produced output but omitted the outcome marker;
+	// the issue stays unlabeled and the circuit breaker counts this run.
+	// "skipped-empty" means claude produced empty output; same treatment.
 	Status  string `json:"status"`
 	PRUrl   string `json:"pr_url,omitempty"`
 	Error   string `json:"error,omitempty"`
@@ -1348,7 +1352,7 @@ func ConsecutiveFailures(repo string, issueNum int) int {
 	})
 	count := 0
 	for _, r := range runs {
-		if r.status != "failed" {
+		if r.status != "failed" && r.status != "no-marker" && r.status != "skipped-empty" {
 			break
 		}
 		count++

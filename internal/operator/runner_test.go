@@ -102,8 +102,10 @@ func TestRun_HappyPath(t *testing.T) {
 			return "evaluation posted", nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// No outcome marker → Run now returns ErrNoOutcomeMarker so the circuit
+	// breaker upstream can count consecutive occurrences (issue #143).
+	if !errors.Is(err, ErrNoOutcomeMarker) {
+		t.Fatalf("expected ErrNoOutcomeMarker, got: %v", err)
 	}
 	if output != "evaluation posted" {
 		t.Errorf("Run returned output %q, want %q", output, "evaluation posted")
@@ -118,10 +120,7 @@ func TestRun_HappyPath(t *testing.T) {
 	if v.removeLabelCals != 0 {
 		t.Errorf("RemoveLabel called %d times, want 0", v.removeLabelCals)
 	}
-	// No outcome marker in the output → runner skips the comment post to
-	// prevent duplicate accumulation (the self-posting guard introduced in
-	// fix/issue-53). A real operator must include a marker; this test op
-	// intentionally omits one to verify the guard fires cleanly.
+	// No outcome marker → runner skips comment post (no VCS side-effects).
 	if len(v.comments) != 0 {
 		t.Fatalf("want 0 comments (no outcome marker → guard skips post), got %d", len(v.comments))
 	}
@@ -198,7 +197,9 @@ func TestRun_EventWriterReceivesRunFuncInput(t *testing.T) {
 			return "ok", nil
 		},
 	})
-	if err != nil {
+	// "ok" has no outcome marker → ErrNoOutcomeMarker (issue #143).
+	// The test only cares that EventWriter was wired through, not the outcome.
+	if err != nil && !errors.Is(err, ErrNoOutcomeMarker) {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if captured != sink {
@@ -349,10 +350,11 @@ func TestRun_OutcomeMarker_None_NoPost(t *testing.T) {
 			return body, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
+	// No marker → ErrNoOutcomeMarker so the circuit breaker can count it (issue #143).
+	if !errors.Is(err, ErrNoOutcomeMarker) {
+		t.Fatalf("expected ErrNoOutcomeMarker, got: %v", err)
 	}
-	// No marker → runner skips comment post (self-posting guard).
+	// No marker → runner skips comment post (no VCS side-effects).
 	if len(v.comments) != 0 {
 		t.Errorf("want 0 comments (no marker → guard skips post); got %v", v.comments)
 	}
