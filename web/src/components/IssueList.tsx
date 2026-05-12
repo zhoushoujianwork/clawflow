@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { ChevronRight, ExternalLink, MessageSquare, Code } from 'lucide-react'
 import { Link } from '@tanstack/react-router'
 import { cn } from '../lib/utils'
@@ -379,25 +380,57 @@ function IssueRow({
   const k = rowKey(group)
   // Mode picker state: null = picker hidden, 'issue'|'edit' = picker shown
   const [showModePicker, setShowModePicker] = useState(false)
-  const modePickerRef = useRef<HTMLDivElement>(null)
+  // Menu position is computed from the trigger's bounding rect and rendered
+  // into a body-level portal so the section container's `overflow-hidden`
+  // (needed for the rounded-xl corners) doesn't clip the dropdown.
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!showModePicker) return
     const handlePointerDown = (e: MouseEvent) => {
-      if (modePickerRef.current && !modePickerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node
+      const inMenu = menuRef.current?.contains(target)
+      const inTrigger = triggerRef.current?.contains(target)
+      if (!inMenu && !inTrigger) {
         setShowModePicker(false)
       }
     }
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setShowModePicker(false)
     }
+    // Close on scroll/resize rather than try to follow the trigger —
+    // simpler, and matches the behaviour of most native dropdowns.
+    const handleDismiss = () => setShowModePicker(false)
     document.addEventListener('mousedown', handlePointerDown)
     document.addEventListener('keydown', handleKey)
+    window.addEventListener('scroll', handleDismiss, true)
+    window.addEventListener('resize', handleDismiss)
     return () => {
       document.removeEventListener('mousedown', handlePointerDown)
       document.removeEventListener('keydown', handleKey)
+      window.removeEventListener('scroll', handleDismiss, true)
+      window.removeEventListener('resize', handleDismiss)
     }
   }, [showModePicker])
+
+  const toggleModePicker = () => {
+    setShowModePicker(prev => {
+      const next = !prev
+      if (next && triggerRef.current) {
+        const rect = triggerRef.current.getBoundingClientRect()
+        // Anchor the menu below the trigger, right-aligned to its right edge.
+        // `right` is measured from the viewport's right edge because the
+        // portal uses position: fixed.
+        setMenuPos({
+          top: rect.bottom + 4,
+          right: Math.max(4, window.innerWidth - rect.right),
+        })
+      }
+      return next
+    })
+  }
 
   const openChat = (mode: 'issue' | 'edit') => {
     setShowModePicker(false)
@@ -468,9 +501,10 @@ function IssueRow({
           {group.runs.length} {group.runs.length === 1 ? 'run' : 'runs'}
         </span>
         {/* Chat button with mode picker */}
-        <div ref={modePickerRef} className="relative shrink-0" onClick={e => e.stopPropagation()}>
+        <div className="relative shrink-0" onClick={e => e.stopPropagation()}>
           <button
-            onClick={() => setShowModePicker(v => !v)}
+            ref={triggerRef}
+            onClick={toggleModePicker}
             className="text-muted-foreground hover:text-foreground"
             title="Chat about this issue"
             aria-haspopup="true"
@@ -478,10 +512,13 @@ function IssueRow({
           >
             <MessageSquare className="w-3.5 h-3.5" />
           </button>
-          {showModePicker && (
+          {showModePicker && menuPos && createPortal(
             <div
-              className="absolute right-0 top-6 z-50 bg-card border border-border rounded-lg shadow-lg py-1 min-w-[160px]"
+              ref={menuRef}
+              className="fixed z-50 bg-card border border-border rounded-lg shadow-lg py-1 min-w-[160px]"
+              style={{ top: menuPos.top, right: menuPos.right }}
               role="menu"
+              onClick={e => e.stopPropagation()}
             >
               <button
                 role="menuitem"
@@ -507,7 +544,8 @@ function IssueRow({
                   <span className="block text-muted-foreground">hot-fix · full access</span>
                 </span>
               </button>
-            </div>
+            </div>,
+            document.body,
           )}
         </div>
       </button>
