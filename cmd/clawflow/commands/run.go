@@ -797,9 +797,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// the caller so it can abort the remaining job queue.
 	isRateLimit := runErr != nil && errors.Is(runErr, operator.ErrRateLimit)
 
+	// Detect no-marker failures: claude produced output but omitted the
+	// outcome marker. operator.Run now returns ErrNoOutcomeMarker for this
+	// case so we can route it through the circuit breaker (status="failed")
+	// instead of silently recording it as "success" and letting the issue
+	// re-fire indefinitely (see issue #143).
+	isNoMarker := runErr != nil && errors.Is(runErr, operator.ErrNoOutcomeMarker)
+
 	if runErr != nil {
 		if isRateLimit {
 			fmt.Fprintf(os.Stderr, "%s ✗ claude rate limited (will retry next pass): %v\n", prefix, runErr)
+		} else if isNoMarker {
+			fmt.Fprintf(os.Stderr, "%s ✗ claude produced no outcome marker (will count toward circuit breaker): %v\n", prefix, runErr)
 		} else {
 			fmt.Fprintf(os.Stderr, "%s ✗ claude failed: %v\n", prefix, runErr)
 		}
@@ -823,11 +832,22 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// and ConsecutiveFailures doesn't count this toward the circuit breaker.
 		rm.Status = "rate-limited"
 		rm.Error = runErr.Error()
+	case isNoMarker:
+		// No-marker runs are recorded as "no-marker" (distinct from generic
+		// "failed") so the dashboard can surface the specific cause. They DO
+		// count toward the circuit breaker — the issue stays unlabeled and
+		// will re-fire on every subsequent pass otherwise (issue #143).
+		rm.Status = "no-marker"
+		rm.Error = runErr.Error()
 	case runErr != nil:
 		rm.Status = "failed"
 		rm.Error = runErr.Error()
 	case output == "":
-		rm.Status = "skipped"
+		// Empty output: claude exited cleanly but produced nothing. Like
+		// no-marker, the issue stays unlabeled and will re-fire. Count toward
+		// the circuit breaker so a stuck issue eventually gets agent-failed
+		// instead of looping forever (issue #143).
+		rm.Status = "skipped-empty"
 	default:
 		rm.Status = "success"
 	}
@@ -835,7 +855,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// Conditional cleanup: only remove the worktree on success/skip.
 	// On failure, preserve it so the next run can resume from the
 	// partial work instead of starting from scratch.
-	if rm.Status == "success" || rm.Status == "skipped" {
+	// skipped-empty and no-marker have no partial work worth resuming,
+	// so clean up to avoid accumulating stale worktrees.
+	if rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
@@ -866,11 +888,17 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	case "success":
 		fmt.Printf("%s ✓ done\n", prefix)
 		return true, false
-	case "skipped":
-		return true, false
 	case "rate-limited":
 		// Signal the caller to abort the queue; do NOT call checkCircuitBreaker.
 		return false, true
+	case "no-marker":
+		fmt.Printf("%s ✗ no outcome marker (circuit breaker counting)\n", prefix)
+		checkCircuitBreaker(j, prefix)
+		return false, false
+	case "skipped-empty":
+		fmt.Printf("%s ✗ empty output (circuit breaker counting)\n", prefix)
+		checkCircuitBreaker(j, prefix)
+		return false, false
 	default:
 		checkCircuitBreaker(j, prefix)
 		return false, false

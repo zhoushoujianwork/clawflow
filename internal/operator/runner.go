@@ -2,6 +2,7 @@ package operator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,14 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrNoOutcomeMarker is returned by Run when claude produced non-empty output
+// but the output contained no <!-- clawflow:outcome=… --> marker. This is
+// treated as a recoverable failure (not a permanent one) so the circuit
+// breaker upstream can count consecutive occurrences and eventually add
+// agent-failed to stop the retry loop. It is distinct from ErrRateLimit so
+// the caller can handle each case appropriately.
+var ErrNoOutcomeMarker = errors.New("operator produced no outcome marker")
 
 // outcomeRE matches a "<!-- clawflow:outcome=<label> --> " line. The runner
 // parses these from the operator's stdout to learn which terminal label to
@@ -132,15 +141,17 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	//
 	// Posting this summary as a comment would accumulate duplicate meta-comments
 	// on every run (the trigger label is still present, so the operator fires
-	// again). Instead, log a warning and skip the comment post. The lock label
-	// will still be removed by the caller, so the issue is left in a clean state
-	// for the next run (which may succeed once the prompt hardening takes effect).
+	// again). Instead, return ErrNoOutcomeMarker so the caller records this as
+	// a failure and the circuit breaker can count consecutive occurrences.
+	// Without this, the issue stays unlabeled and re-fires on every subsequent
+	// pass until claude happens to produce a valid marker — potentially looping
+	// indefinitely (see issue #143).
 	if outcome == "" {
 		fmt.Fprintf(os.Stderr,
-			"  ⚠ operator %q stdout has no outcome marker — operator may have self-posted via a tool call; skipping comment post to prevent duplicate accumulation\n",
+			"  ⚠ operator %q stdout has no outcome marker — operator may have self-posted via a tool call; recording as failure to prevent infinite retry loop\n",
 			op.Name)
 		fmt.Fprintf(os.Stderr, "  ⚠ stdout was: %s\n", trimmed)
-		return trimmed, "", nil
+		return trimmed, "", ErrNoOutcomeMarker
 	}
 
 	// Write-back phase: post comment, apply outcome label, remove trigger labels.

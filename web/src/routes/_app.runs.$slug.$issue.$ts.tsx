@@ -32,7 +32,7 @@ interface RunMeta {
   issue_title?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'skipped-empty'
   summary?: string
   pr_url?: string
   error?: string
@@ -377,6 +377,50 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
     )
   }
 
+  if (meta.status === 'no-marker') {
+    return (
+      <section className="mb-6">
+        <h2 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--error))' }}>
+          Conclusion · no outcome marker
+        </h2>
+        <div
+          className="rounded-lg p-4 text-sm whitespace-pre-wrap"
+          style={{
+            background: 'hsl(var(--bg-secondary))',
+            border: '1px solid hsl(var(--border))',
+            borderLeft: '3px solid hsl(var(--error))',
+            color: 'hsl(var(--text-high))',
+          }}
+        >
+          <p className="mb-2">The operator produced output but omitted the <code>{'<!-- clawflow:outcome=… -->'}</code> marker. No comment was posted and no label was applied to the issue.</p>
+          <p className="text-xs" style={{ color: 'hsl(var(--text-low))' }}>This run counts toward the circuit breaker. After {'{maxConsecutiveFailures}'} consecutive occurrences the issue will be labeled <code>agent-failed</code>.</p>
+          {meta.summary && <pre className="mt-3 text-xs overflow-auto">{meta.summary}</pre>}
+        </div>
+      </section>
+    )
+  }
+
+  if (meta.status === 'skipped-empty') {
+    return (
+      <section className="mb-6">
+        <h2 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--text-high))' }}>
+          Conclusion · empty output
+        </h2>
+        <div
+          className="rounded-lg p-4 text-sm"
+          style={{
+            background: 'hsl(var(--bg-secondary))',
+            border: '1px solid hsl(var(--border))',
+            borderLeft: '3px solid hsl(var(--warning, var(--border)))',
+            color: 'hsl(var(--text-low))',
+          }}
+        >
+          Claude exited cleanly but produced no output. No comment was posted and no label was applied. This run counts toward the circuit breaker.
+        </div>
+      </section>
+    )
+  }
+
   if (meta.status === 'cancelled') {
     return (
       <section className="mb-6">
@@ -529,11 +573,13 @@ function msToShort(ms: number): string {
 
 function StatusBadge({ status }: { status: RunMeta['status'] }) {
   const cfg = {
-    success:   { cls: 'bg-green-100 text-green-700 border-green-200',  Icon: CheckCircle2 },
-    running:   { cls: 'bg-blue-100 text-blue-700 border-blue-200',     Icon: Loader2 },
-    failed:    { cls: 'bg-red-100 text-red-700 border-red-200',        Icon: XCircle },
-    skipped:   { cls: 'bg-muted text-muted-foreground border-border',  Icon: SkipForward },
-    cancelled: { cls: 'bg-amber-50 text-amber-700 border-amber-200',   Icon: Square },
+    success:         { cls: 'bg-green-100 text-green-700 border-green-200',    Icon: CheckCircle2 },
+    running:         { cls: 'bg-blue-100 text-blue-700 border-blue-200',       Icon: Loader2 },
+    failed:          { cls: 'bg-red-100 text-red-700 border-red-200',          Icon: XCircle },
+    skipped:         { cls: 'bg-muted text-muted-foreground border-border',    Icon: SkipForward },
+    cancelled:       { cls: 'bg-amber-50 text-amber-700 border-amber-200',     Icon: Square },
+    'no-marker':     { cls: 'bg-orange-100 text-orange-700 border-orange-200', Icon: XCircle },
+    'skipped-empty': { cls: 'bg-orange-50 text-orange-600 border-orange-200',  Icon: SkipForward },
   }[status] ?? { cls: 'bg-muted text-muted-foreground border-border', Icon: SkipForward }
   const Icon = cfg.Icon
   return (
