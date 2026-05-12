@@ -10,6 +10,17 @@ The local dashboard (`clawflow web`) gives you a filterable timeline of every op
 
 ---
 
+## Why ClawFlow
+
+![Before ClawFlow vs. after](docs/images/pain-points.jpg)
+
+Two pain points the project targets head-on:
+
+- **Big feature issues get stuck.** A tracking issue explodes into a dozen implicit sub-tasks nobody breaks down. The `decompose` operator splits it into native GitHub sub-issues plus a parent checklist; `track-progress` polls completion each run and auto-closes the parent when the last child lands.
+- **Config drift across machines.** Repos you added on the work laptop don't exist on the home laptop. `clawflow sync push/pull` ships your `config.yaml` (minus tokens and local paths) through a private GitHub Gist — `clawflow login` auto-discovers or creates it. No SaaS, no extra account.
+
+---
+
 ## Install
 
 ```bash
@@ -117,6 +128,10 @@ Scans every enabled repo once, runs any matching operators, exits. Schedule it w
 
 ## How It Works
 
+![ClawFlow architecture](docs/images/architecture.jpg)
+
+A single CLI binary, labels and comments as the only shared state, and `claude -p` as the execution engine — the whole system fits on one diagram.
+
 ```
 clawflow run
   └─ for each configured repo
@@ -130,6 +145,8 @@ clawflow run
 ```
 
 No orchestrator, no sub-agents, no DAG. Operators only coordinate through the labels and comments they read and write — one operator's output becomes the next operator's trigger, implicitly.
+
+![ClawFlow run pipeline](docs/images/workflow.jpg)
 
 Example end-to-end flow for a bug:
 
