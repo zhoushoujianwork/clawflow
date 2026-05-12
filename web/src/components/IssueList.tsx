@@ -480,7 +480,7 @@ function IssueRow({
           </button>
           {showModePicker && (
             <div
-              className="absolute right-0 top-6 z-20 bg-card border border-border rounded-lg shadow-lg py-1 min-w-[160px]"
+              className="absolute right-0 top-6 z-50 bg-card border border-border rounded-lg shadow-lg py-1 min-w-[160px]"
               role="menu"
             >
               <button
