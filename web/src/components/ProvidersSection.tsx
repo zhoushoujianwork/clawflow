@@ -30,6 +30,7 @@ import {
   FlaskConical,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { MODEL_PRESETS } from '../routes/_app.settings'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -395,13 +396,34 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
           </Field>
 
           <Field label="Model">
-            <input
-              type="text"
-              value={model}
-              onChange={e => setModel(e.target.value)}
-              placeholder="(use global default)"
-              className="flex-1 text-sm font-mono px-2 py-1 border border-border rounded bg-background"
-            />
+            <div className="flex-1 flex flex-col gap-1">
+              <select
+                value={(MODEL_PRESETS as readonly string[]).includes(model) || model === '' ? model : '__custom__'}
+                onChange={e => {
+                  if (e.target.value !== '__custom__') setModel(e.target.value)
+                }}
+                className="text-sm font-mono px-2 py-1 border border-border rounded bg-background"
+                aria-label="Provider model override"
+              >
+                <option value="">(use global default)</option>
+                {/* Surface a custom option when the saved value isn't in the preset list */}
+                {model !== '' && !(MODEL_PRESETS as readonly string[]).includes(model) && (
+                  <option value="__custom__">{model} (custom)</option>
+                )}
+                {MODEL_PRESETS.map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              {/* Allow manual override for pinned dated IDs not in the preset list */}
+              <input
+                type="text"
+                value={model}
+                onChange={e => setModel(e.target.value)}
+                placeholder="or type a custom model ID…"
+                className="text-xs font-mono px-2 py-1 border border-border rounded bg-background text-muted-foreground"
+                aria-label="Custom model ID"
+              />
+            </div>
           </Field>
 
           <Field label="Enabled">

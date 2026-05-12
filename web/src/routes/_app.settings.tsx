@@ -105,32 +105,24 @@ function SettingsPage() {
 }
 
 // -----------------------------------------------------------------------------
-// Claude API
+// Claude Models (global per-role model defaults)
 // -----------------------------------------------------------------------------
 
 function ClaudeSection({
   view, onSaved,
 }: { view: SettingsView['claude']; onSaved: () => void }) {
-  const [apiKey, setApiKey] = useState('')
-  const [showKey, setShowKey] = useState(false)
-  const [baseURL, setBaseURL] = useState(view.base_url ?? '')
   const [chatModel, setChatModel] = useState(view.chat_model ?? '')
   const [evalModel, setEvalModel] = useState(view.eval_model ?? '')
   const [operatorModel, setOperatorModel] = useState(view.operator_model ?? '')
   const [busy, setBusy] = useState(false)
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
-  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
-  const [testing, setTesting] = useState(false)
 
   // Keep server-backed fields in sync when the parent reloads.
-  useEffect(() => { setBaseURL(view.base_url ?? '') }, [view.base_url])
   useEffect(() => { setChatModel(view.chat_model ?? '') }, [view.chat_model])
   useEffect(() => { setEvalModel(view.eval_model ?? '') }, [view.eval_model])
   useEffect(() => { setOperatorModel(view.operator_model ?? '') }, [view.operator_model])
 
   const dirty =
-    apiKey !== '' ||
-    baseURL !== (view.base_url ?? '') ||
     chatModel !== (view.chat_model ?? '') ||
     evalModel !== (view.eval_model ?? '') ||
     operatorModel !== (view.operator_model ?? '')
@@ -138,8 +130,6 @@ function ClaudeSection({
   const save = () => {
     setBusy(true); setSaveMsg(null)
     const body: Record<string, string> = {}
-    if (apiKey !== '') body.api_key = apiKey
-    if (baseURL !== (view.base_url ?? '')) body.base_url = baseURL
     if (chatModel !== (view.chat_model ?? '')) body.chat_model = chatModel
     if (evalModel !== (view.eval_model ?? '')) body.eval_model = evalModel
     if (operatorModel !== (view.operator_model ?? '')) body.operator_model = operatorModel
@@ -154,85 +144,14 @@ function ClaudeSection({
       })
       .then(() => {
         setSaveMsg({ ok: true, text: 'Saved' })
-        setApiKey('') // clear so the field shows as blank again
         onSaved()
       })
       .catch(e => setSaveMsg({ ok: false, text: String(e.message || e) }))
       .finally(() => setBusy(false))
   }
 
-  const testConnection = () => {
-    setTesting(true); setTestResult(null)
-    // Connectivity test deliberately ignores the configured models —
-    // it always pings haiku so a misconfigured operator/eval model
-    // can't make the credentials look broken.
-    fetch('/api/settings/claude/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        // Test with the IN-FLIGHT (unsaved) values if user typed any,
-        // else fall back to whatever is currently saved.
-        ...(apiKey !== '' ? { api_key: apiKey } : {}),
-        ...(baseURL !== (view.base_url ?? '') ? { base_url: baseURL } : {}),
-      }),
-    })
-      .then(r => r.json())
-      .then(d => {
-        if (d.status === 'ok') {
-          setTestResult({ ok: true, text: `OK${d.reply ? ' — ' + truncate(d.reply, 80) : ''}` })
-        } else {
-          // Backend now returns a humanized `error` like
-          // "<stderr/stdout> (exit status N)". Surface the full
-          // text so the user can actually see what went wrong
-          // instead of a bare "exit status 1".
-          setTestResult({ ok: false, text: d.error || d.stderr || d.stdout || 'failed' })
-        }
-      })
-      .catch(e => setTestResult({ ok: false, text: String(e.message || e) }))
-      .finally(() => setTesting(false))
-  }
-
   return (
-    <Card title="Claude API" hint="Override ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / --model for spawned claude subprocesses. Leave blank to inherit OAuth/keychain and the claude CLI's default model.">
-      <Row label="API key">
-        <div className="flex-1 flex gap-2 items-center">
-          <input
-            type={showKey ? 'text' : 'password'}
-            value={apiKey}
-            onChange={e => setApiKey(e.target.value)}
-            placeholder={view.api_key_set ? `configured · ${view.api_key_hint ?? ''}` : 'sk-ant-…'}
-            className="flex-1 text-sm font-mono px-2 py-1 border border-border rounded bg-background"
-          />
-          <button
-            type="button"
-            onClick={async () => {
-              // Switching from hidden→visible while the input is empty
-              // means "show me what's actually saved" — fetch the raw
-              // value into the field so the user can see it (and edit
-              // it from there if needed). Once they type something the
-              // input owns the value and we just toggle visibility.
-              if (!showKey && apiKey === '' && view.api_key_set) {
-                const v = await revealSecret('claude_api_key')
-                if (v) setApiKey(v)
-              }
-              setShowKey(s => !s)
-            }}
-            className="text-muted-foreground hover:text-foreground"
-            title={showKey ? 'Hide' : 'Show saved value'}
-          >
-            {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-          </button>
-        </div>
-      </Row>
-      <Row label="Base URL">
-        <input
-          type="text"
-          value={baseURL}
-          onChange={e => setBaseURL(e.target.value)}
-          placeholder="https://api.anthropic.com (default)"
-          className="flex-1 text-sm font-mono px-2 py-1 border border-border rounded bg-background"
-        />
-      </Row>
+    <Card title="Claude Models" hint="Global per-role model defaults passed as --model to spawned claude subprocesses. A provider-level model override takes precedence when set on the active provider.">
       <ModelRow
         label="Chat model"
         hint="Used by the dashboard's chat drawer (clawflow chat)."
@@ -270,56 +189,8 @@ function ClaudeSection({
           {busy ? <Loader2 className="w-3 h-3 animate-spin inline mr-1" /> : null}
           Save
         </button>
-        <button
-          type="button"
-          onClick={testConnection}
-          disabled={testing}
-          className="text-sm px-3 py-1 rounded border border-border hover:bg-secondary/50 text-foreground"
-        >
-          {testing ? <Loader2 className="w-3 h-3 animate-spin inline mr-1" /> : null}
-          Test connection
-        </button>
-        {view.api_key_set && (
-          <button
-            type="button"
-            onClick={() => {
-              if (!window.confirm('清除 Claude API 配置？\n\n清除后将使用本地 Claude CLI 的认证方式（OAuth/keychain），无需手动注入 API key。')) return
-              setBusy(true); setSaveMsg(null)
-              fetch('/api/settings/claude', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ api_key: '', base_url: '' }),
-              })
-                .then(async r => {
-                  const d = await r.json().catch(() => null)
-                  if (!r.ok) throw new Error((d && d.error) || `HTTP ${r.status}`)
-                })
-                .then(() => {
-                  setSaveMsg({ ok: true, text: 'Cleared — using local auth' })
-                  setApiKey(''); setBaseURL('')
-                  onSaved()
-                })
-                .catch(e => setSaveMsg({ ok: false, text: String(e.message || e) }))
-                .finally(() => setBusy(false))
-            }}
-            disabled={busy}
-            className="text-sm px-3 py-1 rounded border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
-          >
-            Clear API config
-          </button>
-        )}
-
         {saveMsg && <Status ok={saveMsg.ok} text={saveMsg.text} />}
-        {testResult && testResult.ok && <Status ok text={testResult.text} />}
       </div>
-      {/* Failure detail rendered as a full-width block so long
-          claude error messages (auth failures, rate limits) are
-          actually readable instead of being clipped to a badge. */}
-      {testResult && !testResult.ok && (
-        <pre className="mt-2 px-3 py-2 text-xs font-mono whitespace-pre-wrap break-words bg-red-50 border border-red-200 text-red-800 rounded max-h-48 overflow-auto">
-          {testResult.text}
-        </pre>
-      )}
     </Card>
   )
 }
@@ -1099,7 +970,8 @@ function PasswordInput({
 //
 // A user typing in their own value (e.g. claude-haiku-4-5-20251001 to
 // pin to the dated release) still gets surfaced as a "(custom)" entry.
-const MODEL_PRESETS = [
+// Exported so ProvidersSection can reuse the same list.
+export const MODEL_PRESETS = [
   // family aliases — recommended default
   'haiku',
   'sonnet',
@@ -1160,10 +1032,6 @@ function Status({ ok, text }: { ok: boolean; text: string }) {
       {text}
     </span>
   )
-}
-
-function truncate(s: string, n: number): string {
-  return s.length <= n ? s : s.slice(0, n) + '…'
 }
 
 // -----------------------------------------------------------------------------
