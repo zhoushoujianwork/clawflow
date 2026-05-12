@@ -41,7 +41,12 @@ interface ProviderView {
   base_url?: string
   api_key_set: boolean
   api_key_hint?: string
-  model?: string
+  chat_model: string
+  eval_model: string
+  operator_model: string
+  chat_model_default: string
+  eval_model_default: string
+  operator_model_default: string
   enabled: boolean
   index: number
 }
@@ -60,7 +65,9 @@ async function addProvider(body: {
   name: string
   base_url?: string
   api_key?: string
-  model?: string
+  chat_model?: string
+  eval_model?: string
+  operator_model?: string
   enabled: boolean
 }): Promise<ProviderView> {
   const r = await fetch('/api/providers', {
@@ -75,7 +82,7 @@ async function addProvider(body: {
 
 async function updateProvider(
   idx: number,
-  body: { name?: string; base_url?: string; api_key?: string; model?: string; enabled?: boolean },
+  body: { name?: string; base_url?: string; api_key?: string; chat_model?: string; eval_model?: string; operator_model?: string; enabled?: boolean },
 ): Promise<ProviderView> {
   const r = await fetch(`/api/providers/${idx}`, {
     method: 'PUT',
@@ -190,9 +197,13 @@ function SortableRow({ provider, onEdit, onDelete, onToggle, onTest, testState }
         {maskedURL}
       </span>
 
-      {/* Model */}
-      <span className="text-muted-foreground text-xs w-20 shrink-0 truncate">
-        {provider.model || '(default)'}
+      {/* Models */}
+      <span className="text-muted-foreground text-xs w-36 shrink-0 truncate" title={`chat:${provider.chat_model||'default'} eval:${provider.eval_model||'default'} op:${provider.operator_model||'default'}`}>
+        {[
+          provider.chat_model || provider.chat_model_default,
+          provider.eval_model || provider.eval_model_default,
+          provider.operator_model || provider.operator_model_default,
+        ].join(' / ')}
       </span>
 
       {/* Key hint */}
@@ -285,7 +296,9 @@ interface ProviderModalProps {
     name: string
     base_url: string
     api_key: string
-    model: string
+    chat_model: string
+    eval_model: string
+    operator_model: string
     enabled: boolean
   }) => Promise<void>
   onClose: () => void
@@ -296,7 +309,9 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
   const [baseURL, setBaseURL] = useState(initial?.base_url ?? '')
   const [apiKey, setApiKey] = useState('')
   const [showKey, setShowKey] = useState(false)
-  const [model, setModel] = useState(initial?.model ?? '')
+  const [chatModel, setChatModel] = useState(initial?.chat_model ?? '')
+  const [evalModel, setEvalModel] = useState(initial?.eval_model ?? '')
+  const [operatorModel, setOperatorModel] = useState(initial?.operator_model ?? '')
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -319,7 +334,7 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
     if (!name.trim()) { setErr('Name is required'); return }
     setBusy(true); setErr(null)
     try {
-      await onSave({ name: name.trim(), base_url: baseURL.trim(), api_key: apiKey, model: model.trim(), enabled })
+      await onSave({ name: name.trim(), base_url: baseURL.trim(), api_key: apiKey, chat_model: chatModel.trim(), eval_model: evalModel.trim(), operator_model: operatorModel.trim(), enabled })
       onClose()
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -395,35 +410,31 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
             )}
           </Field>
 
-          <Field label="Model">
-            <div className="flex-1 flex flex-col gap-1">
-              <select
-                value={(MODEL_PRESETS as readonly string[]).includes(model) || model === '' ? model : '__custom__'}
-                onChange={e => {
-                  if (e.target.value !== '__custom__') setModel(e.target.value)
-                }}
-                className="text-sm font-mono px-2 py-1 border border-border rounded bg-background"
-                aria-label="Provider model override"
-              >
-                <option value="">(use global default)</option>
-                {/* Surface a custom option when the saved value isn't in the preset list */}
-                {model !== '' && !(MODEL_PRESETS as readonly string[]).includes(model) && (
-                  <option value="__custom__">{model} (custom)</option>
-                )}
-                {MODEL_PRESETS.map(m => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-              {/* Allow manual override for pinned dated IDs not in the preset list */}
-              <input
-                type="text"
-                value={model}
-                onChange={e => setModel(e.target.value)}
-                placeholder="or type a custom model ID…"
-                className="text-xs font-mono px-2 py-1 border border-border rounded bg-background text-muted-foreground"
-                aria-label="Custom model ID"
-              />
-            </div>
+          <Field label="Chat model" hint={`default: ${initial?.chat_model_default ?? 'haiku'}`}>
+            <ModelSelect
+              value={chatModel}
+              onChange={setChatModel}
+              defaultLabel={initial?.chat_model_default ?? 'haiku'}
+              ariaLabel="Chat model"
+            />
+          </Field>
+
+          <Field label="Eval model" hint={`default: ${initial?.eval_model_default ?? 'opus'}`}>
+            <ModelSelect
+              value={evalModel}
+              onChange={setEvalModel}
+              defaultLabel={initial?.eval_model_default ?? 'opus'}
+              ariaLabel="Eval model"
+            />
+          </Field>
+
+          <Field label="Operator model" hint={`default: ${initial?.operator_model_default ?? 'sonnet'}`}>
+            <ModelSelect
+              value={operatorModel}
+              onChange={setOperatorModel}
+              defaultLabel={initial?.operator_model_default ?? 'sonnet'}
+              ariaLabel="Operator model"
+            />
           </Field>
 
           <Field label="Enabled">
@@ -470,10 +481,50 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function ModelSelect({
+  value, onChange, defaultLabel, ariaLabel,
+}: {
+  value: string
+  onChange: (v: string) => void
+  defaultLabel: string
+  ariaLabel: string
+}) {
+  const inPresets = (MODEL_PRESETS as readonly string[]).includes(value)
+  return (
+    <div className="flex-1 flex flex-col gap-1">
+      <select
+        value={inPresets || value === '' ? value : '__custom__'}
+        onChange={e => { if (e.target.value !== '__custom__') onChange(e.target.value) }}
+        className="text-sm font-mono px-2 py-1 border border-border rounded bg-background"
+        aria-label={ariaLabel}
+      >
+        <option value="">(default — {defaultLabel})</option>
+        {value !== '' && !inPresets && (
+          <option value="__custom__">{value} (custom)</option>
+        )}
+        {MODEL_PRESETS.map(m => (
+          <option key={m} value={m}>{m}</option>
+        ))}
+      </select>
+      <input
+        type="text"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder="or type a custom model ID…"
+        className="text-xs font-mono px-2 py-1 border border-border rounded bg-background text-muted-foreground"
+        aria-label={`${ariaLabel} custom`}
+      />
+    </div>
+  )
+}
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="flex items-start gap-3">
-      <label className="text-xs text-muted-foreground w-20 shrink-0 pt-1.5">{label}</label>
+      <div className="w-28 shrink-0 pt-1.5">
+        <label className="text-xs text-muted-foreground">{label}</label>
+        {hint && <p className="text-[10px] text-muted-foreground/70 mt-0.5">{hint}</p>}
+      </div>
       <div className="flex-1 flex flex-col gap-1">{children}</div>
     </div>
   )
@@ -563,25 +614,29 @@ export function ProvidersSection() {
   }
 
   const handleSaveAdd = async (data: {
-    name: string; base_url: string; api_key: string; model: string; enabled: boolean
+    name: string; base_url: string; api_key: string; chat_model: string; eval_model: string; operator_model: string; enabled: boolean
   }) => {
     await addProvider({
       name: data.name,
       base_url: data.base_url || undefined,
       api_key: data.api_key || undefined,
-      model: data.model || undefined,
+      chat_model: data.chat_model || undefined,
+      eval_model: data.eval_model || undefined,
+      operator_model: data.operator_model || undefined,
       enabled: data.enabled,
     })
     load()
   }
 
   const handleSaveEdit = (p: ProviderView) => async (data: {
-    name: string; base_url: string; api_key: string; model: string; enabled: boolean
+    name: string; base_url: string; api_key: string; chat_model: string; eval_model: string; operator_model: string; enabled: boolean
   }) => {
     const body: Record<string, unknown> = {
       name: data.name,
       base_url: data.base_url,
-      model: data.model,
+      chat_model: data.chat_model,
+      eval_model: data.eval_model,
+      operator_model: data.operator_model,
       enabled: data.enabled,
     }
     // Only send api_key if the user typed something (non-empty = replace).
@@ -643,7 +698,7 @@ export function ProvidersSection() {
             <span className="w-5 shrink-0">#</span>
             <span className="w-32 shrink-0">Name</span>
             <span className="flex-1">Base URL</span>
-            <span className="w-20 shrink-0">Model</span>
+            <span className="w-36 shrink-0">Models (chat/eval/op)</span>
             <span className="w-16 shrink-0">Key</span>
             <span className="w-28 shrink-0">Actions</span>
           </div>
