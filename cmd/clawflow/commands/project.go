@@ -373,7 +373,7 @@ func runProjectGenerate(name, model string) error {
 	resolved := model
 	if resolved == "" {
 		creds, _ := config.LoadCredentials()
-		resolved = creds.EffectiveChatModel()
+		resolved = config.ResolveModelForRole(creds, config.RoleChat)
 	}
 	fmt.Fprintf(os.Stderr, "[clawflow] generating context.md for project %q (model=%s)...\n", name, resolved)
 
@@ -427,7 +427,7 @@ func runProjectChat(name, model string) error {
 
 	if model == "" {
 		creds, _ := config.LoadCredentials()
-		model = creds.EffectiveChatModel()
+		model = config.ResolveModelForRole(creds, config.RoleChat)
 	}
 
 	// Build the member-repo descriptor table — both for the system

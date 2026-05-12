@@ -177,13 +177,68 @@ type Config struct {
 
 // ClaudeProvider represents a single Claude API configuration entry.
 // The order in the list defines priority (index 0 = highest).
+//
+// Model selection is per-provider because provider back-ends don't agree
+// on the same model ID alphabet — e.g. Kiro's proxy exposes
+// claude-sonnet-4.6 (dot form) but the Anthropic direct API only
+// resolves dashed IDs. The three role slots (chat / eval / operator)
+// mirror the subprocess-type split clawflow has always used; each
+// empty slot falls back to the built-in DefaultChat/Eval/OperatorModel
+// constants so a minimally-configured provider still works.
 type ClaudeProvider struct {
-	Name     string `yaml:"name"`               // display name, e.g. "Anthropic Official"
-	BaseURL  string `yaml:"base_url,omitempty"` // e.g. "https://api.anthropic.com"
-	APIKey   string `yaml:"api_key,omitempty"`  // stored plaintext (like current behavior)
-	Model    string `yaml:"model,omitempty"`    // optional override, empty = use global default
-	Enabled  bool   `yaml:"enabled"`             // toggle for this provider
-	Position int    `yaml:"-"`                   // runtime order (not persisted)
+	Name          string `yaml:"name"`                     // display name, e.g. "Anthropic Official"
+	BaseURL       string `yaml:"base_url,omitempty"`       // e.g. "https://api.anthropic.com"
+	APIKey        string `yaml:"api_key,omitempty"`        // stored plaintext (like current behavior)
+	ChatModel     string `yaml:"chat_model,omitempty"`     // used by `clawflow chat` and project Pilot
+	EvalModel     string `yaml:"eval_model,omitempty"`     // used by evaluate-* operators
+	OperatorModel string `yaml:"operator_model,omitempty"` // used by every other operator
+	// Deprecated: Model is the legacy single-slot override. Non-empty on
+	// load triggers migration into the three role-specific fields above.
+	// Kept here so old credentials.yaml entries round-trip without loss.
+	Model    string `yaml:"model,omitempty"`
+	Enabled  bool   `yaml:"enabled"` // toggle for this provider
+	Position int    `yaml:"-"`       // runtime order (not persisted)
+}
+
+// EffectiveChatModel returns the chat model this provider should use,
+// falling back to DefaultChatModel when unset.
+func (p *ClaudeProvider) EffectiveChatModel() string {
+	if p == nil || p.ChatModel == "" {
+		return DefaultChatModel
+	}
+	return p.ChatModel
+}
+
+// EffectiveEvalModel returns the eval model this provider should use,
+// falling back to DefaultEvalModel when unset.
+func (p *ClaudeProvider) EffectiveEvalModel() string {
+	if p == nil || p.EvalModel == "" {
+		return DefaultEvalModel
+	}
+	return p.EvalModel
+}
+
+// EffectiveOperatorModel returns the operator model this provider should
+// use, falling back to DefaultOperatorModel when unset.
+func (p *ClaudeProvider) EffectiveOperatorModel() string {
+	if p == nil || p.OperatorModel == "" {
+		return DefaultOperatorModel
+	}
+	return p.OperatorModel
+}
+
+// EffectiveModelForRole returns the provider's model for the given role
+// ("chat" / "eval" / "operator"). Unknown roles fall back to the
+// operator model — the safest default for user-supplied skills.
+func (p *ClaudeProvider) EffectiveModelForRole(role string) string {
+	switch role {
+	case RoleChat:
+		return p.EffectiveChatModel()
+	case RoleEval:
+		return p.EffectiveEvalModel()
+	default:
+		return p.EffectiveOperatorModel()
+	}
 }
 
 // Credentials holds sensitive config.
@@ -228,24 +283,14 @@ type Credentials struct {
 	// desired behaviour for existing users who upgrade into the feature.
 	DefaultProviderSeeded bool `yaml:"default_provider_seeded,omitempty"`
 
-	// ClaudeChatModel / ClaudeEvalModel / ClaudeOperatorModel are
-	// the three claude `--model` overrides clawflow uses, scoped by
-	// what the subprocess does. Stored in credentials.yaml because
-	// they ship next to api_key/base_url; values themselves aren't
-	// secret. Empty = fall back to the built-in default returned by
-	// EffectiveChat/Eval/OperatorModel — the user's
-	// ~/.claude/settings.json model is never inherited, because we
-	// always pass `--model` so a broken global default can't break
-	// clawflow.
+	// ClaudeChatModel / ClaudeEvalModel / ClaudeOperatorModel were
+	// the global per-role model overrides. They are now kept only for
+	// backwards compatibility: on load, any non-empty value is migrated
+	// into every provider's corresponding per-role field (where the
+	// provider field is empty), then the global slot is cleared. See
+	// MigrateGlobalModels. No new code should read these fields.
 	//
-	//	ChatModel     — `clawflow chat` REPL (analysis, fast turns).
-	//	                Default: "haiku".
-	//	EvalModel     — operators whose name starts with "evaluate-"
-	//	                (currently evaluate-bug, evaluate-feat).
-	//	                Default: "claude-opus-4-7".
-	//	OperatorModel — every other operator (implement, reply-comment,
-	//	                user-supplied skills).
-	//	                Default: "sonnet".
+	// Deprecated: use ClaudeProvider.ChatModel / EvalModel / OperatorModel.
 	ClaudeChatModel     string `yaml:"claude_chat_model,omitempty"`
 	ClaudeEvalModel     string `yaml:"claude_eval_model,omitempty"`
 	ClaudeOperatorModel string `yaml:"claude_operator_model,omitempty"`
@@ -268,11 +313,32 @@ type Credentials struct {
 	// full file editing (the historical behaviour). The --mode flag on
 	// `clawflow chat` overrides this per-session.
 	ChatDefaultMode string `yaml:"chat_default_mode,omitempty"`
+
+	// envChatModel / envEvalModel / envOperatorModel capture env-var
+	// overrides applied at LoadCredentials time. They take precedence
+	// over per-provider fields in ResolveModelForRole, but are NOT
+	// consulted by the per-provider failover loop (which reads
+	// ClaudeProvider.*Model directly). Not persisted — the `-` tag
+	// stops yaml.Marshal from emitting them.
+	envChatModel     string `yaml:"-"`
+	envEvalModel     string `yaml:"-"`
+	envOperatorModel string `yaml:"-"`
 }
 
-// Default model identifiers used when the corresponding Credentials
-// field is empty. Centralized here so the API, CLI, and operator
-// runner all return the same answer.
+// Role constants identify which model slot to read off a ClaudeProvider
+// at subprocess-spawn time. They're thin wrappers around the three
+// existing use-cases (clawflow chat REPL, evaluate-* operators, every
+// other operator) — strings not iota so they can flow through the JSON
+// API and the operator.RunOptions struct unchanged.
+const (
+	RoleChat     = "chat"     // `clawflow chat` REPL + project-gen
+	RoleEval     = "eval"     // operators whose name starts with "evaluate-"
+	RoleOperator = "operator" // every other operator + project Pilot
+)
+
+// Default model identifiers used when no provider is configured for a
+// given role. Centralized here so the API, CLI, and operator runner all
+// return the same answer.
 //
 // We use the family aliases (haiku / sonnet / opus) rather than
 // pinned IDs because they're the only form that works across every
@@ -285,13 +351,26 @@ type Credentials struct {
 //     accepts them anyway via fuzzy fallback.
 //
 // The downside is opacity about the exact pinned version, but a
-// user who needs that pins via the settings dropdown — these
+// user who needs that pins via the provider dropdown — these
 // constants are just the safe out-of-the-box default.
 const (
 	DefaultChatModel     = "haiku"
 	DefaultEvalModel     = "opus"
 	DefaultOperatorModel = "sonnet"
 )
+
+// DefaultModelForRole returns the built-in default for role. Unknown
+// roles fall back to the operator default (safest for user skills).
+func DefaultModelForRole(role string) string {
+	switch role {
+	case RoleChat:
+		return DefaultChatModel
+	case RoleEval:
+		return DefaultEvalModel
+	default:
+		return DefaultOperatorModel
+	}
+}
 
 // EffectiveChatDefaultMode returns the configured default chat mode for
 // issue-level sessions. Valid values are "issue" and "edit"; anything
@@ -304,31 +383,54 @@ func (c *Credentials) EffectiveChatDefaultMode() string {
 	return "issue"
 }
 
-// EffectiveChatModel returns the configured chat model, or the
-// built-in default if unset.
-func (c *Credentials) EffectiveChatModel() string {
-	if c == nil || c.ClaudeChatModel == "" {
-		return DefaultChatModel
+// ResolveModelForRole picks the model clawflow should pass as
+// `--model <x>` to a claude subprocess for the given role. Resolution
+// order:
+//
+//  1. Env-var override (CLAWFLOW_CLAUDE_{CHAT,EVAL,OPERATOR}_MODEL)
+//     applied at credentials load time into an internal bucket.
+//  2. First enabled provider's per-role override.
+//  3. Built-in DefaultModelForRole.
+//
+// Direct callers (chat, projectgen, pilot) that spawn claude without
+// going through the failover loop use this helper to pick which model
+// to request. The operator failover loop resolves per-provider inside
+// RunClaude so it can pick different models per attempt.
+func ResolveModelForRole(c *Credentials, role string) string {
+	if c != nil {
+		if v := c.envRoleOverride(role); v != "" {
+			return v
+		}
+		for _, p := range c.ClaudeProviders {
+			if !p.Enabled {
+				continue
+			}
+			if v := p.EffectiveModelForRole(role); v != "" {
+				return v
+			}
+		}
 	}
-	return c.ClaudeChatModel
+	return DefaultModelForRole(role)
 }
 
-// EffectiveEvalModel returns the configured evaluation-operator
-// model, or the built-in default if unset.
-func (c *Credentials) EffectiveEvalModel() string {
-	if c == nil || c.ClaudeEvalModel == "" {
-		return DefaultEvalModel
+// envRoleOverride returns the env-var-sourced model override for role,
+// if any. The env vars are honored by ResolveModelForRole but NOT by
+// the per-provider failover loop in RunClaude — the loop consults
+// provider fields directly because each failover attempt may use a
+// different provider with a different model.
+func (c *Credentials) envRoleOverride(role string) string {
+	if c == nil {
+		return ""
 	}
-	return c.ClaudeEvalModel
-}
-
-// EffectiveOperatorModel returns the configured generic-operator
-// model, or the built-in default if unset.
-func (c *Credentials) EffectiveOperatorModel() string {
-	if c == nil || c.ClaudeOperatorModel == "" {
-		return DefaultOperatorModel
+	switch role {
+	case RoleChat:
+		return c.envChatModel
+	case RoleEval:
+		return c.envEvalModel
+	case RoleOperator:
+		return c.envOperatorModel
 	}
-	return c.ClaudeOperatorModel
+	return ""
 }
 
 // CredentialsPath returns the path to the credentials file.
@@ -406,6 +508,88 @@ func MigrateLegacyProvider(c *Credentials) bool {
 	return true
 }
 
+// MigrateProviderModels migrates two legacy shapes into the current
+// per-provider role-specific model fields:
+//
+//  1. Credentials-level ClaudeChatModel/EvalModel/OperatorModel — the
+//     old "global default" — copied into every provider where the
+//     corresponding role field is empty, then the global slot is
+//     cleared (so credentials.yaml stops carrying the obsolete value).
+//  2. Per-provider ClaudeProvider.Model — the old single-slot override
+//     — copied into all three role fields (when they're empty), then
+//     cleared.
+//
+// Idempotent: returns true only when some mutation happened so callers
+// can decide whether to persist. Running this on already-migrated
+// credentials is a no-op.
+func MigrateProviderModels(c *Credentials) bool {
+	if c == nil {
+		return false
+	}
+	mutated := false
+
+	// Phase 1: push per-provider legacy Model → three role fields.
+	for i := range c.ClaudeProviders {
+		p := &c.ClaudeProviders[i]
+		if p.Model == "" {
+			continue
+		}
+		if p.ChatModel == "" {
+			p.ChatModel = p.Model
+			mutated = true
+		}
+		if p.EvalModel == "" {
+			p.EvalModel = p.Model
+			mutated = true
+		}
+		if p.OperatorModel == "" {
+			p.OperatorModel = p.Model
+			mutated = true
+		}
+		p.Model = "" // clear legacy slot after migration
+		mutated = true
+	}
+
+	// Phase 2: push global role defaults → each provider's empty slots.
+	global := map[string]string{
+		RoleChat:     c.ClaudeChatModel,
+		RoleEval:     c.ClaudeEvalModel,
+		RoleOperator: c.ClaudeOperatorModel,
+	}
+	for role, v := range global {
+		if v == "" {
+			continue
+		}
+		for i := range c.ClaudeProviders {
+			p := &c.ClaudeProviders[i]
+			switch role {
+			case RoleChat:
+				if p.ChatModel == "" {
+					p.ChatModel = v
+					mutated = true
+				}
+			case RoleEval:
+				if p.EvalModel == "" {
+					p.EvalModel = v
+					mutated = true
+				}
+			case RoleOperator:
+				if p.OperatorModel == "" {
+					p.OperatorModel = v
+					mutated = true
+				}
+			}
+		}
+	}
+	if c.ClaudeChatModel != "" || c.ClaudeEvalModel != "" || c.ClaudeOperatorModel != "" {
+		c.ClaudeChatModel = ""
+		c.ClaudeEvalModel = ""
+		c.ClaudeOperatorModel = ""
+		mutated = true
+	}
+	return mutated
+}
+
 // EnabledProviders returns the subset of ClaudeProviders where Enabled == true,
 // in list order (index 0 = highest priority). The returned slice is a copy.
 func (c *Credentials) EnabledProviders() []ClaudeProvider {
@@ -481,16 +665,27 @@ func LoadCredentials() (*Credentials, error) {
 	c.GitLabToken = envOrFile("GITLAB_TOKEN", c.GitLabToken)
 	c.ClaudeAPIKey = envOrFile("CLAWFLOW_CLAUDE_API_KEY", c.ClaudeAPIKey)
 	c.ClaudeBaseURL = envOrFile("CLAWFLOW_CLAUDE_BASE_URL", c.ClaudeBaseURL)
-	c.ClaudeChatModel = envOrFile("CLAWFLOW_CLAUDE_CHAT_MODEL", c.ClaudeChatModel)
-	c.ClaudeEvalModel = envOrFile("CLAWFLOW_CLAUDE_EVAL_MODEL", c.ClaudeEvalModel)
-	c.ClaudeOperatorModel = envOrFile("CLAWFLOW_CLAUDE_OPERATOR_MODEL", c.ClaudeOperatorModel)
+	// Env-var model overrides feed into ResolveModelForRole (via the
+	// unexported envChatModel/envEvalModel/envOperatorModel fields) so
+	// they take precedence over per-provider slots for direct-spawn
+	// callers. They don't override the per-provider failover loop,
+	// which reads ClaudeProvider.*Model directly — that's intentional,
+	// because a failover attempt against a different provider might
+	// need a different model ID than the env pin.
+	c.envChatModel = os.Getenv("CLAWFLOW_CLAUDE_CHAT_MODEL")
+	c.envEvalModel = os.Getenv("CLAWFLOW_CLAUDE_EVAL_MODEL")
+	c.envOperatorModel = os.Getenv("CLAWFLOW_CLAUDE_OPERATOR_MODEL")
 
 	// Auto-migrate legacy single-provider fields to the providers list,
-	// then seed the built-in OAuth fallback entry on first load. Both are
-	// idempotent; a save failure is non-fatal because the operation will
-	// be retried on the next load.
+	// seed the built-in OAuth fallback entry on first load, and push old
+	// global/per-provider model fields into the current per-role slots.
+	// All three are idempotent; a save failure is non-fatal because the
+	// operations will be retried on the next load.
 	mutated := MigrateLegacyProvider(c)
 	if SeedDefaultProvider(c) {
+		mutated = true
+	}
+	if MigrateProviderModels(c) {
 		mutated = true
 	}
 	if mutated {

@@ -65,13 +65,13 @@ type RunOptions struct {
 	Timeout  time.Duration // claude subprocess timeout; 0 disables
 	Comments []string      // optional comment thread to include in the prompt
 
-	// Model is forwarded as `--model <model>` to the claude subprocess.
-	// Empty falls back to claude's own default (the user's
-	// ~/.claude/settings.json), which is rarely what we want for an
-	// operator run — the runner fills this in from credentials.yaml
-	// before invoking RunFunc, picking the eval or operator model
-	// based on the operator name.
-	Model string
+	// Role selects which per-provider model slot RunClaude should read
+	// when spawning claude ("chat" / "eval" / "operator"). The failover
+	// loop resolves the actual model string per provider on each attempt,
+	// so different providers can have different per-role model IDs. An
+	// empty Role falls back to the operator slot (safest for unknown
+	// user-supplied skills).
+	Role string
 
 	// EventWriter, if non-nil, receives raw stream-json event lines from
 	// claude so the dashboard can replay runs post-mortem. Callers typically
@@ -88,7 +88,7 @@ type RunOptions struct {
 	// RunFunc executes the claude subprocess. Leave nil to use the real
 	// RunClaude; tests inject a fake that returns canned output without
 	// spawning a process.
-	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, model string, systemPrompt ...string) (string, error)
+	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, systemPrompt ...string) (string, error)
 }
 
 // writeBackTimeout is the maximum time allowed for the post-claude VCS
@@ -114,7 +114,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	if runFunc == nil {
 		runFunc = RunClaude
 	}
-	output, err := runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Model, systemPrompt)
+	output, err := runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Role, systemPrompt)
 	if err != nil {
 		// Failure path: do NOT pollute the issue with a comment. The
 		// failure is already recorded in events.jsonl + the dashboard

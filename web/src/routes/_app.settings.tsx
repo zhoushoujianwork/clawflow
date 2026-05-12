@@ -6,17 +6,6 @@ import { emitConfigChanged, useConfigChanged } from '../lib/configEvents'
 import { ProvidersSection } from '../components/ProvidersSection'
 
 interface SettingsView {
-  claude: {
-    api_key_set: boolean
-    api_key_hint?: string
-    base_url?: string
-    chat_model: string
-    eval_model: string
-    operator_model: string
-    chat_model_default: string
-    eval_model_default: string
-    operator_model_default: string
-  }
   tokens: { gh_set: boolean; gh_hint?: string; gitlab_set: boolean; gitlab_hint?: string }
   global: {
     poll_interval: number

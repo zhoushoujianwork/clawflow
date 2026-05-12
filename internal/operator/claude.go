@@ -100,15 +100,17 @@ func scrubAPIKey(s, apiKey string) string {
 // dashboard can replay the run post-mortem. Text deltas are also printed live
 // to os.Stderr so the user sees progress during long runs.
 //
-// `model` is forwarded as `--model <model>`; the empty string skips the
-// flag and lets the claude CLI pick whatever ~/.claude/settings.json
-// says. Operator callers should always supply a non-empty model so a
-// broken global default can't silently break clawflow.
+// `role` selects which per-provider model slot to read
+// (config.RoleChat / RoleEval / RoleOperator); inside the failover loop
+// each provider resolves its own `--model` from that role, so e.g.
+// provider A can run an eval on `opus` while provider B runs the same
+// eval on `claude-opus-4-6`. Empty or unknown role falls back to the
+// operator slot — the safest default for user-supplied skills.
 //
 // --dangerously-skip-permissions is used because operators run unattended;
 // the subprocess cwd is `workdir`, so callers must scope that carefully
 // (tempdir for read-only ops, repo clone for code-writing ops).
-func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, model string, systemPrompt ...string) (string, error) {
+func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, systemPrompt ...string) (string, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -126,6 +128,7 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 	var attempts []providerAttempt
 
 	for i, p := range providers {
+		model := p.modelForRole(role)
 		output, err := runClaudeWithProvider(ctx, prompt, workdir, model, p.apiKey, p.baseURL, events, systemPrompt...)
 		if err == nil {
 			if i > 0 {
@@ -164,13 +167,36 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 	return "", fmt.Errorf("no Claude providers configured")
 }
 
-// providerEntry is the resolved (name, apiKey, baseURL) triple used during
-// a single RunClaude invocation. Constructed from config.ClaudeProvider or
-// the legacy single-provider fields.
+// providerEntry is the resolved (name, apiKey, baseURL, per-role models)
+// tuple used during a single RunClaude invocation. Constructed from
+// config.ClaudeProvider or the legacy single-provider fields.
 type providerEntry struct {
-	name    string
-	apiKey  string
-	baseURL string
+	name          string
+	apiKey        string
+	baseURL       string
+	chatModel     string
+	evalModel     string
+	operatorModel string
+}
+
+// modelForRole returns the model this provider should use for role,
+// applying the built-in DefaultModelForRole when the per-role slot is
+// empty. The failover loop calls this once per attempt so each provider
+// can pin a different model ID.
+func (p providerEntry) modelForRole(role string) string {
+	var v string
+	switch role {
+	case config.RoleChat:
+		v = p.chatModel
+	case config.RoleEval:
+		v = p.evalModel
+	default:
+		v = p.operatorModel
+	}
+	if v == "" {
+		return config.DefaultModelForRole(role)
+	}
+	return v
 }
 
 // buildProviderList returns the ordered list of providers to try. When
@@ -185,7 +211,14 @@ func buildProviderList(creds *config.Credentials) []providerEntry {
 	if len(enabled) > 0 {
 		out := make([]providerEntry, len(enabled))
 		for i, p := range enabled {
-			out[i] = providerEntry{name: p.Name, apiKey: p.APIKey, baseURL: p.BaseURL}
+			out[i] = providerEntry{
+				name:          p.Name,
+				apiKey:        p.APIKey,
+				baseURL:       p.BaseURL,
+				chatModel:     p.ChatModel,
+				evalModel:     p.EvalModel,
+				operatorModel: p.OperatorModel,
+			}
 		}
 		return out
 	}

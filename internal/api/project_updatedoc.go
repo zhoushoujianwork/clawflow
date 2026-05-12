@@ -106,9 +106,7 @@ func HandleProjectUpdateDoc(w http.ResponseWriter, r *http.Request) {
 	model := req.Model
 	if model == "" {
 		creds, _ := config.LoadCredentials()
-		if creds != nil {
-			model = creds.EffectiveOperatorModel()
-		}
+		model = config.ResolveModelForRole(creds, config.RoleOperator)
 	}
 
 	prompt := buildDocUpdatePrompt(p.Name, file, current, instructions)

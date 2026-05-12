@@ -34,17 +34,16 @@ import (
 // package's nil receiver is a no-op).
 var runLog *clog.Logger
 
-// modelForOperator picks which credentials-configured model an
-// operator should run on. evaluate-* operators read existing context
+// roleForOperator picks which config.Role slot an operator should
+// resolve its model from. evaluate-* operators read existing context
 // and produce structured analysis, so they get the heavier eval model
 // (Opus by default). Everything else (implement, reply-comment,
 // user-supplied skills) gets the cheaper operator model (Sonnet).
-// `creds` may be nil — the Effective*Model helpers handle that.
-func modelForOperator(creds *config.Credentials, opName string) string {
+func roleForOperator(opName string) string {
 	if strings.HasPrefix(opName, "evaluate-") {
-		return creds.EffectiveEvalModel()
+		return config.RoleEval
 	}
-	return creds.EffectiveOperatorModel()
+	return config.RoleOperator
 }
 
 // NewRunCmd wires `clawflow run`: one pass of the operator loop over every
@@ -742,10 +741,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 
 	creds, _ := config.LoadCredentials()
-	model := modelForOperator(creds, j.op.Name)
-	fmt.Fprintf(os.Stderr, "%s → claude (model %s, timeout %s)\n", prefix, model, timeout)
-	runLog.Info("run/claude_start", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "model", model, "timeout", timeout)
-	debugf("%s using model %q", prefix, model)
+	role := roleForOperator(j.op.Name)
+	// Resolve a preview model string for logging only — the actual
+	// per-provider resolution happens inside RunClaude's failover loop.
+	previewModel := config.ResolveModelForRole(creds, role)
+	fmt.Fprintf(os.Stderr, "%s → claude (role %s, preview-model %s, timeout %s)\n", prefix, role, previewModel, timeout)
+	runLog.Info("run/claude_start", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "role", role, "model", previewModel, "timeout", timeout)
+	debugf("%s using role %q (preview-model %q)", prefix, role, previewModel)
 	runStart := time.Now()
 
 	// Build resume context for the operator prompt when reusing a worktree.
@@ -759,7 +761,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Workdir:       workdir,
 		Timeout:       timeout,
 		Comments:      comments,
-		Model:         model,
+		Role:          role,
 		EventWriter:   eventsFile,
 		ResumeContext: resumeCtx,
 	})

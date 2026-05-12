@@ -202,7 +202,7 @@ func TestProviderRoundTrip(t *testing.T) {
 	original := &config.Credentials{
 		ClaudeProviders: []config.ClaudeProvider{
 			{Name: "Primary", BaseURL: "https://api.anthropic.com", APIKey: "sk-ant-1", Enabled: true},
-			{Name: "Mirror", BaseURL: "https://mirror.example.com", APIKey: "sk-2", Model: "sonnet", Enabled: true},
+			{Name: "Mirror", BaseURL: "https://mirror.example.com", APIKey: "sk-2", ChatModel: "haiku", EvalModel: "opus", OperatorModel: "sonnet", Enabled: true},
 			{Name: "Disabled", APIKey: "sk-3", Enabled: false},
 		},
 	}
@@ -274,4 +274,124 @@ func TestSaveLoadProviders(t *testing.T) {
 	if loaded.ClaudeProviders[1].Name != "Second" {
 		t.Errorf("order not preserved: second provider is %q", loaded.ClaudeProviders[1].Name)
 	}
+}
+
+// TestMigrateProviderModels_LegacyPerProviderModel verifies the old
+// single-slot ClaudeProvider.Model field is fanned out into the three
+// role-specific slots (when those are empty) and then cleared.
+func TestMigrateProviderModels_LegacyPerProviderModel(t *testing.T) {
+	c := &config.Credentials{
+		ClaudeProviders: []config.ClaudeProvider{
+			// has legacy Model, no role fields → all three fields get it
+			{Name: "A", Model: "haiku", Enabled: true},
+			// has legacy Model AND one role field → role field wins, others get Model
+			{Name: "B", Model: "sonnet", EvalModel: "opus", Enabled: true},
+			// already-migrated provider with no legacy Model → no-op
+			{Name: "C", ChatModel: "haiku", EvalModel: "opus", OperatorModel: "sonnet", Enabled: true},
+		},
+	}
+
+	mutated := config.MigrateProviderModels(c)
+	if !mutated {
+		t.Fatal("expected mutation, got none")
+	}
+
+	a := c.ClaudeProviders[0]
+	if a.Model != "" {
+		t.Errorf("A: legacy Model not cleared: %q", a.Model)
+	}
+	if a.ChatModel != "haiku" || a.EvalModel != "haiku" || a.OperatorModel != "haiku" {
+		t.Errorf("A: expected all slots = 'haiku', got chat=%q eval=%q op=%q", a.ChatModel, a.EvalModel, a.OperatorModel)
+	}
+
+	b := c.ClaudeProviders[1]
+	if b.Model != "" {
+		t.Errorf("B: legacy Model not cleared: %q", b.Model)
+	}
+	if b.ChatModel != "sonnet" || b.EvalModel != "opus" || b.OperatorModel != "sonnet" {
+		t.Errorf("B: expected chat=sonnet eval=opus op=sonnet, got chat=%q eval=%q op=%q", b.ChatModel, b.EvalModel, b.OperatorModel)
+	}
+
+	// Second call must be idempotent.
+	if config.MigrateProviderModels(c) {
+		t.Error("expected second MigrateProviderModels call to be a no-op")
+	}
+}
+
+// TestMigrateProviderModels_GlobalToPerProvider verifies that the old
+// credentials-level ClaudeChatModel/EvalModel/OperatorModel are pushed
+// into each provider's empty role slot and then cleared.
+func TestMigrateProviderModels_GlobalToPerProvider(t *testing.T) {
+	c := &config.Credentials{
+		ClaudeChatModel:     "haiku",
+		ClaudeEvalModel:     "opus",
+		ClaudeOperatorModel: "sonnet",
+		ClaudeProviders: []config.ClaudeProvider{
+			{Name: "A", Enabled: true},                          // no per-provider models — inherit all three
+			{Name: "B", EvalModel: "claude-opus-4-6", Enabled: true}, // keeps its own eval, inherits others
+		},
+	}
+
+	mutated := config.MigrateProviderModels(c)
+	if !mutated {
+		t.Fatal("expected mutation")
+	}
+
+	if c.ClaudeChatModel != "" || c.ClaudeEvalModel != "" || c.ClaudeOperatorModel != "" {
+		t.Errorf("global slots not cleared: chat=%q eval=%q op=%q", c.ClaudeChatModel, c.ClaudeEvalModel, c.ClaudeOperatorModel)
+	}
+
+	a := c.ClaudeProviders[0]
+	if a.ChatModel != "haiku" || a.EvalModel != "opus" || a.OperatorModel != "sonnet" {
+		t.Errorf("A: got chat=%q eval=%q op=%q", a.ChatModel, a.EvalModel, a.OperatorModel)
+	}
+
+	b := c.ClaudeProviders[1]
+	if b.ChatModel != "haiku" || b.EvalModel != "claude-opus-4-6" || b.OperatorModel != "sonnet" {
+		t.Errorf("B: got chat=%q eval=%q op=%q", b.ChatModel, b.EvalModel, b.OperatorModel)
+	}
+}
+
+// TestResolveModelForRole verifies the three-tier resolution order:
+// env override > first enabled provider's role slot > built-in default.
+func TestResolveModelForRole(t *testing.T) {
+	t.Run("falls back to default when no providers", func(t *testing.T) {
+		c := &config.Credentials{}
+		if got := config.ResolveModelForRole(c, config.RoleChat); got != config.DefaultChatModel {
+			t.Errorf("chat: got %q, want %q", got, config.DefaultChatModel)
+		}
+		if got := config.ResolveModelForRole(c, config.RoleEval); got != config.DefaultEvalModel {
+			t.Errorf("eval: got %q, want %q", got, config.DefaultEvalModel)
+		}
+		if got := config.ResolveModelForRole(c, config.RoleOperator); got != config.DefaultOperatorModel {
+			t.Errorf("operator: got %q, want %q", got, config.DefaultOperatorModel)
+		}
+	})
+
+	t.Run("picks first enabled provider", func(t *testing.T) {
+		c := &config.Credentials{
+			ClaudeProviders: []config.ClaudeProvider{
+				{Name: "Disabled", ChatModel: "ignored", Enabled: false},
+				{Name: "A", ChatModel: "claude-haiku-4-5", EvalModel: "claude-opus-4-7", Enabled: true},
+				{Name: "B", ChatModel: "later", Enabled: true},
+			},
+		}
+		if got := config.ResolveModelForRole(c, config.RoleChat); got != "claude-haiku-4-5" {
+			t.Errorf("chat: got %q, want claude-haiku-4-5", got)
+		}
+		if got := config.ResolveModelForRole(c, config.RoleEval); got != "claude-opus-4-7" {
+			t.Errorf("eval: got %q, want claude-opus-4-7", got)
+		}
+		// A's OperatorModel is empty → falls back to the built-in default,
+		// NOT to B (provider precedence is name-index based, not round-robin).
+		if got := config.ResolveModelForRole(c, config.RoleOperator); got != config.DefaultOperatorModel {
+			t.Errorf("operator: got %q, want default %q", got, config.DefaultOperatorModel)
+		}
+	})
+
+	t.Run("nil credentials returns default", func(t *testing.T) {
+		if got := config.ResolveModelForRole(nil, config.RoleChat); got != config.DefaultChatModel {
+			t.Errorf("nil: got %q, want %q", got, config.DefaultChatModel)
+		}
+	})
 }

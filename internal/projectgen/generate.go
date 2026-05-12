@@ -49,7 +49,7 @@ func Generate(name, model, instructions string) (string, error) {
 
 	if model == "" {
 		creds, _ := config.LoadCredentials()
-		model = creds.EffectiveChatModel()
+		model = config.ResolveModelForRole(creds, config.RoleChat)
 	}
 
 	bin := claude.Resolve()
@@ -108,7 +108,7 @@ func GenerateDeployment(name, model string) (string, error) {
 
 	if model == "" {
 		creds, _ := config.LoadCredentials()
-		model = creds.EffectiveChatModel()
+		model = config.ResolveModelForRole(creds, config.RoleChat)
 	}
 
 	bin := claude.Resolve()

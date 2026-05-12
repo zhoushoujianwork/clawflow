@@ -52,7 +52,7 @@ func runFeedback(_ context.Context) error {
 		return fmt.Errorf("no GitHub token configured — run `clawflow config set-token <ghp_...>` first")
 	}
 
-	model := creds.EffectiveChatModel()
+	model := config.ResolveModelForRole(creds, config.RoleChat)
 	systemPrompt := buildFeedbackSystemPrompt()
 
 	args := []string{

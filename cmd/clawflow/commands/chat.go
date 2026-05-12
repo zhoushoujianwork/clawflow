@@ -63,10 +63,10 @@ Examples:
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "repository (owner/repo)")
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number for issue-level chat")
-	// Empty default means "use whatever the settings page configured" —
-	// resolved below via Credentials.EffectiveChatModel(). An explicit
-	// --model on the CLI still wins.
-	cmd.Flags().StringVar(&model, "model", "", "claude model to use (default: settings → chat_model, falls back to haiku)")
+	// Empty default means "use whatever the first enabled provider
+	// configured in its chat slot" — resolved below via
+	// config.ResolveModelForRole. An explicit --model on the CLI still wins.
+	cmd.Flags().StringVar(&model, "model", "", "claude model to use (default: first provider's chat_model, falls back to haiku)")
 	// Empty default means "use chat_default_mode from credentials.yaml" —
 	// resolved below via Credentials.EffectiveChatDefaultMode(). Only
 	// applies to issue-level chat (--issue N); repo-level chat is always
@@ -102,13 +102,13 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 		workdir = os.TempDir()
 	}
 
-	// Resolve the model: explicit --model > settings (chat slot) >
-	// built-in default. We resolve here rather than at flag-parse time
-	// so a settings-page change takes effect on the next chat without
-	// rebuilding the binary.
+	// Resolve the model: explicit --model > first enabled provider's
+	// chat slot > built-in default. We resolve here rather than at
+	// flag-parse time so a provider edit takes effect on the next chat
+	// without rebuilding the binary.
 	if model == "" {
 		creds, _ := config.LoadCredentials()
-		model = creds.EffectiveChatModel()
+		model = config.ResolveModelForRole(creds, config.RoleChat)
 	}
 
 	// Resolve the issue chat mode: explicit --mode > credentials.yaml

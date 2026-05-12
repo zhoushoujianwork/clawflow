@@ -274,7 +274,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		Status:    "running",
 	}
 	_ = snapshot.WritePilotRunMeta(runDir, meta)
-	lg.Info("pilot/start", "project", p.Name, "model", creds.EffectiveOperatorModel(), "timeout", timeout)
+	lg.Info("pilot/start", "project", p.Name, "model", config.ResolveModelForRole(creds, config.RoleOperator), "timeout", timeout)
 
 	// Refresh CLAUDE.md from current project.yaml + cfg.Repos before
 	// every wake. `claude -p` will auto-load it from the workdir, giving
@@ -290,7 +290,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	recent := pilotRecentSummaries(p.Name, 3)
 
 	prompt := chat.BuildPilotContext(p.Name, contextMD, deploymentMD, recent, digests)
-	model := creds.EffectiveOperatorModel()
+	model := config.ResolveModelForRole(creds, config.RoleOperator)
 	workdir := project.ProjectDir(p.Name)
 
 	eventsFile, _ := os.Create(filepath.Join(runDir, "events.jsonl"))

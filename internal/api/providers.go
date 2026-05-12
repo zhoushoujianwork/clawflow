@@ -18,25 +18,40 @@ import (
 
 // providerView is the safe representation of a ClaudeProvider for the API.
 // The api_key is never returned in full — only a masked hint.
+//
+// Each role (chat / eval / operator) has its own stored value plus the
+// built-in default the runner will fall back to when the stored value
+// is empty. Exposing the default lets the dashboard render it as a
+// placeholder without having to duplicate the constants.
 type providerView struct {
-	Name       string `json:"name"`
-	BaseURL    string `json:"base_url,omitempty"`
-	APIKeySet  bool   `json:"api_key_set"`
-	APIKeyHint string `json:"api_key_hint,omitempty"`
-	Model      string `json:"model,omitempty"`
-	Enabled    bool   `json:"enabled"`
-	Index      int    `json:"index"`
+	Name                 string `json:"name"`
+	BaseURL              string `json:"base_url,omitempty"`
+	APIKeySet            bool   `json:"api_key_set"`
+	APIKeyHint           string `json:"api_key_hint,omitempty"`
+	ChatModel            string `json:"chat_model"`
+	EvalModel            string `json:"eval_model"`
+	OperatorModel        string `json:"operator_model"`
+	ChatModelDefault     string `json:"chat_model_default"`
+	EvalModelDefault     string `json:"eval_model_default"`
+	OperatorModelDefault string `json:"operator_model_default"`
+	Enabled              bool   `json:"enabled"`
+	Index                int    `json:"index"`
 }
 
 func toProviderView(p config.ClaudeProvider, idx int) providerView {
 	return providerView{
-		Name:       p.Name,
-		BaseURL:    p.BaseURL,
-		APIKeySet:  p.APIKey != "",
-		APIKeyHint: lastFour(p.APIKey),
-		Model:      p.Model,
-		Enabled:    p.Enabled,
-		Index:      idx,
+		Name:                 p.Name,
+		BaseURL:              p.BaseURL,
+		APIKeySet:            p.APIKey != "",
+		APIKeyHint:           lastFour(p.APIKey),
+		ChatModel:            p.ChatModel,
+		EvalModel:            p.EvalModel,
+		OperatorModel:        p.OperatorModel,
+		ChatModelDefault:     config.DefaultChatModel,
+		EvalModelDefault:     config.DefaultEvalModel,
+		OperatorModelDefault: config.DefaultOperatorModel,
+		Enabled:              p.Enabled,
+		Index:                idx,
 	}
 }
 
@@ -60,11 +75,13 @@ func HandleListProviders(w http.ResponseWriter, r *http.Request) {
 
 // providerAddRequest is the body for POST /api/providers.
 type providerAddRequest struct {
-	Name    string `json:"name"`
-	BaseURL string `json:"base_url,omitempty"`
-	APIKey  string `json:"api_key,omitempty"`
-	Model   string `json:"model,omitempty"`
-	Enabled *bool  `json:"enabled,omitempty"`
+	Name          string `json:"name"`
+	BaseURL       string `json:"base_url,omitempty"`
+	APIKey        string `json:"api_key,omitempty"`
+	ChatModel     string `json:"chat_model,omitempty"`
+	EvalModel     string `json:"eval_model,omitempty"`
+	OperatorModel string `json:"operator_model,omitempty"`
+	Enabled       *bool  `json:"enabled,omitempty"`
 }
 
 // HandleAddProvider handles POST /api/providers.
@@ -92,11 +109,13 @@ func HandleAddProvider(w http.ResponseWriter, r *http.Request) {
 		enabled = *req.Enabled
 	}
 	p := config.ClaudeProvider{
-		Name:    strings.TrimSpace(req.Name),
-		BaseURL: strings.TrimSpace(req.BaseURL),
-		APIKey:  req.APIKey,
-		Model:   strings.TrimSpace(req.Model),
-		Enabled: enabled,
+		Name:          strings.TrimSpace(req.Name),
+		BaseURL:       strings.TrimSpace(req.BaseURL),
+		APIKey:        req.APIKey,
+		ChatModel:     strings.TrimSpace(req.ChatModel),
+		EvalModel:     strings.TrimSpace(req.EvalModel),
+		OperatorModel: strings.TrimSpace(req.OperatorModel),
+		Enabled:       enabled,
 	}
 	creds.ClaudeProviders = append(creds.ClaudeProviders, p)
 	if err := config.SaveCredentials(creds); err != nil {
@@ -110,11 +129,13 @@ func HandleAddProvider(w http.ResponseWriter, r *http.Request) {
 // providerUpdateRequest is the body for PUT /api/providers/{index}.
 // All fields are optional pointers — omitted = keep existing.
 type providerUpdateRequest struct {
-	Name    *string `json:"name,omitempty"`
-	BaseURL *string `json:"base_url,omitempty"`
-	APIKey  *string `json:"api_key,omitempty"`
-	Model   *string `json:"model,omitempty"`
-	Enabled *bool   `json:"enabled,omitempty"`
+	Name          *string `json:"name,omitempty"`
+	BaseURL       *string `json:"base_url,omitempty"`
+	APIKey        *string `json:"api_key,omitempty"`
+	ChatModel     *string `json:"chat_model,omitempty"`
+	EvalModel     *string `json:"eval_model,omitempty"`
+	OperatorModel *string `json:"operator_model,omitempty"`
+	Enabled       *bool   `json:"enabled,omitempty"`
 }
 
 // HandleUpdateProvider handles PUT /api/providers/{index}.
@@ -151,8 +172,14 @@ func HandleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	if req.APIKey != nil {
 		p.APIKey = *req.APIKey
 	}
-	if req.Model != nil {
-		p.Model = strings.TrimSpace(*req.Model)
+	if req.ChatModel != nil {
+		p.ChatModel = strings.TrimSpace(*req.ChatModel)
+	}
+	if req.EvalModel != nil {
+		p.EvalModel = strings.TrimSpace(*req.EvalModel)
+	}
+	if req.OperatorModel != nil {
+		p.OperatorModel = strings.TrimSpace(*req.OperatorModel)
 	}
 	if req.Enabled != nil {
 		p.Enabled = *req.Enabled
