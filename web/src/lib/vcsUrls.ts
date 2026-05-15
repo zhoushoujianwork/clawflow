@@ -53,11 +53,16 @@ export function repoUrl(fullName: string, map: RepoInfoMap): string {
 }
 
 export function issueUrl(fullName: string, number: number, map: RepoInfoMap): string {
-  const { platform, host } = infoFor(fullName, map)
-  // GitLab 11.11+ accepts the canonical /-/issues/ form; older paths still
-  // 301 to it but we don't support those anyway. GitHub uses /issues/.
-  const segment = platform === 'gitlab' ? '/-/issues/' : '/issues/'
-  return `${host}/${fullName}${segment}${number}`
+  const { host } = infoFor(fullName, map)
+  // Use the legacy /issues/ path for both platforms:
+  //   - GitHub serves it natively.
+  //   - Modern GitLab (12+) auto-redirects /issues/ to the canonical
+  //     /-/issues/ form.
+  //   - Older self-hosted GitLab (e.g. 11.11) only serves /issues/ and
+  //     returns 404 for /-/issues/, so the canonical form is unsafe.
+  // The non-prefixed path is the lowest-common-denominator that works
+  // everywhere we ship to.
+  return `${host}/${fullName}/issues/${number}`
 }
 
 /**
