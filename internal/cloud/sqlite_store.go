@@ -30,6 +30,9 @@ type SQLiteStore struct {
 	// DB-level atomicity; leaseMu prevents the interleaving at the Go level.
 	leaseMu sync.Mutex
 	db      *sql.DB
+	// mem holds cloud-config resources (projects, repos, bindings) that are not
+	// yet persisted to SQLite. A follow-up issue should migrate these to the DB.
+	mem *MemoryStore
 }
 
 // NewSQLiteStore opens (or creates) a SQLite database at path and applies any
@@ -46,7 +49,7 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	db.Exec("PRAGMA journal_mode=WAL")
 	db.Exec("PRAGMA foreign_keys=ON")
 
-	s := &SQLiteStore{db: db}
+	s := &SQLiteStore{db: db, mem: NewMemoryStore()}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("sqlite migrate: %w", err)
@@ -497,4 +500,28 @@ func (s *SQLiteStore) GetRun(id string) *RunRecord {
 // sqliteTime formats t as RFC3339Nano for storage in SQLite TEXT columns.
 func sqliteTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// Cloud config methods — not yet implemented for SQLite; delegate to MemoryStore
+// for now so SQLiteStore satisfies the Store interface. A follow-up issue should
+// persist these to the database.
+
+func (s *SQLiteStore) Summary() CloudConfigSummary        { return s.mem.Summary() }
+func (s *SQLiteStore) ListMachines() []*Machine           { return s.mem.ListMachines() }
+func (s *SQLiteStore) ListJobs() []*JobRecord             { return s.mem.ListJobs() }
+func (s *SQLiteStore) ListRuns() []*RunRecord             { return s.mem.ListRuns() }
+func (s *SQLiteStore) CreateProject(req CreateProjectRequest) (*Project, error) {
+	return s.mem.CreateProject(req)
+}
+func (s *SQLiteStore) CreateRepo(req CreateRepoRequest) (*Repo, error) {
+	return s.mem.CreateRepo(req)
+}
+func (s *SQLiteStore) UpdateRepo(id string, req UpdateRepoRequest) (*Repo, error) {
+	return s.mem.UpdateRepo(id, req)
+}
+func (s *SQLiteStore) CreateBinding(req CreateBindingRequest) (*Binding, error) {
+	return s.mem.CreateBinding(req)
+}
+func (s *SQLiteStore) UpdateBinding(id string, req UpdateBindingRequest) (*Binding, error) {
+	return s.mem.UpdateBinding(id, req)
 }

@@ -72,6 +72,7 @@ type RunRecord struct {
 // Store is the server-side persistence interface for the worker protocol.
 // MemoryStore and SQLiteStore are both implementations; swap them via NewServer.
 type Store interface {
+	// Worker protocol.
 	RegisterWorker(req RegisterWorkerRequest) (RegisterWorkerResponse, error)
 	Heartbeat(req HeartbeatRequest) (HeartbeatResponse, error)
 	EnqueueJob(spec JobSpec, boundMachineID string) (*JobRecord, error)
@@ -80,6 +81,17 @@ type Store interface {
 	FinishRun(runID string, req FinishRunRequest) error
 	GetJob(id string) *JobRecord
 	GetRun(id string) *RunRecord
+
+	// Cloud config.
+	Summary() CloudConfigSummary
+	CreateProject(req CreateProjectRequest) (*Project, error)
+	CreateRepo(req CreateRepoRequest) (*Repo, error)
+	UpdateRepo(id string, req UpdateRepoRequest) (*Repo, error)
+	CreateBinding(req CreateBindingRequest) (*Binding, error)
+	UpdateBinding(id string, req UpdateBindingRequest) (*Binding, error)
+	ListMachines() []*Machine
+	ListJobs() []*JobRecord
+	ListRuns() []*RunRecord
 }
 
 // compile-time check
