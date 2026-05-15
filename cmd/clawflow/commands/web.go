@@ -309,6 +309,16 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/sync/push", api.HandleSyncPush)
 			mux.HandleFunc("/api/sync/pull", api.HandleSyncPull)
 			mux.HandleFunc("/api/login", api.HandleLogin)
+			// Cloud proxy — forwards /api/cloud/* to the configured cloud
+			// server using the stored access token. The browser stays
+			// same-origin and never sees the token.
+			mux.HandleFunc("/api/cloud/status", api.HandleCloudStatus)
+			mux.HandleFunc("/api/cloud/config", api.HandleCloudConfig)
+			mux.HandleFunc("/api/cloud/machines", api.HandleCloudMachines)
+			mux.HandleFunc("/api/cloud/bindings", api.HandleCloudBindings)
+			mux.HandleFunc("/api/cloud/bindings/", api.HandleCloudBindingByID)
+			mux.HandleFunc("/api/cloud/jobs", api.HandleCloudJobs)
+			mux.HandleFunc("/api/cloud/runs", api.HandleCloudRuns)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				// SPA fallback: if the requested path maps to a real
 				// asset inside the embedded bundle (assets/, favicon.svg,
