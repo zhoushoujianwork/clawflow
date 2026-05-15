@@ -709,7 +709,33 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (running): %v\n", prefix, err)
 	}
 
-	wtResult, cleanup, err := resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt)
+	// Fetch comments before resolveWorkdir so we can parse the
+	// ClawFlow-Base-Branch: marker and plumb the override into worktree
+	// setup. Using ListIssueCommentsDetail gives us CreatedAt for correct
+	// newest-first ordering and avoids a second round-trip at line 736.
+	detailComments, _ := j.client.ListIssueCommentsDetail(j.repo, j.sub.Number)
+
+	// Parse optional per-issue base-branch override.
+	overrideBranch, overrideSource, hasOverride, overrideErr := ParseBaseBranchOverride(j.sub.Body, detailComments)
+	if overrideErr != nil {
+		// Hard-fail: the marker exists but is invalid. Surface the error
+		// the same way as workdir failures (meta.json + circuit breaker)
+		// so the dashboard and PM patrol can see it without posting a
+		// VCS comment (operator contract: runner owns VCS side-effects).
+		fmt.Fprintf(os.Stderr, "%s ✗ base-branch marker invalid: %v\n", prefix, overrideErr)
+		runningMeta.Status = "failed"
+		runningMeta.Error = overrideErr.Error()
+		now := time.Now().UTC()
+		runningMeta.EndedAt = &now
+		_ = snapshot.WriteRunMeta(runDir, runningMeta)
+		checkCircuitBreaker(j, prefix)
+		return false, false
+	}
+	if hasOverride {
+		fmt.Fprintf(os.Stderr, "%s → base-branch override: %q (from %s)\n", prefix, overrideBranch, overrideSource)
+	}
+
+	wtResult, cleanup, err := resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch)
 	if err != nil {
 		// Failure path: do NOT post a comment to the issue. The full
 		// error is captured in events.jsonl and the run row on the
@@ -733,7 +759,11 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		fmt.Fprintf(os.Stderr, "%s ✓ workdir ready: %s\n", prefix, workdir)
 	}
 
-	comments, _ := j.client.ListIssueComments(j.repo, j.sub.Number)
+	// Extract comment bodies from the already-fetched detail slice.
+	comments := make([]string, len(detailComments))
+	for i, c := range detailComments {
+		comments[i] = c.Body
+	}
 
 	eventsFile, eventsErr := os.Create(filepath.Join(runDir, "events.jsonl"))
 	if eventsErr != nil {
@@ -1118,14 +1148,14 @@ func waitForCI(client vcs.Client, repo string, prNum int, timeoutSec int, prefix
 //   - all other operators with local_path → persistent analysis worktree
 //     (ensureAnalysisWorktree) reset to origin/<base> before each run
 //   - all other operators without local_path → ephemeral tempdir + warning
-func resolveWorkdir(op *operator.Operator, repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time) (worktreeResult, func(), error) {
+func resolveWorkdir(op *operator.Operator, repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time, overrideBranch string) (worktreeResult, func(), error) {
 	// implement and pr-target operators need a mutable per-issue worktree.
 	needsRepo := op.Name == "implement" || op.Trigger.Target == "pr"
 	if needsRepo {
 		if repoCfg.LocalPath == "" {
 			return worktreeResult{}, func() {}, fmt.Errorf("operator %q needs repo local_path but it's empty in config", op.Name)
 		}
-		return setupWorktree(repoCfg, fullName, issueNum, startedAt)
+		return setupWorktree(repoCfg, fullName, issueNum, startedAt, overrideBranch)
 	}
 
 	// Analysis operators need read access to the repo source so the LLM can
@@ -1342,7 +1372,16 @@ func findExistingWorktree(parent string, issueNum int, localPath, base string) (
 //
 // Cleanup removes the worktree (force) but leaves any branches the operator
 // created alone — pushed branches stay locally for the user to inspect/delete.
-func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time) (worktreeResult, func(), error) {
+//
+// overrideBranch, when non-empty, replaces repoCfg.BaseBranch for this single
+// run only — it is the integration point for the ClawFlow-Base-Branch: marker
+// (see ParseBaseBranchOverride in basebranch.go) and is never persisted.
+//
+// NOTE: this override intentionally does NOT propagate to ensureAnalysisWorktree.
+// Analysis worktrees are long-lived and shared across all issues for the same
+// (repo, branch) pair; a per-issue override would either pollute that shared
+// worktree or require a separate per-issue analysis worktree (out of scope).
+func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time, overrideBranch string) (worktreeResult, func(), error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return worktreeResult{}, func() {}, fmt.Errorf("home dir: %w", err)
@@ -1353,7 +1392,12 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 		return worktreeResult{}, func() {}, fmt.Errorf("mkdir worktree parent: %w", err)
 	}
 
-	base := repoCfg.BaseBranch
+	// Resolve base branch: per-issue override takes highest priority,
+	// then the repo config value, then the hardcoded "main" default.
+	base := overrideBranch
+	if base == "" {
+		base = repoCfg.BaseBranch
+	}
 	if base == "" {
 		base = "main"
 	}
