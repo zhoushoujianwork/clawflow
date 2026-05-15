@@ -80,6 +80,11 @@ type MemoryStore struct {
 	Jobs     map[string]*JobRecord
 	Runs     map[string]*RunRecord
 
+	// Cloud config resources.
+	Projects map[string]*Project
+	Repos    map[string]*Repo
+	Bindings map[string]*Binding
+
 	dedupe map[string]string
 }
 
@@ -89,6 +94,9 @@ func NewMemoryStore() *MemoryStore {
 		Workers:  make(map[string]*Worker),
 		Jobs:     make(map[string]*JobRecord),
 		Runs:     make(map[string]*RunRecord),
+		Projects: make(map[string]*Project),
+		Repos:    make(map[string]*Repo),
+		Bindings: make(map[string]*Binding),
 		dedupe:   make(map[string]string),
 	}
 }
@@ -297,6 +305,267 @@ func cloneJob(job *JobRecord) *JobRecord {
 		}
 	}
 	return &cp
+}
+
+// ---- Cloud config store methods ----
+
+// CreateProject creates a new cloud project. Name is required.
+func (s *MemoryStore) CreateProject(req CreateProjectRequest) (*Project, error) {
+	if req.Name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := &Project{
+		ID:          newID("proj"),
+		Name:        req.Name,
+		Description: req.Description,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	s.Projects[p.ID] = p
+	cp := *p
+	return &cp, nil
+}
+
+// GetProject returns a copy of the project with the given ID, or nil.
+func (s *MemoryStore) GetProject(id string) *Project {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.Projects[id]
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	return &cp
+}
+
+// CreateRepo registers a new repository. Name is required.
+// If project_id is supplied it must reference an existing project.
+func (s *MemoryStore) CreateRepo(req CreateRepoRequest) (*Repo, error) {
+	if req.Name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if req.ProjectID != "" {
+		if _, ok := s.Projects[req.ProjectID]; !ok {
+			return nil, fmt.Errorf("project %q not found", req.ProjectID)
+		}
+	}
+	platform := req.Platform
+	if platform == "" {
+		platform = "github"
+	}
+	r := &Repo{
+		ID:         newID("repo"),
+		Name:       req.Name,
+		Platform:   platform,
+		ProjectID:  req.ProjectID,
+		BaseBranch: req.BaseBranch,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	s.Repos[r.ID] = r
+	cp := *r
+	return &cp, nil
+}
+
+// GetRepo returns a copy of the repo with the given ID, or nil.
+func (s *MemoryStore) GetRepo(id string) *Repo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.Repos[id]
+	if r == nil {
+		return nil
+	}
+	cp := *r
+	return &cp
+}
+
+// UpdateRepo applies a partial update to the named repo.
+// Only non-nil fields are modified. Setting project_id to "" unlinks the repo.
+func (s *MemoryStore) UpdateRepo(id string, req UpdateRepoRequest) (*Repo, error) {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.Repos[id]
+	if !ok {
+		return nil, fmt.Errorf("repo %q not found", id)
+	}
+	if req.ProjectID != nil {
+		if *req.ProjectID != "" {
+			if _, ok := s.Projects[*req.ProjectID]; !ok {
+				return nil, fmt.Errorf("project %q not found", *req.ProjectID)
+			}
+		}
+		r.ProjectID = *req.ProjectID
+	}
+	if req.BaseBranch != nil {
+		r.BaseBranch = *req.BaseBranch
+	}
+	r.UpdatedAt = now
+	cp := *r
+	return &cp, nil
+}
+
+// CreateBinding creates a binding that assigns a repo or project to a machine.
+// machine_id is required; exactly one of repo_id or project_id must be set.
+// All referenced IDs must exist.
+func (s *MemoryStore) CreateBinding(req CreateBindingRequest) (*Binding, error) {
+	if req.MachineID == "" {
+		return nil, fmt.Errorf("machine_id is required")
+	}
+	if req.RepoID == "" && req.ProjectID == "" {
+		return nil, fmt.Errorf("one of repo_id or project_id is required")
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.Machines[req.MachineID]; !ok {
+		return nil, fmt.Errorf("machine %q not found", req.MachineID)
+	}
+	if req.RepoID != "" {
+		if _, ok := s.Repos[req.RepoID]; !ok {
+			return nil, fmt.Errorf("repo %q not found", req.RepoID)
+		}
+	}
+	if req.ProjectID != "" {
+		if _, ok := s.Projects[req.ProjectID]; !ok {
+			return nil, fmt.Errorf("project %q not found", req.ProjectID)
+		}
+	}
+	b := &Binding{
+		ID:        newID("binding"),
+		MachineID: req.MachineID,
+		RepoID:    req.RepoID,
+		ProjectID: req.ProjectID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.Bindings[b.ID] = b
+	cp := *b
+	return &cp, nil
+}
+
+// GetBinding returns a copy of the binding with the given ID, or nil.
+func (s *MemoryStore) GetBinding(id string) *Binding {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.Bindings[id]
+	if b == nil {
+		return nil
+	}
+	cp := *b
+	return &cp
+}
+
+// UpdateBinding applies a partial update to the named binding.
+// Non-empty fields are validated and applied.
+func (s *MemoryStore) UpdateBinding(id string, req UpdateBindingRequest) (*Binding, error) {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.Bindings[id]
+	if !ok {
+		return nil, fmt.Errorf("binding %q not found", id)
+	}
+	if req.MachineID != "" {
+		if _, ok := s.Machines[req.MachineID]; !ok {
+			return nil, fmt.Errorf("machine %q not found", req.MachineID)
+		}
+		b.MachineID = req.MachineID
+	}
+	if req.RepoID != "" {
+		if _, ok := s.Repos[req.RepoID]; !ok {
+			return nil, fmt.Errorf("repo %q not found", req.RepoID)
+		}
+		b.RepoID = req.RepoID
+	}
+	if req.ProjectID != "" {
+		if _, ok := s.Projects[req.ProjectID]; !ok {
+			return nil, fmt.Errorf("project %q not found", req.ProjectID)
+		}
+		b.ProjectID = req.ProjectID
+	}
+	b.UpdatedAt = now
+	cp := *b
+	return &cp, nil
+}
+
+// ListMachines returns copies of all registered machines.
+func (s *MemoryStore) ListMachines() []*Machine {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Machine, 0, len(s.Machines))
+	for _, m := range s.Machines {
+		cp := *m
+		out = append(out, &cp)
+	}
+	return out
+}
+
+// ListJobs returns copies of all job records.
+func (s *MemoryStore) ListJobs() []*JobRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*JobRecord, 0, len(s.Jobs))
+	for _, j := range s.Jobs {
+		out = append(out, cloneJob(j))
+	}
+	return out
+}
+
+// ListRuns returns copies of all run records.
+func (s *MemoryStore) ListRuns() []*RunRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*RunRecord, 0, len(s.Runs))
+	for _, r := range s.Runs {
+		cp := *r
+		cp.Events = append([]RunEvent(nil), r.Events...)
+		out = append(out, &cp)
+	}
+	return out
+}
+
+// Summary returns an aggregated snapshot of all cloud config resources.
+func (s *MemoryStore) Summary() CloudConfigSummary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sum := CloudConfigSummary{
+		Projects: make([]*Project, 0, len(s.Projects)),
+		Repos:    make([]*Repo, 0, len(s.Repos)),
+		Machines: make([]*Machine, 0, len(s.Machines)),
+		Bindings: make([]*Binding, 0, len(s.Bindings)),
+	}
+	for _, p := range s.Projects {
+		cp := *p
+		sum.Projects = append(sum.Projects, &cp)
+	}
+	for _, r := range s.Repos {
+		cp := *r
+		sum.Repos = append(sum.Repos, &cp)
+	}
+	for _, m := range s.Machines {
+		cp := *m
+		sum.Machines = append(sum.Machines, &cp)
+	}
+	for _, b := range s.Bindings {
+		cp := *b
+		sum.Bindings = append(sum.Bindings, &cp)
+	}
+	sum.Counts = ConfigCounts{
+		Projects: len(s.Projects),
+		Repos:    len(s.Repos),
+		Machines: len(s.Machines),
+		Bindings: len(s.Bindings),
+		Jobs:     len(s.Jobs),
+		Runs:     len(s.Runs),
+	}
+	return sum
 }
 
 func newID(prefix string) string {
