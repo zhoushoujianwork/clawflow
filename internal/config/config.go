@@ -246,6 +246,16 @@ type Credentials struct {
 	GHToken     string `yaml:"gh_token,omitempty"`
 	GitLabToken string `yaml:"gitlab_token,omitempty"`
 
+	// CloudURL is the ClawFlow SaaS API base URL used by `clawflow cloud`
+	// and `clawflow worker` commands. AccessToken authenticates user-level
+	// cloud API calls; MachineID and WorkerToken identify this registered
+	// machine for worker heartbeats and job leases.
+	CloudURL         string `yaml:"cloud_url,omitempty"`
+	CloudAccessToken string `yaml:"cloud_access_token,omitempty"`
+	CloudMachineID   string `yaml:"cloud_machine_id,omitempty"`
+	CloudWorkerID    string `yaml:"cloud_worker_id,omitempty"`
+	CloudWorkerToken string `yaml:"cloud_worker_token,omitempty"`
+
 	// GistID is the ID of the user's private "clawflow-config" GitHub Gist,
 	// discovered or created by `clawflow login`. Persisted here so subsequent
 	// sync operations skip the search step. Never synced to the Gist itself.
@@ -701,6 +711,11 @@ func LoadCredentials() (*Credentials, error) {
 	}
 	c.GHToken = envOrFile("GH_TOKEN", c.GHToken)
 	c.GitLabToken = envOrFile("GITLAB_TOKEN", c.GitLabToken)
+	c.CloudURL = envOrFile("CLAWFLOW_CLOUD_URL", c.CloudURL)
+	c.CloudAccessToken = envOrFile("CLAWFLOW_CLOUD_TOKEN", c.CloudAccessToken)
+	c.CloudMachineID = envOrFile("CLAWFLOW_CLOUD_MACHINE_ID", c.CloudMachineID)
+	c.CloudWorkerID = envOrFile("CLAWFLOW_CLOUD_WORKER_ID", c.CloudWorkerID)
+	c.CloudWorkerToken = envOrFile("CLAWFLOW_CLOUD_WORKER_TOKEN", c.CloudWorkerToken)
 	c.envClaudeAPIKey = os.Getenv("CLAWFLOW_CLAUDE_API_KEY")
 	c.envClaudeBaseURL = os.Getenv("CLAWFLOW_CLAUDE_BASE_URL")
 	c.ClaudeAPIKey = envOrFile("CLAWFLOW_CLAUDE_API_KEY", c.ClaudeAPIKey)

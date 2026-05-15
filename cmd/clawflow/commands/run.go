@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
+	"github.com/zhoushoujianwork/clawflow/internal/cloud"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
@@ -53,6 +54,7 @@ func NewRunCmd() *cobra.Command {
 	var (
 		onlyRepo  string
 		onlyIssue int
+		localMode bool
 		timeout   time.Duration
 	)
 	cmd := &cobra.Command{
@@ -72,13 +74,73 @@ per-repo because it shares a local git clone. Pass --repo and/or
 			if onlyIssue != 0 && onlyRepo == "" {
 				return fmt.Errorf("--issue requires --repo")
 			}
+			if localMode {
+				debugf("run --local selected; using local repository scan mode")
+			}
 			return runOnce(cmd.Context(), onlyRepo, onlyIssue, timeout)
 		},
 	}
 	cmd.Flags().StringVar(&onlyRepo, "repo", "", "Restrict to a single repo (owner/repo); default: all enabled repos")
 	cmd.Flags().IntVar(&onlyIssue, "issue", 0, "Restrict to a single issue number (requires --repo)")
+	cmd.Flags().BoolVar(&localMode, "local", false, "Explicitly use local scan mode (reserved for cloud-enabled installs)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator claude subprocess timeout")
 	return cmd
+}
+
+// ExecuteJob adapts a cloud-leased job into the existing local operator
+// execution path. It is intentionally thin: worker mode must not grow a
+// second copy of the runner.
+func ExecuteJob(ctx context.Context, spec cloud.JobSpec, timeout time.Duration) (bool, error) {
+	if spec.Repo == "" {
+		return false, fmt.Errorf("job spec missing repo")
+	}
+	if spec.Operator == "" {
+		return false, fmt.Errorf("job spec missing operator")
+	}
+	if spec.Number == 0 {
+		return false, fmt.Errorf("job spec missing target number")
+	}
+	reg, err := loadRegistry()
+	if err != nil {
+		return false, err
+	}
+	op, ok := reg.Get(spec.Operator)
+	if !ok {
+		return false, fmt.Errorf("operator %q not found", spec.Operator)
+	}
+	repoCfg := config.Repo{
+		Platform:   spec.Platform,
+		BaseURL:    spec.BaseURL,
+		BaseBranch: spec.BaseBranch,
+		LocalPath:  spec.LocalPath,
+	}
+	if cfg, err := config.Load(); err == nil {
+		if existing, ok := cfg.Repos[spec.Repo]; ok {
+			repoCfg = existing
+			if spec.LocalPath != "" {
+				repoCfg.LocalPath = spec.LocalPath
+			}
+		}
+	}
+	client, err := newVCSClient(repoCfg)
+	if err != nil {
+		return false, fmt.Errorf("vcs client: %w", err)
+	}
+	state := spec.State
+	if state == "" {
+		state = "open"
+	}
+	sub := &operator.Subject{
+		Number: spec.Number,
+		Title:  spec.Title,
+		Body:   spec.Body,
+		Labels: append([]string(nil), spec.Labels...),
+		State:  state,
+		IsPR:   spec.Target == "pr",
+	}
+	j := &runJob{op: op, sub: sub, repo: spec.Repo, repoCfg: repoCfg, client: client}
+	didFire, _ := runOneOperator(ctx, j, timeout)
+	return didFire, nil
 }
 
 // loadRegistry builds a Registry from the embedded skills + the user's
@@ -583,8 +645,8 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 	}
 
 	var (
-		issueLocks  sync.Map    // key: "<repo>#<issue>" → *sync.Mutex
-		repoLocks   sync.Map    // key: "<repo>"          → *sync.Mutex
+		issueLocks  sync.Map // key: "<repo>#<issue>" → *sync.Mutex
+		repoLocks   sync.Map // key: "<repo>"          → *sync.Mutex
 		fired       []firedKey
 		firedMu     sync.Mutex
 		rateLimited atomic.Bool // set when any worker hits a rate limit
