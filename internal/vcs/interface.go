@@ -17,7 +17,7 @@ type IssueComment struct {
 
 // Issue represents a VCS issue/ticket.
 type Issue struct {
-	ID        int64    `json:"id,omitempty"`  // platform internal ID (GitHub: id, GitLab: id); used for sub-issue API
+	ID        int64    `json:"id,omitempty"` // platform internal ID (GitHub: id, GitLab: id); used for sub-issue API
 	Number    int      `json:"number"`
 	Title     string   `json:"title"`
 	Body      string   `json:"body"`
@@ -31,6 +31,13 @@ type Issue struct {
 	// without abusing CapturedAt (which the scanner rewrites every
 	// pass and thus is not a real close timestamp).
 	ClosedAt string `json:"closed_at,omitempty"`
+}
+
+// IssueUpdate holds editable issue fields. Nil means "leave unchanged"; a
+// pointer to an empty string intentionally clears that field.
+type IssueUpdate struct {
+	Title *string
+	Body  *string
 }
 
 // HasLabel reports whether the issue has a given label.
@@ -95,6 +102,7 @@ type Client interface {
 	ListIssueCommentsDetail(repo string, issueNumber int) ([]IssueComment, error)
 	CloseIssue(repo string, issueNumber int) error
 	CreateIssue(repo string, title, body string) (Issue, error)
+	UpdateIssue(repo string, issueNumber int, update IssueUpdate) (Issue, error)
 	PostIssueComment(repo string, issueNumber int, body string) error
 	DeleteIssueComment(repo string, issueNumber int, commentID int64) error
 	// ListIssuesByBodyKeyword returns open issues whose body contains keyword.
@@ -147,10 +155,10 @@ type Client interface {
 type MergeStatus string
 
 const (
-	MergeStatusClean      MergeStatus = "clean"      // ready to merge
-	MergeStatusConflict   MergeStatus = "conflict"   // has conflicts
-	MergeStatusPending    MergeStatus = "pending"    // mergeability not yet computed
-	MergeStatusUnknown    MergeStatus = "unknown"
+	MergeStatusClean    MergeStatus = "clean"    // ready to merge
+	MergeStatusConflict MergeStatus = "conflict" // has conflicts
+	MergeStatusPending  MergeStatus = "pending"  // mergeability not yet computed
+	MergeStatusUnknown  MergeStatus = "unknown"
 )
 
 // ClawFlowLabels are the standard labels ClawFlow requires on every monitored

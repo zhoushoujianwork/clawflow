@@ -154,6 +154,31 @@ func TestCreateIssue(t *testing.T) {
 	}
 }
 
+func TestUpdateIssue(t *testing.T) {
+	var got map[string]string
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"PATCH /repos/owner/repo/issues/42": func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			jsonResp(w, 200, map[string]any{"number": 42, "title": got["title"], "body": got["body"], "state": "open"})
+		},
+	})
+
+	title := "updated title"
+	body := "updated body"
+	issue, err := client.UpdateIssue("owner/repo", 42, vcs.IssueUpdate{Title: &title, Body: &body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["title"] != title || got["body"] != body {
+		t.Fatalf("payload = %#v", got)
+	}
+	if issue.Number != 42 || issue.Title != title || issue.Body != body {
+		t.Fatalf("issue = %#v", issue)
+	}
+}
+
 func TestInitLabels_SkipsExisting(t *testing.T) {
 	created := []string{}
 	client := newTestClient(t, map[string]http.HandlerFunc{
