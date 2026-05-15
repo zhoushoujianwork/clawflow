@@ -128,7 +128,7 @@ Pass --store to select a persistent backend:
 			}
 			addr := fmt.Sprintf("%s:%d", host, port)
 			fmt.Fprintf(os.Stderr, "ClawFlow cloud dev API listening on http://%s (store: %s)\n", addr, storeFlag)
-			return http.ListenAndServe(addr, cloud.NewServer(store))
+			return http.ListenAndServe(addr, cloud.NewServer(store, nil))
 		},
 	}
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "Host to bind")

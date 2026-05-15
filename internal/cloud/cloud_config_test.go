@@ -40,7 +40,7 @@ func mustMarshal(t *testing.T, v any) []byte {
 // TestCloudConfigAuthRequired verifies that all cloud config endpoints reject
 // requests without a valid Authorization: Bearer header.
 func TestCloudConfigAuthRequired(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	cases := []struct{ method, path string }{
@@ -67,7 +67,7 @@ func TestCloudConfigAuthRequired(t *testing.T) {
 
 // TestCloudConfigGetSummaryEmpty verifies the initial empty summary shape.
 func TestCloudConfigGetSummaryEmpty(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	req := authReq(t, http.MethodGet, srv.URL+"/api/cloud/config", nil)
@@ -95,7 +95,7 @@ func TestCloudConfigGetSummaryEmpty(t *testing.T) {
 
 // TestCloudConfigCreateProject verifies happy-path project creation.
 func TestCloudConfigCreateProject(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	body := mustMarshal(t, CreateProjectRequest{Name: "my-project", Description: "test desc"})
@@ -122,7 +122,7 @@ func TestCloudConfigCreateProject(t *testing.T) {
 
 // TestCloudConfigCreateProjectMissingName verifies validation failure.
 func TestCloudConfigCreateProjectMissingName(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	body := mustMarshal(t, CreateProjectRequest{})
@@ -139,7 +139,7 @@ func TestCloudConfigCreateProjectMissingName(t *testing.T) {
 
 // TestCloudConfigCreateRepo verifies happy-path repo creation.
 func TestCloudConfigCreateRepo(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	body := mustMarshal(t, CreateRepoRequest{Name: "owner/repo", Platform: "github"})
@@ -175,7 +175,7 @@ func TestCloudConfigCreateRepoDefaultsPlatform(t *testing.T) {
 
 // TestCloudConfigCreateRepoMissingName verifies validation failure.
 func TestCloudConfigCreateRepoMissingName(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	body := mustMarshal(t, CreateRepoRequest{})
@@ -193,7 +193,7 @@ func TestCloudConfigCreateRepoMissingName(t *testing.T) {
 // TestCloudConfigCreateRepoUnknownProject verifies that referencing a
 // non-existent project_id returns 400.
 func TestCloudConfigCreateRepoUnknownProject(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	body := mustMarshal(t, CreateRepoRequest{Name: "owner/repo", ProjectID: "nonexistent"})
@@ -211,7 +211,7 @@ func TestCloudConfigCreateRepoUnknownProject(t *testing.T) {
 // TestCloudConfigUpdateRepo verifies PATCH /api/cloud/repos/{id}.
 func TestCloudConfigUpdateRepo(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	repo, err := store.CreateRepo(CreateRepoRequest{Name: "owner/repo"})
@@ -241,7 +241,7 @@ func TestCloudConfigUpdateRepo(t *testing.T) {
 
 // TestCloudConfigUpdateRepoNotFound verifies 404 for unknown repo ID.
 func TestCloudConfigUpdateRepoNotFound(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	newBranch := "develop"
@@ -260,7 +260,7 @@ func TestCloudConfigUpdateRepoNotFound(t *testing.T) {
 // TestCloudConfigCreateBinding verifies POST /api/cloud/bindings.
 func TestCloudConfigCreateBinding(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	reg, err := store.RegisterWorker(RegisterWorkerRequest{Hostname: "host"})
@@ -293,7 +293,7 @@ func TestCloudConfigCreateBinding(t *testing.T) {
 
 // TestCloudConfigCreateBindingMissingMachineID verifies validation failure.
 func TestCloudConfigCreateBindingMissingMachineID(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	body := mustMarshal(t, CreateBindingRequest{RepoID: "some-repo"})
@@ -312,7 +312,7 @@ func TestCloudConfigCreateBindingMissingMachineID(t *testing.T) {
 // of repo_id or project_id must be supplied.
 func TestCloudConfigCreateBindingMissingRepoOrProject(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	reg, _ := store.RegisterWorker(RegisterWorkerRequest{Hostname: "host"})
@@ -331,7 +331,7 @@ func TestCloudConfigCreateBindingMissingRepoOrProject(t *testing.T) {
 // TestCloudConfigCreateBindingUnknownMachine verifies that referencing a
 // non-existent machine_id returns 400.
 func TestCloudConfigCreateBindingUnknownMachine(t *testing.T) {
-	srv := httptest.NewServer(NewServer(NewMemoryStore()))
+	srv := httptest.NewServer(NewServer(NewMemoryStore(), nil))
 	defer srv.Close()
 
 	body := mustMarshal(t, CreateBindingRequest{MachineID: "nonexistent", RepoID: "some-repo"})
@@ -349,7 +349,7 @@ func TestCloudConfigCreateBindingUnknownMachine(t *testing.T) {
 // TestCloudConfigUpdateBinding verifies PATCH /api/cloud/bindings/{id}.
 func TestCloudConfigUpdateBinding(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	reg1, _ := store.RegisterWorker(RegisterWorkerRequest{Hostname: "host1"})
@@ -383,7 +383,7 @@ func TestCloudConfigUpdateBinding(t *testing.T) {
 // TestCloudConfigListMachines verifies GET /api/cloud/machines.
 func TestCloudConfigListMachines(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	reg, err := store.RegisterWorker(RegisterWorkerRequest{Hostname: "host"})
@@ -412,7 +412,7 @@ func TestCloudConfigListMachines(t *testing.T) {
 // TestCloudConfigListJobs verifies GET /api/cloud/jobs.
 func TestCloudConfigListJobs(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	_, err := store.EnqueueJob(JobSpec{
@@ -446,7 +446,7 @@ func TestCloudConfigListJobs(t *testing.T) {
 // TestCloudConfigListRuns verifies GET /api/cloud/runs.
 func TestCloudConfigListRuns(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	reg, _ := store.RegisterWorker(RegisterWorkerRequest{Hostname: "host"})
@@ -480,7 +480,7 @@ func TestCloudConfigListRuns(t *testing.T) {
 // update as resources are created.
 func TestCloudConfigSummaryReflectsCreates(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	store.CreateProject(CreateProjectRequest{Name: "p1"})  //nolint:errcheck
@@ -508,7 +508,7 @@ func TestCloudConfigSummaryReflectsCreates(t *testing.T) {
 // the server and decode the JSON shapes correctly.
 func TestCloudConfigClientRoundTrip(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	client, err := NewClient(Config{BaseURL: srv.URL, AccessToken: "test-token"})

@@ -102,7 +102,7 @@ func TestMemoryStoreLeaseExpiryReturnsJobToPending(t *testing.T) {
 
 func TestServerWorkerLifecycle(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 	client, err := NewClient(Config{BaseURL: srv.URL, AccessToken: "token"})
 	if err != nil {
@@ -148,7 +148,7 @@ func TestServerWorkerLifecycle(t *testing.T) {
 
 func TestServerDevJobEndpoint(t *testing.T) {
 	store := NewMemoryStore()
-	srv := httptest.NewServer(NewServer(store))
+	srv := httptest.NewServer(NewServer(store, nil))
 	defer srv.Close()
 
 	body, _ := json.Marshal(map[string]any{

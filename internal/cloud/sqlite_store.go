@@ -525,3 +525,9 @@ func (s *SQLiteStore) CreateBinding(req CreateBindingRequest) (*Binding, error) 
 func (s *SQLiteStore) UpdateBinding(id string, req UpdateBindingRequest) (*Binding, error) {
 	return s.mem.UpdateBinding(id, req)
 }
+func (s *SQLiteStore) RegisterConnection(conn VCSConnection) (*VCSConnection, error) {
+	return s.mem.RegisterConnection(conn)
+}
+func (s *SQLiteStore) GetConnectionByRepo(repo string) *VCSConnection {
+	return s.mem.GetConnectionByRepo(repo)
+}
