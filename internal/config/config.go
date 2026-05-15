@@ -323,6 +323,13 @@ type Credentials struct {
 	envChatModel     string `yaml:"-"`
 	envEvalModel     string `yaml:"-"`
 	envOperatorModel string `yaml:"-"`
+
+	// envClaudeAPIKey / envClaudeBaseURL capture env-var overrides so
+	// provider-aware callers can preserve env > provider > legacy
+	// precedence without letting persisted legacy fields mask the
+	// ordered provider list.
+	envClaudeAPIKey  string `yaml:"-"`
+	envClaudeBaseURL string `yaml:"-"`
 }
 
 // Role constants identify which model slot to read off a ClaudeProvider
@@ -411,6 +418,37 @@ func ResolveModelForRole(c *Credentials, role string) string {
 		}
 	}
 	return DefaultModelForRole(role)
+}
+
+// ResolveClaudeCredentials returns the API key and base URL direct Claude
+// subprocesses should receive. Resolution order is:
+//
+//  1. CLAWFLOW_CLAUDE_API_KEY / CLAWFLOW_CLAUDE_BASE_URL env overrides.
+//  2. First enabled provider in ClaudeProviders.
+//  3. Deprecated legacy ClaudeAPIKey / ClaudeBaseURL fields.
+func ResolveClaudeCredentials(c *Credentials) (apiKey, baseURL string) {
+	if c == nil {
+		return "", ""
+	}
+	foundProvider := false
+	for _, p := range c.ClaudeProviders {
+		if !p.Enabled {
+			continue
+		}
+		foundProvider = true
+		apiKey, baseURL = p.APIKey, p.BaseURL
+		break
+	}
+	if !foundProvider {
+		apiKey, baseURL = c.ClaudeAPIKey, c.ClaudeBaseURL
+	}
+	if c.envClaudeAPIKey != "" {
+		apiKey = c.envClaudeAPIKey
+	}
+	if c.envClaudeBaseURL != "" {
+		baseURL = c.envClaudeBaseURL
+	}
+	return apiKey, baseURL
 }
 
 // envRoleOverride returns the env-var-sourced model override for role,
@@ -663,6 +701,8 @@ func LoadCredentials() (*Credentials, error) {
 	}
 	c.GHToken = envOrFile("GH_TOKEN", c.GHToken)
 	c.GitLabToken = envOrFile("GITLAB_TOKEN", c.GitLabToken)
+	c.envClaudeAPIKey = os.Getenv("CLAWFLOW_CLAUDE_API_KEY")
+	c.envClaudeBaseURL = os.Getenv("CLAWFLOW_CLAUDE_BASE_URL")
 	c.ClaudeAPIKey = envOrFile("CLAWFLOW_CLAUDE_API_KEY", c.ClaudeAPIKey)
 	c.ClaudeBaseURL = envOrFile("CLAWFLOW_CLAUDE_BASE_URL", c.ClaudeBaseURL)
 	// Env-var model overrides feed into ResolveModelForRole (via the

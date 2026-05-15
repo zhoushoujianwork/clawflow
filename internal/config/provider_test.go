@@ -327,7 +327,7 @@ func TestMigrateProviderModels_GlobalToPerProvider(t *testing.T) {
 		ClaudeEvalModel:     "opus",
 		ClaudeOperatorModel: "sonnet",
 		ClaudeProviders: []config.ClaudeProvider{
-			{Name: "A", Enabled: true},                          // no per-provider models — inherit all three
+			{Name: "A", Enabled: true},                               // no per-provider models — inherit all three
 			{Name: "B", EvalModel: "claude-opus-4-6", Enabled: true}, // keeps its own eval, inherits others
 		},
 	}
@@ -392,6 +392,89 @@ func TestResolveModelForRole(t *testing.T) {
 	t.Run("nil credentials returns default", func(t *testing.T) {
 		if got := config.ResolveModelForRole(nil, config.RoleChat); got != config.DefaultChatModel {
 			t.Errorf("nil: got %q, want %q", got, config.DefaultChatModel)
+		}
+	})
+}
+
+func TestResolveClaudeCredentials(t *testing.T) {
+	t.Run("picks first enabled provider before legacy fields", func(t *testing.T) {
+		c := &config.Credentials{
+			ClaudeAPIKey:  "legacy-key",
+			ClaudeBaseURL: "https://legacy.example.com",
+			ClaudeProviders: []config.ClaudeProvider{
+				{Name: "Disabled", APIKey: "disabled-key", BaseURL: "https://disabled.example.com", Enabled: false},
+				{Name: "Primary", APIKey: "primary-key", BaseURL: "https://primary.example.com", Enabled: true},
+				{Name: "Backup", APIKey: "backup-key", BaseURL: "https://backup.example.com", Enabled: true},
+			},
+		}
+
+		apiKey, baseURL := config.ResolveClaudeCredentials(c)
+		if apiKey != "primary-key" || baseURL != "https://primary.example.com" {
+			t.Fatalf("got key=%q base=%q, want first enabled provider", apiKey, baseURL)
+		}
+	})
+
+	t.Run("falls back to legacy fields when no provider is enabled", func(t *testing.T) {
+		c := &config.Credentials{
+			ClaudeAPIKey:  "legacy-key",
+			ClaudeBaseURL: "https://legacy.example.com",
+			ClaudeProviders: []config.ClaudeProvider{
+				{Name: "Disabled", APIKey: "disabled-key", BaseURL: "https://disabled.example.com", Enabled: false},
+			},
+		}
+
+		apiKey, baseURL := config.ResolveClaudeCredentials(c)
+		if apiKey != "legacy-key" || baseURL != "https://legacy.example.com" {
+			t.Fatalf("got key=%q base=%q, want legacy credentials", apiKey, baseURL)
+		}
+	})
+
+	t.Run("empty enabled provider means inherit claude auth", func(t *testing.T) {
+		c := &config.Credentials{
+			ClaudeAPIKey:  "legacy-key",
+			ClaudeBaseURL: "https://legacy.example.com",
+			ClaudeProviders: []config.ClaudeProvider{
+				{Name: config.DefaultProviderName, Enabled: true},
+			},
+		}
+
+		apiKey, baseURL := config.ResolveClaudeCredentials(c)
+		if apiKey != "" || baseURL != "" {
+			t.Fatalf("got key=%q base=%q, want empty provider credentials", apiKey, baseURL)
+		}
+	})
+
+	t.Run("env overrides loaded credentials", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("CLAWFLOW_CLAUDE_API_KEY", "env-key")
+		t.Setenv("CLAWFLOW_CLAUDE_BASE_URL", "https://env.example.com")
+
+		creds := &config.Credentials{
+			ClaudeProviders: []config.ClaudeProvider{
+				{Name: "Primary", APIKey: "primary-key", BaseURL: "https://primary.example.com", Enabled: true},
+			},
+			DefaultProviderSeeded: true,
+		}
+		data, err := yaml.Marshal(creds)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		path := config.CredentialsPath()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		loaded, err := config.LoadCredentials()
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		apiKey, baseURL := config.ResolveClaudeCredentials(loaded)
+		if apiKey != "env-key" || baseURL != "https://env.example.com" {
+			t.Fatalf("got key=%q base=%q, want env credentials", apiKey, baseURL)
 		}
 	})
 }

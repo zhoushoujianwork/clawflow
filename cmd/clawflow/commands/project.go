@@ -482,7 +482,8 @@ func runProjectChat(name, model string) error {
 	}
 
 	preCreds, _ := config.LoadCredentials()
-	useBare := preCreds != nil && preCreds.ClaudeAPIKey != ""
+	apiKey, baseURL := config.ResolveClaudeCredentials(preCreds)
+	useBare := apiKey != ""
 	if useBare {
 		args = append(args, "--bare")
 	}
@@ -497,11 +498,6 @@ func runProjectChat(name, model string) error {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = workdir
 
-	creds, _ := config.LoadCredentials()
-	apiKey, baseURL := "", ""
-	if creds != nil {
-		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
-	}
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 
 	keyHint := "(none — falling back to OAuth/keychain)"

@@ -60,10 +60,7 @@ func Generate(name, model, instructions string) (string, error) {
 	}
 	cmd := exec.Command(bin, args...)
 	creds, _ := config.LoadCredentials()
-	apiKey, baseURL := "", ""
-	if creds != nil {
-		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
-	}
+	apiKey, baseURL := config.ResolveClaudeCredentials(creds)
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 	cmd.Stderr = os.Stderr
 
@@ -119,10 +116,7 @@ func GenerateDeployment(name, model string) (string, error) {
 	}
 	cmd := exec.Command(bin, args...)
 	creds, _ := config.LoadCredentials()
-	apiKey, baseURL := "", ""
-	if creds != nil {
-		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
-	}
+	apiKey, baseURL := config.ResolveClaudeCredentials(creds)
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 	cmd.Stderr = os.Stderr
 
@@ -241,7 +235,6 @@ func buildDeploymentPrompt(name string, repos []string, cfg *config.Config) (str
 
 	return strings.Join(parts, ""), scanned
 }
-
 
 // "Markdown only, no preamble" instruction. Two common failure modes:
 //

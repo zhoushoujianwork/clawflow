@@ -163,7 +163,8 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 	// plugins, auto-memory, and CLAUDE.md auto-discovery — we add
 	// --add-dir for the workdir below to restore CLAUDE.md.
 	preCreds, _ := config.LoadCredentials()
-	useBare := preCreds != nil && preCreds.ClaudeAPIKey != ""
+	apiKey, baseURL := config.ResolveClaudeCredentials(preCreds)
+	useBare := apiKey != ""
 	if useBare {
 		args = append(args, "--bare", "--add-dir", workdir)
 	}
@@ -203,11 +204,6 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 	// strings, which EnvWithCredentials treats as "don't override"
 	// — same behavior as before for users with no custom claude
 	// config.
-	creds, _ := config.LoadCredentials()
-	apiKey, baseURL := "", ""
-	if creds != nil {
-		apiKey, baseURL = creds.ClaudeAPIKey, creds.ClaudeBaseURL
-	}
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 	// Print a one-line provenance banner before claude takes over the
 	// terminal so the user can confirm which credentials this session

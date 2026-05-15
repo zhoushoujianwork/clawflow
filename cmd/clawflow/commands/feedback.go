@@ -66,7 +66,8 @@ func runFeedback(_ context.Context) error {
 		"--disallowedTools", "Edit,Write,NotebookEdit",
 	}
 
-	useBare := creds.ClaudeAPIKey != ""
+	apiKey, baseURL := config.ResolveClaudeCredentials(creds)
+	useBare := apiKey != ""
 	if useBare {
 		// Same rationale as chat.go: when the user has configured an
 		// API key (often against a corporate proxy), lock claude to
@@ -85,7 +86,6 @@ func runFeedback(_ context.Context) error {
 	// CLAUDE.md from whatever cwd clawflow was launched from.
 	cmd.Dir = os.TempDir()
 
-	apiKey, baseURL := creds.ClaudeAPIKey, creds.ClaudeBaseURL
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 
 	keyHint := "(none — falling back to OAuth/keychain)"
