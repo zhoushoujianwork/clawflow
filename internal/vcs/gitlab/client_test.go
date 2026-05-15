@@ -183,6 +183,30 @@ func TestCreateIssue(t *testing.T) {
 	}
 }
 
+func TestUpdateIssue(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"PUT " + projectPath + "/issues/42": func(w http.ResponseWriter, r *http.Request) {
+			r.ParseForm()
+			jsonResp(w, 200, map[string]any{
+				"iid":         42,
+				"title":       r.FormValue("title"),
+				"description": r.FormValue("description"),
+				"state":       "opened",
+			})
+		},
+	})
+
+	title := "updated title"
+	body := "updated body"
+	issue, err := client.UpdateIssue("ns/group/repo", 42, vcs.IssueUpdate{Title: &title, Body: &body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue.Number != 42 || issue.Title != title || issue.Body != body || issue.State != "open" {
+		t.Fatalf("issue = %#v", issue)
+	}
+}
+
 func TestInitLabels_SkipsExisting(t *testing.T) {
 	created := []string{}
 	client := newTestClient(t, map[string]http.HandlerFunc{

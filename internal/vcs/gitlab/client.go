@@ -337,6 +337,42 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body}, nil
 }
 
+func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdate) (vcs.Issue, error) {
+	form := url.Values{}
+	if update.Title != nil {
+		form.Set("title", *update.Title)
+	}
+	if update.Body != nil {
+		form.Set("description", *update.Body)
+	}
+	if len(form) == 0 {
+		return vcs.Issue{}, fmt.Errorf("gitlab update issue: no fields to update")
+	}
+	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
+	data, status, err := c.do("PUT", path, form)
+	if err != nil {
+		return vcs.Issue{}, err
+	}
+	if status != 200 {
+		return vcs.Issue{}, fmt.Errorf("gitlab update issue: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		ID    int64  `json:"id"`
+		IID   int    `json:"iid"`
+		Title string `json:"title"`
+		Body  string `json:"description"`
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.Issue{}, err
+	}
+	state := raw.State
+	if state == "opened" {
+		state = "open"
+	}
+	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body, State: state}, nil
+}
+
 func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.Issue, error) {
 	// GitLab uses "opened"/"closed" instead of "open"/"closed"
 	glState := state
@@ -670,7 +706,9 @@ func (c *Client) InitLabels(repo string, labels []vcs.Label) error {
 	if status != 200 {
 		return fmt.Errorf("gitlab list labels: HTTP %d", status)
 	}
-	var existing []struct{ Name string `json:"name"` }
+	var existing []struct {
+		Name string `json:"name"`
+	}
 	if err := json.Unmarshal(data, &existing); err != nil {
 		return err
 	}

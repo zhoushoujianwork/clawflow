@@ -315,7 +315,9 @@ func (c *Client) InitLabels(repo string, labels []vcs.Label) error {
 	if status != 200 {
 		return fmt.Errorf("github list labels: HTTP %d", status)
 	}
-	var existing []struct{ Name string `json:"name"` }
+	var existing []struct {
+		Name string `json:"name"`
+	}
 	if err := json.Unmarshal(data, &existing); err != nil {
 		return err
 	}
@@ -368,6 +370,42 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 		return vcs.Issue{}, err
 	}
 	return vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Body: raw.Body}, nil
+}
+
+func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdate) (vcs.Issue, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return vcs.Issue{}, err
+	}
+	body := make(map[string]string)
+	if update.Title != nil {
+		body["title"] = *update.Title
+	}
+	if update.Body != nil {
+		body["body"] = *update.Body
+	}
+	if len(body) == 0 {
+		return vcs.Issue{}, fmt.Errorf("github update issue: no fields to update")
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d", owner, name, issueNumber)
+	data, status, err := c.do("PATCH", path, body)
+	if err != nil {
+		return vcs.Issue{}, err
+	}
+	if status != 200 {
+		return vcs.Issue{}, fmt.Errorf("github update issue: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		ID     int64  `json:"id"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return vcs.Issue{}, err
+	}
+	return vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Body: raw.Body, State: raw.State}, nil
 }
 
 func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.Issue, error) {
@@ -496,7 +534,9 @@ func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
 		Title   string `json:"title"`
 		HTMLURL string `json:"html_url"`
 		State   string `json:"state"`
-		Head    struct{ Ref string `json:"ref"` } `json:"head"`
+		Head    struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.PR{}, err
@@ -524,7 +564,9 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 		State    string `json:"state"`
 		HTMLURL  string `json:"html_url"`
 		MergedAt string `json:"merged_at"`
-		Head     struct{ Ref string `json:"ref"` } `json:"head"`
+		Head     struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.PR{}, err
@@ -730,8 +772,8 @@ func (c *Client) DeleteBranch(repo string, branch string) error {
 // GET /repos/:owner/:repo/pulls/:number/reviews.
 type PRReview struct {
 	ID          int64  `json:"id"`
-	User        string `json:"user"`        // login
-	State       string `json:"state"`       // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+	User        string `json:"user"`         // login
+	State       string `json:"state"`        // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
 	SubmittedAt string `json:"submitted_at"` // RFC3339, empty for PENDING
 }
 

@@ -9,9 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
-	githubpkg "github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	githubpkg "github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 func NewIssueCmd() *cobra.Command {
@@ -20,6 +20,7 @@ func NewIssueCmd() *cobra.Command {
 		Short: "Manage issues",
 	}
 	cmd.AddCommand(newIssueCreateCmd())
+	cmd.AddCommand(newIssueEditCmd())
 	cmd.AddCommand(newIssueListCmd())
 	cmd.AddCommand(newIssueSearchCmd())
 	cmd.AddCommand(newIssueCommentCmd())
@@ -182,6 +183,51 @@ func newIssueCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&body, "body", "", "issue body")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("title")
+	return cmd
+}
+
+func newIssueEditCmd() *cobra.Command {
+	var repo, title, body string
+	var issue int
+	var setTitle, setBody bool
+
+	cmd := &cobra.Command{
+		Use:     "edit",
+		Short:   "Edit an issue title and/or body",
+		Example: "  clawflow issue edit --repo owner/repo --issue 7 --title \"fix: better title\"\n  clawflow issue edit --repo owner/repo --issue 7 --body \"updated details\"",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			update := vcs.IssueUpdate{}
+			if setTitle {
+				update.Title = &title
+			}
+			if setBody {
+				update.Body = &body
+			}
+			if update.Title == nil && update.Body == nil {
+				return fmt.Errorf("at least one of --title or --body is required")
+			}
+			updated, err := client.UpdateIssue(repo, issue, update)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("updated issue #%d: %s\n", updated.Number, updated.Title)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
+	cmd.Flags().StringVar(&title, "title", "", "new issue title")
+	cmd.Flags().StringVar(&body, "body", "", "new issue body")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("issue")
+	cmd.PreRun = func(cmd *cobra.Command, args []string) {
+		setTitle = cmd.Flags().Changed("title")
+		setBody = cmd.Flags().Changed("body")
+	}
 	return cmd
 }
 
