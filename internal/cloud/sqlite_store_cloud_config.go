@@ -92,7 +92,7 @@ func (s *SQLiteStore) CreateRepo(req CreateRepoRequest) (*Repo, error) {
 	if _, err := s.db.Exec(
 		`INSERT INTO repos (id, name, platform, project_id, base_branch, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, req.Name, platform, req.ProjectID, req.BaseBranch,
+		id, req.Name, platform, nullableString(req.ProjectID), req.BaseBranch,
 		sqliteTime(now), sqliteTime(now),
 	); err != nil {
 		return nil, fmt.Errorf("insert repo: %w", err)
