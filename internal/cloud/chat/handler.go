@@ -2,80 +2,62 @@ package chat
 
 import (
 	"context"
-	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/cloud"
 )
 
-// AuthExtractor is the minimal interface the chat handler needs to
-// know which user owns a request. The cloud server passes its real
-// auth.Handler in via NewHandler — we accept the narrow interface
-// rather than importing the auth package.
+// AuthExtractor is the slice of the cloud auth handler the chat router
+// needs. The chat package mounts its own routes (via RegisterRoutes)
+// instead of relying on the cloud server's outer mux to apply auth, so
+// it has to gate browser routes with RequireUser and worker routes with
+// RequireMachine itself. The real implementation is auth.Handler; tests
+// inject a stub.
 type AuthExtractor interface {
 	UserFromContext(ctx context.Context) *cloud.User
+	RequireUser(http.Handler) http.Handler
+	RequireMachine(http.Handler) http.Handler
 }
 
-// Handler owns the in-memory map of active chat sessions and serves
-// the five HTTP routes (see RegisterRoutes).
+// Handler owns the in-memory map of active chat sessions, the
+// per-machine ready queues, and the seven HTTP routes (see
+// RegisterRoutes). It runs no subprocesses — workers do that.
 type Handler struct {
 	cfg  Config
 	auth AuthExtractor
 
-	// appPrivateKey is parsed once at NewHandler time. nil when no
-	// GitHub App is configured (only public repos can be cloned).
-	appPrivateKey *rsa.PrivateKey
-
 	sessionsMu sync.Mutex
-	sessions   map[string]*Session
+	sessions   map[string]*Session // by Session.ID
 
-	tokenMu    sync.Mutex
-	tokenCache map[int64]installationTokenEntry
-
-	cloneLocksMu sync.Mutex
-	cloneLocks   map[string]*sync.Mutex
+	queuesMu sync.Mutex
+	queues   map[string]chan *cloud.ChatAssignment // by machine_id
 
 	gcCancel context.CancelFunc
 }
 
-// NewHandler builds a chat Handler. Returns an error only when the
-// configured GitHub App key file is unreadable — every other
-// misconfiguration is reported per-request (e.g. no anthropic key
-// → 503).
+// NewHandler builds a chat Handler. The (currently nil-tolerant) error
+// return is preserved for forward-compat with config validation.
 func NewHandler(cfg Config, auth AuthExtractor) (*Handler, error) {
 	cfg = cfg.withDefaults()
 	h := &Handler{
-		cfg:        cfg,
-		auth:       auth,
-		sessions:   make(map[string]*Session),
-		tokenCache: make(map[int64]installationTokenEntry),
-		cloneLocks: make(map[string]*sync.Mutex),
+		cfg:      cfg,
+		auth:     auth,
+		sessions: make(map[string]*Session),
+		queues:   make(map[string]chan *cloud.ChatAssignment),
 	}
-	// PEM is optional at startup time. Loading is best-effort so the
-	// cloud server can boot even with an unset / unreadable path —
-	// public-repo chat still works. Only private-repo clones fail at
-	// request time with a clear "private key not configured" error.
-	if cfg.GitHubAppPrivateKeyPath != "" {
-		key, err := loadRSAPrivateKey(cfg.GitHubAppPrivateKeyPath)
-		if err == nil {
-			h.appPrivateKey = key
-		} else {
-			fmt.Fprintf(os.Stderr, "chat: github app private key unavailable (%v); private repos won't clone\n", err)
-		}
-	}
-
 	gcCtx, cancel := context.WithCancel(context.Background())
 	h.gcCancel = cancel
 	go h.gcLoop(gcCtx)
 	return h, nil
 }
 
-// Shutdown stops the GC goroutine and kills every active session.
+// Shutdown stops the GC goroutine and tears down every active session.
 // The cloud server should call this on graceful stop.
 func (h *Handler) Shutdown() {
 	if h.gcCancel != nil {
@@ -93,35 +75,59 @@ func (h *Handler) Shutdown() {
 	}
 }
 
-// RegisterRoutes mounts the chat routes on mux. All require an
-// authenticated user.
+// RegisterRoutes mounts the chat router's routes on mux. Browser routes
+// are wrapped in RequireUser (session cookie or personal Bearer); worker
+// routes in RequireMachine (kind=machine Bearer). The wrapping happens
+// here, not at the outer mux — cloud server's NewServerWithExtras only
+// calls RegisterRoutes(mux), it doesn't introspect or rewrap chat paths.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/cloud/chat/sessions", h.handleCreate)
-	mux.HandleFunc("GET /api/cloud/chat/sessions", h.handleList)
-	mux.HandleFunc("GET /api/cloud/chat/sessions/{id}/stream", h.handleStream)
-	mux.HandleFunc("POST /api/cloud/chat/sessions/{id}/message", h.handleMessage)
-	mux.HandleFunc("DELETE /api/cloud/chat/sessions/{id}", h.handleDelete)
+	mountUser := func(pattern string, fn http.HandlerFunc) {
+		if h.auth == nil {
+			mux.HandleFunc(pattern, fn)
+			return
+		}
+		mux.Handle(pattern, h.auth.RequireUser(fn))
+	}
+	mountMachine := func(pattern string, fn http.HandlerFunc) {
+		if h.auth == nil {
+			mux.HandleFunc(pattern, fn)
+			return
+		}
+		mux.Handle(pattern, h.auth.RequireMachine(fn))
+	}
+
+	// Browser side — user-auth (session cookie or personal Bearer).
+	mountUser("POST /api/cloud/chat/sessions", h.handleCreate)
+	mountUser("GET /api/cloud/chat/sessions", h.handleList)
+	mountUser("GET /api/cloud/chat/sessions/{id}/stream", h.handleStream)
+	mountUser("POST /api/cloud/chat/sessions/{id}/message", h.handleMessage)
+	mountUser("DELETE /api/cloud/chat/sessions/{id}", h.handleDelete)
+
+	// Worker side — machine-auth (kind=machine Bearer).
+	mountMachine("POST /api/worker/chat/poll", h.handlePoll)
+	mountMachine("POST /api/worker/chat/sessions/{id}/events", h.handleWorkerEvents)
 }
 
-// ChatPath is the URL prefix the handler serves under.
+// ChatPath is the URL prefix the handler serves under. Kept for
+// callers that introspect routes (none today; reserved for future
+// per-prefix middleware).
 const ChatPath = "/api/cloud/chat"
 
-// ---- handlers ----
+// ---- Browser handlers ----
 
 // handleCreate spawns a new session.
-// Body: {"repo":"owner/name","message":"..."}
-// Response: {"id":"...","repo":"...","work_dir":"...","created_at":"..."}
+//
+// Body:     {"repo":"owner/name","message":"..."}
+// Response: {"id":"...","repo":"...","work_dir":"","created_at":"..."}
+//
+// work_dir is always empty in the new router model; we keep the field
+// in the JSON for backward compat with the existing browser client.
 func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	user := h.user(r)
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "auth required")
 		return
 	}
-	if h.cfg.AnthropicAPIKey == "" {
-		writeError(w, http.StatusServiceUnavailable, "cloud chat disabled: no ANTHROPIC_API_KEY configured")
-		return
-	}
-
 	var req struct {
 		Repo    string `json:"repo"`
 		Message string `json:"message"`
@@ -130,44 +136,42 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	req.Repo = strings.TrimSpace(req.Repo)
 	if req.Repo == "" {
 		writeError(w, http.StatusBadRequest, "repo is required")
 		return
 	}
 
-	path, err := h.EnsureClone(r.Context(), req.Repo)
+	machineID, platform, baseURL, err := h.resolveBinding(req.Repo)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "clone: "+err.Error())
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 
 	now := h.cfg.Now()
-	s := newSession(user.ID, req.Repo, path, now)
-
-	// Subprocess context is independent of the HTTP request: the
-	// request closes once we return the session id, but the
-	// subprocess must outlive it.
-	procCtx, cancel := context.WithTimeout(context.Background(), defaultSubprocessTTL)
-	s.procCancel = cancel
-
-	if err := s.start(procCtx, h.cfg.ClaudeBin, h.cfg.AnthropicAPIKey, req.Message); err != nil {
-		cancel()
-		writeError(w, http.StatusInternalServerError, "spawn: "+err.Error())
-		return
-	}
-
+	s := newSession(user.ID, req.Repo, machineID, now)
 	h.sessionsMu.Lock()
 	h.sessions[s.ID] = s
 	h.sessionsMu.Unlock()
 
+	h.enqueue(machineID, &cloud.ChatAssignment{
+		SessionID: s.ID,
+		UserID:    user.ID,
+		Repo:      req.Repo,
+		Platform:  platform,
+		BaseURL:   baseURL,
+		Message:   req.Message,
+	})
+
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         s.ID,
 		"repo":       s.Repo,
-		"work_dir":   s.WorkDir,
+		"work_dir":   "", // legacy field; cloud no longer owns a clone
 		"created_at": s.CreatedAt,
 	})
 }
 
+// handleList returns the current user's active sessions.
 func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 	user := h.user(r)
 	if user == nil {
@@ -192,7 +196,7 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 
 // handleStream is the SSE endpoint. Browser opens with
 // EventSource(`/api/cloud/chat/sessions/${id}/stream`) and receives
-// `data: {...}\n\n` frames until the subprocess exits.
+// `data: {...}\n\n` frames until the worker emits an end / error.
 func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	user := h.user(r)
 	if user == nil {
@@ -214,11 +218,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	// Disable nginx proxy buffering.
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	heartbeat := time.NewTicker(defaultSSEHeartbeatEvery)
+	heartbeat := time.NewTicker(h.cfg.HeartbeatEvery)
 	defer heartbeat.Stop()
 
 	events := s.Events()
@@ -229,7 +232,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			// GC loop to reap on idle.
 			return
 		case <-heartbeat.C:
-			fmt.Fprint(w, ": ping\n\n")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
 		case ev, ok := <-events:
 			if !ok {
@@ -239,18 +242,21 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "data: %s\n\n", b)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 			flusher.Flush()
-			if ev.Type == "end" || ev.Type == "error" {
+			if ev.Type == cloud.ChatEventEnd || ev.Type == cloud.ChatEventError {
 				return
 			}
 		}
 	}
 }
 
-// handleMessage queues a follow-up. The SSE stream keeps emitting (or,
-// more precisely, the previous stream ends and EventSource auto-
-// reconnects to a fresh one — see Session.send).
+// handleMessage queues a follow-up. MVP semantics: each follow-up
+// becomes a fresh assignment on the same machine, reusing the existing
+// session id. The browser stays subscribed to the same SSE stream and
+// sees new events arrive in-order. If the existing session has already
+// closed we 410 — the browser is expected to create a new session in
+// that case.
 func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	user := h.user(r)
 	if user == nil {
@@ -261,6 +267,10 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	s := h.lookup(id, user.ID)
 	if s == nil {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if s.Closed() {
+		writeError(w, http.StatusGone, "session closed")
 		return
 	}
 	var req struct {
@@ -274,18 +284,23 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "message is required")
 		return
 	}
-	s.touch(h.cfg.Now())
 
-	if s.procCancel != nil {
-		s.procCancel()
-	}
-	procCtx, cancel := context.WithTimeout(context.Background(), defaultSubprocessTTL)
-	s.procCancel = cancel
-	if err := s.send(procCtx, h.cfg.ClaudeBin, h.cfg.AnthropicAPIKey, req.Message); err != nil {
-		cancel()
-		writeError(w, http.StatusBadRequest, err.Error())
+	// Re-resolve binding in case the operator rebound the repo since
+	// the session was created.
+	machineID, platform, baseURL, err := h.resolveBinding(s.Repo)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+
+	h.enqueue(machineID, &cloud.ChatAssignment{
+		SessionID: s.ID,
+		UserID:    user.ID,
+		Repo:      s.Repo,
+		Platform:  platform,
+		BaseURL:   baseURL,
+		Message:   req.Message,
+	})
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 }
 
@@ -304,7 +319,83 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	h.sessionsMu.Lock()
 	delete(h.sessions, id)
 	h.sessionsMu.Unlock()
-	s.Close()
+	s.terminate("session terminated", h.cfg.Now())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- Worker handlers ----
+
+// handlePoll long-polls for the next ChatAssignment targeted at the
+// caller's machine. The worker authenticates via RequireMachine in the
+// outer mux; we accept the machine_id off the request body and trust
+// it (in test mode there is no middleware to enforce a match).
+func (h *Handler) handlePoll(w http.ResponseWriter, r *http.Request) {
+	var req cloud.ChatPollRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.MachineID == "" {
+		writeError(w, http.StatusBadRequest, "machine_id is required")
+		return
+	}
+	wait := defaultPollWait
+	if req.WaitSeconds > 0 {
+		wait = time.Duration(req.WaitSeconds) * time.Second
+		if wait > maxPollWait {
+			wait = maxPollWait
+		}
+	}
+
+	q := h.queueFor(req.MachineID)
+	select {
+	case a := <-q:
+		writeJSON(w, http.StatusOK, cloud.ChatPollResponse{Assignment: a})
+	case <-time.After(wait):
+		// No work in this window; tell the worker to re-poll.
+		w.WriteHeader(http.StatusNoContent)
+	case <-r.Context().Done():
+		// Client gave up first (e.g. shutdown). 499-ish.
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleWorkerEvents accepts a batch of ChatEvents pushed by the
+// worker and fans them out onto the session's SSE channel. An
+// end-typed event in the batch closes the session.
+func (h *Handler) handleWorkerEvents(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	var req cloud.WorkerEventsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	h.sessionsMu.Lock()
+	s, ok := h.sessions[id]
+	h.sessionsMu.Unlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	terminal := false
+	for _, ev := range req.Events {
+		if ev.Time.IsZero() {
+			ev.Time = h.cfg.Now()
+		}
+		s.emit(ev)
+		if ev.Type == cloud.ChatEventEnd || ev.Type == cloud.ChatEventError {
+			terminal = true
+		}
+	}
+	if terminal {
+		s.Close()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -330,6 +421,90 @@ func (h *Handler) lookup(id, userID string) *Session {
 	return s
 }
 
+// queueFor returns the per-machine ready channel, lazily creating it.
+// Buffer size 64 means a single worker that pauses polling can have
+// up to 64 queued assignments before enqueue starts dropping — well
+// past any realistic chat burst.
+func (h *Handler) queueFor(machineID string) chan *cloud.ChatAssignment {
+	h.queuesMu.Lock()
+	defer h.queuesMu.Unlock()
+	q, ok := h.queues[machineID]
+	if !ok {
+		q = make(chan *cloud.ChatAssignment, 64)
+		h.queues[machineID] = q
+	}
+	return q
+}
+
+// enqueue pushes an assignment onto a machine's ready queue. Drops
+// (with a session-error emit) if the queue is full — better than
+// blocking the create handler.
+func (h *Handler) enqueue(machineID string, a *cloud.ChatAssignment) {
+	q := h.queueFor(machineID)
+	select {
+	case q <- a:
+	default:
+		// Backpressure: tell the browser the assignment was dropped.
+		h.sessionsMu.Lock()
+		s := h.sessions[a.SessionID]
+		h.sessionsMu.Unlock()
+		if s != nil {
+			s.emit(cloud.ChatEvent{
+				Type: cloud.ChatEventError,
+				Text: "machine queue full; try again later",
+				Time: h.cfg.Now(),
+			})
+			s.Close()
+		}
+	}
+}
+
+// resolveBinding finds the machine that owns `repo` via the store's
+// bindings table. Returns (machine_id, platform, base_url). Returns
+// an error suitable for a 409 response when no binding exists.
+//
+// Today the bindings table only carries machine + repo/project IDs.
+// To map "owner/name" → repo_id we walk the repo list once per call.
+// That's O(repos) but the cloud config is small; if it grows we can
+// add a Store method later.
+func (h *Handler) resolveBinding(repo string) (machineID, platform, baseURL string, err error) {
+	if h.cfg.Store == nil {
+		return "", "", "", errors.New("no store configured")
+	}
+	sum := h.cfg.Store.Summary()
+	var repoRec *cloud.Repo
+	for _, r := range sum.Repos {
+		if r.Name == repo {
+			repoRec = r
+			break
+		}
+	}
+	if repoRec == nil {
+		return "", "", "", fmt.Errorf("repo %q not registered: add it under Cloud → Repos and bind a machine", repo)
+	}
+	platform = repoRec.Platform
+	if platform == "" {
+		platform = "github"
+	}
+
+	// Prefer a direct repo binding; fall back to a project binding.
+	for _, b := range sum.Bindings {
+		if b.RepoID != "" && b.RepoID == repoRec.ID {
+			return b.MachineID, platform, baseURL, nil
+		}
+	}
+	if repoRec.ProjectID != "" {
+		for _, b := range sum.Bindings {
+			if b.ProjectID != "" && b.ProjectID == repoRec.ProjectID {
+				return b.MachineID, platform, baseURL, nil
+			}
+		}
+	}
+	return "", "", "", fmt.Errorf("no machine bound to repo %q", repo)
+}
+
+// gcLoop wakes every defaultGCSweepEvery and reaps sessions that have
+// gone idle past defaultSessionIdle.
 func (h *Handler) gcLoop(ctx context.Context) {
 	tick := time.NewTicker(defaultGCSweepEvery)
 	defer tick.Stop()

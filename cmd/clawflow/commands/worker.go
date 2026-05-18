@@ -7,12 +7,14 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/cloud"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	workerchat "github.com/zhoushoujianwork/clawflow/internal/worker/chat"
 )
 
 // NewWorkerCmd manages the long-running SaaS worker process.
@@ -58,6 +60,7 @@ func newWorkerStartCmd() *cobra.Command {
 		timeout  time.Duration
 		once     bool
 		capacity int
+		chat     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -70,6 +73,7 @@ func newWorkerStartCmd() *cobra.Command {
 				Timeout:  timeout,
 				Once:     once,
 				Capacity: capacity,
+				Chat:     chat,
 			})
 		},
 	}
@@ -77,6 +81,7 @@ func newWorkerStartCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-job operator timeout")
 	cmd.Flags().BoolVar(&once, "once", false, "Run one heartbeat/lease cycle and exit")
 	cmd.Flags().IntVar(&capacity, "capacity", 1, "Maximum jobs this worker should request per cycle")
+	cmd.Flags().BoolVar(&chat, "chat", true, "Long-poll cloud for browser chat sessions and run claude locally")
 	return cmd
 }
 
@@ -104,6 +109,10 @@ type workerLoopOptions struct {
 	Timeout  time.Duration
 	Once     bool
 	Capacity int
+	// Chat enables the chat long-poll goroutine. The flag is on by
+	// default; --chat=false leaves a worker as job-lease-only (useful
+	// for legacy operator-only deployments).
+	Chat bool
 }
 
 func runWorkerLoop(ctx context.Context, opts workerLoopOptions) error {
@@ -134,21 +143,66 @@ func runWorkerLoop(ctx context.Context, opts workerLoopOptions) error {
 		return err
 	}
 
+	// In --once mode we keep the simple synchronous flow: no chat
+	// goroutine, just one heartbeat/lease cycle and exit. The chat
+	// loop is a steady-state background concern and would never get
+	// a meaningful slice of work in a single tick.
+	if opts.Once {
+		if err := workerCycle(ctx, client, cfg, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "worker cycle: %v\n", err)
+			return err
+		}
+		return nil
+	}
+
+	// Steady-state: two goroutines share ctx — the existing job-lease
+	// cycle (heartbeat + Lease + ExecuteJob) and the new chat loop
+	// (long-poll + clone + spawn claude). The signal handler installed
+	// by newWorkerStartCmd cancels ctx; both goroutines exit on
+	// ctx.Done(); runWorkerLoop returns after both have drained.
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runJobsLoop(ctx, client, cfg, opts)
+	}()
+
+	if opts.Chat {
+		creds, credsErr := config.LoadCredentials()
+		if credsErr != nil {
+			fmt.Fprintf(os.Stderr, "worker chat: load credentials: %v (chat disabled)\n", credsErr)
+		} else {
+			loop := workerchat.NewLoop(workerchat.Config{
+				Client: client,
+				Creds:  creds,
+			})
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := loop.Run(ctx, cfg.MachineID, cfg.WorkerID); err != nil {
+					fmt.Fprintf(os.Stderr, "worker chat: %v\n", err)
+				}
+			}()
+		}
+	}
+
+	wg.Wait()
+	return nil
+}
+
+// runJobsLoop is the existing heartbeat+lease loop, factored out so
+// it can run as a goroutine alongside the chat loop.
+func runJobsLoop(ctx context.Context, client *cloud.Client, cfg cloud.Config, opts workerLoopOptions) {
 	for {
 		if err := workerCycle(ctx, client, cfg, opts); err != nil {
 			fmt.Fprintf(os.Stderr, "worker cycle: %v\n", err)
-			if opts.Once {
-				return err
-			}
-		}
-		if opts.Once {
-			return nil
 		}
 		timer := time.NewTimer(opts.Interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil
+			return
 		case <-timer.C:
 		}
 	}

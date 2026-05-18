@@ -74,6 +74,17 @@ type Client struct {
 	token      string
 }
 
+// BaseURL returns the cloud base URL the client was constructed with.
+// Exposed so add-on packages (e.g. internal/worker/chat) can issue
+// custom HTTP requests with their own timeouts without duplicating
+// config plumbing. The returned URL has no trailing slash.
+func (c *Client) BaseURL() string { return c.baseURL }
+
+// Token returns the bearer token the client uses for outbound requests.
+// Returns empty when the client is unauthenticated. See BaseURL for the
+// rationale on exposing this generic accessor.
+func (c *Client) Token() string { return c.token }
+
 // NewClient constructs a cloud API client from Config.
 func NewClient(cfg Config) (*Client, error) {
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")

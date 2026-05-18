@@ -1,19 +1,11 @@
 package chat
 
 import (
+	"bytes"
 	"context"
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,9 +13,10 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/cloud"
 )
 
-// fakeAuth is the test-side AuthExtractor that returns a fixed user
-// based on an X-Test-User header. The cloud server uses the real
-// auth.Handler; this stub keeps the test independent of that wiring.
+// ---- Test-only auth plumbing ----
+
+// fakeAuth is the test-side AuthExtractor that pulls the user out of
+// the request context (set by withUser). Production uses auth.Handler.
 type fakeAuth struct{}
 
 type ctxKey int
@@ -35,8 +28,12 @@ func (fakeAuth) UserFromContext(ctx context.Context) *cloud.User {
 	return u
 }
 
-// withUser is the test wrapper that injects a user into r.Context() so
-// fakeAuth can pull it out. Production uses auth.Handler middleware.
+// RequireUser / RequireMachine are pass-through in tests: the user is
+// already in context via the withUser wrapper below. Production uses
+// auth.Handler's real session/Bearer validation.
+func (fakeAuth) RequireUser(next http.Handler) http.Handler    { return next }
+func (fakeAuth) RequireMachine(next http.Handler) http.Handler { return next }
+
 func withUser(h http.Handler, u *cloud.User) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.WithValue(r.Context(), ctxKeyUser, u)
@@ -44,292 +41,201 @@ func withUser(h http.Handler, u *cloud.User) http.Handler {
 	})
 }
 
-// fakeClaude builds a path to a shell script that mimics `claude -p`
-// just enough for our tests: it echoes its stdin to stdout, prepended
-// with a header line. The script is written into t.TempDir() and the
-// returned path can be passed as Config.ClaudeBin.
-func fakeClaude(t *testing.T) string {
+// ---- Fixture helpers ----
+
+// makeBoundRepo creates a repo + binding in the store so a chat
+// session against `repo` resolves to the supplied machineID.
+func makeBoundRepo(t *testing.T, store cloud.Store, repo, machineID string) {
 	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "claude")
-	body := "#!/bin/sh\n" +
-		"echo '{\"type\":\"system\",\"subtype\":\"init\"}'\n" +
-		"cat\n" +
-		"echo ''\n" +
-		"echo '{\"type\":\"result\",\"result\":\"ok\"}'\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
+	// We need a Machine row for CreateBinding's existence check.
+	// Skip RegisterWorker (it mints tokens we don't need) and inject
+	// directly via the typed Store path.
+	mem, ok := store.(*cloud.MemoryStore)
+	if !ok {
+		t.Fatalf("makeBoundRepo expects *MemoryStore, got %T", store)
 	}
-	return script
+	mem.Machines[machineID] = &cloud.Machine{
+		ID:         machineID,
+		Hostname:   "fixture-host",
+		LastSeenAt: time.Now(),
+	}
+	r, err := store.CreateRepo(cloud.CreateRepoRequest{Name: repo, Platform: "github"})
+	if err != nil {
+		t.Fatalf("create repo: %v", err)
+	}
+	if _, err := store.CreateBinding(cloud.CreateBindingRequest{
+		MachineID: machineID,
+		RepoID:    r.ID,
+	}); err != nil {
+		t.Fatalf("create binding: %v", err)
+	}
 }
 
-func TestSessionLifecycle(t *testing.T) {
-	t.Parallel()
-
+func newTestHandler(t *testing.T) (*Handler, cloud.Store) {
+	t.Helper()
 	store := cloud.NewMemoryStore()
-	workdir := t.TempDir()
-	// Pretend the repo is already cloned at workdir so we don't hit
-	// EnsureClone's git path during this test.
-	cfg := Config{
-		ClonesDir:       filepath.Dir(workdir),
-		ClaudeBin:       fakeClaude(t),
-		AnthropicAPIKey: "test-key",
-		Store:           store,
-		Now:             time.Now,
-	}
-	h, err := NewHandler(cfg, fakeAuth{})
+	h, err := NewHandler(Config{
+		Store:          store,
+		Now:            time.Now,
+		HeartbeatEvery: 100 * time.Millisecond, // keep wall-clock test time low
+	}, fakeAuth{})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	defer h.Shutdown()
-
-	// Create a session directly (skip the create handler so we don't
-	// have to plumb the clone path through the fake auth setup).
-	now := time.Now()
-	s := newSession("user-1", "acme/widgets", workdir, now)
-	procCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	t.Cleanup(cancel)
-	s.procCancel = cancel
-	if err := s.start(procCtx, cfg.ClaudeBin, cfg.AnthropicAPIKey, "hello\n"); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	// Drain events until we see end or error. Anything taking longer
-	// than five seconds means the subprocess is wedged.
-	deadline := time.After(5 * time.Second)
-	gotEnd := false
-	gotOutput := false
-	for !gotEnd {
-		select {
-		case ev, ok := <-s.Events():
-			if !ok {
-				gotEnd = true
-				break
-			}
-			switch ev.Type {
-			case "output":
-				gotOutput = true
-			case "end":
-				gotEnd = true
-			case "error":
-				t.Fatalf("subprocess errored: %s", ev.Text)
-			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for subprocess")
-		}
-	}
-	if !gotOutput {
-		t.Errorf("expected at least one output event")
-	}
-
-	// Close is idempotent.
-	s.Close()
-	s.Close()
+	t.Cleanup(h.Shutdown)
+	return h, store
 }
 
-func TestPathSanitise(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		in   string
-		want bool // want error?
-	}{
-		{"acme/widgets", false},
-		{"good-owner/good_repo.name", false},
-		{"", true},
-		{"only-one-part", true},
-		{"too/many/parts", true},
-		{"../etc/passwd", true},
-		{"good/../bad", true},
-		{"./hidden/repo", true},
-		{"owner/..", true},
-		{"owner/.", true},
-		{"owner/with space", true},
-		{"owner/with\nnewline", true},
-		{"owner/with;semi", true},
-	}
-	for _, tc := range cases {
-		_, _, err := splitRepo(tc.in)
-		got := err != nil
-		if got != tc.want {
-			t.Errorf("splitRepo(%q): got err=%v, want err=%v", tc.in, err, tc.want)
-		}
-	}
-}
-
-func TestGitHubJWT(t *testing.T) {
-	t.Parallel()
-	// Generate a fresh RSA key for the round trip.
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-
-	now := time.Now()
-	jwt, err := signGitHubAppJWT(key, 12345, now)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-
-	parts := strings.Split(jwt, ".")
-	if len(parts) != 3 {
-		t.Fatalf("want 3 JWT parts, got %d", len(parts))
-	}
-
-	// Verify the signature with the public key.
-	signingInput := parts[0] + "." + parts[1]
-	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		t.Fatalf("decode sig: %v", err)
-	}
-	sum := sha256.Sum256([]byte(signingInput))
-	if err := rsa.VerifyPKCS1v15(&key.PublicKey, crypto.SHA256, sum[:], sig); err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-
-	// Decode the payload and sanity-check the claims.
-	pb, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		t.Fatalf("decode payload: %v", err)
-	}
-	var claims struct {
-		Iat int64 `json:"iat"`
-		Exp int64 `json:"exp"`
-		Iss any   `json:"iss"`
-	}
-	if err := json.Unmarshal(pb, &claims); err != nil {
-		t.Fatalf("unmarshal claims: %v", err)
-	}
-	// iss is a JSON number; json unmarshals to float64 by default.
-	switch v := claims.Iss.(type) {
-	case float64:
-		if int64(v) != 12345 {
-			t.Errorf("iss = %v, want 12345", v)
-		}
-	case json.Number:
-		i, _ := v.Int64()
-		if i != 12345 {
-			t.Errorf("iss = %v, want 12345", v)
-		}
-	default:
-		t.Errorf("iss has unexpected type %T", claims.Iss)
-	}
-	if claims.Exp <= claims.Iat {
-		t.Errorf("exp %d not after iat %d", claims.Exp, claims.Iat)
-	}
-	if d := claims.Exp - now.Unix(); d > 600 || d < 60 {
-		// GitHub allows up to 10 minutes; we use a 9-minute window.
-		t.Errorf("exp window unexpected: %d seconds", d)
-	}
-}
-
-// TestParseRSAPrivateKey round-trips a generated key through PEM
-// encode/decode to make sure our parser accepts both PKCS#1 and PKCS#8
-// inputs.
-func TestParseRSAPrivateKey(t *testing.T) {
-	t.Parallel()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-
-	pkcs1 := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(key),
-	})
-	got1, err := parseRSAPrivateKey(pkcs1)
-	if err != nil {
-		t.Fatalf("PKCS1: %v", err)
-	}
-	if got1.N.Cmp(key.N) != 0 {
-		t.Fatal("PKCS1 modulus mismatch")
-	}
-
-	der, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatalf("marshal PKCS8: %v", err)
-	}
-	pkcs8 := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	got8, err := parseRSAPrivateKey(pkcs8)
-	if err != nil {
-		t.Fatalf("PKCS8: %v", err)
-	}
-	if got8.N.Cmp(key.N) != 0 {
-		t.Fatal("PKCS8 modulus mismatch")
-	}
-}
-
-// TestHandlerCreateAndStream end-to-end exercises the HTTP routes:
-//
-//  1. POST /sessions to create a session against a pre-existing clone.
-//  2. GET  /sessions/{id}/stream and read until end.
-//  3. DELETE the session.
-//
-// We bypass EnsureClone by using a sentinel repo name whose path the
-// handler will find pre-populated under cfg.ClonesDir.
-func TestHandlerCreateAndStream(t *testing.T) {
-	t.Parallel()
-	clones := t.TempDir()
-	// Pre-create the "clone" so EnsureClone's "already exists" branch
-	// short-circuits without trying to invoke git.
-	prepath := filepath.Join(clones, "acme", "widgets", ".git")
-	if err := os.MkdirAll(prepath, 0o755); err != nil {
-		t.Fatalf("mkdir prepath: %v", err)
-	}
-
-	cfg := Config{
-		ClonesDir:       clones,
-		ClaudeBin:       fakeClaude(t),
-		AnthropicAPIKey: "test-key",
-		Store:           cloud.NewMemoryStore(),
-		Now:             time.Now,
-	}
-	h, err := NewHandler(cfg, fakeAuth{})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
-	defer h.Shutdown()
-
+func newTestServer(t *testing.T, h *Handler, user *cloud.User) *httptest.Server {
+	t.Helper()
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
-	user := &cloud.User{ID: "user-1", Login: "alice"}
 	srv := httptest.NewServer(withUser(mux, user))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv
+}
 
-	// 1. Create session.
-	createBody := `{"repo":"acme/widgets","message":"hello\n"}`
-	resp, err := http.Post(srv.URL+"/api/cloud/chat/sessions", "application/json", strings.NewReader(createBody))
+func jsonBody(t *testing.T, v any) *bytes.Buffer {
+	t.Helper()
+	b, err := json.Marshal(v)
 	if err != nil {
-		t.Fatalf("create: %v", err)
+		t.Fatalf("marshal: %v", err)
+	}
+	return bytes.NewBuffer(b)
+}
+
+// ---- Tests ----
+
+// TestSessionCreateRequiresBinding: POST /sessions with no binding
+// must return 409 with a "no machine bound" body.
+func TestSessionCreateRequiresBinding(t *testing.T) {
+	t.Parallel()
+	h, _ := newTestHandler(t)
+	srv := newTestServer(t, h, &cloud.User{ID: "u1", Login: "alice"})
+
+	body := jsonBody(t, map[string]string{"repo": "acme/widgets", "message": "hello"})
+	resp, err := http.Post(srv.URL+"/api/cloud/chat/sessions", "application/json", body)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	var errBody map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&errBody)
+	if !strings.Contains(strings.ToLower(errBody["error"]), "no machine bound") &&
+		!strings.Contains(strings.ToLower(errBody["error"]), "not registered") {
+		t.Errorf("want binding error, got %q", errBody["error"])
+	}
+}
+
+// TestEnqueueAndPoll: create a session for a repo with a binding, then
+// poll as the worker for that machine and confirm we receive the
+// assignment.
+func TestEnqueueAndPoll(t *testing.T) {
+	t.Parallel()
+	h, store := newTestHandler(t)
+	makeBoundRepo(t, store, "acme/widgets", "machine-1")
+	srv := newTestServer(t, h, &cloud.User{ID: "u1", Login: "alice"})
+
+	// Create session.
+	body := jsonBody(t, map[string]string{"repo": "acme/widgets", "message": "hello world"})
+	resp, err := http.Post(srv.URL+"/api/cloud/chat/sessions", "application/json", body)
+	if err != nil {
+		t.Fatalf("post create: %v", err)
 	}
 	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create status %d", resp.StatusCode)
+		t.Fatalf("create status = %d", resp.StatusCode)
 	}
 	var created struct {
-		ID   string `json:"id"`
-		Repo string `json:"repo"`
+		ID      string `json:"id"`
+		Repo    string `json:"repo"`
+		WorkDir string `json:"work_dir"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 		t.Fatalf("decode create: %v", err)
 	}
 	resp.Body.Close()
-	if created.ID == "" || created.Repo != "acme/widgets" {
-		t.Fatalf("unexpected create response: %+v", created)
+	if created.ID == "" {
+		t.Fatal("created session has empty id")
+	}
+	if created.WorkDir != "" {
+		t.Errorf("work_dir = %q, want empty (router model)", created.WorkDir)
 	}
 
-	// 2. Stream events. We read until we see "end" or 5 s elapse.
-	streamReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/cloud/chat/sessions/"+created.ID+"/stream", nil)
+	// Poll as the bound machine.
+	pollBody := jsonBody(t, cloud.ChatPollRequest{
+		MachineID:   "machine-1",
+		WorkerID:    "worker-1",
+		WaitSeconds: 2,
+	})
+	pResp, err := http.Post(srv.URL+"/api/worker/chat/poll", "application/json", pollBody)
+	if err != nil {
+		t.Fatalf("post poll: %v", err)
+	}
+	defer pResp.Body.Close()
+	if pResp.StatusCode != http.StatusOK {
+		t.Fatalf("poll status = %d, want 200", pResp.StatusCode)
+	}
+	var pollResp cloud.ChatPollResponse
+	if err := json.NewDecoder(pResp.Body).Decode(&pollResp); err != nil {
+		t.Fatalf("decode poll: %v", err)
+	}
+	if pollResp.Assignment == nil {
+		t.Fatal("poll returned no assignment")
+	}
+	if pollResp.Assignment.SessionID != created.ID {
+		t.Errorf("assignment session_id = %q, want %q",
+			pollResp.Assignment.SessionID, created.ID)
+	}
+	if pollResp.Assignment.Repo != "acme/widgets" {
+		t.Errorf("assignment repo = %q", pollResp.Assignment.Repo)
+	}
+	if pollResp.Assignment.Message != "hello world" {
+		t.Errorf("assignment message = %q", pollResp.Assignment.Message)
+	}
+	if pollResp.Assignment.Platform != "github" {
+		t.Errorf("assignment platform = %q, want github", pollResp.Assignment.Platform)
+	}
+}
+
+// TestWorkerEventsRelay: the worker POSTs a batch of events; the
+// browser SSE stream sees them in order, and an `end` event closes the
+// stream.
+func TestWorkerEventsRelay(t *testing.T) {
+	t.Parallel()
+	h, store := newTestHandler(t)
+	makeBoundRepo(t, store, "acme/widgets", "machine-1")
+	srv := newTestServer(t, h, &cloud.User{ID: "u1", Login: "alice"})
+
+	// 1. Create session.
+	body := jsonBody(t, map[string]string{"repo": "acme/widgets", "message": "go"})
+	cResp, err := http.Post(srv.URL+"/api/cloud/chat/sessions", "application/json", body)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(cResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	cResp.Body.Close()
+
+	// 2. Subscribe to SSE in a goroutine.
+	streamReq, _ := http.NewRequest(http.MethodGet,
+		srv.URL+"/api/cloud/chat/sessions/"+created.ID+"/stream", nil)
 	streamResp, err := http.DefaultClient.Do(streamReq)
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
 	defer streamResp.Body.Close()
 	if streamResp.StatusCode != http.StatusOK {
-		t.Fatalf("stream status %d", streamResp.StatusCode)
+		t.Fatalf("stream status = %d", streamResp.StatusCode)
 	}
 
-	// Read the SSE stream in a goroutine so we can timeout the test
-	// even if the server holds the connection open.
-	bodyCh := make(chan string, 1)
+	streamCh := make(chan string, 1)
 	go func() {
 		buf := make([]byte, 4096)
 		var collected strings.Builder
@@ -338,64 +244,201 @@ func TestHandlerCreateAndStream(t *testing.T) {
 			if n > 0 {
 				collected.Write(buf[:n])
 				if strings.Contains(collected.String(), `"type":"end"`) {
-					bodyCh <- collected.String()
+					streamCh <- collected.String()
 					return
 				}
 			}
 			if err != nil {
-				bodyCh <- collected.String()
+				streamCh <- collected.String()
 				return
 			}
 		}
 	}()
-	var body string
-	select {
-	case body = <-bodyCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("stream read timed out")
+
+	// Give the SSE handler a moment to attach to the session's
+	// eventCh before the worker writes — otherwise the buffered
+	// channel will accept the writes regardless, but we'd rather
+	// exercise the realistic ordering.
+	time.Sleep(50 * time.Millisecond)
+
+	// 3. Worker pushes events.
+	now := time.Now().UTC()
+	evBody := jsonBody(t, cloud.WorkerEventsRequest{
+		Events: []cloud.ChatEvent{
+			{Type: cloud.ChatEventOutput, Text: "first", Time: now},
+			{Type: cloud.ChatEventOutput, Text: "second", Time: now.Add(time.Millisecond)},
+			{Type: cloud.ChatEventEnd, Time: now.Add(2 * time.Millisecond)},
+		},
+	})
+	eResp, err := http.Post(
+		srv.URL+"/api/worker/chat/sessions/"+created.ID+"/events",
+		"application/json", evBody)
+	if err != nil {
+		t.Fatalf("events: %v", err)
 	}
-	if !strings.Contains(body, `"type":"end"`) {
-		t.Fatalf("did not see end event; got:\n%s", body)
+	eResp.Body.Close()
+	if eResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("events status = %d", eResp.StatusCode)
 	}
 
-	// 3. Delete.
-	delReq, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/cloud/chat/sessions/"+created.ID, nil)
+	// 4. Verify the SSE stream got all three frames in order.
+	var collected string
+	select {
+	case collected = <-streamCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stream read timed out")
+	}
+	firstIdx := strings.Index(collected, `"text":"first"`)
+	secondIdx := strings.Index(collected, `"text":"second"`)
+	endIdx := strings.Index(collected, `"type":"end"`)
+	if firstIdx < 0 || secondIdx < 0 || endIdx < 0 {
+		t.Fatalf("missing event(s) in stream:\n%s", collected)
+	}
+	if !(firstIdx < secondIdx && secondIdx < endIdx) {
+		t.Errorf("events out of order: first=%d second=%d end=%d",
+			firstIdx, secondIdx, endIdx)
+	}
+}
+
+// TestPollTimeout: no work queued → 204 after wait_seconds.
+func TestPollTimeout(t *testing.T) {
+	t.Parallel()
+	h, _ := newTestHandler(t)
+	srv := newTestServer(t, h, &cloud.User{ID: "u1", Login: "alice"})
+
+	start := time.Now()
+	body := jsonBody(t, cloud.ChatPollRequest{
+		MachineID:   "machine-without-work",
+		WorkerID:    "worker-1",
+		WaitSeconds: 1,
+	})
+	resp, err := http.Post(srv.URL+"/api/worker/chat/poll", "application/json", body)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", resp.StatusCode)
+	}
+	if elapsed := time.Since(start); elapsed < 800*time.Millisecond {
+		t.Errorf("poll returned in %v, want >= ~1s long-poll wait", elapsed)
+	}
+}
+
+// TestDeleteSendsErrorAndClosesStream: DELETE on an active session
+// must surface an error frame to the SSE consumer and shut the stream.
+func TestDeleteSendsErrorAndClosesStream(t *testing.T) {
+	t.Parallel()
+	h, store := newTestHandler(t)
+	makeBoundRepo(t, store, "acme/widgets", "machine-1")
+	srv := newTestServer(t, h, &cloud.User{ID: "u1", Login: "alice"})
+
+	body := jsonBody(t, map[string]string{"repo": "acme/widgets", "message": "go"})
+	cResp, err := http.Post(srv.URL+"/api/cloud/chat/sessions", "application/json", body)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(cResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	cResp.Body.Close()
+
+	streamReq, _ := http.NewRequest(http.MethodGet,
+		srv.URL+"/api/cloud/chat/sessions/"+created.ID+"/stream", nil)
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer streamResp.Body.Close()
+
+	streamCh := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		var collected strings.Builder
+		for {
+			n, err := streamResp.Body.Read(buf)
+			if n > 0 {
+				collected.Write(buf[:n])
+				if strings.Contains(collected.String(), `"type":"error"`) {
+					streamCh <- collected.String()
+					return
+				}
+			}
+			if err != nil {
+				streamCh <- collected.String()
+				return
+			}
+		}
+	}()
+
+	// Let the SSE handler latch onto the eventCh.
+	time.Sleep(50 * time.Millisecond)
+
+	delReq, _ := http.NewRequest(http.MethodDelete,
+		srv.URL+"/api/cloud/chat/sessions/"+created.ID, nil)
 	delResp, err := http.DefaultClient.Do(delReq)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	delResp.Body.Close()
 	if delResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete status %d", delResp.StatusCode)
+		t.Fatalf("delete status = %d", delResp.StatusCode)
+	}
+
+	var collected string
+	select {
+	case collected = <-streamCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not close after DELETE")
+	}
+	if !strings.Contains(collected, `"type":"error"`) {
+		t.Errorf("missing error frame:\n%s", collected)
 	}
 }
 
-// TestBuildSubprocessEnv asserts that ANTHROPIC_* parent vars are
-// stripped and only ANTHROPIC_API_KEY is appended.
-func TestBuildSubprocessEnv(t *testing.T) {
+// TestListSessionsScopedToUser: List endpoint must not leak other
+// users' sessions.
+func TestListSessionsScopedToUser(t *testing.T) {
 	t.Parallel()
-	parent := []string{
-		"PATH=/usr/bin",
-		"ANTHROPIC_BASE_URL=https://stale.example.com",
-		"ANTHROPIC_MODEL=opus",
-		"HOME=/root",
-	}
-	got := buildSubprocessEnv(parent, "fresh-key")
-	want := []string{"PATH=/usr/bin", "HOME=/root", "ANTHROPIC_API_KEY=fresh-key"}
-	if len(got) != len(want) {
-		t.Fatalf("got %d entries, want %d: %v", len(got), len(want), got)
-	}
-	for i, kv := range want {
-		if got[i] != kv {
-			t.Errorf("got[%d]=%q, want %q", i, got[i], kv)
-		}
-	}
+	h, store := newTestHandler(t)
+	makeBoundRepo(t, store, "acme/widgets", "machine-1")
 
-	// With no key configured, no ANTHROPIC_API_KEY entry should be appended.
-	got2 := buildSubprocessEnv(parent, "")
-	for _, kv := range got2 {
-		if strings.HasPrefix(kv, "ANTHROPIC_") {
-			t.Errorf("unexpected ANTHROPIC_* entry %q", kv)
-		}
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	alice := &cloud.User{ID: "u-alice", Login: "alice"}
+	bob := &cloud.User{ID: "u-bob", Login: "bob"}
+
+	// Two muxed servers, one wrapped per user.
+	aSrv := httptest.NewServer(withUser(mux, alice))
+	defer aSrv.Close()
+	bSrv := httptest.NewServer(withUser(mux, bob))
+	defer bSrv.Close()
+
+	// Alice creates a session.
+	body := jsonBody(t, map[string]string{"repo": "acme/widgets", "message": "hi"})
+	resp, err := http.Post(aSrv.URL+"/api/cloud/chat/sessions", "application/json", body)
+	if err != nil {
+		t.Fatalf("alice create: %v", err)
+	}
+	resp.Body.Close()
+
+	// Bob lists — should see zero sessions.
+	lResp, err := http.Get(bSrv.URL + "/api/cloud/chat/sessions")
+	if err != nil {
+		t.Fatalf("bob list: %v", err)
+	}
+	defer lResp.Body.Close()
+	var listed struct {
+		Sessions []any `json:"sessions"`
+	}
+	if err := json.NewDecoder(lResp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed.Sessions) != 0 {
+		t.Errorf("bob sees %d sessions, want 0", len(listed.Sessions))
 	}
 }

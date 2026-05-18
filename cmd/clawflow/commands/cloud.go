@@ -272,26 +272,15 @@ Store backends:
 				})
 			}
 
-			// Cloud-side chat: opt-in. Requires Anthropic API key (so the
-			// cloud server can spawn `claude -p`); the App private-key path
-			// is optional but private-repo clones won't work without it.
-			// Reject placeholder values so an unfilled cloud.env template
-			// doesn't accidentally enable chat in a half-configured state.
+			// Cloud-side chat: PR 3 router model. The cloud no longer runs
+			// `claude -p` — it routes messages between the browser and the
+			// user's bound worker, which holds the ANTHROPIC_API_KEY and the
+			// clone locally. Always-on when auth is configured; the router
+			// keeps no per-session secret state of its own.
 			var extras []cloud.RouteMounter
-			anthropicKey := strings.TrimSpace(os.Getenv("CLAWFLOW_ANTHROPIC_API_KEY"))
-			if strings.HasPrefix(anthropicKey, "__REPLACE") {
-				anthropicKey = ""
-			}
 			chatMode := "chat=OFF"
-			if anthropicKey != "" && authH != nil {
-				chatCfg := chat.Config{
-					AnthropicAPIKey:         anthropicKey,
-					GitHubAppID:             appID,
-					GitHubAppPrivateKeyPath: os.Getenv("CLAWFLOW_GITHUB_APP_PRIVATE_KEY_PATH"),
-					ClonesDir:               orEnv(os.Getenv("CLAWFLOW_CHAT_CLONES_DIR"), ""),
-					Store:                   store,
-				}
-				chatH, err := chat.NewHandler(chatCfg, authH)
+			if authH != nil {
+				chatH, err := chat.NewHandler(chat.Config{Store: store}, authH)
 				if err != nil {
 					return fmt.Errorf("chat handler: %w", err)
 				}

@@ -87,6 +87,90 @@ type UpsertInstallationRequest struct {
 	AccountType          string
 }
 
+// ---- Worker-side chat protocol ----
+//
+// PR 3 architecture: the cloud server NO LONGER runs `claude -p`. Each user's
+// designated worker(s) do. Cloud is a router: browser ↔ cloud ↔ worker.
+//
+// Flow (one user message):
+//
+//   1. Browser POST /api/cloud/chat/sessions  {repo, message}
+//   2. Cloud:
+//        - Resolves repo → bound machine_id via the bindings table.
+//        - Creates a session, queues it in an in-memory ready-list keyed by
+//          machine_id. No subprocess. Returns {session_id, status:"queued"}.
+//   3. Browser GET /api/cloud/chat/sessions/{id}/stream  (SSE)
+//        - Cloud holds the stream open, relays events as they arrive.
+//   4. Worker has an outstanding POST /api/worker/chat/poll long-poll.
+//      Cloud responds with a ChatAssignment when one is queued for this
+//      machine. (Up to 30s wait; empty 204 on timeout, worker re-polls.)
+//   5. Worker:
+//        - Looks up local config for the repo (clone path, providers).
+//        - git clone or git fetch using its local gh_token / gitlab_token.
+//        - Runs `claude -p <message>` in the clone dir with the local
+//          ANTHROPIC_API_KEY (from credentials.yaml). Streams output line
+//          by line.
+//        - POSTs each chunk to /api/worker/chat/sessions/{id}/events as it
+//          arrives. Sends a final {type:"end"} when claude exits.
+//   6. Cloud writes those events to the session's event channel. Browser
+//      SSE picks them up.
+//
+// Bindings are mandatory: if no binding exists for the repo, the cloud
+// returns 409 to the browser ("bind a machine to this repo first").
+
+// ChatAssignment is the payload cloud sends to the worker when one of its
+// bound repos has a pending chat session. The worker uses Repo and
+// LocalPath to clone / cd; Platform to pick the right credential.
+type ChatAssignment struct {
+	SessionID string `json:"session_id"`
+	UserID    string `json:"user_id"`
+	Repo      string `json:"repo"`     // "owner/name"
+	Platform  string `json:"platform"` // "github" | "gitlab"
+	BaseURL   string `json:"base_url,omitempty"`
+	Message   string `json:"message"` // user's prompt
+}
+
+// ChatPollRequest is the body of POST /api/worker/chat/poll. The worker
+// identifies itself; cloud blocks up to WaitSeconds (clamped to 30) before
+// returning either an assignment or 204.
+type ChatPollRequest struct {
+	MachineID   string `json:"machine_id"`
+	WorkerID    string `json:"worker_id"`
+	WaitSeconds int    `json:"wait_seconds,omitempty"` // 0 → server default (30)
+}
+
+// ChatPollResponse carries zero or one assignment. When Assignment is nil
+// the worker should immediately re-poll (no work / poll timed out).
+type ChatPollResponse struct {
+	Assignment *ChatAssignment `json:"assignment,omitempty"`
+}
+
+// ChatEventKind enumerates the shape of a chat event. Workers and cloud
+// agree on this set; the browser ChatDrawer decodes the same strings.
+type ChatEventKind string
+
+const (
+	ChatEventOutput ChatEventKind = "output" // stdout chunk
+	ChatEventStderr ChatEventKind = "stderr" // stderr chunk
+	ChatEventEnd    ChatEventKind = "end"    // subprocess exited cleanly
+	ChatEventError  ChatEventKind = "error"  // worker-side fatal error
+)
+
+// ChatEvent is a single stream event the worker pushes to cloud and the
+// cloud relays to the browser's SSE stream.
+type ChatEvent struct {
+	Type ChatEventKind `json:"type"`
+	Text string        `json:"text,omitempty"`
+	Time time.Time     `json:"time"`
+}
+
+// WorkerEventsRequest is the body of POST /api/worker/chat/sessions/{id}/events.
+// A worker batches up to N events per request; cloud writes them to the
+// session's event channel in order.
+type WorkerEventsRequest struct {
+	Events []ChatEvent `json:"events"`
+}
+
 // ---- Cloud config domain types ----
 
 // Project is a top-level configuration unit that groups repos and automation

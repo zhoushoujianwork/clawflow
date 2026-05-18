@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { FolderGit2, Plus, RefreshCw, Trash2, Loader2, Search, LogIn } from 'lucide-react'
+import { FolderGit2, Plus, RefreshCw, Trash2, Loader2, Search, LogIn, MessageSquare } from 'lucide-react'
+import { useChatDrawer } from '../lib/chatContext'
 import {
   deleteRepo,
   fetchBindings,
@@ -30,6 +31,7 @@ type ProjectFilter = string
 
 function ReposPage() {
   const navigate = useNavigate()
+  const chatDrawer = useChatDrawer()
   const [repos, setRepos] = useState<Repo[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [bindings, setBindings] = useState<Binding[]>([])
@@ -384,19 +386,29 @@ function ReposPage() {
                       )}
                     </td>
                     <td className="px-4 py-2.5">
-                      <button
-                        onClick={() => handleDelete(r)}
-                        disabled={deletingId === r.id}
-                        title={`Delete ${r.name}`}
-                        className="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-50"
-                        style={{ color: 'hsl(var(--text-low))' }}
-                      >
-                        {deletingId === r.id ? (
-                          <Loader2 size={14} className="animate-spin" />
-                        ) : (
-                          <Trash2 size={14} />
-                        )}
-                      </button>
+                      <div className="flex items-center gap-0.5">
+                        <button
+                          onClick={() => { void chatDrawer.open({ repo: r.name }) }}
+                          title={`Chat with claude about ${r.name}`}
+                          className="inline-flex items-center justify-center w-7 h-7 rounded transition-colors"
+                          style={{ color: 'hsl(var(--text-low))' }}
+                        >
+                          <MessageSquare size={14} />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(r)}
+                          disabled={deletingId === r.id}
+                          title={`Delete ${r.name}`}
+                          className="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-50"
+                          style={{ color: 'hsl(var(--text-low))' }}
+                        >
+                          {deletingId === r.id ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Trash2 size={14} />
+                          )}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
