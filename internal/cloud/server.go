@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
 )
 
 // NewServer returns an HTTP handler for the worker protocol. The handler is a
@@ -14,12 +16,18 @@ import (
 // Worker routes (/api/worker/*, /api/cloud/dev/jobs) are unauthenticated for
 // backward compatibility. Cloud config routes (/api/cloud/config, /api/cloud/repos,
 // etc.) require a non-empty Authorization: Bearer <token> header.
+// operators is an optional operator registry used by the webhook handler to
+// determine which operators a given GitHub event should trigger. Pass nil to
+// create a server with no operators registered.
 // TODO(rbac): validate tokens against workspace credentials in a follow-up issue.
-func NewServer(store Store) http.Handler {
+func NewServer(store Store, operators *operator.Registry) http.Handler {
 	if store == nil {
 		store = NewMemoryStore()
 	}
-	s := &server{store: store}
+	if operators == nil {
+		operators = operator.NewRegistry()
+	}
+	s := &server{store: store, operators: operators}
 	mux := http.NewServeMux()
 
 	// Worker protocol — no auth (backward compatible).
@@ -40,11 +48,13 @@ func NewServer(store Store) http.Handler {
 	mux.HandleFunc("/api/cloud/jobs", s.withAuth(s.handleCloudJobs))
 	mux.HandleFunc("/api/cloud/runs", s.withAuth(s.handleCloudRuns))
 
+	mux.HandleFunc("/api/webhooks/github", s.handleWebhookGitHub)
 	return mux
 }
 
 type server struct {
-	store Store
+	store     Store
+	operators *operator.Registry
 }
 
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {

@@ -82,6 +82,10 @@ type Store interface {
 	GetJob(id string) *JobRecord
 	GetRun(id string) *RunRecord
 
+	// VCS connections (used by the webhook handler).
+	RegisterConnection(conn VCSConnection) (*VCSConnection, error)
+	GetConnectionByRepo(repo string) *VCSConnection
+
 	// Cloud config.
 	Summary() CloudConfigSummary
 	CreateProject(req CreateProjectRequest) (*Project, error)
@@ -103,10 +107,11 @@ var _ Store = (*MemoryStore)(nil)
 type MemoryStore struct {
 	mu sync.Mutex
 
-	Machines map[string]*Machine
-	Workers  map[string]*Worker
-	Jobs     map[string]*JobRecord
-	Runs     map[string]*RunRecord
+	Machines    map[string]*Machine
+	Workers     map[string]*Worker
+	Jobs        map[string]*JobRecord
+	Runs        map[string]*RunRecord
+	Connections map[string]*VCSConnection // keyed by VCSConnection.ID
 
 	// Cloud config resources.
 	Projects map[string]*Project
@@ -114,19 +119,67 @@ type MemoryStore struct {
 	Bindings map[string]*Binding
 
 	dedupe map[string]string
+	// repoConn maps "owner/repo" → connection ID for O(1) webhook lookup.
+	repoConn map[string]string
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		Machines: make(map[string]*Machine),
-		Workers:  make(map[string]*Worker),
-		Jobs:     make(map[string]*JobRecord),
-		Runs:     make(map[string]*RunRecord),
-		Projects: make(map[string]*Project),
-		Repos:    make(map[string]*Repo),
-		Bindings: make(map[string]*Binding),
-		dedupe:   make(map[string]string),
+		Machines:    make(map[string]*Machine),
+		Workers:     make(map[string]*Worker),
+		Jobs:        make(map[string]*JobRecord),
+		Runs:        make(map[string]*RunRecord),
+		Connections: make(map[string]*VCSConnection),
+		Projects:    make(map[string]*Project),
+		Repos:       make(map[string]*Repo),
+		Bindings:    make(map[string]*Binding),
+		dedupe:      make(map[string]string),
+		repoConn:    make(map[string]string),
 	}
+}
+
+// RegisterConnection upserts a VCSConnection and returns its ID.
+func (s *MemoryStore) RegisterConnection(conn VCSConnection) (*VCSConnection, error) {
+	if conn.Repo == "" {
+		return nil, fmt.Errorf("connection requires a non-empty repo")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Upsert: if a connection for this repo already exists, update it.
+	if existingID, ok := s.repoConn[conn.Repo]; ok {
+		conn.ID = existingID
+	}
+	if conn.ID == "" {
+		conn.ID = newID("conn")
+	}
+	if conn.Platform == "" {
+		conn.Platform = "github"
+	}
+	cp := conn
+	s.Connections[conn.ID] = &cp
+	s.repoConn[conn.Repo] = conn.ID
+	return &cp, nil
+}
+
+// GetConnectionByRepo looks up the VCSConnection for a given "owner/repo".
+// Returns nil when no connection is registered for that repo.
+func (s *MemoryStore) GetConnectionByRepo(repo string) *VCSConnection {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.repoConn[repo]
+	if !ok {
+		return nil
+	}
+	c := s.Connections[id]
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	if c.GitHubApp != nil {
+		app := *c.GitHubApp
+		cp.GitHubApp = &app
+	}
+	return &cp
 }
 
 func (s *MemoryStore) RegisterWorker(req RegisterWorkerRequest) (RegisterWorkerResponse, error) {
