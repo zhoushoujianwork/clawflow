@@ -64,7 +64,12 @@ func (c Config) withDefaults() Config {
 		c.SessionTTL = 30 * 24 * time.Hour
 	}
 	if c.HTTPClient == nil {
-		c.HTTPClient = &http.Client{Timeout: 15 * time.Second}
+		// 30s covers a worst-case proxied OAuth round trip: token exchange
+		// + /user + /user/installations end-to-end. Direct GitHub access is
+		// well under this; the budget exists for self-hosters routing
+		// through a regional HTTP proxy (e.g. mihomo / clash in mainland
+		// China).
+		c.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	if c.Now == nil {
 		c.Now = time.Now

@@ -89,6 +89,16 @@ export interface CloudStatus {
   url: string
 }
 
+/** Shape of /api/v1/auth/me. Returned when the user has a valid session
+ *  cookie (browser) or a valid Bearer token (CLI). */
+export interface AuthMe {
+  id: string
+  github_id: number
+  login: string
+  name?: string
+  avatar_url?: string
+}
+
 export interface CloudConfigSummary {
   projects: Project[]
   repos: Repo[]
@@ -125,6 +135,37 @@ async function cloudFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function fetchCloudStatus(): Promise<CloudStatus> {
   return cloudFetch<CloudStatus>('/api/cloud/status')
+}
+
+/** AuthMeResult distinguishes the three states the header bar cares about:
+ *  - 'authed':       we're on the cloud and have a valid session.
+ *  - 'anon':         we're on the cloud but signed out (401).
+ *  - 'no-cloud':     /api/v1/auth/me doesn't exist on this origin (404 or
+ *                    network error) — i.e. this bundle was loaded from the
+ *                    legacy local `clawflow web` server. */
+export type AuthMeResult =
+  | { kind: 'authed'; user: AuthMe }
+  | { kind: 'anon' }
+  | { kind: 'no-cloud' }
+
+export async function fetchAuthMe(): Promise<AuthMeResult> {
+  let res: Response
+  try {
+    res = await fetch('/api/v1/auth/me', { credentials: 'include' })
+  } catch {
+    return { kind: 'no-cloud' }
+  }
+  if (res.status === 401) return { kind: 'anon' }
+  if (res.status === 404) return { kind: 'no-cloud' }
+  if (!res.ok) throw new Error(`auth/me: ${res.status}`)
+  const user = (await res.json()) as AuthMe
+  return { kind: 'authed', user }
+}
+
+/** signOut deletes the session cookie. The server clears the cookie
+ *  server-side and DB-side; the caller should reload after. */
+export async function signOut(): Promise<void> {
+  await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' })
 }
 
 export function fetchCloudConfig(): Promise<CloudConfigSummary> {
