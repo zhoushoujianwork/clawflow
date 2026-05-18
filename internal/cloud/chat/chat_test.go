@@ -28,6 +28,12 @@ func (fakeAuth) UserFromContext(ctx context.Context) *cloud.User {
 	return u
 }
 
+// RequireUser / RequireMachine are pass-through in tests: the user is
+// already in context via the withUser wrapper below. Production uses
+// auth.Handler's real session/Bearer validation.
+func (fakeAuth) RequireUser(next http.Handler) http.Handler    { return next }
+func (fakeAuth) RequireMachine(next http.Handler) http.Handler { return next }
+
 func withUser(h http.Handler, u *cloud.User) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.WithValue(r.Context(), ctxKeyUser, u)

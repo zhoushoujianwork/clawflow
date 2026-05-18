@@ -13,12 +13,16 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/cloud"
 )
 
-// AuthExtractor is the minimal slice of the cloud auth handler the
-// chat router needs: look up the authenticated user / machine from
-// the request context. The real implementation is auth.Handler; tests
+// AuthExtractor is the slice of the cloud auth handler the chat router
+// needs. The chat package mounts its own routes (via RegisterRoutes)
+// instead of relying on the cloud server's outer mux to apply auth, so
+// it has to gate browser routes with RequireUser and worker routes with
+// RequireMachine itself. The real implementation is auth.Handler; tests
 // inject a stub.
 type AuthExtractor interface {
 	UserFromContext(ctx context.Context) *cloud.User
+	RequireUser(http.Handler) http.Handler
+	RequireMachine(http.Handler) http.Handler
 }
 
 // Handler owns the in-memory map of active chat sessions, the
@@ -71,25 +75,37 @@ func (h *Handler) Shutdown() {
 	}
 }
 
-// RegisterRoutes mounts the chat router's routes on mux. Browser
-// routes are gated by RequireUser at the cloud server level; worker
-// routes by RequireMachine. The chat handler itself does NOT call the
-// middleware — the cloud server wraps the mux in `withAuth` /
-// `RequireMachine` shells. Tests inject auth via a fakeAuth stub.
+// RegisterRoutes mounts the chat router's routes on mux. Browser routes
+// are wrapped in RequireUser (session cookie or personal Bearer); worker
+// routes in RequireMachine (kind=machine Bearer). The wrapping happens
+// here, not at the outer mux — cloud server's NewServerWithExtras only
+// calls RegisterRoutes(mux), it doesn't introspect or rewrap chat paths.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	// Browser side. Authentication happens at the outer mux (gated by
-	// RequireUser when cloud auth is enabled); we just look the user
-	// up via AuthExtractor.
-	mux.HandleFunc("POST /api/cloud/chat/sessions", h.handleCreate)
-	mux.HandleFunc("GET /api/cloud/chat/sessions", h.handleList)
-	mux.HandleFunc("GET /api/cloud/chat/sessions/{id}/stream", h.handleStream)
-	mux.HandleFunc("POST /api/cloud/chat/sessions/{id}/message", h.handleMessage)
-	mux.HandleFunc("DELETE /api/cloud/chat/sessions/{id}", h.handleDelete)
+	mountUser := func(pattern string, fn http.HandlerFunc) {
+		if h.auth == nil {
+			mux.HandleFunc(pattern, fn)
+			return
+		}
+		mux.Handle(pattern, h.auth.RequireUser(fn))
+	}
+	mountMachine := func(pattern string, fn http.HandlerFunc) {
+		if h.auth == nil {
+			mux.HandleFunc(pattern, fn)
+			return
+		}
+		mux.Handle(pattern, h.auth.RequireMachine(fn))
+	}
 
-	// Worker side. Same shape — middleware in the outer mux gates
-	// these with RequireMachine in production.
-	mux.HandleFunc("POST /api/worker/chat/poll", h.handlePoll)
-	mux.HandleFunc("POST /api/worker/chat/sessions/{id}/events", h.handleWorkerEvents)
+	// Browser side — user-auth (session cookie or personal Bearer).
+	mountUser("POST /api/cloud/chat/sessions", h.handleCreate)
+	mountUser("GET /api/cloud/chat/sessions", h.handleList)
+	mountUser("GET /api/cloud/chat/sessions/{id}/stream", h.handleStream)
+	mountUser("POST /api/cloud/chat/sessions/{id}/message", h.handleMessage)
+	mountUser("DELETE /api/cloud/chat/sessions/{id}", h.handleDelete)
+
+	// Worker side — machine-auth (kind=machine Bearer).
+	mountMachine("POST /api/worker/chat/poll", h.handlePoll)
+	mountMachine("POST /api/worker/chat/sessions/{id}/events", h.handleWorkerEvents)
 }
 
 // ChatPath is the URL prefix the handler serves under. Kept for
