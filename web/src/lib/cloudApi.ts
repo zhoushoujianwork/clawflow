@@ -89,6 +89,16 @@ export interface CloudStatus {
   url: string
 }
 
+/** Shape of /api/v1/auth/me. Returned when the user has a valid session
+ *  cookie (browser) or a valid Bearer token (CLI). */
+export interface AuthMe {
+  id: string
+  github_id: number
+  login: string
+  name?: string
+  avatar_url?: string
+}
+
 export interface CloudConfigSummary {
   projects: Project[]
   repos: Repo[]
@@ -127,6 +137,37 @@ export function fetchCloudStatus(): Promise<CloudStatus> {
   return cloudFetch<CloudStatus>('/api/cloud/status')
 }
 
+/** AuthMeResult distinguishes the three states the header bar cares about:
+ *  - 'authed':       we're on the cloud and have a valid session.
+ *  - 'anon':         we're on the cloud but signed out (401).
+ *  - 'no-cloud':     /api/v1/auth/me doesn't exist on this origin (404 or
+ *                    network error) — i.e. this bundle was loaded from the
+ *                    legacy local `clawflow web` server. */
+export type AuthMeResult =
+  | { kind: 'authed'; user: AuthMe }
+  | { kind: 'anon' }
+  | { kind: 'no-cloud' }
+
+export async function fetchAuthMe(): Promise<AuthMeResult> {
+  let res: Response
+  try {
+    res = await fetch('/api/v1/auth/me', { credentials: 'include' })
+  } catch {
+    return { kind: 'no-cloud' }
+  }
+  if (res.status === 401) return { kind: 'anon' }
+  if (res.status === 404) return { kind: 'no-cloud' }
+  if (!res.ok) throw new Error(`auth/me: ${res.status}`)
+  const user = (await res.json()) as AuthMe
+  return { kind: 'authed', user }
+}
+
+/** signOut deletes the session cookie. The server clears the cookie
+ *  server-side and DB-side; the caller should reload after. */
+export async function signOut(): Promise<void> {
+  await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' })
+}
+
 export function fetchCloudConfig(): Promise<CloudConfigSummary> {
   return cloudFetch<CloudConfigSummary>('/api/cloud/config')
 }
@@ -139,12 +180,92 @@ export function fetchBindings(): Promise<{ bindings: Binding[] }> {
   return cloudFetch<{ bindings: Binding[] }>('/api/cloud/bindings')
 }
 
+export function createBinding(body: {
+  machine_id: string
+  repo_id?: string
+  project_id?: string
+}): Promise<Binding> {
+  return cloudFetch<Binding>('/api/cloud/bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
 export function updateBinding(id: string, body: UpdateBindingRequest): Promise<Binding> {
   return cloudFetch<Binding>(`/api/cloud/bindings/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+}
+
+export async function deleteBinding(id: string): Promise<void> {
+  const res = await fetch(`/api/cloud/bindings/${id}`, { method: 'DELETE', credentials: 'include' })
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`delete binding: ${res.status}`)
+  }
+}
+
+// ---- Repos ----
+
+export function fetchRepos(): Promise<{ repos: Repo[] }> {
+  return cloudFetch<{ repos: Repo[] }>('/api/cloud/repos')
+}
+
+export function createRepo(body: {
+  name: string
+  platform?: string
+  project_id?: string
+  base_branch?: string
+}): Promise<Repo> {
+  return cloudFetch<Repo>('/api/cloud/repos', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function updateRepo(id: string, body: {
+  project_id?: string
+  base_branch?: string
+}): Promise<Repo> {
+  return cloudFetch<Repo>(`/api/cloud/repos/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteRepo(id: string): Promise<void> {
+  const res = await fetch(`/api/cloud/repos/${id}`, { method: 'DELETE', credentials: 'include' })
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`delete repo: ${res.status}`)
+  }
+}
+
+// ---- Projects ----
+
+export function fetchProjects(): Promise<{ projects: Project[] }> {
+  return cloudFetch<{ projects: Project[] }>('/api/cloud/projects')
+}
+
+export function createProject(body: {
+  name: string
+  description?: string
+}): Promise<Project> {
+  return cloudFetch<Project>('/api/cloud/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  const res = await fetch(`/api/cloud/projects/${id}`, { method: 'DELETE', credentials: 'include' })
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`delete project: ${res.status}`)
+  }
 }
 
 export function fetchJobs(): Promise<{ jobs: JobRecord[] }> {

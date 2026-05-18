@@ -1,9 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
-import { Check, Loader2, AlertCircle, X, Eye, EyeOff, Folder, ChevronRight, Home } from 'lucide-react'
+import { Check, Loader2, AlertCircle, X, Eye, EyeOff, Folder, ChevronRight, Home, Terminal as TerminalIcon } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useConfigChanged } from '../lib/configEvents'
 import { ProvidersSection } from '../components/ProvidersSection'
+import { fetchAuthMe, type AuthMeResult } from '../lib/cloudApi'
 
 interface SettingsView {
   tokens: { gh_set: boolean; gh_hint?: string; gitlab_set: boolean; gitlab_hint?: string }
@@ -47,6 +48,17 @@ async function revealSecret(which: 'claude_api_key' | 'gh_token' | 'gitlab_token
 }
 
 function SettingsPage() {
+  // Detect host mode so we can short-circuit the legacy local-only
+  // /api/settings fetch when the bundle is served by a cloud server.
+  // The settings rendered below all live on the worker's filesystem
+  // (~/.clawflow/config/credentials.yaml etc.) — cloud has nowhere to
+  // write them, so we show a small "use the CLI on the worker" panel
+  // instead of crashing on the HTML-not-JSON parse error.
+  const [auth, setAuth] = useState<AuthMeResult | undefined>(undefined)
+  useEffect(() => {
+    fetchAuthMe().then(setAuth).catch(() => setAuth({ kind: 'no-cloud' }))
+  }, [])
+
   const [data, setData] = useState<SettingsView | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -59,8 +71,15 @@ function SettingsPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    if (auth === undefined) return
+    if (auth.kind === 'no-cloud') refresh()
+  }, [auth, refresh])
   useConfigChanged(refresh)
+
+  if (auth?.kind === 'authed' || auth?.kind === 'anon') {
+    return <CloudSettingsPlaceholder />
+  }
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
@@ -87,6 +106,51 @@ function SettingsPage() {
           <GlobalSection view={data.global} onSaved={refresh} />
         </>
       )}
+    </div>
+  )
+}
+
+// CloudSettingsPlaceholder is what /settings renders when the React bundle
+// is served from a cloud server. Everything on the legacy local Settings
+// page edits files in ~/.clawflow/config/ on a worker machine; cloud has
+// no equivalent to write. Point the user at the CLI instead of crashing
+// the page on a missing /api/settings endpoint.
+function CloudSettingsPlaceholder() {
+  return (
+    <div className="max-w-2xl mx-auto px-4 py-12">
+      <h1 className="text-2xl font-bold text-foreground mb-1">Settings</h1>
+      <p className="text-sm text-muted-foreground mb-6">
+        Settings live on each worker machine, not on the cloud server.
+      </p>
+      <div className="border rounded-lg p-5" style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}>
+        <div className="flex items-start gap-3 mb-4">
+          <TerminalIcon className="w-5 h-5 mt-0.5" style={{ color: 'hsl(var(--text-low))' }} />
+          <div>
+            <p className="text-sm font-medium" style={{ color: 'hsl(var(--text-high))' }}>
+              Edit on your worker machine
+            </p>
+            <p className="text-xs mt-1" style={{ color: 'hsl(var(--text-low))' }}>
+              Provider keys, VCS tokens, clone paths and similar local config never leave
+              the worker. Run these commands on the machine that holds your
+              <code className="px-1 mx-1 py-0.5 rounded" style={{ background: 'hsl(var(--bg-primary))' }}>
+                ~/.clawflow/config/credentials.yaml
+              </code>:
+            </p>
+          </div>
+        </div>
+        <div className="space-y-1.5 font-mono text-xs" style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
+          <p>clawflow config show                           # display masked config</p>
+          <p>clawflow config set-token &lt;gh-token&gt;     # GitHub token</p>
+          <p>clawflow config set-gitlab-token &lt;token&gt; # GitLab token</p>
+          <p>clawflow config provider add &lt;name&gt;        # Claude API providers</p>
+        </div>
+      </div>
+      <p className="text-xs mt-6" style={{ color: 'hsl(var(--text-low))' }}>
+        Cloud-side things — your account, your registered repos, project bindings — live in
+        the existing <a href="/repos" className="underline">Repos</a>,{' '}
+        <a href="/projects" className="underline">Projects</a>, and{' '}
+        <a href="/cloud/machines" className="underline">Cloud</a> tabs.
+      </p>
     </div>
   )
 }

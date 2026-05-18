@@ -1,8 +1,9 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, Navigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
 import { Receipt } from 'lucide-react'
 import { type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
+import { fetchAuthMe, type AuthMeResult } from '../lib/cloudApi'
 
 interface UsageAggregate {
   runs: number
@@ -102,6 +103,21 @@ function fmtPeriodLabel(start: string, end: string): string {
 }
 
 function UsagePage() {
+  // Usage rolls up data from /data/usage.json — only `clawflow web` writes
+  // that file. On a cloud-served bundle the file doesn't exist; redirect
+  // to /cloud/jobs which is the cloud-native equivalent (job/run history).
+  const [auth, setAuth] = useState<AuthMeResult | undefined>(undefined)
+  useEffect(() => {
+    fetchAuthMe().then(setAuth).catch(() => setAuth({ kind: 'no-cloud' }))
+  }, [])
+  if (auth?.kind === 'authed' || auth?.kind === 'anon') {
+    return <Navigate to="/cloud/jobs" replace />
+  }
+
+  return <LocalUsagePage />
+}
+
+function LocalUsagePage() {
   const [summary, setSummary] = useState<UsageSummary | null>(null)
   const [repos, setRepos] = useState<Repo[]>([])
   const [loading, setLoading] = useState(true)

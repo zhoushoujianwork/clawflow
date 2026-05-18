@@ -91,8 +91,11 @@ type Store interface {
 	CreateProject(req CreateProjectRequest) (*Project, error)
 	CreateRepo(req CreateRepoRequest) (*Repo, error)
 	UpdateRepo(id string, req UpdateRepoRequest) (*Repo, error)
+	DeleteProject(id string) error
+	DeleteRepo(id string) error
 	CreateBinding(req CreateBindingRequest) (*Binding, error)
 	UpdateBinding(id string, req UpdateBindingRequest) (*Binding, error)
+	DeleteBinding(id string) error
 	ListMachines() []*Machine
 	ListJobs() []*JobRecord
 	ListRuns() []*RunRecord
@@ -601,6 +604,42 @@ func (s *MemoryStore) UpdateBinding(id string, req UpdateBindingRequest) (*Bindi
 	b.UpdatedAt = now
 	cp := *b
 	return &cp, nil
+}
+
+// DeleteProject removes a project. Existing repos that reference the
+// project keep their project_id pointing at the deleted ID — orphaning is
+// considered acceptable for the first iteration.
+func (s *MemoryStore) DeleteProject(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.Projects[id]; !ok {
+		return fmt.Errorf("project %q not found", id)
+	}
+	delete(s.Projects, id)
+	return nil
+}
+
+// DeleteRepo removes a repo. Bindings pointing at the deleted repo are
+// likewise orphaned (kept around so the UI can show "stale" entries).
+func (s *MemoryStore) DeleteRepo(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.Repos[id]; !ok {
+		return fmt.Errorf("repo %q not found", id)
+	}
+	delete(s.Repos, id)
+	return nil
+}
+
+// DeleteBinding removes a single binding row.
+func (s *MemoryStore) DeleteBinding(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.Bindings[id]; !ok {
+		return fmt.Errorf("binding %q not found", id)
+	}
+	delete(s.Bindings, id)
+	return nil
 }
 
 // ListMachines returns copies of all registered machines.

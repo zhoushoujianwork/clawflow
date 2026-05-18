@@ -64,7 +64,12 @@ func (c Config) withDefaults() Config {
 		c.SessionTTL = 30 * 24 * time.Hour
 	}
 	if c.HTTPClient == nil {
-		c.HTTPClient = &http.Client{Timeout: 15 * time.Second}
+		// 30s covers a worst-case proxied OAuth round trip: token exchange
+		// + /user + /user/installations end-to-end. Direct GitHub access is
+		// well under this; the budget exists for self-hosters routing
+		// through a regional HTTP proxy (e.g. mihomo / clash in mainland
+		// China).
+		c.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -125,10 +130,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // one mux rather than nesting two. Patterns match those registered on the
 // handler's internal mux.
 //
-// Also registers a minimal landing page at GET /{$} (exact match for "/"
-// only, leaving 404s for unknown paths intact). The page shows a sign-in
-// link when anonymous, or a "you're signed in" panel otherwise. PR 2 will
-// replace this with the actual React app.
+// PR 1 also registered a minimal landing page here at GET /{$}; PR 2 removes
+// it in favour of the React app served by the cloud server itself.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/github/app/login", h.handleLogin)
 	mux.HandleFunc("GET /api/v1/github/app/callback", h.handleCallback)
@@ -136,7 +139,6 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/device/poll", h.handleDevicePoll)
 	mux.HandleFunc("POST /api/v1/auth/logout", h.handleLogout)
 	mux.HandleFunc("GET /api/v1/auth/me", h.handleMe)
-	mux.HandleFunc("GET /{$}", h.handleIndex)
 }
 
 // ---- Request context plumbing ----

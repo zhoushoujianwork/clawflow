@@ -1,5 +1,7 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { fetchAuthMe, type AuthMeResult } from '../lib/cloudApi'
+import { JobsBoard } from '../components/JobsBoard'
 import {
   Search,
   ExternalLink,
@@ -148,6 +150,26 @@ export const Route = createFileRoute('/_app/dashboard')({
 })
 
 function Dashboard() {
+  // Two modes:
+  //   - cloud (auth-me reachable): the Dashboard IS the cloud Jobs &
+  //     Runs board. JobsBoard is the same component the /cloud/jobs route
+  //     redirects here from.
+  //   - local (auth-me 404 / network err): keep the legacy LocalDashboard
+  //     that polls /data/*.json + /api/run/status for `clawflow web` users.
+  const [auth, setAuth] = useState<AuthMeResult | undefined>(undefined)
+  useEffect(() => {
+    fetchAuthMe().then(setAuth).catch(() => setAuth({ kind: 'no-cloud' }))
+  }, [])
+  if (auth === undefined) {
+    return null // brief flash of nothing while we resolve mode
+  }
+  if (auth.kind === 'authed' || auth.kind === 'anon') {
+    return <JobsBoard />
+  }
+  return <LocalDashboard />
+}
+
+function LocalDashboard() {
   const [runs, setRuns] = useState<Run[]>([])
   const [meta, setMeta] = useState<Meta | null>(null)
   const [repos, setRepos] = useState<Repo[]>([])

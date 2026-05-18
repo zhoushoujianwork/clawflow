@@ -8,13 +8,18 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/cloud"
 	"github.com/zhoushoujianwork/clawflow/internal/cloud/auth"
+	"github.com/zhoushoujianwork/clawflow/internal/cloud/chat"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/project"
 )
 
 // NewCloudCmd contains cloud-config migration and authentication commands.
@@ -29,6 +34,7 @@ Gist sync remains available under 'clawflow sync' as a legacy migration path.`,
 	cmd.AddCommand(newCloudLoginCmd())
 	cmd.AddCommand(newCloudServeCmd())
 	cmd.AddCommand(newCloudStatusCmd())
+	cmd.AddCommand(newCloudImportCmd())
 	return cmd
 }
 
@@ -266,13 +272,50 @@ Store backends:
 				})
 			}
 
+			// Cloud-side chat: opt-in. Requires Anthropic API key (so the
+			// cloud server can spawn `claude -p`); the App private-key path
+			// is optional but private-repo clones won't work without it.
+			// Reject placeholder values so an unfilled cloud.env template
+			// doesn't accidentally enable chat in a half-configured state.
+			var extras []cloud.RouteMounter
+			anthropicKey := strings.TrimSpace(os.Getenv("CLAWFLOW_ANTHROPIC_API_KEY"))
+			if strings.HasPrefix(anthropicKey, "__REPLACE") {
+				anthropicKey = ""
+			}
+			chatMode := "chat=OFF"
+			if anthropicKey != "" && authH != nil {
+				chatCfg := chat.Config{
+					AnthropicAPIKey:         anthropicKey,
+					GitHubAppID:             appID,
+					GitHubAppPrivateKeyPath: os.Getenv("CLAWFLOW_GITHUB_APP_PRIVATE_KEY_PATH"),
+					ClonesDir:               orEnv(os.Getenv("CLAWFLOW_CHAT_CLONES_DIR"), ""),
+					Store:                   store,
+				}
+				chatH, err := chat.NewHandler(chatCfg, authH)
+				if err != nil {
+					return fmt.Errorf("chat handler: %w", err)
+				}
+				extras = append(extras, chatH)
+				chatMode = "chat=ON"
+			}
+
+			// Load embedded operators so /api/cloud/operators and the webhook
+			// handler see them. Don't go through loadRegistry — it also probes
+			// ~/.clawflow/skills/ which is irrelevant for the cloud server
+			// (and fails with EPERM under the unprivileged systemd user).
+			reg := operator.NewRegistry()
+			if err := reg.LoadEmbedded(rootmod.EmbeddedSkills, "skills"); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: embedded operators load: %v\n", err)
+			}
+
 			addr := fmt.Sprintf("%s:%d", host, port)
 			mode := "auth=github-app"
 			if noAuth {
 				mode = "auth=NONE (dev)"
 			}
-			fmt.Fprintf(os.Stderr, "ClawFlow cloud API listening on http://%s (store: %s, %s)\n", addr, storeFlag, mode)
-			return http.ListenAndServe(addr, cloud.NewServerWithAuth(store, nil, authH))
+			fmt.Fprintf(os.Stderr, "ClawFlow cloud API listening on http://%s (store: %s, %s, %s)\n",
+				addr, storeFlag, mode, chatMode)
+			return http.ListenAndServe(addr, cloud.NewServerWithExtras(store, reg, authH, extras))
 		},
 	}
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "Host to bind")
@@ -327,6 +370,284 @@ func firstEmpty(pairs ...[2]string) string {
 		}
 	}
 	return ""
+}
+
+// cloudImporter is the narrow subset of *cloud.Client used by
+// importConfigToCloud. Declared as an interface so the helper can be
+// unit-tested against an in-memory fake without standing up an HTTP
+// server. *cloud.Client satisfies this implicitly.
+type cloudImporter interface {
+	GetCloudConfig(ctx context.Context) (*cloud.CloudConfigSummary, error)
+	CreateProject(ctx context.Context, req cloud.CreateProjectRequest) (*cloud.Project, error)
+	CreateRepo(ctx context.Context, req cloud.CreateRepoRequest) (*cloud.Repo, error)
+}
+
+// importSummary tracks counts and progress lines emitted by
+// importConfigToCloud. Tests inspect Counts directly; the CLI writes
+// the Lines slice to stderr in order.
+type importSummary struct {
+	ProjectsImported int
+	ReposImported    int
+	Skipped          int
+	Lines            []string
+}
+
+// importConfigToCloud pushes local projects and repos into the cloud,
+// skipping entries whose name already exists in the cloud snapshot.
+// The function is intentionally I/O-free apart from the client calls —
+// it takes the local project list and repo map as inputs so tests can
+// supply fixture data without touching the filesystem.
+//
+// projectAssoc maps a local repo name ("owner/repo") to the local
+// project name it belongs to, or "" when unassociated. The local schema
+// stores this relationship on the project side (Project.Repos []string),
+// so callers compute the inverse map before invoking this helper.
+//
+// When dryRun is true no API calls are made; the function only walks
+// the inputs and emits the would-do progress lines.
+func importConfigToCloud(
+	ctx context.Context,
+	c cloudImporter,
+	localProjects []*project.Project,
+	localRepos map[string]config.Repo,
+	projectAssoc map[string]string,
+	dryRun bool,
+) (importSummary, error) {
+	var sum importSummary
+
+	// Build name-keyed sets from the existing cloud snapshot so we can
+	// skip duplicates. Project IDs returned by the cloud are recorded so
+	// repos we're about to create can reference them by ID.
+	existingProjectsByName := map[string]string{} // name -> id
+	existingRepoNames := map[string]struct{}{}
+	if !dryRun {
+		snap, err := c.GetCloudConfig(ctx)
+		if err != nil {
+			return sum, fmt.Errorf("fetch cloud config: %w", err)
+		}
+		for _, p := range snap.Projects {
+			if p == nil {
+				continue
+			}
+			existingProjectsByName[p.Name] = p.ID
+		}
+		for _, r := range snap.Repos {
+			if r == nil {
+				continue
+			}
+			existingRepoNames[r.Name] = struct{}{}
+		}
+	}
+
+	// Sort projects by name for stable progress output.
+	projectsSorted := make([]*project.Project, 0, len(localProjects))
+	for _, p := range localProjects {
+		if p == nil {
+			continue
+		}
+		projectsSorted = append(projectsSorted, p)
+	}
+	sort.Slice(projectsSorted, func(i, j int) bool {
+		return projectsSorted[i].Name < projectsSorted[j].Name
+	})
+
+	// Phase 1: projects. Build localProjectName -> cloud project id map
+	// so repo creation in phase 2 can attach project_id.
+	projectIDByLocalName := map[string]string{}
+	for name, id := range existingProjectsByName {
+		projectIDByLocalName[name] = id
+	}
+
+	totalProjects := len(projectsSorted)
+	for i, p := range projectsSorted {
+		idx := i + 1
+		if id, ok := existingProjectsByName[p.Name]; ok {
+			sum.Skipped++
+			sum.Lines = append(sum.Lines,
+				fmt.Sprintf("[%d/%d] project %q — already on cloud (%s), skipped", idx, totalProjects, p.Name, id))
+			continue
+		}
+		if dryRun {
+			sum.ProjectsImported++
+			sum.Lines = append(sum.Lines,
+				fmt.Sprintf("[%d/%d] project %q → would create", idx, totalProjects, p.Name))
+			projectIDByLocalName[p.Name] = "" // dry-run repos will see empty project_id
+			continue
+		}
+		created, err := c.CreateProject(ctx, cloud.CreateProjectRequest{
+			Name: p.Name,
+		})
+		if err != nil {
+			return sum, fmt.Errorf("create project %q: %w", p.Name, err)
+		}
+		sum.ProjectsImported++
+		projectIDByLocalName[p.Name] = created.ID
+		sum.Lines = append(sum.Lines,
+			fmt.Sprintf("[%d/%d] project %q → %s", idx, totalProjects, p.Name, created.ID))
+	}
+
+	// Sort repos by name for stable output.
+	repoNames := make([]string, 0, len(localRepos))
+	for name := range localRepos {
+		repoNames = append(repoNames, name)
+	}
+	sort.Strings(repoNames)
+
+	totalRepos := len(repoNames)
+	for i, name := range repoNames {
+		idx := i + 1
+		repo := localRepos[name]
+		if _, ok := existingRepoNames[name]; ok {
+			sum.Skipped++
+			sum.Lines = append(sum.Lines,
+				fmt.Sprintf("[%d/%d] repo %q — already on cloud, skipped", idx, totalRepos, name))
+			continue
+		}
+		platform := repo.Platform
+		if platform == "" {
+			platform = "github"
+		}
+		projectID := projectIDByLocalName[projectAssoc[name]]
+		if dryRun {
+			sum.ReposImported++
+			suffix := ""
+			if projectID != "" {
+				suffix = fmt.Sprintf(" (project=%s)", projectID)
+			}
+			sum.Lines = append(sum.Lines,
+				fmt.Sprintf("[%d/%d] repo %q → would create%s", idx, totalRepos, name, suffix))
+			continue
+		}
+		created, err := c.CreateRepo(ctx, cloud.CreateRepoRequest{
+			Name:       name,
+			Platform:   platform,
+			BaseBranch: repo.BaseBranch,
+			ProjectID:  projectID,
+		})
+		if err != nil {
+			return sum, fmt.Errorf("create repo %q: %w", name, err)
+		}
+		sum.ReposImported++
+		suffix := ""
+		if created.ProjectID != "" {
+			suffix = fmt.Sprintf(" (project=%s)", created.ProjectID)
+		}
+		sum.Lines = append(sum.Lines,
+			fmt.Sprintf("[%d/%d] repo %q → %s%s", idx, totalRepos, name, created.ID, suffix))
+	}
+
+	return sum, nil
+}
+
+// buildProjectAssoc inverts the project.Repos []string membership lists
+// into a flat "repo name -> project name" lookup. When a repo is listed
+// under multiple projects (shouldn't happen given AddRepo's one-project
+// guard, but possible from manual yaml edits), the first project wins
+// by sort order — deterministic so import output is reproducible.
+func buildProjectAssoc(projects []*project.Project) map[string]string {
+	out := map[string]string{}
+	// Sort by name so iteration order is stable.
+	sorted := make([]*project.Project, 0, len(projects))
+	for _, p := range projects {
+		if p == nil {
+			continue
+		}
+		sorted = append(sorted, p)
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	for _, p := range sorted {
+		for _, repo := range p.Repos {
+			if _, ok := out[repo]; ok {
+				continue
+			}
+			out[repo] = p.Name
+		}
+	}
+	return out
+}
+
+func newCloudImportCmd() *cobra.Command {
+	var (
+		dryRun   bool
+		cloudURL string
+	)
+	cmd := &cobra.Command{
+		Use:   "import",
+		Short: "Bulk-upload local config.yaml (projects + repos) into the cloud",
+		Long: `One-shot migration that pushes every project under ~/.clawflow/projects/
+and every entry in ~/.clawflow/config/config.yaml's repos map into the cloud.
+
+The local YAML files are left intact — worker-specific fields like
+local_path stay on this machine. Entries whose name already exists on the
+cloud are skipped, so the command is safe to re-run.
+
+Machine bindings (which machine handles which repo) are NOT imported.
+They are per-machine and need user input; configure them via the cloud
+dashboard once the projects and repos land.
+
+Use --dry-run to preview without making API calls. Use --cloud-url to
+target a non-default cloud (typically for testing).`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+
+			creds, err := config.LoadCredentials()
+			if err != nil {
+				return err
+			}
+			cfg := cloud.FromCredentials(creds)
+			if cloudURL != "" {
+				cfg.BaseURL = strings.TrimRight(cloudURL, "/")
+			}
+			if cfg.AccessToken == "" {
+				fmt.Fprintln(os.Stderr, "run 'clawflow cloud login' first")
+				return fmt.Errorf("not logged in")
+			}
+
+			localCfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			localProjects, err := project.List()
+			if err != nil {
+				return fmt.Errorf("list local projects: %w", err)
+			}
+
+			if len(localCfg.Repos) == 0 && len(localProjects) == 0 {
+				fmt.Fprintln(os.Stderr, "nothing to import")
+				return nil
+			}
+
+			assoc := buildProjectAssoc(localProjects)
+
+			var importer cloudImporter
+			if !dryRun {
+				client, err := cloud.NewClient(cfg)
+				if err != nil {
+					return err
+				}
+				importer = client
+			}
+
+			sum, err := importConfigToCloud(ctx, importer, localProjects, localCfg.Repos, assoc, dryRun)
+			for _, line := range sum.Lines {
+				fmt.Fprintln(os.Stderr, line)
+			}
+			if err != nil {
+				return err
+			}
+
+			prefix := ""
+			if dryRun {
+				prefix = "[dry-run] "
+			}
+			fmt.Fprintf(os.Stderr, "%simported %d projects + %d repos; skipped %d duplicates\n",
+				prefix, sum.ProjectsImported, sum.ReposImported, sum.Skipped)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print actions without making API calls")
+	cmd.Flags().StringVar(&cloudURL, "cloud-url", "", "Cloud URL override (default: configured value or "+cloud.DefaultBaseURL+")")
+	return cmd
 }
 
 // openCloudStore returns a Store for the given flag value.
