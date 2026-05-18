@@ -122,10 +122,54 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Secure:   h.cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
 	})
-	if next == "" {
-		next = "/"
+	// If the caller asked us to land on a specific path (e.g. /dashboard
+	// once the Web UI is mounted), redirect there. Otherwise render a
+	// terminal page — the cloud server in this PR does not yet bundle a
+	// Web UI, so blindly redirecting to "/" would 404.
+	if next != "" && next != "/" {
+		http.Redirect(w, r, next, http.StatusFound)
+		return
 	}
-	http.Redirect(w, r, next, http.StatusFound)
+	renderLoginSuccess(w, user)
+}
+
+// renderLoginSuccess writes a self-contained HTML page confirming the user
+// is signed in. Intentionally style-free and dependency-free; PR 2 will
+// replace this with a real Web UI redirect.
+func renderLoginSuccess(w http.ResponseWriter, user *cloud.User) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>ClawFlow Login</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         max-width: 480px; margin: 8rem auto; padding: 0 1rem; color: #1f2328; }
+  h1 { font-size: 1.3rem; margin-bottom: 0.5rem; }
+  p { color: #57606a; line-height: 1.5; }
+  code { background: #f6f8fa; padding: 0.1rem 0.3rem; border-radius: 4px; }
+</style></head>
+<body>
+  <h1>Signed in as %s</h1>
+  <p>The ClawFlow Web UI is not deployed on this cloud yet.
+     You can close this window and continue from the terminal:</p>
+  <p><code>clawflow worker register</code></p>
+  <p style="margin-top:2rem; color:#8c959f; font-size:0.85rem;">
+    Browser session is active for 30 days. To sign out:
+    <code>curl -X POST -b clawflow_session=&lt;cookie&gt; ./api/v1/auth/logout</code>
+  </p>
+</body></html>`, htmlEscape(user.Login))
+}
+
+// htmlEscape is a tiny stdlib-free escape for the user login string. Login
+// values are GitHub-validated to [a-zA-Z0-9-], so this is defense in depth.
+func htmlEscape(s string) string {
+	r := s
+	for _, pair := range [][2]string{
+		{"&", "&amp;"}, {"<", "&lt;"}, {">", "&gt;"}, {`"`, "&quot;"},
+	} {
+		r = strings.ReplaceAll(r, pair[0], pair[1])
+	}
+	return r
 }
 
 // loginGitHubUser is the shared completion path for both browser OAuth and
