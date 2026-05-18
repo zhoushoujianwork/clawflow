@@ -175,65 +175,19 @@ function AppLayout() {
               </div>
             )}
             <nav className="flex gap-1">
-              <Link
-                to="/dashboard"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Dashboard
-              </Link>
-              <Link
-                to="/repos"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Repos
-              </Link>
-              <Link
-                to="/projects"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Projects
-              </Link>
-              <Link
-                to="/operators"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Operators
-              </Link>
-              <Link
-                to="/usage"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Usage
-              </Link>
-              <Link
-                to="/settings"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Settings
-              </Link>
+              <NavLink to="/dashboard">Dashboard</NavLink>
+              <NavLink to="/repos">Repos</NavLink>
+              <NavLink to="/projects">Projects</NavLink>
+              <NavLink to="/operators">Operators</NavLink>
               {cloudConfigured && (
-                <Link
-                  to="/cloud/machines"
-                  className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                  style={{ color: 'hsl(var(--text-low))' }}
-                  activeOptions={{ includeSearch: false, exact: false }}
-                  activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-                >
-                  Cloud
-                </Link>
+                <>
+                  <NavLink to="/cloud/machines">Machines</NavLink>
+                  <NavLink to="/cloud/bindings">Bindings</NavLink>
+                  <NavLink to="/cloud/jobs">Jobs</NavLink>
+                </>
               )}
+              <NavLink to="/usage">Usage</NavLink>
+              <NavLink to="/settings">Settings</NavLink>
             </nav>
           </div>
 
@@ -292,6 +246,22 @@ function AppLayout() {
         <ChatDrawer />
       </div>
     </ChatProvider>
+  )
+}
+
+// NavLink is the single top-bar link template. Used 7-9 times across the
+// header so factoring it out keeps the JSX skim-able and centralises the
+// "active" styling (brand-tinted background + brand text).
+function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+      style={{ color: 'hsl(var(--text-low))' }}
+      activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+    >
+      {children}
+    </Link>
   )
 }
 

@@ -1,4 +1,4 @@
-import { createFileRoute, Outlet, Link } from '@tanstack/react-router'
+import { createFileRoute, Outlet } from '@tanstack/react-router'
 import { Cloud } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { fetchAuthMe, type AuthMeResult } from '../lib/cloudApi'
@@ -40,39 +40,8 @@ function CloudLayout() {
     )
   }
 
-  return (
-    <div>
-      {/* Cloud sub-nav */}
-      <div
-        className="border-b px-6 flex gap-1 h-10 items-center"
-        style={{ background: 'hsl(var(--bg-primary))', borderColor: 'hsl(var(--border))' }}
-      >
-        <Link
-          to="/cloud/machines"
-          className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-          style={{ color: 'hsl(var(--text-low))' }}
-          activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-        >
-          Machines
-        </Link>
-        <Link
-          to="/cloud/bindings"
-          className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-          style={{ color: 'hsl(var(--text-low))' }}
-          activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-        >
-          Bindings
-        </Link>
-        <Link
-          to="/cloud/jobs"
-          className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-          style={{ color: 'hsl(var(--text-low))' }}
-          activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-        >
-          Jobs
-        </Link>
-      </div>
-      <Outlet />
-    </div>
-  )
+  // Sub-nav was removed when Machines / Bindings / Jobs got promoted to
+  // the top-level header — see _app.tsx. This layout is now just an Outlet
+  // wrapper that exists so the existing /cloud/* URLs keep resolving.
+  return <Outlet />
 }
