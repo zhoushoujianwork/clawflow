@@ -3,10 +3,12 @@ package cloud
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"strings"
 	"time"
 
+	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 )
 
@@ -101,7 +103,67 @@ func NewServerWithAuth(store Store, operators *operator.Registry, auth AuthHandl
 	if auth != nil {
 		auth.RegisterRoutes(mux)
 	}
+
+	// Serve the embedded React app. /assets/* are versioned static files;
+	// every other GET request that didn't match an API route falls through
+	// to index.html so the React router can take over.
+	s.mountSPA(mux)
 	return mux
+}
+
+// mountSPA wires the embedded web/dist assets onto mux. /assets/* serves
+// fingerprinted bundle files directly; every other GET (that didn't match an
+// API route) returns index.html so the React SPA owns client-side routing.
+//
+// Best-effort: if the embed is missing or malformed, the function logs
+// nothing and silently leaves "/" unhandled — the server still works for
+// pure-API clients (CLI, worker). Useful for tests that don't need the UI.
+func (s *server) mountSPA(mux *http.ServeMux) {
+	spaFS, err := fs.Sub(rootmod.EmbeddedDashboard, "web/dist")
+	if err != nil {
+		return
+	}
+	// Sanity check: index.html must exist, otherwise nothing else matters.
+	if _, err := fs.ReadFile(spaFS, "index.html"); err != nil {
+		return
+	}
+	fsrv := http.FileServer(http.FS(spaFS))
+
+	// Fingerprinted assets: serve directly, long cache. Method-agnostic to
+	// stay compatible with the other (method-unspecified) routes already
+	// registered on this mux — Go 1.22's mux panics on partial method
+	// shadowing if we mix "GET /assets/" with "/api/worker/runs/".
+	mux.Handle("/assets/", fsrv)
+	mux.Handle("/favicon.ico", fsrv)
+	mux.Handle("/favicon.svg", fsrv)
+	mux.Handle("/robots.txt", fsrv)
+
+	// SPA fallback. "/" is the broadest pattern in Go 1.22's mux, so any
+	// specific API route registered earlier wins automatically. We accept
+	// any method here and let the React app handle method-specific UX;
+	// non-GET on a static file returns 405 from the underlying FileServer.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Allow direct hits on real files (e.g. /manifest.webmanifest).
+		reqPath := strings.TrimPrefix(r.URL.Path, "/")
+		if reqPath != "" && reqPath != "index.html" {
+			if f, err := spaFS.Open(reqPath); err == nil {
+				_ = f.Close()
+				fsrv.ServeHTTP(w, r)
+				return
+			}
+		}
+		// Default: serve index.html with no-cache so a fresh deploy
+		// invalidates the bootstrap immediately. The fingerprinted bundle
+		// files it references are cached separately.
+		indexHTML, err := fs.ReadFile(spaFS, "index.html")
+		if err != nil {
+			http.Error(w, "index.html missing from embed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(indexHTML)
+	})
 }
 
 type server struct {
