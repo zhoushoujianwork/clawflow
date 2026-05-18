@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/cloud"
 	"github.com/zhoushoujianwork/clawflow/internal/cloud/auth"
 	"github.com/zhoushoujianwork/clawflow/internal/cloud/chat"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 )
 
@@ -298,12 +300,12 @@ Store backends:
 			}
 
 			// Load embedded operators so /api/cloud/operators and the webhook
-			// handler see them. User-skills dir is irrelevant on cloud server
-			// (no user environment), so we only load the embedded set.
-			reg, err := loadRegistry()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warn: operator registry load: %v\n", err)
-				reg = nil
+			// handler see them. Don't go through loadRegistry — it also probes
+			// ~/.clawflow/skills/ which is irrelevant for the cloud server
+			// (and fails with EPERM under the unprivileged systemd user).
+			reg := operator.NewRegistry()
+			if err := reg.LoadEmbedded(rootmod.EmbeddedSkills, "skills"); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: embedded operators load: %v\n", err)
 			}
 
 			addr := fmt.Sprintf("%s:%d", host, port)
