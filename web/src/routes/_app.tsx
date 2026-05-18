@@ -5,6 +5,7 @@ import { useTheme } from '../lib/useTheme'
 import { ChatProvider, useChatDrawer } from '../lib/chatContext'
 import { ChatDrawer } from '../components/ChatDrawer'
 import { SyncPopover } from '../components/SyncPopover'
+import { fetchCloudStatus } from '../lib/cloudApi'
 
 export const Route = createFileRoute('/_app')({
   component: AppLayout,
@@ -18,6 +19,7 @@ function AppLayout() {
   const [updating, setUpdating] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [showTooltip, setShowTooltip] = useState(false)
+  const [cloudConfigured, setCloudConfigured] = useState(false)
 
   // Check version once on mount
   useEffect(() => {
@@ -31,6 +33,13 @@ function AppLayout() {
         }
       })
       .catch(() => {})
+  }, [])
+
+  // Check cloud configuration once on mount so we can show/hide the Cloud nav
+  useEffect(() => {
+    fetchCloudStatus()
+      .then(s => setCloudConfigured(s.configured))
+      .catch(() => setCloudConfigured(false))
   }, [])
 
   const triggerUpdate = useCallback(() => {
@@ -190,6 +199,17 @@ function AppLayout() {
               >
                 Settings
               </Link>
+              {cloudConfigured && (
+                <Link
+                  to="/cloud/machines"
+                  className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+                  style={{ color: 'hsl(var(--text-low))' }}
+                  activeOptions={{ includeSearch: false, exact: false }}
+                  activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+                >
+                  Cloud
+                </Link>
+              )}
             </nav>
           </div>
 
