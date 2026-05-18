@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { FolderGit2, Plus, RefreshCw, Trash2, Loader2 } from 'lucide-react'
+import { FolderGit2, Plus, RefreshCw, Trash2, Loader2, Search, LogIn } from 'lucide-react'
 import {
   deleteRepo,
   fetchBindings,
@@ -20,6 +20,14 @@ export const Route = createFileRoute('/_app/repos/')({
   component: ReposPage,
 })
 
+// PlatformFilter is the top-tab selector. 'all' is the default; the others
+// match the literal `Repo.platform` values from the cloud Store.
+type PlatformFilter = 'all' | 'github' | 'gitlab'
+
+// ProjectFilter is keyed by project id, plus the synthetic 'all' (default)
+// and 'orphan' (repos with no project_id) buckets.
+type ProjectFilter = string
+
 function ReposPage() {
   const navigate = useNavigate()
   const [repos, setRepos] = useState<Repo[]>([])
@@ -28,11 +36,16 @@ function ReposPage() {
   const [machines, setMachines] = useState<Machine[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [unauth, setUnauth] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [platform, setPlatform] = useState<PlatformFilter>('all')
+  const [projectF, setProjectF] = useState<ProjectFilter>('all')
+  const [query, setQuery] = useState('')
 
   const load = useCallback(() => {
     setLoading(true)
     setError(null)
+    setUnauth(false)
     Promise.all([fetchRepos(), fetchProjects(), fetchBindings(), fetchMachines()])
       .then(([r, p, b, m]) => {
         setRepos(r.repos ?? [])
@@ -40,7 +53,16 @@ function ReposPage() {
         setBindings(b.bindings ?? [])
         setMachines(m.machines ?? [])
       })
-      .catch(e => setError(String(e)))
+      .catch(e => {
+        // 401 means "no session" — render the Sign-in panel instead of
+        // showing the raw JSON error blob. Anything else is a real error.
+        const s = String(e)
+        if (s.includes('401')) {
+          setUnauth(true)
+        } else {
+          setError(s)
+        }
+      })
       .finally(() => setLoading(false))
   }, [])
 
@@ -88,6 +110,61 @@ function ReposPage() {
     }
     return m
   }, [repos])
+
+  // Apply platform / project / query filters in a stable order so the
+  // filter chips can show live counts that reflect the OTHER filters
+  // already in effect (i.e. counts on the platform tabs respect the
+  // current project + search filter).
+  const platformCount = useCallback(
+    (p: PlatformFilter) => {
+      return repos.filter(r => {
+        if (p !== 'all' && r.platform !== p) return false
+        if (projectF === 'all') {
+          // nothing
+        } else if (projectF === 'orphan') {
+          if (r.project_id) return false
+        } else if (r.project_id !== projectF) {
+          return false
+        }
+        if (query && !r.name.toLowerCase().includes(query.toLowerCase())) return false
+        return true
+      }).length
+    },
+    [repos, projectF, query],
+  )
+
+  const projectCount = useCallback(
+    (pf: ProjectFilter) => {
+      return repos.filter(r => {
+        if (platform !== 'all' && r.platform !== platform) return false
+        if (pf === 'all') {
+          // nothing
+        } else if (pf === 'orphan') {
+          if (r.project_id) return false
+        } else if (r.project_id !== pf) {
+          return false
+        }
+        if (query && !r.name.toLowerCase().includes(query.toLowerCase())) return false
+        return true
+      }).length
+    },
+    [repos, platform, query],
+  )
+
+  const filtered = useMemo(() => {
+    return repos.filter(r => {
+      if (platform !== 'all' && r.platform !== platform) return false
+      if (projectF === 'all') {
+        // nothing
+      } else if (projectF === 'orphan') {
+        if (r.project_id) return false
+      } else if (r.project_id !== projectF) {
+        return false
+      }
+      if (query && !r.name.toLowerCase().includes(query.toLowerCase())) return false
+      return true
+    })
+  }, [repos, platform, projectF, query])
 
   const handleDelete = useCallback(
     async (repo: Repo) => {
@@ -139,6 +216,8 @@ function ReposPage() {
         </div>
       </div>
 
+      {unauth && <SignInPanel />}
+
       {error && (
         <div
           className="mb-4 px-4 py-3 rounded-md text-sm border"
@@ -148,7 +227,80 @@ function ReposPage() {
         </div>
       )}
 
-      {!loading && repos.length === 0 && !error && <EmptyRepos />}
+      {!loading && !unauth && repos.length === 0 && !error && <EmptyRepos />}
+
+      {repos.length > 0 && (
+        <>
+          {/* Filter chip row: platforms + projects + free-text search. */}
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            {([
+              { id: 'all',    label: 'All' },
+              { id: 'github', label: 'GitHub' },
+              { id: 'gitlab', label: 'GitLab' },
+            ] as { id: PlatformFilter; label: string }[]).map(opt => {
+              const active = platform === opt.id
+              const count = platformCount(opt.id)
+              return (
+                <button
+                  key={opt.id}
+                  onClick={() => setPlatform(opt.id)}
+                  className="text-xs px-2.5 py-1 rounded-full transition-colors border font-medium"
+                  style={{
+                    background: active ? 'hsl(var(--brand) / 0.1)' : 'transparent',
+                    color: active ? 'hsl(var(--brand))' : 'hsl(var(--text-low))',
+                    borderColor: active ? 'hsl(var(--brand) / 0.4)' : 'hsl(var(--border))',
+                  }}
+                >
+                  {opt.label}
+                  <span className="ml-1 opacity-70">{count}</span>
+                </button>
+              )
+            })}
+            <span className="mx-1" style={{ color: 'hsl(var(--border))' }}>·</span>
+            {([
+              { id: 'all',    label: 'All projects' },
+              ...projects.map(p => ({ id: p.id as ProjectFilter, label: p.name })),
+              { id: 'orphan', label: 'No project' },
+            ]).map(opt => {
+              const active = projectF === opt.id
+              const count = projectCount(opt.id)
+              return (
+                <button
+                  key={opt.id}
+                  onClick={() => setProjectF(opt.id)}
+                  className="text-xs px-2.5 py-1 rounded-full transition-colors border font-medium"
+                  style={{
+                    background: active ? 'hsl(var(--brand) / 0.1)' : 'transparent',
+                    color: active ? 'hsl(var(--brand))' : 'hsl(var(--text-low))',
+                    borderColor: active ? 'hsl(var(--brand) / 0.4)' : 'hsl(var(--border))',
+                  }}
+                >
+                  {opt.label}
+                  <span className="ml-1 opacity-70">{count}</span>
+                </button>
+              )
+            })}
+            <div className="ml-auto relative">
+              <Search
+                size={12}
+                className="absolute left-2.5 top-1/2 -translate-y-1/2"
+                style={{ color: 'hsl(var(--text-low))' }}
+              />
+              <input
+                type="text"
+                placeholder="Filter by name…"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                className="text-xs pl-7 pr-2 py-1 rounded-sm border bg-transparent w-44 focus:outline-none focus:ring-1"
+                style={{
+                  borderColor: 'hsl(var(--border))',
+                  color: 'hsl(var(--text-high))',
+                }}
+              />
+            </div>
+          </div>
+        </>
+      )}
 
       {repos.length > 0 && (
         <div
@@ -174,7 +326,18 @@ function ReposPage() {
               </tr>
             </thead>
             <tbody>
-              {repos.map((r, i) => {
+              {filtered.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="px-4 py-8 text-center text-xs"
+                    style={{ color: 'hsl(var(--text-low))' }}
+                  >
+                    No repos match the current filter.
+                  </td>
+                </tr>
+              )}
+              {filtered.map((r, i) => {
                 const lastMachine = lastMachineForRepo(r.id)
                 return (
                   <tr
@@ -242,6 +405,33 @@ function ReposPage() {
           </table>
         </div>
       )}
+    </div>
+  )
+}
+
+// SignInPanel replaces the raw 401 JSON error with a friendly "you need
+// to sign in" call-to-action. /api/v1/github/app/login is a server-side
+// redirect endpoint, so a plain anchor element is enough.
+function SignInPanel() {
+  return (
+    <div
+      className="rounded-lg border px-6 py-12 text-center"
+      style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}
+    >
+      <LogIn size={32} className="mx-auto mb-3 opacity-30" style={{ color: 'hsl(var(--text-low))' }} />
+      <p className="text-sm font-medium mb-1" style={{ color: 'hsl(var(--text-high))' }}>
+        Sign in to view your repos
+      </p>
+      <p className="text-xs mb-4" style={{ color: 'hsl(var(--text-low))' }}>
+        ClawFlow uses your GitHub identity. The repos you've registered with this cloud appear once you're signed in.
+      </p>
+      <a
+        href="/api/v1/github/app/login"
+        className="inline-flex items-center text-xs font-medium px-3 py-1.5 rounded-sm"
+        style={{ background: 'hsl(var(--brand))', color: 'white' }}
+      >
+        Sign in with GitHub
+      </a>
     </div>
   )
 }

@@ -168,8 +168,19 @@ func (s *server) mountSPA(mux *http.ServeMux) {
 	// any method here and let the React app handle method-specific UX;
 	// non-GET on a static file returns 405 from the underlying FileServer.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// 404 on namespaces that are meant for backend APIs but didn't
+		// match any registered handler — without this, a stale local-web
+		// fetch like /api/settings or /data/runs.json silently gets
+		// served index.html (200) and the browser's JSON parser explodes.
+		// Returning a clean 404 lets the React app render proper "not
+		// found" / "this endpoint is local-only" UX instead.
+		p := r.URL.Path
+		if strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/data/") || strings.HasPrefix(p, "/ws/") {
+			http.NotFound(w, r)
+			return
+		}
 		// Allow direct hits on real files (e.g. /manifest.webmanifest).
-		reqPath := strings.TrimPrefix(r.URL.Path, "/")
+		reqPath := strings.TrimPrefix(p, "/")
 		if reqPath != "" && reqPath != "index.html" {
 			if f, err := spaFS.Open(reqPath); err == nil {
 				_ = f.Close()

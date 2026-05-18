@@ -1,5 +1,6 @@
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { createFileRoute, Link, Navigate } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { fetchAuthMe, type AuthMeResult } from '../lib/cloudApi'
 import {
   Search,
   ExternalLink,
@@ -148,6 +149,23 @@ export const Route = createFileRoute('/_app/dashboard')({
 })
 
 function Dashboard() {
+  // The legacy local-mode Dashboard polls /data/*.json, /api/run/status,
+  // and offers a "Run" button that POSTs /api/run — all backed only by
+  // `clawflow web`. On a cloud-served bundle those endpoints don't exist
+  // and the polling would spin forever rendering misleading "no runs yet"
+  // state. Redirect to /cloud/jobs (the cloud equivalent) instead.
+  const [auth, setAuth] = useState<AuthMeResult | undefined>(undefined)
+  useEffect(() => {
+    fetchAuthMe().then(setAuth).catch(() => setAuth({ kind: 'no-cloud' }))
+  }, [])
+  if (auth?.kind === 'authed' || auth?.kind === 'anon') {
+    return <Navigate to="/cloud/jobs" replace />
+  }
+
+  return <LocalDashboard />
+}
+
+function LocalDashboard() {
   const [runs, setRuns] = useState<Run[]>([])
   const [meta, setMeta] = useState<Meta | null>(null)
   const [repos, setRepos] = useState<Repo[]>([])
