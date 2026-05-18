@@ -104,12 +104,6 @@ func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Push the new bound_machine to Gist synchronously. Without this, the
-	// next AutoPull (clawflow run / web startup) would silently revert
-	// the local change to whatever the cloud last had — that's the
-	// "I bound it but after restart it came back" bug.
-	AutoPush()
-
 	// Single-repo mode: backward-compatible response shape
 	if req.Repo != "" && len(req.Repos) == 0 {
 		writeJSON(w, http.StatusOK, repoBindResponse{

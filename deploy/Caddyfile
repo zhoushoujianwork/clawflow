@@ -1,0 +1,52 @@
+# Caddyfile for the ClawFlow cloud server.
+#
+# Replace clawflow.daboluo.cc with your own domain. Caddy will request a
+# Let's Encrypt certificate on first start. Port 80 must be reachable for
+# the ACME HTTP-01 challenge; port 443 is the public TLS endpoint.
+
+clawflow.daboluo.cc {
+    encode zstd gzip
+
+    # Forward everything to the local clawflow cloud server.
+    reverse_proxy 127.0.0.1:8790 {
+        # Long-running endpoints (device flow poll, worker lease) need
+        # generous read/write timeouts. Lease and poll both block up to
+        # 30s by default.
+        transport http {
+            read_timeout 90s
+            write_timeout 90s
+        }
+
+        # Pass the client IP through. The cloud server uses it for audit
+        # logs only — no IP-based auth — so spoofing is not a risk worth
+        # closing here.
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # GitHub webhook deliveries can spike to several MB on large repos.
+    # Default request_body limit is 10MB; raise it to be safe.
+    request_body {
+        max_size 25MB
+    }
+
+    # Basic security headers. We do NOT set HSTS — Caddy already issues
+    # HSTS by default with includeSubDomains, which we don't want
+    # affecting daboluo.cc as a whole.
+    header {
+        Referrer-Policy "strict-origin-when-cross-origin"
+        X-Content-Type-Options "nosniff"
+        # Frame protection is fine here; the server has no frame-friendly UX.
+        X-Frame-Options "DENY"
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/clawflow.access.log {
+            roll_size 100mb
+            roll_keep 7
+        }
+        format json
+    }
+}

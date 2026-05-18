@@ -96,6 +96,33 @@ type Store interface {
 	ListMachines() []*Machine
 	ListJobs() []*JobRecord
 	ListRuns() []*RunRecord
+
+	// Identity / auth.
+	UpsertUser(req UpsertUserRequest) (*User, error)
+	GetUserByGitHubID(githubID int64) (*User, error)
+	GetUser(id string) (*User, error)
+
+	// Sessions are opaque browser cookies. CreateSession returns the new
+	// session id; the caller is responsible for placing it in a Set-Cookie
+	// header. GetSession returns nil when expired or not found.
+	CreateSession(userID string, ttl time.Duration) (*Session, error)
+	GetSession(id string) (*Session, error)
+	DeleteSession(id string) error
+
+	// API tokens. CreateAPIToken hashes req.Plaintext before persisting and
+	// returns the stored row (without the plaintext). LookupAPIToken hashes
+	// the supplied plaintext and returns the matching non-revoked token, or
+	// nil if no match. Hash collisions are not possible (SHA-256 over a
+	// 32-byte random seed).
+	CreateAPIToken(req CreateAPITokenRequest) (*APIToken, error)
+	LookupAPIToken(plaintext string) (*APIToken, error)
+	RevokeAPIToken(id string) error
+
+	// Installations cache. ListUserInstallations returns the cached GitHub
+	// installations the user has authorized via OAuth.
+	UpsertInstallation(req UpsertInstallationRequest) (*Installation, error)
+	LinkUserInstallation(userID, installationID string) error
+	ListUserInstallations(userID string) []*Installation
 }
 
 // compile-time check

@@ -36,7 +36,8 @@ jobs:
           go build -o clawflow ./cmd/clawflow/
           ./clawflow --help
           ./clawflow version
-          ./clawflow run --help
+          ./clawflow cloud --help
+          ./clawflow worker --help
           ./clawflow operators list
           # Hard fail if any embedded SKILL.md has bad frontmatter.
           ./clawflow operators validate

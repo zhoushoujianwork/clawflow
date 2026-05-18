@@ -6,6 +6,87 @@ import "time"
 // "github", "gitlab", or "codex".
 type Capability string
 
+// ---- Identity / auth domain types ----
+
+// User is one authenticated GitHub user. The cloud server uses (id, github_id)
+// as the stable identity across sessions and API tokens.
+type User struct {
+	ID        string    `json:"id"`
+	GitHubID  int64     `json:"github_id"`
+	Login     string    `json:"login"`
+	Name      string    `json:"name,omitempty"`
+	AvatarURL string    `json:"avatar_url,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Session is a browser cookie session for a logged-in user. The cookie value
+// IS the session id (random, opaque); the server lookups by id.
+type Session struct {
+	ID        string    `json:"-"`
+	UserID    string    `json:"user_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// APITokenKind discriminates between personal CLI tokens and worker tokens.
+const (
+	APITokenKindPersonal = "personal"
+	APITokenKindMachine  = "machine"
+)
+
+// APIToken is a Bearer credential issued to a user (personal) or a worker
+// (machine). The plaintext token is shown to the caller exactly once at
+// creation; the database only stores its SHA-256 hash.
+type APIToken struct {
+	ID         string     `json:"id"`
+	UserID     string     `json:"user_id"`
+	Kind       string     `json:"kind"`
+	MachineID  string     `json:"machine_id,omitempty"`
+	Label      string     `json:"label,omitempty"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+}
+
+// Installation is one row in the cached list of GitHub App installations a
+// user has authorized. Refreshed on login.
+type Installation struct {
+	ID                   string    `json:"id"`
+	GitHubInstallationID int64     `json:"github_installation_id"`
+	AccountLogin         string    `json:"account_login"`
+	AccountType          string    `json:"account_type"` // 'Organization' | 'User'
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+// UpsertUserRequest captures the fields the cloud needs after GitHub OAuth.
+type UpsertUserRequest struct {
+	GitHubID  int64
+	Login     string
+	Name      string
+	AvatarURL string
+}
+
+// CreateAPITokenRequest is the input to Store.CreateAPIToken. The caller
+// supplies the random plaintext via Plaintext; the store hashes it before
+// persisting and never echoes it back.
+type CreateAPITokenRequest struct {
+	UserID    string
+	Kind      string
+	Plaintext string
+	MachineID string
+	Label     string
+}
+
+// UpsertInstallationRequest is the input to Store.UpsertInstallation. The
+// account_type should be 'Organization' or 'User'.
+type UpsertInstallationRequest struct {
+	GitHubInstallationID int64
+	AccountLogin         string
+	AccountType          string
+}
+
 // ---- Cloud config domain types ----
 
 // Project is a top-level configuration unit that groups repos and automation

@@ -73,7 +73,7 @@ func newWebhookServer(t *testing.T, reg *operator.Registry) (*httptest.Server, *
 	return srv, store
 }
 
-// postWebhook sends a POST to /api/webhooks/github with the given event type,
+// postWebhook sends a POST to /api/v1/github/app/webhook with the given event type,
 // payload, and signature. Returns the response.
 func postWebhook(t *testing.T, srv *httptest.Server, eventType string, payload any, sig string) *http.Response {
 	t.Helper()
@@ -81,7 +81,7 @@ func postWebhook(t *testing.T, srv *httptest.Server, eventType string, payload a
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/webhooks/github", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/github/app/webhook", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestWebhookGitHub_BadSigBodyNotInResponse(t *testing.T) {
 	secretPayload := `{"secret_data":"super-sensitive","action":"labeled","issue":{"number":10,"labels":[{"name":"bug"}]},"repository":{"full_name":"acme/backend"}}`
 	badSig := "sha256=deadbeef"
 
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/webhooks/github", bytes.NewBufferString(secretPayload))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/github/app/webhook", bytes.NewBufferString(secretPayload))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GitHub-Event", "issues")
 	req.Header.Set("X-Hub-Signature-256", badSig)

@@ -1,6 +1,7 @@
 package cloud
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -9,35 +10,78 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 )
 
-// NewServer returns an HTTP handler for the worker protocol. The handler is a
-// dev/reference server around MemoryStore; production can keep these routes and
-// replace the store implementation.
+// AuthHandler is the contract NewServerWithAuth expects: a registrar that can
+// mount its own routes on a parent mux and middleware factories that gate
+// arbitrary handlers behind user / machine credentials. internal/cloud/auth.Handler
+// implements this — cloud avoids importing the auth package directly to keep
+// the dependency arrow pointing the right way.
 //
-// Worker routes (/api/worker/*, /api/cloud/dev/jobs) are unauthenticated for
-// backward compatibility. Cloud config routes (/api/cloud/config, /api/cloud/repos,
-// etc.) require a non-empty Authorization: Bearer <token> header.
+// UserFromContext returns the authenticated user that the surrounding
+// RequireUser/RequireMachine middleware injected, or nil if no auth ran.
+// Cloud handlers use it to attribute writes (e.g. worker registration → owner).
+type AuthHandler interface {
+	RegisterRoutes(mux *http.ServeMux)
+	RequireUser(http.Handler) http.Handler
+	RequireMachine(http.Handler) http.Handler
+	UserFromContext(context.Context) *User
+}
+
+// NewServer returns an HTTP handler for the worker protocol with NO real
+// auth. Cloud config routes accept any non-empty Bearer token; worker routes
+// are open. Suitable for tests and `cloud serve --no-auth` development.
+// Production callers should use NewServerWithAuth.
+//
 // operators is an optional operator registry used by the webhook handler to
 // determine which operators a given GitHub event should trigger. Pass nil to
 // create a server with no operators registered.
-// TODO(rbac): validate tokens against workspace credentials in a follow-up issue.
 func NewServer(store Store, operators *operator.Registry) http.Handler {
+	return NewServerWithAuth(store, operators, nil)
+}
+
+// NewServerWithAuth wires the cloud server with a real auth.Handler. When
+// auth is non-nil:
+//   - All cloud-config routes call auth.RequireUser.
+//   - Worker protocol routes call auth.RequireMachine.
+//   - Auth's own routes (login / callback / device / me / logout) are mounted
+//     on the same mux.
+//
+// When auth is nil the server falls back to the legacy "any non-empty bearer"
+// check for cloud-config and leaves worker routes open. Tests rely on that.
+func NewServerWithAuth(store Store, operators *operator.Registry, auth AuthHandler) http.Handler {
 	if store == nil {
 		store = NewMemoryStore()
 	}
 	if operators == nil {
 		operators = operator.NewRegistry()
 	}
-	s := &server{store: store, operators: operators}
+	s := &server{store: store, operators: operators, auth: auth}
 	mux := http.NewServeMux()
 
-	// Worker protocol — no auth (backward compatible).
-	mux.HandleFunc("/api/worker/register", s.handleRegister)
-	mux.HandleFunc("/api/worker/heartbeat", s.handleHeartbeat)
-	mux.HandleFunc("/api/worker/lease", s.handleLease)
-	mux.HandleFunc("/api/worker/runs/", s.handleRun)
+	// Worker protocol:
+	//   - /register: caller is a logged-in user (personal token); cloud
+	//     mints a machine token and returns it. RequireUser when configured.
+	//   - heartbeat/lease/runs: caller is the registered worker
+	//     (machine token). RequireMachine when configured.
+	gateUser := func(h http.HandlerFunc) http.HandlerFunc {
+		if auth == nil {
+			return h
+		}
+		return auth.RequireUser(h).ServeHTTP
+	}
+	gateMachine := func(h http.HandlerFunc) http.HandlerFunc {
+		if auth == nil {
+			return h
+		}
+		return auth.RequireMachine(h).ServeHTTP
+	}
+	mux.HandleFunc("/api/worker/register", gateUser(s.handleRegister))
+	mux.HandleFunc("/api/worker/heartbeat", gateMachine(s.handleHeartbeat))
+	mux.HandleFunc("/api/worker/lease", gateMachine(s.handleLease))
+	mux.HandleFunc("/api/worker/runs/", gateMachine(s.handleRun))
 	mux.HandleFunc("/api/cloud/dev/jobs", s.handleDevJobs)
 
-	// Cloud config — bearer auth required.
+	// Cloud config — auth.RequireUser when configured, fallback to legacy
+	// bearer check otherwise. The s.withAuth wrapper handles both paths.
 	mux.HandleFunc("/api/cloud/config", s.withAuth(s.handleCloudConfig))
 	mux.HandleFunc("/api/cloud/projects", s.withAuth(s.handleCloudProjects))
 	mux.HandleFunc("/api/cloud/repos", s.withAuth(s.handleCloudRepos))
@@ -48,13 +92,21 @@ func NewServer(store Store, operators *operator.Registry) http.Handler {
 	mux.HandleFunc("/api/cloud/jobs", s.withAuth(s.handleCloudJobs))
 	mux.HandleFunc("/api/cloud/runs", s.withAuth(s.handleCloudRuns))
 
-	mux.HandleFunc("/api/webhooks/github", s.handleWebhookGitHub)
+	// Webhook route matches the GitHub App's configured Webhook URL exactly.
+	mux.HandleFunc("/api/v1/github/app/webhook", s.handleWebhookGitHub)
+
+	// Mount auth routes (login / callback / device flow / me / logout) when
+	// an auth handler is present.
+	if auth != nil {
+		auth.RegisterRoutes(mux)
+	}
 	return mux
 }
 
 type server struct {
 	store     Store
 	operators *operator.Registry
+	auth      AuthHandler
 }
 
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +123,28 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeCloudError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// When real auth is wired, mint a kind=machine API token so subsequent
+	// worker calls (heartbeat / lease / runs) can authenticate. The token
+	// plaintext is the same opaque string that RegisterWorker returned —
+	// we hash it into api_tokens, the worker keeps the plaintext locally
+	// and never sees a second secret.
+	if s.auth != nil {
+		user := s.auth.UserFromContext(r.Context())
+		if user == nil {
+			writeCloudError(w, http.StatusInternalServerError, "auth user missing after RequireUser")
+			return
+		}
+		if _, err := s.store.CreateAPIToken(CreateAPITokenRequest{
+			UserID:    user.ID,
+			Kind:      APITokenKindMachine,
+			Plaintext: resp.WorkerToken,
+			MachineID: resp.MachineID,
+			Label:     "worker:" + req.Hostname,
+		}); err != nil {
+			writeCloudError(w, http.StatusInternalServerError, "mint machine token: "+err.Error())
+			return
+		}
 	}
 	writeCloudJSON(w, http.StatusOK, resp)
 }
@@ -193,14 +267,19 @@ func writeCloudError(w http.ResponseWriter, status int, msg string) {
 
 // ---- Cloud config auth middleware ----
 
-// withAuth wraps a handler to require a non-empty Authorization: Bearer <token>
-// header. It accepts any non-empty token for now.
-// TODO(rbac): validate token against registered workers or user credentials.
+// withAuth gates a handler behind the cloud server's auth model. When the
+// server was constructed with a real AuthHandler, requests must carry either
+// a session cookie or a Bearer API token that resolves to a user (the
+// auth.Handler.RequireUser path). Otherwise — tests and `cloud serve` in
+// no-auth mode — the request just needs any non-empty Bearer token.
 func (s *server) withAuth(h http.HandlerFunc) http.HandlerFunc {
+	if s.auth != nil {
+		return s.auth.RequireUser(h).ServeHTTP
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "Bearer "
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, prefix) || strings.TrimSpace(strings.TrimPrefix(auth, prefix)) == "" {
+		authz := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authz, prefix) || strings.TrimSpace(strings.TrimPrefix(authz, prefix)) == "" {
 			writeCloudError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 			return
 		}

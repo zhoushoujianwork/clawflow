@@ -256,11 +256,6 @@ type Credentials struct {
 	CloudWorkerID    string `yaml:"cloud_worker_id,omitempty"`
 	CloudWorkerToken string `yaml:"cloud_worker_token,omitempty"`
 
-	// GistID is the ID of the user's private "clawflow-config" GitHub Gist,
-	// discovered or created by `clawflow login`. Persisted here so subsequent
-	// sync operations skip the search step. Never synced to the Gist itself.
-	GistID string `yaml:"gist_id,omitempty"`
-
 	// ClaudeAPIKey, when set, overrides whatever auth the user's
 	// system claude would use (OAuth keychain, ~/.claude.json) by
 	// passing ANTHROPIC_API_KEY to every claude subprocess clawflow
@@ -304,18 +299,6 @@ type Credentials struct {
 	ClaudeChatModel     string `yaml:"claude_chat_model,omitempty"`
 	ClaudeEvalModel     string `yaml:"claude_eval_model,omitempty"`
 	ClaudeOperatorModel string `yaml:"claude_operator_model,omitempty"`
-
-	// LastSyncedAt is an RFC3339 timestamp recording when the config was
-	// last successfully pushed or pulled via the sync API. It is stored in
-	// credentials.yaml (alongside GistID) because it is machine-specific
-	// metadata, not part of the synced config payload itself.
-	LastSyncedAt string `yaml:"last_synced_at,omitempty"`
-
-	// LastPulledAt is the RFC3339 UTC timestamp of the last successful
-	// auto-pull or manual pull. Used by the manual-edit detection logic:
-	// if config.yaml's mtime is newer than LastPulledAt, the user edited
-	// the file directly and we should push instead of pull.
-	LastPulledAt string `yaml:"last_pulled_at,omitempty"`
 
 	// ChatDefaultMode controls the default mode for issue-level chat sessions.
 	// Valid values: "issue" (default) — disallows Edit/Write/NotebookEdit and
