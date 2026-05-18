@@ -1,7 +1,11 @@
 package commands
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -29,21 +33,19 @@ Gist sync remains available under 'clawflow sync' as a legacy migration path.`,
 }
 
 func newCloudLoginCmd() *cobra.Command {
-	var (
-		baseURL string
-		token   string
-	)
+	var baseURL string
 	cmd := &cobra.Command{
-		Use:   "login [token]",
-		Short: "Store ClawFlow SaaS URL and access token",
+		Use:   "login",
+		Short: "Authenticate this machine against ClawFlow cloud (GitHub device flow)",
+		Long: `Run a GitHub App device-flow login against the configured cloud URL.
+
+The cloud prints a one-time user code; open the verification URL in any
+browser, enter the code, approve the App, and the CLI saves the issued
+personal API token to ~/.clawflow/config/credentials.yaml.
+
+A previous login on this machine is overwritten. Use --url to override the
+configured cloud URL.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 && token == "" {
-				token = args[0]
-			}
-			token = strings.TrimSpace(token)
-			if token == "" {
-				return fmt.Errorf("cloud access token is required")
-			}
 			creds, err := config.LoadCredentials()
 			if err != nil {
 				return err
@@ -52,18 +54,125 @@ func newCloudLoginCmd() *cobra.Command {
 			if baseURL != "" {
 				cfg.BaseURL = strings.TrimRight(baseURL, "/")
 			}
+			if cfg.BaseURL == "" {
+				cfg.BaseURL = cloud.DefaultBaseURL
+			}
+
+			token, login, err := runDeviceLogin(cmd.Context(), cfg.BaseURL)
+			if err != nil {
+				return err
+			}
 			cfg.AccessToken = token
 			if err := config.SaveCredentials(cfg.ApplyToCredentials(creds)); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "Cloud login saved for %s\n", cfg.BaseURL)
+			fmt.Fprintf(os.Stderr, "\nLogged in as %s at %s\n", login, cfg.BaseURL)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&baseURL, "url", cloud.DefaultBaseURL, "ClawFlow SaaS API base URL")
-	cmd.Flags().StringVar(&token, "token", "", "Cloud access token")
+	cmd.Flags().StringVar(&baseURL, "url", "", "Cloud URL override (default: existing or "+cloud.DefaultBaseURL+")")
 	return cmd
 }
+
+// runDeviceLogin drives the cloud's /api/v1/auth/device flow end-to-end.
+// Returns the issued personal token and the user's github login, or an
+// error explaining why the flow could not complete.
+func runDeviceLogin(ctx context.Context, baseURL string) (token, login string, err error) {
+	start, err := postCloudJSON(ctx, baseURL+"/api/v1/auth/device", nil)
+	if err != nil {
+		return "", "", fmt.Errorf("start device flow: %w", err)
+	}
+	userCode, _ := start["user_code"].(string)
+	verifyURL, _ := start["verification_uri"].(string)
+	interval, _ := start["interval"].(float64)
+	if interval < 1 {
+		interval = 5
+	}
+	if userCode == "" || verifyURL == "" {
+		return "", "", fmt.Errorf("cloud device response missing user_code / verification_uri")
+	}
+
+	fmt.Fprintf(os.Stderr, "\nTo authorize this machine, open:\n  %s\nAnd enter the code:\n  %s\n", verifyURL, userCode)
+	openBrowser(verifyURL)
+
+	pollInterval := time.Duration(interval) * time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		case <-time.After(pollInterval):
+		}
+		poll, err := postCloudJSON(ctx, baseURL+"/api/v1/auth/device/poll",
+			map[string]string{"user_code": userCode})
+		if err != nil {
+			return "", "", fmt.Errorf("poll device flow: %w", err)
+		}
+		status, _ := poll["status"].(string)
+		switch status {
+		case "pending":
+			continue
+		case "slow_down":
+			pollInterval += time.Second
+			continue
+		case "expired":
+			return "", "", fmt.Errorf("device code expired; run `clawflow cloud login` again")
+		case "ok":
+			tok, _ := poll["token"].(string)
+			user, _ := poll["user"].(map[string]any)
+			lg := ""
+			if user != nil {
+				lg, _ = user["login"].(string)
+			}
+			if tok == "" {
+				return "", "", fmt.Errorf("cloud returned status=ok with empty token")
+			}
+			return tok, lg, nil
+		default:
+			return "", "", fmt.Errorf("unexpected device poll status %q", status)
+		}
+	}
+}
+
+// postCloudJSON POSTs a JSON body to url and returns the parsed JSON
+// response. nil body sends an empty POST. Status codes 2xx are treated as
+// success; 4xx/5xx return an error including the response body for
+// debuggability.
+func postCloudJSON(ctx context.Context, url string, body any) (map[string]any, error) {
+	var rdr io.Reader
+	if body != nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		rdr = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, rdr)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	if len(raw) == 0 {
+		return map[string]any{}, nil
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode JSON: %w (body=%q)", err, string(raw))
+	}
+	return out, nil
+}
+
 
 func newCloudStatusCmd() *cobra.Command {
 	return &cobra.Command{

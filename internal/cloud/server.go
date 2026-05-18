@@ -1,6 +1,7 @@
 package cloud
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -14,10 +15,15 @@ import (
 // arbitrary handlers behind user / machine credentials. internal/cloud/auth.Handler
 // implements this — cloud avoids importing the auth package directly to keep
 // the dependency arrow pointing the right way.
+//
+// UserFromContext returns the authenticated user that the surrounding
+// RequireUser/RequireMachine middleware injected, or nil if no auth ran.
+// Cloud handlers use it to attribute writes (e.g. worker registration → owner).
 type AuthHandler interface {
 	RegisterRoutes(mux *http.ServeMux)
 	RequireUser(http.Handler) http.Handler
 	RequireMachine(http.Handler) http.Handler
+	UserFromContext(context.Context) *User
 }
 
 // NewServer returns an HTTP handler for the worker protocol with NO real
@@ -51,14 +57,24 @@ func NewServerWithAuth(store Store, operators *operator.Registry, auth AuthHandl
 	s := &server{store: store, operators: operators, auth: auth}
 	mux := http.NewServeMux()
 
-	// Worker protocol — auth.RequireMachine when configured, open otherwise.
+	// Worker protocol:
+	//   - /register: caller is a logged-in user (personal token); cloud
+	//     mints a machine token and returns it. RequireUser when configured.
+	//   - heartbeat/lease/runs: caller is the registered worker
+	//     (machine token). RequireMachine when configured.
+	gateUser := func(h http.HandlerFunc) http.HandlerFunc {
+		if auth == nil {
+			return h
+		}
+		return auth.RequireUser(h).ServeHTTP
+	}
 	gateMachine := func(h http.HandlerFunc) http.HandlerFunc {
 		if auth == nil {
 			return h
 		}
 		return auth.RequireMachine(h).ServeHTTP
 	}
-	mux.HandleFunc("/api/worker/register", s.handleRegister)
+	mux.HandleFunc("/api/worker/register", gateUser(s.handleRegister))
 	mux.HandleFunc("/api/worker/heartbeat", gateMachine(s.handleHeartbeat))
 	mux.HandleFunc("/api/worker/lease", gateMachine(s.handleLease))
 	mux.HandleFunc("/api/worker/runs/", gateMachine(s.handleRun))
@@ -107,6 +123,28 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeCloudError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// When real auth is wired, mint a kind=machine API token so subsequent
+	// worker calls (heartbeat / lease / runs) can authenticate. The token
+	// plaintext is the same opaque string that RegisterWorker returned —
+	// we hash it into api_tokens, the worker keeps the plaintext locally
+	// and never sees a second secret.
+	if s.auth != nil {
+		user := s.auth.UserFromContext(r.Context())
+		if user == nil {
+			writeCloudError(w, http.StatusInternalServerError, "auth user missing after RequireUser")
+			return
+		}
+		if _, err := s.store.CreateAPIToken(CreateAPITokenRequest{
+			UserID:    user.ID,
+			Kind:      APITokenKindMachine,
+			Plaintext: resp.WorkerToken,
+			MachineID: resp.MachineID,
+			Label:     "worker:" + req.Hostname,
+		}); err != nil {
+			writeCloudError(w, http.StatusInternalServerError, "mint machine token: "+err.Error())
+			return
+		}
 	}
 	writeCloudJSON(w, http.StatusOK, resp)
 }

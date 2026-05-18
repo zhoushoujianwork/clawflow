@@ -148,6 +148,13 @@ func UserFromContext(ctx context.Context) *cloud.User {
 	return v
 }
 
+// UserFromContext on *Handler satisfies cloud.AuthHandler so callers that
+// only hold an AuthHandler interface (e.g. server.go) can still resolve the
+// authenticated user without importing the auth package directly.
+func (h *Handler) UserFromContext(ctx context.Context) *cloud.User {
+	return UserFromContext(ctx)
+}
+
 // TokenFromContext returns the API token used to authenticate the request,
 // or nil if the user authenticated via session cookie.
 func TokenFromContext(ctx context.Context) *cloud.APIToken {
