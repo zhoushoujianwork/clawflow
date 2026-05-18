@@ -175,12 +175,10 @@ function AppLayout() {
               </div>
             )}
             <nav className="flex gap-1">
-              {/* Dashboard and Usage are local-web only: in cloud mode they
-                  redirect to /cloud/jobs, which makes them look like dead
-                  duplicates of the dedicated Jobs nav. Hide them on cloud
-                  bundles. (Direct navigation to /dashboard or /usage still
-                  redirects — the entry points just don't appear in nav.) */}
-              {!cloudConfigured && <NavLink to="/dashboard">Dashboard</NavLink>}
+              {/* Dashboard renders the cloud Jobs & Runs board in cloud
+                  mode (see _app.dashboard.tsx). The old standalone
+                  "Jobs" nav entry is gone — /cloud/jobs redirects here. */}
+              <NavLink to="/dashboard">Dashboard</NavLink>
               <NavLink to="/repos">Repos</NavLink>
               <NavLink to="/projects">Projects</NavLink>
               <NavLink to="/operators">Operators</NavLink>
@@ -188,9 +186,10 @@ function AppLayout() {
                 <>
                   <NavLink to="/cloud/machines">Machines</NavLink>
                   <NavLink to="/cloud/bindings">Bindings</NavLink>
-                  <NavLink to="/cloud/jobs">Jobs</NavLink>
                 </>
               )}
+              {/* Usage on cloud still redirects to Dashboard until PR 3
+                  wires worker → cloud usage sync; hide its nav entry. */}
               {!cloudConfigured && <NavLink to="/usage">Usage</NavLink>}
               <NavLink to="/settings">Settings</NavLink>
             </nav>
