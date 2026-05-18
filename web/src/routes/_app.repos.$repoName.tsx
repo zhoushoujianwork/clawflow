@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, Loader2, RefreshCw, Save, Trash2 } from 'lucide-react'
+import { ArrowLeft, Loader2, MessageSquare, RefreshCw, Save, Trash2 } from 'lucide-react'
+import { useChatDrawer } from '../lib/chatContext'
 import {
   deleteRepo,
   fetchBindings,
@@ -25,6 +26,7 @@ function RepoDetailPage() {
   const { repoName } = Route.useParams()
   const fullName = decodeURIComponent(repoName)
   const navigate = useNavigate()
+  const chatDrawer = useChatDrawer()
 
   const [repo, setRepo] = useState<Repo | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
@@ -204,6 +206,16 @@ function RepoDetailPage() {
               </h1>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => { if (repo) void chatDrawer.open({ repo: repo.name }) }}
+                disabled={!repo}
+                className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm transition-colors disabled:opacity-50"
+                style={{ background: 'hsl(var(--brand))', color: 'white' }}
+                title="Open a chat session for this repo"
+              >
+                <MessageSquare size={12} />
+                Chat
+              </button>
               <button
                 onClick={load}
                 disabled={loading}
