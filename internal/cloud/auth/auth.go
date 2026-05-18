@@ -124,6 +124,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // when embedding the auth handler in a larger HTTP server so the routes share
 // one mux rather than nesting two. Patterns match those registered on the
 // handler's internal mux.
+//
+// Also registers a minimal landing page at GET /{$} (exact match for "/"
+// only, leaving 404s for unknown paths intact). The page shows a sign-in
+// link when anonymous, or a "you're signed in" panel otherwise. PR 2 will
+// replace this with the actual React app.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/github/app/login", h.handleLogin)
 	mux.HandleFunc("GET /api/v1/github/app/callback", h.handleCallback)
@@ -131,6 +136,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/device/poll", h.handleDevicePoll)
 	mux.HandleFunc("POST /api/v1/auth/logout", h.handleLogout)
 	mux.HandleFunc("GET /api/v1/auth/me", h.handleMe)
+	mux.HandleFunc("GET /{$}", h.handleIndex)
 }
 
 // ---- Request context plumbing ----
