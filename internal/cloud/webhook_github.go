@@ -13,7 +13,8 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 )
 
-// handleWebhookGitHub is registered on POST /api/webhooks/github.
+// handleWebhookGitHub is registered on POST /api/v1/github/app/webhook
+// (must match the GitHub App's Webhook URL exactly).
 //
 // It verifies the X-Hub-Signature-256 HMAC, dispatches on X-GitHub-Event,
 // and enqueues one JobSpec per (issue/PR, matching operator) pair.

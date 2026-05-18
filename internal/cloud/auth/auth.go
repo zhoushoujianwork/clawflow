@@ -120,6 +120,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// RegisterRoutes mounts every auth route on the supplied outer mux. Use this
+// when embedding the auth handler in a larger HTTP server so the routes share
+// one mux rather than nesting two. Patterns match those registered on the
+// handler's internal mux.
+func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/github/app/login", h.handleLogin)
+	mux.HandleFunc("GET /api/v1/github/app/callback", h.handleCallback)
+	mux.HandleFunc("POST /api/v1/auth/device", h.handleDeviceStart)
+	mux.HandleFunc("POST /api/v1/auth/device/poll", h.handleDevicePoll)
+	mux.HandleFunc("POST /api/v1/auth/logout", h.handleLogout)
+	mux.HandleFunc("GET /api/v1/auth/me", h.handleMe)
+}
+
 // ---- Request context plumbing ----
 
 type ctxKey int

@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/cloud"
+	"github.com/zhoushoujianwork/clawflow/internal/cloud/auth"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
 
@@ -106,19 +108,39 @@ func newCloudStatusCmd() *cobra.Command {
 
 func newCloudServeCmd() *cobra.Command {
 	var (
-		host      string
-		port      int
-		storeFlag string
+		host       string
+		port       int
+		storeFlag  string
+		publicURL  string
+		appID      int64
+		appSlug    string
+		clientID   string
+		clientSec  string
+		sessionKey string
+		noAuth     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run a local development ClawFlow SaaS API",
-		Long: `Run a local development ClawFlow SaaS API.
+		Short: "Run the ClawFlow cloud API",
+		Long: `Run the ClawFlow cloud API server.
 
-By default the server uses an in-memory store (data is lost on exit).
-Pass --store to select a persistent backend:
+In production, pass GitHub App OAuth credentials so user identity and CLI
+device-flow login work. Required flags (or matching env vars) for auth mode:
 
-  --store memory                          in-memory (default)
+  --github-app-id              CLAWFLOW_GITHUB_APP_ID
+  --github-app-slug            CLAWFLOW_GITHUB_APP_SLUG
+  --github-app-client-id       CLAWFLOW_GITHUB_APP_CLIENT_ID
+  --github-app-client-secret   CLAWFLOW_GITHUB_APP_CLIENT_SECRET
+  --session-key                CLAWFLOW_SESSION_KEY (>=32 random bytes, hex/ascii)
+  --public-url                 CLAWFLOW_PUBLIC_URL  (e.g. https://clawflow.daboluo.cc)
+
+For local development without GitHub credentials, pass --no-auth. Worker
+endpoints become open and cloud-config endpoints accept any non-empty
+Bearer token. Never run --no-auth in production.
+
+Store backends:
+
+  --store memory                          in-memory (default; lost on exit)
   --store sqlite:///path/to/state.db      persistent SQLite file
   --store sqlite://:memory:               ephemeral SQLite (for testing)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -126,16 +148,98 @@ Pass --store to select a persistent backend:
 			if err != nil {
 				return err
 			}
+
+			var authH cloud.AuthHandler
+			if !noAuth {
+				appID = orEnvInt(appID, "CLAWFLOW_GITHUB_APP_ID")
+				appSlug = orEnv(appSlug, "CLAWFLOW_GITHUB_APP_SLUG")
+				clientID = orEnv(clientID, "CLAWFLOW_GITHUB_APP_CLIENT_ID")
+				clientSec = orEnv(clientSec, "CLAWFLOW_GITHUB_APP_CLIENT_SECRET")
+				sessionKey = orEnv(sessionKey, "CLAWFLOW_SESSION_KEY")
+				publicURL = orEnv(publicURL, "CLAWFLOW_PUBLIC_URL")
+
+				if missing := firstEmpty([2]string{"--github-app-client-id", clientID},
+					[2]string{"--github-app-client-secret", clientSec},
+					[2]string{"--session-key", sessionKey},
+					[2]string{"--public-url", publicURL}); missing != "" {
+					return fmt.Errorf("%s is required (set the flag, the matching env var, or pass --no-auth for local dev)", missing)
+				}
+				if len(sessionKey) < 32 {
+					return fmt.Errorf("--session-key must be at least 32 bytes")
+				}
+				authH = auth.NewHandler(store, auth.Config{
+					AppID:        appID,
+					AppSlug:      appSlug,
+					ClientID:     clientID,
+					ClientSecret: clientSec,
+					PublicURL:    publicURL,
+					SessionKey:   []byte(sessionKey),
+					SessionTTL:   30 * 24 * time.Hour,
+					CookieSecure: strings.HasPrefix(strings.ToLower(publicURL), "https://"),
+				})
+			}
+
 			addr := fmt.Sprintf("%s:%d", host, port)
-			fmt.Fprintf(os.Stderr, "ClawFlow cloud dev API listening on http://%s (store: %s)\n", addr, storeFlag)
-			return http.ListenAndServe(addr, cloud.NewServer(store, nil))
+			mode := "auth=github-app"
+			if noAuth {
+				mode = "auth=NONE (dev)"
+			}
+			fmt.Fprintf(os.Stderr, "ClawFlow cloud API listening on http://%s (store: %s, %s)\n", addr, storeFlag, mode)
+			return http.ListenAndServe(addr, cloud.NewServerWithAuth(store, nil, authH))
 		},
 	}
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "Host to bind")
 	cmd.Flags().IntVar(&port, "port", 8790, "Port to bind")
 	cmd.Flags().StringVar(&storeFlag, "store", "memory",
 		`Store backend: "memory" (default) or "sqlite:///path/to/file.db"`)
+
+	cmd.Flags().StringVar(&publicURL, "public-url", "",
+		"Externally-visible base URL (e.g. https://clawflow.daboluo.cc); env CLAWFLOW_PUBLIC_URL")
+	cmd.Flags().Int64Var(&appID, "github-app-id", 0, "GitHub App ID; env CLAWFLOW_GITHUB_APP_ID")
+	cmd.Flags().StringVar(&appSlug, "github-app-slug", "",
+		"GitHub App slug (URL fragment); env CLAWFLOW_GITHUB_APP_SLUG")
+	cmd.Flags().StringVar(&clientID, "github-app-client-id", "",
+		"GitHub App OAuth client ID; env CLAWFLOW_GITHUB_APP_CLIENT_ID")
+	cmd.Flags().StringVar(&clientSec, "github-app-client-secret", "",
+		"GitHub App OAuth client secret; env CLAWFLOW_GITHUB_APP_CLIENT_SECRET")
+	cmd.Flags().StringVar(&sessionKey, "session-key", "",
+		"Random secret used to sign session/state cookies (>=32 bytes); env CLAWFLOW_SESSION_KEY")
+	cmd.Flags().BoolVar(&noAuth, "no-auth", false,
+		"Disable GitHub App auth (DEV ONLY — never use in production)")
 	return cmd
+}
+
+// orEnv returns flag if non-empty, otherwise os.Getenv(envKey).
+func orEnv(flag, envKey string) string {
+	if flag != "" {
+		return flag
+	}
+	return os.Getenv(envKey)
+}
+
+// orEnvInt is the int64 analogue. Empty / unparseable env yields 0.
+func orEnvInt(flag int64, envKey string) int64 {
+	if flag != 0 {
+		return flag
+	}
+	v := os.Getenv(envKey)
+	if v == "" {
+		return 0
+	}
+	var n int64
+	_, _ = fmt.Sscanf(v, "%d", &n)
+	return n
+}
+
+// firstEmpty returns the first flag name whose value is empty, or "" if all
+// values are populated.
+func firstEmpty(pairs ...[2]string) string {
+	for _, p := range pairs {
+		if p[1] == "" {
+			return p[0]
+		}
+	}
+	return ""
 }
 
 // openCloudStore returns a Store for the given flag value.
