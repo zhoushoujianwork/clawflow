@@ -23,8 +23,6 @@ func NewCloudCmd() *cobra.Command {
 Gist sync remains available under 'clawflow sync' as a legacy migration path.`,
 	}
 	cmd.AddCommand(newCloudLoginCmd())
-	cmd.AddCommand(newCloudPullCmd())
-	cmd.AddCommand(newCloudPushCmd())
 	cmd.AddCommand(newCloudServeCmd())
 	cmd.AddCommand(newCloudStatusCmd())
 	return cmd
@@ -65,26 +63,6 @@ func newCloudLoginCmd() *cobra.Command {
 	cmd.Flags().StringVar(&baseURL, "url", cloud.DefaultBaseURL, "ClawFlow SaaS API base URL")
 	cmd.Flags().StringVar(&token, "token", "", "Cloud access token")
 	return cmd
-}
-
-func newCloudPullCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "pull",
-		Short: "Pull cloud config into the local cache",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("cloud pull is reserved for the SaaS config API phase")
-		},
-	}
-}
-
-func newCloudPushCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "push",
-		Short: "Migrate local config into cloud config",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("cloud push is reserved for the SaaS config API phase")
-		},
-	}
 }
 
 func newCloudStatusCmd() *cobra.Command {

@@ -26,7 +26,6 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 
 	root.AddCommand(NewCloudCmd())
 	root.AddCommand(NewWorkerCmd())
-	root.AddCommand(NewRunCmd())
 	root.AddCommand(NewWebCmd())
 	root.AddCommand(NewChatCmd())
 	root.AddCommand(NewFeedbackCmd())
