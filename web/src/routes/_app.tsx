@@ -175,7 +175,12 @@ function AppLayout() {
               </div>
             )}
             <nav className="flex gap-1">
-              <NavLink to="/dashboard">Dashboard</NavLink>
+              {/* Dashboard and Usage are local-web only: in cloud mode they
+                  redirect to /cloud/jobs, which makes them look like dead
+                  duplicates of the dedicated Jobs nav. Hide them on cloud
+                  bundles. (Direct navigation to /dashboard or /usage still
+                  redirects — the entry points just don't appear in nav.) */}
+              {!cloudConfigured && <NavLink to="/dashboard">Dashboard</NavLink>}
               <NavLink to="/repos">Repos</NavLink>
               <NavLink to="/projects">Projects</NavLink>
               <NavLink to="/operators">Operators</NavLink>
@@ -186,7 +191,7 @@ function AppLayout() {
                   <NavLink to="/cloud/jobs">Jobs</NavLink>
                 </>
               )}
-              <NavLink to="/usage">Usage</NavLink>
+              {!cloudConfigured && <NavLink to="/usage">Usage</NavLink>}
               <NavLink to="/settings">Settings</NavLink>
             </nav>
           </div>
