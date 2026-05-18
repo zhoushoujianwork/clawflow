@@ -180,12 +180,92 @@ export function fetchBindings(): Promise<{ bindings: Binding[] }> {
   return cloudFetch<{ bindings: Binding[] }>('/api/cloud/bindings')
 }
 
+export function createBinding(body: {
+  machine_id: string
+  repo_id?: string
+  project_id?: string
+}): Promise<Binding> {
+  return cloudFetch<Binding>('/api/cloud/bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
 export function updateBinding(id: string, body: UpdateBindingRequest): Promise<Binding> {
   return cloudFetch<Binding>(`/api/cloud/bindings/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+}
+
+export async function deleteBinding(id: string): Promise<void> {
+  const res = await fetch(`/api/cloud/bindings/${id}`, { method: 'DELETE', credentials: 'include' })
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`delete binding: ${res.status}`)
+  }
+}
+
+// ---- Repos ----
+
+export function fetchRepos(): Promise<{ repos: Repo[] }> {
+  return cloudFetch<{ repos: Repo[] }>('/api/cloud/repos')
+}
+
+export function createRepo(body: {
+  name: string
+  platform?: string
+  project_id?: string
+  base_branch?: string
+}): Promise<Repo> {
+  return cloudFetch<Repo>('/api/cloud/repos', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function updateRepo(id: string, body: {
+  project_id?: string
+  base_branch?: string
+}): Promise<Repo> {
+  return cloudFetch<Repo>(`/api/cloud/repos/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteRepo(id: string): Promise<void> {
+  const res = await fetch(`/api/cloud/repos/${id}`, { method: 'DELETE', credentials: 'include' })
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`delete repo: ${res.status}`)
+  }
+}
+
+// ---- Projects ----
+
+export function fetchProjects(): Promise<{ projects: Project[] }> {
+  return cloudFetch<{ projects: Project[] }>('/api/cloud/projects')
+}
+
+export function createProject(body: {
+  name: string
+  description?: string
+}): Promise<Project> {
+  return cloudFetch<Project>('/api/cloud/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  const res = await fetch(`/api/cloud/projects/${id}`, { method: 'DELETE', credentials: 'include' })
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`delete project: ${res.status}`)
+  }
 }
 
 export function fetchJobs(): Promise<{ jobs: JobRecord[] }> {

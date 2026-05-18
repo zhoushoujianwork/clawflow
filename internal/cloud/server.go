@@ -28,6 +28,14 @@ type AuthHandler interface {
 	UserFromContext(context.Context) *User
 }
 
+// RouteMounter is anything that can register additional routes onto the cloud
+// server's mux — e.g. the chat package's Handler. Pass a slice of these via
+// NewServerWithExtras so the chat / future feature handlers stay decoupled
+// from the cloud package proper.
+type RouteMounter interface {
+	RegisterRoutes(mux *http.ServeMux)
+}
+
 // NewServer returns an HTTP handler for the worker protocol with NO real
 // auth. Cloud config routes accept any non-empty Bearer token; worker routes
 // are open. Suitable for tests and `cloud serve --no-auth` development.
@@ -50,6 +58,14 @@ func NewServer(store Store, operators *operator.Registry) http.Handler {
 // When auth is nil the server falls back to the legacy "any non-empty bearer"
 // check for cloud-config and leaves worker routes open. Tests rely on that.
 func NewServerWithAuth(store Store, operators *operator.Registry, auth AuthHandler) http.Handler {
+	return NewServerWithExtras(store, operators, auth, nil)
+}
+
+// NewServerWithExtras is NewServerWithAuth + an optional list of extra route
+// mounters (e.g. chat). Each mounter's RegisterRoutes(mux) is called after
+// the core auth/cloud-config/worker routes — extras can rely on those being
+// registered first if they care about precedence.
+func NewServerWithExtras(store Store, operators *operator.Registry, auth AuthHandler, extras []RouteMounter) http.Handler {
 	if store == nil {
 		store = NewMemoryStore()
 	}
@@ -102,6 +118,15 @@ func NewServerWithAuth(store Store, operators *operator.Registry, auth AuthHandl
 	// an auth handler is present.
 	if auth != nil {
 		auth.RegisterRoutes(mux)
+	}
+
+	// Mount any extra route bundles (e.g. chat). These come BEFORE the SPA
+	// catch-all so their API paths win route resolution.
+	for _, ext := range extras {
+		if ext == nil {
+			continue
+		}
+		ext.RegisterRoutes(mux)
 	}
 
 	// Serve the embedded React app. /assets/* are versioned static files;
@@ -362,24 +387,28 @@ func (s *server) handleCloudConfig(w http.ResponseWriter, r *http.Request) {
 	writeCloudJSON(w, http.StatusOK, s.store.Summary())
 }
 
-// handleCloudProjects handles project creation.
-// POST /api/cloud/projects
+// handleCloudProjects handles list (GET) and creation (POST).
+// GET  /api/cloud/projects → { "projects": [...] }
+// POST /api/cloud/projects → 201 with project
 func (s *server) handleCloudProjects(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+		writeCloudJSON(w, http.StatusOK, map[string]any{"projects": s.store.Summary().Projects})
+	case http.MethodPost:
+		var req CreateProjectRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeCloudError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		p, err := s.store.CreateProject(req)
+		if err != nil {
+			writeCloudError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeCloudJSON(w, http.StatusCreated, p)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	var req CreateProjectRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-	p, err := s.store.CreateProject(req)
-	if err != nil {
-		writeCloudError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeCloudJSON(w, http.StatusCreated, p)
 }
 
 // handleCloudProjectByID handles DELETE on a project.
@@ -401,24 +430,28 @@ func (s *server) handleCloudProjectByID(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleCloudRepos handles repo creation.
-// POST /api/cloud/repos
+// handleCloudRepos handles list (GET) and creation (POST).
+// GET  /api/cloud/repos → { "repos": [...] }
+// POST /api/cloud/repos → 201 with repo
 func (s *server) handleCloudRepos(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+		writeCloudJSON(w, http.StatusOK, map[string]any{"repos": s.store.Summary().Repos})
+	case http.MethodPost:
+		var req CreateRepoRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeCloudError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		repo, err := s.store.CreateRepo(req)
+		if err != nil {
+			writeCloudError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeCloudJSON(w, http.StatusCreated, repo)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	var req CreateRepoRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-	repo, err := s.store.CreateRepo(req)
-	if err != nil {
-		writeCloudError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeCloudJSON(w, http.StatusCreated, repo)
 }
 
 // handleCloudRepoByID handles PATCH (partial update) and DELETE on a repo.
@@ -454,24 +487,28 @@ func (s *server) handleCloudRepoByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleCloudBindings handles binding creation.
-// POST /api/cloud/bindings
+// handleCloudBindings handles list (GET) and creation (POST).
+// GET  /api/cloud/bindings → { "bindings": [...] }
+// POST /api/cloud/bindings → 201 with binding
 func (s *server) handleCloudBindings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+		writeCloudJSON(w, http.StatusOK, map[string]any{"bindings": s.store.Summary().Bindings})
+	case http.MethodPost:
+		var req CreateBindingRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeCloudError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		b, err := s.store.CreateBinding(req)
+		if err != nil {
+			writeCloudError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeCloudJSON(w, http.StatusCreated, b)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	var req CreateBindingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-	b, err := s.store.CreateBinding(req)
-	if err != nil {
-		writeCloudError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeCloudJSON(w, http.StatusCreated, b)
 }
 
 // handleCloudBindingByID handles PATCH (partial update) and DELETE on a binding.
