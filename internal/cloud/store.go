@@ -69,6 +69,34 @@ type RunRecord struct {
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 }
 
+// Store is the server-side persistence interface for the worker protocol.
+// MemoryStore and SQLiteStore are both implementations; swap them via NewServer.
+type Store interface {
+	// Worker protocol.
+	RegisterWorker(req RegisterWorkerRequest) (RegisterWorkerResponse, error)
+	Heartbeat(req HeartbeatRequest) (HeartbeatResponse, error)
+	EnqueueJob(spec JobSpec, boundMachineID string) (*JobRecord, error)
+	Lease(req LeaseRequest, leaseFor time.Duration) (*JobSpec, error)
+	AppendRunEvents(runID string, events []RunEvent) error
+	FinishRun(runID string, req FinishRunRequest) error
+	GetJob(id string) *JobRecord
+	GetRun(id string) *RunRecord
+
+	// Cloud config.
+	Summary() CloudConfigSummary
+	CreateProject(req CreateProjectRequest) (*Project, error)
+	CreateRepo(req CreateRepoRequest) (*Repo, error)
+	UpdateRepo(id string, req UpdateRepoRequest) (*Repo, error)
+	CreateBinding(req CreateBindingRequest) (*Binding, error)
+	UpdateBinding(id string, req UpdateBindingRequest) (*Binding, error)
+	ListMachines() []*Machine
+	ListJobs() []*JobRecord
+	ListRuns() []*RunRecord
+}
+
+// compile-time check
+var _ Store = (*MemoryStore)(nil)
+
 // MemoryStore is the first server-side implementation of the worker protocol.
 // It is useful for local development and tests; production storage should keep
 // this behavior but replace the in-memory maps with a database-backed store.

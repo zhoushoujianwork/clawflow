@@ -15,7 +15,7 @@ import (
 // backward compatibility. Cloud config routes (/api/cloud/config, /api/cloud/repos,
 // etc.) require a non-empty Authorization: Bearer <token> header.
 // TODO(rbac): validate tokens against workspace credentials in a follow-up issue.
-func NewServer(store *MemoryStore) http.Handler {
+func NewServer(store Store) http.Handler {
 	if store == nil {
 		store = NewMemoryStore()
 	}
@@ -44,7 +44,7 @@ func NewServer(store *MemoryStore) http.Handler {
 }
 
 type server struct {
-	store *MemoryStore
+	store Store
 }
 
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {

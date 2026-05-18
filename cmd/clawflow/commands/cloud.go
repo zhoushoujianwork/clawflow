@@ -106,23 +106,47 @@ func newCloudStatusCmd() *cobra.Command {
 
 func newCloudServeCmd() *cobra.Command {
 	var (
-		host string
-		port int
+		host      string
+		port      int
+		storeFlag string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run a local development ClawFlow SaaS API",
-		Long: `Run a local development ClawFlow SaaS API with in-memory storage.
+		Long: `Run a local development ClawFlow SaaS API.
 
-This is a worker-protocol reference server for local testing. Production SaaS
-storage will replace the in-memory store with a database-backed implementation.`,
+By default the server uses an in-memory store (data is lost on exit).
+Pass --store to select a persistent backend:
+
+  --store memory                          in-memory (default)
+  --store sqlite:///path/to/state.db      persistent SQLite file
+  --store sqlite://:memory:               ephemeral SQLite (for testing)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openCloudStore(storeFlag)
+			if err != nil {
+				return err
+			}
 			addr := fmt.Sprintf("%s:%d", host, port)
-			fmt.Fprintf(os.Stderr, "ClawFlow cloud dev API listening on http://%s\n", addr)
-			return http.ListenAndServe(addr, cloud.NewServer(cloud.NewMemoryStore()))
+			fmt.Fprintf(os.Stderr, "ClawFlow cloud dev API listening on http://%s (store: %s)\n", addr, storeFlag)
+			return http.ListenAndServe(addr, cloud.NewServer(store))
 		},
 	}
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "Host to bind")
 	cmd.Flags().IntVar(&port, "port", 8790, "Port to bind")
+	cmd.Flags().StringVar(&storeFlag, "store", "memory",
+		`Store backend: "memory" (default) or "sqlite:///path/to/file.db"`)
 	return cmd
+}
+
+// openCloudStore returns a Store for the given flag value.
+func openCloudStore(storeFlag string) (cloud.Store, error) {
+	switch {
+	case storeFlag == "" || storeFlag == "memory":
+		return cloud.NewMemoryStore(), nil
+	case strings.HasPrefix(storeFlag, "sqlite://"):
+		path := strings.TrimPrefix(storeFlag, "sqlite://")
+		return cloud.NewSQLiteStore(path)
+	default:
+		return nil, fmt.Errorf("unknown store %q: use \"memory\" or \"sqlite:///path/to/file.db\"", storeFlag)
+	}
 }
