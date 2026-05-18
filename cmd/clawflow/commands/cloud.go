@@ -273,8 +273,13 @@ Store backends:
 			// Cloud-side chat: opt-in. Requires Anthropic API key (so the
 			// cloud server can spawn `claude -p`); the App private-key path
 			// is optional but private-repo clones won't work without it.
+			// Reject placeholder values so an unfilled cloud.env template
+			// doesn't accidentally enable chat in a half-configured state.
 			var extras []cloud.RouteMounter
-			anthropicKey := os.Getenv("CLAWFLOW_ANTHROPIC_API_KEY")
+			anthropicKey := strings.TrimSpace(os.Getenv("CLAWFLOW_ANTHROPIC_API_KEY"))
+			if strings.HasPrefix(anthropicKey, "__REPLACE") {
+				anthropicKey = ""
+			}
 			chatMode := "chat=OFF"
 			if anthropicKey != "" && authH != nil {
 				chatCfg := chat.Config{

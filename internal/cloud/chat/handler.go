@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -55,12 +56,17 @@ func NewHandler(cfg Config, auth AuthExtractor) (*Handler, error) {
 		tokenCache: make(map[int64]installationTokenEntry),
 		cloneLocks: make(map[string]*sync.Mutex),
 	}
+	// PEM is optional at startup time. Loading is best-effort so the
+	// cloud server can boot even with an unset / unreadable path —
+	// public-repo chat still works. Only private-repo clones fail at
+	// request time with a clear "private key not configured" error.
 	if cfg.GitHubAppPrivateKeyPath != "" {
 		key, err := loadRSAPrivateKey(cfg.GitHubAppPrivateKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("load github app private key: %w", err)
+		if err == nil {
+			h.appPrivateKey = key
+		} else {
+			fmt.Fprintf(os.Stderr, "chat: github app private key unavailable (%v); private repos won't clone\n", err)
 		}
-		h.appPrivateKey = key
 	}
 
 	gcCtx, cancel := context.WithCancel(context.Background())
