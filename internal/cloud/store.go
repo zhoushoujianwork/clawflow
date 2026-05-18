@@ -82,6 +82,15 @@ type Store interface {
 	GetJob(id string) *JobRecord
 	GetRun(id string) *RunRecord
 
+	// Usage. AddChatUsage is called by the chat handler after a worker
+	// POSTs to /api/worker/chat/sessions/{id}/usage. AddRunUsage is
+	// called implicitly from FinishRun when the request carries a
+	// non-nil Usage. Get* are for tests and for the future
+	// /api/cloud/usage/summary aggregation endpoint.
+	AddChatUsage(in AddChatUsageInput) error
+	GetRunUsage(runID string) *UsageRecord
+	GetChatUsage(sessionID string) *UsageRecord
+
 	// VCS connections (used by the webhook handler).
 	RegisterConnection(conn VCSConnection) (*VCSConnection, error)
 	GetConnectionByRepo(repo string) *VCSConnection
@@ -148,6 +157,11 @@ type MemoryStore struct {
 	Repos    map[string]*Repo
 	Bindings map[string]*Binding
 
+	// Usage by primary key. RunUsage is keyed by run_id, ChatUsage by
+	// session_id.
+	RunUsage  map[string]*UsageRecord
+	ChatUsage map[string]*UsageRecord
+
 	dedupe map[string]string
 	// repoConn maps "owner/repo" → connection ID for O(1) webhook lookup.
 	repoConn map[string]string
@@ -163,6 +177,8 @@ func NewMemoryStore() *MemoryStore {
 		Projects:    make(map[string]*Project),
 		Repos:       make(map[string]*Repo),
 		Bindings:    make(map[string]*Binding),
+		RunUsage:    make(map[string]*UsageRecord),
+		ChatUsage:   make(map[string]*UsageRecord),
 		dedupe:      make(map[string]string),
 		repoConn:    make(map[string]string),
 	}
@@ -369,13 +385,97 @@ func (s *MemoryStore) FinishRun(runID string, req FinishRunRequest) error {
 	run.Error = req.Error
 	run.EndedAt = &now
 
+	var (
+		repo     string
+		operator string
+	)
 	if job := s.Jobs[run.JobID]; job != nil {
 		job.Status = status
 		job.LeaseWorkerID = ""
 		job.LeaseExpiresAt = time.Time{}
 		job.UpdatedAt = now
+		repo = job.Spec.Repo
+		operator = job.Spec.Operator
+	}
+	if req.Usage != nil {
+		// Idempotent on duplicate run_id: later upload wins (a retry
+		// usually means later events.jsonl is more complete).
+		s.RunUsage[runID] = newUsageRecord("", runID, repo, operator, "", "", now, req.Usage)
 	}
 	return nil
+}
+
+// AddChatUsage stores a chat session's terminal token / cost breakdown.
+// Idempotent on (session_id): retries from the worker simply overwrite.
+func (s *MemoryStore) AddChatUsage(in AddChatUsageInput) error {
+	if in.SessionID == "" {
+		return fmt.Errorf("session_id is required")
+	}
+	if in.Usage == nil {
+		return fmt.Errorf("usage is required")
+	}
+	endedAt := in.EndedAt
+	if endedAt.IsZero() {
+		endedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ChatUsage[in.SessionID] = newUsageRecord(in.SessionID, "", in.Repo, "", in.UserID, in.MachineID, endedAt, in.Usage)
+	return nil
+}
+
+// GetRunUsage returns a copy of the stored run usage, or nil.
+func (s *MemoryStore) GetRunUsage(runID string) *UsageRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneUsage(s.RunUsage[runID])
+}
+
+// GetChatUsage returns a copy of the stored chat usage, or nil.
+func (s *MemoryStore) GetChatUsage(sessionID string) *UsageRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneUsage(s.ChatUsage[sessionID])
+}
+
+func newUsageRecord(sessionID, runID, repo, operator, userID, machineID string, endedAt time.Time, u *Usage) *UsageRecord {
+	rec := &UsageRecord{
+		RunID:                    runID,
+		SessionID:                sessionID,
+		UserID:                   userID,
+		MachineID:                machineID,
+		Repo:                     repo,
+		Operator:                 operator,
+		DurationMs:               u.DurationMs,
+		NumTurns:                 u.NumTurns,
+		TotalCostUSD:             u.TotalCostUSD,
+		InputTokens:              u.InputTokens,
+		OutputTokens:             u.OutputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+		EndedAt:                  endedAt,
+	}
+	if len(u.ModelUsage) > 0 {
+		rec.ModelUsage = make(map[string]ModelUsage, len(u.ModelUsage))
+		for k, v := range u.ModelUsage {
+			rec.ModelUsage[k] = v
+		}
+	}
+	return rec
+}
+
+func cloneUsage(u *UsageRecord) *UsageRecord {
+	if u == nil {
+		return nil
+	}
+	cp := *u
+	if u.ModelUsage != nil {
+		cp.ModelUsage = make(map[string]ModelUsage, len(u.ModelUsage))
+		for k, v := range u.ModelUsage {
+			cp.ModelUsage[k] = v
+		}
+	}
+	return &cp
 }
 
 func (s *MemoryStore) GetJob(id string) *JobRecord {

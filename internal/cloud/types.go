@@ -358,4 +358,79 @@ type FinishRunRequest struct {
 	Outcome string `json:"outcome,omitempty"`
 	Summary string `json:"summary,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Usage, when non-nil, carries the run's token / cost breakdown
+	// extracted from the terminal "result" event in events.jsonl. Optional
+	// for backward compat with older workers; consumers must handle nil.
+	Usage *Usage `json:"usage,omitempty"`
+}
+
+// Usage is the wire shape of one run or chat session's terminal token /
+// cost breakdown. It mirrors snapshot.Usage field-for-field so the worker
+// can json.Marshal one into the other; the duplicated declaration avoids
+// internal/cloud → internal/snapshot import coupling.
+type Usage struct {
+	DurationMs               int64                 `json:"duration_ms"`
+	NumTurns                 int                   `json:"num_turns"`
+	TotalCostUSD             float64               `json:"total_cost_usd"`
+	InputTokens              int64                 `json:"input_tokens"`
+	OutputTokens             int64                 `json:"output_tokens"`
+	CacheReadInputTokens     int64                 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64                 `json:"cache_creation_input_tokens"`
+	ModelUsage               map[string]ModelUsage `json:"model_usage,omitempty"`
+}
+
+// ModelUsage is the per-model slice of a single Usage. Mirrors
+// snapshot.ModelUsage; same wire shape.
+type ModelUsage struct {
+	InputTokens              int64   `json:"input_tokens"`
+	OutputTokens             int64   `json:"output_tokens"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
+	CostUSD                  float64 `json:"cost_usd"`
+}
+
+// ChatUsageRequest is what a worker POSTs to
+// /api/worker/chat/sessions/{id}/usage after a chat session's claude
+// subprocess exits. The session_id comes from the URL; the body carries
+// the Usage and the model bucket (or empty if claude didn't report one).
+type ChatUsageRequest struct {
+	Usage *Usage `json:"usage"`
+}
+
+// UsageRecord is the stored form of one run or chat session's usage,
+// returned by Store.GetRunUsage / Store.GetChatUsage. The denormalized
+// columns (Repo, Operator) are filled in by the store at insert time so
+// the aggregation endpoint (sub 4) doesn't have to JOIN runs/jobs.
+//
+// Either RunID or SessionID is set, never both — the same shape is reused
+// for both surfaces so the eventual summary endpoint can union them.
+type UsageRecord struct {
+	RunID                    string                `json:"run_id,omitempty"`
+	SessionID                string                `json:"session_id,omitempty"`
+	UserID                   string                `json:"user_id,omitempty"`
+	MachineID                string                `json:"machine_id,omitempty"`
+	Repo                     string                `json:"repo,omitempty"`
+	Operator                 string                `json:"operator,omitempty"`
+	DurationMs               int64                 `json:"duration_ms"`
+	NumTurns                 int                   `json:"num_turns"`
+	TotalCostUSD             float64               `json:"total_cost_usd"`
+	InputTokens              int64                 `json:"input_tokens"`
+	OutputTokens             int64                 `json:"output_tokens"`
+	CacheReadInputTokens     int64                 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64                 `json:"cache_creation_input_tokens"`
+	ModelUsage               map[string]ModelUsage `json:"model_usage,omitempty"`
+	EndedAt                  time.Time             `json:"ended_at"`
+}
+
+// AddChatUsageInput is what the chat handler hands to Store.AddChatUsage
+// after a worker POSTs to /api/worker/chat/sessions/{id}/usage. The
+// handler fills in UserID / MachineID / Repo from the active session
+// registry; the wire body only carries Usage.
+type AddChatUsageInput struct {
+	SessionID string
+	UserID    string
+	MachineID string
+	Repo      string
+	Usage     *Usage
+	EndedAt   time.Time
 }

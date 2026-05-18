@@ -28,3 +28,14 @@ func TestSQLiteStoreLeaseExpiry(t *testing.T) {
 		return s
 	})
 }
+
+func TestSQLiteStoreUsage(t *testing.T) {
+	runStoreUsage(t, func() Store {
+		s, err := NewSQLiteStore(":memory:")
+		if err != nil {
+			t.Fatalf("NewSQLiteStore: %v", err)
+		}
+		t.Cleanup(func() { s.Close() })
+		return s
+	})
+}
