@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from 'react'
 import { useTheme } from '../lib/useTheme'
 import { ChatProvider, useChatDrawer } from '../lib/chatContext'
 import { ChatDrawer } from '../components/ChatDrawer'
-import { SyncPopover } from '../components/SyncPopover'
 import { fetchCloudStatus } from '../lib/cloudApi'
 
 export const Route = createFileRoute('/_app')({
@@ -236,7 +235,6 @@ function AppLayout() {
                 />
               </svg>
             </a>
-            <SyncPopover />
             <button
               onClick={toggle}
               className="w-7 h-7 flex items-center justify-center rounded-sm transition-colors"

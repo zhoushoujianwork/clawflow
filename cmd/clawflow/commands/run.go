@@ -19,7 +19,6 @@ import (
 
 	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
-	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/cloud"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
@@ -222,15 +221,6 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	lg.Info("run/start", "pid", os.Getpid(), "version", Version, "only_repo", onlyRepo, "only_issue", onlyIssue, "timeout", timeout)
 	defer lg.Info("run/exit", "pid", os.Getpid())
 
-	// Auto-pull: sync config from Gist before scanning so this machine
-	// picks up any changes pushed from other machines (e.g. new repos,
-	// updated settings). Best-effort: if sync is not configured or the
-	// network is unavailable, we continue with the local config.
-	if api.AutoPull() {
-		fmt.Fprintf(os.Stderr, "✓ auto-pulled config from Gist\n")
-		lg.Info("run/auto_pull", "result", "ok")
-	}
-
 	reg, err := loadRegistry()
 	if err != nil {
 		return err
@@ -392,13 +382,6 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		} else if n > 0 {
 			fmt.Fprintf(os.Stderr, "[pilot] woke %d project(s)\n", n)
 		}
-	}
-
-	// Auto-push: sync config to Gist after the run so any label/config
-	// changes made during this pass are visible to other machines.
-	// Best-effort: push failure does not fail the run.
-	if api.AutoPush() {
-		fmt.Fprintf(os.Stderr, "✓ auto-pushed config to Gist\n")
 	}
 
 	return nil
