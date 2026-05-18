@@ -297,6 +297,15 @@ Store backends:
 				chatMode = "chat=ON"
 			}
 
+			// Load embedded operators so /api/cloud/operators and the webhook
+			// handler see them. User-skills dir is irrelevant on cloud server
+			// (no user environment), so we only load the embedded set.
+			reg, err := loadRegistry()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warn: operator registry load: %v\n", err)
+				reg = nil
+			}
+
 			addr := fmt.Sprintf("%s:%d", host, port)
 			mode := "auth=github-app"
 			if noAuth {
@@ -304,7 +313,7 @@ Store backends:
 			}
 			fmt.Fprintf(os.Stderr, "ClawFlow cloud API listening on http://%s (store: %s, %s, %s)\n",
 				addr, storeFlag, mode, chatMode)
-			return http.ListenAndServe(addr, cloud.NewServerWithExtras(store, nil, authH, extras))
+			return http.ListenAndServe(addr, cloud.NewServerWithExtras(store, reg, authH, extras))
 		},
 	}
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "Host to bind")

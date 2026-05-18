@@ -110,6 +110,7 @@ func NewServerWithExtras(store Store, operators *operator.Registry, auth AuthHan
 	mux.HandleFunc("/api/cloud/machines", s.withAuth(s.handleCloudMachines))
 	mux.HandleFunc("/api/cloud/jobs", s.withAuth(s.handleCloudJobs))
 	mux.HandleFunc("/api/cloud/runs", s.withAuth(s.handleCloudRuns))
+	mux.HandleFunc("/api/cloud/operators", s.withAuth(s.handleCloudOperators))
 
 	// Webhook route matches the GitHub App's configured Webhook URL exactly.
 	mux.HandleFunc("/api/v1/github/app/webhook", s.handleWebhookGitHub)
@@ -573,6 +574,43 @@ func (s *server) handleCloudJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeCloudJSON(w, http.StatusOK, ListJobsResponse{Jobs: s.store.ListJobs()})
+}
+
+// handleCloudOperators returns the operator registry the cloud server was
+// constructed with. Shape matches the legacy /data/operators.json the local
+// web's snapshot writer used to produce, so the Operators page can fetch
+// the same struct on either origin.
+// GET /api/cloud/operators
+func (s *server) handleCloudOperators(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	type view struct {
+		Name              string   `json:"name"`
+		Description       string   `json:"description"`
+		Target            string   `json:"target"`
+		LabelsRequired    []string `json:"labels_required"`
+		LabelsRequiredAny []string `json:"labels_required_any,omitempty"`
+		LabelsExcluded    []string `json:"labels_excluded"`
+		LockLabel         string   `json:"lock_label"`
+		Source            string   `json:"source"`
+	}
+	ops := s.operators.All()
+	out := make([]view, 0, len(ops))
+	for _, op := range ops {
+		out = append(out, view{
+			Name:              op.Name,
+			Description:       op.Description,
+			Target:            op.Trigger.Target,
+			LabelsRequired:    op.Trigger.LabelsRequired,
+			LabelsRequiredAny: op.Trigger.LabelsRequiredAny,
+			LabelsExcluded:    op.Trigger.LabelsExcluded,
+			LockLabel:         op.LockLabel,
+			Source:            op.Source,
+		})
+	}
+	writeCloudJSON(w, http.StatusOK, map[string]any{"operators": out})
 }
 
 // handleCloudRuns returns all run records.

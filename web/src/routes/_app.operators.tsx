@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { cn } from '../lib/utils'
+import { fetchAuthMe } from '../lib/cloudApi'
 
 interface Operator {
   name: string
@@ -58,11 +59,28 @@ function OperatorsList() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('/data/operators.json', { cache: 'no-store' })
-      .then(r => (r.ok ? r.json() : []))
-      .then(d => setOps(Array.isArray(d) ? d : []))
-      .catch(() => setOps([]))
-      .finally(() => setLoading(false))
+    // Cloud bundles serve /api/cloud/operators (the registry the cloud
+    // server itself was constructed with). Local `clawflow web` writes
+    // /data/operators.json. Probe auth to decide which endpoint to hit;
+    // fall back to the local snapshot when fetchAuthMe says no-cloud.
+    let cancelled = false
+    fetchAuthMe()
+      .then(async auth => {
+        if (auth.kind === 'authed' || auth.kind === 'anon') {
+          const r = await fetch('/api/cloud/operators', { credentials: 'include' })
+          if (!r.ok) return [] as Operator[]
+          const d = await r.json().catch(() => ({ operators: [] }))
+          return Array.isArray(d.operators) ? (d.operators as Operator[]) : []
+        }
+        const r = await fetch('/data/operators.json', { cache: 'no-store' })
+        if (!r.ok) return [] as Operator[]
+        const d = await r.json().catch(() => [])
+        return Array.isArray(d) ? (d as Operator[]) : []
+      })
+      .then(d => { if (!cancelled) setOps(d) })
+      .catch(() => { if (!cancelled) setOps([]) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [])
 
   // Group operators by stage, preserving explicit intra-stage order.
