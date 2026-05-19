@@ -233,7 +233,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/run/status", api.HandleRunStatus)
 			mux.HandleFunc("/api/run/pause", api.HandleRunPause)
 			mux.HandleFunc("/api/run/cancel", api.HandleRunCancel)
-			mux.HandleFunc("/api/version", api.HandleVersion)
+			// /api/version doubles as the cloud bundle's local-agent
+			// probe; CORS-gated so a remote browser can detect this
+			// machine without exposing the endpoint to arbitrary sites.
+			mux.HandleFunc("/api/version", api.WithChatAgentCORS(api.HandleVersion))
 			mux.HandleFunc("/api/update", api.HandleUpdate)
 			mux.HandleFunc("/api/repo/config", api.HandleRepoConfig)
 			mux.HandleFunc("/api/repo/bind", api.HandleRepoBind)
@@ -277,7 +280,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 				}
 			})
 			mux.HandleFunc("/api/browse-directory", api.HandleBrowseDirectory)
-			mux.HandleFunc("/api/chat/spawn", api.HandleChatSpawn)
+			// CORS-gated so a remote cloud bundle can spawn a local
+			// terminal here. Only the user's configured cloud URL is
+			// allowed (worker.yaml `saas_url`) — see cors_chat_agent.go.
+			mux.HandleFunc("/api/chat/spawn", api.WithChatAgentCORS(api.HandleChatSpawn))
 			mux.HandleFunc("/api/project/create", api.HandleProjectCreate)
 			mux.HandleFunc("/api/project/delete", api.HandleProjectDelete)
 			mux.HandleFunc("/api/project/add-repo", api.HandleProjectAddRepo)
@@ -298,8 +304,14 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// same-origin and never sees the token.
 			mux.HandleFunc("/api/cloud/status", api.HandleCloudStatus)
 			mux.HandleFunc("/api/cloud/config", api.HandleCloudConfig)
-			mux.HandleFunc("/api/cloud/machines", api.HandleCloudMachines)
-			mux.HandleFunc("/api/cloud/bindings", api.HandleCloudBindings)
+			// /api/cloud/{repos,projects,machines,bindings} dual-mode:
+			// proxy upstream when cloud is configured, or translate the
+			// local config.yaml to the cloud shape so the Repos /
+			// Projects pages render the same filter UI in offline mode.
+			mux.HandleFunc("/api/cloud/repos", api.HandleCloudRepos)
+			mux.HandleFunc("/api/cloud/projects", api.HandleCloudProjects)
+			mux.HandleFunc("/api/cloud/machines", api.HandleCloudMachinesLocal)
+			mux.HandleFunc("/api/cloud/bindings", api.HandleCloudBindingsLocal)
 			mux.HandleFunc("/api/cloud/bindings/", api.HandleCloudBindingByID)
 			mux.HandleFunc("/api/cloud/jobs", api.HandleCloudJobs)
 			mux.HandleFunc("/api/cloud/runs", api.HandleCloudRuns)
