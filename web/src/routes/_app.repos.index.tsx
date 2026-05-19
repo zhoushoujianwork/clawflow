@@ -17,10 +17,6 @@ import {
 import { VcsIcon } from '../components/VcsIcon'
 import type { RepoInfoMap, Platform } from '../lib/vcsUrls'
 
-export const Route = createFileRoute('/_app/repos/')({
-  component: ReposPage,
-})
-
 // PlatformFilter is the top-tab selector. 'all' is the default; the others
 // match the literal `Repo.platform` values from the cloud Store.
 type PlatformFilter = 'all' | 'github' | 'gitlab'
@@ -29,8 +25,55 @@ type PlatformFilter = 'all' | 'github' | 'gitlab'
 // and 'orphan' (repos with no project_id) buckets.
 type ProjectFilter = string
 
+// ReposSearch is the URL ?platform=…&project=…&q=… schema. Refresh
+// preserves the user's selection; the same triple is also mirrored
+// into localStorage so opening Repos in a new tab restores last state.
+interface ReposSearch {
+  platform?: PlatformFilter
+  project?: ProjectFilter
+  q?: string
+}
+
+// LocalStorage keys for the filter triple. v1 suffix so a future
+// schema change can bump and ignore stale values.
+const STORAGE_PLATFORM = 'clawflow:repos:filter:platform:v1'
+const STORAGE_PROJECT = 'clawflow:repos:filter:project:v1'
+
+export const Route = createFileRoute('/_app/repos/')({
+  component: ReposPage,
+  validateSearch: (s: Record<string, unknown>): ReposSearch => {
+    const platform = s.platform === 'github' || s.platform === 'gitlab' || s.platform === 'all'
+      ? (s.platform as PlatformFilter)
+      : undefined
+    const project = typeof s.project === 'string' && s.project.length > 0
+      ? s.project
+      : undefined
+    const q = typeof s.q === 'string' && s.q.length > 0 ? s.q : undefined
+    return { platform, project, q }
+  },
+})
+
+// readStored reads localStorage but no-ops in SSR / private-mode
+// browsers where the API throws. Best-effort UX.
+function readStored(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeStored(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // private-mode quota errors, etc.
+  }
+}
+
 function ReposPage() {
-  const navigate = useNavigate()
+  const navigate = useNavigate({ from: Route.fullPath })
+  const search = Route.useSearch()
   const chatDrawer = useChatDrawer()
   const [repos, setRepos] = useState<Repo[]>([])
   const [projects, setProjects] = useState<Project[]>([])
@@ -40,9 +83,70 @@ function ReposPage() {
   const [error, setError] = useState<string | null>(null)
   const [unauth, setUnauth] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
-  const [platform, setPlatform] = useState<PlatformFilter>('all')
-  const [projectF, setProjectF] = useState<ProjectFilter>('all')
-  const [query, setQuery] = useState('')
+
+  // Filter state is sourced in priority order:
+  //   1. URL search param (refresh-safe, link-shareable)
+  //   2. localStorage (cross-tab continuity)
+  //   3. 'all' (first-ever visit)
+  //
+  // Mutating any filter writes BOTH the URL and localStorage so
+  // the next visit resumes wherever the user left off.
+  const initialPlatform = (search.platform
+    ?? (readStored(STORAGE_PLATFORM) as PlatformFilter | null)
+    ?? 'all') as PlatformFilter
+  const initialProject = (search.project
+    ?? readStored(STORAGE_PROJECT)
+    ?? 'all') as ProjectFilter
+  const [platform, setPlatformState] = useState<PlatformFilter>(
+    initialPlatform === 'all' || initialPlatform === 'github' || initialPlatform === 'gitlab'
+      ? initialPlatform
+      : 'all',
+  )
+  const [projectF, setProjectFState] = useState<ProjectFilter>(initialProject || 'all')
+  const [query, setQuery] = useState<string>(search.q ?? '')
+
+  // pushFilters writes the current filter triple to URL + storage.
+  // Called after every setter so refresh and re-open stay in sync.
+  const pushFilters = useCallback(
+    (p: PlatformFilter, pr: ProjectFilter, q: string) => {
+      writeStored(STORAGE_PLATFORM, p)
+      writeStored(STORAGE_PROJECT, pr)
+      void navigate({
+        search: {
+          platform: p === 'all' ? undefined : p,
+          project: pr === 'all' ? undefined : pr,
+          q: q ? q : undefined,
+        },
+        replace: true,
+      })
+    },
+    [navigate],
+  )
+
+  const setPlatform = useCallback(
+    (p: PlatformFilter) => {
+      setPlatformState(p)
+      pushFilters(p, projectF, query)
+    },
+    [projectF, query, pushFilters],
+  )
+
+  const setProjectF = useCallback(
+    (pr: ProjectFilter) => {
+      setProjectFState(pr)
+      pushFilters(platform, pr, query)
+    },
+    [platform, query, pushFilters],
+  )
+
+  // For the search input, debounce the URL sync to avoid one nav per
+  // keystroke. localStorage still updates on every change so a
+  // refresh while typing keeps the latest text.
+  useEffect(() => {
+    const id = setTimeout(() => pushFilters(platform, projectF, query), 300)
+    return () => clearTimeout(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query])
 
   const load = useCallback(() => {
     setLoading(true)
