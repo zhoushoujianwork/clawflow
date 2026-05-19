@@ -111,6 +111,7 @@ func NewServerWithExtras(store Store, operators *operator.Registry, auth AuthHan
 	mux.HandleFunc("/api/cloud/jobs", s.withAuth(s.handleCloudJobs))
 	mux.HandleFunc("/api/cloud/runs", s.withAuth(s.handleCloudRuns))
 	mux.HandleFunc("/api/cloud/operators", s.withAuth(s.handleCloudOperators))
+	mux.HandleFunc("/api/cloud/usage/summary", s.withAuth(s.handleCloudUsageSummary))
 
 	// Webhook route matches the GitHub App's configured Webhook URL exactly.
 	mux.HandleFunc("/api/v1/github/app/webhook", s.handleWebhookGitHub)
@@ -611,6 +612,29 @@ func (s *server) handleCloudOperators(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeCloudJSON(w, http.StatusOK, map[string]any{"operators": out})
+}
+
+// handleCloudUsageSummary aggregates the calling user's run + chat
+// usage rows and returns the UsageSummary shape the local-mode Usage
+// page already speaks. Strictly user-scoped; run rows with no
+// recorded user_id are included to keep single-user self-hosts
+// functional until owner_user_id wiring lands.
+func (s *server) handleCloudUsageSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.auth == nil {
+		writeCloudError(w, http.StatusInternalServerError, "auth not configured")
+		return
+	}
+	user := s.auth.UserFromContext(r.Context())
+	if user == nil {
+		writeCloudError(w, http.StatusUnauthorized, "auth required")
+		return
+	}
+	records := s.store.ListUsageForUser(user.ID)
+	writeCloudJSON(w, http.StatusOK, BuildUsageSummary(records, time.Now().UTC()))
 }
 
 // handleCloudRuns returns all run records.
