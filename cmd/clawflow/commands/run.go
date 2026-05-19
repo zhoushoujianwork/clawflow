@@ -43,24 +43,27 @@ func roleForOperator(opName string) string {
 
 // ExecuteJob adapts a cloud-leased job into the existing local operator
 // execution path. It is intentionally thin: worker mode must not grow a
-// second copy of the runner.
-func ExecuteJob(ctx context.Context, spec cloud.JobSpec, timeout time.Duration) (bool, error) {
+// second copy of the runner. Returns (didFire, runDir, err). The runDir
+// (when non-empty) is the on-disk snapshot directory containing
+// events.jsonl; the cloud-mode worker uses ExtractCloudUsage on it to
+// produce a cloud.Usage for FinishRunRequest.
+func ExecuteJob(ctx context.Context, spec cloud.JobSpec, timeout time.Duration) (bool, string, error) {
 	if spec.Repo == "" {
-		return false, fmt.Errorf("job spec missing repo")
+		return false, "", fmt.Errorf("job spec missing repo")
 	}
 	if spec.Operator == "" {
-		return false, fmt.Errorf("job spec missing operator")
+		return false, "", fmt.Errorf("job spec missing operator")
 	}
 	if spec.Number == 0 {
-		return false, fmt.Errorf("job spec missing target number")
+		return false, "", fmt.Errorf("job spec missing target number")
 	}
 	reg, err := loadRegistry()
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	op, ok := reg.Get(spec.Operator)
 	if !ok {
-		return false, fmt.Errorf("operator %q not found", spec.Operator)
+		return false, "", fmt.Errorf("operator %q not found", spec.Operator)
 	}
 	repoCfg := config.Repo{
 		Platform:   spec.Platform,
@@ -78,7 +81,7 @@ func ExecuteJob(ctx context.Context, spec cloud.JobSpec, timeout time.Duration) 
 	}
 	client, err := newVCSClient(repoCfg)
 	if err != nil {
-		return false, fmt.Errorf("vcs client: %w", err)
+		return false, "", fmt.Errorf("vcs client: %w", err)
 	}
 	state := spec.State
 	if state == "" {
@@ -93,8 +96,46 @@ func ExecuteJob(ctx context.Context, spec cloud.JobSpec, timeout time.Duration) 
 		IsPR:   spec.Target == "pr",
 	}
 	j := &runJob{op: op, sub: sub, repo: spec.Repo, repoCfg: repoCfg, client: client}
-	didFire, _ := runOneOperator(ctx, j, timeout)
-	return didFire, nil
+	didFire, _, runDir := runOneOperator(ctx, j, timeout)
+	return didFire, runDir, nil
+}
+
+// ExtractCloudUsage reads runDir/events.jsonl, extracts the terminal
+// result event via snapshot.ExtractUsage, and converts the
+// snapshot.Usage to a cloud.Usage. Returns nil when runDir is empty,
+// the file is missing, no result event has been written, or the file
+// is unreadable — all of which the worker treats as "no usage to
+// report; finish the run anyway".
+func ExtractCloudUsage(runDir string) *cloud.Usage {
+	if runDir == "" {
+		return nil
+	}
+	u, err := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl"))
+	if err != nil || u == nil {
+		return nil
+	}
+	cu := &cloud.Usage{
+		DurationMs:               u.DurationMs,
+		NumTurns:                 u.NumTurns,
+		TotalCostUSD:             u.TotalCostUSD,
+		InputTokens:              u.InputTokens,
+		OutputTokens:             u.OutputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+	}
+	if len(u.ModelUsage) > 0 {
+		cu.ModelUsage = make(map[string]cloud.ModelUsage, len(u.ModelUsage))
+		for name, m := range u.ModelUsage {
+			cu.ModelUsage[name] = cloud.ModelUsage{
+				InputTokens:              m.InputTokens,
+				OutputTokens:             m.OutputTokens,
+				CacheReadInputTokens:     m.CacheReadInputTokens,
+				CacheCreationInputTokens: m.CacheCreationInputTokens,
+				CostUSD:                  m.CostUSD,
+			}
+		}
+	}
+	return cu
 }
 
 // loadRegistry builds a Registry from the embedded skills + the user's
@@ -192,7 +233,7 @@ func deterministicSkipReason(op *operator.Operator, repoCfg config.Repo) string 
 //
 // All log lines are prefixed with "[<repo>#<issue> <op>]" so output
 // from concurrent workers stays disentangleable.
-func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool) {
+func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool, runDir string) {
 	prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
 	fmt.Printf("%s → start\n", prefix)
 
@@ -202,7 +243,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ lock failed (another process owns it): %v\n", prefix, err)
 		runLog.Warn("run/lock_failed", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", err.Error())
-		return false, false
+		return false, false, ""
 	}
 	defer snapshot.ReleaseLock(j.repo, j.sub.Number)
 	runLog.Info("run/lock", "pid", os.Getpid(), "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
@@ -216,7 +257,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		freshSub.Labels = freshLabels
 		if ok, reason := operator.MatchesWithReason(&freshSub, j.op); !ok {
 			fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
-			return false, false
+			return false, false, ""
 		}
 	}
 
@@ -226,7 +267,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// even an early failure (e.g. worktree creation) gets recorded as
 	// a real run on disk.
 	startedAt := time.Now()
-	runDir := snapshot.RunDir(j.repo, j.sub.Number, startedAt)
+	runDir = snapshot.RunDir(j.repo, j.sub.Number, startedAt)
 	_ = os.MkdirAll(runDir, 0o755)
 
 	runningMeta := snapshot.RunMeta{
@@ -265,7 +306,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, runDir
 	}
 	if hasOverride {
 		fmt.Fprintf(os.Stderr, "%s → base-branch override: %q (from %s)\n", prefix, overrideBranch, overrideSource)
@@ -286,7 +327,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, runDir
 	}
 	workdir := wtResult.Path
 	if wtResult.Resumed {
@@ -455,21 +496,21 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	switch rm.Status {
 	case "success":
 		fmt.Printf("%s ✓ done\n", prefix)
-		return true, false
+		return true, false, runDir
 	case "rate-limited":
 		// Signal the caller to abort the queue; do NOT call checkCircuitBreaker.
-		return false, true
+		return false, true, runDir
 	case "no-marker":
 		fmt.Printf("%s ✗ no outcome marker (circuit breaker counting)\n", prefix)
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, runDir
 	case "skipped-empty":
 		fmt.Printf("%s ✗ empty output (circuit breaker counting)\n", prefix)
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, runDir
 	default:
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, runDir
 	}
 }
 

@@ -235,7 +235,7 @@ func workerCycle(ctx context.Context, client *cloud.Client, cfg cloud.Config, op
 		return fmt.Errorf("leased job %s has no run_id", job.JobID)
 	}
 	fmt.Fprintf(os.Stderr, "leased job %s run %s: %s#%d %s\n", job.JobID, job.RunID, job.Repo, job.Number, job.Operator)
-	didFire, runErr := ExecuteJob(ctx, *job, opts.Timeout)
+	didFire, runDir, runErr := ExecuteJob(ctx, *job, opts.Timeout)
 	status := "succeeded"
 	if runErr != nil || !didFire {
 		status = "failed"
@@ -244,6 +244,10 @@ func workerCycle(ctx context.Context, client *cloud.Client, cfg cloud.Config, op
 	if runErr != nil {
 		finish.Error = runErr.Error()
 	}
+	// Attach usage from this run's events.jsonl (nil when claude
+	// produced no terminal result event — finishing without usage is
+	// still valid; the cloud row simply won't carry cost numbers).
+	finish.Usage = ExtractCloudUsage(runDir)
 	if err := client.FinishRun(ctx, job.RunID, finish); err != nil {
 		return err
 	}
