@@ -176,6 +176,174 @@ func runLeaseExpiry(t *testing.T, newStore func() Store) {
 	}
 }
 
+// runStoreUsage exercises the usage write/read path for any Store:
+// FinishRun-with-usage persists a run_usage row; AddChatUsage persists
+// a chat_usage row; a duplicate run_id upload overwrites (idempotent).
+func runStoreUsage(t *testing.T, newStore func() Store) {
+	t.Helper()
+	store := newStore()
+
+	// Stand up a registered worker + job + leased run so FinishRun has
+	// a row to update.
+	reg, err := store.RegisterWorker(RegisterWorkerRequest{Hostname: "host-usage"})
+	if err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	rec, err := store.EnqueueJob(JobSpec{
+		Repo:     "acme/widget",
+		Platform: "github",
+		Operator: "evaluate-bug",
+		Target:   "issue",
+		Number:   42,
+	}, reg.MachineID)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	spec, err := store.Lease(LeaseRequest{
+		MachineID: reg.MachineID,
+		WorkerID:  reg.WorkerID,
+	}, time.Minute)
+	if err != nil || spec == nil {
+		t.Fatalf("Lease: spec=%v err=%v", spec, err)
+	}
+	runID := spec.RunID
+
+	// FinishRun with usage attached.
+	usage := &Usage{
+		DurationMs:               12_345,
+		NumTurns:                 7,
+		TotalCostUSD:             0.1234,
+		InputTokens:              1000,
+		OutputTokens:             200,
+		CacheReadInputTokens:     5000,
+		CacheCreationInputTokens: 50,
+		ModelUsage: map[string]ModelUsage{
+			"claude-opus-4-7": {
+				InputTokens:  900,
+				OutputTokens: 180,
+				CostUSD:      0.10,
+			},
+			"claude-haiku-4-5-20251001": {
+				InputTokens:  100,
+				OutputTokens: 20,
+				CostUSD:      0.02,
+			},
+		},
+	}
+	if err := store.FinishRun(runID, FinishRunRequest{
+		Status:  JobStatusSucceeded,
+		Outcome: "agent-evaluated",
+		Usage:   usage,
+	}); err != nil {
+		t.Fatalf("FinishRun with usage: %v", err)
+	}
+
+	got := store.GetRunUsage(runID)
+	if got == nil {
+		t.Fatal("GetRunUsage returned nil after FinishRun with usage")
+	}
+	if got.TotalCostUSD != 0.1234 {
+		t.Fatalf("TotalCostUSD = %v, want 0.1234", got.TotalCostUSD)
+	}
+	if got.Repo != "acme/widget" || got.Operator != "evaluate-bug" {
+		t.Fatalf("denorm fail: repo=%q operator=%q", got.Repo, got.Operator)
+	}
+	if got.NumTurns != 7 || got.InputTokens != 1000 || got.OutputTokens != 200 {
+		t.Fatalf("scalar mismatch: %+v", got)
+	}
+	if len(got.ModelUsage) != 2 || got.ModelUsage["claude-opus-4-7"].CostUSD != 0.10 {
+		t.Fatalf("model usage round-trip lost data: %+v", got.ModelUsage)
+	}
+	if got.EndedAt.IsZero() {
+		t.Fatal("EndedAt is zero")
+	}
+
+	// Idempotency: a retry with different numbers overwrites.
+	updated := *usage
+	updated.TotalCostUSD = 0.9999
+	updated.InputTokens = 9999
+	if err := store.FinishRun(runID, FinishRunRequest{
+		Status: JobStatusSucceeded,
+		Usage:  &updated,
+	}); err != nil {
+		t.Fatalf("FinishRun (retry): %v", err)
+	}
+	got = store.GetRunUsage(runID)
+	if got == nil || got.TotalCostUSD != 0.9999 || got.InputTokens != 9999 {
+		t.Fatalf("idempotent overwrite did not take: %+v", got)
+	}
+
+	// FinishRun without Usage on a different run must NOT crash and
+	// must leave run_usage empty for that run.
+	rec2, err := store.EnqueueJob(JobSpec{
+		Repo:      "acme/widget",
+		Platform:  "github",
+		Operator:  "evaluate-bug",
+		Target:    "issue",
+		Number:    43,
+		DedupeKey: "no-usage-run",
+	}, reg.MachineID)
+	if err != nil {
+		t.Fatalf("EnqueueJob 2: %v", err)
+	}
+	spec2, err := store.Lease(LeaseRequest{
+		MachineID: reg.MachineID,
+		WorkerID:  reg.WorkerID,
+	}, time.Minute)
+	if err != nil || spec2 == nil {
+		t.Fatalf("Lease 2: spec=%v err=%v", spec2, err)
+	}
+	if err := store.FinishRun(spec2.RunID, FinishRunRequest{
+		Status: JobStatusFailed,
+	}); err != nil {
+		t.Fatalf("FinishRun no-usage: %v", err)
+	}
+	if store.GetRunUsage(spec2.RunID) != nil {
+		t.Fatal("GetRunUsage non-nil for run without uploaded usage")
+	}
+	_ = rec
+	_ = rec2
+
+	// AddChatUsage path. user_id is required by SQLite (FK to users).
+	// MemoryStore doesn't enforce that; we use a non-empty string so
+	// the same test body works on both implementations. The lifecycle
+	// suite that calls this seeds a real user in SQLite mode.
+	chatUsage := &Usage{
+		DurationMs:   3_400,
+		NumTurns:     1,
+		TotalCostUSD: 0.0042,
+		InputTokens:  300,
+		OutputTokens: 80,
+	}
+	if err := store.AddChatUsage(AddChatUsageInput{
+		SessionID: "sess-abc",
+		UserID:    "user-test",
+		MachineID: reg.MachineID,
+		Repo:      "acme/widget",
+		Usage:     chatUsage,
+	}); err != nil {
+		t.Fatalf("AddChatUsage: %v", err)
+	}
+	gotChat := store.GetChatUsage("sess-abc")
+	if gotChat == nil {
+		t.Fatal("GetChatUsage returned nil")
+	}
+	if gotChat.TotalCostUSD != 0.0042 || gotChat.InputTokens != 300 {
+		t.Fatalf("chat usage round-trip mismatch: %+v", gotChat)
+	}
+	if gotChat.UserID != "user-test" || gotChat.Repo != "acme/widget" {
+		t.Fatalf("chat denorm fail: %+v", gotChat)
+	}
+
+	// Missing usage / id rejected.
+	if err := store.AddChatUsage(AddChatUsageInput{SessionID: "x", UserID: "user-test"}); err == nil {
+		t.Fatal("AddChatUsage with nil Usage should error")
+	}
+	if err := store.AddChatUsage(AddChatUsageInput{UserID: "user-test", Usage: chatUsage}); err == nil {
+		t.Fatal("AddChatUsage with empty session id should error")
+	}
+}
+
 // MemoryStore runs of the shared suite.
 
 func TestMemoryStoreLifecycle(t *testing.T) {
@@ -184,4 +352,8 @@ func TestMemoryStoreLifecycle(t *testing.T) {
 
 func TestMemoryStoreLeaseExpiry(t *testing.T) {
 	runLeaseExpiry(t, func() Store { return NewMemoryStore() })
+}
+
+func TestMemoryStoreUsage(t *testing.T) {
+	runStoreUsage(t, func() Store { return NewMemoryStore() })
 }

@@ -106,6 +106,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Worker side — machine-auth (kind=machine Bearer).
 	mountMachine("POST /api/worker/chat/poll", h.handlePoll)
 	mountMachine("POST /api/worker/chat/sessions/{id}/events", h.handleWorkerEvents)
+	mountMachine("POST /api/worker/chat/sessions/{id}/usage", h.handleWorkerUsage)
 }
 
 // ChatPath is the URL prefix the handler serves under. Kept for
@@ -358,6 +359,49 @@ func (h *Handler) handlePoll(w http.ResponseWriter, r *http.Request) {
 		// Client gave up first (e.g. shutdown). 499-ish.
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// handleWorkerUsage receives the terminal token / cost breakdown for
+// one chat session, posted by the worker after its claude subprocess
+// exits. The session_id comes from the URL; user_id / machine_id / repo
+// are looked up server-side from the active session registry so the
+// worker can't claim usage for a session it doesn't own.
+func (h *Handler) handleWorkerUsage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	var req cloud.ChatUsageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.Usage == nil {
+		writeError(w, http.StatusBadRequest, "usage is required")
+		return
+	}
+
+	h.sessionsMu.Lock()
+	s, ok := h.sessions[id]
+	h.sessionsMu.Unlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if err := h.cfg.Store.AddChatUsage(cloud.AddChatUsageInput{
+		SessionID: s.ID,
+		UserID:    s.UserID,
+		MachineID: s.MachineID,
+		Repo:      s.Repo,
+		Usage:     req.Usage,
+		EndedAt:   h.cfg.Now(),
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleWorkerEvents accepts a batch of ChatEvents pushed by the

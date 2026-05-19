@@ -442,3 +442,97 @@ func TestListSessionsScopedToUser(t *testing.T) {
 		t.Errorf("bob sees %d sessions, want 0", len(listed.Sessions))
 	}
 }
+
+// TestWorkerUsageEndpoint: worker POSTs the terminal token / cost
+// breakdown for a chat session; the store row gets denorm fields
+// (user_id, machine_id, repo) from the session registry; 404 on unknown
+// session; 400 on missing Usage body.
+func TestWorkerUsageEndpoint(t *testing.T) {
+	t.Parallel()
+	h, store := newTestHandler(t)
+	makeBoundRepo(t, store, "acme/widgets", "machine-1")
+	srv := newTestServer(t, h, &cloud.User{ID: "u-alice", Login: "alice"})
+
+	// Create a session (this populates the in-memory session registry
+	// with user/machine/repo the usage endpoint will look up).
+	body := jsonBody(t, map[string]string{"repo": "acme/widgets", "message": "hi"})
+	cResp, err := http.Post(srv.URL+"/api/cloud/chat/sessions", "application/json", body)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(cResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	cResp.Body.Close()
+
+	// Happy path.
+	usageReq := cloud.ChatUsageRequest{
+		Usage: &cloud.Usage{
+			DurationMs:   4500,
+			NumTurns:     1,
+			TotalCostUSD: 0.0321,
+			InputTokens:  420,
+			OutputTokens: 88,
+			ModelUsage: map[string]cloud.ModelUsage{
+				"claude-opus-4-7": {InputTokens: 420, OutputTokens: 88, CostUSD: 0.0321},
+			},
+		},
+	}
+	uResp, err := http.Post(
+		srv.URL+"/api/worker/chat/sessions/"+created.ID+"/usage",
+		"application/json", jsonBody(t, usageReq))
+	if err != nil {
+		t.Fatalf("usage post: %v", err)
+	}
+	uResp.Body.Close()
+	if uResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("usage status = %d, want 204", uResp.StatusCode)
+	}
+
+	got := store.GetChatUsage(created.ID)
+	if got == nil {
+		t.Fatal("GetChatUsage returned nil after worker upload")
+	}
+	if got.UserID != "u-alice" {
+		t.Errorf("denorm user_id = %q, want u-alice", got.UserID)
+	}
+	if got.MachineID != "machine-1" {
+		t.Errorf("denorm machine_id = %q, want machine-1", got.MachineID)
+	}
+	if got.Repo != "acme/widgets" {
+		t.Errorf("denorm repo = %q", got.Repo)
+	}
+	if got.TotalCostUSD != 0.0321 || got.InputTokens != 420 {
+		t.Errorf("usage round-trip mismatch: %+v", got)
+	}
+	if got.ModelUsage["claude-opus-4-7"].CostUSD != 0.0321 {
+		t.Errorf("model usage lost: %+v", got.ModelUsage)
+	}
+
+	// Unknown session.
+	resp404, err := http.Post(
+		srv.URL+"/api/worker/chat/sessions/does-not-exist/usage",
+		"application/json", jsonBody(t, usageReq))
+	if err != nil {
+		t.Fatalf("404 post: %v", err)
+	}
+	resp404.Body.Close()
+	if resp404.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown session status = %d, want 404", resp404.StatusCode)
+	}
+
+	// Missing usage body.
+	resp400, err := http.Post(
+		srv.URL+"/api/worker/chat/sessions/"+created.ID+"/usage",
+		"application/json", jsonBody(t, cloud.ChatUsageRequest{Usage: nil}))
+	if err != nil {
+		t.Fatalf("400 post: %v", err)
+	}
+	resp400.Body.Close()
+	if resp400.StatusCode != http.StatusBadRequest {
+		t.Errorf("missing usage status = %d, want 400", resp400.StatusCode)
+	}
+}

@@ -374,9 +374,12 @@ func (s *SQLiteStore) AppendRunEvents(runID string, events []RunEvent) error {
 }
 
 // FinishRun marks a run as completed (succeeded, failed, etc.) and updates the
-// parent job status accordingly.
+// parent job status accordingly. If req.Usage is non-nil it is also
+// persisted to run_usage with denormalized repo/operator from the job spec
+// so the aggregation endpoint (sub 4) can GROUP BY without joins.
 func (s *SQLiteStore) FinishRun(runID string, req FinishRunRequest) error {
-	now := sqliteTime(time.Now().UTC())
+	nowT := time.Now().UTC()
+	now := sqliteTime(nowT)
 	status := req.Status
 	if status == "" {
 		status = JobStatusFailed
@@ -398,11 +401,196 @@ func (s *SQLiteStore) FinishRun(runID string, req FinishRunRequest) error {
 		return err
 	}
 
-	_, err := s.db.Exec(
+	if _, err := s.db.Exec(
 		`UPDATE jobs SET status = ?, lease_worker_id = '', lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
 		status, now, jobID,
+	); err != nil {
+		return err
+	}
+
+	if req.Usage != nil {
+		var (
+			specJSON         string
+			repo, operator   string
+			boundMachineID   string
+		)
+		if err := s.db.QueryRow(
+			`SELECT spec_json, bound_machine_id FROM jobs WHERE id = ?`, jobID,
+		).Scan(&specJSON, &boundMachineID); err == nil {
+			var spec JobSpec
+			if json.Unmarshal([]byte(specJSON), &spec) == nil {
+				repo = spec.Repo
+				operator = spec.Operator
+			}
+		}
+		if err := s.upsertRunUsage(runID, repo, operator, boundMachineID, nowT, req.Usage); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// upsertRunUsage inserts or replaces a run_usage row. Idempotent on
+// run_id; a worker retry overwrites with the (presumably more complete)
+// later upload. user_id is left NULL — derived from machine→owner in a
+// follow-up PR once machines carry an owner column.
+func (s *SQLiteStore) upsertRunUsage(runID, repo, operator, machineID string, endedAt time.Time, u *Usage) error {
+	modelJSON, err := json.Marshal(u.ModelUsage)
+	if err != nil {
+		modelJSON = []byte("{}")
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO run_usage (
+			run_id, machine_id, repo, operator,
+			duration_ms, num_turns, total_cost_usd,
+			input_tokens, output_tokens,
+			cache_read_input_tokens, cache_creation_input_tokens,
+			model_usage_json, ended_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id) DO UPDATE SET
+			machine_id = excluded.machine_id,
+			repo = excluded.repo,
+			operator = excluded.operator,
+			duration_ms = excluded.duration_ms,
+			num_turns = excluded.num_turns,
+			total_cost_usd = excluded.total_cost_usd,
+			input_tokens = excluded.input_tokens,
+			output_tokens = excluded.output_tokens,
+			cache_read_input_tokens = excluded.cache_read_input_tokens,
+			cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+			model_usage_json = excluded.model_usage_json,
+			ended_at = excluded.ended_at`,
+		runID, machineID, repo, operator,
+		u.DurationMs, u.NumTurns, u.TotalCostUSD,
+		u.InputTokens, u.OutputTokens,
+		u.CacheReadInputTokens, u.CacheCreationInputTokens,
+		string(modelJSON), sqliteTime(endedAt),
 	)
 	return err
+}
+
+// AddChatUsage persists one chat session's token / cost breakdown.
+// Idempotent on session_id.
+func (s *SQLiteStore) AddChatUsage(in AddChatUsageInput) error {
+	if in.SessionID == "" {
+		return fmt.Errorf("session_id is required")
+	}
+	if in.Usage == nil {
+		return fmt.Errorf("usage is required")
+	}
+	if in.UserID == "" {
+		return fmt.Errorf("user_id is required")
+	}
+	endedAt := in.EndedAt
+	if endedAt.IsZero() {
+		endedAt = time.Now().UTC()
+	}
+	modelJSON, err := json.Marshal(in.Usage.ModelUsage)
+	if err != nil {
+		modelJSON = []byte("{}")
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO chat_usage (
+			session_id, user_id, machine_id, repo,
+			duration_ms, num_turns, total_cost_usd,
+			input_tokens, output_tokens,
+			cache_read_input_tokens, cache_creation_input_tokens,
+			model_usage_json, ended_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			user_id = excluded.user_id,
+			machine_id = excluded.machine_id,
+			repo = excluded.repo,
+			duration_ms = excluded.duration_ms,
+			num_turns = excluded.num_turns,
+			total_cost_usd = excluded.total_cost_usd,
+			input_tokens = excluded.input_tokens,
+			output_tokens = excluded.output_tokens,
+			cache_read_input_tokens = excluded.cache_read_input_tokens,
+			cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+			model_usage_json = excluded.model_usage_json,
+			ended_at = excluded.ended_at`,
+		in.SessionID, in.UserID, in.MachineID, in.Repo,
+		in.Usage.DurationMs, in.Usage.NumTurns, in.Usage.TotalCostUSD,
+		in.Usage.InputTokens, in.Usage.OutputTokens,
+		in.Usage.CacheReadInputTokens, in.Usage.CacheCreationInputTokens,
+		string(modelJSON), sqliteTime(endedAt),
+	)
+	return err
+}
+
+// GetRunUsage returns the run_usage row for a given run_id, or nil.
+func (s *SQLiteStore) GetRunUsage(runID string) *UsageRecord {
+	return s.queryUsage(true, runID)
+}
+
+// GetChatUsage returns the chat_usage row for a given session_id, or nil.
+func (s *SQLiteStore) GetChatUsage(sessionID string) *UsageRecord {
+	return s.queryUsage(false, sessionID)
+}
+
+func (s *SQLiteStore) queryUsage(isRun bool, id string) *UsageRecord {
+	var (
+		userID, machineID, repo, operator string
+		modelJSON, endedAt                string
+		durationMs                        int64
+		numTurns                          int
+		totalCost                         float64
+		inTokens, outTokens               int64
+		cacheRead, cacheCreate            int64
+		row                               *sql.Row
+	)
+	if isRun {
+		row = s.db.QueryRow(
+			`SELECT COALESCE(user_id,''), machine_id, repo, operator,
+			        duration_ms, num_turns, total_cost_usd,
+			        input_tokens, output_tokens,
+			        cache_read_input_tokens, cache_creation_input_tokens,
+			        model_usage_json, ended_at
+			 FROM run_usage WHERE run_id = ?`, id)
+	} else {
+		row = s.db.QueryRow(
+			`SELECT user_id, machine_id, repo, '' AS operator,
+			        duration_ms, num_turns, total_cost_usd,
+			        input_tokens, output_tokens,
+			        cache_read_input_tokens, cache_creation_input_tokens,
+			        model_usage_json, ended_at
+			 FROM chat_usage WHERE session_id = ?`, id)
+	}
+	if err := row.Scan(&userID, &machineID, &repo, &operator,
+		&durationMs, &numTurns, &totalCost,
+		&inTokens, &outTokens,
+		&cacheRead, &cacheCreate,
+		&modelJSON, &endedAt); err != nil {
+		return nil
+	}
+	rec := &UsageRecord{
+		UserID:                   userID,
+		MachineID:                machineID,
+		Repo:                     repo,
+		Operator:                 operator,
+		DurationMs:               durationMs,
+		NumTurns:                 numTurns,
+		TotalCostUSD:             totalCost,
+		InputTokens:              inTokens,
+		OutputTokens:             outTokens,
+		CacheReadInputTokens:     cacheRead,
+		CacheCreationInputTokens: cacheCreate,
+	}
+	rec.EndedAt, _ = time.Parse(time.RFC3339Nano, endedAt)
+	if isRun {
+		rec.RunID = id
+	} else {
+		rec.SessionID = id
+	}
+	if modelJSON != "" && modelJSON != "{}" && modelJSON != "null" {
+		var mu map[string]ModelUsage
+		if json.Unmarshal([]byte(modelJSON), &mu) == nil {
+			rec.ModelUsage = mu
+		}
+	}
+	return rec
 }
 
 // GetJob returns the current state of a job by ID, or nil if not found.
