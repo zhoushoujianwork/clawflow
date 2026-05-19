@@ -207,6 +207,64 @@ export async function deleteBinding(id: string): Promise<void> {
   }
 }
 
+// ---- Usage ----
+
+/** UsageAggregate mirrors the JSON shape produced by the cloud
+ * /api/cloud/usage/summary endpoint and by the local `clawflow web`
+ * data/usage.json. Both surfaces use the same shape so the Usage
+ * page can render either without translation. */
+export interface UsageAggregate {
+  runs: number
+  total_cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  duration_ms: number
+}
+
+export interface ModelAggregate {
+  cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+}
+
+export interface DailyPoint {
+  date: string
+  runs: number
+  total_cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  by_operator?: Record<string, UsageAggregate>
+  by_repo?: Record<string, UsageAggregate>
+  by_model?: Record<string, ModelAggregate>
+}
+
+export interface PeriodSummary {
+  period_start: string
+  period_end: string
+  totals: UsageAggregate
+  by_operator: Record<string, UsageAggregate>
+  by_repo: Record<string, UsageAggregate>
+  by_model: Record<string, ModelAggregate>
+  daily_trend: DailyPoint[]
+}
+
+export interface UsageSummary {
+  generated_at: string
+  totals: UsageAggregate
+  by_operator: Record<string, UsageAggregate>
+  by_repo: Record<string, UsageAggregate>
+  by_model: Record<string, ModelAggregate>
+  periods?: PeriodSummary[]
+}
+
+export function fetchUsageSummary(): Promise<UsageSummary> {
+  return cloudFetch<UsageSummary>('/api/cloud/usage/summary')
+}
+
 // ---- Repos ----
 
 export function fetchRepos(): Promise<{ repos: Repo[] }> {
