@@ -110,7 +110,12 @@ func NewServerWithExtras(store Store, operators *operator.Registry, auth AuthHan
 	mux.HandleFunc("/api/cloud/machines", s.withAuth(s.handleCloudMachines))
 	mux.HandleFunc("/api/cloud/jobs", s.withAuth(s.handleCloudJobs))
 	mux.HandleFunc("/api/cloud/runs", s.withAuth(s.handleCloudRuns))
-	mux.HandleFunc("/api/cloud/operators", s.withAuth(s.handleCloudOperators))
+	// Operators registry is just the embedded SKILL.md catalog — public
+	// metadata, no user-scoped data. Skipping s.withAuth so the
+	// Operators page renders the same list on anonymous cloud as it
+	// does on local `clawflow web` (which reads /data/operators.json
+	// without auth too).
+	mux.HandleFunc("/api/cloud/operators", s.handleCloudOperators)
 	mux.HandleFunc("/api/cloud/usage/summary", s.withAuth(s.handleCloudUsageSummary))
 
 	// Webhook route matches the GitHub App's configured Webhook URL exactly.
