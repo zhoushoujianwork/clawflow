@@ -70,9 +70,16 @@ func runSession(parent context.Context, l *Loop, a *cloud.ChatAssignment) error 
 }
 
 // runClaude spawns the claude subprocess and shuttles stdout/stderr
-// back to cloud as ChatEvents.
+// back to cloud as ChatEvents. stdout is parsed as `--output-format
+// stream-json --verbose` so the worker can both unwrap assistant text
+// deltas for the browser AND extract the terminal "result" event's
+// token/cost breakdown for the cloud usage POST.
 func (l *Loop) runClaude(ctx context.Context, a *cloud.ChatAssignment, workdir, apiKey, baseURL string) error {
-	cmd := exec.CommandContext(ctx, l.cfg.ClaudeBin, "-p", a.Message)
+	cmd := exec.CommandContext(ctx, l.cfg.ClaudeBin,
+		"-p", a.Message,
+		"--output-format", "stream-json",
+		"--verbose",
+	)
 	cmd.Dir = workdir
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 	// Provide the message on stdin too so claude clients that prefer
@@ -100,14 +107,19 @@ func (l *Loop) runClaude(ctx context.Context, a *cloud.ChatAssignment, workdir, 
 
 	stderrTail := &boundedBuffer{cap: stderrTailBytes}
 
-	var wg sync.WaitGroup
+	var (
+		wg    sync.WaitGroup
+		usage *cloud.Usage
+	)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		streamReader(stdout, func(chunk []byte) {
+		// parseStreamJSON unwraps assistant text deltas (→ browser via
+		// the batcher) and captures the terminal result event's usage.
+		usage = parseStreamJSON(stdout, func(text string) {
 			b.add(cloud.ChatEvent{
 				Type: cloud.ChatEventOutput,
-				Text: string(chunk),
+				Text: text,
 				Time: time.Now().UTC(),
 			})
 		})
@@ -127,6 +139,16 @@ func (l *Loop) runClaude(ctx context.Context, a *cloud.ChatAssignment, workdir, 
 	wg.Wait()
 	waitErr := cmd.Wait()
 	b.flushNow()
+
+	// Best-effort usage upload: a transport error here is logged but
+	// does NOT fail the session — the browser already saw the answer.
+	if usage != nil {
+		bg, cancel := context.WithTimeout(context.Background(), eventHTTPTimeout)
+		if err := l.postChatUsage(bg, a.SessionID, usage); err != nil {
+			fmt.Fprintf(stderr(), "clawflow chat: post usage: %v\n", err)
+		}
+		cancel()
+	}
 
 	if waitErr == nil {
 		l.emitEnd(a.SessionID)

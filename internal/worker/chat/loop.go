@@ -210,6 +210,39 @@ func (l *Loop) postEvents(ctx context.Context, sessionID string, events []cloud.
 	return nil
 }
 
+// postChatUsage uploads the terminal token / cost breakdown for one
+// chat session to cloud's /api/worker/chat/sessions/{id}/usage
+// endpoint. Best-effort: a transport failure is returned but does not
+// fail the session (the browser already saw the answer).
+func (l *Loop) postChatUsage(ctx context.Context, sessionID string, usage *cloud.Usage) error {
+	body, err := json.Marshal(cloud.ChatUsageRequest{Usage: usage})
+	if err != nil {
+		return err
+	}
+	endpoint, err := l.endpoint("/api/worker/chat/sessions/" + url.PathEscape(sessionID) + "/usage")
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tok := l.cfg.Client.Token(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := l.eventClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("chat usage HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(buf))
+	}
+	return nil
+}
+
 func (l *Loop) endpoint(path string) (string, error) {
 	base := l.cfg.Client.BaseURL()
 	if base == "" {

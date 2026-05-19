@@ -179,17 +179,22 @@ func TestBuildCloneURL(t *testing.T) {
 	}
 }
 
-// fakeClaudeBin writes a tiny script to dir that emits a marker to
-// stdout, a marker to stderr, and exits 0. Returns the script path.
-// Skipped on Windows because we use a bash shebang.
+// fakeClaudeBin writes a tiny script to dir that emits a canned
+// stream-json transcript to stdout (one assistant text delta + a
+// terminal result event with usage), a marker to stderr, and exits 0.
+// The transcript matches the schema claude --output-format stream-json
+// --verbose produces. Skipped on Windows because we use a bash shebang.
 func fakeClaudeBin(t *testing.T, dir string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("posix-only test")
 	}
 	p := filepath.Join(dir, "fake-claude.sh")
+	assistant := `{"type":"assistant","message":{"content":[{"type":"text","text":"hello-from-claude"}]}}`
+	result := `{"type":"result","duration_ms":1234,"num_turns":1,"total_cost_usd":0.0042,"usage":{"input_tokens":100,"output_tokens":42,"cache_read_input_tokens":50,"cache_creation_input_tokens":5},"modelUsage":{"claude-opus-4-7":{"inputTokens":100,"outputTokens":42,"cacheReadInputTokens":50,"cacheCreationInputTokens":5,"costUSD":0.0042}}}`
 	script := "#!/bin/sh\n" +
-		"echo hello-from-claude\n" +
+		"echo '" + assistant + "'\n" +
+		"echo '" + result + "'\n" +
 		"echo warn-line >&2\n" +
 		"exit 0\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
@@ -210,31 +215,44 @@ func initLocalClone(t *testing.T, dir string) {
 }
 
 // fakeCloud is a minimal httptest.Server that records WorkerEvents
-// posts. Use start() to spin one up and stop via Close.
+// posts AND ChatUsage posts so tests can assert on both. Use
+// newFakeCloud to spin one up and snapshot* to inspect.
 type fakeCloud struct {
 	server *httptest.Server
 
 	mu     sync.Mutex
 	events []cloud.ChatEvent
+	usages []*cloud.Usage
 }
 
 func newFakeCloud(t *testing.T) *fakeCloud {
 	t.Helper()
 	fc := &fakeCloud{}
 	fc.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/events") {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/events"):
+			var req cloud.WorkerEventsRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			fc.mu.Lock()
+			fc.events = append(fc.events, req.Events...)
+			fc.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/usage"):
+			var req cloud.ChatUsageRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			fc.mu.Lock()
+			fc.usages = append(fc.usages, req.Usage)
+			fc.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		var req cloud.WorkerEventsRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		fc.mu.Lock()
-		fc.events = append(fc.events, req.Events...)
-		fc.mu.Unlock()
-		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(fc.server.Close)
 	return fc
@@ -245,6 +263,14 @@ func (fc *fakeCloud) snapshot() []cloud.ChatEvent {
 	defer fc.mu.Unlock()
 	out := make([]cloud.ChatEvent, len(fc.events))
 	copy(out, fc.events)
+	return out
+}
+
+func (fc *fakeCloud) usageSnapshot() []*cloud.Usage {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	out := make([]*cloud.Usage, len(fc.usages))
+	copy(out, fc.usages)
 	return out
 }
 
@@ -353,6 +379,34 @@ func TestRunSession_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(combined.String(), "hello-from-claude") {
 		t.Errorf("expected stdout to contain marker; got:\n%s", combined.String())
+	}
+
+	// Browser-side contract: text deltas come through as plain text,
+	// not as JSON envelopes. If a raw `"type":"assistant"` ever leaks
+	// into a ChatEventOutput, the browser would render it instead of
+	// the human-readable answer.
+	if strings.Contains(combined.String(), `"type":"assistant"`) {
+		t.Errorf("raw stream-json envelope leaked into output events:\n%s", combined.String())
+	}
+
+	// Usage POST: the fake claude bin emitted a terminal result event
+	// with cost 0.0042; the worker must have uploaded it.
+	usages := fc.usageSnapshot()
+	if len(usages) != 1 {
+		t.Fatalf("usage uploads = %d, want 1", len(usages))
+	}
+	u := usages[0]
+	if u == nil {
+		t.Fatal("usage upload body had nil Usage")
+	}
+	if u.TotalCostUSD != 0.0042 {
+		t.Errorf("usage.TotalCostUSD = %v, want 0.0042", u.TotalCostUSD)
+	}
+	if u.InputTokens != 100 || u.OutputTokens != 42 {
+		t.Errorf("usage tokens mismatch: %+v", u)
+	}
+	if u.ModelUsage["claude-opus-4-7"].CostUSD != 0.0042 {
+		t.Errorf("model usage round-trip lost data: %+v", u.ModelUsage)
 	}
 }
 
