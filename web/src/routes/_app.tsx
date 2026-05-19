@@ -188,9 +188,10 @@ function AppLayout() {
                   <NavLink to="/cloud/bindings">Bindings</NavLink>
                 </>
               )}
-              {/* Usage on cloud still redirects to Dashboard until PR 3
-                  wires worker → cloud usage sync; hide its nav entry. */}
-              {!cloudConfigured && <NavLink to="/usage">Usage</NavLink>}
+              {/* /usage is now real in cloud mode too — PR 4 wired the
+                  worker → cloud usage upload and the cloud aggregation
+                  endpoint, and the route renders CloudUsagePage. */}
+              <NavLink to="/usage">Usage</NavLink>
               <NavLink to="/settings">Settings</NavLink>
             </nav>
           </div>
