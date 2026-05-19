@@ -99,6 +99,12 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          # CGO disabled so the Linux binary is statically linked and
+          # doesn't fail with "GLIBC_2.34 not found" on older base
+          # images (Ubuntu 20.04 / Aliyun ECS / etc.). The cloud build
+          # has no native deps — modernc.org/sqlite is pure Go — so
+          # this is a safe blanket setting for all three targets.
+          CGO_ENABLED: 0
         run: |
           VERSION=${GITHUB_REF_NAME}
           go build -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=${VERSION}" \
