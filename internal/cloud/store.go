@@ -60,6 +60,10 @@ type JobRecord struct {
 type RunRecord struct {
 	ID        string     `json:"id"`
 	JobID     string     `json:"job_id"`
+	// MachineID is the machine that leased and is executing this run.
+	// Populated by Lease(); used by worker-protocol handlers to verify
+	// that only the owning machine can post events or finish the run.
+	MachineID string     `json:"machine_id,omitempty"`
 	Status    string     `json:"status"`
 	Outcome   string     `json:"outcome,omitempty"`
 	Summary   string     `json:"summary,omitempty"`
@@ -353,6 +357,7 @@ func (s *MemoryStore) Lease(req LeaseRequest, leaseFor time.Duration) (*JobSpec,
 		s.Runs[runID] = &RunRecord{
 			ID:        runID,
 			JobID:     job.Spec.JobID,
+			MachineID: req.MachineID,
 			Status:    JobStatusRunning,
 			StartedAt: now,
 		}

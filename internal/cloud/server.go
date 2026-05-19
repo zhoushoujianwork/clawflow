@@ -21,11 +21,17 @@ import (
 // UserFromContext returns the authenticated user that the surrounding
 // RequireUser/RequireMachine middleware injected, or nil if no auth ran.
 // Cloud handlers use it to attribute writes (e.g. worker registration → owner).
+//
+// TokenFromContext returns the APIToken injected by RequireMachine, or nil
+// when the request was not authenticated via a machine Bearer token.
+// Worker handlers use it to bind-check the token's machine_id against the
+// machine_id carried in the request body.
 type AuthHandler interface {
 	RegisterRoutes(mux *http.ServeMux)
 	RequireUser(http.Handler) http.Handler
 	RequireMachine(http.Handler) http.Handler
 	UserFromContext(context.Context) *User
+	TokenFromContext(context.Context) *APIToken
 }
 
 // RouteMounter is anything that can register additional routes onto the cloud
@@ -96,7 +102,12 @@ func NewServerWithExtras(store Store, operators *operator.Registry, auth AuthHan
 	mux.HandleFunc("/api/worker/heartbeat", gateMachine(s.handleHeartbeat))
 	mux.HandleFunc("/api/worker/lease", gateMachine(s.handleLease))
 	mux.HandleFunc("/api/worker/runs/", gateMachine(s.handleRun))
-	mux.HandleFunc("/api/cloud/dev/jobs", s.handleDevJobs)
+	// /api/cloud/dev/jobs is only available in no-auth mode (local dev / tests).
+	// When real auth is configured this route is intentionally omitted so the
+	// endpoint does not exist in production.
+	if auth == nil {
+		mux.HandleFunc("/api/cloud/dev/jobs", s.handleDevJobs)
+	}
 
 	// Cloud config — auth.RequireUser when configured, fallback to legacy
 	// bearer check otherwise. The s.withAuth wrapper handles both paths.
@@ -265,6 +276,9 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeCloudError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if !s.guardMachineID(w, r, req.MachineID) {
+		return
+	}
 	resp, err := s.store.Heartbeat(req)
 	if err != nil {
 		writeCloudError(w, http.StatusBadRequest, err.Error())
@@ -281,6 +295,9 @@ func (s *server) handleLease(w http.ResponseWriter, r *http.Request) {
 	var req LeaseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeCloudError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if !s.guardMachineID(w, r, req.MachineID) {
 		return
 	}
 	job, err := s.store.Lease(req, DefaultLeaseDuration)
@@ -303,6 +320,10 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID, action := parts[0], parts[1]
+	// Verify the requesting machine owns this run before processing any action.
+	if !s.guardRunOwner(w, r, runID) {
+		return
+	}
 	switch action {
 	case "events":
 		var req RunEventsRequest
@@ -369,6 +390,53 @@ func writeCloudError(w http.ResponseWriter, status int, msg string) {
 		"error": msg,
 		"time":  time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// ---- Worker-protocol ownership guards ----
+
+// guardMachineID returns false and writes 403 if the authenticated token's
+// machine_id does not match machineID. In no-auth mode (s.auth == nil) it is
+// a no-op that always returns true, preserving test and local-dev behaviour.
+func (s *server) guardMachineID(w http.ResponseWriter, r *http.Request, machineID string) bool {
+	if s.auth == nil {
+		return true
+	}
+	tok := s.auth.TokenFromContext(r.Context())
+	if tok == nil || tok.MachineID == "" {
+		// RequireMachine ensures we only reach here with a machine token,
+		// so a nil/empty token indicates an unexpected code path.
+		writeCloudError(w, http.StatusForbidden, "machine credential required")
+		return false
+	}
+	if tok.MachineID != machineID {
+		writeCloudError(w, http.StatusForbidden, "token does not match machine")
+		return false
+	}
+	return true
+}
+
+// guardRunOwner returns false and writes 403 if the run identified by runID
+// does not belong to the machine in the authenticated token. It also writes
+// 404 when the run does not exist. In no-auth mode it always returns true.
+func (s *server) guardRunOwner(w http.ResponseWriter, r *http.Request, runID string) bool {
+	if s.auth == nil {
+		return true
+	}
+	tok := s.auth.TokenFromContext(r.Context())
+	if tok == nil || tok.MachineID == "" {
+		writeCloudError(w, http.StatusForbidden, "machine credential required")
+		return false
+	}
+	run := s.store.GetRun(runID)
+	if run == nil {
+		writeCloudError(w, http.StatusNotFound, "run not found")
+		return false
+	}
+	if run.MachineID != tok.MachineID {
+		writeCloudError(w, http.StatusForbidden, "token does not own this run")
+		return false
+	}
+	return true
 }
 
 // ---- Cloud config auth middleware ----

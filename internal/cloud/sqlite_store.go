@@ -335,8 +335,8 @@ func (s *SQLiteStore) Lease(req LeaseRequest, leaseFor time.Duration) (*JobSpec,
 	}
 
 	if _, err = tx.Exec(
-		`INSERT INTO runs (id, job_id, status, started_at) VALUES (?, ?, ?, ?)`,
-		runID, chosen.id, JobStatusRunning, nowStr,
+		`INSERT INTO runs (id, job_id, machine_id, status, started_at) VALUES (?, ?, ?, ?, ?)`,
+		runID, chosen.id, req.MachineID, JobStatusRunning, nowStr,
 	); err != nil {
 		tx.Rollback()
 		return nil, err
@@ -720,25 +720,26 @@ func (s *SQLiteStore) GetJob(id string) *JobRecord {
 
 // GetRun returns a run record including all appended events, or nil if not found.
 func (s *SQLiteStore) GetRun(id string) *RunRecord {
-	var jobID, status, outcome, summary, errStr, startedAt string
+	var jobID, machineID, status, outcome, summary, errStr, startedAt string
 	var endedAt sql.NullString
 
 	err := s.db.QueryRow(
-		`SELECT job_id, status, outcome, summary, error, started_at, ended_at
+		`SELECT job_id, machine_id, status, outcome, summary, error, started_at, ended_at
 		 FROM runs WHERE id = ?`,
 		id,
-	).Scan(&jobID, &status, &outcome, &summary, &errStr, &startedAt, &endedAt)
+	).Scan(&jobID, &machineID, &status, &outcome, &summary, &errStr, &startedAt, &endedAt)
 	if err != nil {
 		return nil
 	}
 
 	rec := &RunRecord{
-		ID:      id,
-		JobID:   jobID,
-		Status:  status,
-		Outcome: outcome,
-		Summary: summary,
-		Error:   errStr,
+		ID:        id,
+		JobID:     jobID,
+		MachineID: machineID,
+		Status:    status,
+		Outcome:   outcome,
+		Summary:   summary,
+		Error:     errStr,
 	}
 	rec.StartedAt, _ = time.Parse(time.RFC3339Nano, startedAt)
 	if endedAt.Valid {

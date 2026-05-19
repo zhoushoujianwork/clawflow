@@ -19,8 +19,14 @@ import (
 // it has to gate browser routes with RequireUser and worker routes with
 // RequireMachine itself. The real implementation is auth.Handler; tests
 // inject a stub.
+//
+// TokenFromContext returns the machine token the surrounding
+// RequireMachine middleware injected (or nil in no-auth mode). Worker
+// handlers use it to verify the token's machine_id matches the machine
+// the request claims to act on.
 type AuthExtractor interface {
 	UserFromContext(ctx context.Context) *cloud.User
+	TokenFromContext(ctx context.Context) *cloud.APIToken
 	RequireUser(http.Handler) http.Handler
 	RequireMachine(http.Handler) http.Handler
 }
@@ -326,10 +332,30 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 // ---- Worker handlers ----
 
+// tokenMatchesMachine returns false and writes 403 if the authenticated
+// token's machine_id does not match wantMachineID. It is a no-op (returns
+// true) when auth is nil or no token is present in the context — those
+// cases cover no-auth mode and existing tests that bypass RequireMachine.
+func (h *Handler) tokenMatchesMachine(w http.ResponseWriter, r *http.Request, wantMachineID string) bool {
+	if h.auth == nil {
+		return true
+	}
+	tok := h.auth.TokenFromContext(r.Context())
+	if tok == nil {
+		// No token injected means the middleware didn't enforce it
+		// (e.g. fakeAuth pass-through in unit tests). Allow.
+		return true
+	}
+	if tok.MachineID != wantMachineID {
+		writeError(w, http.StatusForbidden, "token does not match machine")
+		return false
+	}
+	return true
+}
+
 // handlePoll long-polls for the next ChatAssignment targeted at the
 // caller's machine. The worker authenticates via RequireMachine in the
-// outer mux; we accept the machine_id off the request body and trust
-// it (in test mode there is no middleware to enforce a match).
+// outer mux; we bind-check the token's machine_id against the request body.
 func (h *Handler) handlePoll(w http.ResponseWriter, r *http.Request) {
 	var req cloud.ChatPollRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -338,6 +364,9 @@ func (h *Handler) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MachineID == "" {
 		writeError(w, http.StatusBadRequest, "machine_id is required")
+		return
+	}
+	if !h.tokenMatchesMachine(w, r, req.MachineID) {
 		return
 	}
 	wait := defaultPollWait
@@ -365,7 +394,8 @@ func (h *Handler) handlePoll(w http.ResponseWriter, r *http.Request) {
 // one chat session, posted by the worker after its claude subprocess
 // exits. The session_id comes from the URL; user_id / machine_id / repo
 // are looked up server-side from the active session registry so the
-// worker can't claim usage for a session it doesn't own.
+// worker can't claim usage for a session it doesn't own. The caller's
+// token machine_id must also match the session's bound machine.
 func (h *Handler) handleWorkerUsage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -389,6 +419,9 @@ func (h *Handler) handleWorkerUsage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if !h.tokenMatchesMachine(w, r, s.MachineID) {
+		return
+	}
 
 	if err := h.cfg.Store.AddChatUsage(cloud.AddChatUsageInput{
 		SessionID: s.ID,
@@ -406,7 +439,8 @@ func (h *Handler) handleWorkerUsage(w http.ResponseWriter, r *http.Request) {
 
 // handleWorkerEvents accepts a batch of ChatEvents pushed by the
 // worker and fans them out onto the session's SSE channel. An
-// end-typed event in the batch closes the session.
+// end-typed event in the batch closes the session. The caller's token
+// machine_id must match the session's bound machine.
 func (h *Handler) handleWorkerEvents(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -424,6 +458,9 @@ func (h *Handler) handleWorkerEvents(w http.ResponseWriter, r *http.Request) {
 	h.sessionsMu.Unlock()
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if !h.tokenMatchesMachine(w, r, s.MachineID) {
 		return
 	}
 
