@@ -310,6 +310,17 @@ here — run 'clawflow run' first if you want fresh data.`,
 				// back index.html so the client-side router can resolve
 				// /dashboard, /repos, /runs/… on hard-refresh. /data/
 				// is mounted separately above and never reaches here.
+				//
+				// Unknown /api/* paths must 404 — never the SPA index.
+				// Otherwise a browser-side probe like
+				// fetch('/api/v1/auth/me') or fetch('/api/cloud/repos')
+				// would parse HTML as JSON and throw a SyntaxError,
+				// breaking pages that rely on a clean 404 to detect
+				// "this is local-only mode, no cloud here".
+				if strings.HasPrefix(r.URL.Path, "/api/") {
+					http.NotFound(w, r)
+					return
+				}
 				reqPath := strings.TrimPrefix(r.URL.Path, "/")
 				if reqPath == "" {
 					fsrv.ServeHTTP(w, r)

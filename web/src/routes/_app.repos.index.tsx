@@ -56,10 +56,19 @@ function ReposPage() {
         setMachines(m.machines ?? [])
       })
       .catch(e => {
-        // 401 means "no session" — render the Sign-in panel instead of
-        // showing the raw JSON error blob. Anything else is a real error.
+        // 401 = "no session"; 404 = "endpoint missing" (a local
+        // `clawflow web` doesn't serve /api/cloud/*); JSON parse
+        // errors on HTML responses look like SyntaxError from a raw
+        // doctype. All three cases are "this Repos UI needs cloud
+        // sign-in" — render the Sign-in panel instead of leaking the
+        // raw error string.
         const s = String(e)
-        if (s.includes('401')) {
+        if (
+          s.includes('401') ||
+          s.includes('404') ||
+          s.includes('Unexpected token') ||
+          s.includes('not valid JSON')
+        ) {
           setUnauth(true)
         } else {
           setError(s)

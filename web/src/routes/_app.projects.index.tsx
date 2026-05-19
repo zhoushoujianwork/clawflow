@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { FolderKanban, ChevronRight, Plus, Loader2, X, RefreshCw, Trash2 } from 'lucide-react'
+import { FolderKanban, ChevronRight, Plus, Loader2, X, RefreshCw, Trash2, LogIn } from 'lucide-react'
 import {
   fetchProjects,
   fetchRepos,
@@ -20,6 +20,7 @@ function ProjectList() {
   const [repos, setRepos] = useState<Repo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [unauth, setUnauth] = useState(false)
 
   // Create form state
   const [showCreate, setShowCreate] = useState(false)
@@ -36,12 +37,30 @@ function ProjectList() {
   const load = () => {
     setLoading(true)
     setError(null)
+    setUnauth(false)
     Promise.all([fetchProjects(), fetchRepos()])
       .then(([p, r]) => {
         setProjects(p.projects ?? [])
         setRepos(r.repos ?? [])
       })
-      .catch(e => setError(String(e)))
+      .catch(e => {
+        // 401 (no session), 404 (local `clawflow web` doesn't serve the
+        // cloud API), or JSON parse error on an HTML body all mean
+        // "Projects UI needs a cloud sign-in". Show the panel instead
+        // of leaking the raw error string. See the matching block in
+        // _app.repos.index.tsx for the same heuristic.
+        const s = String(e)
+        if (
+          s.includes('401') ||
+          s.includes('404') ||
+          s.includes('Unexpected token') ||
+          s.includes('not valid JSON')
+        ) {
+          setUnauth(true)
+        } else {
+          setError(s)
+        }
+      })
       .finally(() => setLoading(false))
   }
 
@@ -196,7 +215,9 @@ function ProjectList() {
         </div>
       )}
 
-      {!loading && projects.length === 0 && !error && (
+      {unauth && <SignInPanel />}
+
+      {!loading && !unauth && projects.length === 0 && !error && (
         <EmptyProjects />
       )}
 
@@ -345,6 +366,33 @@ function EmptyProjects() {
       >
         clawflow cloud import
       </div>
+    </div>
+  )
+}
+
+// SignInPanel — friendly stand-in for the raw 401/404/parse-error
+// surface when a local `clawflow web` (or a signed-out cloud session)
+// tries to load this page. Mirrors the Repos page's panel.
+function SignInPanel() {
+  return (
+    <div
+      className="rounded-lg border px-6 py-12 text-center"
+      style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}
+    >
+      <LogIn size={32} className="mx-auto mb-3 opacity-30" style={{ color: 'hsl(var(--text-low))' }} />
+      <p className="text-sm font-medium mb-1" style={{ color: 'hsl(var(--text-high))' }}>
+        Sign in to view your projects
+      </p>
+      <p className="text-xs mb-4" style={{ color: 'hsl(var(--text-low))' }}>
+        ClawFlow uses your GitHub identity. Projects appear once you're signed in.
+      </p>
+      <a
+        href="/api/v1/github/app/login"
+        className="inline-flex items-center text-xs font-medium px-3 py-1.5 rounded-sm"
+        style={{ background: 'hsl(var(--brand))', color: 'white' }}
+      >
+        Sign in with GitHub
+      </a>
     </div>
   )
 }
