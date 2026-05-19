@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -69,4 +70,10 @@ func (h *Handler) RequireMachine(next http.Handler) http.Handler {
 		ctx = withToken(ctx, tok)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// TokenFromContext on *Handler satisfies cloud.AuthHandler so server.go can
+// read the authenticated machine token without importing the auth package.
+func (h *Handler) TokenFromContext(ctx context.Context) *cloud.APIToken {
+	return TokenFromContext(ctx)
 }

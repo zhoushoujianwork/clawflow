@@ -193,6 +193,8 @@ func (a *stubAuth) UserFromContext(ctx context.Context) *User {
 	return u
 }
 
+func (a *stubAuth) TokenFromContext(_ context.Context) *APIToken { return nil }
+
 func absDiff(a, b float64) float64 {
 	if a > b {
 		return a - b

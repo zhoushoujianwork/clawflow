@@ -28,6 +28,10 @@ func (fakeAuth) UserFromContext(ctx context.Context) *cloud.User {
 	return u
 }
 
+// TokenFromContext returns nil in test mode (no machine token is injected
+// by fakeAuth), so the machine ownership guard is a no-op in existing tests.
+func (fakeAuth) TokenFromContext(_ context.Context) *cloud.APIToken { return nil }
+
 // RequireUser / RequireMachine are pass-through in tests: the user is
 // already in context via the withUser wrapper below. Production uses
 // auth.Handler's real session/Bearer validation.
