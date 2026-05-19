@@ -85,11 +85,17 @@ type Store interface {
 	// Usage. AddChatUsage is called by the chat handler after a worker
 	// POSTs to /api/worker/chat/sessions/{id}/usage. AddRunUsage is
 	// called implicitly from FinishRun when the request carries a
-	// non-nil Usage. Get* are for tests and for the future
+	// non-nil Usage. Get* are for tests; ListUsageForUser backs the
 	// /api/cloud/usage/summary aggregation endpoint.
 	AddChatUsage(in AddChatUsageInput) error
 	GetRunUsage(runID string) *UsageRecord
 	GetChatUsage(sessionID string) *UsageRecord
+	// ListUsageForUser returns every run_usage + chat_usage row whose
+	// user_id matches the supplied user. Run usage rows that have an
+	// empty user_id (single-user self-host where no owner has been
+	// stamped) are also returned to keep that mode functional; pass
+	// userID == "" to retrieve only the orphaned rows.
+	ListUsageForUser(userID string) []*UsageRecord
 
 	// VCS connections (used by the webhook handler).
 	RegisterConnection(conn VCSConnection) (*VCSConnection, error)
@@ -436,6 +442,25 @@ func (s *MemoryStore) GetChatUsage(sessionID string) *UsageRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneUsage(s.ChatUsage[sessionID])
+}
+
+// ListUsageForUser returns chat rows belonging to userID + run rows
+// whose user_id is empty (single-user self-host) or matches.
+func (s *MemoryStore) ListUsageForUser(userID string) []*UsageRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*UsageRecord, 0, len(s.RunUsage)+len(s.ChatUsage))
+	for _, r := range s.RunUsage {
+		if r.UserID == "" || r.UserID == userID {
+			out = append(out, cloneUsage(r))
+		}
+	}
+	for _, c := range s.ChatUsage {
+		if c.UserID == userID {
+			out = append(out, cloneUsage(c))
+		}
+	}
+	return out
 }
 
 func newUsageRecord(sessionID, runID, repo, operator, userID, machineID string, endedAt time.Time, u *Usage) *UsageRecord {

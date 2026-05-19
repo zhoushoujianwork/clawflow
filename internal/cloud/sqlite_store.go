@@ -530,6 +530,93 @@ func (s *SQLiteStore) GetChatUsage(sessionID string) *UsageRecord {
 	return s.queryUsage(false, sessionID)
 }
 
+// ListUsageForUser returns chat rows belonging to userID + run rows
+// whose user_id is empty (single-user self-host) or matches.
+func (s *SQLiteStore) ListUsageForUser(userID string) []*UsageRecord {
+	out := make([]*UsageRecord, 0)
+
+	// Run usage. We accept empty-user rows so single-user self-hosts
+	// see their runs even before owner_user_id wiring lands.
+	runRows, err := s.db.Query(
+		`SELECT run_id, COALESCE(user_id,''), machine_id, repo, operator,
+		        duration_ms, num_turns, total_cost_usd,
+		        input_tokens, output_tokens,
+		        cache_read_input_tokens, cache_creation_input_tokens,
+		        model_usage_json, ended_at
+		 FROM run_usage
+		 WHERE user_id = '' OR user_id = ?`, userID)
+	if err == nil {
+		defer runRows.Close()
+		for runRows.Next() {
+			out = append(out, scanUsageRow(runRows, true))
+		}
+	}
+
+	chatRows, err := s.db.Query(
+		`SELECT session_id, user_id, machine_id, repo, '',
+		        duration_ms, num_turns, total_cost_usd,
+		        input_tokens, output_tokens,
+		        cache_read_input_tokens, cache_creation_input_tokens,
+		        model_usage_json, ended_at
+		 FROM chat_usage WHERE user_id = ?`, userID)
+	if err == nil {
+		defer chatRows.Close()
+		for chatRows.Next() {
+			out = append(out, scanUsageRow(chatRows, false))
+		}
+	}
+	return out
+}
+
+// scanUsageRow is the shared row→UsageRecord scan used by both run and
+// chat list queries. isRun discriminates which primary-key field to
+// populate on the resulting record.
+func scanUsageRow(rows interface {
+	Scan(...any) error
+}, isRun bool) *UsageRecord {
+	var (
+		id, userID, machineID, repo, operator string
+		modelJSON, endedAt                    string
+		durationMs                            int64
+		numTurns                              int
+		totalCost                             float64
+		inT, outT                             int64
+		cacheR, cacheC                        int64
+	)
+	if err := rows.Scan(&id, &userID, &machineID, &repo, &operator,
+		&durationMs, &numTurns, &totalCost,
+		&inT, &outT, &cacheR, &cacheC,
+		&modelJSON, &endedAt); err != nil {
+		return nil
+	}
+	rec := &UsageRecord{
+		UserID:                   userID,
+		MachineID:                machineID,
+		Repo:                     repo,
+		Operator:                 operator,
+		DurationMs:               durationMs,
+		NumTurns:                 numTurns,
+		TotalCostUSD:             totalCost,
+		InputTokens:              inT,
+		OutputTokens:             outT,
+		CacheReadInputTokens:     cacheR,
+		CacheCreationInputTokens: cacheC,
+	}
+	if isRun {
+		rec.RunID = id
+	} else {
+		rec.SessionID = id
+	}
+	rec.EndedAt, _ = time.Parse(time.RFC3339Nano, endedAt)
+	if modelJSON != "" && modelJSON != "{}" && modelJSON != "null" {
+		var mu map[string]ModelUsage
+		if json.Unmarshal([]byte(modelJSON), &mu) == nil {
+			rec.ModelUsage = mu
+		}
+	}
+	return rec
+}
+
 func (s *SQLiteStore) queryUsage(isRun bool, id string) *UsageRecord {
 	var (
 		userID, machineID, repo, operator string
