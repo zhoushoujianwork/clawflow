@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import { useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, FolderKanban, Trash2, Loader2, Plus, X, RefreshCw } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ChevronLeft, FolderKanban, Trash2, Loader2, Plus, X, RefreshCw, Zap } from 'lucide-react'
 import {
   fetchProjects,
   fetchRepos,
@@ -10,6 +10,14 @@ import {
   type Project,
   type Repo,
 } from '../lib/cloudApi'
+import {
+  type PilotRun,
+  DUTY_KEYS,
+  DUTY_LABELS,
+  dutyStatusColour,
+  PilotRunDetailModal,
+} from '../components/PilotRun'
+import { cn } from '../lib/utils'
 
 export const Route = createFileRoute('/_app/projects/$name')({
   component: ProjectDetail,
@@ -36,6 +44,15 @@ function ProjectDetail() {
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
+  // Pilot wake history for this project. Local-mode-only — the cloud
+  // endpoint returns 404 and pilotRuns stays empty so the section
+  // collapses to nothing. The full history page is /pilot-runs;
+  // here we surface only the latest with-duties wake + a Wake button.
+  const [pilotRuns, setPilotRuns] = useState<PilotRun[]>([])
+  const [pilotRunDetail, setPilotRunDetail] = useState<PilotRun | null>(null)
+  const [waking, setWaking] = useState(false)
+  const [wakeMessage, setWakeMessage] = useState<string | null>(null)
+
   const load = () => {
     setLoading(true)
     setError(null)
@@ -49,6 +66,59 @@ function ProjectDetail() {
   }
 
   useEffect(load, [])
+
+  // fetchPilotRuns hits the local-mode endpoint. Cloud returns 404 →
+  // catch swallows it, list stays empty, the Pilot section collapses.
+  const fetchPilotRuns = useCallback(() => {
+    fetch(`/api/project/pilot-runs?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : []))
+      .then(data => setPilotRuns(Array.isArray(data) ? data : []))
+      .catch(() => setPilotRuns([]))
+  }, [name])
+
+  useEffect(() => {
+    fetchPilotRuns()
+    // Refresh every 30s while the page is open so a manual wake's
+    // result lands without the user having to refresh.
+    const id = setInterval(fetchPilotRuns, 30_000)
+    return () => clearInterval(id)
+  }, [fetchPilotRuns])
+
+  const handleWake = useCallback(async () => {
+    setWaking(true)
+    setWakeMessage(null)
+    try {
+      const r = await fetch('/api/project/pilot/wake', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name }),
+      })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok) {
+        setWakeMessage(data.error || `Wake failed (${r.status})`)
+        return
+      }
+      setWakeMessage('Wake started — refreshing pilot activity…')
+      // Re-poll a few times to catch the new run as it appears.
+      fetchPilotRuns()
+      setTimeout(fetchPilotRuns, 2_000)
+      setTimeout(fetchPilotRuns, 5_000)
+    } catch (e) {
+      setWakeMessage(e instanceof Error ? e.message : String(e))
+    } finally {
+      setWaking(false)
+    }
+  }, [name, fetchPilotRuns])
+
+  // The most-recent successful wake whose output included duties.
+  // Used to render the at-a-glance duty digest. Older shapeless wakes
+  // (pre-duty schema) are skipped — they're still in the history page.
+  const latestWakeWithDuties = useMemo<PilotRun | null>(() => {
+    for (const r of pilotRuns) {
+      if (r.status === 'success' && r.duties) return r
+    }
+    return null
+  }, [pilotRuns])
 
   // Look up the project by name (URL slug). Cloud projects have an opaque
   // id we use for API calls, but the URL key is the human-readable name.
@@ -200,6 +270,112 @@ function ProjectDetail() {
         >
           {error}
         </div>
+      )}
+
+      {/* Pilot section — only renders when /api/project/pilot-runs
+          returned data (i.e. local mode AND this project has wake
+          history). Cloud anon mode quietly hides it. */}
+      {pilotRuns.length > 0 && (
+        <section className="mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold flex items-center gap-2" style={{ color: 'hsl(var(--text-high))' }}>
+              <Zap size={14} style={{ color: 'hsl(var(--text-low))' }} />
+              Pilot
+              <span className="text-xs font-normal tabular-nums" style={{ color: 'hsl(var(--text-low))' }}>
+                {pilotRuns.length} wake{pilotRuns.length === 1 ? '' : 's'}
+              </span>
+            </h2>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleWake}
+                disabled={waking}
+                className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
+                style={{
+                  borderColor: 'hsl(var(--brand))',
+                  color: 'hsl(var(--brand))',
+                  background: 'hsl(var(--brand) / 0.08)',
+                }}
+              >
+                {waking ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+                Wake now
+              </button>
+              {/* Full /pilot-runs route hasn't been ported to the
+                  cloud-style React routes yet — see the legacy commit
+                  at 5a4d9c9^. For now expose the modal-detail flow via
+                  the "Details" button on the latest-wake card below. */}
+            </div>
+          </div>
+
+          {wakeMessage && (
+            <div
+              className="mb-3 px-3 py-2 rounded-md text-xs border"
+              style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-mid, var(--text-low)))' }}
+            >
+              {wakeMessage}
+            </div>
+          )}
+
+          {latestWakeWithDuties && (
+            <div
+              className="rounded-lg border p-4"
+              style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}
+            >
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <div className="text-xs flex items-center gap-2" style={{ color: 'hsl(var(--text-low))' }}>
+                  Latest wake
+                  <span style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
+                    {timeAgo(latestWakeWithDuties.started_at)}
+                  </span>
+                </div>
+                <button
+                  onClick={() => setPilotRunDetail(latestWakeWithDuties)}
+                  className="text-xs underline-offset-2 hover:underline"
+                  style={{ color: 'hsl(var(--text-low))' }}
+                >
+                  Details
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {DUTY_KEYS.map(k => {
+                  const duty = latestWakeWithDuties.duties?.[k]
+                  if (!duty) return null
+                  return (
+                    <span
+                      key={k}
+                      className={cn(
+                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border',
+                        dutyStatusColour(duty.status),
+                      )}
+                      title={duty.note || duty.status}
+                    >
+                      {DUTY_LABELS[k]}: {duty.status}
+                    </span>
+                  )
+                })}
+              </div>
+
+              {latestWakeWithDuties.duties?.issue_digest?.summary && (
+                <p className="text-xs leading-relaxed" style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
+                  {latestWakeWithDuties.duties.issue_digest.summary}
+                </p>
+              )}
+            </div>
+          )}
+
+          {!latestWakeWithDuties && (
+            <div
+              className="rounded-lg border px-4 py-6 text-center text-xs"
+              style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))', color: 'hsl(var(--text-low))' }}
+            >
+              {pilotRuns.length} wake{pilotRuns.length === 1 ? '' : 's'} on record, none with a parseable duties block yet.
+            </div>
+          )}
+        </section>
+      )}
+
+      {pilotRunDetail && (
+        <PilotRunDetailModal run={pilotRunDetail} onClose={() => setPilotRunDetail(null)} />
       )}
 
       <section className="mb-6">
