@@ -147,8 +147,55 @@ function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+// LOCAL_AGENT_CANDIDATES is the short list of localhost URLs the cloud
+// bundle probes on mount to detect a co-located `clawflow web`. The
+// first 200-OK response (with CORS allow — see internal/api/
+// cors_chat_agent.go) wins; chat.open() then targets that URL's
+// /api/chat/spawn instead of the in-browser cloud drawer.
+//
+// 8090 is the `clawflow web --port` default; 7070 is a common
+// override. If a user binds elsewhere they can still use the drawer.
+const LOCAL_AGENT_CANDIDATES = [
+  'http://127.0.0.1:8090',
+  'http://127.0.0.1:7070',
+]
+
+// probeLocalAgent races the GET /api/version probes against the
+// candidate list and resolves to the first reachable URL, or null
+// when nothing answers within 800 ms (typical localhost RTT is sub-
+// 10 ms; the cap is just a guard against blocking the cloud drawer
+// behind a slow probe).
+async function probeLocalAgent(): Promise<string | null> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 800)
+  try {
+    const results = await Promise.allSettled(
+      LOCAL_AGENT_CANDIDATES.map(async url => {
+        const r = await fetch(`${url}/api/version`, {
+          mode: 'cors',
+          signal: controller.signal,
+        })
+        if (!r.ok) throw new Error(`probe ${url}: ${r.status}`)
+        return url
+      }),
+    )
+    for (const res of results) {
+      if (res.status === 'fulfilled') return res.value
+    }
+    return null
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export function ChatProvider({ children }: { children: ReactNode }) {
   const [hostMode, setHostMode] = useState<HostMode>(undefined)
+  // agentURL is the prefix used by openLocal when hostMode === 'local'.
+  // Empty string = same-origin local web bundle (chatContext is on the
+  // local server itself). A full http://127.0.0.1:NNNN URL = a remote
+  // cloud bundle that discovered a co-located local-web via the
+  // localhost probe above.
+  const [agentURL, setAgentURL] = useState<string>('')
   const [spawnError, setSpawnError] = useState<SpawnError | null>(null)
   const [cloud, setCloud] = useState<CloudState>({ messages: [], status: 'idle' })
   const [cloudOpen, setCloudOpen] = useState(false)
@@ -161,20 +208,43 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   // fresh assistant bubble.
   const activeAssistantIdRef = useRef<string | null>(null)
 
-  // Probe host mode on mount. fetchAuthMe returns 'no-cloud' when
-  // /api/v1/auth/me doesn't exist on this origin (local bundle).
+  // Probe host mode on mount. Two probes race:
+  //
+  //   1. fetchAuthMe — 'no-cloud' (404) means we're on a local-web
+  //      bundle, so hostMode is unambiguously 'local'.
+  //   2. probeLocalAgent — looks for a `clawflow web` on common
+  //      localhost ports. Only succeeds when origin === user's
+  //      configured cloud URL (CORS gate). When it succeeds the
+  //      remote cloud bundle gets to spawn a native terminal here
+  //      via /api/chat/spawn instead of falling back to the in-
+  //      browser drawer (the user's stated preference).
+  //
+  // Local-web bundle always gets hostMode='local' with agentURL=''
+  // (relative paths). Cloud bundle gets 'local' + the probed agent
+  // URL when reachable, else 'cloud' for the drawer fallback.
   useEffect(() => {
     let cancelled = false
-    fetchAuthMe()
-      .then(r => {
-        if (cancelled) return
-        setHostMode(r.kind === 'no-cloud' ? 'local' : 'cloud')
-      })
-      .catch(() => {
-        // Treat network errors as local — fetchAuthMe already maps
-        // network failures to 'no-cloud', but be defensive.
-        if (!cancelled) setHostMode('local')
-      })
+    ;(async () => {
+      const me = await fetchAuthMe().catch(() => ({ kind: 'no-cloud' as const }))
+      if (cancelled) return
+      if (me.kind === 'no-cloud') {
+        setHostMode('local')
+        setAgentURL('')
+        return
+      }
+      // Remote bundle — try the localhost agent. If found, route
+      // chat through it; otherwise stay in cloud (drawer) mode.
+      const agent = await probeLocalAgent()
+      if (cancelled) return
+      if (agent) {
+        setAgentURL(agent)
+        setHostMode('local')
+      } else {
+        setHostMode('cloud')
+      }
+    })().catch(() => {
+      if (!cancelled) setHostMode('local')
+    })
     return () => {
       cancelled = true
     }
@@ -273,7 +343,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const openLocal = useCallback(async (t: ChatTarget) => {
     setSpawnError(null)
     try {
-      const r = await fetch('/api/chat/spawn', {
+      // agentURL is empty string for same-origin (local-web bundle)
+      // and a full http://127.0.0.1:NNNN URL when this is a cloud
+      // bundle that found a co-located local-web during the probe.
+      const r = await fetch(`${agentURL}/api/chat/spawn`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(t),
@@ -295,7 +368,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         error: String((e as Error).message || e),
       })
     }
-  }, [])
+  }, [agentURL])
 
   const openCloud = useCallback(
     async (t: ChatTarget) => {
