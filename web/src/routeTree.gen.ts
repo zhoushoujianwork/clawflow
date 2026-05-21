@@ -16,15 +16,12 @@ import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppProjectsRouteImport } from './routes/_app.projects'
 import { Route as AppOperatorsRouteImport } from './routes/_app.operators'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
-import { Route as AppCloudRouteImport } from './routes/_app.cloud'
 import { Route as AppReposIndexRouteImport } from './routes/_app.repos.index'
 import { Route as AppProjectsIndexRouteImport } from './routes/_app.projects.index'
 import { Route as AppReposAddRouteImport } from './routes/_app.repos.add'
 import { Route as AppReposRepoNameRouteImport } from './routes/_app.repos.$repoName'
 import { Route as AppProjectsNameRouteImport } from './routes/_app.projects.$name'
-import { Route as AppCloudMachinesRouteImport } from './routes/_app.cloud.machines'
-import { Route as AppCloudJobsRouteImport } from './routes/_app.cloud.jobs'
-import { Route as AppCloudBindingsRouteImport } from './routes/_app.cloud.bindings'
+import { Route as AppProjectsNamePilotRunsRouteImport } from './routes/_app.projects.$name_.pilot-runs'
 import { Route as AppRunsSlugIssueTsRouteImport } from './routes/_app.runs.$slug.$issue.$ts'
 
 const AppRoute = AppRouteImport.update({
@@ -61,11 +58,6 @@ const AppDashboardRoute = AppDashboardRouteImport.update({
   path: '/dashboard',
   getParentRoute: () => AppRoute,
 } as any)
-const AppCloudRoute = AppCloudRouteImport.update({
-  id: '/cloud',
-  path: '/cloud',
-  getParentRoute: () => AppRoute,
-} as any)
 const AppReposIndexRoute = AppReposIndexRouteImport.update({
   id: '/repos/',
   path: '/repos/',
@@ -91,21 +83,12 @@ const AppProjectsNameRoute = AppProjectsNameRouteImport.update({
   path: '/$name',
   getParentRoute: () => AppProjectsRoute,
 } as any)
-const AppCloudMachinesRoute = AppCloudMachinesRouteImport.update({
-  id: '/machines',
-  path: '/machines',
-  getParentRoute: () => AppCloudRoute,
-} as any)
-const AppCloudJobsRoute = AppCloudJobsRouteImport.update({
-  id: '/jobs',
-  path: '/jobs',
-  getParentRoute: () => AppCloudRoute,
-} as any)
-const AppCloudBindingsRoute = AppCloudBindingsRouteImport.update({
-  id: '/bindings',
-  path: '/bindings',
-  getParentRoute: () => AppCloudRoute,
-} as any)
+const AppProjectsNamePilotRunsRoute =
+  AppProjectsNamePilotRunsRouteImport.update({
+    id: '/$name_/pilot-runs',
+    path: '/$name/pilot-runs',
+    getParentRoute: () => AppProjectsRoute,
+  } as any)
 const AppRunsSlugIssueTsRoute = AppRunsSlugIssueTsRouteImport.update({
   id: '/runs/$slug/$issue/$ts',
   path: '/runs/$slug/$issue/$ts',
@@ -114,113 +97,95 @@ const AppRunsSlugIssueTsRoute = AppRunsSlugIssueTsRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/cloud': typeof AppCloudRouteWithChildren
   '/dashboard': typeof AppDashboardRoute
   '/operators': typeof AppOperatorsRoute
   '/projects': typeof AppProjectsRouteWithChildren
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
-  '/cloud/bindings': typeof AppCloudBindingsRoute
-  '/cloud/jobs': typeof AppCloudJobsRoute
-  '/cloud/machines': typeof AppCloudMachinesRoute
   '/projects/$name': typeof AppProjectsNameRoute
   '/repos/$repoName': typeof AppReposRepoNameRoute
   '/repos/add': typeof AppReposAddRoute
   '/projects/': typeof AppProjectsIndexRoute
   '/repos/': typeof AppReposIndexRoute
+  '/projects/$name/pilot-runs': typeof AppProjectsNamePilotRunsRoute
   '/runs/$slug/$issue/$ts': typeof AppRunsSlugIssueTsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/cloud': typeof AppCloudRouteWithChildren
   '/dashboard': typeof AppDashboardRoute
   '/operators': typeof AppOperatorsRoute
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
-  '/cloud/bindings': typeof AppCloudBindingsRoute
-  '/cloud/jobs': typeof AppCloudJobsRoute
-  '/cloud/machines': typeof AppCloudMachinesRoute
   '/projects/$name': typeof AppProjectsNameRoute
   '/repos/$repoName': typeof AppReposRepoNameRoute
   '/repos/add': typeof AppReposAddRoute
   '/projects': typeof AppProjectsIndexRoute
   '/repos': typeof AppReposIndexRoute
+  '/projects/$name/pilot-runs': typeof AppProjectsNamePilotRunsRoute
   '/runs/$slug/$issue/$ts': typeof AppRunsSlugIssueTsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_app': typeof AppRouteWithChildren
-  '/_app/cloud': typeof AppCloudRouteWithChildren
   '/_app/dashboard': typeof AppDashboardRoute
   '/_app/operators': typeof AppOperatorsRoute
   '/_app/projects': typeof AppProjectsRouteWithChildren
   '/_app/settings': typeof AppSettingsRoute
   '/_app/usage': typeof AppUsageRoute
-  '/_app/cloud/bindings': typeof AppCloudBindingsRoute
-  '/_app/cloud/jobs': typeof AppCloudJobsRoute
-  '/_app/cloud/machines': typeof AppCloudMachinesRoute
   '/_app/projects/$name': typeof AppProjectsNameRoute
   '/_app/repos/$repoName': typeof AppReposRepoNameRoute
   '/_app/repos/add': typeof AppReposAddRoute
   '/_app/projects/': typeof AppProjectsIndexRoute
   '/_app/repos/': typeof AppReposIndexRoute
+  '/_app/projects/$name_/pilot-runs': typeof AppProjectsNamePilotRunsRoute
   '/_app/runs/$slug/$issue/$ts': typeof AppRunsSlugIssueTsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/cloud'
     | '/dashboard'
     | '/operators'
     | '/projects'
     | '/settings'
     | '/usage'
-    | '/cloud/bindings'
-    | '/cloud/jobs'
-    | '/cloud/machines'
     | '/projects/$name'
     | '/repos/$repoName'
     | '/repos/add'
     | '/projects/'
     | '/repos/'
+    | '/projects/$name/pilot-runs'
     | '/runs/$slug/$issue/$ts'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/cloud'
     | '/dashboard'
     | '/operators'
     | '/settings'
     | '/usage'
-    | '/cloud/bindings'
-    | '/cloud/jobs'
-    | '/cloud/machines'
     | '/projects/$name'
     | '/repos/$repoName'
     | '/repos/add'
     | '/projects'
     | '/repos'
+    | '/projects/$name/pilot-runs'
     | '/runs/$slug/$issue/$ts'
   id:
     | '__root__'
     | '/'
     | '/_app'
-    | '/_app/cloud'
     | '/_app/dashboard'
     | '/_app/operators'
     | '/_app/projects'
     | '/_app/settings'
     | '/_app/usage'
-    | '/_app/cloud/bindings'
-    | '/_app/cloud/jobs'
-    | '/_app/cloud/machines'
     | '/_app/projects/$name'
     | '/_app/repos/$repoName'
     | '/_app/repos/add'
     | '/_app/projects/'
     | '/_app/repos/'
+    | '/_app/projects/$name_/pilot-runs'
     | '/_app/runs/$slug/$issue/$ts'
   fileRoutesById: FileRoutesById
 }
@@ -280,13 +245,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppDashboardRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/cloud': {
-      id: '/_app/cloud'
-      path: '/cloud'
-      fullPath: '/cloud'
-      preLoaderRoute: typeof AppCloudRouteImport
-      parentRoute: typeof AppRoute
-    }
     '/_app/repos/': {
       id: '/_app/repos/'
       path: '/repos'
@@ -322,26 +280,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppProjectsNameRouteImport
       parentRoute: typeof AppProjectsRoute
     }
-    '/_app/cloud/machines': {
-      id: '/_app/cloud/machines'
-      path: '/machines'
-      fullPath: '/cloud/machines'
-      preLoaderRoute: typeof AppCloudMachinesRouteImport
-      parentRoute: typeof AppCloudRoute
-    }
-    '/_app/cloud/jobs': {
-      id: '/_app/cloud/jobs'
-      path: '/jobs'
-      fullPath: '/cloud/jobs'
-      preLoaderRoute: typeof AppCloudJobsRouteImport
-      parentRoute: typeof AppCloudRoute
-    }
-    '/_app/cloud/bindings': {
-      id: '/_app/cloud/bindings'
-      path: '/bindings'
-      fullPath: '/cloud/bindings'
-      preLoaderRoute: typeof AppCloudBindingsRouteImport
-      parentRoute: typeof AppCloudRoute
+    '/_app/projects/$name_/pilot-runs': {
+      id: '/_app/projects/$name_/pilot-runs'
+      path: '/$name/pilot-runs'
+      fullPath: '/projects/$name/pilot-runs'
+      preLoaderRoute: typeof AppProjectsNamePilotRunsRouteImport
+      parentRoute: typeof AppProjectsRoute
     }
     '/_app/runs/$slug/$issue/$ts': {
       id: '/_app/runs/$slug/$issue/$ts'
@@ -353,30 +297,16 @@ declare module '@tanstack/react-router' {
   }
 }
 
-interface AppCloudRouteChildren {
-  AppCloudBindingsRoute: typeof AppCloudBindingsRoute
-  AppCloudJobsRoute: typeof AppCloudJobsRoute
-  AppCloudMachinesRoute: typeof AppCloudMachinesRoute
-}
-
-const AppCloudRouteChildren: AppCloudRouteChildren = {
-  AppCloudBindingsRoute: AppCloudBindingsRoute,
-  AppCloudJobsRoute: AppCloudJobsRoute,
-  AppCloudMachinesRoute: AppCloudMachinesRoute,
-}
-
-const AppCloudRouteWithChildren = AppCloudRoute._addFileChildren(
-  AppCloudRouteChildren,
-)
-
 interface AppProjectsRouteChildren {
   AppProjectsNameRoute: typeof AppProjectsNameRoute
   AppProjectsIndexRoute: typeof AppProjectsIndexRoute
+  AppProjectsNamePilotRunsRoute: typeof AppProjectsNamePilotRunsRoute
 }
 
 const AppProjectsRouteChildren: AppProjectsRouteChildren = {
   AppProjectsNameRoute: AppProjectsNameRoute,
   AppProjectsIndexRoute: AppProjectsIndexRoute,
+  AppProjectsNamePilotRunsRoute: AppProjectsNamePilotRunsRoute,
 }
 
 const AppProjectsRouteWithChildren = AppProjectsRoute._addFileChildren(
@@ -384,7 +314,6 @@ const AppProjectsRouteWithChildren = AppProjectsRoute._addFileChildren(
 )
 
 interface AppRouteChildren {
-  AppCloudRoute: typeof AppCloudRouteWithChildren
   AppDashboardRoute: typeof AppDashboardRoute
   AppOperatorsRoute: typeof AppOperatorsRoute
   AppProjectsRoute: typeof AppProjectsRouteWithChildren
@@ -397,7 +326,6 @@ interface AppRouteChildren {
 }
 
 const AppRouteChildren: AppRouteChildren = {
-  AppCloudRoute: AppCloudRouteWithChildren,
   AppDashboardRoute: AppDashboardRoute,
   AppOperatorsRoute: AppOperatorsRoute,
   AppProjectsRoute: AppProjectsRouteWithChildren,

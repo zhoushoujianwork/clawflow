@@ -1,73 +1,54 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { FolderKanban, ChevronRight, Plus, Loader2, X, RefreshCw, Trash2, LogIn } from 'lucide-react'
-import {
-  fetchProjects,
-  fetchRepos,
-  createProject,
-  deleteProject,
-  timeAgo,
-  type Project,
-  type Repo,
-} from '../lib/cloudApi'
+import { FolderKanban, ChevronRight, Plus, Loader2, X } from 'lucide-react'
+import { cn } from '../lib/utils'
+import { useConfigChanged } from '../lib/configEvents'
+
+interface Project {
+  name: string
+  repos: string[]
+  created_at?: string
+  context_md?: string
+}
 
 export const Route = createFileRoute('/_app/projects/')({
   component: ProjectList,
 })
 
+function timeAgo(iso: string): string {
+  if (!iso) return '—'
+  const t = new Date(iso).getTime()
+  if (!isFinite(t)) return '—'
+  const diff = Math.floor((Date.now() - t) / 1000)
+  if (diff < 0) return 'just now'
+  if (diff < 60) return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}min ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
 function ProjectList() {
   const [projects, setProjects] = useState<Project[]>([])
-  const [repos, setRepos] = useState<Repo[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [unauth, setUnauth] = useState(false)
-
-  // Create form state
   const [showCreate, setShowCreate] = useState(false)
   const [createName, setCreateName] = useState('')
-  const [createDescription, setCreateDescription] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
 
-  // Delete state — tracks which project is currently being confirmed/deleted
-  const [confirmDelete, setConfirmDelete] = useState<Project | null>(null)
-  const [deleting, setDeleting] = useState(false)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
-
-  const load = () => {
-    setLoading(true)
-    setError(null)
-    setUnauth(false)
-    Promise.all([fetchProjects(), fetchRepos()])
-      .then(([p, r]) => {
-        setProjects(p.projects ?? [])
-        setRepos(r.repos ?? [])
+  function fetchProjects() {
+    fetch('/data/projects.json', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : []))
+      .catch(() => [])
+      .then(data => {
+        setProjects(Array.isArray(data) ? data : [])
+        setLoading(false)
       })
-      .catch(e => {
-        // 401 (no session), 404 (local `clawflow web` doesn't serve the
-        // cloud API), or JSON parse error on an HTML body all mean
-        // "Projects UI needs a cloud sign-in". Show the panel instead
-        // of leaking the raw error string. See the matching block in
-        // _app.repos.index.tsx for the same heuristic.
-        const s = String(e)
-        if (
-          s.includes('401') ||
-          s.includes('404') ||
-          s.includes('Unexpected token') ||
-          s.includes('not valid JSON')
-        ) {
-          setUnauth(true)
-        } else {
-          setError(s)
-        }
-      })
-      .finally(() => setLoading(false))
   }
 
-  useEffect(load, [])
-
-  const repoCount = (projectId: string) =>
-    repos.filter(r => r.project_id === projectId).length
+  useEffect(() => {
+    fetchProjects()
+  }, [])
+  useConfigChanged(fetchProjects)
 
   async function handleCreate() {
     const name = createName.trim()
@@ -75,217 +56,137 @@ function ProjectList() {
     setCreating(true)
     setCreateError(null)
     try {
-      await createProject({
-        name,
-        description: createDescription.trim() || undefined,
+      const r = await fetch('/api/project/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
       })
+      const d = await r.json()
+      if (!r.ok || d.error) {
+        throw new Error(d.error || `HTTP ${r.status}`)
+      }
       setShowCreate(false)
       setCreateName('')
-      setCreateDescription('')
-      load()
+      fetchProjects()
     } catch (e) {
-      setCreateError(e instanceof Error ? e.message : String(e))
+      setCreateError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
       setCreating(false)
     }
   }
 
-  async function handleDelete(p: Project) {
-    setDeleting(true)
-    setDeleteError(null)
-    try {
-      await deleteProject(p.id)
-      setConfirmDelete(null)
-      load()
-    } catch (e) {
-      setDeleteError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setDeleting(false)
-    }
-  }
-
   return (
-    <div className="px-6 py-6 max-w-5xl mx-auto">
+    <div className="max-w-5xl mx-auto px-4 py-6">
       <div className="flex items-center justify-between mb-5">
-        <h1 className="text-base font-semibold" style={{ color: 'hsl(var(--text-high))' }}>
-          Projects
-        </h1>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={load}
-            disabled={loading}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
-            style={{ borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
-          >
-            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
-            Refresh
-          </button>
-          <button
-            onClick={() => { setShowCreate(true); setCreateError(null) }}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm border transition-colors"
-            style={{
-              background: 'hsl(var(--brand))',
-              borderColor: 'hsl(var(--brand))',
-              color: 'hsl(var(--brand-foreground, 0 0% 100%))',
-            }}
-          >
-            <Plus size={12} />
-            New project
-          </button>
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Projects</h1>
+          <p className="text-xs text-muted-foreground mt-1">
+            Cross-repo project groups with shared context
+          </p>
         </div>
+        <button
+          type="button"
+          onClick={() => { setShowCreate(true); setCreateError(null) }}
+          className={cn(
+            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+            'bg-primary text-primary-foreground hover:bg-primary/90',
+          )}
+        >
+          <Plus className="w-3.5 h-3.5" />
+          New project
+        </button>
       </div>
 
-      {error && (
-        <div
-          className="mb-4 px-4 py-3 rounded-md text-sm border"
-          style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-high))' }}
-        >
-          {error}
-        </div>
-      )}
-
-      {/* Create form */}
+      {/* Create dialog */}
       {showCreate && (
-        <div
-          className="mb-4 rounded-lg border p-4"
-          style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}
-        >
+        <div className="bg-card border border-border rounded-xl p-4 mb-5">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold" style={{ color: 'hsl(var(--text-high))' }}>
-              Create project
-            </h2>
+            <h2 className="text-sm font-semibold text-foreground">Create project</h2>
             <button
-              onClick={() => { setShowCreate(false); setCreateName(''); setCreateDescription(''); setCreateError(null) }}
-              className="p-1 rounded transition-colors"
-              style={{ color: 'hsl(var(--text-low))' }}
-              aria-label="Close"
+              type="button"
+              onClick={() => { setShowCreate(false); setCreateName(''); setCreateError(null) }}
+              className="text-muted-foreground hover:text-foreground"
             >
-              <X size={14} />
+              <X className="w-4 h-4" />
             </button>
           </div>
-          <div className="space-y-2">
+          <div className="flex gap-2">
             <input
               type="text"
               placeholder="Project name"
               value={createName}
               onChange={e => setCreateName(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && createName.trim()) handleCreate() }}
-              className="w-full px-3 py-1.5 rounded-sm border text-sm font-mono focus:outline-none"
-              style={{
-                background: 'hsl(var(--bg-primary))',
-                borderColor: 'hsl(var(--border))',
-                color: 'hsl(var(--text-high))',
-              }}
+              onKeyDown={e => { if (e.key === 'Enter') handleCreate() }}
+              className="flex-1 px-3 py-1.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary font-mono"
               autoFocus
             />
-            <input
-              type="text"
-              placeholder="Description (optional)"
-              value={createDescription}
-              onChange={e => setCreateDescription(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && createName.trim()) handleCreate() }}
-              className="w-full px-3 py-1.5 rounded-sm border text-sm focus:outline-none"
-              style={{
-                background: 'hsl(var(--bg-primary))',
-                borderColor: 'hsl(var(--border))',
-                color: 'hsl(var(--text-high))',
-              }}
-            />
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleCreate}
-                disabled={creating || !createName.trim()}
-                className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
-                style={{
-                  background: 'hsl(var(--brand))',
-                  borderColor: 'hsl(var(--brand))',
-                  color: 'hsl(var(--brand-foreground, 0 0% 100%))',
-                }}
-              >
-                {creating && <Loader2 size={12} className="animate-spin" />}
-                Create
-              </button>
-              {createError && (
-                <span className="text-xs" style={{ color: 'hsl(0 70% 60%)' }}>
-                  {createError}
-                </span>
+            <button
+              type="button"
+              onClick={handleCreate}
+              disabled={creating || !createName.trim()}
+              className={cn(
+                'px-4 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                creating || !createName.trim()
+                  ? 'bg-secondary text-muted-foreground cursor-not-allowed'
+                  : 'bg-primary text-primary-foreground hover:bg-primary/90',
               )}
-            </div>
+            >
+              {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Create'}
+            </button>
           </div>
+          {createError && (
+            <p className="text-xs text-red-600 mt-2">{createError}</p>
+          )}
         </div>
       )}
 
-      {unauth && <SignInPanel />}
-
-      {!loading && !unauth && projects.length === 0 && !error && (
-        <EmptyProjects />
-      )}
-
-      {projects.length > 0 && (
-        <div
-          className="rounded-lg border overflow-hidden"
-          style={{ borderColor: 'hsl(var(--border))' }}
-        >
+      {loading ? (
+        <p className="text-sm text-muted-foreground text-center py-8">Loading…</p>
+      ) : projects.length === 0 ? (
+        <div className="bg-card border border-border rounded-xl p-8 text-center">
+          <FolderKanban className="w-8 h-8 text-muted-foreground/40 mx-auto mb-3" />
+          <p className="text-sm text-muted-foreground">
+            No projects yet. Click <strong>New project</strong> to get started.
+          </p>
+        </div>
+      ) : (
+        <div className="bg-card border border-border rounded-xl overflow-hidden">
           <table className="w-full text-sm">
-            <thead>
-              <tr
-                className="text-xs font-medium border-b"
-                style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
-              >
-                <th className="text-left px-4 py-2">Name</th>
-                <th className="text-left px-4 py-2">Description</th>
-                <th className="text-left px-4 py-2">Repos</th>
-                <th className="text-left px-4 py-2">Created</th>
-                <th className="text-right px-4 py-2">Actions</th>
+            <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
+              <tr>
+                <th className="text-left px-4 py-2 font-semibold">Project</th>
+                <th className="text-left px-4 py-2 font-semibold">Repos</th>
+                <th className="text-left px-4 py-2 font-semibold">Created</th>
+                <th className="w-8" />
               </tr>
             </thead>
-            <tbody>
-              {projects.map((p, i) => (
-                <tr
-                  key={p.id}
-                  className="border-b last:border-b-0"
-                  style={{ borderColor: 'hsl(var(--border))', background: i % 2 === 0 ? 'transparent' : 'hsl(var(--bg-panel) / 0.4)' }}
-                >
-                  <td className="px-4 py-2.5">
+            <tbody className="divide-y divide-border">
+              {projects.map(p => (
+                <tr key={p.name} className="hover:bg-secondary/20">
+                  <td className="px-4 py-2">
                     <Link
                       to="/projects/$name"
                       params={{ name: p.name }}
-                      className="inline-flex items-center gap-2 font-mono text-sm hover:underline"
-                      style={{ color: 'hsl(var(--text-high))' }}
+                      className="inline-flex items-center gap-2 font-mono text-foreground hover:underline"
                     >
-                      <FolderKanban size={14} style={{ color: 'hsl(var(--text-low))' }} />
+                      <FolderKanban className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                       {p.name}
                     </Link>
                   </td>
-                  <td className="px-4 py-2.5 text-sm" style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
-                    {p.description || '—'}
+                  <td className="px-4 py-2 text-muted-foreground tabular-nums">
+                    {p.repos?.length ?? 0} {(p.repos?.length ?? 0) === 1 ? 'repo' : 'repos'}
                   </td>
-                  <td className="px-4 py-2.5 text-xs tabular-nums" style={{ color: 'hsl(var(--text-low))' }}>
-                    {repoCount(p.id)} {repoCount(p.id) === 1 ? 'repo' : 'repos'}
+                  <td className="px-4 py-2 text-muted-foreground text-xs tabular-nums">
+                    {p.created_at ? timeAgo(p.created_at) : '—'}
                   </td>
-                  <td className="px-4 py-2.5 text-xs" style={{ color: 'hsl(var(--text-low))' }}>
-                    {timeAgo(p.created_at)}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex items-center justify-end gap-1">
-                      <button
-                        onClick={() => { setConfirmDelete(p); setDeleteError(null) }}
-                        className="p-1 rounded transition-colors"
-                        style={{ color: 'hsl(var(--text-low))' }}
-                        title="Delete"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                      <Link
-                        to="/projects/$name"
-                        params={{ name: p.name }}
-                        className="p-1 rounded transition-colors"
-                        style={{ color: 'hsl(var(--text-low))' }}
-                        aria-label="View"
-                      >
-                        <ChevronRight size={14} />
-                      </Link>
-                    </div>
+                  <td className="px-4 py-2">
+                    <Link
+                      to="/projects/$name"
+                      params={{ name: p.name }}
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </Link>
                   </td>
                 </tr>
               ))}
@@ -293,106 +194,6 @@ function ProjectList() {
           </table>
         </div>
       )}
-
-      {/* Delete confirmation modal */}
-      {confirmDelete && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center px-4"
-          style={{ background: 'rgba(0,0,0,0.4)' }}
-          onClick={() => !deleting && setConfirmDelete(null)}
-        >
-          <div
-            className="w-full max-w-md rounded-lg border p-5"
-            style={{ background: 'hsl(var(--bg-primary))', borderColor: 'hsl(var(--border))' }}
-            onClick={e => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--text-high))' }}>
-              Delete project
-            </h3>
-            <p className="text-sm mb-4" style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
-              Are you sure you want to delete <span className="font-mono">{confirmDelete.name}</span>?
-              Repos belonging to it will be detached, but not deleted.
-            </p>
-            {deleteError && (
-              <p className="text-xs mb-3" style={{ color: 'hsl(0 70% 60%)' }}>{deleteError}</p>
-            )}
-            <div className="flex items-center justify-end gap-2">
-              <button
-                onClick={() => setConfirmDelete(null)}
-                disabled={deleting}
-                className="text-xs px-3 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
-                style={{ borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => handleDelete(confirmDelete)}
-                disabled={deleting}
-                className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
-                style={{
-                  background: 'hsl(0 70% 50%)',
-                  borderColor: 'hsl(0 70% 50%)',
-                  color: 'hsl(0 0% 100%)',
-                }}
-              >
-                {deleting && <Loader2 size={12} className="animate-spin" />}
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function EmptyProjects() {
-  return (
-    <div
-      className="rounded-lg border px-6 py-12 text-center"
-      style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}
-    >
-      <FolderKanban size={32} className="mx-auto mb-3 opacity-30" style={{ color: 'hsl(var(--text-low))' }} />
-      <p className="text-sm font-medium mb-1" style={{ color: 'hsl(var(--text-high))' }}>
-        No projects yet
-      </p>
-      <p className="text-xs mb-4" style={{ color: 'hsl(var(--text-low))' }}>
-        Click <strong>New project</strong> to create one, or import an existing
-        local config from a registered machine.
-      </p>
-      <div
-        className="inline-block text-left rounded-md px-3 py-2 font-mono text-xs border"
-        style={{ background: 'hsl(var(--bg-primary))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
-      >
-        clawflow cloud import
-      </div>
-    </div>
-  )
-}
-
-// SignInPanel — friendly stand-in for the raw 401/404/parse-error
-// surface when a local `clawflow web` (or a signed-out cloud session)
-// tries to load this page. Mirrors the Repos page's panel.
-function SignInPanel() {
-  return (
-    <div
-      className="rounded-lg border px-6 py-12 text-center"
-      style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}
-    >
-      <LogIn size={32} className="mx-auto mb-3 opacity-30" style={{ color: 'hsl(var(--text-low))' }} />
-      <p className="text-sm font-medium mb-1" style={{ color: 'hsl(var(--text-high))' }}>
-        Sign in to view your projects
-      </p>
-      <p className="text-xs mb-4" style={{ color: 'hsl(var(--text-low))' }}>
-        ClawFlow uses your GitHub identity. Projects appear once you're signed in.
-      </p>
-      <a
-        href="/api/v1/github/app/login"
-        className="inline-flex items-center text-xs font-medium px-3 py-1.5 rounded-sm"
-        style={{ background: 'hsl(var(--brand))', color: 'white' }}
-      >
-        Sign in with GitHub
-      </a>
     </div>
   )
 }

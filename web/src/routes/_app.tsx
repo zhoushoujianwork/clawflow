@@ -1,10 +1,10 @@
 import { createFileRoute, Outlet, Link } from '@tanstack/react-router'
-import { Loader2, LogOut } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { useTheme } from '../lib/useTheme'
 import { ChatProvider, useChatDrawer } from '../lib/chatContext'
 import { ChatDrawer } from '../components/ChatDrawer'
-import { fetchAuthMe, signOut, type AuthMe, type AuthMeResult } from '../lib/cloudApi'
+import { SyncPopover } from '../components/SyncPopover'
 
 export const Route = createFileRoute('/_app')({
   component: AppLayout,
@@ -18,22 +18,8 @@ function AppLayout() {
   const [updating, setUpdating] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [showTooltip, setShowTooltip] = useState(false)
-  const [auth, setAuth] = useState<AuthMeResult | undefined>(undefined)
-  // hostMode trinary:
-  //  'cloud'   — served from cloud, signed in
-  //  'cloud-anon' — served from cloud, anonymous (visible Sign-in button)
-  //  'local'   — served from `clawflow web`, no cloud auth
-  //  undefined — still loading auth probe
-  const hostMode =
-    auth === undefined ? undefined
-    : auth.kind === 'authed' ? 'cloud'
-    : auth.kind === 'anon' ? 'cloud-anon'
-    : 'local'
-  const authUser = auth?.kind === 'authed' ? auth.user : null
 
-  // Check version once on mount. /api/version is local-web only; on the
-  // cloud-served bundle the fetch will 404 silently and the version chip
-  // stays hidden.
+  // Check version once on mount
   useEffect(() => {
     fetch('/api/version', { cache: 'no-store' })
       .then(r => r.ok ? r.json() : null)
@@ -46,16 +32,6 @@ function AppLayout() {
       })
       .catch(() => {})
   }, [])
-
-  // Resolve identity on mount. fetchAuthMe distinguishes 'cloud-authed',
-  // 'cloud-anon', and 'local' (no /api/v1/auth/me on this origin).
-  useEffect(() => {
-    fetchAuthMe()
-      .then(setAuth)
-      .catch(() => setAuth({ kind: 'no-cloud' }))
-  }, [])
-
-  const cloudConfigured = hostMode === 'cloud' || hostMode === 'cloud-anon'
 
   const triggerUpdate = useCallback(() => {
     setUpdating(true)
@@ -115,17 +91,8 @@ function AppLayout() {
               <span>
                 <span style={{ color: 'hsl(var(--brand))' }}>Claw</span>Flow
               </span>
-              <span
-                className="text-[10px] font-normal ml-1"
-                style={{ color: 'hsl(var(--text-low))' }}
-                title={
-                  hostMode === 'cloud' ? `Cloud · signed in as ${authUser?.login}` :
-                  hostMode === 'cloud-anon' ? 'Cloud · not signed in' :
-                  hostMode === 'local' ? 'Local clawflow web' : 'Loading…'
-                }
-              >
-                {hostMode === undefined ? '' :
-                 hostMode === 'local' ? 'local' : 'cloud'}
+              <span className="text-[10px] font-normal ml-1" style={{ color: 'hsl(var(--text-low))' }}>
+                local
               </span>
             </a>
             {/* Version badge with upgrade indicator */}
@@ -175,44 +142,58 @@ function AppLayout() {
               </div>
             )}
             <nav className="flex gap-1">
-              {/* Dashboard renders the cloud Jobs & Runs board in cloud
-                  mode (see _app.dashboard.tsx). The old standalone
-                  "Jobs" nav entry is gone — /cloud/jobs redirects here. */}
-              <NavLink to="/dashboard">Dashboard</NavLink>
-              <NavLink to="/repos">Repos</NavLink>
-              <NavLink to="/projects">Projects</NavLink>
-              <NavLink to="/operators">Operators</NavLink>
-              {cloudConfigured && (
-                <>
-                  <NavLink to="/cloud/machines">Machines</NavLink>
-                  <NavLink to="/cloud/bindings">Bindings</NavLink>
-                </>
-              )}
-              {/* /usage is now real in cloud mode too — PR 4 wired the
-                  worker → cloud usage upload and the cloud aggregation
-                  endpoint, and the route renders CloudUsagePage. */}
-              <NavLink to="/usage">Usage</NavLink>
-              <NavLink to="/settings">Settings</NavLink>
+              <Link
+                to="/dashboard"
+                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+                style={{ color: 'hsl(var(--text-low))' }}
+                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+              >
+                Dashboard
+              </Link>
+              <Link
+                to="/repos"
+                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+                style={{ color: 'hsl(var(--text-low))' }}
+                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+              >
+                Repos
+              </Link>
+              <Link
+                to="/projects"
+                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+                style={{ color: 'hsl(var(--text-low))' }}
+                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+              >
+                Projects
+              </Link>
+              <Link
+                to="/operators"
+                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+                style={{ color: 'hsl(var(--text-low))' }}
+                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+              >
+                Operators
+              </Link>
+              <Link
+                to="/usage"
+                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+                style={{ color: 'hsl(var(--text-low))' }}
+                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+              >
+                Usage
+              </Link>
+              <Link
+                to="/settings"
+                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+                style={{ color: 'hsl(var(--text-low))' }}
+                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+              >
+                Settings
+              </Link>
             </nav>
           </div>
 
           <div className="flex items-center gap-2">
-            {hostMode === 'cloud' && authUser && (
-              <AccountChip user={authUser} />
-            )}
-            {hostMode === 'cloud-anon' && (
-              <a
-                href="/api/v1/github/app/login"
-                className="text-xs font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{
-                  background: 'hsl(var(--brand))',
-                  color: 'white',
-                }}
-                title="Sign in with GitHub"
-              >
-                Sign in
-              </a>
-            )}
             <ReportIssueButton />
             <a
               href="https://github.com/zhoushoujianwork/clawflow"
@@ -235,6 +216,7 @@ function AppLayout() {
                 />
               </svg>
             </a>
+            <SyncPopover />
             <button
               onClick={toggle}
               className="w-7 h-7 flex items-center justify-center rounded-sm transition-colors"
@@ -251,80 +233,6 @@ function AppLayout() {
         <ChatDrawer />
       </div>
     </ChatProvider>
-  )
-}
-
-// NavLink is the single top-bar link template. Used 7-9 times across the
-// header so factoring it out keeps the JSX skim-able and centralises the
-// "active" styling (brand-tinted background + brand text).
-function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
-  return (
-    <Link
-      to={to}
-      className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-      style={{ color: 'hsl(var(--text-low))' }}
-      activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-    >
-      {children}
-    </Link>
-  )
-}
-
-// AccountChip shows the signed-in cloud user in the top bar. Click for a
-// tiny menu with Sign out. Avatar falls back to the user's first letter when
-// avatar_url is absent or fails to load.
-function AccountChip({ user }: { user: AuthMe }) {
-  const [open, setOpen] = useState(false)
-  const close = useCallback(() => setOpen(false), [])
-  useEffect(() => {
-    if (!open) return
-    const onClick = (e: MouseEvent) => {
-      const el = (e.target as HTMLElement).closest('[data-account-chip]')
-      if (!el) close()
-    }
-    document.addEventListener('mousedown', onClick)
-    return () => document.removeEventListener('mousedown', onClick)
-  }, [open, close])
-
-  return (
-    <div className="relative" data-account-chip>
-      <button
-        onClick={() => setOpen(v => !v)}
-        className="flex items-center gap-1.5 px-1.5 py-0.5 rounded-sm transition-colors hover:opacity-80"
-        style={{ background: 'hsl(var(--bg-panel))', color: 'hsl(var(--text-low))' }}
-        title={`Signed in as ${user.login}`}
-      >
-        {user.avatar_url ? (
-          <img src={user.avatar_url} alt="" className="w-5 h-5 rounded-full" />
-        ) : (
-          <span
-            className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-semibold"
-            style={{ background: 'hsl(var(--brand))', color: 'white' }}
-          >
-            {user.login.charAt(0).toUpperCase()}
-          </span>
-        )}
-        <span className="text-xs font-medium">{user.login}</span>
-      </button>
-      {open && (
-        <div
-          className="absolute right-0 top-full mt-1 min-w-[160px] rounded-md shadow-lg border z-50"
-          style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))' }}
-        >
-          <button
-            onClick={async () => {
-              await signOut()
-              window.location.reload()
-            }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-[hsl(var(--bg-primary))] transition-colors"
-            style={{ color: 'hsl(var(--text-high))' }}
-          >
-            <LogOut size={12} />
-            Sign out
-          </button>
-        </div>
-      )}
-    </div>
   )
 }
 

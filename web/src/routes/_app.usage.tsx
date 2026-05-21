@@ -3,20 +3,56 @@ import { useEffect, useMemo, useState } from 'react'
 import { Receipt } from 'lucide-react'
 import { type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
-import {
-  fetchAuthMe,
-  fetchRepos,
-  fetchUsageSummary,
-  type AuthMeResult,
-  type DailyPoint,
-  type PeriodSummary,
-  type UsageAggregate,
-  type UsageSummary,
-} from '../lib/cloudApi'
 
-// Local-mode repo shape lives in /data/repos.json. Cloud-mode uses
-// the cloud.Repo from fetchRepos() — see CloudUsagePage.
-interface LocalRepo {
+interface UsageAggregate {
+  runs: number
+  total_cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  duration_ms: number
+}
+
+interface ModelAggregate {
+  cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+}
+
+interface DailyPoint {
+  date: string
+  runs: number
+  total_cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  by_operator?: Record<string, UsageAggregate>
+  by_repo?: Record<string, UsageAggregate>
+  by_model?: Record<string, ModelAggregate>
+}
+
+interface PeriodSummary {
+  period_start: string
+  period_end: string
+  totals: UsageAggregate
+  by_operator: Record<string, UsageAggregate>
+  by_repo: Record<string, UsageAggregate>
+  by_model: Record<string, ModelAggregate>
+  daily_trend: DailyPoint[]
+}
+
+interface UsageSummary {
+  generated_at: string
+  totals: UsageAggregate
+  by_operator: Record<string, UsageAggregate>
+  by_repo: Record<string, UsageAggregate>
+  by_model: Record<string, ModelAggregate>
+  periods?: PeriodSummary[]
+}
+
+interface Repo {
   full_name: string
   platform?: Platform
   base_url?: string
@@ -66,87 +102,11 @@ function fmtPeriodLabel(start: string, end: string): string {
 }
 
 function UsagePage() {
-  // Route by auth: authenticated cloud sessions get the
-  // CloudUsagePage which fetches /api/cloud/usage/summary; local
-  // `clawflow web` sessions ('no-cloud') get the legacy local page
-  // that reads /data/usage.json.
-  const [auth, setAuth] = useState<AuthMeResult | undefined>(undefined)
-  useEffect(() => {
-    fetchAuthMe().then(setAuth).catch(() => setAuth({ kind: 'no-cloud' }))
-  }, [])
-  if (auth === undefined) {
-    return <p className="text-sm text-muted-foreground text-center py-8">Loading…</p>
-  }
-  if (auth.kind === 'authed' || auth.kind === 'anon') {
-    return <CloudUsagePage />
-  }
-  return <LocalUsagePage />
-}
-
-// ---- Cloud page: fetches /api/cloud/usage/summary -----------------
-
-function CloudUsagePage() {
   const [summary, setSummary] = useState<UsageSummary | null>(null)
-  const [repoMap, setRepoMap] = useState<RepoInfoMap>({})
+  const [repos, setRepos] = useState<Repo[]>([])
   const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    let cancelled = false
-    const refetch = async (initial: boolean) => {
-      if (initial) setLoading(true)
-      try {
-        const [u, repoResp] = await Promise.all([
-          fetchUsageSummary(),
-          fetchRepos().catch(() => ({ repos: [] })),
-        ])
-        if (cancelled) return
-        const m: RepoInfoMap = {}
-        for (const r of repoResp.repos) {
-          const platform: Platform = r.platform === 'gitlab' ? 'gitlab' : 'github'
-          m[r.name] = {
-            platform,
-            host: platform === 'gitlab' ? 'https://gitlab.com' : 'https://github.com',
-          }
-        }
-        setSummary(u)
-        setRepoMap(m)
-      } catch {
-        if (!cancelled) setSummary(null)
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    refetch(true)
-    // Cloud aggregation is a server-side query — poll less aggressively
-    // than the local 5s rhythm to avoid pestering the cloud server.
-    const id = setInterval(() => refetch(false), 15_000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [])
-
-  return (
-    <UsageView
-      summary={summary}
-      repoMap={repoMap}
-      loading={loading}
-      emptyHint={
-        <>
-          No usage data yet — run a job, or open a chat against a repo
-          bound to a worker. Numbers show up here within a few seconds.
-        </>
-      }
-    />
-  )
-}
-
-// ---- Local page: reads /data/usage.json --------------------------
-
-function LocalUsagePage() {
-  const [summary, setSummary] = useState<UsageSummary | null>(null)
-  const [repos, setRepos] = useState<LocalRepo[]>([])
-  const [loading, setLoading] = useState(true)
+  const [selectedPeriod, setSelectedPeriod] = useState<string>('current')
+  const [selectedDay, setSelectedDay] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -188,38 +148,6 @@ function LocalUsagePage() {
     return m
   }, [repos])
 
-  return (
-    <UsageView
-      summary={summary}
-      repoMap={repoMap}
-      loading={loading}
-      emptyHint={
-        <>
-          No completed runs with usage data yet — run{' '}
-          <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code>{' '}
-          first.
-        </>
-      }
-    />
-  )
-}
-
-// ---- Shared render --------------------------------------------------
-
-function UsageView({
-  summary,
-  repoMap,
-  loading,
-  emptyHint,
-}: {
-  summary: UsageSummary | null
-  repoMap: RepoInfoMap
-  loading: boolean
-  emptyHint: React.ReactNode
-}) {
-  const [selectedPeriod, setSelectedPeriod] = useState<string>('current')
-  const [selectedDay, setSelectedDay] = useState<string | null>(null)
-
   const periods = summary?.periods ?? []
 
   const activePeriod = useMemo<PeriodSummary | null>(() => {
@@ -228,11 +156,13 @@ function UsageView({
     return periods.find(p => p.period_start === selectedPeriod) ?? null
   }, [selectedPeriod, periods])
 
+  // When a day bar is clicked, drill down into that day's breakdowns
   const activeDay = useMemo<DailyPoint | null>(() => {
     if (!selectedDay || !activePeriod) return null
     return activePeriod.daily_trend.find(d => d.date === selectedDay) ?? null
   }, [selectedDay, activePeriod])
 
+  // Clear day selection when period changes
   useEffect(() => { setSelectedDay(null) }, [selectedPeriod])
 
   const viewTotals = activeDay
@@ -298,7 +228,11 @@ function UsageView({
         <div className="bg-card border border-border rounded-xl p-12 flex flex-col items-center text-center">
           <Receipt className="w-12 h-12 text-muted-foreground/40 mb-4" />
           <p className="text-base font-semibold text-foreground mb-1">No usage data yet</p>
-          <p className="text-sm text-muted-foreground">{emptyHint}</p>
+          <p className="text-sm text-muted-foreground">
+            No completed runs with usage data yet — run{' '}
+            <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code>{' '}
+            first.
+          </p>
         </div>
       ) : (
         <>

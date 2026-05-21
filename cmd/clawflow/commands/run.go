@@ -6,18 +6,24 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
-	"github.com/zhoushoujianwork/clawflow/internal/cloud"
+	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -40,102 +46,39 @@ func roleForOperator(opName string) string {
 	return config.RoleOperator
 }
 
+// NewRunCmd wires `clawflow run`: one pass of the operator loop over every
+// enabled repo (or a single repo / issue if flags are set). Schedule via cron
+// or invoke ad-hoc; the CLI holds no long-running state.
+func NewRunCmd() *cobra.Command {
+	var (
+		onlyRepo  string
+		onlyIssue int
+		timeout   time.Duration
+	)
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Scan configured repos and run matching operators",
+		Long: `Execute one pass of the operator loop:
+  - for each enabled repo, list open issues
+  - for each issue, match against registered operators
+  - on first match: run claude -p, post result as a comment, apply outcome label
 
-// ExecuteJob adapts a cloud-leased job into the existing local operator
-// execution path. It is intentionally thin: worker mode must not grow a
-// second copy of the runner. Returns (didFire, runDir, err). The runDir
-// (when non-empty) is the on-disk snapshot directory containing
-// events.jsonl; the cloud-mode worker uses ExtractCloudUsage on it to
-// produce a cloud.Usage for FinishRunRequest.
-func ExecuteJob(ctx context.Context, spec cloud.JobSpec, timeout time.Duration) (bool, string, error) {
-	if spec.Repo == "" {
-		return false, "", fmt.Errorf("job spec missing repo")
-	}
-	if spec.Operator == "" {
-		return false, "", fmt.Errorf("job spec missing operator")
-	}
-	if spec.Number == 0 {
-		return false, "", fmt.Errorf("job spec missing target number")
-	}
-	reg, err := loadRegistry()
-	if err != nil {
-		return false, "", err
-	}
-	op, ok := reg.Get(spec.Operator)
-	if !ok {
-		return false, "", fmt.Errorf("operator %q not found", spec.Operator)
-	}
-	repoCfg := config.Repo{
-		Platform:   spec.Platform,
-		BaseURL:    spec.BaseURL,
-		BaseBranch: spec.BaseBranch,
-		LocalPath:  spec.LocalPath,
-	}
-	if cfg, err := config.Load(); err == nil {
-		if existing, ok := cfg.Repos[spec.Repo]; ok {
-			repoCfg = existing
-			if spec.LocalPath != "" {
-				repoCfg.LocalPath = spec.LocalPath
+Concurrency is gated by an in-process per-issue mutex; up to
+settings.max_concurrent_agents (default 4) operators run in parallel
+across issues. The "implement" operator is additionally serialized
+per-repo because it shares a local git clone. Pass --repo and/or
+--issue to narrow the scan.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if onlyIssue != 0 && onlyRepo == "" {
+				return fmt.Errorf("--issue requires --repo")
 			}
-		}
+			return runOnce(cmd.Context(), onlyRepo, onlyIssue, timeout)
+		},
 	}
-	client, err := newVCSClient(repoCfg)
-	if err != nil {
-		return false, "", fmt.Errorf("vcs client: %w", err)
-	}
-	state := spec.State
-	if state == "" {
-		state = "open"
-	}
-	sub := &operator.Subject{
-		Number: spec.Number,
-		Title:  spec.Title,
-		Body:   spec.Body,
-		Labels: append([]string(nil), spec.Labels...),
-		State:  state,
-		IsPR:   spec.Target == "pr",
-	}
-	j := &runJob{op: op, sub: sub, repo: spec.Repo, repoCfg: repoCfg, client: client}
-	didFire, _, runDir := runOneOperator(ctx, j, timeout)
-	return didFire, runDir, nil
-}
-
-// ExtractCloudUsage reads runDir/events.jsonl, extracts the terminal
-// result event via snapshot.ExtractUsage, and converts the
-// snapshot.Usage to a cloud.Usage. Returns nil when runDir is empty,
-// the file is missing, no result event has been written, or the file
-// is unreadable — all of which the worker treats as "no usage to
-// report; finish the run anyway".
-func ExtractCloudUsage(runDir string) *cloud.Usage {
-	if runDir == "" {
-		return nil
-	}
-	u, err := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl"))
-	if err != nil || u == nil {
-		return nil
-	}
-	cu := &cloud.Usage{
-		DurationMs:               u.DurationMs,
-		NumTurns:                 u.NumTurns,
-		TotalCostUSD:             u.TotalCostUSD,
-		InputTokens:              u.InputTokens,
-		OutputTokens:             u.OutputTokens,
-		CacheReadInputTokens:     u.CacheReadInputTokens,
-		CacheCreationInputTokens: u.CacheCreationInputTokens,
-	}
-	if len(u.ModelUsage) > 0 {
-		cu.ModelUsage = make(map[string]cloud.ModelUsage, len(u.ModelUsage))
-		for name, m := range u.ModelUsage {
-			cu.ModelUsage[name] = cloud.ModelUsage{
-				InputTokens:              m.InputTokens,
-				OutputTokens:             m.OutputTokens,
-				CacheReadInputTokens:     m.CacheReadInputTokens,
-				CacheCreationInputTokens: m.CacheCreationInputTokens,
-				CostUSD:                  m.CostUSD,
-			}
-		}
-	}
-	return cu
+	cmd.Flags().StringVar(&onlyRepo, "repo", "", "Restrict to a single repo (owner/repo); default: all enabled repos")
+	cmd.Flags().IntVar(&onlyIssue, "issue", 0, "Restrict to a single issue number (requires --repo)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator claude subprocess timeout")
+	return cmd
 }
 
 // loadRegistry builds a Registry from the embedded skills + the user's
@@ -154,6 +97,250 @@ func loadRegistry() (*operator.Registry, error) {
 	return reg, nil
 }
 
+func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.Duration) error {
+	// Global collection for all issues from all repos
+	var globalIssues []snapshot.IssueEntry
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Open the run.log sink. nil-safe — if Open fails (read-only home,
+	// disk full) the rest of the command still runs; only the file
+	// trail is missing. Install it as the snapshot.ReconcileLog sink so
+	// reconciler skip events land in the same file as run lifecycle.
+	lg, _ := clog.Open("run")
+	defer lg.Close()
+	runLog = lg
+	if lg != nil {
+		snapshot.ReconcileLog = lg
+	}
+
+	// Single-instance lock: prevent concurrent clawflow run invocations
+	// (e.g. cron firing while a previous run is still active). On
+	// contention, log run/skip and exit cleanly so cron doesn't treat
+	// the skip as a failure. Stale locks from crashed processes are
+	// reclaimed automatically via PID-liveness check.
+	if err := snapshot.AcquireRunLock(Version); err != nil {
+		if holder, readErr := snapshot.ReadRunLock(); readErr == nil {
+			lg.Info("run/skip",
+				"pid", os.Getpid(),
+				"holder_pid", holder.PID,
+				"holder_started", holder.StartedAt.Format(time.RFC3339),
+			)
+			fmt.Fprintf(os.Stderr, "⚠ clawflow run already active (pid=%d, started=%s) — skipping\n",
+				holder.PID, holder.StartedAt.Format(time.RFC3339))
+		} else {
+			lg.Info("run/skip", "pid", os.Getpid(), "reason", err.Error())
+			fmt.Fprintf(os.Stderr, "⚠ %v — skipping\n", err)
+		}
+		return nil
+	}
+	// Release the run lock on normal exit. For unhandled signals (SIGINT/
+	// SIGTERM) the lock is also released explicitly before os.Exit so the
+	// next cron tick isn't blocked by a stale file. The PID-liveness check
+	// in AcquireRunLock handles any remaining crash scenarios.
+	defer snapshot.ReleaseRunLock()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sigDone := make(chan struct{})
+	go func() {
+		select {
+		case <-sigCh:
+			snapshot.ReleaseRunLock()
+			os.Exit(0)
+		case <-sigDone:
+		}
+	}()
+	defer func() {
+		signal.Stop(sigCh)
+		close(sigDone)
+	}()
+
+	lg.Info("run/start", "pid", os.Getpid(), "version", Version, "only_repo", onlyRepo, "only_issue", onlyIssue, "timeout", timeout)
+	defer lg.Info("run/exit", "pid", os.Getpid())
+
+	// Auto-pull: sync config from Gist before scanning so this machine
+	// picks up any changes pushed from other machines (e.g. new repos,
+	// updated settings). Best-effort: if sync is not configured or the
+	// network is unavailable, we continue with the local config.
+	if api.AutoPull() {
+		fmt.Fprintf(os.Stderr, "✓ auto-pulled config from Gist\n")
+		lg.Info("run/auto_pull", "result", "ok")
+	}
+
+	reg, err := loadRegistry()
+	if err != nil {
+		return err
+	}
+	if len(reg.All()) == 0 {
+		return fmt.Errorf("no operators registered (embed missing? user dir empty?)")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	allRepos := cfg.EnabledRepos()
+	if onlyRepo != "" {
+		if _, ok := allRepos[onlyRepo]; !ok {
+			return fmt.Errorf("repo %q not found or not enabled", onlyRepo)
+		}
+	}
+	if len(allRepos) == 0 {
+		fmt.Println("no enabled repos to scan")
+		return nil
+	}
+	workers := cfg.Settings.MaxConcurrentAgents
+	if workers <= 0 {
+		workers = 4
+	}
+	debugf("loaded %d operator(s); scanning %d enabled repo(s) (onlyRepo=%q onlyIssue=%d timeout=%s workers=%d)",
+		len(reg.All()), len(allRepos), onlyRepo, onlyIssue, timeout, workers)
+	for _, op := range reg.All() {
+		debugf("  operator %s target=%s required=%v excluded=%v",
+			op.Name, op.Trigger.Target, op.Trigger.LabelsRequired, op.Trigger.LabelsExcluded)
+	}
+
+	// Resolve the current machine's hostname once. Used to skip repos that
+	// are bound to a different machine (BoundMachine field). Errors are
+	// non-fatal: an empty hostname means no repos will be skipped by the
+	// bound_machine check (safe default).
+	hostname, _ := os.Hostname()
+
+	// Reconcile any runs whose on-disk state is inconsistent (stuck
+	// "running", missing meta.json) BEFORE we touch anything else, so the
+	// dashboard's first refresh of this run picks up the fixed state. The
+	// staleAfter threshold matches the per-operator default timeout — any
+	// run still showing "running" past that is definitively dead.
+	if n, err := snapshot.ReconcileStaleRuns(timeout); err == nil {
+		if n > 0 {
+			fmt.Fprintf(os.Stderr, "✓ reconciled %d stale run(s) on disk\n", n)
+		}
+		lg.Info("run/reconcile", "fixed", n, "stale_after", timeout)
+	} else {
+		fmt.Fprintf(os.Stderr, "⚠ reconcile stale runs: %v\n", err)
+		lg.Warn("run/reconcile", "err", err.Error())
+	}
+
+	// Snapshot the static state so the dashboard can render it even if no
+	// operator fires this run. Failures are best-effort logged, not fatal.
+	if err := snapshot.WriteRepos(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot repos: %v\n", err)
+	}
+	if err := snapshot.WriteOperators(reg); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot operators: %v\n", err)
+	}
+	if err := snapshot.WriteMeta(Version); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot meta: %v\n", err)
+	}
+
+	// Two-axis scan:
+	//   - Pending snapshot covers every enabled repo, every open issue.
+	//     Narrowing flags (--repo / --issue) must NOT shrink the queue view,
+	//     otherwise the dashboard loses sight of work outside the current run.
+	//   - Operator execution is restricted to the requested scope so an
+	//     ad-hoc "rerun for issue 7" doesn't accidentally fire across the
+	//     whole org.
+	//
+	// Phase 1 (sequential): scan every repo, build the pending snapshot,
+	// and queue the (issue × first-matching-operator) pairs that are
+	// eligible to run. Issues locked by another process (local lockfile)
+	// are skipped at queue time.
+	var pending []snapshot.PendingEntry
+	var jobs []*runJob
+	for fullName, repoCfg := range allRepos {
+		// Skip repos bound to a different machine. A repo with no BoundMachine
+		// (empty string) is processed by every machine — the common case.
+		// When hostname resolution failed (empty string), we conservatively
+		// process all repos so a misconfigured machine doesn't silently drop work.
+		if repoCfg.BoundMachine != "" && hostname != "" && repoCfg.BoundMachine != hostname {
+			debugf("repo %s is bound to %s, skipping (current machine: %s)", fullName, repoCfg.BoundMachine, hostname)
+			continue
+		}
+		if cfg.Settings.RequireBinding && repoCfg.BoundMachine == "" && hostname != "" {
+			debugf("repo %s has no bound_machine and require_binding is set, skipping", fullName)
+			continue
+		}
+		executeHere := onlyRepo == "" || onlyRepo == fullName
+		repoPending, repoJobs, err := scanRepoOnce(reg, fullName, repoCfg, executeHere, onlyIssue, &globalIssues)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
+		}
+		pending = append(pending, repoPending...)
+		jobs = append(jobs, repoJobs...)
+	}
+
+	// Phase 2 (parallel): dispatch matched jobs across `workers` goroutines.
+	// Three concurrency gates:
+	//   - local lockfile (~/.clawflow/locks/): cross-process lock, visible
+	//     to other clawflow run processes via PID-liveness check
+	//   - per-issue mutex: within this process, at most one operator per issue
+	//   - per-repo mutex: serializes `implement` against the shared local
+	//     git clone (worktree add + fetch are not safe in parallel).
+	//     Read-only operators (classify, evaluate-*, reply-comment) skip
+	//     the per-repo lock and run freely.
+	fired := runJobsParallel(ctx, jobs, workers, timeout)
+
+	// Phase 3 (sequential): drop pending entries that fired, then write
+	// the snapshots so the dashboard reflects the post-run state.
+	if len(fired) > 0 {
+		pending = slices.DeleteFunc(pending, func(p snapshot.PendingEntry) bool {
+			for _, f := range fired {
+				if f.Repo == p.Repo && f.IssueNumber == p.IssueNumber && f.Operator == p.Operator {
+					return true
+				}
+			}
+			return false
+		})
+	}
+
+	// Refresh the runs index so the dashboard shows this run at the top.
+	// WriteRunsIndex returns the FULL entry set so we can hand it to
+	// WriteUsageSummary without re-walking the runs tree.
+	allEntries, err := snapshot.WriteRunsIndex(50)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot runs index: %v\n", err)
+	}
+	if err := snapshot.WriteUsageSummary(allEntries, cfg.Settings.BillingCycleDay); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot usage summary: %v\n", err)
+	}
+	if err := snapshot.WritePending(pending); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot pending: %v\n", err)
+	}
+	if err := snapshot.WriteIssues(globalIssues); err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot issues: %v\n", err)
+	}
+
+	// Phase 4 (sequential): wake the project-manager for every project
+	// with automation enabled and past its cooldown. PMs run AFTER
+	// operators so they see the post-pass state — any issue an
+	// operator just marked agent-evaluated is visible to the PM
+	// scheduling decision. PM failures are non-fatal: the run as a
+	// whole is reported successful as long as the operator phase
+	// completed.
+	//
+	// Gated on --repo / --issue narrowing: ad-hoc single-issue runs
+	// shouldn't wake every project's PM. Only the unscoped pass
+	// (the one a cron / hook normally invokes) triggers PMs.
+	if onlyRepo == "" && onlyIssue == 0 {
+		if n, err := pilot.Schedule(ctx, timeout); err != nil {
+			fmt.Fprintf(os.Stderr, "[pilot] schedule: %v\n", err)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "[pilot] woke %d project(s)\n", n)
+		}
+	}
+
+	// Auto-push: sync config to Gist after the run so any label/config
+	// changes made during this pass are visible to other machines.
+	// Best-effort: push failure does not fail the run.
+	if api.AutoPush() {
+		fmt.Fprintf(os.Stderr, "✓ auto-pushed config to Gist\n")
+	}
+
+	return nil
+}
 
 // runJob is one (issue, operator) pair that scanRepoOnce decided is
 // eligible to fire. The worker pool in runJobsParallel consumes these.
@@ -165,6 +352,14 @@ type runJob struct {
 	client  vcs.Client
 }
 
+// firedKey identifies a (repo, issue, operator) triple that ran to a
+// non-empty success/skip outcome. Used to dedup pending entries that
+// already fired in this pass.
+type firedKey struct {
+	Repo        string
+	IssueNumber int
+	Operator    string
+}
 
 // deterministicSkip reports whether `op` is guaranteed to be skipped at
 // execution time on `repoCfg` no matter what the issue's labels look like.
@@ -209,6 +404,159 @@ func deterministicSkipReason(op *operator.Operator, repoCfg config.Repo) string 
 // model) are stripped here before matching, so an issue that was left
 // labeled by a crashed run from an older binary cleanly re-enters the
 // pipeline without manual intervention.
+func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, executeHere bool, onlyIssue int, allIssues *[]snapshot.IssueEntry) ([]snapshot.PendingEntry, []*runJob, error) {
+	client, err := newVCSClient(repoCfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("vcs client: %w", err)
+	}
+
+	issues, err := client.ListOpenIssues(fullName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list open issues: %w", err)
+	}
+
+	// GitHub sub-issues are not returned by the standard /issues list API.
+	// Walk every open issue and append any sub-issues that aren't already
+	// in the list. Two levels deep covers the current tracking→sub→sub-sub
+	// pattern; deeper nesting is uncommon and can be added later.
+	seen := make(map[int]bool, len(issues))
+	for _, iss := range issues {
+		seen[iss.Number] = true
+	}
+	for _, iss := range issues {
+		subs, subErr := client.ListSubIssues(fullName, iss.Number)
+		if subErr != nil {
+			debugf("[%s] list sub-issues of #%d: %v (skipping)", fullName, iss.Number, subErr)
+			continue
+		}
+		for _, sub := range subs {
+			if seen[sub.Number] || sub.State != "open" {
+				continue
+			}
+			seen[sub.Number] = true
+			issues = append(issues, sub)
+			debugf("[%s] discovered sub-issue #%d (parent #%d)", fullName, sub.Number, iss.Number)
+		}
+	}
+
+	debugf("[%s] %d open issue(s) fetched (executeHere=%v onlyIssue=%d)",
+		fullName, len(issues), executeHere, onlyIssue)
+
+	// NOTE: cross-process locking now uses local lockfiles (~/.clawflow/locks/)
+	// instead of the `agent-running` VCS label. Stale lockfiles from crashed
+	// processes are cleaned up by CleanStaleLocks (called in ReconcileStaleRuns)
+	// and by AcquireLock's PID-liveness check.
+
+	var pending []snapshot.PendingEntry
+	var jobs []*runJob
+	capturedAt := time.Now().UTC()
+	for _, iss := range issues {
+		sub := &operator.Subject{
+			Number: iss.Number,
+			Title:  iss.Title,
+			Body:   iss.Body,
+			Labels: iss.Labels,
+			State:  iss.State,
+			IsPR:   false,
+		}
+		debugf("[%s] #%d labels=%v title=%q", fullName, sub.Number, sub.Labels, sub.Title)
+		// Snapshot every operator that would match this issue's CURRENT
+		// label state. The executor will fire at most one of them and
+		// mutate labels, but pending.json captures the queue as it looked
+		// at the start of this run — the next refresh will show the
+		// post-run state.
+		var firstMatch *operator.Operator
+		for _, op := range reg.All() {
+			ok, reason := operator.MatchesWithReason(sub, op)
+			if !ok {
+				debugf("  ✗ %s: %s", op.Name, reason)
+				continue
+			}
+			// Drop "deterministic skip" cases from pending so they don't
+			// pile up forever in the dashboard. The execution path below
+			// has the same skip for firstMatch (see "Pre-flight: skip
+			// deterministic failures early"); both must agree, otherwise
+			// matched-but-unrunnable operators stay queued indefinitely.
+			if deterministicSkip(op, repoCfg) {
+				debugf("  ⊘ %s matches but config makes it unrunnable, skipping pending", op.Name)
+				continue
+			}
+			debugf("  ✓ %s matches", op.Name)
+			pending = append(pending, snapshot.PendingEntry{
+				Repo:        fullName,
+				IssueNumber: sub.Number,
+				IssueTitle:  sub.Title,
+				Operator:    op.Name,
+				Labels:      append([]string(nil), sub.Labels...),
+				CapturedAt:  capturedAt,
+			})
+			if firstMatch == nil {
+				firstMatch = op
+			}
+		}
+		if firstMatch == nil {
+			debugf("  → no operator matched #%d (label its required trigger to enqueue, e.g. \"clawflow label add --repo %s --issue %d --label feat\")",
+				sub.Number, fullName, sub.Number)
+		}
+		// Execution scope: skip queuing operators on this issue when the
+		// caller restricted the run to a different repo / different issue.
+		// Pending collection above already happened.
+		if !executeHere {
+			debugf("  · skipping execution on %s#%d (--repo restricts execution to a different repo)", fullName, iss.Number)
+			continue
+		}
+		if onlyIssue != 0 && iss.Number != onlyIssue {
+			debugf("  · skipping execution on #%d (--issue=%d)", iss.Number, onlyIssue)
+			continue
+		}
+		if firstMatch != nil {
+			// Pre-flight: skip deterministic failures early. implement
+			// needs a local clone but the repo may not have local_path set.
+			if deterministicSkip(firstMatch, repoCfg) {
+				debugf("  · skipping %s on #%d: %s", firstMatch.Name, iss.Number, deterministicSkipReason(firstMatch, repoCfg))
+				continue
+			}
+			// Skip issues already locked by another process.
+			if snapshot.IsLocked(fullName, iss.Number) {
+				debugf("  · skipping #%d: locked by another process", iss.Number)
+				continue
+			}
+			jobs = append(jobs, &runJob{op: firstMatch, sub: sub, repo: fullName, repoCfg: repoCfg, client: client})
+		}
+	}
+
+	// MVP: skip PRs. All 3 built-in operators target issues. When a
+	// pr-target operator appears we'll add the same loop over ListOpenPRs.
+
+	// Snapshot every issue (open + closed) for the dashboard via a
+	// single ListIssues("all") call — same shape as POST
+	// /api/repo/refresh-issues so the cron path and the manual Sync
+	// button can't disagree about which issues are open vs closed.
+	//
+	// Operator matching above keeps using ListOpenIssues so the
+	// per_page=100 budget for open issues is independent of any closed
+	// noise. Snapshot side accepts the implicit ~100-issue cap from
+	// the "all" call (sorted updated_at desc), which keeps stale
+	// ancient closed issues out of the view.
+	if snapshotIssues, sErr := client.ListIssues(fullName, "all", nil); sErr == nil {
+		for _, iss := range snapshotIssues {
+			*allIssues = append(*allIssues, snapshot.IssueEntry{
+				Repo:        fullName,
+				IssueNumber: iss.Number,
+				IssueTitle:  iss.Title,
+				Labels:      append([]string(nil), iss.Labels...),
+				State:       iss.State,
+				CapturedAt:  capturedAt,
+				CreatedAt:   iss.CreatedAt,
+				ClosedAt:    iss.ClosedAt,
+			})
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "[%s] snapshot list issues: %v\n", fullName, sErr)
+	}
+
+	return pending, jobs, nil
+}
 
 // runJobsParallel dispatches `jobs` across `workers` goroutines, gating
 // concurrency with two in-process locks: per-issue (always) so two
@@ -223,6 +571,81 @@ func deterministicSkipReason(op *operator.Operator, repoCfg config.Repo) string 
 // before starting and skip their job (recording status="rate-limited") so the
 // entire queue doesn't cascade into failures. The skipped issues retain their
 // trigger labels and will be retried on the next run pass.
+func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout time.Duration) []firedKey {
+	if len(jobs) == 0 {
+		return nil
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+
+	var (
+		issueLocks  sync.Map    // key: "<repo>#<issue>" → *sync.Mutex
+		repoLocks   sync.Map    // key: "<repo>"          → *sync.Mutex
+		fired       []firedKey
+		firedMu     sync.Mutex
+		rateLimited atomic.Bool // set when any worker hits a rate limit
+	)
+
+	mu := func(m *sync.Map, key string) *sync.Mutex {
+		actual, _ := m.LoadOrStore(key, &sync.Mutex{})
+		return actual.(*sync.Mutex)
+	}
+
+	jobCh := make(chan *runJob, len(jobs))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobCh {
+				// If a previous worker hit a rate limit, skip remaining
+				// jobs so they aren't permanently marked as failed. They
+				// keep their trigger labels and will be retried next pass.
+				if rateLimited.Load() {
+					prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
+					fmt.Fprintf(os.Stderr, "%s → skipped (rate limit hit earlier in this pass)\n", prefix)
+					runLog.Info("run/skipped_rate_limit", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
+					continue
+				}
+
+				iMu := mu(&issueLocks, fmt.Sprintf("%s#%d", j.repo, j.sub.Number))
+				iMu.Lock()
+				// `implement` mutates a shared local clone (worktree
+				// add + fetch), so two implement jobs in the same repo
+				// must serialize. Read-only operators don't touch the
+				// clone and run unrestricted.
+				var rMu *sync.Mutex
+				if j.op.Name == "implement" {
+					rMu = mu(&repoLocks, j.repo)
+					rMu.Lock()
+				}
+				didFire, hitRateLimit := runOneOperator(ctx, j, timeout)
+				if rMu != nil {
+					rMu.Unlock()
+				}
+				iMu.Unlock()
+				if hitRateLimit {
+					rateLimited.Store(true)
+				}
+				if didFire {
+					firedMu.Lock()
+					fired = append(fired, firedKey{Repo: j.repo, IssueNumber: j.sub.Number, Operator: j.op.Name})
+					firedMu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, j := range jobs {
+		jobCh <- j
+	}
+	close(jobCh)
+	wg.Wait()
+	return fired
+}
 
 // runOneOperator executes a single operator against its issue and
 // persists meta.json + events.jsonl under the dashboard data dir.
@@ -233,7 +656,7 @@ func deterministicSkipReason(op *operator.Operator, repoCfg config.Repo) string 
 //
 // All log lines are prefixed with "[<repo>#<issue> <op>]" so output
 // from concurrent workers stays disentangleable.
-func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool, runDir string) {
+func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool) {
 	prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
 	fmt.Printf("%s → start\n", prefix)
 
@@ -243,7 +666,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ lock failed (another process owns it): %v\n", prefix, err)
 		runLog.Warn("run/lock_failed", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", err.Error())
-		return false, false, ""
+		return false, false
 	}
 	defer snapshot.ReleaseLock(j.repo, j.sub.Number)
 	runLog.Info("run/lock", "pid", os.Getpid(), "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
@@ -257,7 +680,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		freshSub.Labels = freshLabels
 		if ok, reason := operator.MatchesWithReason(&freshSub, j.op); !ok {
 			fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
-			return false, false, ""
+			return false, false
 		}
 	}
 
@@ -267,7 +690,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// even an early failure (e.g. worktree creation) gets recorded as
 	// a real run on disk.
 	startedAt := time.Now()
-	runDir = snapshot.RunDir(j.repo, j.sub.Number, startedAt)
+	runDir := snapshot.RunDir(j.repo, j.sub.Number, startedAt)
 	_ = os.MkdirAll(runDir, 0o755)
 
 	runningMeta := snapshot.RunMeta{
@@ -306,7 +729,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
 		checkCircuitBreaker(j, prefix)
-		return false, false, runDir
+		return false, false
 	}
 	if hasOverride {
 		fmt.Fprintf(os.Stderr, "%s → base-branch override: %q (from %s)\n", prefix, overrideBranch, overrideSource)
@@ -327,7 +750,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
 		checkCircuitBreaker(j, prefix)
-		return false, false, runDir
+		return false, false
 	}
 	workdir := wtResult.Path
 	if wtResult.Resumed {
@@ -496,21 +919,21 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	switch rm.Status {
 	case "success":
 		fmt.Printf("%s ✓ done\n", prefix)
-		return true, false, runDir
+		return true, false
 	case "rate-limited":
 		// Signal the caller to abort the queue; do NOT call checkCircuitBreaker.
-		return false, true, runDir
+		return false, true
 	case "no-marker":
 		fmt.Printf("%s ✗ no outcome marker (circuit breaker counting)\n", prefix)
 		checkCircuitBreaker(j, prefix)
-		return false, false, runDir
+		return false, false
 	case "skipped-empty":
 		fmt.Printf("%s ✗ empty output (circuit breaker counting)\n", prefix)
 		checkCircuitBreaker(j, prefix)
-		return false, false, runDir
+		return false, false
 	default:
 		checkCircuitBreaker(j, prefix)
-		return false, false, runDir
+		return false, false
 	}
 }
 

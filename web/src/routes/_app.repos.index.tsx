@@ -1,531 +1,477 @@
-import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { FolderGit2, Plus, RefreshCw, Trash2, Loader2, Search, LogIn, MessageSquare } from 'lucide-react'
-import { useChatDrawer } from '../lib/chatContext'
-import {
-  deleteRepo,
-  fetchBindings,
-  fetchMachines,
-  fetchProjects,
-  fetchRepos,
-  timeAgo,
-  type Binding,
-  type Machine,
-  type Project,
-  type Repo,
-} from '../lib/cloudApi'
+import { createFileRoute, Link } from '@tanstack/react-router'
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
+import { FolderOpen, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2 } from 'lucide-react'
+import { cn } from '../lib/utils'
+import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
-import type { RepoInfoMap, Platform } from '../lib/vcsUrls'
+import { useConfigChanged } from '../lib/configEvents'
 
-// PlatformFilter is the top-tab selector. 'all' is the default; the others
-// match the literal `Repo.platform` values from the cloud Store.
-type PlatformFilter = 'all' | 'github' | 'gitlab'
-
-// ProjectFilter is keyed by project id, plus the synthetic 'all' (default)
-// and 'orphan' (repos with no project_id) buckets.
-type ProjectFilter = string
-
-// ReposSearch is the URL ?platform=…&project=…&q=… schema. Refresh
-// preserves the user's selection; the same triple is also mirrored
-// into localStorage so opening Repos in a new tab restores last state.
-interface ReposSearch {
-  platform?: PlatformFilter
-  project?: ProjectFilter
-  q?: string
+interface Repo {
+  full_name: string
+  platform?: Platform
+  base_url?: string
+  base_branch: string
+  local_path?: string
+  enabled: boolean
+  auto_approve: boolean
+  auto_merge: boolean
+  bound_machine?: string
 }
 
-// LocalStorage keys for the filter triple. v1 suffix so a future
-// schema change can bump and ignore stale values.
-const STORAGE_PLATFORM = 'clawflow:repos:filter:platform:v1'
-const STORAGE_PROJECT = 'clawflow:repos:filter:project:v1'
+interface RunEntry {
+  repo: string
+  started_at: string
+}
+
+const PROVIDER_KEY = 'clawflow.repos.provider'
+
+function timeAgo(iso: string): string {
+  if (!iso) return '—'
+  const t = new Date(iso).getTime()
+  if (!isFinite(t)) return '—'
+  const diff = Math.floor((Date.now() - t) / 1000)
+  if (diff < 0) return 'just now'
+  if (diff < 60) return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}min ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
+type RepoSearch = { provider?: string }
 
 export const Route = createFileRoute('/_app/repos/')({
-  component: ReposPage,
-  validateSearch: (s: Record<string, unknown>): ReposSearch => {
-    const platform = s.platform === 'github' || s.platform === 'gitlab' || s.platform === 'all'
-      ? (s.platform as PlatformFilter)
-      : undefined
-    const project = typeof s.project === 'string' && s.project.length > 0
-      ? s.project
-      : undefined
-    const q = typeof s.q === 'string' && s.q.length > 0 ? s.q : undefined
-    return { platform, project, q }
+  component: RepoList,
+  validateSearch: (s: Record<string, unknown>): RepoSearch => {
+    return typeof s.provider === 'string' ? { provider: s.provider } : {}
   },
 })
 
-// readStored reads localStorage but no-ops in SSR / private-mode
-// browsers where the API throws. Best-effort UX.
-function readStored(key: string): string | null {
-  try {
-    return localStorage.getItem(key)
-  } catch {
-    return null
-  }
-}
+function RepoList() {
+  const { provider } = Route.useSearch()
+  const navigate = Route.useNavigate()
 
-function writeStored(key: string, value: string) {
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    // private-mode quota errors, etc.
-  }
-}
-
-function ReposPage() {
-  const navigate = useNavigate({ from: Route.fullPath })
-  const search = Route.useSearch()
-  const chatDrawer = useChatDrawer()
   const [repos, setRepos] = useState<Repo[]>([])
-  const [projects, setProjects] = useState<Project[]>([])
-  const [bindings, setBindings] = useState<Binding[]>([])
-  const [machines, setMachines] = useState<Machine[]>([])
+  const [runs, setRuns] = useState<RunEntry[]>([])
+  const [ideScheme, setIdeScheme] = useState('vscode://file/')
+  const [hostname, setHostname] = useState<string>('')
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [unauth, setUnauth] = useState(false)
-  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [didApplyDefault, setDidApplyDefault] = useState(false)
+  const [query, setQuery] = useState('')
+  // Per-row "work in progress" indicators, keyed by full_name + field.
+  // Kept as a Set so toggling one repo doesn't block the rest.
+  const [busy, setBusy] = useState<Set<string>>(new Set())
+  const [bindMenuFor, setBindMenuFor] = useState<string | null>(null)
 
-  // Filter state is sourced in priority order:
-  //   1. URL search param (refresh-safe, link-shareable)
-  //   2. localStorage (cross-tab continuity)
-  //   3. 'all' (first-ever visit)
-  //
-  // Mutating any filter writes BOTH the URL and localStorage so
-  // the next visit resumes wherever the user left off.
-  const initialPlatform = (search.platform
-    ?? (readStored(STORAGE_PLATFORM) as PlatformFilter | null)
-    ?? 'all') as PlatformFilter
-  const initialProject = (search.project
-    ?? readStored(STORAGE_PROJECT)
-    ?? 'all') as ProjectFilter
-  const [platform, setPlatformState] = useState<PlatformFilter>(
-    initialPlatform === 'all' || initialPlatform === 'github' || initialPlatform === 'gitlab'
-      ? initialPlatform
-      : 'all',
-  )
-  const [projectF, setProjectFState] = useState<ProjectFilter>(initialProject || 'all')
-  const [query, setQuery] = useState<string>(search.q ?? '')
-
-  // pushFilters writes the current filter triple to URL + storage.
-  // Called after every setter so refresh and re-open stay in sync.
-  const pushFilters = useCallback(
-    (p: PlatformFilter, pr: ProjectFilter, q: string) => {
-      writeStored(STORAGE_PLATFORM, p)
-      writeStored(STORAGE_PROJECT, pr)
-      void navigate({
-        search: {
-          platform: p === 'all' ? undefined : p,
-          project: pr === 'all' ? undefined : pr,
-          q: q ? q : undefined,
-        },
-        replace: true,
-      })
-    },
-    [navigate],
-  )
-
-  const setPlatform = useCallback(
-    (p: PlatformFilter) => {
-      setPlatformState(p)
-      pushFilters(p, projectF, query)
-    },
-    [projectF, query, pushFilters],
-  )
-
-  const setProjectF = useCallback(
-    (pr: ProjectFilter) => {
-      setProjectFState(pr)
-      pushFilters(platform, pr, query)
-    },
-    [platform, query, pushFilters],
-  )
-
-  // For the search input, debounce the URL sync to avoid one nav per
-  // keystroke. localStorage still updates on every change so a
-  // refresh while typing keeps the latest text.
-  useEffect(() => {
-    const id = setTimeout(() => pushFilters(platform, projectF, query), 300)
-    return () => clearTimeout(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query])
-
-  const load = useCallback(() => {
-    setLoading(true)
-    setError(null)
-    setUnauth(false)
-    Promise.all([fetchRepos(), fetchProjects(), fetchBindings(), fetchMachines()])
-      .then(([r, p, b, m]) => {
-        setRepos(r.repos ?? [])
-        setProjects(p.projects ?? [])
-        setBindings(b.bindings ?? [])
-        setMachines(m.machines ?? [])
-      })
-      .catch(e => {
-        // 401 = "no session"; 404 = "endpoint missing" (a local
-        // `clawflow web` doesn't serve /api/cloud/*); JSON parse
-        // errors on HTML responses look like SyntaxError from a raw
-        // doctype. All three cases are "this Repos UI needs cloud
-        // sign-in" — render the Sign-in panel instead of leaking the
-        // raw error string.
-        const s = String(e)
-        if (
-          s.includes('401') ||
-          s.includes('404') ||
-          s.includes('Unexpected token') ||
-          s.includes('not valid JSON')
-        ) {
-          setUnauth(true)
-        } else {
-          setError(s)
+  const loadAll = useCallback(() => {
+    return Promise.all([
+      fetch('/data/repos.json', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : []))
+        .catch(() => []),
+      fetch('/data/runs.json', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : []))
+        .catch(() => []),
+      fetch('/api/settings', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ]).then(([rp, rn, settings]) => {
+      setRepos(Array.isArray(rp) ? rp : [])
+      setRuns(Array.isArray(rn) ? rn : [])
+      if (settings?.global?.default_ide) {
+        const ide = settings.global.default_ide as string
+        const schemeMap: Record<string, string> = {
+          vscode: 'vscode://file/',
+          cursor: 'cursor://file/',
+          qoder: 'qoder://file/',
+          'vscode-insiders': 'vscode-insiders://file/',
         }
-      })
-      .finally(() => setLoading(false))
+        setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
+      }
+      if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+      setLoading(false)
+    })
   }, [])
 
+  useEffect(() => { loadAll() }, [loadAll])
+  useConfigChanged(loadAll)
+
+  const counts = useMemo(() => {
+    const c = new Map<string, number>()
+    for (const r of repos) {
+      const p = r.platform || 'github'
+      c.set(p, (c.get(p) || 0) + 1)
+    }
+    return c
+  }, [repos])
+
+  const platformKeys = useMemo(() => Array.from(counts.keys()).sort(), [counts])
+
+  // Apply persisted default once after data loads, only if URL has no
+  // explicit provider. If the stored value points to a platform that no
+  // longer has any repos, we silently fall through to "all".
   useEffect(() => {
-    load()
-  }, [load])
+    if (loading || didApplyDefault) return
+    setDidApplyDefault(true)
+    if (provider !== undefined) return
+    if (typeof window === 'undefined') return
+    const stored = window.localStorage.getItem(PROVIDER_KEY)
+    if (!stored) return
+    if (stored === 'all' || counts.has(stored)) {
+      navigate({ search: { provider: stored }, replace: true })
+    }
+  }, [loading, didApplyDefault, provider, counts, navigate])
 
-  const projectName = useCallback(
-    (id?: string) => {
-      if (!id) return '—'
-      const p = projects.find(p => p.id === id)
-      return p ? p.name : id
-    },
-    [projects],
-  )
+  const active = provider || 'all'
 
-  // For each repo, look up its most-recently-updated binding and resolve
-  // the machine name from it. Repos with no binding get an em dash.
-  const lastMachineForRepo = useCallback(
-    (repoId: string): { name: string; updated_at: string } | null => {
-      const matching = bindings.filter(b => b.repo_id === repoId)
-      if (matching.length === 0) return null
-      const newest = matching.reduce((a, b) =>
-        (a.updated_at || '') > (b.updated_at || '') ? a : b,
-      )
-      const m = machines.find(m => m.id === newest.machine_id)
-      return {
-        name: m ? (m.display_name || m.hostname) : newest.machine_id,
-        updated_at: newest.updated_at,
+  function pickProvider(next: string) {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(PROVIDER_KEY, next)
+    }
+    navigate({ search: { provider: next } })
+  }
+
+  // Build a map of repo → most recent run timestamp
+  const lastActivityMap = useMemo<Record<string, string>>(() => {
+    const m: Record<string, string> = {}
+    for (const r of runs) {
+      if (!r.repo || !r.started_at) continue
+      if (!m[r.repo] || r.started_at > m[r.repo]) {
+        m[r.repo] = r.started_at
       }
-    },
-    [bindings, machines],
-  )
+    }
+    return m
+  }, [runs])
 
-  // Reuse the existing VcsIcon by feeding it a minimal RepoInfoMap built
-  // from the cloud repo list (we only know platform here — no base_url).
+  // Known machines = union of every non-empty bound_machine seen across
+  // all repos. Powers the bind-dropdown so users can reassign a repo to
+  // another box without typing the hostname.
+  const knownMachines = useMemo<string[]>(() => {
+    const s = new Set<string>()
+    if (hostname) s.add(hostname)
+    for (const r of repos) {
+      if (r.bound_machine) s.add(r.bound_machine)
+    }
+    return Array.from(s).sort()
+  }, [repos, hostname])
+
+  const filtered = useMemo(() => {
+    let list = active === 'all' ? [...repos] : repos.filter(r => (r.platform || 'github') === active)
+    const q = query.trim().toLowerCase()
+    if (q) {
+      list = list.filter(r =>
+        r.full_name.toLowerCase().includes(q) ||
+        (r.local_path || '').toLowerCase().includes(q) ||
+        (r.base_branch || '').toLowerCase().includes(q) ||
+        (r.bound_machine || '').toLowerCase().includes(q),
+      )
+    }
+    list.sort((a, b) => {
+      const ta = lastActivityMap[a.full_name] || ''
+      const tb = lastActivityMap[b.full_name] || ''
+      if (ta !== tb) return tb.localeCompare(ta)
+      return a.full_name.localeCompare(b.full_name)
+    })
+    return list
+  }, [repos, active, lastActivityMap, query])
+
+  const showTabs = repos.length > 0 && platformKeys.length > 1
+
+  const markBusy = useCallback((key: string, on: boolean) => {
+    setBusy(prev => {
+      const next = new Set(prev)
+      if (on) next.add(key); else next.delete(key)
+      return next
+    })
+  }, [])
+
+  // POST /api/repo/config for a single field toggle. Optimistic UI:
+  // we update local state on success only so a network hiccup doesn't
+  // lie to the user.
+  const toggleField = useCallback(async (name: string, field: 'enabled' | 'auto_approve' | 'auto_merge') => {
+    const repo = repos.find(r => r.full_name === name)
+    if (!repo) return
+    const key = `${name}:${field}`
+    if (busy.has(key)) return
+    const nextVal = !repo[field]
+    markBusy(key, true)
+    try {
+      const resp = await fetch('/api/repo/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo: name, [field]: nextVal }),
+      })
+      if (resp.ok) {
+        setRepos(prev => prev.map(r => r.full_name === name ? { ...r, [field]: nextVal } : r))
+      }
+    } catch { /* ignore */ }
+    finally { markBusy(key, false) }
+  }, [repos, busy, markBusy])
+
+  const handleRemove = useCallback(async (name: string) => {
+    const confirmed = window.confirm(
+      `确认移除 ${name}？\n\n（仅从配置中移除，不会删除本地项目文件）`
+    )
+    if (!confirmed) return
+    const key = `${name}:remove`
+    markBusy(key, true)
+    try {
+      const resp = await fetch('/api/repo/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repos: [name] }),
+      })
+      if (resp.ok) {
+        setRepos(prev => prev.filter(r => r.full_name !== name))
+      } else {
+        const data = await resp.json().catch(() => ({}))
+        alert(data.error || '移除失败')
+      }
+    } catch {
+      alert('网络错误，请重试')
+    } finally {
+      markBusy(key, false)
+    }
+  }, [markBusy])
+
+  const handleBind = useCallback(async (name: string, machine: string | null) => {
+    // machine=null  → unbind
+    // machine=''    → treat like null
+    // machine=<hn>  → bind to that hostname
+    const key = `${name}:bind`
+    markBusy(key, true)
+    setBindMenuFor(null)
+    try {
+      const resp = await fetch('/api/repo/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          machine
+            ? { repo: name, bind: true, machine }
+            : { repo: name, bind: false }
+        ),
+      })
+      if (resp.ok) {
+        const data = await resp.json()
+        setRepos(prev => prev.map(r =>
+          r.full_name === name ? { ...r, bound_machine: data.bound_machine || undefined } : r
+        ))
+      }
+    } catch { /* ignore */ }
+    finally { markBusy(key, false) }
+  }, [markBusy])
+
   const repoMap = useMemo<RepoInfoMap>(() => {
     const m: RepoInfoMap = {}
     for (const r of repos) {
-      const platform: Platform = r.platform === 'gitlab' ? 'gitlab' : 'github'
-      m[r.name] = {
+      const platform: Platform = r.platform || 'github'
+      const defaultHost = platform === 'gitlab' ? 'https://gitlab.com' : 'https://github.com'
+      m[r.full_name] = {
         platform,
-        host: platform === 'gitlab' ? 'https://gitlab.com' : 'https://github.com',
+        host: (r.base_url || defaultHost).replace(/\/$/, ''),
       }
     }
     return m
   }, [repos])
 
-  // Apply platform / project / query filters in a stable order so the
-  // filter chips can show live counts that reflect the OTHER filters
-  // already in effect (i.e. counts on the platform tabs respect the
-  // current project + search filter).
-  const platformCount = useCallback(
-    (p: PlatformFilter) => {
-      return repos.filter(r => {
-        if (p !== 'all' && r.platform !== p) return false
-        if (projectF === 'all') {
-          // nothing
-        } else if (projectF === 'orphan') {
-          if (r.project_id) return false
-        } else if (r.project_id !== projectF) {
-          return false
-        }
-        if (query && !r.name.toLowerCase().includes(query.toLowerCase())) return false
-        return true
-      }).length
-    },
-    [repos, projectF, query],
-  )
-
-  const projectCount = useCallback(
-    (pf: ProjectFilter) => {
-      return repos.filter(r => {
-        if (platform !== 'all' && r.platform !== platform) return false
-        if (pf === 'all') {
-          // nothing
-        } else if (pf === 'orphan') {
-          if (r.project_id) return false
-        } else if (r.project_id !== pf) {
-          return false
-        }
-        if (query && !r.name.toLowerCase().includes(query.toLowerCase())) return false
-        return true
-      }).length
-    },
-    [repos, platform, query],
-  )
-
-  const filtered = useMemo(() => {
-    return repos.filter(r => {
-      if (platform !== 'all' && r.platform !== platform) return false
-      if (projectF === 'all') {
-        // nothing
-      } else if (projectF === 'orphan') {
-        if (r.project_id) return false
-      } else if (r.project_id !== projectF) {
-        return false
-      }
-      if (query && !r.name.toLowerCase().includes(query.toLowerCase())) return false
-      return true
-    })
-  }, [repos, platform, projectF, query])
-
-  const handleDelete = useCallback(
-    async (repo: Repo) => {
-      const confirmed = window.confirm(
-        `Delete repo "${repo.name}" from the cloud?\n\nThis removes its bindings too. Local clones on worker machines are not touched.`,
-      )
-      if (!confirmed) return
-      setDeletingId(repo.id)
-      try {
-        await deleteRepo(repo.id)
-        load()
-      } catch (e) {
-        setError(String(e))
-      } finally {
-        setDeletingId(null)
-      }
-    },
-    [load],
-  )
-
   return (
-    <div className="px-6 py-6 max-w-5xl mx-auto">
+    <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="flex items-center justify-between mb-5">
-        <h1 className="text-base font-semibold" style={{ color: 'hsl(var(--text-high))' }}>
-          Repos
-        </h1>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={load}
-            disabled={loading}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
-            style={{ borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
-          >
-            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
-            Refresh
-          </button>
-          <button
-            onClick={() => navigate({ to: '/repos/add' })}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm border transition-colors"
-            style={{
-              borderColor: 'hsl(var(--brand))',
-              color: 'hsl(var(--brand))',
-              background: 'hsl(var(--brand) / 0.08)',
-            }}
-          >
-            <Plus size={12} />
-            Add repo
-          </button>
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Monitored repos</h1>
+          <p className="text-xs text-muted-foreground mt-1">
+            Click toggles and machine badges to edit directly. Source of truth is{' '}
+            <code className="px-1 py-0.5 bg-secondary rounded text-[10px]">~/.clawflow/config/config.yaml</code>.
+          </p>
         </div>
+        <Link
+          to="/repos/add"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          Add from VCS
+        </Link>
       </div>
 
-      {unauth && <SignInPanel />}
-
-      {error && (
-        <div
-          className="mb-4 px-4 py-3 rounded-md text-sm border"
-          style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-high))' }}
-        >
-          {error}
+      {repos.length > 0 && (
+        <div className="flex items-center gap-3 mb-4 flex-wrap">
+          {showTabs && (
+            <div className="inline-flex bg-card border border-border rounded-xl overflow-hidden">
+              <TabButton active={active === 'all'} onClick={() => pickProvider('all')}>
+                All <span className="ml-1 text-xs opacity-60 tabular-nums">{repos.length}</span>
+              </TabButton>
+              {platformKeys.map(p => (
+                <TabButton key={p} active={active === p} onClick={() => pickProvider(p)}>
+                  <span className="capitalize">{p}</span>
+                  <span className="ml-1 text-xs opacity-60 tabular-nums">{counts.get(p)}</span>
+                </TabButton>
+              ))}
+            </div>
+          )}
+          <div className="relative flex-1 min-w-[200px] max-w-sm">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+            <input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search repo, branch, path…"
+              aria-label="Search repos"
+              className="w-full bg-card border border-border rounded-lg pl-8 pr-8 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          {query && (
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {filtered.length} match{filtered.length === 1 ? '' : 'es'}
+            </span>
+          )}
+          <span className="text-xs text-muted-foreground tabular-nums ml-auto">
+            {repos.length} repo{repos.length === 1 ? '' : 's'}
+          </span>
         </div>
       )}
 
-      {!loading && !unauth && repos.length === 0 && !error && <EmptyRepos />}
-
-      {repos.length > 0 && (
-        <>
-          {/* Filter chip row: platforms + projects + free-text search. */}
-          <div className="flex flex-wrap items-center gap-2 mb-3">
-            {([
-              { id: 'all',    label: 'All' },
-              { id: 'github', label: 'GitHub' },
-              { id: 'gitlab', label: 'GitLab' },
-            ] as { id: PlatformFilter; label: string }[]).map(opt => {
-              const active = platform === opt.id
-              const count = platformCount(opt.id)
-              return (
-                <button
-                  key={opt.id}
-                  onClick={() => setPlatform(opt.id)}
-                  className="text-xs px-2.5 py-1 rounded-full transition-colors border font-medium"
-                  style={{
-                    background: active ? 'hsl(var(--brand) / 0.1)' : 'transparent',
-                    color: active ? 'hsl(var(--brand))' : 'hsl(var(--text-low))',
-                    borderColor: active ? 'hsl(var(--brand) / 0.4)' : 'hsl(var(--border))',
-                  }}
-                >
-                  {opt.label}
-                  <span className="ml-1 opacity-70">{count}</span>
-                </button>
-              )
-            })}
-            <span className="mx-1" style={{ color: 'hsl(var(--border))' }}>·</span>
-            {([
-              { id: 'all',    label: 'All projects' },
-              ...projects.map(p => ({ id: p.id as ProjectFilter, label: p.name })),
-              { id: 'orphan', label: 'No project' },
-            ]).map(opt => {
-              const active = projectF === opt.id
-              const count = projectCount(opt.id)
-              return (
-                <button
-                  key={opt.id}
-                  onClick={() => setProjectF(opt.id)}
-                  className="text-xs px-2.5 py-1 rounded-full transition-colors border font-medium"
-                  style={{
-                    background: active ? 'hsl(var(--brand) / 0.1)' : 'transparent',
-                    color: active ? 'hsl(var(--brand))' : 'hsl(var(--text-low))',
-                    borderColor: active ? 'hsl(var(--brand) / 0.4)' : 'hsl(var(--border))',
-                  }}
-                >
-                  {opt.label}
-                  <span className="ml-1 opacity-70">{count}</span>
-                </button>
-              )
-            })}
-            <div className="ml-auto relative">
-              <Search
-                size={12}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2"
-                style={{ color: 'hsl(var(--text-low))' }}
-              />
-              <input
-                type="text"
-                placeholder="Filter by name…"
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                className="text-xs pl-7 pr-2 py-1 rounded-sm border bg-transparent w-44 focus:outline-none focus:ring-1"
-                style={{
-                  borderColor: 'hsl(var(--border))',
-                  color: 'hsl(var(--text-high))',
-                }}
-              />
-            </div>
-          </div>
-        </>
-      )}
-
-      {repos.length > 0 && (
-        <div
-          className="rounded-lg border overflow-hidden"
-          style={{ borderColor: 'hsl(var(--border))' }}
-        >
+      {loading ? (
+        <p className="text-sm text-muted-foreground text-center py-8">Loading…</p>
+      ) : repos.length === 0 ? (
+        <div className="bg-card border border-border rounded-xl p-8 text-center">
+          <p className="text-sm text-muted-foreground">
+            No repos yet. Run <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">clawflow repo add &lt;owner/repo&gt;</code>.
+          </p>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="bg-card border border-border rounded-xl p-8 text-center">
+          {query ? (
+            <p className="text-sm text-muted-foreground">
+              No repos match <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{query}</code>.{' '}
+              <button type="button" onClick={() => setQuery('')} className="underline hover:text-foreground">Clear search</button>
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">{active}</code> repos. Pick another tab or add one with{' '}
+              <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow repo add</code>.
+            </p>
+          )}
+        </div>
+      ) : (
+        <div className="bg-card border border-border rounded-xl overflow-x-auto">
           <table className="w-full text-sm">
-            <thead>
-              <tr
-                className="text-xs font-medium border-b"
-                style={{
-                  background: 'hsl(var(--bg-panel))',
-                  borderColor: 'hsl(var(--border))',
-                  color: 'hsl(var(--text-low))',
-                }}
-              >
-                <th className="text-left px-4 py-2 w-8"></th>
-                <th className="text-left px-4 py-2">Name</th>
-                <th className="text-left px-4 py-2">Base branch</th>
-                <th className="text-left px-4 py-2">Project</th>
-                <th className="text-left px-4 py-2">Last bound machine</th>
-                <th className="text-left px-4 py-2 w-20">Actions</th>
+            <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
+              <tr>
+                <th className="text-left px-4 py-2 font-semibold">Repo</th>
+                <th className="text-left px-4 py-2 font-semibold">Last activity</th>
+                <th className="text-left px-4 py-2 font-semibold">Base</th>
+                <th className="text-left px-4 py-2 font-semibold">Enabled</th>
+                <th className="text-left px-4 py-2 font-semibold">Auto-approve</th>
+                <th className="text-left px-4 py-2 font-semibold">Auto-merge</th>
+                <th className="text-left px-4 py-2 font-semibold">Bound</th>
+                <th className="px-2 py-2 w-8"></th>
               </tr>
             </thead>
-            <tbody>
-              {filtered.length === 0 && (
-                <tr>
-                  <td
-                    colSpan={6}
-                    className="px-4 py-8 text-center text-xs"
-                    style={{ color: 'hsl(var(--text-low))' }}
-                  >
-                    No repos match the current filter.
-                  </td>
-                </tr>
-              )}
-              {filtered.map((r, i) => {
-                const lastMachine = lastMachineForRepo(r.id)
-                return (
-                  <tr
-                    key={r.id}
-                    className="border-b last:border-b-0"
-                    style={{
-                      borderColor: 'hsl(var(--border))',
-                      background: i % 2 === 0 ? 'transparent' : 'hsl(var(--bg-panel) / 0.4)',
-                    }}
-                  >
-                    <td className="px-4 py-2.5">
-                      <VcsIcon repo={r.name} map={repoMap} className="w-3.5 h-3.5 shrink-0" />
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs" style={{ color: 'hsl(var(--text-high))' }}>
+            <tbody className="divide-y divide-border">
+              {filtered.map(r => (
+                <tr key={r.full_name} className="hover:bg-secondary/20 group">
+                  <td className="px-4 py-2">
+                    <div className="flex items-center gap-2">
                       <Link
                         to="/repos/$repoName"
-                        params={{ repoName: encodeURIComponent(r.name) }}
-                        className="hover:underline"
+                        params={{ repoName: encodeURIComponent(r.full_name) }}
+                        className="font-mono text-foreground hover:underline"
                       >
-                        {r.name}
+                        {r.full_name}
                       </Link>
-                    </td>
-                    <td
-                      className="px-4 py-2.5 font-mono text-xs"
-                      style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}
-                    >
-                      {r.base_branch || '—'}
-                    </td>
-                    <td className="px-4 py-2.5 text-xs" style={{ color: 'hsl(var(--text-low))' }}>
-                      {projectName(r.project_id)}
-                    </td>
-                    <td className="px-4 py-2.5 text-xs" style={{ color: 'hsl(var(--text-low))' }}>
-                      {lastMachine ? (
-                        <span className="inline-flex items-center gap-1.5">
-                          <span className="font-mono" style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
-                            {lastMachine.name}
-                          </span>
-                          <span style={{ color: 'hsl(var(--text-low))' }}>
-                            ({timeAgo(lastMachine.updated_at)})
-                          </span>
-                        </span>
-                      ) : (
-                        '—'
+                      <a
+                        href={repoUrl(r.full_name, repoMap)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open in VCS"
+                        className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0"
+                      >
+                        <VcsIcon repo={r.full_name} map={repoMap} className="w-3.5 h-3.5" />
+                      </a>
+                      {r.local_path && (
+                        <a
+                          href={`${ideScheme}${r.local_path}?windowId=_blank`}
+                          title={`Open in IDE: ${r.local_path}`}
+                          className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0"
+                        >
+                          <FolderOpen className="w-3.5 h-3.5" />
+                        </a>
                       )}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <div className="flex items-center gap-0.5">
-                        <button
-                          onClick={() => { void chatDrawer.open({ repo: r.name }) }}
-                          title={`Chat with claude about ${r.name}`}
-                          className="inline-flex items-center justify-center w-7 h-7 rounded transition-colors"
-                          style={{ color: 'hsl(var(--text-low))' }}
-                        >
-                          <MessageSquare size={14} />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(r)}
-                          disabled={deletingId === r.id}
-                          title={`Delete ${r.name}`}
-                          className="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-50"
-                          style={{ color: 'hsl(var(--text-low))' }}
-                        >
-                          {deletingId === r.id ? (
-                            <Loader2 size={14} className="animate-spin" />
-                          ) : (
-                            <Trash2 size={14} />
-                          )}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                )
-              })}
+                    </div>
+                  </td>
+                  <td className="px-4 py-2 text-muted-foreground text-xs tabular-nums">
+                    {lastActivityMap[r.full_name] ? timeAgo(lastActivityMap[r.full_name]) : '—'}
+                  </td>
+                  <td className="px-4 py-2 text-muted-foreground font-mono text-xs">{r.base_branch}</td>
+                  <td className="px-4 py-2">
+                    <TogglePill
+                      on={r.enabled}
+                      busy={busy.has(`${r.full_name}:enabled`)}
+                      onLabel="enabled"
+                      offLabel="disabled"
+                      onClick={() => toggleField(r.full_name, 'enabled')}
+                    />
+                  </td>
+                  <td className="px-4 py-2">
+                    <TogglePill
+                      on={r.auto_approve}
+                      busy={busy.has(`${r.full_name}:auto_approve`)}
+                      onLabel="on"
+                      offLabel="off"
+                      onClick={() => toggleField(r.full_name, 'auto_approve')}
+                    />
+                  </td>
+                  <td className="px-4 py-2">
+                    <TogglePill
+                      on={r.auto_merge}
+                      busy={busy.has(`${r.full_name}:auto_merge`)}
+                      onLabel="on"
+                      offLabel="off"
+                      onClick={() => toggleField(r.full_name, 'auto_merge')}
+                    />
+                  </td>
+                  <td className="px-4 py-2">
+                    <BindButton
+                      repo={r.full_name}
+                      bound={r.bound_machine || ''}
+                      hostname={hostname}
+                      knownMachines={knownMachines}
+                      busy={busy.has(`${r.full_name}:bind`)}
+                      open={bindMenuFor === r.full_name}
+                      onOpen={() => setBindMenuFor(bindMenuFor === r.full_name ? null : r.full_name)}
+                      onClose={() => setBindMenuFor(null)}
+                      onBind={(m) => handleBind(r.full_name, m)}
+                    />
+                  </td>
+                  <td className="px-2 py-2">
+                    <button
+                      type="button"
+                      onClick={() => handleRemove(r.full_name)}
+                      disabled={busy.has(`${r.full_name}:remove`)}
+                      title={`Remove ${r.full_name} from config`}
+                      className={cn(
+                        'inline-flex items-center justify-center w-7 h-7 rounded transition-all',
+                        'text-muted-foreground/60 opacity-0 group-hover:opacity-100',
+                        'hover:bg-destructive/10 hover:text-destructive',
+                        'disabled:opacity-50 disabled:cursor-not-allowed',
+                      )}
+                    >
+                      {busy.has(`${r.full_name}:remove`)
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Trash2 className="w-3.5 h-3.5" />}
+                    </button>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
@@ -534,52 +480,194 @@ function ReposPage() {
   )
 }
 
-// SignInPanel replaces the raw 401 JSON error with a friendly "you need
-// to sign in" call-to-action. /api/v1/github/app/login is a server-side
-// redirect endpoint, so a plain anchor element is enough.
-function SignInPanel() {
+function TogglePill({
+  on, busy, onLabel, offLabel, onClick,
+}: {
+  on: boolean
+  busy: boolean
+  onLabel: string
+  offLabel: string
+  onClick: () => void
+}) {
   return (
-    <div
-      className="rounded-lg border px-6 py-12 text-center"
-      style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className={cn(
+        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold border transition-colors',
+        on ? 'bg-green-100 text-green-700 border-green-200 hover:bg-green-200' : 'bg-muted text-muted-foreground border-border hover:bg-secondary',
+        busy && 'opacity-60 cursor-wait',
+      )}
     >
-      <LogIn size={32} className="mx-auto mb-3 opacity-30" style={{ color: 'hsl(var(--text-low))' }} />
-      <p className="text-sm font-medium mb-1" style={{ color: 'hsl(var(--text-high))' }}>
-        Sign in to view your repos
-      </p>
-      <p className="text-xs mb-4" style={{ color: 'hsl(var(--text-low))' }}>
-        ClawFlow uses your GitHub identity. The repos you've registered with this cloud appear once you're signed in.
-      </p>
-      <a
-        href="/api/v1/github/app/login"
-        className="inline-flex items-center text-xs font-medium px-3 py-1.5 rounded-sm"
-        style={{ background: 'hsl(var(--brand))', color: 'white' }}
+      {busy && <Loader2 className="w-3 h-3 animate-spin" />}
+      {on ? onLabel : offLabel}
+    </button>
+  )
+}
+
+function BindButton({
+  repo, bound, hostname, knownMachines, busy, open, onOpen, onClose, onBind,
+}: {
+  repo: string
+  bound: string
+  hostname: string
+  knownMachines: string[]
+  busy: boolean
+  open: boolean
+  onOpen: () => void
+  onClose: () => void
+  onBind: (machine: string | null) => void
+}) {
+  const boundToMe = !!bound && bound === hostname
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
+
+  // Menu is rendered via portal with position:fixed so the parent
+  // table's overflow-x-auto can't clip it onto the next row. We
+  // compute the anchor rect on open and on scroll/resize; close on
+  // Esc or outside click.
+  useEffect(() => {
+    if (!open) {
+      setPos(null)
+      return
+    }
+    function place() {
+      const el = btnRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      setPos({ top: r.bottom + 4, right: window.innerWidth - r.right })
+    }
+    place()
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open, onClose])
+
+  return (
+    <div className="relative inline-block">
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={onOpen}
+        disabled={busy}
+        title={bound ? `Bound to ${bound} — click to change` : 'Unbound — click to assign a machine'}
+        className={cn(
+          'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold border transition-colors max-w-[160px]',
+          bound
+            ? boundToMe
+              ? 'bg-blue-100 text-blue-700 border-blue-200 hover:bg-blue-200'
+              : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+            : 'border-dashed border-muted-foreground/40 text-muted-foreground hover:bg-secondary',
+          busy && 'opacity-60 cursor-wait',
+        )}
       >
-        Sign in with GitHub
-      </a>
+        {busy
+          ? <Loader2 className="w-3 h-3 animate-spin" />
+          : bound ? <Link2 className="w-3 h-3" /> : <Link2Off className="w-3 h-3" />}
+        <span className="truncate" title={bound || 'unbound'}>{bound || 'unbound'}</span>
+      </button>
+
+      {open && pos && typeof document !== 'undefined' && createPortal(
+        <>
+          <div className="fixed inset-0 z-40" onClick={onClose} />
+          <div
+            role="menu"
+            aria-label={`Bind ${repo}`}
+            style={{ top: pos.top, right: pos.right }}
+            className="fixed z-50 min-w-[220px] bg-card border border-border rounded-lg shadow-lg py-1"
+          >
+            <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+              Bind to machine
+            </div>
+            {knownMachines.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">
+                No known machines yet.
+              </div>
+            ) : (
+              knownMachines.map(m => (
+                <MenuItem
+                  key={m}
+                  active={bound === m}
+                  onClick={() => onBind(m)}
+                >
+                  <Link2 className="w-3.5 h-3.5 text-muted-foreground" />
+                  <span className="font-mono text-xs truncate flex-1" title={m}>{m}</span>
+                  {m === hostname && (
+                    <span className="text-[10px] text-blue-600 font-semibold">this</span>
+                  )}
+                  {bound === m && <Check className="w-3.5 h-3.5 text-blue-600" />}
+                </MenuItem>
+              ))
+            )}
+            {bound && (
+              <>
+                <div className="h-px bg-border my-1" />
+                <MenuItem onClick={() => onBind(null)} danger>
+                  <Link2Off className="w-3.5 h-3.5" />
+                  <span className="text-xs">Unbind</span>
+                </MenuItem>
+              </>
+            )}
+          </div>
+        </>,
+        document.body,
+      )}
     </div>
   )
 }
 
-function EmptyRepos() {
+function MenuItem({
+  active, danger, onClick, children,
+}: {
+  active?: boolean
+  danger?: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
   return (
-    <div
-      className="rounded-lg border px-6 py-12 text-center"
-      style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      className={cn(
+        'w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-secondary/60 transition-colors',
+        active && 'bg-secondary/40',
+        danger ? 'text-destructive hover:bg-destructive/10' : 'text-foreground',
+      )}
     >
-      <FolderGit2 size={32} className="mx-auto mb-3 opacity-30" style={{ color: 'hsl(var(--text-low))' }} />
-      <p className="text-sm font-medium mb-1" style={{ color: 'hsl(var(--text-high))' }}>
-        No repos registered
-      </p>
-      <p className="text-xs mb-4" style={{ color: 'hsl(var(--text-low))' }}>
-        Add a repo with the button above, or import existing config from the CLI.
-      </p>
-      <div
-        className="inline-block text-left rounded-md px-3 py-2 font-mono text-xs border"
-        style={{ background: 'hsl(var(--bg-primary))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
-      >
-        clawflow cloud import
-      </div>
-    </div>
+      {children}
+    </button>
+  )
+}
+
+function TabButton({
+  active, onClick, children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'px-3 py-1.5 text-sm border-r border-border last:border-r-0 transition-colors',
+        active
+          ? 'bg-secondary text-foreground font-semibold'
+          : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50',
+      )}
+    >
+      {children}
+    </button>
   )
 }

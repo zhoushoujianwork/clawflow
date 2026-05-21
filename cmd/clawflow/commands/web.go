@@ -95,6 +95,18 @@ here — run 'clawflow run' first if you want fresh data.`,
 				_ = snapshot.WriteRepos(cfg)
 			}
 
+			// Auto-pull: sync config from Gist on startup so this machine
+			// picks up any changes pushed from other machines. Best-effort:
+			// if the Gist is unreachable or sync is not configured, we
+			// continue with the local config unchanged.
+			if api.AutoPull() {
+				fmt.Fprintf(os.Stderr, "✓ auto-pulled config from Gist on startup\n")
+				// Re-snapshot repos after pull so the dashboard reflects
+				// any changes that came in from the remote config.
+				if cfg, err := config.Load(); err == nil {
+					_ = snapshot.WriteRepos(cfg)
+				}
+			}
 			// Refresh data/projects.json so the dashboard picks up any
 			// project changes made via the CLI since the last web start.
 			_ = snapshot.WriteProjects()
@@ -233,10 +245,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/run/status", api.HandleRunStatus)
 			mux.HandleFunc("/api/run/pause", api.HandleRunPause)
 			mux.HandleFunc("/api/run/cancel", api.HandleRunCancel)
-			// /api/version doubles as the cloud bundle's local-agent
-			// probe; CORS-gated so a remote browser can detect this
-			// machine without exposing the endpoint to arbitrary sites.
-			mux.HandleFunc("/api/version", api.WithChatAgentCORS(api.HandleVersion))
+			mux.HandleFunc("/api/version", api.HandleVersion)
 			mux.HandleFunc("/api/update", api.HandleUpdate)
 			mux.HandleFunc("/api/repo/config", api.HandleRepoConfig)
 			mux.HandleFunc("/api/repo/bind", api.HandleRepoBind)
@@ -280,10 +289,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 				}
 			})
 			mux.HandleFunc("/api/browse-directory", api.HandleBrowseDirectory)
-			// CORS-gated so a remote cloud bundle can spawn a local
-			// terminal here. Only the user's configured cloud URL is
-			// allowed (worker.yaml `saas_url`) — see cors_chat_agent.go.
-			mux.HandleFunc("/api/chat/spawn", api.WithChatAgentCORS(api.HandleChatSpawn))
+			mux.HandleFunc("/api/chat/spawn", api.HandleChatSpawn)
 			mux.HandleFunc("/api/project/create", api.HandleProjectCreate)
 			mux.HandleFunc("/api/project/delete", api.HandleProjectDelete)
 			mux.HandleFunc("/api/project/add-repo", api.HandleProjectAddRepo)
@@ -299,22 +305,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/project/update-doc", api.HandleProjectUpdateDoc)
 			mux.HandleFunc("/api/project/pilot-runs", api.HandleProjectPilotRuns)
 			mux.HandleFunc("/api/project/pm-runs", api.HandleProjectPilotRuns) // deprecated alias
-			// Cloud proxy — forwards /api/cloud/* to the configured cloud
-			// server using the stored access token. The browser stays
-			// same-origin and never sees the token.
-			mux.HandleFunc("/api/cloud/status", api.HandleCloudStatus)
-			mux.HandleFunc("/api/cloud/config", api.HandleCloudConfig)
-			// /api/cloud/{repos,projects,machines,bindings} dual-mode:
-			// proxy upstream when cloud is configured, or translate the
-			// local config.yaml to the cloud shape so the Repos /
-			// Projects pages render the same filter UI in offline mode.
-			mux.HandleFunc("/api/cloud/repos", api.HandleCloudRepos)
-			mux.HandleFunc("/api/cloud/projects", api.HandleCloudProjects)
-			mux.HandleFunc("/api/cloud/machines", api.HandleCloudMachinesLocal)
-			mux.HandleFunc("/api/cloud/bindings", api.HandleCloudBindingsLocal)
-			mux.HandleFunc("/api/cloud/bindings/", api.HandleCloudBindingByID)
-			mux.HandleFunc("/api/cloud/jobs", api.HandleCloudJobs)
-			mux.HandleFunc("/api/cloud/runs", api.HandleCloudRuns)
+			mux.HandleFunc("/api/sync/status", api.HandleSyncStatus)
+			mux.HandleFunc("/api/sync/push", api.HandleSyncPush)
+			mux.HandleFunc("/api/sync/pull", api.HandleSyncPull)
+			mux.HandleFunc("/api/login", api.HandleLogin)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				// SPA fallback: if the requested path maps to a real
 				// asset inside the embedded bundle (assets/, favicon.svg,
@@ -322,17 +316,6 @@ here — run 'clawflow run' first if you want fresh data.`,
 				// back index.html so the client-side router can resolve
 				// /dashboard, /repos, /runs/… on hard-refresh. /data/
 				// is mounted separately above and never reaches here.
-				//
-				// Unknown /api/* paths must 404 — never the SPA index.
-				// Otherwise a browser-side probe like
-				// fetch('/api/v1/auth/me') or fetch('/api/cloud/repos')
-				// would parse HTML as JSON and throw a SyntaxError,
-				// breaking pages that rely on a clean 404 to detect
-				// "this is local-only mode, no cloud here".
-				if strings.HasPrefix(r.URL.Path, "/api/") {
-					http.NotFound(w, r)
-					return
-				}
 				reqPath := strings.TrimPrefix(r.URL.Path, "/")
 				if reqPath == "" {
 					fsrv.ServeHTTP(w, r)

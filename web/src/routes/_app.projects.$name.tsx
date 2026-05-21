@@ -1,15 +1,20 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, FolderKanban, Trash2, Loader2, Plus, X, RefreshCw, Zap } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Settings2, Zap } from 'lucide-react'
+import { cn } from '../lib/utils'
+import { useChatDrawer } from '../lib/chatContext'
+import { Markdown } from '../components/Markdown'
+import { useDocUpdater } from '../components/DocUpdater'
 import {
-  fetchProjects,
-  fetchRepos,
-  updateRepo,
-  deleteProject,
-  timeAgo,
-  type Project,
-  type Repo,
-} from '../lib/cloudApi'
+  IssueList,
+  PROJECT_SECTIONS,
+  useIssueGroups,
+  type IssueEntry,
+  type PendingEntry,
+  type Run,
+} from '../components/IssueList'
+import { useRepoInfoMap } from '../lib/vcsUrls'
+import { useConfigChanged } from '../lib/configEvents'
 import {
   type PilotRun,
   DUTY_KEYS,
@@ -17,7 +22,59 @@ import {
   dutyStatusColour,
   PilotRunDetailModal,
 } from '../components/PilotRun'
-import { cn } from '../lib/utils'
+
+// Long claude -p run (typically 30s–2min). The job runs server-side
+// so the user is free to navigate away — re-opening the page resumes
+// the spinner via /api/project/generate-context/status polling.
+const GENERATE_HINT = 'Calling claude -p — usually 30s to 2min. Runs in the background, you can close this tab.'
+
+interface Project {
+  name: string
+  repos: string[]
+  created_at?: string
+  context_md?: string
+  testing_md?: string
+  deployment_md?: string
+  automation?: ProjectAutomation
+}
+interface ProjectAutomation {
+  enabled: boolean
+  cooldown_minutes: number
+  last_woken_at?: string
+  // bound_machine pins the Pilot wake to a specific hostname. Empty =
+  // any machine. Independent from repo.bound_machine (which gates the
+  // operator/run path) — a project's Pilot may legitimately run on a
+  // machine where none of its repos are cloned, since Pilot only does
+  // API-layer triage.
+  bound_machine?: string
+  // last_skip_reason explains why the most recent Schedule pass declined
+  // to wake the Pilot. Surfaces the "Pilot on but no recent activity"
+  // failure mode (most often: bound_machine mismatch, or
+  // require_binding=on with no bound_machine).
+  last_skip_reason?: string
+  last_skip_at?: string
+}
+
+interface RepoEntry {
+  full_name: string
+  auto_approve?: boolean
+  auto_merge?: boolean
+  enabled?: boolean
+  bound_machine?: string
+}
+
+// previewMD returns a one-line preview suitable for a collapsed-card
+// header — first non-empty heading if there is one, else the first
+// non-empty line truncated. Used by the context.md / testing.md
+// section headers when collapsed so the user sees what's inside
+// without expanding.
+function previewMD(md: string): string {
+  const lines = md.split('\n').map(l => l.trim()).filter(Boolean)
+  for (const l of lines) {
+    if (l.startsWith('#')) return l.replace(/^#+\s*/, '').slice(0, 80)
+  }
+  return (lines[0] ?? '').slice(0, 80)
+}
 
 export const Route = createFileRoute('/_app/projects/$name')({
   component: ProjectDetail,
@@ -26,66 +83,148 @@ export const Route = createFileRoute('/_app/projects/$name')({
 function ProjectDetail() {
   const { name } = Route.useParams()
   const navigate = useNavigate()
+  const chatDrawer = useChatDrawer()
 
-  const [projects, setProjects] = useState<Project[]>([])
-  const [repos, setRepos] = useState<Repo[]>([])
+  const [project, setProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
 
-  // Per-row pending state for repo attach/detach (keyed by repo id).
-  const [pendingRepoId, setPendingRepoId] = useState<string | null>(null)
-  const [repoActionError, setRepoActionError] = useState<string | null>(null)
-
-  // Add-repo dropdown selection.
-  const [addRepoId, setAddRepoId] = useState<string>('')
-
-  // Delete-project confirmation.
+  // Delete state
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
 
-  // Pilot wake history for this project. Local-mode-only — the cloud
-  // endpoint returns 404 and pilotRuns stays empty so the section
-  // collapses to nothing. The full history page is /pilot-runs;
-  // here we surface only the latest with-duties wake + a Wake button.
+  // Add repo state
+  const [showAddRepo, setShowAddRepo] = useState(false)
+  const [availableRepos, setAvailableRepos] = useState<string[]>([])
+  const [repoSearch, setRepoSearch] = useState('')
+  const [addingRepo, setAddingRepo] = useState<string | null>(null)
+  const [repoError, setRepoError] = useState<string | null>(null)
+
+  // Per-repo auto_approve / auto_merge state, keyed by full_name. Populated
+  // from /data/repos.json on mount so the member-repo list can render the
+  // automation rollup badges without waiting for the add-repo dropdown to
+  // open. Empty until the fetch resolves.
+  const [repoMeta, setRepoMeta] = useState<Record<string, RepoEntry>>({})
+
+  // Remove repo state
+  const [removingRepo, setRemovingRepo] = useState<string | null>(null)
+
+  // Pilot runs state. We only keep the modal-detail state on the
+  // project page now — the full Pilot wake history lives on
+  // /projects/$name/pilot-runs. pilotRuns is still fetched so the
+  // "Latest wake" card and the "N wakes" link can read counts +
+  // the newest entry without bouncing to the history page.
   const [pilotRuns, setPilotRuns] = useState<PilotRun[]>([])
   const [pilotRunDetail, setPilotRunDetail] = useState<PilotRun | null>(null)
-  const [waking, setWaking] = useState(false)
-  const [wakeMessage, setWakeMessage] = useState<string | null>(null)
 
-  const load = () => {
-    setLoading(true)
-    setError(null)
-    Promise.all([fetchProjects(), fetchRepos()])
-      .then(([p, r]) => {
-        setProjects(p.projects ?? [])
-        setRepos(r.repos ?? [])
+  // Automation popover
+  const [automationPopoverOpen, setAutomationPopoverOpen] = useState(false)
+
+  // Hostname the dashboard is running on. Used by the bind-to-this-machine
+  // button so the label reads "Bind to <hostname>" rather than a generic
+  // "Bind here". Comes from /api/settings.global.hostname — same source
+  // the per-repo page uses, so the UX feels uniform.
+  const [hostname, setHostname] = useState<string>('')
+
+  // Generate context state. Used only by the empty-state Initialize
+  // button — once context.md exists, all further edits go through
+  // `clawflow project chat` (the chat link in the header), which
+  // handles regeneration via dialogue.
+  const [generating, setGenerating] = useState(false)
+  const [generateError, setGenerateError] = useState<string | null>(null)
+  const pollTimerRef = useRef<number | null>(null)
+
+  // Automation state. The cooldown input is held locally so the user
+  // can edit it freely without each keystroke firing a save — the
+  // server only learns the new value on toggle change or explicit Save.
+  // Defaults to 30 min to match the CLI's `--cooldown` default.
+  const [cooldownDraft, setCooldownDraft] = useState<string>('30')
+  const [automationSaving, setAutomationSaving] = useState(false)
+  const [automationError, setAutomationError] = useState<string | null>(null)
+
+  // Collapsed-by-default state for the two docs. Both can be long
+  // (especially context.md), so the page would otherwise scroll past
+  // the member-repo list for non-trivial projects. Empty docs render
+  // their own "no content yet" panel and ignore this state.
+  const [contextOpen, setContextOpen] = useState(false)
+  const [testingOpen, setTestingOpen] = useState(false)
+  const [deploymentOpen, setDeploymentOpen] = useState(false)
+
+  // "Update with AI" affordances for the three project-level docs.
+  // The hook returns { trigger, form } per doc — trigger goes inline in
+  // the card header row, form renders below when open.
+  const contextUpdater = useDocUpdater({ project: name, file: 'context.md', onUpdated: fetchProject })
+  const testingUpdater = useDocUpdater({ project: name, file: 'testing.md', onUpdated: fetchProject })
+  const deploymentUpdater = useDocUpdater({ project: name, file: 'deployment.md', onUpdated: fetchProject })
+
+  // Generate deployment state — mirrors the context generation pattern.
+  const [generatingDeployment, setGeneratingDeployment] = useState(false)
+  const [generateDeploymentError, setGenerateDeploymentError] = useState<string | null>(null)
+  const deploymentPollTimerRef = useRef<number | null>(null)
+
+  // Cross-repo backlog state — same data sources the per-repo page
+  // reads, just filtered to project.repos here. The shared IssueList
+  // component does the merging, sectioning, and rendering.
+  const [allIssues, setAllIssues] = useState<IssueEntry[]>([])
+  const [allRuns, setAllRuns] = useState<Run[]>([])
+  const [allPending, setAllPending] = useState<PendingEntry[]>([])
+  const [backlogExpanded, setBacklogExpanded] = useState<Set<string>>(new Set())
+  const [backlogSyncing, setBacklogSyncing] = useState(false)
+  const repoInfoMap = useRepoInfoMap()
+
+  function fetchProject() {
+    // Live read from /api/project/get — bypasses the
+    // /data/projects.json snapshot so out-of-band file edits
+    // (most common path: `clawflow project chat` writing back an
+    // updated context.md or testing.md) show up on the next page
+    // refresh without waiting for a fresh `clawflow run` snapshot.
+    fetch(`/api/project/get?name=${encodeURIComponent(name)}`, { cache: 'no-store' })
+      .then(async r => {
+        if (!r.ok) return null
+        return r.json().catch(() => null) as Promise<Project | null>
       })
-      .catch(e => setError(String(e)))
-      .finally(() => setLoading(false))
+      .catch(() => null)
+      .then(data => {
+        setProject(data)
+        // Seed the cooldown input from the persisted value. Only do this
+        // on initial load (or when the field comes back empty) so a user
+        // mid-edit doesn't have their typing wiped by a refetch.
+        if (data?.automation && (cooldownDraft === '30' || !cooldownDraft)) {
+          setCooldownDraft(String(data.automation.cooldown_minutes ?? 30))
+        }
+        setLoading(false)
+      })
   }
 
-  useEffect(load, [])
+  async function saveAutomation(enabled: boolean, cooldownMinutes: number) {
+    setAutomationSaving(true)
+    setAutomationError(null)
+    try {
+      const r = await fetch('/api/project/automation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name, enabled, cooldown_minutes: cooldownMinutes }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
+      fetchProject()
+    } catch (e) {
+      setAutomationError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setAutomationSaving(false)
+    }
+  }
 
-  // fetchPilotRuns hits the local-mode endpoint. Cloud returns 404 →
-  // catch swallows it, list stays empty, the Pilot section collapses.
-  const fetchPilotRuns = useCallback(() => {
-    fetch(`/api/project/pilot-runs?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
-      .then(r => (r.ok ? r.json() : []))
-      .then(data => setPilotRuns(Array.isArray(data) ? data : []))
-      .catch(() => setPilotRuns([]))
-  }, [name])
+  // Manual-wake state. wakeStarting covers the click → 200 round-trip
+  // only — once the subprocess is spawned the button switches to a
+  // "Waking…" affordance backed by pilot-runs polling so the user sees
+  // when the wake actually completes (minutes later).
+  const [wakeStarting, setWakeStarting] = useState(false)
+  const [wakeError, setWakeError] = useState<string | null>(null)
+  const [wakeMessage, setWakeMessage] = useState<string | null>(null)
 
-  useEffect(() => {
-    fetchPilotRuns()
-    // Refresh every 30s while the page is open so a manual wake's
-    // result lands without the user having to refresh.
-    const id = setInterval(fetchPilotRuns, 30_000)
-    return () => clearInterval(id)
-  }, [fetchPilotRuns])
-
-  const handleWake = useCallback(async () => {
-    setWaking(true)
+  async function triggerWake() {
+    setWakeStarting(true)
+    setWakeError(null)
     setWakeMessage(null)
     try {
       const r = await fetch('/api/project/pilot/wake', {
@@ -93,26 +232,362 @@ function ProjectDetail() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project: name }),
       })
-      const data = await r.json().catch(() => ({}))
-      if (!r.ok) {
-        setWakeMessage(data.error || `Wake failed (${r.status})`)
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok || d.error) throw new Error(d.error || d.message || `HTTP ${r.status}`)
+      setWakeMessage('Wake started — refreshing pilot activity…')
+      // Light refresh so the popover's "Last woken" timestamp jumps
+      // immediately; the heavy pilot-runs activity stream below the
+      // header keeps polling on its own and will show the run when it
+      // completes.
+      fetchProject()
+      fetchPilotRuns()
+    } catch (e) {
+      setWakeError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setWakeStarting(false)
+    }
+  }
+
+  // saveBoundMachine binds the project Pilot to a specific hostname (or
+  // unbinds when machine is empty). Server resolves "this machine" when
+  // bind=true and machine is omitted — matches /api/repo/bind ergonomics.
+  async function saveBoundMachine(bind: boolean, machine?: string) {
+    setAutomationSaving(true)
+    setAutomationError(null)
+    try {
+      const r = await fetch('/api/project/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name, bind, ...(machine ? { machine } : {}) }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
+      fetchProject()
+    } catch (e) {
+      setAutomationError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setAutomationSaving(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchProject()
+    // Always fetch repo metadata on mount so the member-repo list can
+    // render auto_approve / auto_merge badges immediately. The add-repo
+    // dropdown re-fetches on open to catch any repos added since.
+    fetchAvailableRepos()
+    fetchPilotRuns()
+    fetchBacklog()
+    // Pull the current machine's hostname once so the bind button can
+    // render the actual name. Best-effort: failing leaves the label as
+    // "this machine" — the API will still resolve correctly on submit.
+    fetch('/api/settings', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : null))
+      .catch(() => null)
+      .then(settings => {
+        if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+      })
+    // Check if a generate job is already running for this project so
+    // navigating away mid-run and coming back resumes the spinner.
+    fetch(`/api/project/generate-context/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+      .then(r => r.json().catch(() => ({})).then(d => ({ status: r.status, body: d })))
+      .then(({ status, body }) => {
+        if (status === 200 && body.status === 'running') {
+          setGenerating(true)
+          startPolling()
+        }
+      })
+      .catch(() => { /* idle */ })
+    // Same resume-on-navigate check for deployment generation.
+    fetch(`/api/project/generate-deployment/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+      .then(r => r.json().catch(() => ({})).then(d => ({ status: r.status, body: d })))
+      .then(({ status, body }) => {
+        if (status === 200 && body.status === 'running') {
+          setGeneratingDeployment(true)
+          startDeploymentPolling()
+        }
+      })
+      .catch(() => { /* idle */ })
+    return () => { stopPolling(); stopDeploymentPolling() }
+  }, [name])
+  useConfigChanged(() => {
+    fetchProject()
+    fetchAvailableRepos()
+    fetchBacklog()
+  })
+
+  function fetchAvailableRepos() {
+    fetch('/data/repos.json', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : []))
+      .catch(() => [])
+      .then(data => {
+        const repos: RepoEntry[] = Array.isArray(data) ? data : []
+        setAvailableRepos(repos.map(r => r.full_name).filter(Boolean))
+        const byName: Record<string, RepoEntry> = {}
+        for (const r of repos) {
+          if (r.full_name) byName[r.full_name] = r
+        }
+        setRepoMeta(byName)
+      })
+  }
+
+  // fetchBacklog pulls the three snapshot files in parallel. No
+  // server-side filtering — the backlog is a small client-side
+  // .filter() across what's already on disk.
+  function fetchBacklog() {
+    Promise.all([
+      fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+    ]).then(([issues, runs, pending]) => {
+      setAllIssues(Array.isArray(issues) ? issues : [])
+      setAllRuns(Array.isArray(runs) ? runs : [])
+      setAllPending(Array.isArray(pending) ? pending : [])
+    })
+  }
+
+  // syncBacklog calls /api/repo/refresh-issues for every member repo
+  // sequentially — same endpoint the repo page's Sync button uses.
+  // Sequential because the endpoint hits the VCS provider per call;
+  // parallel fan-out would just multiply rate-limit pressure.
+  async function syncBacklog() {
+    if (!project || backlogSyncing) return
+    setBacklogSyncing(true)
+    try {
+      for (const repo of project.repos ?? []) {
+        try {
+          await fetch('/api/repo/refresh-issues', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repo }),
+          })
+        } catch {
+          // One repo failing (auth, network) shouldn't abort the rest.
+        }
+      }
+      fetchBacklog()
+    } finally {
+      setBacklogSyncing(false)
+    }
+  }
+
+  function fetchPilotRuns() {
+    fetch(`/api/project/pilot-runs?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : []))
+      .catch(() => [])
+      .then(data => setPilotRuns(Array.isArray(data) ? data : []))
+  }
+
+  async function handleDelete() {
+    setDeleting(true)
+    try {
+      const r = await fetch('/api/project/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+      const d = await r.json()
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
+      navigate({ to: '/projects' })
+    } catch {
+      setDeleting(false)
+      setShowDeleteConfirm(false)
+    }
+  }
+
+  async function handleAddRepo(repo: string) {
+    setAddingRepo(repo)
+    setRepoError(null)
+    try {
+      const r = await fetch('/api/project/add-repo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name, repo }),
+      })
+      const d = await r.json()
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
+      setShowAddRepo(false)
+      setRepoSearch('')
+      fetchProject()
+    } catch (e) {
+      setRepoError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setAddingRepo(null)
+    }
+  }
+
+  function startPolling() {
+    if (pollTimerRef.current !== null) return
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/project/generate-context/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+        const d = await r.json().catch(() => ({}))
+        if (r.status === 404 || d.status === 'idle') {
+          stopPolling()
+          setGenerating(false)
+          return
+        }
+        if (d.status === 'running') return
+        if (d.status === 'done') {
+          stopPolling()
+          setGenerating(false)
+          fetchProject()
+          return
+        }
+        if (d.status === 'error') {
+          stopPolling()
+          setGenerating(false)
+          setGenerateError(d.error || 'generation failed')
+          return
+        }
+      } catch {
+        // network blip — just keep polling
+      }
+    }
+    // Poll right away so the user sees state quickly, then every 2s.
+    void tick()
+    pollTimerRef.current = window.setInterval(tick, 2000)
+  }
+
+  function stopPolling() {
+    if (pollTimerRef.current !== null) {
+      window.clearInterval(pollTimerRef.current)
+      pollTimerRef.current = null
+    }
+  }
+
+  function startDeploymentPolling() {
+    if (deploymentPollTimerRef.current !== null) return
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/project/generate-deployment/status?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
+        const d = await r.json().catch(() => ({}))
+        if (r.status === 404 || d.status === 'idle') {
+          stopDeploymentPolling()
+          setGeneratingDeployment(false)
+          return
+        }
+        if (d.status === 'running') return
+        if (d.status === 'done') {
+          stopDeploymentPolling()
+          setGeneratingDeployment(false)
+          fetchProject()
+          return
+        }
+        if (d.status === 'error') {
+          stopDeploymentPolling()
+          setGeneratingDeployment(false)
+          setGenerateDeploymentError(d.error || 'generation failed')
+          return
+        }
+      } catch {
+        // network blip — keep polling
+      }
+    }
+    void tick()
+    deploymentPollTimerRef.current = window.setInterval(tick, 2000)
+  }
+
+  function stopDeploymentPolling() {
+    if (deploymentPollTimerRef.current !== null) {
+      window.clearInterval(deploymentPollTimerRef.current)
+      deploymentPollTimerRef.current = null
+    }
+  }
+
+  async function handleGenerateDeployment() {
+    setGenerateDeploymentError(null)
+    setGeneratingDeployment(true)
+    try {
+      const r = await fetch('/api/project/generate-deployment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (r.status === 202 || r.status === 409) {
+        startDeploymentPolling()
         return
       }
-      setWakeMessage('Wake started — refreshing pilot activity…')
-      // Re-poll a few times to catch the new run as it appears.
-      fetchPilotRuns()
-      setTimeout(fetchPilotRuns, 2_000)
-      setTimeout(fetchPilotRuns, 5_000)
+      throw new Error(d.error || `HTTP ${r.status}`)
     } catch (e) {
-      setWakeMessage(e instanceof Error ? e.message : String(e))
-    } finally {
-      setWaking(false)
+      setGeneratingDeployment(false)
+      setGenerateDeploymentError(e instanceof Error ? e.message : 'Unknown error')
     }
-  }, [name, fetchPilotRuns])
+  }
 
-  // The most-recent successful wake whose output included duties.
-  // Used to render the at-a-glance duty digest. Older shapeless wakes
-  // (pre-duty schema) are skipped — they're still in the history page.
+  async function handleInitialize() {
+    setGenerateError(null)
+    setGenerating(true)
+    try {
+      const r = await fetch('/api/project/generate-context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name }),
+      })
+      const d = await r.json().catch(() => ({}))
+      // 202 = accepted, 409 = already running — both mean a job exists,
+      // so start polling. Anything else is a real error.
+      if (r.status === 202 || r.status === 409) {
+        startPolling()
+        return
+      }
+      throw new Error(d.error || `HTTP ${r.status}`)
+    } catch (e) {
+      setGenerating(false)
+      setGenerateError(e instanceof Error ? e.message : 'Unknown error')
+    }
+  }
+
+  async function handleRemoveRepo(repo: string) {
+    setRemovingRepo(repo)
+    try {
+      const r = await fetch('/api/project/remove-repo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: name, repo }),
+      })
+      const d = await r.json()
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
+      fetchProject()
+    } catch {
+      // silent — the UI will just not update
+    } finally {
+      setRemovingRepo(null)
+    }
+  }
+
+  const filteredAvailableRepos = availableRepos
+    .filter(r => !project?.repos?.includes(r))
+    .filter(r => !repoSearch || r.toLowerCase().includes(repoSearch.toLowerCase()))
+
+  // Aggregate bound_machine across this project's member repos. Shown
+  // inside the Pilot popover so the user can see where the *execution*
+  // half of automation lives (repos) alongside where the *triage* half
+  // lives (Pilot). Repos with no bound_machine are bucketed as "unbound".
+  // The two layers are independent on purpose, but seeing them
+  // side-by-side is the easiest way to spot misconfigurations.
+  const repoBoundSummary = useMemo(() => {
+    const counts = new Map<string, number>()
+    let unbound = 0
+    for (const repo of project?.repos ?? []) {
+      const meta = repoMeta[repo]
+      const bm = meta?.bound_machine?.trim() || ''
+      if (!bm) {
+        unbound++
+      } else {
+        counts.set(bm, (counts.get(bm) ?? 0) + 1)
+      }
+    }
+    return { counts, unbound }
+  }, [project?.repos, repoMeta])
+
+  // latestWakeWithDuties = the most recent Pilot wake whose output had
+  // a parseable duties block. Used to render the project-page digest
+  // card (Layer 1) and the duty-status chips strip (Layer 2). When no
+  // such wake exists yet (first wakes after upgrade, or all failures),
+  // both surfaces stay hidden — the legacy Pilot Activity card below
+  // still shows the run history regardless.
   const latestWakeWithDuties = useMemo<PilotRun | null>(() => {
     for (const r of pilotRuns) {
       if (r.status === 'success' && r.duties) return r
@@ -120,440 +595,976 @@ function ProjectDetail() {
     return null
   }, [pilotRuns])
 
-  // Look up the project by name (URL slug). Cloud projects have an opaque
-  // id we use for API calls, but the URL key is the human-readable name.
-  const project = useMemo(
-    () => projects.find(p => p.name === name) ?? null,
-    [projects, name],
-  )
-
-  const memberRepos = useMemo(
-    () => (project ? repos.filter(r => r.project_id === project.id) : []),
-    [repos, project],
-  )
-
-  const availableRepos = useMemo(
-    () => (project ? repos.filter(r => r.project_id !== project.id) : []),
-    [repos, project],
-  )
-
-  async function handleAttachRepo() {
-    if (!project || !addRepoId) return
-    setPendingRepoId(addRepoId)
-    setRepoActionError(null)
-    try {
-      await updateRepo(addRepoId, { project_id: project.id })
-      setAddRepoId('')
-      load()
-    } catch (e) {
-      setRepoActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setPendingRepoId(null)
-    }
-  }
-
-  async function handleDetachRepo(repo: Repo) {
-    setPendingRepoId(repo.id)
-    setRepoActionError(null)
-    try {
-      // Empty string clears the project_id on the server side.
-      await updateRepo(repo.id, { project_id: '' })
-      load()
-    } catch (e) {
-      setRepoActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setPendingRepoId(null)
-    }
-  }
-
-  async function handleDeleteProject() {
-    if (!project) return
-    setDeleting(true)
-    setDeleteError(null)
-    try {
-      await deleteProject(project.id)
-      navigate({ to: '/projects' })
-    } catch (e) {
-      setDeleteError(e instanceof Error ? e.message : String(e))
-      setDeleting(false)
-    }
-  }
-
-  if (loading) {
-    return (
-      <div className="px-6 py-6 max-w-5xl mx-auto">
-        <p className="text-sm" style={{ color: 'hsl(var(--text-low))' }}>Loading…</p>
-      </div>
-    )
-  }
-
-  if (!project) {
-    return (
-      <div className="px-6 py-6 max-w-5xl mx-auto">
-        <Link
-          to="/projects"
-          className="inline-flex items-center gap-1.5 text-xs mb-4"
-          style={{ color: 'hsl(var(--text-low))' }}
-        >
-          <ChevronLeft size={14} />
-          Back to projects
-        </Link>
-        {error ? (
-          <div
-            className="px-4 py-3 rounded-md text-sm border"
-            style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-high))' }}
-          >
-            {error}
-          </div>
-        ) : (
-          <p className="text-sm" style={{ color: 'hsl(var(--text-low))' }}>
-            Project <span className="font-mono">{name}</span> not found.
-          </p>
-        )}
-      </div>
-    )
-  }
+  // pilotBound = whether this project has any project-level binding.
+  // pilotBoundHere = bound to the dashboard's own machine.
+  const pilotBound = !!project?.automation?.bound_machine
+  const pilotBoundHere = pilotBound && !!hostname && project?.automation?.bound_machine === hostname
+  // Skip-reason is set by the runner whenever Schedule refuses to wake.
+  // When automation is on AND a skip reason exists, the popover surfaces
+  // an amber banner so the user sees the obstacle without grepping logs.
+  const pilotSkipReason = (project?.automation?.last_skip_reason ?? '').trim()
 
   return (
-    <div className="px-6 py-6 max-w-5xl mx-auto">
+    <div className="max-w-5xl mx-auto px-4 py-6">
       <Link
         to="/projects"
-        className="inline-flex items-center gap-1.5 text-xs mb-4"
-        style={{ color: 'hsl(var(--text-low))' }}
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-4"
       >
-        <ChevronLeft size={14} />
-        Back to projects
+        <ChevronLeft className="w-3.5 h-3.5" /> Projects
       </Link>
 
-      <div className="flex items-start justify-between mb-5">
-        <div>
-          <h1 className="text-base font-semibold flex items-center gap-2" style={{ color: 'hsl(var(--text-high))' }}>
-            <FolderKanban size={16} style={{ color: 'hsl(var(--text-low))' }} />
-            <span className="font-mono">{project.name}</span>
-          </h1>
-          {project.description && (
-            <p className="text-sm mt-1" style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
-              {project.description}
-            </p>
-          )}
-          <p className="text-xs mt-1" style={{ color: 'hsl(var(--text-low))' }}>
-            Created {timeAgo(project.created_at)}
-          </p>
+      {loading ? (
+        <p className="text-sm text-muted-foreground py-8">Loading…</p>
+      ) : !project ? (
+        <div className="bg-card border border-border rounded-xl p-6 text-sm text-muted-foreground">
+          Project <code className="font-mono text-foreground">{name}</code> not found.
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={load}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm border transition-colors"
-            style={{ borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
-          >
-            <RefreshCw size={12} />
-            Refresh
-          </button>
-          <button
-            onClick={() => { setShowDeleteConfirm(true); setDeleteError(null) }}
-            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm border transition-colors"
-            style={{
-              borderColor: 'hsl(0 70% 50% / 0.5)',
-              color: 'hsl(0 70% 60%)',
-            }}
-          >
-            <Trash2 size={12} />
-            Delete project
-          </button>
-        </div>
-      </div>
-
-      {error && (
-        <div
-          className="mb-4 px-4 py-3 rounded-md text-sm border"
-          style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-high))' }}
-        >
-          {error}
-        </div>
-      )}
-
-      {/* Pilot section — only renders when /api/project/pilot-runs
-          returned data (i.e. local mode AND this project has wake
-          history). Cloud anon mode quietly hides it. */}
-      {pilotRuns.length > 0 && (
-        <section className="mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold flex items-center gap-2" style={{ color: 'hsl(var(--text-high))' }}>
-              <Zap size={14} style={{ color: 'hsl(var(--text-low))' }} />
-              Pilot
-              <span className="text-xs font-normal tabular-nums" style={{ color: 'hsl(var(--text-low))' }}>
-                {pilotRuns.length} wake{pilotRuns.length === 1 ? '' : 's'}
-              </span>
-            </h2>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleWake}
-                disabled={waking}
-                className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
-                style={{
-                  borderColor: 'hsl(var(--brand))',
-                  color: 'hsl(var(--brand))',
-                  background: 'hsl(var(--brand) / 0.08)',
-                }}
-              >
-                {waking ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
-                Wake now
-              </button>
-              {/* Full /pilot-runs route hasn't been ported to the
-                  cloud-style React routes yet — see the legacy commit
-                  at 5a4d9c9^. For now expose the modal-detail flow via
-                  the "Details" button on the latest-wake card below. */}
-            </div>
-          </div>
-
-          {wakeMessage && (
-            <div
-              className="mb-3 px-3 py-2 rounded-md text-xs border"
-              style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-mid, var(--text-low)))' }}
-            >
-              {wakeMessage}
-            </div>
-          )}
-
-          {latestWakeWithDuties && (
-            <div
-              className="rounded-lg border p-4"
-              style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))' }}
-            >
-              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                <div className="text-xs flex items-center gap-2" style={{ color: 'hsl(var(--text-low))' }}>
-                  Latest wake
-                  <span style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
-                    {timeAgo(latestWakeWithDuties.started_at)}
-                  </span>
-                </div>
+      ) : (
+        <>
+          {/* Header */}
+          <div className="flex items-start justify-between mb-6">
+            <div>
+              <h1 className="text-2xl font-bold text-foreground font-mono flex items-center gap-2">
+                <FolderKanban className="w-5 h-5 text-muted-foreground" />
+                {project.name}
+              </h1>
+              <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground flex-wrap">
+                <span className="tabular-nums">
+                  {project.repos?.length ?? 0} {(project.repos?.length ?? 0) === 1 ? 'repo' : 'repos'}
+                </span>
+                {project.created_at && (
+                  <>
+                    <span>·</span>
+                    <span>created {new Date(project.created_at).toLocaleDateString()}</span>
+                  </>
+                )}
+                <span>·</span>
                 <button
-                  onClick={() => setPilotRunDetail(latestWakeWithDuties)}
-                  className="text-xs underline-offset-2 hover:underline"
-                  style={{ color: 'hsl(var(--text-low))' }}
+                  onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
+                  className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline"
+                  title="Open chat — spawns a terminal running clawflow project chat"
                 >
-                  Details
+                  <MessageSquare className="w-3 h-3" /> chat
                 </button>
-              </div>
-
-              <div className="flex flex-wrap gap-1.5 mb-3">
-                {DUTY_KEYS.map(k => {
-                  const duty = latestWakeWithDuties.duties?.[k]
-                  if (!duty) return null
-                  return (
-                    <span
-                      key={k}
-                      className={cn(
-                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border',
-                        dutyStatusColour(duty.status),
-                      )}
-                      title={duty.note || duty.status}
-                    >
-                      {DUTY_LABELS[k]}: {duty.status}
-                    </span>
-                  )
-                })}
-              </div>
-
-              {latestWakeWithDuties.duties?.issue_digest?.summary && (
-                <p className="text-xs leading-relaxed" style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
-                  {latestWakeWithDuties.duties.issue_digest.summary}
-                </p>
-              )}
-            </div>
-          )}
-
-          {!latestWakeWithDuties && (
-            <div
-              className="rounded-lg border px-4 py-6 text-center text-xs"
-              style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))', color: 'hsl(var(--text-low))' }}
-            >
-              {pilotRuns.length} wake{pilotRuns.length === 1 ? '' : 's'} on record, none with a parseable duties block yet.
-            </div>
-          )}
-        </section>
-      )}
-
-      {pilotRunDetail && (
-        <PilotRunDetailModal run={pilotRunDetail} onClose={() => setPilotRunDetail(null)} />
-      )}
-
-      <section className="mb-6">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-semibold" style={{ color: 'hsl(var(--text-high))' }}>
-            Repos
-          </h2>
-          <span className="text-xs tabular-nums" style={{ color: 'hsl(var(--text-low))' }}>
-            {memberRepos.length} {memberRepos.length === 1 ? 'repo' : 'repos'}
-          </span>
-        </div>
-
-        {repoActionError && (
-          <div
-            className="mb-3 px-3 py-2 rounded-md text-xs border"
-            style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))', color: 'hsl(0 70% 60%)' }}
-          >
-            {repoActionError}
-          </div>
-        )}
-
-        {memberRepos.length === 0 ? (
-          <div
-            className="rounded-lg border px-4 py-6 text-center text-xs"
-            style={{ borderColor: 'hsl(var(--border))', background: 'hsl(var(--bg-panel))', color: 'hsl(var(--text-low))' }}
-          >
-            No repos attached to this project yet.
-          </div>
-        ) : (
-          <div
-            className="rounded-lg border overflow-hidden"
-            style={{ borderColor: 'hsl(var(--border))' }}
-          >
-            <table className="w-full text-sm">
-              <thead>
-                <tr
-                  className="text-xs font-medium border-b"
-                  style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
-                >
-                  <th className="text-left px-4 py-2">Repo</th>
-                  <th className="text-left px-4 py-2">Platform</th>
-                  <th className="text-left px-4 py-2">Base branch</th>
-                  <th className="text-right px-4 py-2">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {memberRepos.map((r, i) => (
-                  <tr
-                    key={r.id}
-                    className="border-b last:border-b-0"
-                    style={{ borderColor: 'hsl(var(--border))', background: i % 2 === 0 ? 'transparent' : 'hsl(var(--bg-panel) / 0.4)' }}
+                {/* At-a-glance Pilot scheduling pill — a quick read on
+                    whether automation is on without scrolling down. */}
+                <span>·</span>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setAutomationPopoverOpen(o => !o)}
+                    className={cn(
+                      'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium transition-colors',
+                      // Amber state: automation is on but Schedule recorded
+                      // a skip last pass — clearest signal that the pill's
+                      // "on" claim is currently a lie. Take precedence over
+                      // the green "enabled" colouring.
+                      project.automation?.enabled && pilotSkipReason
+                        ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-950/60'
+                        : project.automation?.enabled
+                          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-950/60'
+                          : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700/60',
+                    )}
+                    title={pilotSkipReason ? `Pilot enabled but last pass skipped: ${pilotSkipReason}` : 'Automation settings'}
                   >
-                    <td className="px-4 py-2.5 font-mono text-xs" style={{ color: 'hsl(var(--text-high))' }}>
-                      {r.name}
-                    </td>
-                    <td className="px-4 py-2.5 text-xs" style={{ color: 'hsl(var(--text-low))' }}>
-                      {r.platform || '—'}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs" style={{ color: 'hsl(var(--text-low))' }}>
-                      {r.base_branch || '—'}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <div className="flex justify-end">
-                        <button
-                          onClick={() => handleDetachRepo(r)}
-                          disabled={pendingRepoId === r.id}
-                          className="flex items-center gap-1 text-xs px-2 py-1 rounded-sm border transition-colors disabled:opacity-50"
-                          style={{ borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
-                        >
-                          {pendingRepoId === r.id ? (
-                            <Loader2 size={12} className="animate-spin" />
-                          ) : (
-                            <X size={12} />
+                    <span
+                      className={cn(
+                        'inline-block w-1.5 h-1.5 rounded-full',
+                        project.automation?.enabled && pilotSkipReason
+                          ? 'bg-amber-500'
+                          : project.automation?.enabled
+                            ? 'bg-emerald-500 animate-pulse'
+                            : 'bg-slate-400',
+                      )}
+                    />
+                    Pilot {project.automation?.enabled ? (pilotSkipReason ? 'skipped' : 'on') : 'off'}
+                    <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
+                  </button>
+                  {automationPopoverOpen && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setAutomationPopoverOpen(false)} />
+                      <div className="absolute left-0 top-full mt-2 z-20 w-72 bg-card border border-border rounded-xl shadow-lg p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-sm font-semibold text-foreground">Automation</span>
+                          <button type="button" onClick={() => setAutomationPopoverOpen(false)} className="text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5" /></button>
+                        </div>
+                        <div className="flex items-center gap-3 mb-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const cd = parseInt(cooldownDraft, 10)
+                              saveAutomation(!project.automation?.enabled, isNaN(cd) ? 30 : cd)
+                            }}
+                            disabled={automationSaving}
+                            role="switch"
+                            aria-checked={project.automation?.enabled ?? false}
+                            className={cn(
+                              'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
+                              project.automation?.enabled ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700',
+                              automationSaving && 'opacity-50 cursor-not-allowed',
+                            )}
+                          >
+                            <span className={cn('inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform', project.automation?.enabled ? 'translate-x-5' : 'translate-x-0.5')} />
+                          </button>
+                          <span className={cn('text-sm font-medium', project.automation?.enabled ? 'text-emerald-700 dark:text-emerald-400' : 'text-slate-600 dark:text-slate-400')}>
+                            {project.automation?.enabled ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mb-3">
+                          When on, every <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code> pass wakes the Pilot. It triages the backlog: files new work, fixes missing labels, closes stale/duplicate issues, and resolves merge conflicts on existing PRs.
+                        </p>
+                        {project.automation?.last_woken_at && (
+                          <p className="text-[11px] text-muted-foreground mb-3 tabular-nums">
+                            Last woken {new Date(project.automation.last_woken_at).toLocaleString()}
+                          </p>
+                        )}
+
+                        {/* Pilot skip banner — only when Schedule recorded a
+                            reason on the last pass. This is the "Pilot on
+                            but nothing happening" signal made visible. The
+                            most common cases (bound_machine mismatch /
+                            require_binding=true with no binding) point the
+                            user at the bind row immediately below. */}
+                        {pilotSkipReason && (
+                          <div className="mb-3 px-2 py-1.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800 dark:bg-amber-950/30 dark:border-amber-900 dark:text-amber-300 text-[11px] leading-snug">
+                            <div className="font-medium">Last pass skipped</div>
+                            <div className="opacity-90">{pilotSkipReason}</div>
+                            {project.automation?.last_skip_at && (
+                              <div className="opacity-70 tabular-nums mt-0.5">
+                                {new Date(project.automation.last_skip_at).toLocaleString()}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Triage binding — which machine wakes the Pilot.
+                            Independent from repo bindings shown below;
+                            useful in multi-machine deployments to prevent
+                            duplicate Pilot wakes on cron. */}
+                        <div className="mb-3">
+                          <div className="text-xs text-muted-foreground mb-1.5">Triage on</div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {pilotBound ? (
+                              <span
+                                className={cn(
+                                  'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono border',
+                                  pilotBoundHere
+                                    ? 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-950/30 dark:border-blue-900 dark:text-blue-300'
+                                    : 'bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-950/30 dark:border-amber-900 dark:text-amber-300',
+                                )}
+                              >
+                                {project.automation?.bound_machine}
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono border border-border text-muted-foreground">
+                                unbound — any machine
+                              </span>
+                            )}
+                            {pilotBoundHere ? (
+                              <button
+                                type="button"
+                                onClick={() => saveBoundMachine(false)}
+                                disabled={automationSaving}
+                                className="text-[11px] px-1.5 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 disabled:opacity-50"
+                              >
+                                Unbind
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => saveBoundMachine(true)}
+                                disabled={automationSaving}
+                                className="text-[11px] px-1.5 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 disabled:opacity-50"
+                                title={pilotBound ? `Take over from ${project.automation?.bound_machine}` : 'Bind Pilot to this machine'}
+                              >
+                                {pilotBound ? `Take over (bind ${hostname || 'here'})` : `Bind to ${hostname || 'this machine'}`}
+                              </button>
+                            )}
+                          </div>
+                          {/* Aggregate view of repo-level bindings so the
+                              user can see the relationship between where
+                              Pilot triages and where operators execute. */}
+                          {(project.repos?.length ?? 0) > 0 && (
+                            <div className="mt-2 text-[11px] text-muted-foreground">
+                              Repos run on:{' '}
+                              {Array.from(repoBoundSummary.counts.entries()).map(([m, n], i) => (
+                                <span key={m}>
+                                  {i > 0 && ', '}
+                                  <span className="font-mono">{m}</span> ({n})
+                                </span>
+                              ))}
+                              {repoBoundSummary.unbound > 0 && (
+                                <span>
+                                  {repoBoundSummary.counts.size > 0 && ', '}
+                                  unbound ({repoBoundSummary.unbound})
+                                </span>
+                              )}
+                            </div>
                           )}
-                          Remove
-                        </button>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <label className="text-xs text-muted-foreground shrink-0">Cooldown (min)</label>
+                          <input
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={cooldownDraft}
+                            onChange={e => setCooldownDraft(e.target.value)}
+                            className="w-16 px-2 py-1 bg-background border border-border rounded-lg text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const cd = parseInt(cooldownDraft, 10)
+                              saveAutomation(project.automation?.enabled ?? false, isNaN(cd) ? 30 : cd)
+                            }}
+                            disabled={automationSaving || parseInt(cooldownDraft, 10) === (project.automation?.cooldown_minutes ?? 30)}
+                            className="px-2 py-1 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Save
+                          </button>
+                        </div>
+
+                        {/* Manual wake. Click resets the cooldown clock
+                            (LastWokenAt = now) so the next auto-wake is
+                            cooldown_minutes from this click — matches
+                            the scheduled-wake semantics, no special
+                            case to learn. Disabled while automation is
+                            off; the server also enforces, so this is
+                            just a UX hint. */}
+                        <div className="mt-3 pt-3 border-t border-border flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={triggerWake}
+                            disabled={wakeStarting || !project.automation?.enabled || automationSaving}
+                            className={cn(
+                              'inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+                              'border-emerald-300 text-emerald-700 hover:bg-emerald-50 dark:border-emerald-900 dark:text-emerald-300 dark:hover:bg-emerald-950/40',
+                            )}
+                            title="Trigger a Pilot wake now, ignoring cooldown. The cooldown clock restarts from this wake."
+                          >
+                            {wakeStarting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                            Wake now
+                          </button>
+                          <span className="text-[11px] text-muted-foreground">
+                            Triggers immediately, resets the cooldown clock
+                          </span>
+                        </div>
+                        {wakeMessage && <p className="mt-2 text-xs text-emerald-700 dark:text-emerald-400">{wakeMessage}</p>}
+                        {wakeError && <p className="mt-2 text-xs text-red-600">{wakeError}</p>}
+
+                        {automationError && <p className="mt-2 text-xs text-red-600">{automationError}</p>}
                       </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {/* Attach repo affordance */}
-        {availableRepos.length > 0 && (
-          <div className="mt-3 flex items-center gap-2">
-            <select
-              value={addRepoId}
-              onChange={e => setAddRepoId(e.target.value)}
-              disabled={pendingRepoId !== null}
-              className="text-xs px-2 py-1.5 rounded-sm border focus:outline-none disabled:opacity-50"
-              style={{
-                background: 'hsl(var(--bg-primary))',
-                borderColor: 'hsl(var(--border))',
-                color: 'hsl(var(--text-high))',
-              }}
-            >
-              <option value="">Attach a repo…</option>
-              {availableRepos.map(r => (
-                <option key={r.id} value={r.id}>
-                  {r.name}
-                  {r.project_id ? ' (already in another project)' : ''}
-                </option>
-              ))}
-            </select>
-            <button
-              onClick={handleAttachRepo}
-              disabled={!addRepoId || pendingRepoId !== null}
-              className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
-              style={{
-                background: addRepoId ? 'hsl(var(--brand))' : 'transparent',
-                borderColor: addRepoId ? 'hsl(var(--brand))' : 'hsl(var(--border))',
-                color: addRepoId
-                  ? 'hsl(var(--brand-foreground, 0 0% 100%))'
-                  : 'hsl(var(--text-low))',
-              }}
-            >
-              {pendingRepoId !== null && pendingRepoId === addRepoId ? (
-                <Loader2 size={12} className="animate-spin" />
-              ) : (
-                <Plus size={12} />
-              )}
-              Attach
-            </button>
-          </div>
-        )}
-      </section>
-
-      {/* Delete confirmation modal */}
-      {showDeleteConfirm && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center px-4"
-          style={{ background: 'rgba(0,0,0,0.4)' }}
-          onClick={() => !deleting && setShowDeleteConfirm(false)}
-        >
-          <div
-            className="w-full max-w-md rounded-lg border p-5"
-            style={{ background: 'hsl(var(--bg-primary))', borderColor: 'hsl(var(--border))' }}
-            onClick={e => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--text-high))' }}>
-              Delete project
-            </h3>
-            <p className="text-sm mb-4" style={{ color: 'hsl(var(--text-mid, var(--text-low)))' }}>
-              Are you sure you want to delete <span className="font-mono">{project.name}</span>?
-              The {memberRepos.length} attached {memberRepos.length === 1 ? 'repo' : 'repos'} will be detached but not deleted.
-            </p>
-            {deleteError && (
-              <p className="text-xs mb-3" style={{ color: 'hsl(0 70% 60%)' }}>{deleteError}</p>
-            )}
-            <div className="flex items-center justify-end gap-2">
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+            {/* Delete button */}
+            {!showDeleteConfirm ? (
               <button
-                onClick={() => setShowDeleteConfirm(false)}
-                disabled={deleting}
-                className="text-xs px-3 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
-                style={{ borderColor: 'hsl(var(--border))', color: 'hsl(var(--text-low))' }}
+                type="button"
+                onClick={() => setShowDeleteConfirm(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border border-border text-muted-foreground hover:text-red-600 hover:border-red-300 transition-colors"
               >
-                Cancel
-              </button>
-              <button
-                onClick={handleDeleteProject}
-                disabled={deleting}
-                className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-sm border transition-colors disabled:opacity-50"
-                style={{
-                  background: 'hsl(0 70% 50%)',
-                  borderColor: 'hsl(0 70% 50%)',
-                  color: 'hsl(0 0% 100%)',
-                }}
-              >
-                {deleting && <Loader2 size={12} className="animate-spin" />}
+                <Trash2 className="w-3.5 h-3.5" />
                 Delete
               </button>
-            </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-red-600">Delete this project?</span>
+                <button
+                  type="button"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  className="px-3 py-1.5 rounded-lg text-sm font-medium bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-50"
+                >
+                  {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Confirm'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="px-3 py-1.5 rounded-lg text-sm font-medium border border-border text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
-        </div>
+
+          {/* Single Pilot status card — consolidates the digest + duty
+              chips into one bordered surface so the project page reads
+              as "one Pilot panel" instead of three stacked widgets.
+              Header line: latest wake time + verdict, clickable into
+              the full run modal. Chip row: only renders text when the
+              status is NOT ok (ok-everywhere = quiet by design). */}
+          {latestWakeWithDuties?.duties && (
+            <section className="mb-6">
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setPilotRunDetail(latestWakeWithDuties)}
+                  className="w-full flex items-center gap-2 px-4 py-2.5 border-b border-border hover:bg-secondary/30 transition-colors text-left"
+                  title="Open full pilot run"
+                >
+                  <Activity className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-sm font-semibold text-foreground">Latest Pilot wake</span>
+                  <span className="text-[11px] text-muted-foreground tabular-nums">
+                    {new Date(latestWakeWithDuties.started_at).toLocaleString()}
+                  </span>
+                  {latestWakeWithDuties.result && (
+                    <span className="text-[11px] text-muted-foreground truncate ml-1">
+                      · {latestWakeWithDuties.result.replace(/^PILOT-RESULT:\s*/, '')}
+                    </span>
+                  )}
+                </button>
+
+                {/* Duty chip row. Each chip is a colored pill; when the
+                    status is "ok" we elide any text and just show the
+                    duty name — green pill alone communicates the state.
+                    Non-ok statuses get their text label appended so the
+                    user knows where to look. */}
+                <div className="px-4 py-2.5 flex items-center gap-1.5 flex-wrap border-b border-border">
+                  {DUTY_KEYS.map(key => {
+                    const duty = latestWakeWithDuties.duties![key]
+                    if (!duty) return null
+                    const isOk = duty.status === 'ok'
+                    const actCount = duty.actions?.length ?? 0
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setPilotRunDetail(latestWakeWithDuties)}
+                        className={cn(
+                          'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium border transition-colors hover:brightness-95',
+                          dutyStatusColour(duty.status),
+                        )}
+                        title={duty.note || (actCount > 0 ? duty.actions!.join('; ') : DUTY_LABELS[key])}
+                      >
+                        <span>{DUTY_LABELS[key]}</span>
+                        {!isOk && (
+                          <span className="text-[10px] opacity-80 tabular-nums">
+                            {duty.status === 'action_taken' ? `${actCount}` : duty.status}
+                          </span>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+
+                {/* Issue digest — the passive review duty. Embedded here
+                    rather than its own card so the user sees the prose
+                    summary right where they expect Pilot status, not
+                    scattered across the page. */}
+                {latestWakeWithDuties.duties.issue_digest && (
+                  <div className="px-4 py-3">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <ListTodo className="w-3.5 h-3.5 text-muted-foreground" />
+                      <span className="text-xs font-semibold text-foreground">Issue digest</span>
+                      {latestWakeWithDuties.duties.issue_digest.since_hours ? (
+                        <span className="text-[10px] text-muted-foreground tabular-nums">past {latestWakeWithDuties.duties.issue_digest.since_hours}h</span>
+                      ) : null}
+                      <span className="text-[11px] text-muted-foreground tabular-nums ml-auto">
+                        +{latestWakeWithDuties.duties.issue_digest.new ?? 0} new
+                        {' · '}
+                        −{latestWakeWithDuties.duties.issue_digest.closed ?? 0} closed
+                      </span>
+                    </div>
+                    {latestWakeWithDuties.duties.issue_digest.summary && (
+                      <div className="text-xs text-foreground/85 whitespace-pre-wrap leading-relaxed">
+                        {latestWakeWithDuties.duties.issue_digest.summary}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* History footer — drop the full wake-list off the
+                    project page (it had grown into a competing 5-row
+                    card right below this one). Single link to the
+                    dedicated history page; the count makes it
+                    discoverable without forcing a click to see scale. */}
+                <Link
+                  to="/projects/$name/pilot-runs"
+                  params={{ name }}
+                  className="block px-4 py-2 border-t border-border text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary/30 transition-colors text-center"
+                >
+                  View all {pilotRuns.length} wake{pilotRuns.length !== 1 ? 's' : ''} →
+                </Link>
+              </div>
+            </section>
+          )}
+
+          {/* When no wake has duties yet (fresh project, or all wakes
+              pre-upgrade) the Latest card is hidden but the user still
+              wants a way into the history. Show a thin fallback link
+              so /pilot-runs is never orphaned. */}
+          {!latestWakeWithDuties && pilotRuns.length > 0 && (
+            <section className="mb-6">
+              <Link
+                to="/projects/$name/pilot-runs"
+                params={{ name }}
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <Activity className="w-3.5 h-3.5" />
+                View {pilotRuns.length} Pilot wake{pilotRuns.length !== 1 ? 's' : ''} →
+              </Link>
+            </section>
+          )}
+
+
+          {pilotRunDetail && <PilotRunDetailModal run={pilotRunDetail} onClose={() => setPilotRunDetail(null)} />}
+
+          {/* Member repos — moved above the doc sections so the
+              user sees the repo list before the config controls. */}
+          <section className="mb-6">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-sm font-semibold text-foreground">
+                Member repos{' '}
+                <span className="font-normal text-muted-foreground">
+                  ({project.repos?.length ?? 0})
+                </span>
+              </h2>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddRepo(true)
+                  setRepoError(null)
+                  fetchAvailableRepos()
+                }}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+              >
+                <Plus className="w-3 h-3" />
+                Add repo
+              </button>
+            </div>
+
+            {/* Add repo panel */}
+            {showAddRepo && (
+              <div className="bg-card border border-border rounded-xl p-4 mb-3">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-xs font-semibold text-foreground">Add a configured repo</h3>
+                  <button
+                    type="button"
+                    onClick={() => { setShowAddRepo(false); setRepoSearch(''); setRepoError(null) }}
+                    className="text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  placeholder="Search repos..."
+                  value={repoSearch}
+                  onChange={e => setRepoSearch(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary font-mono mb-2"
+                  autoFocus
+                />
+                {repoError && (
+                  <p className="text-xs text-red-600 mb-2">{repoError}</p>
+                )}
+                {filteredAvailableRepos.length === 0 ? (
+                  <p className="text-xs text-muted-foreground py-2">
+                    {availableRepos.length === 0
+                      ? 'No configured repos found. Add repos in the Repos page first.'
+                      : 'No matching repos available to add.'}
+                  </p>
+                ) : (
+                  <div className="max-h-48 overflow-y-auto divide-y divide-border rounded-lg border border-border">
+                    {filteredAvailableRepos.map(repo => (
+                      <div
+                        key={repo}
+                        className="flex items-center justify-between px-3 py-2 hover:bg-secondary/20"
+                      >
+                        <span className="font-mono text-sm text-foreground">{repo}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleAddRepo(repo)}
+                          disabled={addingRepo === repo}
+                          className={cn(
+                            'px-2 py-0.5 rounded text-xs font-medium transition-colors',
+                            addingRepo === repo
+                              ? 'text-muted-foreground cursor-not-allowed'
+                              : 'text-primary hover:bg-primary/10',
+                          )}
+                        >
+                          {addingRepo === repo ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Add'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!project.repos || project.repos.length === 0 ? (
+              <div className="bg-card border border-border rounded-xl p-6 text-center">
+                <p className="text-sm text-muted-foreground">
+                  No repos in this project. Click <strong>Add repo</strong> above to add one.
+                </p>
+              </div>
+            ) : (
+              <>
+                {(() => {
+                  const meta = project.repos.map(r => repoMeta[r] ?? null)
+                  const known = meta.filter(m => m !== null) as RepoEntry[]
+                  const approveOn = known.filter(m => m.auto_approve).length
+                  const mergeOn = known.filter(m => m.auto_merge).length
+                  const pmOn = project.automation?.enabled
+                  const allOn = pmOn && approveOn === project.repos.length && mergeOn === project.repos.length
+                  return (
+                    <div className="text-xs text-muted-foreground mb-2 flex items-center gap-3 flex-wrap">
+                      <span className="tabular-nums">
+                        auto-approve: <span className="font-medium text-foreground">{approveOn}/{project.repos.length}</span>
+                      </span>
+                      <span className="tabular-nums">
+                        auto-merge: <span className="font-medium text-foreground">{mergeOn}/{project.repos.length}</span>
+                      </span>
+                      {allOn ? (
+                        <span className="text-emerald-700 dark:text-emerald-400 font-medium">· fully autopiloted</span>
+                      ) : pmOn ? (
+                        <span>· Pilot scheduling on; some repos need manual approve/merge</span>
+                      ) : (
+                        <span>· Pilot scheduling off — toggle Automation above</span>
+                      )}
+                    </div>
+                  )
+                })()}
+                <div className="bg-card border border-border rounded-xl overflow-hidden divide-y divide-border">
+                  {project.repos.map(repo => {
+                    const m = repoMeta[repo]
+                    return (
+                      <div
+                        key={repo}
+                        className="flex items-center justify-between px-4 py-2 hover:bg-secondary/20 group gap-3"
+                      >
+                        <Link
+                          to="/repos/$repoName"
+                          params={{ repoName: encodeURIComponent(repo) }}
+                          className="font-mono text-sm text-foreground hover:underline truncate"
+                          title={repo}
+                        >
+                          {repo}
+                        </Link>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span
+                            className={cn(
+                              'px-1.5 py-0.5 rounded text-[10px] font-medium tabular-nums',
+                              m?.auto_approve
+                                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
+                                : 'bg-secondary text-muted-foreground',
+                            )}
+                            title={m?.auto_approve ? 'auto_approve enabled' : 'auto_approve off'}
+                          >
+                            approve {m?.auto_approve ? 'on' : 'off'}
+                          </span>
+                          <span
+                            className={cn(
+                              'px-1.5 py-0.5 rounded text-[10px] font-medium tabular-nums',
+                              m?.auto_merge
+                                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
+                                : 'bg-secondary text-muted-foreground',
+                            )}
+                            title={m?.auto_merge ? 'auto_merge enabled' : 'auto_merge off'}
+                          >
+                            merge {m?.auto_merge ? 'on' : 'off'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveRepo(repo)}
+                            disabled={removingRepo === repo}
+                            className="text-muted-foreground hover:text-red-600 transition-colors disabled:opacity-50 ml-1"
+                            title="Remove from project"
+                          >
+                            {removingRepo === repo ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <X className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </section>
+
+          {/* Context.md — collapsible. Default collapsed because the
+              doc is often long enough to push the rest of the page out
+              of view. Header bar carries enough preview info (heading
+              or size) so the user knows whether it's worth opening.
+              Stays full-width (not paired with testing.md in a 2-col
+              grid) so the collapsed/expanded card never visually
+              merges with the status row above. */}
+          <section className="mb-3">
+            {generateError && (
+              <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
+                {generateError}
+              </div>
+            )}
+            {project.context_md ? (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setContextOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={contextOpen}
+                >
+                  {contextOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <span className="text-sm font-semibold text-foreground font-mono">context.md</span>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+                    {(project.context_md.length / 1024).toFixed(1)}kb
+                  </span>
+                  {!contextOpen && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      · {previewMD(project.context_md)}
+                    </span>
+                  )}
+                  {contextUpdater.trigger}
+                </button>
+                {contextOpen && (
+                  <div className="px-4 pb-4 pt-0 border-t border-border">
+                    <Markdown>{project.context_md}</Markdown>
+                  </div>
+                )}
+                {contextUpdater.form}
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-foreground font-mono">context.md</h2>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">context.md</code> yet.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleInitialize}
+                    disabled={generating || !project.repos?.length}
+                    className={cn(
+                      'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                      'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
+                    )}
+                  >
+                    {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    {generating ? 'Generating…' : 'Initialize context.md'}
+                  </button>
+                  {!project.repos?.length && (
+                    <p className="text-xs text-muted-foreground">Add at least one repo first.</p>
+                  )}
+                  {generating && (
+                    <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+
+          {/* Testing.md — collapsible. Same pattern as Context above.
+              No AI auto-generation path; authored interactively via
+              project chat (the SOP relies on details only the user
+              knows: which serial port, which board, startup order). */}
+          <section className="mb-3">
+            {project.testing_md ? (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setTestingOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={testingOpen}
+                >
+                  {testingOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <span className="text-sm font-semibold text-foreground font-mono">testing.md</span>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+                    {(project.testing_md.length / 1024).toFixed(1)}kb
+                  </span>
+                  {!testingOpen && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      · {previewMD(project.testing_md)}
+                    </span>
+                  )}
+                  {testingUpdater.trigger}
+                </button>
+                {testingOpen && (
+                  <div className="px-4 pb-4 pt-0 border-t border-border">
+                    <Markdown>{project.testing_md}</Markdown>
+                  </div>
+                )}
+                {testingUpdater.form}
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-foreground font-mono">testing.md</h2>
+                  <span className="text-xs text-muted-foreground">
+                    How to bring up the local runtime — startup order, services, hardware
+                  </span>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">testing.md</code> yet.
+                    Describe how to start your local env (frontend + backend + hardware/serial)
+                    so <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">implement</code> can verify changes locally.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    Draft via chat
+                  </button>
+                  <p className="text-xs text-muted-foreground">
+                    This is a runbook (startup steps), not a list of test cases.
+                  </p>
+                </div>
+              </>
+            )}
+          </section>
+
+          {/* Deployment.md — collapsible. Same pattern as Context and
+              Testing above. Has an AI Generate button in the empty state
+              (mirrors context.md's Initialize button) because deployment
+              config can be inferred from CI workflows and context.md. */}
+          <section className="mb-3">
+            {generateDeploymentError && (
+              <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:bg-red-950/30 dark:border-red-900">
+                {generateDeploymentError}
+              </div>
+            )}
+            {project.deployment_md ? (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setDeploymentOpen(o => !o)}
+                  className="w-full flex items-center gap-2 px-4 py-3 hover:bg-secondary/30 transition-colors text-left"
+                  aria-expanded={deploymentOpen}
+                >
+                  {deploymentOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                  <span className="text-sm font-semibold text-foreground font-mono">deployment.md</span>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+                    {(project.deployment_md.length / 1024).toFixed(1)}kb
+                  </span>
+                  {!deploymentOpen && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      · {previewMD(project.deployment_md)}
+                    </span>
+                  )}
+                  {deploymentUpdater.trigger}
+                </button>
+                {deploymentOpen && (
+                  <div className="px-4 pb-4 pt-0 border-t border-border">
+                    <Markdown>{project.deployment_md}</Markdown>
+                  </div>
+                )}
+                {deploymentUpdater.form}
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-foreground font-mono">deployment.md</h2>
+                  <span className="text-xs text-muted-foreground">
+                    Runtime environment, log retrieval, health indicators
+                  </span>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-6 text-center space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">deployment.md</code> yet.
+                    Describe how to inspect the runtime (logs, metrics, SSH/kubectl) so the Pilot can assess live health.
+                  </p>
+                  <div className="flex items-center justify-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={handleGenerateDeployment}
+                      disabled={generatingDeployment || !project.repos?.length}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
+                        'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed',
+                      )}
+                    >
+                      {generatingDeployment ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                      {generatingDeployment ? 'Generating…' : 'Generate deployment.md'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => chatDrawer.open({ project: project.name, action: 'chat' })}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      Draft via chat
+                    </button>
+                  </div>
+                  {!project.repos?.length && (
+                    <p className="text-xs text-muted-foreground">Add at least one repo first.</p>
+                  )}
+                  {generatingDeployment && (
+                    <p className="text-xs text-muted-foreground">{GENERATE_HINT}</p>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+
+          {/* Backlog — cross-repo issue + run + pending aggregate so the
+              user can see project progress without bouncing into each
+              repo page. Same renderer as the per-repo page (shared
+              IssueList component); the project-level section config
+              adds an "Awaiting evaluation" bucket up front and shows
+              the repo column on each row. */}
+          <BacklogSection
+            project={project}
+            issues={allIssues}
+            runs={allRuns}
+            pending={allPending}
+            repoMap={repoInfoMap}
+            expanded={backlogExpanded}
+            onToggle={k =>
+              setBacklogExpanded(prev => {
+                const next = new Set(prev)
+                if (next.has(k)) next.delete(k)
+                else next.add(k)
+                return next
+              })
+            }
+            onSync={syncBacklog}
+            syncing={backlogSyncing}
+          />
+
+        </>
       )}
     </div>
+  )
+}
+
+// BacklogSection is the project-level cross-repo issue aggregate. It
+// owns the collapsed/open state and the bucket-counts header, and
+// delegates the actual list rendering to the shared IssueList. Heavy
+// per-row markup (StatusBadge, Timeline, etc.) lives in IssueList so
+// adding/changing row chrome doesn't require editing this file too.
+function BacklogSection({
+  project,
+  issues,
+  runs,
+  pending,
+  repoMap,
+  expanded,
+  onToggle,
+  onSync,
+  syncing,
+}: {
+  project: Project
+  issues: IssueEntry[]
+  runs: Run[]
+  pending: PendingEntry[]
+  repoMap: ReturnType<typeof useRepoInfoMap>
+  expanded: Set<string>
+  onToggle: (key: string) => void
+  onSync: () => void
+  syncing: boolean
+}) {
+  // Filter all three datasets to this project's member repos before
+  // merging. Cheap (a few hundred entries at most) so doing it inline
+  // beats threading per-project filtered slices through the API.
+  const memberSet = useMemo(() => new Set(project.repos ?? []), [project.repos])
+  const filteredIssues = useMemo(() => issues.filter(i => memberSet.has(i.repo)), [issues, memberSet])
+  const filteredRuns = useMemo(() => runs.filter(r => memberSet.has(r.repo)), [runs, memberSet])
+  const filteredPending = useMemo(() => pending.filter(p => memberSet.has(p.repo)), [pending, memberSet])
+  const groups = useIssueGroups({
+    issues: filteredIssues,
+    runs: filteredRuns,
+    pending: filteredPending,
+  })
+
+  // Counts roll up per section without rebuilding the buckets — same
+  // predicates as PROJECT_SECTIONS, applied once for the header
+  // summary line. Cheap, no need to memoize.
+  const counts = {
+    inFlight: 0,
+    queued: 0,
+    awaiting: 0,
+    done: 0,
+    closed: 0,
+  }
+  for (const g of groups) {
+    if (g.state === 'closed') counts.closed++
+    else if (g.runs[0]?.status === 'running') counts.inFlight++
+    else if (g.pending.length > 0) counts.queued++
+    else {
+      const labels = g.labels ?? []
+      const hasTrigger = labels.includes('bug') || labels.includes('feature')
+      const hasAgentLabel = labels.some(l => l.startsWith('agent-'))
+      if (g.runs.length === 0 && hasTrigger && !hasAgentLabel) counts.awaiting++
+      else counts.done++
+    }
+  }
+
+  const [open, setOpen] = useState(true)
+
+  if ((project.repos?.length ?? 0) === 0) return null
+
+  return (
+    <section className="mb-6">
+      <div className="flex items-center gap-2 mb-2">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className="inline-flex items-center gap-1 text-sm font-semibold text-foreground hover:text-foreground"
+          aria-expanded={open}
+        >
+          {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          <ListTodo className="w-3.5 h-3.5 text-muted-foreground" />
+          Backlog{' '}
+          <span className="font-normal text-muted-foreground">({groups.length})</span>
+        </button>
+        <span className="text-xs text-muted-foreground">
+          {counts.inFlight} in flight · {counts.queued} queued ·{' '}
+          <span className={cn(counts.awaiting > 0 && 'text-red-600 dark:text-red-400 font-medium')}>
+            {counts.awaiting} awaiting eval
+          </span>{' '}
+          · {counts.done} done · {counts.closed} closed
+        </span>
+        <button
+          onClick={onSync}
+          disabled={syncing}
+          title="Refresh issue state for every member repo"
+          className={cn(
+            'ml-auto inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border transition-colors',
+            syncing
+              ? 'border-border text-muted-foreground bg-secondary/30'
+              : 'border-border text-foreground hover:bg-secondary/50',
+          )}
+        >
+          {syncing ? (
+            <>
+              <Loader2 className="w-3 h-3 animate-spin" /> syncing…
+            </>
+          ) : (
+            <>
+              <RotateCw className="w-3 h-3" /> Sync all
+            </>
+          )}
+        </button>
+      </div>
+      {open && (
+        groups.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4">
+            No issues across {project.repos?.length ?? 0} repo{project.repos?.length === 1 ? '' : 's'} yet.
+            Click <strong>Sync all</strong> to pull current state from VCS.
+          </p>
+        ) : (
+          <IssueList
+            groups={groups}
+            sections={PROJECT_SECTIONS}
+            showRepo={true}
+            repoMap={repoMap}
+            expanded={expanded}
+            onToggle={onToggle}
+          />
+        )
+      )}
+    </section>
   )
 }
