@@ -829,10 +829,35 @@ type IssueEntry struct {
 }
 
 // WriteIssues writes data/issues.json with all issues from monitored repos.
+//
+// Closed issues are kept sticky: if the previous snapshot contained a closed
+// issue that is absent from `entries` (because the GitHub API only returns
+// ~100 results sorted by updated_at and the issue fell out of the window),
+// it is merged back in. "Closed" is a terminal state that never reverts, so
+// once an issue is known closed it must not silently disappear from the
+// snapshot — otherwise the dashboard would infer it is open and mis-classify
+// it as DONE rather than Closed.
 func WriteIssues(entries []IssueEntry) error {
 	if entries == nil {
 		entries = []IssueEntry{}
 	}
+
+	// Merge in previously-known closed issues missing from the new batch.
+	newKeys := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		newKeys[fmt.Sprintf("%s#%d", e.Repo, e.IssueNumber)] = true
+	}
+	if data, err := os.ReadFile(filepath.Join(DataDir(), "issues.json")); err == nil {
+		var old []IssueEntry
+		if json.Unmarshal(data, &old) == nil {
+			for _, e := range old {
+				if e.State == "closed" && !newKeys[fmt.Sprintf("%s#%d", e.Repo, e.IssueNumber)] {
+					entries = append(entries, e)
+				}
+			}
+		}
+	}
+
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Repo != entries[j].Repo {
 			return entries[i].Repo < entries[j].Repo

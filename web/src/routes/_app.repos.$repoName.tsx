@@ -196,7 +196,9 @@ function RepoDetail() {
       if (g.state === 'closed') closed++
       else if (g.runs[0]?.status === 'running') running++
       else if (g.pending.length > 0) pendingI++
-      else done++
+      else if (g.state === 'open') done++
+      // state === 'unknown': run exists but no issues.json entry — not counted
+      // in any bucket to match the Done section's explicit state === 'open' filter.
     }
     return { running, pending: pendingI, done, closed }
   }, [issueGroups])
