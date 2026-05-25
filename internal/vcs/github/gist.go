@@ -71,12 +71,32 @@ func (c *Client) GetGist(id string) (*Gist, error) {
 	return &g, nil
 }
 
+// buildAPIFiles converts a filename→content map into the nested shape the
+// Gist API expects, dropping any entry whose content is empty.
+//
+// GitHub treats a file entry with empty content as a request to DELETE that
+// file. ClawFlow only ever pushes real content, so an empty entry is always
+// unintended — and worse, if every entry is empty the resulting body becomes
+// {"files":{}}, which GitHub rejects with 422 missing_field "files" (see
+// issue #195). Stripping empties here prevents both the accidental deletion
+// and the malformed-payload death loop.
+func buildAPIFiles(files map[string]string) map[string]map[string]string {
+	apiFiles := make(map[string]map[string]string, len(files))
+	for name, content := range files {
+		if content == "" {
+			continue
+		}
+		apiFiles[name] = map[string]string{"content": content}
+	}
+	return apiFiles
+}
+
 // CreateGist creates a new private Gist with the given description and files.
 // files maps filename → content.
 func (c *Client) CreateGist(description string, files map[string]string) (*Gist, error) {
-	apiFiles := make(map[string]map[string]string, len(files))
-	for name, content := range files {
-		apiFiles[name] = map[string]string{"content": content}
+	apiFiles := buildAPIFiles(files)
+	if len(apiFiles) == 0 {
+		return nil, fmt.Errorf("refusing to create gist with no non-empty files")
 	}
 	body := map[string]any{
 		"description": description,
@@ -103,9 +123,11 @@ func (c *Client) CreateGist(description string, files map[string]string) (*Gist,
 // UpdateGist updates the files in an existing Gist.
 // files maps filename → content.
 func (c *Client) UpdateGist(id string, files map[string]string) (*Gist, error) {
-	apiFiles := make(map[string]map[string]string, len(files))
-	for name, content := range files {
-		apiFiles[name] = map[string]string{"content": content}
+	apiFiles := buildAPIFiles(files)
+	if len(apiFiles) == 0 {
+		// Sending {"files":{}} would either delete every file or be rejected
+		// with 422 missing_field "files". Refuse explicitly instead.
+		return nil, fmt.Errorf("refusing to update gist %s with no non-empty files (would delete all content)", id)
 	}
 	body := map[string]any{"files": apiFiles}
 	data, status, err := c.do("PATCH", "/gists/"+id, body)

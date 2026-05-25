@@ -141,8 +141,27 @@ func PushAllToGist(gh *github.Client, gistID string, files map[string]string) (s
 	return pushFiles(gh, gistID, files)
 }
 
+// hasNonEmptyFile reports whether files contains at least one entry with
+// non-empty content. GitHub's Gist API rejects a push whose effective file
+// set is empty, so callers must not send one.
+func hasNonEmptyFile(files map[string]string) bool {
+	for _, content := range files {
+		if content != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // pushFiles is the shared implementation for PushToGist and PushAllToGist.
 func pushFiles(gh *github.Client, gistID string, files map[string]string) (string, error) {
+	// Guard against an empty payload up front. Without this, a config with no
+	// real content would produce a {"files":{}} PATCH that GitHub rejects with
+	// 422 missing_field "files" on every cycle (issue #195).
+	if !hasNonEmptyFile(files) {
+		return "", fmt.Errorf("no non-empty files to push to Gist (refusing to send an empty payload)")
+	}
+
 	if gistID != "" {
 		// Try to update the existing Gist.
 		_, err := gh.UpdateGist(gistID, files)
@@ -158,7 +177,10 @@ func pushFiles(gh *github.Client, gistID string, files map[string]string) (strin
 	if err != nil {
 		return "", fmt.Errorf("cannot search Gists: %w", err)
 	}
-	if existing != nil {
+	// Only retry against a *different* Gist. If the lookup returns the same ID
+	// we already failed to update, retrying with the identical payload would
+	// just reproduce the same error — fall through to create a fresh Gist.
+	if existing != nil && existing.ID != gistID {
 		_, err := gh.UpdateGist(existing.ID, files)
 		if err != nil {
 			return "", fmt.Errorf("cannot update Gist: %w", err)

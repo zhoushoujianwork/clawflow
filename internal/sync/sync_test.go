@@ -1,9 +1,14 @@
 package sync
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // ---------------------------------------------------------------------------
@@ -388,5 +393,88 @@ func TestDiscoverSkillAssets_Missing(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("expected empty result on missing dir, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// pushFiles guards (issue #195)
+// ---------------------------------------------------------------------------
+
+func TestHasNonEmptyFile(t *testing.T) {
+	if hasNonEmptyFile(map[string]string{}) {
+		t.Error("empty map should report no non-empty files")
+	}
+	if hasNonEmptyFile(map[string]string{"config.yaml": ""}) {
+		t.Error("all-empty content should report no non-empty files")
+	}
+	if !hasNonEmptyFile(map[string]string{"a": "", "config.yaml": "x"}) {
+		t.Error("a single non-empty file should report true")
+	}
+}
+
+// TestPushFiles_RefusesEmptyPayload verifies the death-loop guard: an
+// all-empty payload must fail fast without making any HTTP request, instead
+// of sending {"files":{}} and getting 422 missing_field "files" forever.
+func TestPushFiles_RefusesEmptyPayload(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected HTTP request for empty payload: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "should not be called", 500)
+	}))
+	defer srv.Close()
+	gh := github.New("test-token", srv.URL)
+
+	_, err := pushFiles(gh, "some-gist-id", map[string]string{"config.yaml": ""})
+	if err == nil {
+		t.Fatal("expected error for empty payload, got nil")
+	}
+}
+
+// TestPushFiles_NoRetryOnSameGist verifies that when updating the stored Gist
+// fails and FindGistByDescription returns that same Gist, pushFiles does not
+// retry the identical payload — it creates a fresh Gist instead.
+func TestPushFiles_NoRetryOnSameGist(t *testing.T) {
+	const staleID = "stale123"
+	var patchCount, createCount int
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PATCH" && r.URL.Path == "/gists/"+staleID:
+			patchCount++
+			http.Error(w, `{"message":"Validation Failed"}`, 422)
+		case r.Method == "GET" && r.URL.Path == "/gists":
+			// The description lookup finds the very same stale Gist.
+			writeJSON(t, w, 200, []map[string]any{{"id": staleID, "description": "clawflow-config"}})
+		case r.Method == "POST" && r.URL.Path == "/gists":
+			createCount++
+			writeJSON(t, w, 201, map[string]any{"id": "fresh456"})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+	gh := github.New("test-token", srv.URL)
+
+	id, err := pushFiles(gh, staleID, map[string]string{"config.yaml": "real content"})
+	if err != nil {
+		t.Fatalf("pushFiles: %v", err)
+	}
+	if id != "fresh456" {
+		t.Errorf("expected a freshly created Gist id, got %q", id)
+	}
+	if patchCount != 1 {
+		t.Errorf("expected exactly 1 PATCH (no retry on same Gist), got %d", patchCount)
+	}
+	if createCount != 1 {
+		t.Errorf("expected exactly 1 create, got %d", createCount)
+	}
+}
+
+func writeJSON(t *testing.T, w http.ResponseWriter, status int, v any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		t.Fatalf("encode response: %v", err)
 	}
 }
