@@ -127,6 +127,14 @@ After running a command, read the real stdout/stderr and report what
 actually happened. The command's exit status is the only source of
 truth.`)
 
+	// Self-awareness: surface the ClawFlow automation model and the
+	// scope-filtered CLI cheatsheet so the AI doesn't ask "where do I
+	// file an issue?" or forget about read-only sub-commands it can use.
+	// ScopeSingleIssue keeps issue create / sub-issue ops out of the list.
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, prompts.AutomationModel())
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, prompts.CLICheatsheet(prompts.ScopeSingleIssue))
 	fmt.Fprintln(b)
 	fmt.Fprintln(b, prompts.LanguageRule())
 }
@@ -199,6 +207,13 @@ After running a command, read the real stdout/stderr and report what
 actually happened. The command's exit status is the only source of
 truth.`)
 
+	// Self-awareness: same reasoning as buildEditModeRole. Even though
+	// file edits are blocked here, the AI still benefits from knowing
+	// ClawFlow's label vocabulary and the read-only commands it can run.
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, prompts.AutomationModel())
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, prompts.CLICheatsheet(prompts.ScopeSingleIssue))
 	fmt.Fprintln(b)
 	fmt.Fprintln(b, prompts.LanguageRule())
 }
@@ -311,6 +326,8 @@ the user can cancel — side effects are gated, not silent.
 Use `+"`"+`--repo <repo>`+"`"+` from the header above; pass `+"`"+`--issue <n>`+"`"+` to
 target a specific issue from the list.`)
 
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, prompts.AutomationModel())
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, prompts.CLICheatsheet(prompts.ScopeRepo))
 	fmt.Fprintln(&b)
