@@ -347,7 +347,7 @@ func HandleTestProvider(w http.ResponseWriter, r *http.Request) {
 		probeArgs = append(probeArgs, "--bare")
 	}
 	probeArgs = append(probeArgs,
-		"--model", config.DefaultChatModel,
+		"--model", p.EffectiveChatModel(),
 		"--output-format", "text",
 		"say PONG",
 	)
