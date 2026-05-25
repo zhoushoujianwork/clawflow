@@ -10,7 +10,7 @@ import (
 )
 
 func TestBuildDocUpdatePrompt_IncludesCurrentAndInstructions(t *testing.T) {
-	prompt := buildDocUpdatePrompt("my-proj", "context.md", "# Existing\n\nFoo bar.", "Add a section on testing")
+	prompt := buildDocUpdatePrompt("my-proj", "context.md", "# Existing\n\nFoo bar.", "Add a section on testing", "")
 
 	for _, want := range []string{
 		"my-proj",
@@ -33,7 +33,7 @@ func TestBuildDocUpdatePrompt_OffersBothOutcomes(t *testing.T) {
 	// audit questions where the doc is already accurate. Without the
 	// no-change escape hatch, audit-style requests (the user's
 	// "看下要不要更新" case) always fail validation.
-	prompt := buildDocUpdatePrompt("p", "context.md", "ctx", "is this still accurate?")
+	prompt := buildDocUpdatePrompt("p", "context.md", "ctx", "is this still accurate?", "")
 
 	for _, want := range []string{
 		"Rewrite path",
@@ -49,7 +49,7 @@ func TestBuildDocUpdatePrompt_OffersBothOutcomes(t *testing.T) {
 }
 
 func TestBuildDocUpdatePrompt_EmptyCurrentFlagged(t *testing.T) {
-	prompt := buildDocUpdatePrompt("p", "deployment.md", "", "Add SSH log retrieval")
+	prompt := buildDocUpdatePrompt("p", "deployment.md", "", "Add SSH log retrieval", "")
 
 	if !strings.Contains(prompt, "fresh authoring task") {
 		t.Error("empty-current case should signal 'fresh authoring task' to the model")

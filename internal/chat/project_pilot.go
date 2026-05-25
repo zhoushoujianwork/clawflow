@@ -66,12 +66,14 @@ type PilotWakeSummary struct {
 // Two safety rails: skip any issue carrying agent-running, and
 // don't duplicate prior Pilot actions (cooldown + recent-wake
 // history give the Pilot the data to enforce this itself).
+// lang is the preferred output language from Settings.Language.
 func BuildPilotContext(
 	name string,
 	contextMD string,
 	deploymentMD string,
 	recent []PilotWakeSummary,
 	repos []PilotRepoDigest,
+	lang string,
 ) string {
 	var b strings.Builder
 
@@ -457,6 +459,9 @@ Examples:
 
 The runner uses this line as your next wake's short-term memory entry.
 Make it specific.`)
+
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, prompts.LanguageRule(lang))
 
 	return b.String()
 }

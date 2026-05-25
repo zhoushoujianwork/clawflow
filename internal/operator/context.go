@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 )
 
@@ -12,7 +13,12 @@ import (
 // body. This content is identical across every issue the same operator
 // processes, so passing it via `--system-prompt` lets Anthropic's prompt
 // cache hit on subsequent runs of the same operator.
-func BuildSystemPrompt(op *Operator, repo string) string {
+//
+// lang is the preferred output language from Settings.Language ("zh", "en",
+// or "" for the historical auto-detect behaviour). A non-empty value appends
+// a language directive so all operator output (comments, verdicts) uses the
+// configured language.
+func BuildSystemPrompt(op *Operator, repo string, lang string) string {
 	var b strings.Builder
 
 	if header := project.HeaderForRepo(repo); header != "" {
@@ -21,6 +27,9 @@ func BuildSystemPrompt(op *Operator, repo string) string {
 
 	fmt.Fprintf(&b, "# Your Task (Operator: %s)\n\n", op.Name)
 	fmt.Fprint(&b, op.Prompt)
+	if directive := config.LanguageDirective(lang); directive != "" {
+		b.WriteString(directive)
+	}
 	return b.String()
 }
 
@@ -74,8 +83,10 @@ func BuildUserMessage(sub *Subject, repo string, comments []string) string {
 // BuildPrompt constructs the full prompt handed to `claude -p` as a single
 // string. Retained for back-compat with callers that don't use the split
 // system-prompt / user-message path (e.g. tests, one-off invocations).
+// It passes an empty language string (auto-detect), which preserves the
+// historical default behaviour.
 func BuildPrompt(op *Operator, sub *Subject, repo string, comments []string) string {
-	sys := BuildSystemPrompt(op, repo)
+	sys := BuildSystemPrompt(op, repo, "")
 	usr := BuildUserMessage(sub, repo, comments)
 	return usr + "---\n\n" + sys
 }

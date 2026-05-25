@@ -174,7 +174,7 @@ func TestBuildProjectChatContext(t *testing.T) {
 		{Name: "owner/repo-a", LocalPath: "/tmp/repo-a"},
 		{Name: "owner/repo-b", LocalPath: ""},
 	}
-	ctx := BuildProjectChatContext("my-proj", repos, "# My Project\n\nSome content.\n", "")
+	ctx := BuildProjectChatContext("my-proj", repos, "# My Project\n\nSome content.\n", "", "")
 
 	if !containsStr(ctx, "Project: my-proj") {
 		t.Error("missing project name in context")
@@ -205,7 +205,7 @@ func TestBuildPilotContext_WithDeployment(t *testing.T) {
 	}
 	deploymentMD := "## Logs\n\n```bash\nssh prod 'journalctl -u myapp -n 200'\n```"
 
-	prompt := BuildPilotContext("my-proj", "# Context\n\nSome overview.", deploymentMD, nil, repos)
+	prompt := BuildPilotContext("my-proj", "# Context\n\nSome overview.", deploymentMD, nil, repos, "")
 
 	if !containsStr(prompt, "Deployment & runtime health") {
 		t.Error("missing 'Deployment & runtime health' section")
@@ -233,7 +233,7 @@ func TestBuildPilotContext_WithDeployment(t *testing.T) {
 func TestBuildPilotContext_NoDeployment(t *testing.T) {
 	repos := []PilotRepoDigest{}
 
-	prompt := BuildPilotContext("empty-proj", "", "", nil, repos)
+	prompt := BuildPilotContext("empty-proj", "", "", nil, repos, "")
 
 	if !containsStr(prompt, "Deployment & runtime health") {
 		t.Error("missing 'Deployment & runtime health' section even when empty")
@@ -257,7 +257,7 @@ func TestBuildPilotContext_RecentHistory(t *testing.T) {
 		{StartedAt: "2026-05-05T12:00:00Z", Status: "success", Result: "PILOT-RESULT: no-action — backlog coherent"},
 	}
 
-	prompt := BuildPilotContext("my-proj", "", "", recent, repos)
+	prompt := BuildPilotContext("my-proj", "", "", recent, repos, "")
 
 	if !containsStr(prompt, "Recent wake history") {
 		t.Error("missing Recent wake history section")
@@ -279,7 +279,7 @@ func TestBuildPilotContext_RecentHistory(t *testing.T) {
 
 func TestBuildPilotContext_StandardPlays(t *testing.T) {
 	repos := []PilotRepoDigest{}
-	prompt := BuildPilotContext("p", "", "", nil, repos)
+	prompt := BuildPilotContext("p", "", "", nil, repos, "")
 
 	// Section header present
 	if !containsStr(prompt, "Standard plays") {
@@ -336,7 +336,7 @@ func TestBuildPilotContext_StandardPlays(t *testing.T) {
 
 func TestBuildPilotContext_SOPDriftAndDeploymentUpdate(t *testing.T) {
 	repos := []PilotRepoDigest{}
-	prompt := BuildPilotContext("p", "", "## Logs\n\n```bash\ncat /tmp/old.log\n```", nil, repos)
+	prompt := BuildPilotContext("p", "", "## Logs\n\n```bash\ncat /tmp/old.log\n```", nil, repos, "")
 
 	// 4th PATROL output must be present
 	if !containsStr(prompt, "PATROL: SOP drift") {
@@ -372,7 +372,7 @@ func TestBuildPilotContext_DeploymentUpdateProtocolAlwaysPresent(t *testing.T) {
 	// The deployment.md update protocol section should appear even when
 	// deployment.md is empty — Pilot may discover the file is missing and
 	// create it from scratch.
-	prompt := BuildPilotContext("p", "", "", nil, []PilotRepoDigest{})
+	prompt := BuildPilotContext("p", "", "", nil, []PilotRepoDigest{}, "")
 
 	if !containsStr(prompt, "Updating the project's runtime SOP (deployment.md)") {
 		t.Error("deployment.md update protocol section must be present even when deployment.md is empty")
@@ -382,7 +382,7 @@ func TestBuildPilotContext_DeploymentUpdateProtocolAlwaysPresent(t *testing.T) {
 
 func TestBuildProjectChatContext_AutomationModel(t *testing.T) {
 	repos := []ProjectChatRepo{{Name: "owner/repo-a", LocalPath: "/tmp/repo-a"}}
-	ctx := BuildProjectChatContext("my-proj", repos, "", "")
+	ctx := BuildProjectChatContext("my-proj", repos, "", "", "")
 
 	// Core automation model concepts must be present
 	if !containsStr(ctx, "ClawFlow automation model") {
@@ -422,7 +422,7 @@ func TestBuildProjectChatContext_AutomationModel(t *testing.T) {
 
 func TestBuildPilotContext_AutomationModel(t *testing.T) {
 	repos := []PilotRepoDigest{}
-	prompt := BuildPilotContext("my-proj", "", "", nil, repos)
+	prompt := BuildPilotContext("my-proj", "", "", nil, repos, "")
 
 	// Core automation model concepts must be present
 	if !containsStr(prompt, "ClawFlow automation model") {

@@ -10,19 +10,22 @@ import (
 
 // BuildIssueContext assembles the system prompt for issue-level chat in
 // edit mode — the AI can read AND modify files in the repo working tree.
-func BuildIssueContext(repo string, issue vcs.Issue, comments []vcs.IssueComment) string {
-	return buildIssueContext(repo, issue, comments, "edit")
+// lang is the preferred output language from Settings.Language (see
+// prompts.LanguageRule for accepted values).
+func BuildIssueContext(repo string, issue vcs.Issue, comments []vcs.IssueComment, lang string) string {
+	return buildIssueContext(repo, issue, comments, "edit", lang)
 }
 
 // BuildIssueModeContext assembles the system prompt for issue-level chat
 // in issue mode — the AI is restricted to discussion and issue-tracker
 // operations; file editing is disallowed at the claude CLI level.
-func BuildIssueModeContext(repo string, issue vcs.Issue, comments []vcs.IssueComment) string {
-	return buildIssueContext(repo, issue, comments, "issue")
+// lang is the preferred output language from Settings.Language.
+func BuildIssueModeContext(repo string, issue vcs.Issue, comments []vcs.IssueComment, lang string) string {
+	return buildIssueContext(repo, issue, comments, "issue", lang)
 }
 
 // buildIssueContext is the shared builder. mode is "issue" or "edit".
-func buildIssueContext(repo string, issue vcs.Issue, comments []vcs.IssueComment, mode string) string {
+func buildIssueContext(repo string, issue vcs.Issue, comments []vcs.IssueComment, mode string, lang string) string {
 	var b strings.Builder
 
 	fmt.Fprintln(&b, "# Chat Context")
@@ -53,16 +56,16 @@ func buildIssueContext(repo string, issue vcs.Issue, comments []vcs.IssueComment
 	fmt.Fprintln(&b)
 
 	if mode == "edit" {
-		buildEditModeRole(&b, repo, issue)
+		buildEditModeRole(&b, repo, issue, lang)
 	} else {
-		buildIssueModeRole(&b, repo, issue)
+		buildIssueModeRole(&b, repo, issue, lang)
 	}
 
 	return b.String()
 }
 
 // buildEditModeRole writes the "edit mode" role section — full file access.
-func buildEditModeRole(b *strings.Builder, repo string, issue vcs.Issue) {
+func buildEditModeRole(b *strings.Builder, repo string, issue vcs.Issue, lang string) {
 	fmt.Fprintf(b, "## Your role\n\n")
 	fmt.Fprintf(b, "You are a hands-on development assistant focused EXCLUSIVELY on\n")
 	fmt.Fprintf(b, "issue #%d in repo %s. You can directly read, analyze, AND fix\n", issue.Number, repo)
@@ -136,12 +139,12 @@ truth.`)
 	fmt.Fprintln(b)
 	fmt.Fprintln(b, prompts.CLICheatsheet(prompts.ScopeSingleIssue))
 	fmt.Fprintln(b)
-	fmt.Fprintln(b, prompts.LanguageRule())
+	fmt.Fprintln(b, prompts.LanguageRule(lang))
 }
 
 // buildIssueModeRole writes the "issue mode" role section — discussion and
 // issue-tracker operations only; file editing is blocked at the CLI level.
-func buildIssueModeRole(b *strings.Builder, repo string, issue vcs.Issue) {
+func buildIssueModeRole(b *strings.Builder, repo string, issue vcs.Issue, lang string) {
 	fmt.Fprintf(b, "## Your role\n\n")
 	fmt.Fprintf(b, "You are a planning and discussion assistant focused EXCLUSIVELY on\n")
 	fmt.Fprintf(b, "issue #%d in repo %s. Your job is to help the user think through\n", issue.Number, repo)
@@ -215,12 +218,13 @@ truth.`)
 	fmt.Fprintln(b)
 	fmt.Fprintln(b, prompts.CLICheatsheet(prompts.ScopeSingleIssue))
 	fmt.Fprintln(b)
-	fmt.Fprintln(b, prompts.LanguageRule())
+	fmt.Fprintln(b, prompts.LanguageRule(lang))
 }
 
 
 // BuildRepoContext assembles the system prompt for repo-level chat.
-func BuildRepoContext(repo string, platform string, baseBranch string, issues []vcs.Issue) string {
+// lang is the preferred output language from Settings.Language.
+func BuildRepoContext(repo string, platform string, baseBranch string, issues []vcs.Issue, lang string) string {
 	var b strings.Builder
 
 	fmt.Fprintln(&b, "# Chat Context")
@@ -333,7 +337,7 @@ target a specific issue from the list.`)
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, prompts.BehaviorRules())
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, prompts.LanguageRule())
+	fmt.Fprintln(&b, prompts.LanguageRule(lang))
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, `After running a command, read the real stdout/stderr (issue URL, new label
 state) and report what actually happened. Do NOT claim success

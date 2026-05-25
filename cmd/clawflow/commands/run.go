@@ -268,6 +268,11 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
 		}
+		// Propagate language preference to each job so the operator runner
+		// can inject the correct language directive into the system prompt.
+		for _, j := range repoJobs {
+			j.language = cfg.Settings.Language
+		}
 		pending = append(pending, repoPending...)
 		jobs = append(jobs, repoJobs...)
 	}
@@ -345,11 +350,12 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 // runJob is one (issue, operator) pair that scanRepoOnce decided is
 // eligible to fire. The worker pool in runJobsParallel consumes these.
 type runJob struct {
-	op      *operator.Operator
-	sub     *operator.Subject
-	repo    string
-	repoCfg config.Repo
-	client  vcs.Client
+	op       *operator.Operator
+	sub      *operator.Subject
+	repo     string
+	repoCfg  config.Repo
+	client   vcs.Client
+	language string // Settings.Language propagated from cfg at job creation time
 }
 
 // firedKey identifies a (repo, issue, operator) triple that ran to a
@@ -794,6 +800,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Role:          role,
 		EventWriter:   eventsFile,
 		ResumeContext: resumeCtx,
+		Language:      j.language,
 	})
 	runDur := time.Since(runStart).Round(time.Second)
 	if eventsFile != nil {

@@ -173,11 +173,17 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 	// repo/issue context. The resume branch was removed when chat moved
 	// to the user's native terminal — see the comment on sessionID
 	// above for the full rationale.
+	// Resolve language preference for AI output.
+	var lang string
+	if globalCfg, cfgErr := config.Load(); cfgErr == nil {
+		lang = globalCfg.Settings.Language
+	}
+
 	var systemCtx string
 	if issueNum > 0 {
-		systemCtx, err = buildIssueChatContext(client, repo, issueNum, modeFlag)
+		systemCtx, err = buildIssueChatContext(client, repo, issueNum, modeFlag, lang)
 	} else {
-		systemCtx, err = buildRepoChatContext(client, repo, repoCfg.Platform, repoCfg.BaseBranch)
+		systemCtx, err = buildRepoChatContext(client, repo, repoCfg.Platform, repoCfg.BaseBranch, lang)
 	}
 	if err != nil {
 		return fmt.Errorf("build context: %w", err)
@@ -238,7 +244,7 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 	return cmd.Run()
 }
 
-func buildIssueChatContext(client vcs.Client, repo string, issueNum int, mode string) (string, error) {
+func buildIssueChatContext(client vcs.Client, repo string, issueNum int, mode string, lang string) (string, error) {
 	issues, err := client.ListOpenIssues(repo)
 	if err != nil {
 		return "", err
@@ -271,12 +277,12 @@ func buildIssueChatContext(client vcs.Client, repo string, issueNum int, mode st
 
 	comments, _ := client.ListIssueCommentsDetail(repo, issueNum)
 	if mode == "edit" {
-		return chat.BuildIssueContext(repo, issue, comments), nil
+		return chat.BuildIssueContext(repo, issue, comments, lang), nil
 	}
-	return chat.BuildIssueModeContext(repo, issue, comments), nil
+	return chat.BuildIssueModeContext(repo, issue, comments, lang), nil
 }
 
-func buildRepoChatContext(client vcs.Client, repo, platform, baseBranch string) (string, error) {
+func buildRepoChatContext(client vcs.Client, repo, platform, baseBranch string, lang string) (string, error) {
 	if platform == "" {
 		platform = "github"
 	}
@@ -287,5 +293,5 @@ func buildRepoChatContext(client vcs.Client, repo, platform, baseBranch string) 
 	if err != nil {
 		return "", err
 	}
-	return chat.BuildRepoContext(repo, platform, baseBranch, issues), nil
+	return chat.BuildRepoContext(repo, platform, baseBranch, issues, lang), nil
 }

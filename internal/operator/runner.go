@@ -98,6 +98,11 @@ type RunOptions struct {
 	// rather than start from scratch.
 	ResumeContext string
 
+	// Language is the preferred output language from Settings.Language
+	// ("zh", "en", or "" for auto). Passed to BuildSystemPrompt so all
+	// operator output (comments, verdicts) uses the configured language.
+	Language string
+
 	// RunFunc executes the claude subprocess. Leave nil to use the real
 	// RunClaude; tests inject a fake that returns canned output without
 	// spawning a process.
@@ -118,7 +123,7 @@ var writeBackTimeout = 5 * time.Minute
 // Run executes one operator against one subject and returns the operator's
 // final stdout text, the outcome label (empty if none), or an error.
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
-	systemPrompt := BuildSystemPrompt(op, opts.Repo)
+	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language)
 	userMessage := BuildUserMessage(sub, opts.Repo, opts.Comments)
 	if opts.ResumeContext != "" {
 		userMessage += "\n---\n\n" + opts.ResumeContext

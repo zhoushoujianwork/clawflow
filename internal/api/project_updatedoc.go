@@ -109,7 +109,12 @@ func HandleProjectUpdateDoc(w http.ResponseWriter, r *http.Request) {
 		model = config.ResolveModelForRole(creds, config.RoleOperator)
 	}
 
-	prompt := buildDocUpdatePrompt(p.Name, file, current, instructions)
+	var lang string
+	if cfg, cfgErr := config.Load(); cfgErr == nil {
+		lang = cfg.Settings.Language
+	}
+
+	prompt := buildDocUpdatePrompt(p.Name, file, current, instructions, lang)
 	workdir := project.ProjectDir(p.Name)
 
 	ctx, cancel := context.WithTimeout(r.Context(), updateDocTimeout)
@@ -189,7 +194,8 @@ func writeDocFile(projectName, file, content string) error {
 
 // buildDocUpdatePrompt is the pure prompt-builder. Separated from the
 // HTTP handler so it can be unit-tested without a running claude.
-func buildDocUpdatePrompt(projectName, file, current, instructions string) string {
+// lang is the preferred output language from Settings.Language.
+func buildDocUpdatePrompt(projectName, file, current, instructions, lang string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# Update `%s` for project `%s`\n\n", file, projectName)
@@ -249,6 +255,9 @@ func buildDocUpdatePrompt(projectName, file, current, instructions string) strin
 	fmt.Fprintln(&b, "  gaps worth filling — use A (with the new content).")
 	fmt.Fprintln(&b, "- Never both. Never neither. Do not add commentary outside the")
 	fmt.Fprintln(&b, "  chosen output (the runner ignores it and will reject the response).")
+	if directive := config.LanguageDirective(lang); directive != "" {
+		b.WriteString(directive)
+	}
 
 	return b.String()
 }

@@ -42,7 +42,8 @@ type ProjectChatRepo struct {
 // The prompt establishes the role, lists member repos with paths,
 // enumerates allowed tools and CLI commands, and pins the output
 // contract for both context.md and testing.md updates.
-func BuildProjectChatContext(name string, repos []ProjectChatRepo, contextMD, testingMD string) string {
+// lang is the preferred output language from Settings.Language.
+func BuildProjectChatContext(name string, repos []ProjectChatRepo, contextMD, testingMD string, lang string) string {
 	var b strings.Builder
 
 	fmt.Fprintln(&b, "# Project Chat Context")
@@ -146,7 +147,7 @@ func BuildProjectChatContext(name string, repos []ProjectChatRepo, contextMD, te
 	fmt.Fprintln(&b)
 
 	// Language rule — unified across all chat kinds
-	fmt.Fprintln(&b, prompts.LanguageRule())
+	fmt.Fprintln(&b, prompts.LanguageRule(lang))
 	fmt.Fprintln(&b)
 
 	fmt.Fprintln(&b, "## Updating context.md or testing.md")

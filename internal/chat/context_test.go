@@ -13,7 +13,7 @@ import (
 
 func TestBuildIssueContext_HasSelfAwareness(t *testing.T) {
 	issue := vcs.Issue{Number: 42, Title: "x", State: "open", Labels: []string{"bug"}, Body: "details"}
-	out := BuildIssueContext("o/r", issue, nil)
+	out := BuildIssueContext("o/r", issue, nil, "")
 	assertSelfAwareness(t, "BuildIssueContext", out)
 
 	// Single-issue scope cheatsheet must NOT teach `issue create`. The
@@ -26,7 +26,7 @@ func TestBuildIssueContext_HasSelfAwareness(t *testing.T) {
 
 func TestBuildIssueModeContext_HasSelfAwareness(t *testing.T) {
 	issue := vcs.Issue{Number: 42, Title: "x", State: "open", Labels: []string{"feat"}, Body: "details"}
-	out := BuildIssueModeContext("o/r", issue, nil)
+	out := BuildIssueModeContext("o/r", issue, nil, "")
 	assertSelfAwareness(t, "BuildIssueModeContext", out)
 
 	if strings.Contains(out, "issue create --repo") || strings.Contains(out, "issue create --title") {
@@ -35,7 +35,7 @@ func TestBuildIssueModeContext_HasSelfAwareness(t *testing.T) {
 }
 
 func TestBuildRepoContext_HasSelfAwareness(t *testing.T) {
-	out := BuildRepoContext("o/r", "github", "main", nil)
+	out := BuildRepoContext("o/r", "github", "main", nil, "")
 	assertSelfAwareness(t, "BuildRepoContext", out)
 
 	// Repo scope is allowed to create issues — the actionable form should
@@ -50,8 +50,8 @@ func TestBuildRepoContext_HasSelfAwareness(t *testing.T) {
 func TestChatBuilders_LanguageRuleIsLast(t *testing.T) {
 	issue := vcs.Issue{Number: 1, Title: "t", State: "open"}
 	cases := map[string]string{
-		"BuildIssueContext":     BuildIssueContext("o/r", issue, nil),
-		"BuildIssueModeContext": BuildIssueModeContext("o/r", issue, nil),
+		"BuildIssueContext":     BuildIssueContext("o/r", issue, nil, ""),
+		"BuildIssueModeContext": BuildIssueModeContext("o/r", issue, nil, ""),
 	}
 	for name, prompt := range cases {
 		langIdx := strings.Index(prompt, "Match the user's input language")
@@ -62,6 +62,34 @@ func TestChatBuilders_LanguageRuleIsLast(t *testing.T) {
 		}
 		if langIdx < autoIdx || langIdx < cliIdx {
 			t.Errorf("%s: LanguageRule must come after both automation model and CLI cheatsheet", name)
+		}
+	}
+}
+
+// TestChatBuilders_LanguageOverride verifies that the language parameter is
+// threaded into each builder's output.
+func TestChatBuilders_LanguageOverride(t *testing.T) {
+	issue := vcs.Issue{Number: 1, Title: "t", State: "open"}
+
+	for _, lang := range []string{"zh", "en"} {
+		outIssue := BuildIssueContext("o/r", issue, nil, lang)
+		outIssueMode := BuildIssueModeContext("o/r", issue, nil, lang)
+		outRepo := BuildRepoContext("o/r", "github", "main", nil, lang)
+		for name, out := range map[string]string{
+			"BuildIssueContext[" + lang + "]":     outIssue,
+			"BuildIssueModeContext[" + lang + "]": outIssueMode,
+			"BuildRepoContext[" + lang + "]":      outRepo,
+		} {
+			switch lang {
+			case "zh":
+				if !strings.Contains(out, "简体中文") {
+					t.Errorf("%s: expected Chinese directive, not found", name)
+				}
+			case "en":
+				if !strings.Contains(out, "Always respond in **English**") {
+					t.Errorf("%s: expected English directive, not found", name)
+				}
+			}
 		}
 	}
 }
