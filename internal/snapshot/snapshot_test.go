@@ -989,3 +989,127 @@ func TestCleanupLegacyDashboardDir_RefusesNonEmptyDataSubdir(t *testing.T) {
 	}
 }
 
+// TestWriteIssues_StickyClosedIssues verifies that WriteIssues merges back
+// previously-known closed issues that are absent from the new batch.
+//
+// Scenario: The GitHub API returns at most ~100 items. An older closed issue
+// (#92) was written in the previous snapshot but is now absent because it
+// fell out of the 100-item window. WriteIssues must preserve it so the
+// dashboard can correctly classify it as Closed rather than assuming it is open.
+func TestWriteIssues_StickyClosedIssues(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if err := os.MkdirAll(filepath.Join(tmp, ".clawflow", "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	earlier := now.Add(-24 * time.Hour)
+
+	// Simulate the previous snapshot: contains closed issue #92 plus open #200.
+	prev := []IssueEntry{
+		{Repo: "owner/repo", IssueNumber: 92, IssueTitle: "old bug", State: "closed", CapturedAt: earlier},
+		{Repo: "owner/repo", IssueNumber: 200, IssueTitle: "open issue", State: "open", CapturedAt: earlier},
+	}
+	if err := WriteIssues(prev); err != nil {
+		t.Fatalf("first WriteIssues: %v", err)
+	}
+
+	// Simulate the next API refresh: #92 is absent (fell out of the window),
+	// only #200 (now closed) and a new #205 are returned.
+	fresh := []IssueEntry{
+		{Repo: "owner/repo", IssueNumber: 200, IssueTitle: "open issue", State: "closed", CapturedAt: now},
+		{Repo: "owner/repo", IssueNumber: 205, IssueTitle: "new issue", State: "open", CapturedAt: now},
+	}
+	if err := WriteIssues(fresh); err != nil {
+		t.Fatalf("second WriteIssues: %v", err)
+	}
+
+	// Read back and verify.
+	data, err := os.ReadFile(filepath.Join(tmp, ".clawflow", "data", "issues.json"))
+	if err != nil {
+		t.Fatalf("read issues.json: %v", err)
+	}
+	var got []IssueEntry
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	byNum := make(map[int]IssueEntry)
+	for _, e := range got {
+		byNum[e.IssueNumber] = e
+	}
+
+	// #92 must be preserved (sticky closed).
+	e92, ok := byNum[92]
+	if !ok {
+		t.Fatal("issue #92 was lost — closed issues must be preserved across refreshes")
+	}
+	if e92.State != "closed" {
+		t.Errorf("#92 state=%q, want closed", e92.State)
+	}
+
+	// #200 must reflect the new closed state from the fresh batch.
+	e200, ok := byNum[200]
+	if !ok {
+		t.Fatal("issue #200 missing")
+	}
+	if e200.State != "closed" {
+		t.Errorf("#200 state=%q, want closed", e200.State)
+	}
+
+	// #205 must be present (new open issue).
+	e205, ok := byNum[205]
+	if !ok {
+		t.Fatal("issue #205 missing")
+	}
+	if e205.State != "open" {
+		t.Errorf("#205 state=%q, want open", e205.State)
+	}
+
+	// Total: 3 entries.
+	if len(got) != 3 {
+		t.Errorf("got %d entries, want 3 (92, 200, 205)", len(got))
+	}
+}
+
+// TestWriteIssues_StickyDoesNotDuplicateClosedInBatch verifies that closed
+// issues already present in the new batch are NOT duplicated by the sticky merge.
+func TestWriteIssues_StickyDoesNotDuplicateClosedInBatch(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if err := os.MkdirAll(filepath.Join(tmp, ".clawflow", "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	earlier := now.Add(-1 * time.Hour)
+
+	prev := []IssueEntry{
+		{Repo: "owner/repo", IssueNumber: 10, State: "closed", CapturedAt: earlier},
+	}
+	if err := WriteIssues(prev); err != nil {
+		t.Fatalf("first WriteIssues: %v", err)
+	}
+
+	// Same closed #10 is in the fresh batch — must NOT be duplicated.
+	fresh := []IssueEntry{
+		{Repo: "owner/repo", IssueNumber: 10, State: "closed", CapturedAt: now},
+	}
+	if err := WriteIssues(fresh); err != nil {
+		t.Fatalf("second WriteIssues: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(tmp, ".clawflow", "data", "issues.json"))
+	var got []IssueEntry
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("got %d entries, want 1 (no duplicates)", len(got))
+	}
+	// The fresh entry (newer CapturedAt) should win.
+	if !got[0].CapturedAt.Equal(now) {
+		t.Errorf("expected fresh CapturedAt to win; got %v", got[0].CapturedAt)
+	}
+}

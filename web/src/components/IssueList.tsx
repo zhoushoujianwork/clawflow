@@ -66,7 +66,7 @@ export interface IssueGroup {
   runs: Run[]
   pending: PendingEntry[]
   labels?: string[]
-  state?: string // "open" | "closed"
+  state?: string // "open" | "closed" | "unknown" (unknown = run exists but no issues.json entry)
 }
 
 // SectionConfig parameterizes how groups bucket into headed sections.
@@ -124,7 +124,11 @@ export function useIssueGroups({
           runs: [],
           pending: [],
           labels: [],
-          state: 'open',
+          // 'unknown': issue not in issues.json snapshot — don't assume open.
+          // The backend's WriteIssues sticky-merge should prevent this for
+          // closed issues; 'unknown' acts as a safety net so they don't
+          // incorrectly land in the Done section.
+          state: 'unknown',
         }
         map.set(k, g)
       }
@@ -198,7 +202,10 @@ export function bucketize(
 export const REPO_SECTIONS: SectionConfig[] = [
   { title: 'Running', tone: 'blue', filter: g => g.state !== 'closed' && g.runs[0]?.status === 'running' },
   { title: 'Pending', tone: 'amber', filter: g => g.state !== 'closed' && g.pending.length > 0 },
-  { title: 'Done', tone: 'muted', filter: g => g.state !== 'closed' },
+  // Explicitly check state === 'open' so that issues with state 'unknown'
+  // (run exists but no issues.json entry — see useIssueGroups) or 'closed'
+  // are not incorrectly shown as Done.
+  { title: 'Done', tone: 'muted', filter: g => g.state === 'open' },
   { title: 'Closed', tone: 'gray', filter: g => g.state === 'closed', limit: 10 },
 ]
 
@@ -228,7 +235,7 @@ export const PROJECT_SECTIONS: SectionConfig[] = [
       return hasTrigger && !hasAgentLabel
     },
   },
-  { title: 'Done', tone: 'muted', filter: g => g.state !== 'closed', limit: 10 },
+  { title: 'Done', tone: 'muted', filter: g => g.state === 'open', limit: 10 },
   { title: 'Closed', tone: 'gray', filter: g => g.state === 'closed', limit: 10 },
 ]
 
