@@ -27,6 +27,18 @@ var ErrNoOutcomeMarker = errors.New("operator produced no outcome marker")
 // line at the end of the comment.
 var outcomeRE = regexp.MustCompile(`[ \t]*<!--\s*clawflow:outcome=([\w./:-]+)\s*-->[ \t]*\n?`)
 
+// thinkingRE strips literal <thinking>…</thinking> blocks that some Claude
+// variants emit as plain text inside an assistant turn. This is distinct from
+// API-level thinking blocks (content[].type == "thinking"), which claude.go
+// already filters by content-block type. The (?s) flag makes . match newlines
+// so multi-paragraph reasoning blocks are fully removed. Non-greedy .*? means
+// multiple blocks in one response are each stripped independently rather than
+// one giant match swallowing content between the first <thinking> and the last
+// </thinking>. An unclosed tag (model truncation) is left as-is — the regex
+// simply won't match and the raw tag will appear in the comment, which is
+// preferable to silently swallowing the rest of the output.
+var thinkingRE = regexp.MustCompile(`(?s)<thinking>.*?</thinking>\s*`)
+
 // parseOutcome scans `body` for outcome markers, returning the label of the
 // LAST marker (so a model that emits multiple drafts has its final pick
 // honored) and a copy of `body` with every marker line removed.
@@ -40,6 +52,7 @@ func parseOutcome(body string) (label, cleaned string) {
 	}
 	label = matches[len(matches)-1][1]
 	cleaned = outcomeRE.ReplaceAllString(body, "")
+	cleaned = thinkingRE.ReplaceAllString(cleaned, "")
 	return label, strings.TrimSpace(cleaned)
 }
 

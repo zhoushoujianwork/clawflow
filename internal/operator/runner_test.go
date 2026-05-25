@@ -529,6 +529,31 @@ func TestParseOutcome_Direct(t *testing.T) {
 		{"label with hyphens and dots", "x\n<!-- clawflow:outcome=v1.2-rc -->\n", "v1.2-rc", "x"},
 		{"trailing whitespace tolerant", "x\n<!-- clawflow:outcome=agent-skipped --> \n", "agent-skipped", "x"},
 		{"multiple — last wins", "<!-- clawflow:outcome=a -->\nfoo\n<!-- clawflow:outcome=b -->\n", "b", "foo"},
+		// thinking-block stripping (issue #196)
+		{
+			"single thinking block stripped",
+			"<thinking>\nNow I have enough context.\nMore reasoning.\n</thinking>\n\n## Eval\n\nbody\n\n<!-- clawflow:outcome=agent-evaluated -->\n",
+			"agent-evaluated",
+			"## Eval\n\nbody",
+		},
+		{
+			"multiple thinking blocks stripped",
+			"<thinking>first</thinking>\n\n## Eval\n\n<thinking>second\nmultiline</thinking>\n\nbody\n\n<!-- clawflow:outcome=agent-evaluated -->\n",
+			"agent-evaluated",
+			"## Eval\n\nbody",
+		},
+		{
+			"thinking block before outcome marker stripped",
+			"## Result\n\nbody\n\n<thinking>internal notes</thinking>\n\n<!-- clawflow:outcome=agent-skipped -->\n",
+			"agent-skipped",
+			"## Result\n\nbody",
+		},
+		{
+			"unclosed thinking tag left as-is (no swallow)",
+			"<thinking>truncated\n\n## Eval\n\nbody\n\n<!-- clawflow:outcome=agent-evaluated -->\n",
+			"agent-evaluated",
+			"<thinking>truncated\n\n## Eval\n\nbody",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
