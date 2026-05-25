@@ -66,6 +66,18 @@ func CLICheatsheet(scope Scope) string {
 	fmt.Fprintln(&b, "### Labels")
 	fmt.Fprintln(&b, "- `clawflow label add --repo <owner/name> --issue <n> --label <name>`")
 	fmt.Fprintln(&b, "- `clawflow label remove --repo <owner/name> --issue <n> --label <name>`")
+	fmt.Fprintln(&b)
+
+	// Other top-level commands users (and the AI) should know about.
+	// Always present regardless of scope — these are about clawflow itself,
+	// not about the current issue/repo, so scope filtering doesn't apply.
+	fmt.Fprintln(&b, "### Other")
+	fmt.Fprintln(&b, "- `clawflow feedback` — open an interactive chat to file a")
+	fmt.Fprintln(&b, "  feedback / bug / feature issue against the upstream ClawFlow repo")
+	fmt.Fprintln(&b, "  (`zhoushoujianwork/clawflow`). Use this when the user wants to")
+	fmt.Fprintln(&b, "  report something about clawflow itself, not the current project.")
+	fmt.Fprintln(&b, "- `clawflow repo list` — list configured repositories")
+	fmt.Fprintln(&b, "- `clawflow status` — show running operators, locks, recent activity")
 
 	return strings.TrimRight(b.String(), "\n")
 }

@@ -64,6 +64,19 @@ func TestCLICheatsheet_AllScopes_HaveBasicCommands(t *testing.T) {
 	}
 }
 
+func TestCLICheatsheet_AllScopes_HaveFeedback(t *testing.T) {
+	// `clawflow feedback` is a top-level user-facing command that lets the
+	// AI route project-unrelated complaints to the upstream ClawFlow repo.
+	// It must be visible in every chat scope so the AI doesn't ask "where
+	// should I file the issue?" when the user complains about clawflow itself.
+	for _, scope := range []Scope{ScopeFull, ScopeRepo, ScopeSingleIssue} {
+		out := CLICheatsheet(scope)
+		if !strings.Contains(out, "clawflow feedback") {
+			t.Errorf("scope %d: cheatsheet missing `clawflow feedback`", scope)
+		}
+	}
+}
+
 func TestLanguageRule_Content(t *testing.T) {
 	out := LanguageRule()
 	if !strings.Contains(out, "Match the user's input language") {
