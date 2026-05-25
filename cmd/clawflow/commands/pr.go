@@ -226,11 +226,12 @@ func newPRCIWaitCmd() *cobra.Command {
 func newPRMergeCmd() *cobra.Command {
 	var repo string
 	var number int
+	var noDeleteBranch bool
 
 	cmd := &cobra.Command{
 		Use:     "merge",
 		Short:   "Merge a pull request via the VCS API",
-		Example: "  clawflow pr merge --repo owner/repo --pr 7",
+		Example: "  clawflow pr merge --repo owner/repo --pr 7\n  clawflow pr merge --repo owner/repo --pr 7 --no-delete-branch",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, _, err := newVCSClientForRepo(repo)
 			if err != nil {
@@ -240,11 +241,37 @@ func newPRMergeCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("merged %s PR #%d\n", repo, number)
+
+			// Default behavior: delete the remote source branch after a
+			// successful merge, matching GitHub/GitLab's "Delete source
+			// branch" UI default. Pass --no-delete-branch to keep it.
+			// Mirrors the cleanup path in `clawflow run` auto-merge so
+			// manual and automatic merges behave consistently. Failures
+			// are non-fatal: the merge already landed, branch deletion
+			// is just housekeeping.
+			if !noDeleteBranch {
+				baseBranch := "main"
+				if cfg, err := config.Load(); err == nil {
+					if repoCfg, ok := cfg.Repos[repo]; ok && repoCfg.BaseBranch != "" {
+						baseBranch = repoCfg.BaseBranch
+					}
+				}
+				if pr, err := client.GetPR(repo, number); err != nil {
+					fmt.Fprintf(os.Stderr, "⚠ branch cleanup: lookup PR failed: %v\n", err)
+				} else if head := pr.HeadBranch; head != "" && head != baseBranch {
+					if err := client.DeleteBranch(repo, head); err != nil {
+						fmt.Fprintf(os.Stderr, "⚠ branch cleanup: delete %s failed: %v\n", head, err)
+					} else {
+						fmt.Printf("deleted branch %s\n", head)
+					}
+				}
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().IntVar(&number, "pr", 0, "PR number (required)")
+	cmd.Flags().BoolVar(&noDeleteBranch, "no-delete-branch", false, "keep the source branch after merging (default: delete)")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("pr")
 	return cmd
