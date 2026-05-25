@@ -124,6 +124,18 @@ type Settings struct {
 	// being processed by all machines simultaneously — they must be
 	// explicitly bound first. Synced via Gist as a shared fleet policy.
 	RequireBinding bool `yaml:"require_binding,omitempty"`
+
+	// Language, when set, overrides the language of all AI-generated output
+	// (operator comments, chat replies, Pilot verdicts, doc generation).
+	// Supported values:
+	//   ""   — auto: match the user's input language; default to Chinese
+	//           (preserves historical behaviour).
+	//   "zh" — always respond in Simplified Chinese (简体中文).
+	//   "en" — always respond in English.
+	// The directive is injected into every AI system prompt at build time
+	// so all current and future operators inherit the setting automatically.
+	// Synced via Gist as a shared preference.
+	Language string `yaml:"language,omitempty"`
 }
 
 // ResolveGithubCloneDir returns the configured GitHub clone directory, defaulting to ~/github.
@@ -158,6 +170,28 @@ func (s *Settings) ResolveIDEScheme() string {
 		return "vscode-insiders://file/"
 	default: // "", "vscode", or any unrecognised value
 		return "vscode://file/"
+	}
+}
+
+// LanguageDirective returns a short instruction to append to any AI system
+// prompt so the model responds in the user's preferred language.
+//
+// Values:
+//
+//	"zh" → instruct the model to always respond in Simplified Chinese.
+//	"en" → instruct the model to always respond in English.
+//	""   → return "" (no override; the model's default language behaviour applies).
+//
+// The returned string is either empty or starts with "\n\n" so callers can
+// concatenate it directly without extra spacing.
+func LanguageDirective(lang string) string {
+	switch lang {
+	case "zh":
+		return "\n\n**Language directive:** Respond in 简体中文 (Simplified Chinese). All output — analysis, plans, comments, and prose — must be written in Chinese regardless of the input language. Code identifiers, log snippets, and machine-stable markers (e.g. `<!-- clawflow:outcome=… -->`) must remain unchanged.\n"
+	case "en":
+		return "\n\n**Language directive:** Respond in English. All output — analysis, plans, comments, and prose — must be written in English regardless of the input language.\n"
+	default:
+		return ""
 	}
 }
 

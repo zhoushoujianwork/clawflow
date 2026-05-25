@@ -289,7 +289,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	deploymentMD, _ := project.ReadDeployment(p.Name)
 	recent := pilotRecentSummaries(p.Name, 3)
 
-	prompt := chat.BuildPilotContext(p.Name, contextMD, deploymentMD, recent, digests)
+	prompt := chat.BuildPilotContext(p.Name, contextMD, deploymentMD, recent, digests, cfg.Settings.Language)
 	model := config.ResolveModelForRole(creds, config.RoleOperator)
 	workdir := project.ProjectDir(p.Name)
 

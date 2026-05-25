@@ -78,12 +78,25 @@ func TestCLICheatsheet_AllScopes_HaveFeedback(t *testing.T) {
 }
 
 func TestLanguageRule_Content(t *testing.T) {
-	out := LanguageRule()
+	// Default (empty) — mirror input language, fallback to Chinese.
+	out := LanguageRule("")
 	if !strings.Contains(out, "Match the user's input language") {
-		t.Error("LanguageRule missing language-mirroring instruction")
+		t.Error("LanguageRule('') missing language-mirroring instruction")
 	}
 	if !strings.Contains(out, "Chinese") {
-		t.Error("LanguageRule missing Chinese default fallback")
+		t.Error("LanguageRule('') missing Chinese default fallback")
+	}
+
+	// "zh" — always Chinese.
+	outZH := LanguageRule("zh")
+	if !strings.Contains(outZH, "简体中文") {
+		t.Error("LanguageRule('zh') missing Simplified Chinese instruction")
+	}
+
+	// "en" — always English.
+	outEN := LanguageRule("en")
+	if !strings.Contains(outEN, "English") {
+		t.Error("LanguageRule('en') missing English instruction")
 	}
 }
 

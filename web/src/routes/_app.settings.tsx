@@ -19,6 +19,8 @@ interface SettingsView {
     terminal?: string
     default_ide?: string
     require_binding?: boolean
+    /** AI output language: '' (auto), 'zh' (Simplified Chinese), 'en' (English) */
+    language?: string
   }
 }
 
@@ -273,6 +275,7 @@ function GlobalSection({
   const [terminal, setTerminal] = useState(view.terminal ?? '')
   const [defaultIDE, setDefaultIDE] = useState(view.default_ide ?? '')
   const [requireBinding, setRequireBinding] = useState(view.require_binding ?? false)
+  const [language, setLanguage] = useState(view.language ?? '')
   const [busy, setBusy] = useState(false)
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
@@ -289,6 +292,7 @@ function GlobalSection({
     setTerminal(view.terminal ?? '')
     setDefaultIDE(view.default_ide ?? '')
     setRequireBinding(view.require_binding ?? false)
+    setLanguage(view.language ?? '')
   }, [view])
 
   const dirty =
@@ -302,7 +306,8 @@ function GlobalSection({
     gitlabURL !== (view.gitlab_url ?? '') ||
     terminal !== (view.terminal ?? '') ||
     defaultIDE !== (view.default_ide ?? '') ||
-    requireBinding !== (view.require_binding ?? false)
+    requireBinding !== (view.require_binding ?? false) ||
+    language !== (view.language ?? '')
 
   const save = () => {
     setBusy(true); setSaveMsg(null)
@@ -321,6 +326,7 @@ function GlobalSection({
         terminal: terminal,
         default_ide: defaultIDE,
         require_binding: requireBinding,
+        language: language,
       }),
     })
       .then(async r => {
@@ -403,6 +409,17 @@ function GlobalSection({
           onChange={e => setRequireBinding(e.target.checked)}
           className="rounded border-border w-4 h-4"
         />
+      </Row>
+      <Row label="AI language" hint="Language for all AI-generated output: operator comments, chat replies, Pilot verdicts. 'Auto' mirrors user input, defaulting to Chinese.">
+        <select
+          value={language}
+          onChange={e => setLanguage(e.target.value)}
+          className="flex-1 text-sm px-2 py-1 border border-border rounded bg-background"
+        >
+          <option value="">Auto (match input, default Chinese)</option>
+          <option value="zh">中文 (Simplified Chinese)</option>
+          <option value="en">English</option>
+        </select>
       </Row>
 
       <div className="flex items-center gap-2 pt-2">

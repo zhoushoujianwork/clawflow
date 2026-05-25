@@ -446,7 +446,7 @@ func runProjectChat(name, model string) error {
 		}
 	}
 
-	systemCtx := chat.BuildProjectChatContext(name, chatRepos, originalCtx, originalTesting)
+	systemCtx := chat.BuildProjectChatContext(name, chatRepos, originalCtx, originalTesting, cfg.Settings.Language)
 
 	sessionID := chat.NewSessionID("project/"+name, 0)
 	sessionName := fmt.Sprintf("clawflow: project/%s [project]", name)

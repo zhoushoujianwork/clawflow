@@ -49,6 +49,9 @@ type settingsView struct {
 		// the dashboard can decide whether a given repo is "mine"
 		// without round-tripping through the bind endpoint.
 		Hostname string `json:"hostname,omitempty"`
+		// Language is the preferred AI output language. Supported values:
+		// "" (auto), "zh" (Simplified Chinese), "en" (English).
+		Language string `json:"language,omitempty"`
 	} `json:"global"`
 }
 
@@ -96,6 +99,7 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	v.Global.Terminal = cfg.Settings.Terminal
 	v.Global.DefaultIDE = cfg.Settings.DefaultIDE
 	v.Global.RequireBinding = cfg.Settings.RequireBinding
+	v.Global.Language = cfg.Settings.Language
 	if h, hErr := os.Hostname(); hErr == nil {
 		v.Global.Hostname = h
 	}
@@ -198,6 +202,7 @@ type globalUpdate struct {
 	Terminal            *string `json:"terminal,omitempty"`
 	DefaultIDE          *string `json:"default_ide,omitempty"`
 	RequireBinding      *bool   `json:"require_binding,omitempty"`
+	Language            *string `json:"language,omitempty"`
 }
 
 // HandleUpdateGlobalSettings handles POST /api/settings/global.
@@ -261,6 +266,17 @@ func HandleUpdateGlobalSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RequireBinding != nil {
 		cfg.Settings.RequireBinding = *req.RequireBinding
+	}
+	if req.Language != nil {
+		lang := strings.TrimSpace(*req.Language)
+		// Validate: only "", "zh", "en" are accepted.
+		switch lang {
+		case "", "zh", "en":
+			cfg.Settings.Language = lang
+		default:
+			writeJSON(w, 400, map[string]string{"error": "language must be '' (auto), 'zh', or 'en'"})
+			return
+		}
 	}
 	if err := cfg.Save(); err != nil {
 		writeErr(w, err)
