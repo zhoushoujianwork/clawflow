@@ -1,9 +1,12 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -565,12 +568,13 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 }
 
 // runJobsParallel dispatches `jobs` across `workers` goroutines, gating
-// concurrency with two in-process locks: per-issue (always) so two
-// operators never race on the same (repo, issue), and per-repo (only
-// for `implement`) so worktree add / git fetch on the shared local
-// clone stay serialized. Returns the set of jobs whose operator
-// produced output (i.e. fired), so the caller can deduplicate pending
-// entries.
+// concurrency with a per-issue lock (always) so two operators never race
+// on the same (repo, issue). The previous per-repo lock for `implement`
+// has been removed: git-level lock conflicts during concurrent worktree
+// operations are handled by runGitWithRetry (exponential backoff on git
+// lock errors) so same-repo implement jobs can now run in parallel.
+// Returns the set of jobs whose operator produced output (i.e. fired),
+// so the caller can deduplicate pending entries.
 //
 // Rate-limit circuit breaker: when any worker detects a transient rate-limit
 // from claude, it sets a shared atomic flag. Subsequent workers check the flag
@@ -590,7 +594,6 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 
 	var (
 		issueLocks  sync.Map    // key: "<repo>#<issue>" → *sync.Mutex
-		repoLocks   sync.Map    // key: "<repo>"          → *sync.Mutex
 		fired       []firedKey
 		firedMu     sync.Mutex
 		rateLimited atomic.Bool // set when any worker hits a rate limit
@@ -620,19 +623,7 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 
 				iMu := mu(&issueLocks, fmt.Sprintf("%s#%d", j.repo, j.sub.Number))
 				iMu.Lock()
-				// `implement` mutates a shared local clone (worktree
-				// add + fetch), so two implement jobs in the same repo
-				// must serialize. Read-only operators don't touch the
-				// clone and run unrestricted.
-				var rMu *sync.Mutex
-				if j.op.Name == "implement" {
-					rMu = mu(&repoLocks, j.repo)
-					rMu.Lock()
-				}
 				didFire, hitRateLimit := runOneOperator(ctx, j, timeout)
-				if rMu != nil {
-					rMu.Unlock()
-				}
 				iMu.Unlock()
 				if hitRateLimit {
 					rateLimited.Store(true)
@@ -1269,24 +1260,21 @@ func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResul
 
 		fmt.Fprintf(os.Stderr, "  → analysis worktree: initializing at %s\n", wtPath)
 		fmt.Fprintf(os.Stderr, "  → analysis worktree: fetching origin/%s\n", base)
-		fetchCmd := exec.Command("git", "-C", localPath, "fetch", "origin", base)
-		fetchCmd.Stdout = os.Stderr
-		fetchCmd.Stderr = os.Stderr
-		if err := fetchCmd.Run(); err != nil {
+		if err := runGitWithRetry(func() *exec.Cmd {
+			return exec.Command("git", "-C", localPath, "fetch", "origin", base)
+		}); err != nil {
 			return worktreeResult{}, func() {}, fmt.Errorf("git fetch origin/%s: %w — cannot initialize analysis worktree without network access", base, err)
 		}
 
-		addCmd := exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
-		addCmd.Stdout = os.Stderr
-		addCmd.Stderr = os.Stderr
-		if err := addCmd.Run(); err != nil {
+		if err := runGitWithRetry(func() *exec.Cmd {
+			return exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
+		}); err != nil {
 			// Fall back to the local base branch ref (e.g. brand-new clone
 			// that hasn't pushed yet and has no origin/<base> remote ref).
 			fmt.Fprintf(os.Stderr, "  ⚠ worktree add origin/%s failed, falling back to local %s\n", base, base)
-			addLocal := exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
-			addLocal.Stdout = os.Stderr
-			addLocal.Stderr = os.Stderr
-			if err2 := addLocal.Run(); err2 != nil {
+			if err2 := runGitWithRetry(func() *exec.Cmd {
+				return exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
+			}); err2 != nil {
 				return worktreeResult{}, func() {}, fmt.Errorf("git worktree add failed (origin/%s: %v; %s: %w)", base, err, base, err2)
 			}
 		}
@@ -1294,10 +1282,9 @@ func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResul
 	} else {
 		// Existing worktree: fetch + reset to latest origin/<base>.
 		fmt.Fprintf(os.Stderr, "  → analysis worktree: refreshing to origin/%s\n", base)
-		fetchCmd := exec.Command("git", "-C", localPath, "fetch", "origin", base)
-		fetchCmd.Stdout = os.Stderr
-		fetchCmd.Stderr = os.Stderr
-		if err := fetchCmd.Run(); err != nil {
+		if err := runGitWithRetry(func() *exec.Cmd {
+			return exec.Command("git", "-C", localPath, "fetch", "origin", base)
+		}); err != nil {
 			return worktreeResult{}, func() {}, fmt.Errorf("git fetch origin/%s: %w — analysis blocked to avoid stale-code evaluation", base, err)
 		}
 
@@ -1398,6 +1385,82 @@ func findExistingWorktree(parent string, issueNum int, localPath, base string) (
 	return "", "", ""
 }
 
+// isGitLockError reports whether the combined output of a failed git command
+// indicates a transient lock conflict. These errors are safe to retry; all
+// other errors should fail immediately.
+//
+// Common patterns across git versions/locales:
+//   - "index.lock: File exists" — index lock left by a previous process
+//   - "cannot lock ref" — ref lock conflict
+//   - "Another git process seems to be running" — general process lock
+//   - ".lock" — catch-all for any lock-file mention
+func isGitLockError(output string) bool {
+	for _, pattern := range []string{
+		"index.lock",
+		"cannot lock ref",
+		"Another git process seems to be running",
+		".lock: File exists",
+	} {
+		if strings.Contains(output, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// runGitWithRetry executes a git command produced by makeCmd(). On exit
+// failure it inspects the combined output: if the error matches a transient
+// git lock conflict it retries up to maxGitRetries times with exponential
+// backoff (baseGitDelay*2^n + up-to-50%-jitter). Non-lock errors fail
+// immediately without retrying.
+//
+// All output is written to os.Stderr for observability regardless of
+// whether the command ultimately succeeds or fails.
+//
+// makeCmd is called once per attempt so each retry gets a fresh *exec.Cmd
+// (reusing a Cmd after Run returns is not supported by the standard library).
+func runGitWithRetry(makeCmd func() *exec.Cmd) error {
+	const maxGitRetries = 5
+	const baseGitDelay = 100 * time.Millisecond
+
+	for attempt := 0; attempt <= maxGitRetries; attempt++ {
+		cmd := makeCmd()
+		var buf bytes.Buffer
+		// Tee output: observable on stderr AND captured for error classification.
+		mw := io.MultiWriter(os.Stderr, &buf)
+		cmd.Stdout = mw
+		cmd.Stderr = mw
+
+		err := cmd.Run()
+		if err == nil {
+			return nil
+		}
+
+		output := buf.String()
+		if !isGitLockError(output) {
+			// Permanent error — return immediately, no retry.
+			return err
+		}
+		if attempt == maxGitRetries {
+			return fmt.Errorf("%w (retried %d times after git lock conflicts)", err, maxGitRetries)
+		}
+
+		// Exponential backoff: baseGitDelay * 2^attempt, capped at 5 s,
+		// plus up to 50% random jitter to reduce thundering-herd.
+		delay := baseGitDelay * time.Duration(1<<uint(attempt))
+		if delay > 5*time.Second {
+			delay = 5 * time.Second
+		}
+		jitter := time.Duration(rand.Int63n(int64(delay / 2))) //nolint:gosec
+		delay += jitter
+
+		fmt.Fprintf(os.Stderr, "  ⚠ git lock conflict (attempt %d/%d), retrying in %v\n",
+			attempt+1, maxGitRetries, delay.Round(time.Millisecond))
+		time.Sleep(delay)
+	}
+	return nil // unreachable
+}
+
 // setupWorktree provisions a git worktree for the implement operator.
 //
 // Resume logic: before creating a fresh worktree, it scans for an existing
@@ -1471,27 +1534,26 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 	// Best-effort fetch to align origin/<base> with the remote. A repo
 	// without network reachability (offline dev, private bastion) should
 	// still be able to spin up a worktree at the local origin/<base>.
+	// runGitWithRetry handles transient git lock conflicts from concurrent
+	// parallel implement jobs on the same repo.
 	fmt.Fprintf(os.Stderr, "  → setup: fetching origin/%s\n", base)
-	fetchCmd := exec.Command("git", "-C", localPath, "fetch", "origin", base)
-	fetchCmd.Stdout = os.Stderr
-	fetchCmd.Stderr = os.Stderr
-	if err := fetchCmd.Run(); err != nil {
+	if err := runGitWithRetry(func() *exec.Cmd {
+		return exec.Command("git", "-C", localPath, "fetch", "origin", base)
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "  ⚠ fetch failed (continuing): %v\n", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "  → setup: creating worktree at %s\n", wtPath)
-	addCmd := exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
-	addCmd.Stdout = os.Stderr
-	addCmd.Stderr = os.Stderr
-	if err := addCmd.Run(); err != nil {
+	if err := runGitWithRetry(func() *exec.Cmd {
+		return exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
+	}); err != nil {
 		// Fall back to the local base branch ref. Brand-new clones may
 		// not have origin/<base> yet (e.g. the user just `git init`'d
 		// and added a remote without pushing anything).
 		fmt.Fprintf(os.Stderr, "  ⚠ worktree add origin/%s failed, falling back to local %s\n", base, base)
-		addLocal := exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
-		addLocal.Stdout = os.Stderr
-		addLocal.Stderr = os.Stderr
-		if err2 := addLocal.Run(); err2 != nil {
+		if err2 := runGitWithRetry(func() *exec.Cmd {
+			return exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
+		}); err2 != nil {
 			return worktreeResult{}, func() {}, fmt.Errorf("git worktree add failed (origin/%s: %v; %s: %w)", base, err, base, err2)
 		}
 	}
