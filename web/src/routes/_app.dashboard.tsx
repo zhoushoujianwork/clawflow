@@ -71,6 +71,20 @@ interface Pending {
   captured_at: string
 }
 
+/**
+ * Mirror of snapshot.IssueEntry on the Go side, from /data/issues.json. This
+ * is the authoritative *current* issue state — unlike runs.json, whose
+ * `issue_state` is a point-in-time snapshot captured when the run executed and
+ * may be stale (e.g. null for runs that predate a later close). The dashboard
+ * cross-references this map so closed issues render with strikethrough even
+ * when their run records still say open/null.
+ */
+interface Issue {
+  repo: string
+  issue_number: number
+  state: string // "open" | "closed"
+}
+
 type StatusFilter = 'all' | 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
 type ViewMode = 'run' | 'issue'
 
@@ -182,6 +196,7 @@ function Dashboard() {
   const [meta, setMeta] = useState<Meta | null>(null)
   const [repos, setRepos] = useState<Repo[]>([])
   const [pending, setPending] = useState<Pending[]>([])
+  const [issues, setIssues] = useState<Issue[]>([])
   const [loading, setLoading] = useState(true)
   const [runBusy, setRunBusy] = useState(false)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
@@ -214,7 +229,7 @@ function Dashboard() {
 
     const refetch = async (initial: boolean) => {
       if (initial) setLoading(true)
-      const [r, m, rp, pd, settings] = await Promise.all([
+      const [r, m, rp, pd, iss, settings] = await Promise.all([
         fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
         fetch('/data/meta.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
         fetch('/data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
@@ -222,6 +237,9 @@ function Dashboard() {
         // queue; missing file is normal on older installs and renders as no
         // pending section.
         fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+        // issues.json carries the authoritative current state used to override
+        // the stale per-run issue_state when deciding closed-issue styling.
+        fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
         fetch('/api/settings', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
       ])
       if (cancelled) return
@@ -229,6 +247,7 @@ function Dashboard() {
       setMeta(m)
       setRepos(Array.isArray(rp) ? rp : [])
       setPending(Array.isArray(pd) ? pd : [])
+      setIssues(Array.isArray(iss) ? iss : [])
       if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
       setLoading(false)
     }
@@ -370,8 +389,24 @@ function Dashboard() {
   // Reset pagination when filters or view mode change
   useEffect(() => { setVisibleCount(20) }, [statusFilter, repoFilter, query, viewMode])
 
+  // Authoritative current state per issue, keyed `${repo}#${number}`. Sourced
+  // from issues.json rather than the per-run snapshot so a later close is
+  // reflected even on old run records whose issue_state is null/open.
+  const issueStateMap = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const i of issues) m.set(`${i.repo}#${i.issue_number}`, i.state)
+    return m
+  }, [issues])
+
   const { filteredRunning, filteredHistory } = useMemo(() => {
     const q = query.trim().toLowerCase()
+    // Override the stale per-run issue_state with the authoritative current
+    // state. filteredHistory feeds both the By-Run rows and the By-Issue
+    // groups, so this single enrichment fixes closed-issue styling everywhere.
+    const withState = (r: Run): Run => {
+      const cur = issueStateMap.get(`${r.repo}#${r.issue_number}`)
+      return cur && cur !== r.issue_state ? { ...r, issue_state: cur } : r
+    }
     const passesFilters = (r: Run) => {
       if (statusFilter !== 'all') {
         // "failed" filter also captures no-marker and skipped-empty since they
@@ -383,7 +418,7 @@ function Dashboard() {
       if (q && !(r.issue_title || '').toLowerCase().includes(q) && !String(r.issue_number).includes(q)) return false
       return true
     }
-    const matched = runs.filter(passesFilters)
+    const matched = runs.filter(passesFilters).map(withState)
     if (statusFilter === 'running') {
       return { filteredRunning: [], filteredHistory: matched }
     }
@@ -391,7 +426,7 @@ function Dashboard() {
       filteredRunning: matched.filter(r => r.status === 'running'),
       filteredHistory: matched.filter(r => r.status !== 'running'),
     }
-  }, [runs, statusFilter, repoFilter, query])
+  }, [runs, statusFilter, repoFilter, query, issueStateMap])
 
   /** Build issue groups from filteredHistory for the issue-aggregated view.
    *  Runs already passed the status/repo/search filters so groups reflect the
