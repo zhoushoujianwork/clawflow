@@ -836,6 +836,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// the caller so it can abort the remaining job queue.
 	isRateLimit := runErr != nil && errors.Is(runErr, operator.ErrRateLimit)
 
+	// Detect auth errors (403 / "request not allowed"). These are distinct
+	// from rate limits and generic failures: retrying immediately won't help —
+	// the session token or account permission needs human intervention.
+	// We do NOT count auth errors toward the circuit breaker to avoid
+	// auto-labeling agent-failed on a configuration problem (issue #204).
+	isAuthError := runErr != nil && errors.Is(runErr, operator.ErrAuthError)
+
 	// Detect no-marker failures: claude produced output but omitted the
 	// outcome marker. operator.Run now returns ErrNoOutcomeMarker for this
 	// case so we can route it through the circuit breaker (status="failed")
@@ -846,6 +853,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if runErr != nil {
 		if isRateLimit {
 			fmt.Fprintf(os.Stderr, "%s ✗ claude rate limited (will retry next pass): %v\n", prefix, runErr)
+		} else if isAuthError {
+			// Use Warn-level so patrol grep -E "ERROR|WARN" catches this.
+			runLog.Warn("run/auth_error", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", runErr.Error())
+			fmt.Fprintf(os.Stderr, "%s ✗ claude auth error 403 (check session/API key, NOT retrying): %v\n", prefix, runErr)
 		} else if isNoMarker {
 			fmt.Fprintf(os.Stderr, "%s ✗ claude produced no outcome marker (will count toward circuit breaker): %v\n", prefix, runErr)
 		} else {
@@ -871,6 +882,14 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// and ConsecutiveFailures doesn't count this toward the circuit breaker.
 		rm.Status = "rate-limited"
 		rm.Error = runErr.Error()
+	case isAuthError:
+		// Record as "auth-error" — distinct from "failed" so the dashboard
+		// can surface the specific cause. Does NOT count toward circuit breaker
+		// since agent-failed would be misleading (the issue itself is fine;
+		// the credentials are broken). Operator should investigate the session
+		// or configure an independent API key provider (issue #204).
+		rm.Status = "auth-error"
+		rm.Error = runErr.Error()
 	case isNoMarker:
 		// No-marker runs are recorded as "no-marker" (distinct from generic
 		// "failed") so the dashboard can surface the specific cause. They DO
@@ -894,9 +913,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// Conditional cleanup: only remove the worktree on success/skip.
 	// On failure, preserve it so the next run can resume from the
 	// partial work instead of starting from scratch.
-	// skipped-empty and no-marker have no partial work worth resuming,
-	// so clean up to avoid accumulating stale worktrees.
-	if rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" {
+	// skipped-empty, no-marker, and auth-error have no partial work worth
+	// resuming, so clean up to avoid accumulating stale worktrees.
+	if rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "auth-error" {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
@@ -908,7 +927,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if err := snapshot.WriteRunMeta(runDir, rm); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ run meta: %v\n", prefix, err)
 	}
-	runLog.Info("run/end",
+	// Upgrade to WARN for non-success statuses so deployment.md patrol's
+	// "grep -E ERROR|WARN" actively catches failures (issue #204).
+	logFn := runLog.Info
+	if rm.Status == "failed" || rm.Status == "auth-error" {
+		logFn = runLog.Warn
+	}
+	logFn("run/end",
 		"repo", j.repo,
 		"issue", j.sub.Number,
 		"op", j.op.Name,
@@ -930,6 +955,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	case "rate-limited":
 		// Signal the caller to abort the queue; do NOT call checkCircuitBreaker.
 		return false, true
+	case "auth-error":
+		// Do NOT signal queue abort (unlike rate-limit, other issues may still
+		// succeed with the same session). Do NOT call checkCircuitBreaker —
+		// agent-failed would be misleading for a credential problem.
+		fmt.Printf("%s ✗ auth error (check session/API key)\n", prefix)
+		return false, false
 	case "no-marker":
 		fmt.Printf("%s ✗ no outcome marker (circuit breaker counting)\n", prefix)
 		checkCircuitBreaker(j, prefix)
