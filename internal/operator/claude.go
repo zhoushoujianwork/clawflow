@@ -22,6 +22,25 @@ import (
 // stop processing the current queue and let the next scheduled run retry.
 var ErrRateLimit = errors.New("claude rate limit")
 
+// ErrAuthError is returned by RunClaude when the claude CLI exits with a
+// 403 / authentication-failure response. Unlike rate limits this is NOT
+// transient in the same way — retrying immediately will reproduce the same
+// error. Callers should stop retrying and surface the failure loudly (WARN
+// log + a distinct outcome label) so operators can investigate the session
+// or API-key configuration rather than burning quota on an infinite loop.
+var ErrAuthError = errors.New("claude auth error")
+
+// authErrorPatterns are substrings (case-insensitive) that identify a
+// 403 / authentication-failure response from the claude CLI. Matching any
+// one of them triggers ErrAuthError rather than the generic failure path.
+var authErrorPatterns = []string{
+	"403",
+	"request not allowed",
+	"failed to authenticate",
+	"authentication failed",
+	"api error: 403",
+}
+
 // rateLimitPatterns are substrings (case-insensitive) that identify a
 // transient rate-limit / quota response from the claude CLI. The list covers:
 //   - Claude Code CLI English output: "You've hit your limit"
@@ -53,6 +72,23 @@ func IsRateLimitError(err error, output string) bool {
 	}
 	combined := strings.ToLower(err.Error() + " " + output)
 	for _, pat := range rateLimitPatterns {
+		if strings.Contains(combined, strings.ToLower(pat)) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAuthError reports whether err or the captured claude output text indicates
+// a 403 / authentication-failure response. Both are checked because the claude
+// CLI writes the human-readable message to stdout while the Go error only
+// carries "exit status 1".
+func IsAuthError(err error, output string) bool {
+	if err == nil {
+		return false
+	}
+	combined := strings.ToLower(err.Error() + " " + output)
+	for _, pat := range authErrorPatterns {
 		if strings.Contains(combined, strings.ToLower(pat)) {
 			return true
 		}
@@ -135,6 +171,16 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 				fmt.Fprintf(os.Stderr, "  ✓ provider %q succeeded (after %d failed attempt(s))\n", p.name, i)
 			}
 			return output, nil
+		}
+
+		// Auth errors (403 / "request not allowed") are distinct from both
+		// failover and rate-limit: retrying immediately or switching provider
+		// won't help — the session token or account permission is the issue.
+		// Return ErrAuthError immediately so the caller can surface a loud
+		// warning and stop retrying without counting toward the circuit breaker.
+		if IsAuthError(err, output) {
+			wrapped := fmt.Errorf("claude: %w", err)
+			return output, fmt.Errorf("%w: %w", ErrAuthError, wrapped)
 		}
 
 		// Determine whether this is a provider-level failure (failover) or

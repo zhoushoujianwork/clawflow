@@ -160,6 +160,78 @@ func TestParseClaudeStream_MultipleMarkerTurns_LastWins(t *testing.T) {
 	}
 }
 
+func TestIsAuthError(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		output string
+		want   bool
+	}{
+		{
+			name:   "nil error",
+			err:    nil,
+			output: "",
+			want:   false,
+		},
+		{
+			name:   "generic exit status 1 no auth pattern",
+			err:    errors.New("claude: exit status 1"),
+			output: "some unrelated error",
+			want:   false,
+		},
+		{
+			name:   "403 in output",
+			err:    errors.New("claude: exit status 1"),
+			output: "Failed to authenticate. API Error: 403 Request not allowed",
+			want:   true,
+		},
+		{
+			name:   "request not allowed case-insensitive",
+			err:    errors.New("claude: exit status 1"),
+			output: "REQUEST NOT ALLOWED",
+			want:   true,
+		},
+		{
+			name:   "failed to authenticate in output",
+			err:    errors.New("claude: exit status 1"),
+			output: "Failed to authenticate with the API",
+			want:   true,
+		},
+		{
+			name:   "api error 403 in output",
+			err:    errors.New("claude: exit status 1"),
+			output: "api error: 403 forbidden",
+			want:   true,
+		},
+		{
+			name:   "authentication failed in output",
+			err:    errors.New("claude: exit status 1"),
+			output: "Authentication failed: invalid session",
+			want:   true,
+		},
+		{
+			name:   "rate limit 429 should not match auth",
+			err:    errors.New("claude: exit status 1"),
+			output: "HTTP 429 Too Many Requests",
+			want:   false,
+		},
+		{
+			name:   "rate limit hit your limit should not match auth",
+			err:    errors.New("claude: exit status 1"),
+			output: "You've hit your limit",
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsAuthError(tc.err, tc.output)
+			if got != tc.want {
+				t.Errorf("IsAuthError(%v, %q) = %v, want %v", tc.err, tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsRateLimitError(t *testing.T) {
 	cases := []struct {
 		name    string
