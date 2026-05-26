@@ -72,6 +72,36 @@ interface Pending {
 }
 
 type StatusFilter = 'all' | 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
+type ViewMode = 'run' | 'issue'
+
+/** Ordered list of known pipeline stages for badge display. Unknown operators
+ *  are appended after these in discovery order. */
+const KNOWN_STAGES = ['classify', 'implement', 'evaluate-feat', 'evaluate-bug', 'reply-comment', 'decompose']
+
+interface IssueGroup {
+  key: string       // `${repo}#${issueNumber}`
+  repo: string
+  issueNumber: number
+  issueTitle: string
+  issueState: string
+  /** Latest run per operator name */
+  stages: Map<string, Run>
+  /** max started_at across all runs */
+  lastActivity: string
+  allRuns: Run[]
+  overallStatus: Run['status']
+}
+
+/** Derive overall status for an issue from its per-operator latest runs.
+ *  Priority: running > failed/no-marker/skipped-empty > success > cancelled > skipped */
+function issueOverallStatus(stages: Map<string, Run>): Run['status'] {
+  const statuses = Array.from(stages.values()).map(r => r.status)
+  if (statuses.some(s => s === 'running')) return 'running'
+  if (statuses.some(s => s === 'failed' || s === 'no-marker' || s === 'skipped-empty')) return 'failed'
+  if (statuses.every(s => s === 'success')) return 'success'
+  if (statuses.some(s => s === 'cancelled')) return 'cancelled'
+  return 'skipped'
+}
 
 const statusPill: Record<Run['status'], { label: string; cls: string; Icon: typeof CheckCircle2 }> = {
   success:       { label: 'success',      cls: 'bg-green-100 text-green-700 border-green-200',   Icon: CheckCircle2 },
@@ -167,6 +197,17 @@ function Dashboard() {
   // fire two POSTs against the same lock.
   const [cancellingKey, setCancellingKey] = useState<string | null>(null)
   const [hostname, setHostname] = useState<string>('')
+  const [viewMode, setViewMode] = useState<ViewMode>('issue')
+  const [expandedIssues, setExpandedIssues] = useState<Set<string>>(new Set())
+
+  const toggleIssueExpand = useCallback((key: string) => {
+    setExpandedIssues(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -297,18 +338,37 @@ function Dashboard() {
     return c
   }, [runs])
 
+  /** Issue-level stat counts. Groups all runs by (repo, issue_number) and
+   *  derives one status per issue using issueOverallStatus. */
+  const issueCounts = useMemo(() => {
+    const map = new Map<string, Run[]>()
+    for (const r of runs) {
+      const key = `${r.repo}#${r.issue_number}`
+      if (!map.has(key)) map.set(key, [])
+      map.get(key)!.push(r)
+    }
+    const c = { total: map.size, success: 0, failed: 0, skipped: 0, running: 0, cancelled: 0 }
+    for (const issueRuns of map.values()) {
+      const stages = new Map<string, Run>()
+      for (const r of issueRuns) {
+        const existing = stages.get(r.operator)
+        if (!existing || r.started_at > existing.started_at) stages.set(r.operator, r)
+      }
+      const status = issueOverallStatus(stages)
+      // Bucket no-marker / skipped-empty as failed at the issue level too
+      const bucket = (status === 'no-marker' || status === 'skipped-empty') ? 'failed' : status
+      if (bucket in c) c[bucket as keyof typeof c]++
+    }
+    return c
+  }, [runs])
+
   const repoOptions = useMemo(() => {
     const set = new Set(runs.map(r => r.repo))
     return ['all', ...Array.from(set).sort()]
   }, [runs])
 
-  // Split filtered runs into "running now" and "everything else (history)".
-  // Running rows render in their own section above; history is the main
-  // scrollable list. When the user explicitly clicks the Running stat
-  // card we keep all running rows in `filteredHistory` and skip the
-  // dedicated section, so the page doesn't show the same row twice.
-  // Reset pagination when filters change
-  useEffect(() => { setVisibleCount(20) }, [statusFilter, repoFilter, query])
+  // Reset pagination when filters or view mode change
+  useEffect(() => { setVisibleCount(20) }, [statusFilter, repoFilter, query, viewMode])
 
   const { filteredRunning, filteredHistory } = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -332,6 +392,45 @@ function Dashboard() {
       filteredHistory: matched.filter(r => r.status !== 'running'),
     }
   }, [runs, statusFilter, repoFilter, query])
+
+  /** Build issue groups from filteredHistory for the issue-aggregated view.
+   *  Runs already passed the status/repo/search filters so groups reflect the
+   *  same slice the flat view would show. */
+  const filteredIssueGroups = useMemo<IssueGroup[]>(() => {
+    const map = new Map<string, { runs: Run[]; repo: string; issueNumber: number; issueTitle: string; issueState: string }>()
+    for (const r of filteredHistory) {
+      const key = `${r.repo}#${r.issue_number}`
+      if (!map.has(key)) {
+        map.set(key, {
+          runs: [],
+          repo: r.repo,
+          issueNumber: r.issue_number,
+          issueTitle: r.issue_title || '(no title)',
+          issueState: r.issue_state || 'open',
+        })
+      }
+      map.get(key)!.runs.push(r)
+    }
+
+    const groups: IssueGroup[] = []
+    for (const [key, { runs, repo, issueNumber, issueTitle, issueState }] of map) {
+      // Latest run per operator
+      const stages = new Map<string, Run>()
+      for (const r of runs) {
+        const existing = stages.get(r.operator)
+        if (!existing || r.started_at > existing.started_at) stages.set(r.operator, r)
+      }
+      // Running operator takes priority even if started later
+      for (const r of runs) {
+        if (r.status === 'running') stages.set(r.operator, r)
+      }
+      const lastActivity = runs.reduce((best, r) => (r.started_at > best ? r.started_at : best), '')
+      const overallStatus = issueOverallStatus(stages)
+      groups.push({ key, repo, issueNumber, issueTitle, issueState, stages, lastActivity, allRuns: runs, overallStatus })
+    }
+    groups.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
+    return groups
+  }, [filteredHistory])
 
   // Pending ignores statusFilter (queued items have no run status yet) but
   // honors repo + search filters so the user can drill into one repo's queue.
@@ -444,14 +543,45 @@ function Dashboard() {
       )}
 
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-4">
-        <StatCard label="Total"     value={counts.total}     filter="all"       active={statusFilter === 'all'}       onClick={setStatusFilter} tone="neutral" />
-        <StatCard label="Running"   value={counts.running}   filter="running"   active={statusFilter === 'running'}   onClick={setStatusFilter} tone="blue" />
-        <StatCard label="Success"   value={counts.success}   filter="success"   active={statusFilter === 'success'}   onClick={setStatusFilter} tone="green" />
-        <StatCard label="Failed"    value={counts.failed}    filter="failed"    active={statusFilter === 'failed'}    onClick={setStatusFilter} tone="red" />
-        <StatCard label="Cancelled" value={counts.cancelled} filter="cancelled" active={statusFilter === 'cancelled'} onClick={setStatusFilter} tone="amber" />
-        <StatCard label="Skipped"   value={counts.skipped}   filter="skipped"   active={statusFilter === 'skipped'}   onClick={setStatusFilter} tone="muted" />
+      {/* View mode toggle + stat cards */}
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <span className="text-xs text-muted-foreground">
+          {viewMode === 'issue' ? 'Counts by issue' : 'Counts by run'}
+        </span>
+        <div className="inline-flex rounded-lg border border-border overflow-hidden text-xs font-medium">
+          <button
+            onClick={() => setViewMode('issue')}
+            className={cn(
+              'px-3 py-1.5 transition-colors',
+              viewMode === 'issue' ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-secondary',
+            )}
+          >
+            By Issue
+          </button>
+          <button
+            onClick={() => setViewMode('run')}
+            className={cn(
+              'px-3 py-1.5 transition-colors border-l border-border',
+              viewMode === 'run' ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground hover:bg-secondary',
+            )}
+          >
+            By Run
+          </button>
+        </div>
       </div>
+      {(() => {
+        const c = viewMode === 'issue' ? issueCounts : counts
+        return (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-4">
+            <StatCard label="Total"     value={c.total}     filter="all"       active={statusFilter === 'all'}       onClick={setStatusFilter} tone="neutral" />
+            <StatCard label="Running"   value={c.running}   filter="running"   active={statusFilter === 'running'}   onClick={setStatusFilter} tone="blue" />
+            <StatCard label="Success"   value={c.success}   filter="success"   active={statusFilter === 'success'}   onClick={setStatusFilter} tone="green" />
+            <StatCard label="Failed"    value={c.failed}    filter="failed"    active={statusFilter === 'failed'}    onClick={setStatusFilter} tone="red" />
+            <StatCard label="Cancelled" value={c.cancelled} filter="cancelled" active={statusFilter === 'cancelled'} onClick={setStatusFilter} tone="amber" />
+            <StatCard label="Skipped"   value={c.skipped}   filter="skipped"   active={statusFilter === 'skipped'}   onClick={setStatusFilter} tone="muted" />
+          </div>
+        )
+      })()}
 
       <div className="flex gap-2 mb-3 flex-wrap">
         <div className="relative flex-1 min-w-[200px]">
@@ -532,6 +662,34 @@ function Dashboard() {
           <p className="text-sm text-muted-foreground">
             Execute <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code> in your terminal and refresh.
           </p>
+        </div>
+      ) : viewMode === 'issue' ? (
+        <div className="bg-card border border-border rounded-xl shadow-sm divide-y divide-border overflow-hidden">
+          {filteredIssueGroups.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-6">No issues match the current filters.</p>
+          ) : (
+            <>
+              {filteredIssueGroups.slice(0, visibleCount).map(group => (
+                <IssueGroupRow
+                  key={group.key}
+                  group={group}
+                  repoMap={repoMap}
+                  expanded={expandedIssues.has(group.key)}
+                  onToggleExpand={() => toggleIssueExpand(group.key)}
+                  onCancel={cancelRun}
+                  cancellingKey={cancellingKey}
+                />
+              ))}
+              {visibleCount < filteredIssueGroups.length && (
+                <button
+                  onClick={() => setVisibleCount(c => c + 20)}
+                  className="w-full py-3 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+                >
+                  Load more ({filteredIssueGroups.length - visibleCount} remaining)
+                </button>
+              )}
+            </>
+          )}
         </div>
       ) : (
         <div className="bg-card border border-border rounded-xl shadow-sm divide-y divide-border overflow-hidden">
@@ -710,6 +868,137 @@ function StatCard({
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className={cn('text-2xl font-bold mt-0.5', toneCls)}>{value}</div>
     </button>
+  )
+}
+
+/** A single operator badge in the issue-aggregated view. Shows the operator
+ *  name and its latest run status. Clicking navigates to the run detail. */
+function StageBadge({ operator, run }: { operator: string; run: Run | undefined }) {
+  const dur = run ? durationStr(run.started_at, run.ended_at) : null
+  if (!run) {
+    return (
+      <span
+        title={`${operator} — not run`}
+        className="inline-flex items-center gap-1 border border-dashed px-1.5 py-0.5 rounded text-[11px] font-mono border-muted-foreground/30 text-muted-foreground/40"
+      >
+        {operator}
+      </span>
+    )
+  }
+  const { cls, Icon } = statusPill[run.status]
+  const spinning = run.status === 'running'
+  return (
+    <a
+      href={`/runs/${repoSlug(run.repo)}/issue-${run.issue_number}/${runIdFromPath(run.path)}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={`${operator} · ${run.status}${dur ? ` · ${dur}` : ''}`}
+      className={cn(
+        'inline-flex items-center gap-1 border px-1.5 py-0.5 rounded text-[11px] font-mono hover:opacity-80 transition-opacity',
+        cls,
+      )}
+      onClick={e => e.stopPropagation()}
+    >
+      <Icon className={cn('w-3 h-3', spinning && 'animate-spin')} />
+      {operator}
+      {dur && <span className="opacity-70 ml-0.5">{dur}</span>}
+    </a>
+  )
+}
+
+/** Aggregated row for one issue — shows all pipeline-stage badges inline and
+ *  can be expanded to reveal the underlying flat run rows (drill-down). */
+function IssueGroupRow({
+  group,
+  repoMap,
+  expanded,
+  onToggleExpand,
+  onCancel,
+  cancellingKey,
+}: {
+  group: IssueGroup
+  repoMap: RepoInfoMap
+  expanded: boolean
+  onToggleExpand: () => void
+  onCancel: (repo: string, issue: number) => void
+  cancellingKey: string | null
+}) {
+  const isClosed = group.issueState === 'closed'
+
+  // Display stages: known operators in fixed order first, then any unknown ones
+  const allOperators = Array.from(group.stages.keys())
+  const orderedStages = [
+    ...KNOWN_STAGES.filter(s => group.stages.has(s)),
+    ...allOperators.filter(s => !KNOWN_STAGES.includes(s)),
+  ]
+
+  return (
+    <div>
+      <div
+        className={cn(
+          'flex items-center gap-3 px-4 py-2.5 hover:bg-secondary/50 transition-colors cursor-pointer group',
+          isClosed && 'opacity-60',
+        )}
+        onClick={onToggleExpand}
+      >
+        <StatusChip status={group.overallStatus} />
+        <VcsIcon repo={group.repo} map={repoMap} className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+        <a
+          href={issueUrl(group.repo, group.issueNumber, repoMap)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={cn(
+            'font-mono text-xs hover:text-foreground hover:underline shrink-0',
+            isClosed ? 'text-muted-foreground/50 line-through' : 'text-muted-foreground',
+          )}
+          onClick={e => e.stopPropagation()}
+        >
+          #{group.issueNumber}
+        </a>
+        <span
+          className={cn('text-sm text-foreground flex-1 truncate min-w-0', isClosed && 'line-through')}
+          title={group.issueTitle}
+        >
+          {group.issueTitle}
+        </span>
+        {/* Stage badges — hidden on very narrow screens to avoid overflow */}
+        <div className="hidden sm:flex items-center gap-1 flex-wrap shrink-0" onClick={e => e.stopPropagation()}>
+          {orderedStages.map(op => (
+            <StageBadge key={op} operator={op} run={group.stages.get(op)} />
+          ))}
+        </div>
+        <span className="text-xs text-muted-foreground shrink-0 w-16 text-right tabular-nums">
+          {timeAgo(group.lastActivity)}
+        </span>
+        <Link
+          to="/repos/$repoName"
+          params={{ repoName: encodeURIComponent(group.repo) }}
+          className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 hidden lg:inline"
+          onClick={e => e.stopPropagation()}
+        >
+          {group.repo}
+        </Link>
+        <ChevronRight
+          className={cn(
+            'w-4 h-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0 transition-transform duration-150',
+            expanded && 'rotate-90',
+          )}
+        />
+      </div>
+      {expanded && (
+        <div className="border-t border-border divide-y divide-border bg-secondary/20 pl-4">
+          {group.allRuns.map(r => (
+            <Row
+              key={r.path}
+              r={r}
+              repoMap={repoMap}
+              onCancel={r.status === 'running' ? onCancel : undefined}
+              cancelling={r.status === 'running' && cancellingKey === `${r.repo}#${r.issue_number}`}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
