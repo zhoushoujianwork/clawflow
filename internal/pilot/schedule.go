@@ -346,7 +346,16 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	}
 
 	if err != nil {
-		meta.Status = "failed"
+		// Distinguish auth errors (403 / "request not allowed") from
+		// generic failures. Auth errors are not transient — retrying
+		// immediately will reproduce the same error — so they deserve a
+		// distinct status and a louder log level. This mirrors the
+		// operator runner path fixed in issue #204.
+		if operator.IsAuthError(err, output) {
+			meta.Status = "auth-error"
+		} else {
+			meta.Status = "failed"
+		}
 		meta.Error = err.Error()
 		// When the top-level deadline fires, resultLine is empty because
 		// claude never emitted a PILOT-RESULT. Fill it with a diagnostic
@@ -388,15 +397,58 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		meta.Usage = u
 	}
 	_ = snapshot.WritePilotRunMeta(runDir, meta)
-	lg.Info("pilot/end",
+
+	// Use the appropriate log level so patrol grep -E "ERROR|WARN" catches
+	// failures. Previously all outcomes used lg.Info, making auth failures
+	// and generic failures invisible to standard log scanning (issue #209).
+	endLogKV := []any{
 		"project", p.Name,
 		"status", meta.Status,
 		"duration", endedAt.Sub(startedAt).Round(time.Second),
 		"result", resultLine,
-	)
+	}
+	if meta.Error != "" {
+		endLogKV = append(endLogKV, "error", meta.Error)
+	}
+	switch meta.Status {
+	case "auth-error":
+		lg.Error("pilot/end", endLogKV...)
+		fmt.Fprintf(os.Stderr, "[pilot] %s: auth error 403 (check session/API key — subprocess cannot inherit interactive credentials): %v\n", p.Name, err)
+	case "failed":
+		lg.Warn("pilot/end", endLogKV...)
+	default:
+		lg.Info("pilot/end", endLogKV...)
+	}
 
 	if _, ierr := snapshot.WritePilotRunsIndex(20); ierr != nil {
 		fmt.Fprintf(os.Stderr, "[pilot] %s: snapshot pilot-runs index: %v\n", p.Name, ierr)
+	}
+
+	// Consecutive failure threshold alerting: when the last N wakes (including
+	// this one) all ended in failure, emit an ERROR so patrol grep surfaces it.
+	// De-bounced to log at exactly the threshold and then every threshold
+	// increment (e.g. 3, 6, 9, …) to avoid spamming the log on prolonged outages.
+	if meta.Status == "failed" || meta.Status == "auth-error" {
+		const consecutiveFailThreshold = 3
+		recentN := pilotRecentSummaries(p.Name, consecutiveFailThreshold*3)
+		consecutive := 0
+		for _, s := range recentN {
+			if s.Status == "failed" || s.Status == "auth-error" {
+				consecutive++
+			} else {
+				break
+			}
+		}
+		if consecutive >= consecutiveFailThreshold && consecutive%consecutiveFailThreshold == 0 {
+			lg.Error("pilot/consecutive_failures",
+				"project", p.Name,
+				"count", consecutive,
+				"last_status", meta.Status,
+				"last_error", meta.Error,
+			)
+			fmt.Fprintf(os.Stderr, "[pilot] %s: ALERT: %d consecutive pilot failure(s) (last status=%s) — check credentials and project automation config\n",
+				p.Name, consecutive, meta.Status)
+		}
 	}
 
 	if resultLine != "" {
