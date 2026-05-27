@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -174,6 +175,119 @@ func TestRunGitWithRetry_LockErrorSucceedsOnRetry(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("expected 2 calls (1 lock failure + 1 success), got %d", calls)
+	}
+}
+
+// TestExtractOwnerRepo verifies that extractOwnerRepo parses various git
+// remote URL formats into "owner/repo", handling .git suffixes, SSH, HTTPS,
+// and self-hosted GitLab instances (issue #211).
+func TestExtractOwnerRepo(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "HTTPS GitHub with .git",
+			url:  "https://github.com/owner/repo.git",
+			want: "owner/repo",
+		},
+		{
+			name: "HTTPS GitHub without .git",
+			url:  "https://github.com/owner/repo",
+			want: "owner/repo",
+		},
+		{
+			name: "SSH GitHub",
+			url:  "git@github.com:owner/repo.git",
+			want: "owner/repo",
+		},
+		{
+			name: "SSH without .git suffix",
+			url:  "git@github.com:owner/repo",
+			want: "owner/repo",
+		},
+		{
+			name: "self-hosted GitLab HTTPS",
+			url:  "https://gitlab.company.com/owner/repo.git",
+			want: "owner/repo",
+		},
+		{
+			name: "self-hosted GitLab SSH",
+			url:  "git@gitlab.company.com:owner/repo.git",
+			want: "owner/repo",
+		},
+		{
+			name: "HTTPS with nested group (GitLab subgroup, returns first two segments)",
+			url:  "https://gitlab.com/owner/repo/subgroup.git",
+			want: "owner/repo",
+		},
+		{
+			name: "empty string",
+			url:  "",
+			want: "",
+		},
+		{
+			name: "unrecognised format",
+			url:  "not-a-url",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractOwnerRepo(tc.url)
+			if got != tc.want {
+				t.Errorf("extractOwnerRepo(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPruneOrphanedAnalysisWorktrees verifies that pruneOrphanedAnalysisWorktrees
+// removes analysis-* directories only for slugs not present in the active
+// config, leaving active-repo worktrees untouched (issue #211).
+func TestPruneOrphanedAnalysisWorktrees(t *testing.T) {
+	// Create a temporary worktrees root to isolate the test from real state.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp) // pruneOrphanedAnalysisWorktrees uses os.UserHomeDir
+
+	wtRoot := tmp + "/.clawflow/worktrees"
+
+	// active repo: owner__active  →  analysis-main should survive
+	activeSlugDir := wtRoot + "/owner__active"
+	_ = os.MkdirAll(activeSlugDir+"/analysis-main", 0o755)
+
+	// orphaned repo: owner__gone  →  analysis-main should be removed
+	orphanSlugDir := wtRoot + "/owner__gone"
+	_ = os.MkdirAll(orphanSlugDir+"/analysis-main", 0o755)
+
+	// non-analysis dir inside orphaned slug: must NOT be touched
+	_ = os.MkdirAll(orphanSlugDir+"/issue-42-2025-01-01T00-00-00Z", 0o755)
+
+	cfg := &config.Config{
+		Repos: map[string]config.Repo{
+			"owner/active": {Enabled: true, LocalPath: "/tmp/active"},
+		},
+	}
+
+	n := pruneOrphanedAnalysisWorktrees(cfg)
+	if n != 1 {
+		t.Errorf("expected 1 worktree pruned, got %d", n)
+	}
+
+	// Active repo worktree must still exist.
+	if _, err := os.Stat(activeSlugDir + "/analysis-main"); err != nil {
+		t.Errorf("active analysis worktree was incorrectly removed: %v", err)
+	}
+
+	// Orphaned analysis dir must be gone.
+	if _, err := os.Stat(orphanSlugDir + "/analysis-main"); !os.IsNotExist(err) {
+		t.Errorf("orphaned analysis worktree was not removed (stat err: %v)", err)
+	}
+
+	// Non-analysis issue dir must be untouched.
+	if _, err := os.Stat(orphanSlugDir + "/issue-42-2025-01-01T00-00-00Z"); err != nil {
+		t.Errorf("non-analysis dir was unexpectedly removed: %v", err)
 	}
 }
 

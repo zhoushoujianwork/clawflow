@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -225,6 +226,16 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	} else {
 		fmt.Fprintf(os.Stderr, "⚠ reconcile stale runs: %v\n", err)
 		lg.Warn("run/reconcile", "err", err.Error())
+	}
+
+	// GC analysis worktrees for repos that are no longer in config. When a
+	// repo is removed from clawflow config the persistent analysis worktree
+	// it created would otherwise remain registered in the source clone's
+	// .git/worktrees/ forever (issue #211). This is cheap (just a directory
+	// scan) and idempotent.
+	if n := pruneOrphanedAnalysisWorktrees(cfg); n > 0 {
+		fmt.Fprintf(os.Stderr, "✓ pruned %d orphaned analysis worktree(s)\n", n)
+		lg.Info("run/prune_analysis_worktrees", "pruned", n)
 	}
 
 	// Snapshot the static state so the dashboard can render it even if no
@@ -1216,6 +1227,177 @@ func getAnalysisWorktreeLock(slug, base string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// validateLocalPathOrigin checks that the git repository at localPath has an
+// origin remote whose URL resolves to fullName (owner/repo). This prevents
+// cross-project contamination: if local_path accidentally points at a
+// different repo's clone, git would register the analysis worktree entry
+// inside the wrong repository's .git/worktrees/ (issue #211).
+//
+// The check is best-effort: if we cannot determine the origin URL (no git,
+// offline, custom setup) we log a warning and allow the operation to proceed
+// rather than blocking the operator entirely.
+func validateLocalPathOrigin(localPath, fullName string) error {
+	out, err := exec.Command("git", "-C", localPath, "remote", "get-url", "origin").Output()
+	if err != nil {
+		// Can't validate (no remote, offline, non-git dir) — allow with warning.
+		fmt.Fprintf(os.Stderr, "  ⚠ cannot verify local_path origin for %s (get-url failed: %v); proceeding\n", fullName, err)
+		return nil
+	}
+	remoteURL := strings.TrimSpace(string(out))
+	parsed := extractOwnerRepo(remoteURL)
+	if parsed == "" {
+		// Unrecognised URL format — allow with warning.
+		fmt.Fprintf(os.Stderr, "  ⚠ cannot parse origin URL %q for %s; proceeding without validation\n", remoteURL, fullName)
+		return nil
+	}
+	if !strings.EqualFold(parsed, fullName) {
+		return fmt.Errorf(
+			"local_path %q origin is %q (parsed: %q), expected %q — "+
+				"local_path is misconfigured or shared across repos; "+
+				"fix local_path in your clawflow config to avoid cross-project worktree contamination (issue #211)",
+			localPath, remoteURL, parsed, fullName,
+		)
+	}
+	return nil
+}
+
+// extractOwnerRepo parses owner/repo out of common git remote URL formats:
+//   - https://github.com/owner/repo
+//   - https://github.com/owner/repo.git
+//   - git@github.com:owner/repo.git
+//   - https://gitlab.company.com/owner/repo
+//
+// Returns "" if the format is not recognised.
+func extractOwnerRepo(rawURL string) string {
+	rawURL = strings.TrimSuffix(rawURL, ".git")
+
+	// SSH: git@host:owner/repo
+	if strings.HasPrefix(rawURL, "git@") {
+		// git@github.com:owner/repo → owner/repo
+		if idx := strings.Index(rawURL, ":"); idx >= 0 {
+			return rawURL[idx+1:]
+		}
+		return ""
+	}
+
+	// HTTPS / HTTP
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	// path is "/owner/repo" — strip leading slash and take exactly two segments
+	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	return parts[0] + "/" + parts[1]
+}
+
+// pruneOrphanedAnalysisWorktrees scans ~/.clawflow/worktrees/*/analysis-* and
+// removes any analysis worktree whose slug no longer corresponds to a
+// configured + enabled repo. This GC runs during each `clawflow run` reconcile
+// pass so that repos removed from config don't leave permanent git worktree
+// entries cluttering the source clone (issue #211).
+//
+// The approach:
+//  1. Build the set of active slugs from cfg.
+//  2. Scan ~/.clawflow/worktrees/* for slug dirs that are NOT in the active set.
+//  3. For each orphaned slug dir, remove any analysis-* subdirs via
+//     removeAnalysisWorktree.
+//
+// Returns the number of worktrees removed.
+func pruneOrphanedAnalysisWorktrees(cfg *config.Config) int {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0
+	}
+	wtRoot := filepath.Join(home, ".clawflow", "worktrees")
+
+	// Build set of active slug directories from current config.
+	activeSlugs := make(map[string]struct{}, len(cfg.Repos))
+	for fullName, repoCfg := range cfg.Repos {
+		if !repoCfg.Enabled {
+			continue
+		}
+		activeSlugs[strings.ReplaceAll(fullName, "/", "__")] = struct{}{}
+	}
+
+	slugDirs, err := os.ReadDir(wtRoot)
+	if err != nil {
+		return 0 // worktrees dir not yet created
+	}
+
+	removed := 0
+	for _, slugEntry := range slugDirs {
+		if !slugEntry.IsDir() {
+			continue
+		}
+		slug := slugEntry.Name()
+		if _, active := activeSlugs[slug]; active {
+			continue // still in use — keep it
+		}
+		// Orphaned slug: remove all analysis-* worktrees inside it.
+		slugDir := filepath.Join(wtRoot, slug)
+		analysisEntries, err := os.ReadDir(slugDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range analysisEntries {
+			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "analysis-") {
+				continue
+			}
+			wtPath := filepath.Join(slugDir, entry.Name())
+			if removeAnalysisWorktree(wtPath) {
+				fmt.Fprintf(os.Stderr, "  ✓ pruned orphaned analysis worktree: %s\n", wtPath)
+				removed++
+			}
+		}
+	}
+	return removed
+}
+
+// removeAnalysisWorktree removes a single analysis worktree directory along
+// with its git registration. It reads the .git pointer file inside the
+// worktree to locate the owning repository, then calls
+// `git worktree remove --force` so the .git/worktrees/<name> metadata is also
+// cleaned up. Falls back to `os.RemoveAll` if the git step fails.
+//
+// Returns true if any cleanup was performed.
+func removeAnalysisWorktree(wtPath string) bool {
+	// Read the .git pointer file to find the owning clone's git dir.
+	// Format: "gitdir: /path/to/clone/.git/worktrees/<name>\n"
+	gitFile := filepath.Join(wtPath, ".git")
+	data, err := os.ReadFile(gitFile)
+	if err == nil {
+		line := strings.TrimSpace(string(data))
+		if after, ok := strings.CutPrefix(line, "gitdir:"); ok {
+			// mainGitWorktreesEntry = /path/to/clone/.git/worktrees/<name>
+			mainGitWorktreesEntry := strings.TrimSpace(after)
+			// mainGitDir = /path/to/clone/.git
+			mainGitDir := filepath.Dir(filepath.Dir(mainGitWorktreesEntry))
+			// mainRepoPath = /path/to/clone
+			mainRepoPath := filepath.Dir(mainGitDir)
+			rm := exec.Command("git", "-C", mainRepoPath, "worktree", "remove", "--force", wtPath)
+			rm.Stdout = os.Stderr
+			rm.Stderr = os.Stderr
+			if rmErr := rm.Run(); rmErr == nil {
+				// git worktree remove already deleted the directory.
+				return true
+			}
+			// git step failed — fall through to os.RemoveAll and manual prune.
+		}
+	}
+
+	// Fallback: delete the directory directly.
+	if _, statErr := os.Stat(wtPath); statErr == nil {
+		if removeErr := os.RemoveAll(wtPath); removeErr != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ could not remove analysis worktree dir %s: %v\n", wtPath, removeErr)
+			return false
+		}
+	}
+	return true
+}
+
 // ensureAnalysisWorktree provisions or refreshes a persistent read-only
 // analysis worktree at ~/.clawflow/worktrees/<slug>/analysis-<base>.
 //
@@ -1241,6 +1423,16 @@ func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResul
 	slug := strings.ReplaceAll(fullName, "/", "__")
 	localPath := repoCfg.LocalPath
 	wtPath := filepath.Join(home, ".clawflow", "worktrees", slug, "analysis-"+base)
+
+	// Validate that localPath's git origin matches fullName before we
+	// register any worktree against it. A misconfigured local_path (e.g.
+	// pointing at the wrong clone, or shared across repos) would cause
+	// git to register the worktree entry inside the wrong repository's
+	// .git/worktrees/, producing the cross-project contamination described
+	// in issue #211.
+	if err := validateLocalPathOrigin(localPath, fullName); err != nil {
+		return worktreeResult{}, func() {}, err
+	}
 
 	// Serialize setup/refresh within this process so concurrent analysis
 	// operators on the same repo don't race on fetch+reset.
