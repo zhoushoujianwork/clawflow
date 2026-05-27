@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -18,6 +19,7 @@ func NewWorktreeCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newWorktreeCreateCmd())
 	cmd.AddCommand(newWorktreeRemoveCmd())
+	cmd.AddCommand(newWorktreePruneCmd())
 	return cmd
 }
 
@@ -132,6 +134,88 @@ func newWorktreeRemoveCmd() *cobra.Command {
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("issue")
+	return cmd
+}
+
+func newWorktreePruneCmd() *cobra.Command {
+	var dryRun bool
+
+	cmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Remove persistent analysis worktrees left over from past runs",
+		Long: `Scans ~/.clawflow/worktrees/*/analysis-* and removes analysis worktrees
+that are no longer needed. By default every found analysis worktree is removed;
+use --dry-run to preview what would be deleted without making any changes.
+
+Analysis worktrees are persistent by design (they are reused across runs for
+performance), but they can accumulate over time and remain registered in the
+source clone's .git/worktrees/ indefinitely. Run 'clawflow worktree prune'
+to clean them up.`,
+		Example: `  # Preview what would be removed
+  clawflow worktree prune --dry-run
+
+  # Remove all analysis worktrees
+  clawflow worktree prune`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("home dir: %w", err)
+			}
+			wtRoot := filepath.Join(home, ".clawflow", "worktrees")
+
+			slugDirs, err := os.ReadDir(wtRoot)
+			if err != nil {
+				if os.IsNotExist(err) {
+					fmt.Println("no worktrees directory found — nothing to prune")
+					return nil
+				}
+				return fmt.Errorf("read worktrees dir: %w", err)
+			}
+
+			found := 0
+			removed := 0
+			for _, slugEntry := range slugDirs {
+				if !slugEntry.IsDir() {
+					continue
+				}
+				slugDir := filepath.Join(wtRoot, slugEntry.Name())
+				entries, err := os.ReadDir(slugDir)
+				if err != nil {
+					continue
+				}
+				for _, entry := range entries {
+					if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "analysis-") {
+						continue
+					}
+					wtPath := filepath.Join(slugDir, entry.Name())
+					found++
+					if dryRun {
+						fmt.Printf("would remove: %s\n", wtPath)
+						continue
+					}
+					if removeAnalysisWorktree(wtPath) {
+						fmt.Printf("removed: %s\n", wtPath)
+						removed++
+					} else {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warn: could not remove %s\n", wtPath)
+					}
+				}
+			}
+
+			if found == 0 {
+				fmt.Println("no analysis worktrees found")
+				return nil
+			}
+			if dryRun {
+				fmt.Printf("\n%d analysis worktree(s) would be removed (re-run without --dry-run to apply)\n", found)
+			} else {
+				fmt.Printf("\n%d/%d analysis worktree(s) removed\n", removed, found)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview removals without making any changes")
 	return cmd
 }
 
