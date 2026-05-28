@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off } from 'lucide-react'
+import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off, FolderOpen } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -50,6 +50,7 @@ function RepoDetail() {
   const [binding, setBinding] = useState(false)
   const [allIssues, setAllIssues] = useState<IssueEntry[]>([])
   const [hostname, setHostname] = useState<string>('')
+  const [ideScheme, setIdeScheme] = useState('vscode://file/')
 
   const cloneNow = useCallback(() => {
     if (!repo || cloning) return
@@ -90,6 +91,16 @@ function RepoDetail() {
       setPending((Array.isArray(allPending) ? allPending : []).filter((p: PendingEntry) => p.repo === fullName))
       setAllIssues((Array.isArray(allIssuesData) ? allIssuesData : []).filter((i: IssueEntry) => i.repo === fullName))
       if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+      if (settings?.global?.default_ide) {
+        const ide = settings.global.default_ide as string
+        const schemeMap: Record<string, string> = {
+          vscode: 'vscode://file/',
+          cursor: 'cursor://file/',
+          qoder: 'qoder://file/',
+          'vscode-insiders': 'vscode-insiders://file/',
+        }
+        setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
+      }
     })
   }, [fullName])
 
@@ -251,6 +262,18 @@ function RepoDetail() {
               >
                 <MessageSquare className="w-3 h-3" /> chat
               </button>
+              {repo.local_path && (
+                <>
+                  <span>·</span>
+                  <a
+                    href={`${ideScheme}${repo.local_path}?windowId=_blank`}
+                    title={`Open in IDE: ${repo.local_path}`}
+                    className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline"
+                  >
+                    <FolderOpen className="w-3 h-3" /> open
+                  </a>
+                </>
+              )}
             </div>
           </div>
 
