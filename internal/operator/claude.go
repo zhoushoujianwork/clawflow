@@ -306,6 +306,9 @@ func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, 
 	cmd.Dir = workdir
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
 	cmd.Stderr = os.Stderr
+	// Run claude as its own process-group leader so the deadline kill below
+	// can reap the entire subtree, not just the direct child (issue #213).
+	setProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -315,15 +318,17 @@ func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, 
 		return "", fmt.Errorf("claude start: %w", err)
 	}
 
-	// Guard: if the context fires while we're reading (e.g. orphaned child
-	// processes keep the pipe open after the main claude process is killed),
-	// close stdout to unblock the scanner. exec.CommandContext kills the
-	// direct child but not its grandchildren, so without this the scanner
-	// can block indefinitely past the deadline.
+	// Guard: when the context fires (deadline / cancellation), exec.CommandContext
+	// only SIGKILLs the direct claude child — its Bash tool grandchildren
+	// (`git fetch`, `clawflow issue list`, …) are orphaned and keep the stdout
+	// pipe open, hanging the run far past the deadline (issue #213). Signal the
+	// whole process group to bring the subtree down, then close stdout so the
+	// scanner unblocks even if something still holds the write end.
 	pipeGuardDone := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
+			terminateProcessGroup(cmd)
 			_ = stdout.Close()
 		case <-pipeGuardDone:
 		}
