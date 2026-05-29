@@ -873,30 +873,21 @@ function PasswordInput({
   )
 }
 
-// MODEL_PRESETS is the curated dropdown list. Empty value (the
-// default-marker option) means "inherit whatever DefaultChatModel /
-// DefaultEvalModel / DefaultOperatorModel resolves to". Three groups:
+// MODEL_PRESETS are the combobox suggestion entries (rendered into a
+// <datalist> by ModelSelect). We keep only the family aliases here:
+// they are the most portable (work on Anthropic direct, Kiro, cc-proxy)
+// and always resolve to the tier's latest model, so users default to the
+// newest version instead of pinning themselves to a stale dashed/dot ID.
 //
-//   - aliases: most portable (work on Anthropic direct, Kiro, cc-proxy)
-//   - dash form: Anthropic standard, pinned versions
-//   - dot form: Kiro proxy specific (matches its /v1/models verbatim,
-//     including the 1M-context Sonnet 4.6 it ships)
-//
-// A user typing in their own value (e.g. claude-haiku-4-5-20251001 to
-// pin to the dated release) still gets surfaced as a "(custom)" entry.
+// These are suggestions only — the combobox still accepts free input, so
+// users who need to pin a specific version (e.g. claude-opus-4-7) or
+// target a custom / non-Anthropic gateway can type any model ID. An empty
+// value keeps the "inherit default" semantics the backend expects.
 // Exported so ProvidersSection can reuse the same list.
 export const MODEL_PRESETS = [
-  // family aliases — recommended default
   'haiku',
   'sonnet',
   'opus',
-  // Anthropic dashed IDs — pin a specific version
-  'claude-haiku-4-5',
-  'claude-sonnet-4-6',
-  'claude-opus-4-7',
-  // Kiro proxy dot IDs — match its /v1/models listing
-  'claude-sonnet-4.6',
-  'claude-opus-4.6',
 ] as const
 
 

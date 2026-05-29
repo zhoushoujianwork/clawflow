@@ -437,6 +437,16 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
             />
           </Field>
 
+          <div className="flex items-start gap-3">
+            <div className="w-28 shrink-0" />
+            <p className="flex-1 text-[10px] text-muted-foreground/70 leading-relaxed">
+              Type an alias (opus / sonnet / haiku) to always track that tier's
+              latest model; type a full model ID to pin that exact version;
+              custom providers can enter any model name they expose. Leave blank
+              to use the default shown above.
+            </p>
+          </div>
+
           <Field label="Enabled">
             <input
               type="checkbox"
@@ -481,6 +491,9 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
   )
 }
 
+// ModelSelect is a single editable combobox (native <input list> +
+// <datalist>): pick an alias suggestion or type any custom model ID.
+// Empty value keeps the "inherit default" semantics the backend expects.
 function ModelSelect({
   value, onChange, defaultLabel, ariaLabel,
 }: {
@@ -489,31 +502,25 @@ function ModelSelect({
   defaultLabel: string
   ariaLabel: string
 }) {
-  const inPresets = (MODEL_PRESETS as readonly string[]).includes(value)
+  // Stable, unique datalist id per field so the three comboboxes don't
+  // share (and clobber) one another's suggestion list.
+  const listId = `model-presets-${ariaLabel.replace(/\s+/g, '-').toLowerCase()}`
   return (
     <div className="flex-1 flex flex-col gap-1">
-      <select
-        value={inPresets || value === '' ? value : '__custom__'}
-        onChange={e => { if (e.target.value !== '__custom__') onChange(e.target.value) }}
-        className="text-sm font-mono px-2 py-1 border border-border rounded bg-background"
-        aria-label={ariaLabel}
-      >
-        <option value="">(default — {defaultLabel})</option>
-        {value !== '' && !inPresets && (
-          <option value="__custom__">{value} (custom)</option>
-        )}
-        {MODEL_PRESETS.map(m => (
-          <option key={m} value={m}>{m}</option>
-        ))}
-      </select>
       <input
         type="text"
+        list={listId}
         value={value}
         onChange={e => onChange(e.target.value)}
-        placeholder="or type a custom model ID…"
-        className="text-xs font-mono px-2 py-1 border border-border rounded bg-background text-muted-foreground"
-        aria-label={`${ariaLabel} custom`}
+        placeholder={`default — ${defaultLabel}`}
+        className="text-sm font-mono px-2 py-1 border border-border rounded bg-background"
+        aria-label={ariaLabel}
       />
+      <datalist id={listId}>
+        {MODEL_PRESETS.map(m => (
+          <option key={m} value={m} />
+        ))}
+      </datalist>
     </div>
   )
 }
