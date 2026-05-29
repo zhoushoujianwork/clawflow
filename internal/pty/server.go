@@ -13,10 +13,37 @@ import (
 	creackpty "github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
+	"github.com/zhoushoujianwork/clawflow/internal/webguard"
 )
 
+// originGuard, when non-nil, restricts which Origins may open a /ws/pty
+// WebSocket. /ws/pty spawns a Bash-capable `clawflow chat`, so an
+// unrestricted CheckOrigin let any cross-origin page open a shell —
+// ConfigureOriginGuard installs the same whitelist the HTTP layer uses.
+// Until configured it stays nil and CheckOrigin is permissive, preserving
+// behavior for embedders that don't set up a guard.
+var originGuard *webguard.Guard
+
+// ConfigureOriginGuard pins the /ws/pty Origin whitelist to the same
+// host:port-derived set the `clawflow web` HTTP middleware enforces. Call
+// once at server startup, before any WebSocket can arrive.
+func ConfigureOriginGuard(host string, port int) {
+	originGuard = webguard.New(host, port)
+}
+
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: checkOrigin,
+}
+
+// checkOrigin rejects WebSocket upgrades from origins outside the
+// configured whitelist. A missing Origin (non-browser client) is allowed
+// for parity with the HTTP guard; browsers always attach Origin on WS
+// handshakes, so cross-site pages are reliably caught.
+func checkOrigin(r *http.Request) bool {
+	if originGuard == nil {
+		return true
+	}
+	return originGuard.OriginAllowed(r.Header.Get("Origin"))
 }
 
 // WebSocket close codes the browser uses to signal user intent.
