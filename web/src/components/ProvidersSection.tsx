@@ -28,6 +28,7 @@ import {
   AlertCircle,
   X,
   FlaskConical,
+  ChevronDown,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { MODEL_PRESETS } from '../routes/_app.settings'
@@ -491,9 +492,14 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
   )
 }
 
-// ModelSelect is a single editable combobox (native <input list> +
-// <datalist>): pick an alias suggestion or type any custom model ID.
-// Empty value keeps the "inherit default" semantics the backend expects.
+// ModelSelect is a single editable combobox: type any custom model ID, or
+// click the chevron to pick an alias suggestion. We hand-roll the dropdown
+// instead of using a native <datalist> because the native control filters
+// suggestions by the current input — once the field already holds an alias
+// (e.g. "opus"), the popup collapses to that one match and looks like there
+// is nothing else to choose, and its arrow/popup styling can't be themed.
+// This custom list always shows the full alias set when open. Empty value
+// keeps the "inherit default" semantics the backend expects.
 function ModelSelect({
   value, onChange, defaultLabel, ariaLabel,
 }: {
@@ -502,25 +508,66 @@ function ModelSelect({
   defaultLabel: string
   ariaLabel: string
 }) {
-  // Stable, unique datalist id per field so the three comboboxes don't
-  // share (and clobber) one another's suggestion list.
-  const listId = `model-presets-${ariaLabel.replace(/\s+/g, '-').toLowerCase()}`
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  // Close the dropdown when the user clicks anywhere outside the combobox.
+  useEffect(() => {
+    if (!open) return
+    function onDocMouseDown(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    return () => document.removeEventListener('mousedown', onDocMouseDown)
+  }, [open])
+
   return (
-    <div className="flex-1 flex flex-col gap-1">
-      <input
-        type="text"
-        list={listId}
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        placeholder={`default — ${defaultLabel}`}
-        className="text-sm font-mono px-2 py-1 border border-border rounded bg-background"
-        aria-label={ariaLabel}
-      />
-      <datalist id={listId}>
-        {MODEL_PRESETS.map(m => (
-          <option key={m} value={m} />
-        ))}
-      </datalist>
+    <div ref={wrapRef} className="flex-1 flex flex-col gap-1 relative">
+      <div className="relative">
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => setOpen(true)}
+          placeholder={`default — ${defaultLabel}`}
+          className="w-full text-sm font-mono px-2 py-1 pr-7 border border-border rounded bg-background"
+          aria-label={ariaLabel}
+        />
+        <button
+          type="button"
+          tabIndex={-1}
+          onClick={() => setOpen(o => !o)}
+          className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground"
+          aria-label={`Toggle ${ariaLabel} suggestions`}
+        >
+          <ChevronDown className="w-4 h-4" />
+        </button>
+      </div>
+      {open && (
+        <ul
+          role="listbox"
+          className="absolute z-10 top-full mt-1 w-full bg-background border border-border rounded shadow-md py-1 max-h-48 overflow-auto"
+        >
+          {MODEL_PRESETS.map(m => (
+            <li key={m}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={value === m}
+                onClick={() => { onChange(m); setOpen(false) }}
+                className={cn(
+                  'w-full text-left text-sm font-mono px-2 py-1 hover:bg-secondary/60',
+                  value === m && 'bg-secondary/40',
+                )}
+              >
+                {m}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
