@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -78,20 +79,68 @@ func TriggerRun(repo string, issue int) bool {
 		args = append(args, "--issue", fmt.Sprintf("%d", issue))
 	}
 
-	cmd := exec.Command(self, args...)
+	// Watchdog: bound the entire subprocess lifetime. A `clawflow run`
+	// that wedges on a hung downstream call (e.g. a git fetch blocked on
+	// a credential prompt, or a network read that never returns) would
+	// otherwise pin runActive=true forever — and because the periodic
+	// scheduler in `clawflow web` only fires the next run once this one
+	// exits, a single hung run permanently stalls auto-run. See issue
+	// #216, where a run sat idle for 8h+ after reconcile and froze the
+	// web scheduler. The window is deliberately generous (a healthy
+	// multi-operator run finishes well within it) and the run process
+	// also self-terminates earlier via its own overall budget; this is
+	// the harder, process-level backstop for the case where the run
+	// cannot unwind itself.
+	watchdog := runWatchdogTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), watchdog)
+
+	cmd := exec.CommandContext(ctx, self, args...)
 	cmd.Env = os.Environ()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// exec.CommandContext's default cancel only SIGKILLs the direct
+	// child; the run spawns its own descendants (claude, git, ssh) that
+	// would be orphaned. Reuse killProcessTree so the whole tree dies.
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			killProcessTree(cmd.Process.Pid)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 30 * time.Second
 
 	go func() {
 		defer func() {
+			cancel()
 			runMu.Lock()
 			runActive = false
 			runMu.Unlock()
 		}()
 		_ = cmd.Run()
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr,
+				"[run-watchdog] clawflow run exceeded %s and was force-killed (issue #216 safeguard); auto-run scheduler unblocked\n",
+				watchdog)
+		}
 	}()
 	return true
+}
+
+// runWatchdogTimeout returns how long TriggerRun lets a `clawflow run`
+// subprocess live before force-killing its process tree. It is derived
+// from the per-operator agent_timeout setting: 2× the per-operator
+// budget plus a 30-minute grace window. With the default 60-minute
+// agent_timeout this is 150 minutes — far longer than any healthy run,
+// far shorter than the indefinite hang of issue #216. It is also kept
+// strictly larger than the run process's own overall self-budget so a
+// healthy-but-slow run self-terminates (with a goroutine dump) before
+// this external backstop ever trips.
+func runWatchdogTimeout() time.Duration {
+	sec := 3600
+	if cfg, err := config.Load(); err == nil && cfg.Settings.AgentTimeout > 0 {
+		sec = cfg.Settings.AgentTimeout
+	}
+	return time.Duration(sec)*time.Second*2 + 30*time.Minute
 }
 
 // HandleRun handles POST /api/run — triggers `clawflow run` in background.
@@ -151,9 +200,9 @@ type cancelRequest struct {
 }
 
 type cancelResponse struct {
-	Status string `json:"status"`            // "cancelled" | "already_dead" | "not_locked"
-	PID    int    `json:"pid,omitempty"`     // owner PID we signaled (informational)
-	Killed []int  `json:"killed,omitempty"`  // every PID we sent SIGTERM to (parent + descendants)
+	Status string `json:"status"`           // "cancelled" | "already_dead" | "not_locked"
+	PID    int    `json:"pid,omitempty"`    // owner PID we signaled (informational)
+	Killed []int  `json:"killed,omitempty"` // every PID we sent SIGTERM to (parent + descendants)
 }
 
 // HandleRunCancel handles POST /api/run/cancel. Body: {repo, issue}.

@@ -132,8 +132,15 @@ func cloneRepo(ownerRepo, dest string, repoCfg config.Repo, progress io.Writer, 
 	c := exec.Command("git", "clone", cloneURL, dest)
 	c.Stdout = progress
 	c.Stderr = progress
-	// Prevent git from waiting for interactive password input
-	c.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// Prevent git from waiting for interactive input: GIT_TERMINAL_PROMPT=0
+	// blocks HTTP credential prompts, and the SSH BatchMode/ConnectTimeout
+	// options block passphrase prompts and bound the TCP connect for
+	// git-over-SSH. Without the SSH guard a clone over SSH can hang
+	// indefinitely on a key passphrase prompt (same class as issue #216).
+	c.Env = append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10",
+	)
 	return c.Run()
 }
 

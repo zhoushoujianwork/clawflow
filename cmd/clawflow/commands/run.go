@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -163,6 +164,28 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 
 	lg.Info("run/start", "pid", os.Getpid(), "version", Version, "only_repo", onlyRepo, "only_issue", onlyIssue, "timeout", timeout)
 	defer lg.Info("run/exit", "pid", os.Getpid())
+
+	// Self-watchdog: a downstream call that blocks forever (a git
+	// subprocess stuck on a credential prompt, a network read that never
+	// returns) can leave this process alive indefinitely — exactly what
+	// issue #216 observed, where the run sat idle for 8h+ after reconcile
+	// and stalled the web auto-run scheduler waiting on it. A plain
+	// context deadline does NOT save us here: cancelling a context cannot
+	// interrupt a blocking exec.Command or syscall. So we arm an
+	// independent timer that, on expiry, dumps every goroutine stack (the
+	// diagnostic the original report lacked — it pinpoints the exact
+	// blocked call) and force-exits. This covers standalone/cron runs;
+	// web-spawned runs are additionally bounded by api.TriggerRun's
+	// process-level watchdog.
+	overall := overallRunBudget(timeout)
+	selfWatchdog := time.AfterFunc(overall, func() {
+		lg.Warn("run/watchdog", "pid", os.Getpid(), "msg", "overall run budget exceeded — likely a hung git/network call; dumping stacks and exiting", "budget", overall.String())
+		fmt.Fprintf(os.Stderr, "\n⚠ clawflow run exceeded its overall budget %s — likely a hung git/network call.\n  Dumping goroutine stacks and exiting (issue #216 safeguard).\n", overall)
+		dumpGoroutineStacks(lg)
+		snapshot.ReleaseRunLock()
+		os.Exit(1)
+	})
+	defer selfWatchdog.Stop()
 
 	// Auto-pull: sync config from Gist before scanning so this machine
 	// picks up any changes pushed from other machines (e.g. new repos,
@@ -604,7 +627,7 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 	}
 
 	var (
-		issueLocks  sync.Map    // key: "<repo>#<issue>" → *sync.Mutex
+		issueLocks  sync.Map // key: "<repo>#<issue>" → *sync.Mutex
 		fired       []firedKey
 		firedMu     sync.Mutex
 		rateLimited atomic.Bool // set when any worker hits a rate limit
@@ -1611,6 +1634,113 @@ func isGitLockError(output string) bool {
 //
 // makeCmd is called once per attempt so each retry gets a fresh *exec.Cmd
 // (reusing a Cmd after Run returns is not supported by the standard library).
+// overallRunBudget returns the wall-clock budget for a whole `clawflow
+// run` process before the self-watchdog force-exits it. The per-operator
+// timeout already bounds each claude/operator; this bounds everything
+// else (scan, git fetch/push, pilot waves, snapshot writes) as a whole.
+// It is 2× the per-operator budget, floored at per-op + 30 minutes, so a
+// healthy multi-operator run never trips it. Kept strictly below
+// api.TriggerRun's watchdog so a slow run self-terminates (with a stack
+// dump) before the external process-level kill.
+func overallRunBudget(perOp time.Duration) time.Duration {
+	if perOp <= 0 {
+		perOp = 60 * time.Minute
+	}
+	budget := perOp * 2
+	if floor := perOp + 30*time.Minute; budget < floor {
+		budget = floor
+	}
+	return budget
+}
+
+// dumpGoroutineStacks writes a full goroutine stack trace to
+// ~/.clawflow/logs/run-stackdump-<ts>.txt. Called by the self-watchdog
+// when a run overruns its budget so the next investigation can see the
+// exact blocked call — the missing evidence noted in issue #216. Best
+// effort: errors are reported to stderr but never block the exit path.
+func dumpGoroutineStacks(lg *clog.Logger) {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ stack dump: cannot resolve home dir: %v\n%s\n", err, buf[:n])
+		return
+	}
+	dir := filepath.Join(home, ".clawflow", "logs")
+	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ stack dump: mkdir %s: %v\n%s\n", dir, mkErr, buf[:n])
+		return
+	}
+	path := filepath.Join(dir, fmt.Sprintf("run-stackdump-%s.txt", time.Now().UTC().Format("20060102T150405Z")))
+	if wErr := os.WriteFile(path, buf[:n], 0o644); wErr != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ stack dump: write %s: %v\n%s\n", path, wErr, buf[:n])
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  → goroutine stack dump written to %s\n", path)
+	if lg != nil {
+		lg.Warn("run/watchdog", "stackdump", path)
+	}
+}
+
+// gitAttemptTimeout bounds a single git subprocess invocation inside
+// runGitWithRetry. A package var (not const) so tests can shrink it.
+var gitAttemptTimeout = 3 * time.Minute
+
+// hardenedGitEnv augments a git command's environment so it can never
+// block on interactive input. GIT_TERMINAL_PROMPT=0 makes git fail
+// instead of prompting for HTTP credentials; the BatchMode/ConnectTimeout
+// SSH options do the same for git-over-SSH (no passphrase prompt, bounded
+// TCP connect). base may be nil, in which case the current environment is
+// used. See issue #216 — the run hung as an `S+` foreground process with
+// ~0 CPU, the classic signature of git waiting on a credential prompt.
+func hardenedGitEnv(base []string) []string {
+	if base == nil {
+		base = os.Environ()
+	}
+	return append(base,
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10",
+	)
+}
+
+// runBoundedGit runs a git command with a hard wall-clock ceiling. The
+// command is started in its own process group so that on timeout we can
+// SIGKILL the entire group (git plus any ssh/credential-helper children),
+// not just the git parent. Returns the command's own error on normal
+// completion, or a descriptive timeout error if the ceiling was hit.
+// timeout <= 0 means "no ceiling" (delegates straight to cmd.Run).
+func runBoundedGit(cmd *exec.Cmd, timeout time.Duration) error {
+	if timeout <= 0 {
+		return cmd.Run()
+	}
+	// Own process group so a negative-PID kill reaps descendants too.
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		if cmd.Process != nil {
+			// Negative PID targets the whole process group.
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		<-done // reap the now-killed process so we don't leak it
+		return fmt.Errorf("git command exceeded %s and was killed (no network response or stuck on credentials)", timeout)
+	}
+}
+
 func runGitWithRetry(makeCmd func() *exec.Cmd) error {
 	const maxGitRetries = 5
 	const baseGitDelay = 100 * time.Millisecond
@@ -1622,15 +1752,26 @@ func runGitWithRetry(makeCmd func() *exec.Cmd) error {
 		mw := io.MultiWriter(os.Stderr, &buf)
 		cmd.Stdout = mw
 		cmd.Stderr = mw
+		// Never let a git subprocess block forever. Two complementary
+		// guards (issue #216):
+		//   1. hardenedGitEnv disables interactive credential/SSH prompts
+		//      so git fails fast instead of waiting on a TTY that will
+		//      never answer (the most likely cause of the 8h hang).
+		//   2. runBoundedGit kills the whole git process group if the
+		//      attempt overruns gitAttemptTimeout, so a black-holed
+		//      network read can't wedge the run indefinitely.
+		cmd.Env = hardenedGitEnv(cmd.Env)
 
-		err := cmd.Run()
+		err := runBoundedGit(cmd, gitAttemptTimeout)
 		if err == nil {
 			return nil
 		}
 
 		output := buf.String()
 		if !isGitLockError(output) {
-			// Permanent error — return immediately, no retry.
+			// Permanent error (incl. attempt timeout) — return
+			// immediately, no retry. A timeout won't fix itself by
+			// retrying and would only delay surfacing the failure.
 			return err
 		}
 		if attempt == maxGitRetries {
