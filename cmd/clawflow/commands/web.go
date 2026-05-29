@@ -25,6 +25,7 @@ import (
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	ptyserver "github.com/zhoushoujianwork/clawflow/internal/pty"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
+	"github.com/zhoushoujianwork/clawflow/internal/webguard"
 )
 
 // webLog is the package-level web.log handle, set by NewWebCmd's RunE
@@ -338,9 +339,22 @@ here — run 'clawflow run' first if you want fresh data.`,
 				_, _ = w.Write(indexHTML)
 			})
 
+			// Harden the server against browser-borne attacks that
+			// loopback binding does NOT stop: DNS-rebinding (Host-header
+			// validation on every request) and cross-site CSRF (Origin
+			// validation on state-changing methods). The /ws/pty upgrader
+			// reuses the exact same whitelist via ConfigureOriginGuard, so
+			// the WS path can't drift looser than the HTTP path.
+			guard := webguard.New(host, port)
+			ptyserver.ConfigureOriginGuard(host, port)
+			if webguard.IsWildcardHost(host) {
+				fmt.Fprintf(os.Stderr, "⚠ binding %s exposes the dashboard beyond loopback; Host-header rebinding protection is disabled for this bind (Origin/CSRF checks still apply)\n", addr)
+				lg.Warn("web/host_unguarded", "host", host, "port", port)
+			}
+
 			srv := &http.Server{
 				Addr:              addr,
-				Handler:           mux,
+				Handler:           guard.Middleware(mux),
 				ReadHeaderTimeout: 5 * time.Second,
 			}
 
