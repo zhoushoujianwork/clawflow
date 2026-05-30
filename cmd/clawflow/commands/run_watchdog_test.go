@@ -46,6 +46,46 @@ func TestOverallRunBudgetAlwaysExceedsPerOp(t *testing.T) {
 	}
 }
 
+// Issue #221: the VCS scan/poll phase (after run/reconcile, before the first
+// run/lock) had no bound of its own — one ListSubIssues per open issue, each
+// capped only by the 30s HTTP timeout, so a throttled endpoint amplified N
+// sequential calls into a multi-hour silent hang that held run.lock. The scan
+// phase now gets its own deadline; this verifies the budget math.
+func TestScanPhaseBudget(t *testing.T) {
+	cases := []struct {
+		name  string
+		perOp time.Duration
+		want  time.Duration
+	}{
+		// perOp/4, clamped to [5m, 15m].
+		{"default-hour", time.Hour, 15 * time.Minute},  // 15m hits the cap
+		{"two-hours", 2 * time.Hour, 15 * time.Minute}, // still capped at 15m
+		{"forty-min", 40 * time.Minute, 10 * time.Minute},
+		{"small-perop", 10 * time.Minute, 5 * time.Minute}, // floor
+		{"zero", 0, 15 * time.Minute},                      // falls back to 60m → cap
+		{"negative", -5 * time.Minute, 15 * time.Minute},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := scanPhaseBudget(c.perOp); got != c.want {
+				t.Errorf("scanPhaseBudget(%s) = %s, want %s", c.perOp, got, c.want)
+			}
+		})
+	}
+}
+
+func TestScanPhaseBudgetAlwaysBelowOverallBudget(t *testing.T) {
+	// The scan budget must always fire well before the overall-run watchdog,
+	// otherwise a hung poll could still pin run.lock until the hard kill.
+	for _, perOp := range []time.Duration{time.Minute, 30 * time.Minute, time.Hour, 3 * time.Hour} {
+		scan := scanPhaseBudget(perOp)
+		overall := overallRunBudget(perOp)
+		if scan >= overall {
+			t.Errorf("scanPhaseBudget(%s)=%s must be < overallRunBudget(%s)=%s", perOp, scan, perOp, overall)
+		}
+	}
+}
+
 func TestHardenedGitEnvDisablesPrompts(t *testing.T) {
 	env := hardenedGitEnv([]string{"PATH=/usr/bin"})
 

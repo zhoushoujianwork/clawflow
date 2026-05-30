@@ -183,6 +183,10 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		fmt.Fprintf(os.Stderr, "\n⚠ clawflow run exceeded its overall budget %s — likely a hung git/network call.\n  Dumping goroutine stacks and exiting (issue #216 safeguard).\n", overall)
 		dumpGoroutineStacks(lg)
 		snapshot.ReleaseRunLock()
+		// os.Exit skips the deferred run/exit, so emit it here with the
+		// reason — this is the observable signature the watchdog path must
+		// leave behind (issue #221 acceptance: run/exit reason=timeout).
+		lg.Info("run/exit", "pid", os.Getpid(), "reason", "timeout", "budget", overall.String())
 		os.Exit(1)
 	})
 	defer selfWatchdog.Stop()
@@ -285,6 +289,18 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// and queue the (issue × first-matching-operator) pairs that are
 	// eligible to run. Issues locked by another process (local lockfile)
 	// are skipped at queue time.
+	// Bound the whole scan/poll phase with its own deadline. Each VCS call
+	// is already capped at 30s by the HTTP client, but the phase issues one
+	// ListSubIssues per open issue across every repo — when GitHub throttles,
+	// N sequential 30s calls amplify into hours of "silent" hang after
+	// run/reconcile and before the first run/lock (issue #221). The scan
+	// context is propagated into the HTTP layer so in-flight requests abort
+	// when the budget expires, well before the overall-run watchdog.
+	scanBudget := scanPhaseBudget(timeout)
+	scanCtx, cancelScan := context.WithTimeout(ctx, scanBudget)
+	defer cancelScan()
+	lg.Info("run/scan_phase", "pid", os.Getpid(), "repos", len(allRepos), "budget", scanBudget.String())
+
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
 	for fullName, repoCfg := range allRepos {
@@ -301,7 +317,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 			continue
 		}
 		executeHere := onlyRepo == "" || onlyRepo == fullName
-		repoPending, repoJobs, err := scanRepoOnce(reg, fullName, repoCfg, executeHere, onlyIssue, &globalIssues)
+		repoPending, repoJobs, err := scanRepoOnce(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, &globalIssues)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
 		}
@@ -447,14 +463,25 @@ func deterministicSkipReason(op *operator.Operator, repoCfg config.Repo) string 
 // model) are stripped here before matching, so an issue that was left
 // labeled by a crashed run from an older binary cleanly re-enters the
 // pipeline without manual intervention.
-func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, executeHere bool, onlyIssue int, allIssues *[]snapshot.IssueEntry) ([]snapshot.PendingEntry, []*runJob, error) {
+func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, repoCfg config.Repo, executeHere bool, onlyIssue int, allIssues *[]snapshot.IssueEntry) ([]snapshot.PendingEntry, []*runJob, error) {
+	scanStart := time.Now()
+	runLog.Info("run/scan", "repo", fullName, "phase", "start")
 	client, err := newVCSClient(repoCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("vcs client: %w", err)
 	}
+	// Propagate the scan-phase deadline into the HTTP layer so a slow /
+	// rate-limited endpoint can't stretch this poll into hours; in-flight
+	// requests abort when the budget expires (issue #221).
+	if ctx != nil {
+		if rc, ok := client.(interface{ SetRequestContext(context.Context) }); ok {
+			rc.SetRequestContext(ctx)
+		}
+	}
 
 	issues, err := client.ListOpenIssues(fullName)
 	if err != nil {
+		runLog.Warn("run/scan", "repo", fullName, "phase", "list_issues_err", "elapsed", time.Since(scanStart).Round(time.Millisecond), "err", err.Error())
 		return nil, nil, fmt.Errorf("list open issues: %w", err)
 	}
 
@@ -467,6 +494,15 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 		seen[iss.Number] = true
 	}
 	for _, iss := range issues {
+		// Stop enriching once the scan budget is spent. Each ListSubIssues
+		// call is a separate request; under throttling they each burn the
+		// full 30s HTTP timeout, so without this guard N issues turn one
+		// slow repo into a multi-hour hang (issue #221). Remaining sub-issues
+		// are simply not discovered this pass and picked up on the next run.
+		if ctx != nil && ctx.Err() != nil {
+			runLog.Warn("run/scan", "repo", fullName, "phase", "subissue_budget_exceeded", "elapsed", time.Since(scanStart).Round(time.Millisecond), "err", ctx.Err().Error())
+			break
+		}
 		subs, subErr := client.ListSubIssues(fullName, iss.Number)
 		if subErr != nil {
 			debugf("[%s] list sub-issues of #%d: %v (skipping)", fullName, iss.Number, subErr)
@@ -598,6 +634,7 @@ func scanRepoOnce(reg *operator.Registry, fullName string, repoCfg config.Repo, 
 		fmt.Fprintf(os.Stderr, "[%s] snapshot list issues: %v\n", fullName, sErr)
 	}
 
+	runLog.Info("run/scan", "repo", fullName, "phase", "done", "issues", len(issues), "pending", len(pending), "jobs", len(jobs), "elapsed", time.Since(scanStart).Round(time.Millisecond))
 	return pending, jobs, nil
 }
 
@@ -1642,6 +1679,26 @@ func isGitLockError(output string) bool {
 // healthy multi-operator run never trips it. Kept strictly below
 // api.TriggerRun's watchdog so a slow run self-terminates (with a stack
 // dump) before the external process-level kill.
+// scanPhaseBudget bounds the VCS scan/poll phase (listing open issues +
+// enriching with sub-issues across every repo). The scan is normally a few
+// seconds; a slow or rate-limited endpoint is the pathological case. We give
+// it a generous fraction of the per-operator timeout so a healthy poll never
+// trips it, while still firing long before the overall-run watchdog so a hung
+// poll can't hold run.lock for hours (issue #221).
+func scanPhaseBudget(perOp time.Duration) time.Duration {
+	if perOp <= 0 {
+		perOp = 60 * time.Minute
+	}
+	b := perOp / 4
+	if b < 5*time.Minute {
+		b = 5 * time.Minute
+	}
+	if b > 15*time.Minute {
+		b = 15 * time.Minute
+	}
+	return b
+}
+
 func overallRunBudget(perOp time.Duration) time.Duration {
 	if perOp <= 0 {
 		perOp = 60 * time.Minute

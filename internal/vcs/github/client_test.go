@@ -1,10 +1,12 @@
 package github_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
@@ -204,5 +206,37 @@ func TestInitLabels_SkipsExisting(t *testing.T) {
 	}
 	if len(created) != 1 || created[0] != "new-label" {
 		t.Errorf("expected only 'new-label' created, got %v", created)
+	}
+}
+
+// TestSetRequestContextCancelsHangingCall is the issue #221 regression: a slow
+// / hung VCS endpoint must abort when the scan-phase context expires, rather
+// than blocking up to the 30s HTTP client timeout (and, across N issues,
+// amplifying into a multi-hour silent hang). Binding a short-deadline context
+// via SetRequestContext makes the in-flight request return promptly.
+func TestSetRequestContextCancelsHangingCall(t *testing.T) {
+	// Handler hangs until the client aborts the request. When the client's
+	// context deadline fires it drops the connection, the server-side request
+	// context is cancelled, and the handler returns — so srv.Close() during
+	// cleanup never blocks on an in-flight request.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.New("test-token", srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	client.SetRequestContext(ctx)
+
+	start := time.Now()
+	_, err := client.ListOpenIssues("owner/repo")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected a context-deadline error from a hung endpoint, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("request did not abort on context deadline: took %s (expected ~150ms)", elapsed)
 	}
 }

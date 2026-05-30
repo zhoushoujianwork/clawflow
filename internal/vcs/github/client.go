@@ -3,6 +3,7 @@ package github
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,23 @@ type Client struct {
 	token   string
 	baseURL string // default: https://api.github.com
 	http    *http.Client
+	ctx     context.Context // optional; bounds every request (see SetRequestContext)
+}
+
+// SetRequestContext binds ctx to every subsequent request so the caller's
+// deadline / cancellation can abort in-flight HTTP calls. Without it a slow or
+// rate-limited GitHub endpoint is only bounded by the 30s client timeout, and
+// the scan phase issues one request per open issue (ListSubIssues) — N
+// sequential 30s calls amplify into hours of "silent" hang after run/reconcile
+// (issue #221). The run-scan budget is propagated through here so the poll
+// phase respects the run timeout and can be cancelled.
+func (c *Client) SetRequestContext(ctx context.Context) { c.ctx = ctx }
+
+func (c *Client) reqContext() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
 }
 
 // New returns a GitHub client. baseURL is optional (for GHE); pass "" for github.com.
@@ -42,7 +60,7 @@ func (c *Client) do(method, path string, body any) ([]byte, int, error) {
 		}
 		r = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, c.baseURL+path, r)
+	req, err := http.NewRequestWithContext(c.reqContext(), method, c.baseURL+path, r)
 	if err != nil {
 		return nil, 0, err
 	}
