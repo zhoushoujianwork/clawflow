@@ -4,6 +4,7 @@ package gitlab
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,20 @@ type Client struct {
 	token   string
 	baseURL string // e.g. https://gitlab.company.com/api/v4
 	http    *http.Client
+	ctx     context.Context // optional; bounds every request (see SetRequestContext)
+}
+
+// SetRequestContext binds ctx to every subsequent request so the caller's
+// deadline / cancellation can abort in-flight HTTP calls. Without it a slow or
+// rate-limited endpoint is only bounded by the 30s client timeout, letting the
+// scan phase amplify into hours of silent hang (issue #221).
+func (c *Client) SetRequestContext(ctx context.Context) { c.ctx = ctx }
+
+func (c *Client) reqContext() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
 }
 
 // New returns a GitLab client. baseURL should be the GitLab instance root,
@@ -43,7 +58,7 @@ func (c *Client) do(method, path string, body url.Values) ([]byte, int, error) {
 	if body != nil {
 		r = strings.NewReader(body.Encode())
 	}
-	req, err := http.NewRequest(method, c.baseURL+path, r)
+	req, err := http.NewRequestWithContext(c.reqContext(), method, c.baseURL+path, r)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -69,7 +84,7 @@ func (c *Client) doJSON(method, path string, body any) ([]byte, int, error) {
 		}
 		r = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, c.baseURL+path, r)
+	req, err := http.NewRequestWithContext(c.reqContext(), method, c.baseURL+path, r)
 	if err != nil {
 		return nil, 0, err
 	}
