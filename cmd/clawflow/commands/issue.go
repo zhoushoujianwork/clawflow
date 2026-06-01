@@ -2,8 +2,10 @@ package commands
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -158,8 +160,48 @@ func printSearchHits(hits []searchHit, jsonOutput bool, query string) error {
 	return nil
 }
 
+// imageExts is the set of attachment extensions accepted by --image.
+var imageExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
+}
+
+// appendImageMarkdown validates each --image path, uploads it via the VCS
+// client, and appends the returned image markdown to body. On any failure
+// (missing file, unsupported type, upload error) it aborts and returns the
+// error rather than silently degrading to text-only — so the user never
+// believes an image was attached when it wasn't. GitHub returns
+// vcs.ErrNotSupported (no public attachment API); that is wrapped into a
+// friendly hint pointing users to the web UI.
+func appendImageMarkdown(client vcs.Client, repo, body string, images []string) (string, error) {
+	for _, img := range images {
+		ext := strings.ToLower(filepath.Ext(img))
+		if !imageExts[ext] {
+			return "", fmt.Errorf("unsupported image type %q (supported: png, jpg, jpeg, gif): %s", ext, img)
+		}
+		if fi, err := os.Stat(img); err != nil {
+			return "", fmt.Errorf("cannot read image %q: %w", img, err)
+		} else if fi.IsDir() {
+			return "", fmt.Errorf("image path %q is a directory", img)
+		}
+		md, err := client.UploadAttachment(repo, img)
+		if err != nil {
+			if errors.Is(err, vcs.ErrNotSupported) {
+				return "", fmt.Errorf("GitHub does not support CLI image attachments — paste the image in the web UI instead (file: %s)", img)
+			}
+			return "", fmt.Errorf("upload image %q: %w", img, err)
+		}
+		if body == "" {
+			body = md
+		} else {
+			body = body + "\n\n" + md
+		}
+	}
+	return body, nil
+}
+
 func newIssueCreateCmd() *cobra.Command {
 	var repo, title, body string
+	var images []string
 
 	cmd := &cobra.Command{
 		Use:     "create",
@@ -167,6 +209,10 @@ func newIssueCreateCmd() *cobra.Command {
 		Example: "  clawflow issue create --repo owner/repo --title \"bug: something broken\" --body \"details...\"",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			body, err = appendImageMarkdown(client, repo, body, images)
 			if err != nil {
 				return err
 			}
@@ -181,6 +227,7 @@ func newIssueCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().StringVar(&title, "title", "", "issue title (required)")
 	cmd.Flags().StringVar(&body, "body", "", "issue body")
+	cmd.Flags().StringArrayVar(&images, "image", nil, "local image to attach (png/jpg/jpeg/gif; repeatable; GitLab only)")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("title")
 	return cmd
@@ -286,13 +333,18 @@ func newIssueListCmd() *cobra.Command {
 func newIssueCommentCmd() *cobra.Command {
 	var repo, body string
 	var issue int
+	var images []string
 
 	cmd := &cobra.Command{
 		Use:     "comment",
 		Short:   "Post a comment on an issue",
-		Example: "  clawflow issue comment --repo owner/repo --issue 7 --body \"looks good\"",
+		Example: "  clawflow issue comment --repo owner/repo --issue 7 --body \"looks good\"\n  clawflow issue comment --repo owner/repo --issue 7 --body \"see screenshot\" --image bug.png",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			body, err = appendImageMarkdown(client, repo, body, images)
 			if err != nil {
 				return err
 			}
@@ -305,10 +357,16 @@ func newIssueCommentCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number (required)")
-	cmd.Flags().StringVar(&body, "body", "", "comment body (required)")
+	cmd.Flags().StringVar(&body, "body", "", "comment body (required unless --image is given)")
+	cmd.Flags().StringArrayVar(&images, "image", nil, "local image to attach (png/jpg/jpeg/gif; repeatable; GitLab only)")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("issue")
-	_ = cmd.MarkFlagRequired("body")
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		if body == "" && len(images) == 0 {
+			return fmt.Errorf("at least one of --body or --image is required")
+		}
+		return nil
+	}
 	return cmd
 }
 

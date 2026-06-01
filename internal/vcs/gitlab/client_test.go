@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -229,5 +231,67 @@ func TestInitLabels_SkipsExisting(t *testing.T) {
 	}
 	if len(created) != 1 || created[0] != "new-label" {
 		t.Errorf("expected only 'new-label' created, got %v", created)
+	}
+}
+
+func TestUploadAttachment(t *testing.T) {
+	var gotContentType, gotFormName, gotFileName string
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"POST " + projectPath + "/uploads": func(w http.ResponseWriter, r *http.Request) {
+			gotContentType = r.Header.Get("Content-Type")
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatalf("parse multipart: %v", err)
+			}
+			for name, fhs := range r.MultipartForm.File {
+				gotFormName = name
+				if len(fhs) > 0 {
+					gotFileName = fhs[0].Filename
+				}
+			}
+			jsonResp(w, 201, map[string]string{
+				"alt":      "shot",
+				"url":      "/uploads/abc123/shot.png",
+				"markdown": "![shot](/uploads/abc123/shot.png)",
+			})
+		},
+	})
+
+	dir := t.TempDir()
+	imgPath := dir + "/shot.png"
+	if err := os.WriteFile(imgPath, []byte("\x89PNG fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	md, err := client.UploadAttachment("ns/group/repo", imgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md != "![shot](/uploads/abc123/shot.png)" {
+		t.Errorf("unexpected markdown: %q", md)
+	}
+	if !strings.HasPrefix(gotContentType, "multipart/form-data") {
+		t.Errorf("expected multipart request, got Content-Type %q", gotContentType)
+	}
+	if gotFormName != "file" {
+		t.Errorf("expected form field 'file', got %q", gotFormName)
+	}
+	if gotFileName != "shot.png" {
+		t.Errorf("expected filename 'shot.png', got %q", gotFileName)
+	}
+}
+
+func TestUploadAttachmentServerError(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"POST " + projectPath + "/uploads": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "file too big", http.StatusRequestEntityTooLarge)
+		},
+	})
+	dir := t.TempDir()
+	imgPath := dir + "/big.png"
+	if err := os.WriteFile(imgPath, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.UploadAttachment("ns/group/repo", imgPath); err == nil {
+		t.Fatal("expected error on HTTP 413, got nil")
 	}
 }
