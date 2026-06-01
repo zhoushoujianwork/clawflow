@@ -244,6 +244,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/labels/remove", api.HandleRemoveLabel)
 			mux.HandleFunc("/api/run", api.HandleRun)
 			mux.HandleFunc("/api/run/status", api.HandleRunStatus)
+			mux.HandleFunc("/api/run/stream", api.HandleRunStream)
 			mux.HandleFunc("/api/run/pause", api.HandleRunPause)
 			mux.HandleFunc("/api/run/cancel", api.HandleRunCancel)
 			mux.HandleFunc("/api/version", api.HandleVersion)

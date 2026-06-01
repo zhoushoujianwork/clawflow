@@ -795,12 +795,29 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		IssueState:  j.sub.State,
 		StartedAt:   startedAt.UTC(),
 		Status:      "running",
+		Stage:       "lock-acquired",
 	}
 	if err := snapshot.WriteRunMeta(runDir, runningMeta); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ✗ initial run meta: %v\n", prefix, err)
 	}
 	if _, err := snapshot.WriteRunsIndex(50); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (running): %v\n", prefix, err)
+	}
+
+	// emitStage persists a fine-grained lifecycle transition while the run is
+	// still in flight: it advances runningMeta.Stage and rewrites BOTH meta.json
+	// AND runs.json. Rewriting runs.json on every stage is the crux of issue
+	// #199 — the dashboard polls runs.json (not meta.json), so without this the
+	// frontend was frozen on the start-of-run snapshot and intermediate stages
+	// were invisible. Status stays "running" throughout; Stage is advisory.
+	emitStage := func(stage string) {
+		runningMeta.Stage = stage
+		if err := snapshot.WriteRunMeta(runDir, runningMeta); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ stage meta (%s): %v\n", prefix, stage, err)
+		}
+		if _, err := snapshot.WriteRunsIndex(50); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (%s): %v\n", prefix, stage, err)
+		}
 	}
 
 	// Fetch comments before resolveWorkdir so we can parse the
@@ -889,6 +906,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		EventWriter:   eventsFile,
 		ResumeContext: resumeCtx,
 		Language:      j.language,
+		StageFunc:     emitStage,
 	})
 	runDur := time.Since(runStart).Round(time.Second)
 	if eventsFile != nil {
@@ -911,6 +929,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			IssueState:  j.sub.State,
 			StartedAt:   startedAt.UTC(),
 			Status:      "finalizing",
+			Stage:       "finalizing",
 			Summary:     output,
 		}
 		if err := snapshot.WriteRunMeta(runDir, finalizingMeta); err != nil {

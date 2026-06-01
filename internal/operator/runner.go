@@ -12,6 +12,18 @@ import (
 	"time"
 )
 
+// Lifecycle stages emitted via RunOptions.StageFunc as Run progresses. These
+// are fine-grained, observable phases WITHIN the runner's coarse "running"
+// status — they let the dashboard surface intermediate progress instead of a
+// frozen start-of-run snapshot (issue #199). Kept as exported consts so the
+// caller (cmd/clawflow/commands/run.go) and tests share one source of truth.
+const (
+	StageClaudeStarted  = "claude-started"
+	StageParsingOutcome = "parsing-outcome"
+	StagePostingComment = "posting-comment"
+	StageApplyingLabel  = "applying-label"
+)
+
 // ErrNoOutcomeMarker is returned by Run when claude produced non-empty output
 // but the output contained no <!-- clawflow:outcome=… --> marker. This is
 // treated as a recoverable failure (not a permanent one) so the circuit
@@ -107,6 +119,21 @@ type RunOptions struct {
 	// RunClaude; tests inject a fake that returns canned output without
 	// spawning a process.
 	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, systemPrompt ...string) (string, error)
+
+	// StageFunc, if non-nil, is invoked at each lifecycle transition with a
+	// Stage* constant so the caller can persist intermediate progress (e.g.
+	// rewrite meta.json + runs.json for the dashboard). It runs synchronously
+	// on the runner's goroutine, so callers should keep it cheap and must not
+	// block. Nil is the common case for tests and non-dashboard callers.
+	StageFunc func(stage string)
+}
+
+// emitStage safely invokes a (possibly nil) stage callback. Centralizing the
+// nil-check keeps the call sites in Run/runWriteBack uncluttered.
+func emitStage(fn func(string), stage string) {
+	if fn != nil {
+		fn(stage)
+	}
 }
 
 // writeBackTimeout is the maximum time allowed for the post-claude VCS
@@ -132,6 +159,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	if runFunc == nil {
 		runFunc = RunClaude
 	}
+	emitStage(opts.StageFunc, StageClaudeStarted)
 	output, err := runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Role, systemPrompt)
 	if err != nil {
 		// Failure path: do NOT pollute the issue with a comment. The
@@ -150,6 +178,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		return trimmed, "", nil
 	}
 
+	emitStage(opts.StageFunc, StageParsingOutcome)
 	outcome, body := parseOutcome(trimmed)
 
 	// Guard: if the operator produced output but no outcome marker, the model
@@ -187,6 +216,9 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		done <- runWriteBack(v, op, sub, opts, body, outcome)
 	}()
 
+	// Note: the write-back stages (posting-comment / applying-label) are
+	// emitted from inside runWriteBack so they reflect the actual VCS calls.
+
 	select {
 	case err := <-done:
 		if err != nil {
@@ -205,6 +237,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 // via a goroutine in Run.
 func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outcome string) error {
 	if body != "" {
+		emitStage(opts.StageFunc, StagePostingComment)
 		if err := v.PostIssueComment(opts.Repo, sub.Number, body); err != nil {
 			return fmt.Errorf("post result comment: %w", err)
 		}
@@ -212,6 +245,7 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 	}
 
 	if outcome != "" {
+		emitStage(opts.StageFunc, StageApplyingLabel)
 		if !outcomeAllowed(op, outcome) {
 			fmt.Fprintf(os.Stderr,
 				"  ⚠ operator %q produced disallowed outcome %q (allowed: %v); skipping label add\n",
