@@ -322,6 +322,31 @@ func TestBuildPilotContext_StandardPlays(t *testing.T) {
 		t.Error("missing PATROL summary line format")
 	}
 
+	// Play 5 — dependency-unlock re-push
+	if !containsStr(prompt, "Dependency-unlock re-push") {
+		t.Error("missing Play 5 (dependency-unlock re-push) header")
+	}
+	if !containsStr(prompt, "label remove") || !containsStr(prompt, "agent-skipped") {
+		t.Error("missing agent-skipped label-remove action in Play 5")
+	}
+	if !containsStr(prompt, "named dependency is closed/merged") {
+		t.Error("missing all-dependencies-merged gate in Play 5")
+	}
+	if !containsStr(prompt, "unresolved design") {
+		t.Error("missing unresolved-design-item guard in Play 5 (must not auto-re-push on open design questions)")
+	}
+	if !containsStr(prompt, "ping-pong") {
+		t.Error("missing human ping-pong / re-skip guard in Play 5")
+	}
+	if !containsStr(prompt, "per wake") {
+		t.Error("missing per-wake cap on dependency-unlock re-pushes")
+	}
+
+	// Hard rules narrow exception converged onto Play 5
+	if !containsStr(prompt, "ONLY during an active Play 5") {
+		t.Error("missing Play 5-scoped narrow exception for agent-skipped removal in Hard rules")
+	}
+
 	// Hard rules updated to allow narrow Edit/push exceptions
 	if !containsStr(prompt, "Edit") || !containsStr(prompt, "ONLY inside an") {
 		t.Error("hard rules missing the active-play scope on Edit/Write")
