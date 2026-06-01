@@ -305,6 +305,41 @@ Be conservative: require at least one strong positive signal (e.g.
 A genuinely idle project with no recent runs should still write
 ` + "`PATROL: clean`" + `, not trigger a false drift alarm.
 
+### Play 4 — Auto-merge recovery
+
+**Trigger:** an OPEN PR that got stuck after a transient auto-merge race.
+All of these must hold:
+- the PR is still open with ` + "`mergeable_state`" + ` = ` + "`clean`" + ` (no conflict —
+  ` + "`clawflow pr view <n>`" + ` shows the state),
+- its linked issue carries ` + "`agent-implemented`" + `, and
+- a ` + "`🤖 Auto-merge failed`" + ` comment exists on the issue or PR.
+
+That failure comment is only ever posted when the repo has ` + "`auto_merge`" + `
+enabled, so its presence is itself the proof you're in an auto-merge repo —
+you don't need to look the config up separately. This is the death-zone
+case from issue #224: ` + "`implement`" + ` already produced ` + "`agent-implemented`" + `
+(so it won't re-fire), auto_merge tried once and hit a transient GitHub
+405 "Base branch was modified" (a sibling PR landed mid-merge), and no
+other play covers a ` + "`clean`" + ` open PR. You are the backstop.
+
+**Action:**
+
+    clawflow pr view --repo <owner/repo> --pr <n>    # confirm open + mergeable_state=clean
+    clawflow pr merge --repo <owner/repo> --pr <n>   # retry the merge exactly once
+
+` + "`clawflow pr merge`" + ` deletes the merged head branch by default, so the
+Play 1 cleanup happens automatically — no separate ` + "`push --delete`" + ` needed.
+
+**Bounds:**
+- ONLY when ` + "`mergeable_state`" + ` = ` + "`clean`" + `. If it's ` + "`dirty`" + `/conflicting,
+  that's Play 2's job, not this one. Never force a merge.
+- ONLY when a ` + "`🤖 Auto-merge failed`" + ` comment is present — that marker is
+  the contract that gates this play. No marker → not your call; leave it.
+- **Max ONE auto-merge recovery per wake.** Cap blast radius.
+- Retry the merge at most once. If it fails again, post a one-line PR
+  comment noting the recovery attempt failed and stop — do NOT keep
+  hammering or force-push. A human or the next wake can pick it up.
+
 ## Hard rules
 
 You CAN, via Bash:
@@ -320,7 +355,8 @@ You CAN, via Bash:
   forbidden.
 
 You CANNOT:
-- Merge PRs (` + "`auto_merge`" + ` owns that), or push to a base/default branch.
+- Merge PRs (` + "`auto_merge`" + ` owns that, except the narrow Play 4 recovery
+  below), or push to a base/default branch.
 - Modify CI configuration or change repo settings.
 - Delete issues or PRs, change milestones, transfer issues.
 - Add ` + "`ready-for-agent`" + `, ` + "`agent-evaluated`" + `, ` + "`agent-implemented`" + `,
@@ -336,6 +372,10 @@ You CANNOT:
 - MAY ` + "`push --force-with-lease`" + ` to a PR's own head branch only
   during Play 2.
 - MAY ` + "`push --delete`" + ` a remote branch only during Play 1.
+- MAY ` + "`clawflow pr merge`" + ` a PR ONLY during an active Play 4 recovery —
+  i.e. an open ` + "`clean`" + ` PR with a ` + "`🤖 Auto-merge failed`" + ` comment and an
+  ` + "`agent-implemented`" + ` issue. One retry, never force. This is the only
+  case where Pilot touches merge; auto_merge owns every other path.
 
 ## Updating your own memory (context.md)
 

@@ -1,13 +1,16 @@
 package commands
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // TestDeterministicSkip pins down which (operator × repo-config) combinations
@@ -175,6 +178,158 @@ func TestRunGitWithRetry_LockErrorSucceedsOnRetry(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("expected 2 calls (1 lock failure + 1 success), got %d", calls)
+	}
+}
+
+// TestIsTransientMergeError verifies that only known retryable base-moved
+// races are classified as transient (issue #224).
+func TestIsTransientMergeError(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{
+			name: "405 base branch modified",
+			s:    `github merge PR: HTTP 405: {"message":"Base branch was modified. Review and try the merge again.","status":"405"}`,
+			want: true,
+		},
+		{
+			name: "message only",
+			s:    "Base branch was modified",
+			want: true,
+		},
+		{
+			name: "bare 405 status",
+			s:    "HTTP 405: method not allowed",
+			want: true,
+		},
+		{
+			name: "branch protection is permanent",
+			s:    "github merge PR: HTTP 405: required status checks have not passed",
+			want: true, // contains 405; acceptable — re-check gate stops bad retries
+		},
+		{
+			name: "auth failure is permanent",
+			s:    "github merge PR: HTTP 403: Resource not accessible by integration",
+			want: false,
+		},
+		{
+			name: "real conflict is permanent",
+			s:    "Pull Request is not mergeable",
+			want: false,
+		},
+		{
+			name: "empty",
+			s:    "",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTransientMergeError(tc.s); got != tc.want {
+				t.Errorf("isTransientMergeError(%q) = %v, want %v", tc.s, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMergeWithRetry_SuccessFirstTry verifies no retry overhead when the
+// first merge attempt succeeds.
+func TestMergeWithRetry_SuccessFirstTry(t *testing.T) {
+	merges, rechecks, sleeps := 0, 0, 0
+	err := mergeWithRetry("test",
+		func() error { merges++; return nil },
+		func() (vcs.MergeStatus, error) { rechecks++; return vcs.MergeStatusClean, nil },
+		func(time.Duration) { sleeps++ },
+	)
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if merges != 1 || rechecks != 0 || sleeps != 0 {
+		t.Errorf("merges=%d rechecks=%d sleeps=%d, want 1/0/0", merges, rechecks, sleeps)
+	}
+}
+
+// TestMergeWithRetry_TransientThenSuccess verifies a 405 race is retried
+// after a clean re-check and then succeeds.
+func TestMergeWithRetry_TransientThenSuccess(t *testing.T) {
+	merges := 0
+	err := mergeWithRetry("test",
+		func() error {
+			merges++
+			if merges == 1 {
+				return errors.New(`HTTP 405: {"message":"Base branch was modified.","status":"405"}`)
+			}
+			return nil
+		},
+		func() (vcs.MergeStatus, error) { return vcs.MergeStatusClean, nil },
+		func(time.Duration) {},
+	)
+	if err != nil {
+		t.Fatalf("expected nil after retry, got %v", err)
+	}
+	if merges != 2 {
+		t.Errorf("expected 2 merge attempts, got %d", merges)
+	}
+}
+
+// TestMergeWithRetry_PermanentNoRetry verifies a non-transient failure is
+// returned immediately without re-checking or retrying.
+func TestMergeWithRetry_PermanentNoRetry(t *testing.T) {
+	merges, rechecks := 0, 0
+	want := errors.New("HTTP 403: Resource not accessible by integration")
+	err := mergeWithRetry("test",
+		func() error { merges++; return want },
+		func() (vcs.MergeStatus, error) { rechecks++; return vcs.MergeStatusClean, nil },
+		func(time.Duration) {},
+	)
+	if err == nil {
+		t.Fatal("expected error for permanent failure")
+	}
+	if merges != 1 || rechecks != 0 {
+		t.Errorf("merges=%d rechecks=%d, want 1/0 (no retry on permanent error)", merges, rechecks)
+	}
+}
+
+// TestMergeWithRetry_BaseWentDirty verifies that if a real conflict appears
+// during the transient window, the retry loop stops and reports it instead
+// of merging a no-longer-clean base.
+func TestMergeWithRetry_BaseWentDirty(t *testing.T) {
+	merges := 0
+	err := mergeWithRetry("test",
+		func() error {
+			merges++
+			return errors.New("HTTP 405: Base branch was modified")
+		},
+		func() (vcs.MergeStatus, error) { return vcs.MergeStatusConflict, nil },
+		func(time.Duration) {},
+	)
+	if err == nil {
+		t.Fatal("expected error when base went non-clean")
+	}
+	if merges != 1 {
+		t.Errorf("expected exactly 1 merge attempt (re-check blocked retry), got %d", merges)
+	}
+}
+
+// TestMergeWithRetry_ExhaustsRetries verifies the loop caps at the initial
+// attempt plus mergeRetryAttempts when the race never clears.
+func TestMergeWithRetry_ExhaustsRetries(t *testing.T) {
+	merges := 0
+	err := mergeWithRetry("test",
+		func() error {
+			merges++
+			return errors.New("HTTP 405: Base branch was modified")
+		},
+		func() (vcs.MergeStatus, error) { return vcs.MergeStatusClean, nil },
+		func(time.Duration) {},
+	)
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if want := 1 + mergeRetryAttempts; merges != want {
+		t.Errorf("expected %d merge attempts, got %d", want, merges)
 	}
 }
 
