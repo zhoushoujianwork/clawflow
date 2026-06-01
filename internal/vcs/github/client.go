@@ -455,6 +455,10 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		Labels      []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
+		SubIssuesSummary *struct {
+			Total     int `json:"total"`
+			Completed int `json:"completed"`
+		} `json:"sub_issues_summary"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -465,6 +469,10 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 			continue
 		}
 		issue := vcs.Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
+		if r.SubIssuesSummary != nil {
+			issue.SubIssuesTotal = r.SubIssuesSummary.Total
+			issue.SubIssuesCompleted = r.SubIssuesSummary.Completed
+		}
 		for _, l := range r.Labels {
 			issue.Labels = append(issue.Labels, l.Name)
 		}

@@ -618,17 +618,43 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	// the "all" call (sorted updated_at desc), which keeps stale
 	// ancient closed issues out of the view.
 	if snapshotIssues, sErr := client.ListIssues(fullName, "all", nil); sErr == nil {
+		// Resolve sub-issue parentage so the dashboard can nest sub-issues
+		// under their parent. Only issues whose sub_issues_summary reports
+		// children (SubIssuesTotal > 0) trigger the extra ListSubIssues
+		// call, so a repo with no sub-issues costs zero additional requests.
+		// GitLab has no native sub-issues (SubIssuesTotal stays 0), so this
+		// loop is a no-op there.
+		parentOf := map[int]int{} // child issue number → parent issue number
 		for _, iss := range snapshotIssues {
-			*allIssues = append(*allIssues, snapshot.IssueEntry{
-				Repo:        fullName,
-				IssueNumber: iss.Number,
-				IssueTitle:  iss.Title,
-				Labels:      append([]string(nil), iss.Labels...),
-				State:       iss.State,
-				CapturedAt:  capturedAt,
-				CreatedAt:   iss.CreatedAt,
-				ClosedAt:    iss.ClosedAt,
-			})
+			if iss.SubIssuesTotal == 0 {
+				continue
+			}
+			children, subErr := client.ListSubIssues(fullName, iss.Number)
+			if subErr != nil {
+				debugf("  · sub-issues of #%d: %v", iss.Number, subErr)
+				continue
+			}
+			for _, ch := range children {
+				parentOf[ch.Number] = iss.Number
+			}
+		}
+		for _, iss := range snapshotIssues {
+			entry := snapshot.IssueEntry{
+				Repo:         fullName,
+				IssueNumber:  iss.Number,
+				IssueTitle:   iss.Title,
+				Labels:       append([]string(nil), iss.Labels...),
+				State:        iss.State,
+				CapturedAt:   capturedAt,
+				CreatedAt:    iss.CreatedAt,
+				ClosedAt:     iss.ClosedAt,
+				SubTotal:     iss.SubIssuesTotal,
+				SubCompleted: iss.SubIssuesCompleted,
+			}
+			if p, ok := parentOf[iss.Number]; ok {
+				entry.ParentNumber = &p
+			}
+			*allIssues = append(*allIssues, entry)
 		}
 	} else {
 		fmt.Fprintf(os.Stderr, "[%s] snapshot list issues: %v\n", fullName, sErr)

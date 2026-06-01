@@ -54,6 +54,13 @@ export interface IssueEntry {
   labels?: string[]
   state: string // "open" | "closed"
   captured_at: string
+  // Sub-issue linkage (GitHub native; absent on GitLab). parent_number is
+  // the number of the issue this one is a sub-issue of; sub_total/
+  // sub_completed mirror the parent's sub_issues_summary. See the Go
+  // snapshot.IssueEntry for the source of truth.
+  parent_number?: number
+  sub_total?: number
+  sub_completed?: number
 }
 
 // IssueGroup is the merged per-issue view consumed by the renderer.
@@ -67,6 +74,11 @@ export interface IssueGroup {
   pending: PendingEntry[]
   labels?: string[]
   state?: string // "open" | "closed" | "unknown" (unknown = run exists but no issues.json entry)
+  // Carried through from IssueEntry so the renderer can nest sub-issues
+  // under their parent and draw the parent's ring progress.
+  parent_number?: number
+  sub_total?: number
+  sub_completed?: number
 }
 
 // SectionConfig parameterizes how groups bucket into headed sections.
@@ -110,6 +122,9 @@ export function useIssueGroups({
           pending: [],
           labels: [...(iss.labels ?? [])],
           state: iss.state,
+          parent_number: iss.parent_number,
+          sub_total: iss.sub_total,
+          sub_completed: iss.sub_completed,
         })
       }
     }
@@ -186,10 +201,10 @@ export function bucketize(
       }
     }
   }
-  // Sort each bucket by latest activity desc.
-  const sortKey = (g: IssueGroup) => g.runs[0]?.started_at || g.pending[0]?.captured_at || ''
-  const cmp = (a: IssueGroup, b: IssueGroup) => sortKey(b).localeCompare(sortKey(a))
-  for (const b of buckets) b.groups.sort(cmp)
+  // Sort each bucket by issue number descending (newest issue on top) so
+  // ordering is stable and matches the sub-issue nesting, which also sorts
+  // children by issue number desc.
+  for (const b of buckets) b.groups.sort(byIssueNumberDesc)
   return buckets
 }
 
@@ -264,7 +279,13 @@ export function IssueList({
   expanded: Set<string>
   onToggle: (key: string) => void
 }) {
-  const buckets = useMemo(() => bucketize(groups, sections), [groups, sections])
+  // Split sub-issues out of the top-level list: a group whose parent is
+  // also present is rendered nested under that parent (collapsed by
+  // default), not as its own section row. Groups whose parent is absent
+  // (e.g. parent fell outside the snapshot window) stay top-level so they
+  // never vanish. childrenOf is keyed by the parent's rowKey.
+  const { topLevel, childrenOf } = useMemo(() => splitSubIssues(groups), [groups])
+  const buckets = useMemo(() => bucketize(topLevel, sections), [topLevel, sections])
   return (
     <div className="space-y-4">
       {buckets.map(b => (
@@ -272,6 +293,7 @@ export function IssueList({
           key={b.config.title}
           config={b.config}
           groups={b.groups}
+          childrenOf={childrenOf}
           showRepo={showRepo}
           repoMap={repoMap}
           slug={slug}
@@ -290,9 +312,76 @@ export function rowKey(g: IssueGroup): string {
   return `${g.repo}#${g.issue_number}`
 }
 
+// byIssueNumberDesc sorts groups newest-issue-first. Used both for the
+// section buckets and for the nested sub-issue lists so the whole tree
+// shares one ordering.
+function byIssueNumberDesc(a: IssueGroup, b: IssueGroup): number {
+  return b.issue_number - a.issue_number
+}
+
+// splitSubIssues partitions groups into top-level rows and a parent→children
+// index. A group is treated as a child only when its parent_number resolves
+// to another group in the same repo that is actually present; otherwise it
+// stays top-level so an orphaned sub-issue is never hidden. Children are
+// sorted newest-first to match the section ordering.
+export function splitSubIssues(groups: IssueGroup[]): {
+  topLevel: IssueGroup[]
+  childrenOf: Map<string, IssueGroup[]>
+} {
+  const present = new Set(groups.map(rowKey))
+  const childrenOf = new Map<string, IssueGroup[]>()
+  const topLevel: IssueGroup[] = []
+  for (const g of groups) {
+    const parentKey = g.parent_number != null ? `${g.repo}#${g.parent_number}` : null
+    if (parentKey && present.has(parentKey)) {
+      const arr = childrenOf.get(parentKey) ?? []
+      arr.push(g)
+      childrenOf.set(parentKey, arr)
+    } else {
+      topLevel.push(g)
+    }
+  }
+  for (const arr of childrenOf.values()) arr.sort(byIssueNumberDesc)
+  return { topLevel, childrenOf }
+}
+
+// SubIssueRing draws a small donut showing how many of an issue's
+// sub-issues are completed. Green once everything is done, blue while in
+// progress. Rendered only when the issue actually has sub-issues.
+export function SubIssueRing({ completed, total }: { completed: number; total: number }) {
+  const radius = 6.5
+  const circumference = 2 * Math.PI * radius
+  const pct = total > 0 ? Math.min(1, completed / total) : 0
+  const done = total > 0 && completed >= total
+  return (
+    <span
+      className="inline-flex items-center gap-1 shrink-0"
+      title={`${completed}/${total} sub-issues done`}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" className="shrink-0 -rotate-90">
+        <circle cx="8" cy="8" r={radius} fill="none" strokeWidth="2.5" className="stroke-border" />
+        <circle
+          cx="8"
+          cy="8"
+          r={radius}
+          fill="none"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          className={done ? 'stroke-green-500' : 'stroke-blue-500'}
+          strokeDasharray={`${(circumference * pct).toFixed(2)} ${circumference.toFixed(2)}`}
+        />
+      </svg>
+      <span className="text-[11px] tabular-nums text-muted-foreground">
+        {completed}/{total}
+      </span>
+    </span>
+  )
+}
+
 function IssueSection({
   config,
   groups,
+  childrenOf,
   showRepo,
   repoMap,
   slug,
@@ -301,6 +390,7 @@ function IssueSection({
 }: {
   config: SectionConfig
   groups: IssueGroup[]
+  childrenOf: Map<string, IssueGroup[]>
   showRepo: boolean
   repoMap: RepoInfoMap
   slug?: string
@@ -343,10 +433,12 @@ function IssueSection({
           <IssueRow
             key={rowKey(g)}
             group={g}
+            childrenOf={childrenOf}
+            depth={0}
             showRepo={showRepo}
             repoMap={repoMap}
             slug={slug}
-            expanded={expanded.has(rowKey(g))}
+            expanded={expanded}
             onToggle={onToggle}
           />
         ))}
@@ -369,6 +461,8 @@ function IssueSection({
 
 function IssueRow({
   group,
+  childrenOf,
+  depth,
   showRepo,
   repoMap,
   slug,
@@ -376,15 +470,21 @@ function IssueRow({
   onToggle,
 }: {
   group: IssueGroup
+  childrenOf: Map<string, IssueGroup[]>
+  depth: number
   showRepo: boolean
   repoMap: RepoInfoMap
   slug?: string
-  expanded: boolean
+  expanded: Set<string>
   onToggle: (key: string) => void
 }) {
   const chatDrawer = useChatDrawer()
   const latest = group.runs[0]
   const k = rowKey(group)
+  const isExpanded = expanded.has(k)
+  const children = childrenOf.get(k) ?? []
+  const hasChildren = children.length > 0
+  const subTotal = group.sub_total ?? 0
   // Mode picker state: null = picker hidden, 'issue'|'edit' = picker shown
   const [showModePicker, setShowModePicker] = useState(false)
   // Menu position is computed from the trigger's bounding rect and rendered
@@ -450,11 +550,12 @@ function IssueRow({
         type="button"
         onClick={() => onToggle(k)}
         className="w-full flex items-center gap-3 px-4 py-2 hover:bg-secondary/30 text-left flex-wrap"
+        style={depth > 0 ? { paddingLeft: `${1 + depth * 1.5}rem` } : undefined}
       >
         <ChevronRight
           className={cn(
             'w-3.5 h-3.5 text-muted-foreground transition-transform shrink-0',
-            expanded && 'rotate-90',
+            isExpanded && 'rotate-90',
           )}
         />
         {showRepo && (
@@ -503,6 +604,9 @@ function IssueRow({
           <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
             queued: {group.pending.map(p => p.operator).join(', ')}
           </span>
+        )}
+        {subTotal > 0 && (
+          <SubIssueRing completed={group.sub_completed ?? 0} total={subTotal} />
         )}
         <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-16 text-right">
           {group.runs.length} {group.runs.length === 1 ? 'run' : 'runs'}
@@ -556,7 +660,25 @@ function IssueRow({
           )}
         </div>
       </button>
-      {expanded && <Timeline group={group} slug={slug} />}
+      {isExpanded && (
+        <>
+          {hasChildren &&
+            children.map(child => (
+              <IssueRow
+                key={rowKey(child)}
+                group={child}
+                childrenOf={childrenOf}
+                depth={depth + 1}
+                showRepo={showRepo}
+                repoMap={repoMap}
+                slug={slug}
+                expanded={expanded}
+                onToggle={onToggle}
+              />
+            ))}
+          <Timeline group={group} slug={slug} />
+        </>
+      )}
     </div>
   )
 }

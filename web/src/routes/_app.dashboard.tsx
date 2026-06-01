@@ -17,6 +17,7 @@ import {
 import { cn } from '../lib/utils'
 import { issueUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
+import { SubIssueRing } from '../components/IssueList'
 
 /**
  * Shape of one entry in /data/runs.json. Mirrors snapshot.RunIndexEntry on
@@ -83,6 +84,12 @@ interface Issue {
   repo: string
   issue_number: number
   state: string // "open" | "closed"
+  // Sub-issue linkage (GitHub native; absent on GitLab). See the Go
+  // snapshot.IssueEntry. Used to nest sub-issues under their parent and
+  // draw the parent's ring progress in the by-issue view.
+  parent_number?: number
+  sub_total?: number
+  sub_completed?: number
 }
 
 type StatusFilter = 'all' | 'success' | 'failed' | 'skipped' | 'running' | 'cancelled'
@@ -104,6 +111,35 @@ interface IssueGroup {
   lastActivity: string
   allRuns: Run[]
   overallStatus: Run['status']
+  /** Sub-issue linkage from issues.json (0/undefined when none). */
+  parentNumber?: number
+  subTotal: number
+  subCompleted: number
+}
+
+/** Partition issue groups into top-level rows and a parent→children index.
+ *  A group is a child only when its parentNumber resolves to another group
+ *  that is actually present; orphans stay top-level so nothing is hidden.
+ *  Children are ordered newest-issue-first to match the top-level sort. */
+function splitIssueTree(groups: IssueGroup[]): {
+  topLevel: IssueGroup[]
+  childrenOf: Map<string, IssueGroup[]>
+} {
+  const present = new Set(groups.map(g => g.key))
+  const childrenOf = new Map<string, IssueGroup[]>()
+  const topLevel: IssueGroup[] = []
+  for (const g of groups) {
+    const parentKey = g.parentNumber != null ? `${g.repo}#${g.parentNumber}` : null
+    if (parentKey && present.has(parentKey)) {
+      const arr = childrenOf.get(parentKey) ?? []
+      arr.push(g)
+      childrenOf.set(parentKey, arr)
+    } else {
+      topLevel.push(g)
+    }
+  }
+  for (const arr of childrenOf.values()) arr.sort((a, b) => b.issueNumber - a.issueNumber)
+  return { topLevel, childrenOf }
 }
 
 /** Derive overall status for an issue from its per-operator latest runs.
@@ -398,6 +434,21 @@ function Dashboard() {
     return m
   }, [issues])
 
+  // Sub-issue metadata keyed by `repo#number`, sourced from issues.json so
+  // the by-issue view can nest sub-issues under their parent and draw the
+  // parent ring even for issues whose run history is what built the group.
+  const issueMetaMap = useMemo(() => {
+    const m = new Map<string, { parentNumber?: number; subTotal: number; subCompleted: number }>()
+    for (const i of issues) {
+      m.set(`${i.repo}#${i.issue_number}`, {
+        parentNumber: i.parent_number,
+        subTotal: i.sub_total ?? 0,
+        subCompleted: i.sub_completed ?? 0,
+      })
+    }
+    return m
+  }, [issues])
+
   const { filteredRunning, filteredHistory } = useMemo(() => {
     const q = query.trim().toLowerCase()
     // Override the stale per-run issue_state with the authoritative current
@@ -461,11 +512,32 @@ function Dashboard() {
       }
       const lastActivity = runs.reduce((best, r) => (r.started_at > best ? r.started_at : best), '')
       const overallStatus = issueOverallStatus(stages)
-      groups.push({ key, repo, issueNumber, issueTitle, issueState, stages, lastActivity, allRuns: runs, overallStatus })
+      const meta = issueMetaMap.get(key)
+      groups.push({
+        key,
+        repo,
+        issueNumber,
+        issueTitle,
+        issueState,
+        stages,
+        lastActivity,
+        allRuns: runs,
+        overallStatus,
+        parentNumber: meta?.parentNumber,
+        subTotal: meta?.subTotal ?? 0,
+        subCompleted: meta?.subCompleted ?? 0,
+      })
     }
-    groups.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
+    // Sort by issue number descending (newest issue on top) to match the
+    // sub-issue nesting, which also orders children newest-first.
+    groups.sort((a, b) => b.issueNumber - a.issueNumber)
     return groups
-  }, [filteredHistory])
+  }, [filteredHistory, issueMetaMap])
+
+  // Nest sub-issues under their parent for the by-issue view. visibleCount
+  // and "Load more" operate on the top-level rows; children render inside
+  // their parent's expansion.
+  const issueTree = useMemo(() => splitIssueTree(filteredIssueGroups), [filteredIssueGroups])
 
   // Pending ignores statusFilter (queued items have no run status yet) but
   // honors repo + search filters so the user can drill into one repo's queue.
@@ -704,23 +776,25 @@ function Dashboard() {
             <p className="text-sm text-muted-foreground text-center py-6">No issues match the current filters.</p>
           ) : (
             <>
-              {filteredIssueGroups.slice(0, visibleCount).map(group => (
+              {issueTree.topLevel.slice(0, visibleCount).map(group => (
                 <IssueGroupRow
                   key={group.key}
                   group={group}
+                  childrenOf={issueTree.childrenOf}
+                  depth={0}
                   repoMap={repoMap}
-                  expanded={expandedIssues.has(group.key)}
-                  onToggleExpand={() => toggleIssueExpand(group.key)}
+                  expandedSet={expandedIssues}
+                  onToggleExpand={toggleIssueExpand}
                   onCancel={cancelRun}
                   cancellingKey={cancellingKey}
                 />
               ))}
-              {visibleCount < filteredIssueGroups.length && (
+              {visibleCount < issueTree.topLevel.length && (
                 <button
                   onClick={() => setVisibleCount(c => c + 20)}
                   className="w-full py-3 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
                 >
-                  Load more ({filteredIssueGroups.length - visibleCount} remaining)
+                  Load more ({issueTree.topLevel.length - visibleCount} remaining)
                 </button>
               )}
             </>
@@ -945,20 +1019,27 @@ function StageBadge({ operator, run }: { operator: string; run: Run | undefined 
  *  can be expanded to reveal the underlying flat run rows (drill-down). */
 function IssueGroupRow({
   group,
+  childrenOf,
+  depth,
   repoMap,
-  expanded,
+  expandedSet,
   onToggleExpand,
   onCancel,
   cancellingKey,
 }: {
   group: IssueGroup
+  childrenOf: Map<string, IssueGroup[]>
+  depth: number
   repoMap: RepoInfoMap
-  expanded: boolean
-  onToggleExpand: () => void
+  expandedSet: Set<string>
+  onToggleExpand: (key: string) => void
   onCancel: (repo: string, issue: number) => void
   cancellingKey: string | null
 }) {
   const isClosed = group.issueState === 'closed'
+  const expanded = expandedSet.has(group.key)
+  const children = childrenOf.get(group.key) ?? []
+  const hasChildren = children.length > 0
 
   // Display stages: known operators in fixed order first, then any unknown ones
   const allOperators = Array.from(group.stages.keys())
@@ -974,7 +1055,8 @@ function IssueGroupRow({
           'flex items-center gap-3 px-4 py-2.5 hover:bg-secondary/50 transition-colors cursor-pointer group',
           isClosed && 'opacity-60',
         )}
-        onClick={onToggleExpand}
+        style={depth > 0 ? { paddingLeft: `${1 + depth * 1.5}rem` } : undefined}
+        onClick={() => onToggleExpand(group.key)}
       >
         <StatusChip status={group.overallStatus} />
         <VcsIcon repo={group.repo} map={repoMap} className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
@@ -1002,6 +1084,11 @@ function IssueGroupRow({
             <StageBadge key={op} operator={op} run={group.stages.get(op)} />
           ))}
         </div>
+        {group.subTotal > 0 && (
+          <span onClick={e => e.stopPropagation()}>
+            <SubIssueRing completed={group.subCompleted} total={group.subTotal} />
+          </span>
+        )}
         <span className="text-xs text-muted-foreground shrink-0 w-16 text-right tabular-nums">
           {timeAgo(group.lastActivity)}
         </span>
@@ -1021,17 +1108,33 @@ function IssueGroupRow({
         />
       </div>
       {expanded && (
-        <div className="border-t border-border divide-y divide-border bg-secondary/20 pl-4">
-          {group.allRuns.map(r => (
-            <Row
-              key={r.path}
-              r={r}
-              repoMap={repoMap}
-              onCancel={r.status === 'running' ? onCancel : undefined}
-              cancelling={r.status === 'running' && cancellingKey === `${r.repo}#${r.issue_number}`}
-            />
-          ))}
-        </div>
+        <>
+          {hasChildren &&
+            children.map(child => (
+              <IssueGroupRow
+                key={child.key}
+                group={child}
+                childrenOf={childrenOf}
+                depth={depth + 1}
+                repoMap={repoMap}
+                expandedSet={expandedSet}
+                onToggleExpand={onToggleExpand}
+                onCancel={onCancel}
+                cancellingKey={cancellingKey}
+              />
+            ))}
+          <div className="border-t border-border divide-y divide-border bg-secondary/20 pl-4">
+            {group.allRuns.map(r => (
+              <Row
+                key={r.path}
+                r={r}
+                repoMap={repoMap}
+                onCancel={r.status === 'running' ? onCancel : undefined}
+                cancelling={r.status === 'running' && cancellingKey === `${r.repo}#${r.issue_number}`}
+              />
+            ))}
+          </div>
+        </>
       )}
     </div>
   )

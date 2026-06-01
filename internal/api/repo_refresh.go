@@ -57,18 +57,42 @@ func HandleRepoRefreshIssues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	capturedAt := time.Now().UTC()
+
+	// Resolve sub-issue parentage (GitHub native; no-op on GitLab where
+	// SubIssuesTotal stays 0). Only issues that report children incur the
+	// extra ListSubIssues call, mirroring the cron scan path in run.go.
+	parentOf := map[int]int{} // child issue number → parent issue number
+	for _, iss := range issues {
+		if iss.SubIssuesTotal == 0 {
+			continue
+		}
+		children, subErr := client.ListSubIssues(req.Repo, iss.Number)
+		if subErr != nil {
+			continue
+		}
+		for _, ch := range children {
+			parentOf[ch.Number] = iss.Number
+		}
+	}
+
 	fresh := make([]snapshot.IssueEntry, 0, len(issues))
 	for _, iss := range issues {
-		fresh = append(fresh, snapshot.IssueEntry{
-			Repo:        req.Repo,
-			IssueNumber: iss.Number,
-			IssueTitle:  iss.Title,
-			Labels:      append([]string(nil), iss.Labels...),
-			State:       iss.State,
-			CapturedAt:  capturedAt,
-			CreatedAt:   iss.CreatedAt,
-			ClosedAt:    iss.ClosedAt,
-		})
+		entry := snapshot.IssueEntry{
+			Repo:         req.Repo,
+			IssueNumber:  iss.Number,
+			IssueTitle:   iss.Title,
+			Labels:       append([]string(nil), iss.Labels...),
+			State:        iss.State,
+			CapturedAt:   capturedAt,
+			CreatedAt:    iss.CreatedAt,
+			ClosedAt:     iss.ClosedAt,
+			SubTotal:     iss.SubIssuesTotal,
+			SubCompleted: iss.SubIssuesCompleted,
+		}
+		if p, ok := parentOf[iss.Number]; ok {
+			entry.ParentNumber = &p
+		}
+		fresh = append(fresh, entry)
 	}
 
 	// Read existing issues.json so we keep entries from OTHER repos

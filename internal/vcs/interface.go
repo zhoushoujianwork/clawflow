@@ -31,6 +31,14 @@ type Issue struct {
 	// without abusing CapturedAt (which the scanner rewrites every
 	// pass and thus is not a real close timestamp).
 	ClosedAt string `json:"closed_at,omitempty"`
+	// SubIssuesTotal / SubIssuesCompleted mirror GitHub's
+	// sub_issues_summary on the issue list response: how many sub-issues
+	// this issue has, and how many of them are closed. Both zero when the
+	// issue has no sub-issues, or on platforms without native sub-issues
+	// (GitLab). Lets the dashboard render a parent's ring progress without
+	// an extra round-trip per issue.
+	SubIssuesTotal     int `json:"sub_issues_total,omitempty"`
+	SubIssuesCompleted int `json:"sub_issues_completed,omitempty"`
 }
 
 // IssueUpdate holds editable issue fields. Nil means "leave unchanged"; a

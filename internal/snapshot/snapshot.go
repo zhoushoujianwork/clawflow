@@ -826,6 +826,16 @@ type IssueEntry struct {
 	CapturedAt  time.Time `json:"captured_at"`
 	CreatedAt   string    `json:"created_at,omitempty"`
 	ClosedAt    string    `json:"closed_at,omitempty"`
+	// ParentNumber is the issue number this issue is a sub-issue of, or
+	// nil when it is a top-level issue. Resolved by the scanner from the
+	// parent's ListSubIssues call (GitHub native; always nil on GitLab).
+	// The dashboard uses it to nest sub-issues under their parent row.
+	ParentNumber *int `json:"parent_number,omitempty"`
+	// SubTotal / SubCompleted mirror the parent's sub_issues_summary:
+	// total sub-issues and how many are closed. Both zero for issues that
+	// have no sub-issues. Drives the parent row's ring progress indicator.
+	SubTotal     int `json:"sub_total,omitempty"`
+	SubCompleted int `json:"sub_completed,omitempty"`
 }
 
 // WriteIssues writes data/issues.json with all issues from monitored repos.
