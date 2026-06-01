@@ -43,6 +43,7 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewRespawnCmd())
 	// Helpers retained for operator use (invoked from SKILL.md bodies):
 	root.AddCommand(NewWorktreeCmd())
+	root.AddCommand(NewBranchCmd())
 	root.AddCommand(NewStatusCmd())
 	root.AddCommand(NewPRCheckCmd())
 	root.AddCommand(NewLangCmd())
