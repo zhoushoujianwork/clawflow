@@ -253,6 +253,14 @@ type RunMeta struct {
 	// the issue stays unlabeled and the circuit breaker counts this run.
 	// "skipped-empty" means claude produced empty output; same treatment.
 	Status  string `json:"status"`
+	// Stage is the fine-grained lifecycle phase WITHIN the coarse Status.
+	// While Status=="running" it advances through the operator lifecycle so
+	// the dashboard can show intermediate progress instead of a frozen
+	// start-of-run snapshot: "lock-acquired" → "claude-started" →
+	// "parsing-outcome" → "posting-comment" → "applying-label". It is purely
+	// advisory (the reconciler and circuit breaker key off Status, not Stage)
+	// and omitted from the wire when empty for back-compat with older runs.
+	Stage   string `json:"stage,omitempty"`
 	PRUrl   string `json:"pr_url,omitempty"`
 	Error   string `json:"error,omitempty"`
 	Summary string `json:"summary,omitempty"` // operator's final text output

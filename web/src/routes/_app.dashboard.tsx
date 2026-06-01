@@ -33,6 +33,9 @@ interface Run {
   started_at: string
   ended_at?: string
   status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'skipped-empty'
+  /** fine-grained lifecycle phase while status === 'running' (issue #199):
+   *  lock-acquired → claude-started → parsing-outcome → posting-comment → applying-label */
+  stage?: string
   summary?: string
   pr_url?: string
   error?: string
@@ -98,6 +101,18 @@ type ViewMode = 'run' | 'issue'
 /** Ordered list of known pipeline stages for badge display. Unknown operators
  *  are appended after these in discovery order. */
 const KNOWN_STAGES = ['classify', 'implement', 'evaluate-feat', 'evaluate-bug', 'reply-comment', 'decompose']
+
+/** Ordered lifecycle phases an operator passes through WHILE running (issue
+ *  #199). Distinct from KNOWN_STAGES (which lists *which operators* ran on an
+ *  issue) — this is the intra-run progress of a single operator, surfaced as a
+ *  stepper on live rows. `key` matches RunMeta.Stage emitted by the runner. */
+const LIFECYCLE_STAGES: { key: string; label: string }[] = [
+  { key: 'lock-acquired', label: 'lock' },
+  { key: 'claude-started', label: 'claude' },
+  { key: 'parsing-outcome', label: 'parse' },
+  { key: 'posting-comment', label: 'comment' },
+  { key: 'applying-label', label: 'label' },
+]
 
 interface IssueGroup {
   key: string       // `${repo}#${issueNumber}`
@@ -298,6 +313,33 @@ function Dashboard() {
       clearInterval(id)
     }
   }, [refreshTick])
+
+  // Real-time runs stream (issue #199). The server pushes the runs index over
+  // SSE whenever it changes — including mid-run lifecycle stage transitions —
+  // so the operator-status view updates without manual refresh and at far lower
+  // latency than the 5s poll above. The poll is intentionally KEPT as a
+  // graceful fallback: EventSource auto-reconnects on drop, and if SSE is
+  // unavailable entirely the dashboard still refreshes every 5s.
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return
+    let es: EventSource | null = null
+    try {
+      es = new EventSource('/api/run/stream')
+      es.onmessage = e => {
+        try {
+          const parsed = JSON.parse(e.data)
+          if (Array.isArray(parsed)) setRuns(parsed)
+        } catch {
+          /* ignore a malformed frame; next frame or the poll recovers */
+        }
+      }
+      // onerror: EventSource reconnects on its own; the 5s poll covers the gap.
+      es.onerror = () => {}
+    } catch {
+      /* SSE construction failed; polling fallback already covers updates */
+    }
+    return () => es?.close()
+  }, [])
 
   // Poll run status — also picks up the auto-run scheduler state
   // (interval, paused, next fire time) so we render everything in one
@@ -1140,6 +1182,38 @@ function IssueGroupRow({
   )
 }
 
+/** Live lifecycle stepper for a running operator (issue #199). Renders the
+ *  ordered LIFECYCLE_STAGES as dots: completed stages filled, the current one
+ *  pulsing, the rest dimmed — so the user sees intra-run progress instead of a
+ *  frozen "running" badge. Falls back to the first stage when `stage` is unset
+ *  (older runs / pre-claude window). */
+function StageStepper({ stage }: { stage?: string }) {
+  const idx = stage ? LIFECYCLE_STAGES.findIndex(s => s.key === stage) : -1
+  const current = idx < 0 ? 0 : idx
+  const label = LIFECYCLE_STAGES[current]?.label ?? ''
+  return (
+    <div
+      className="hidden md:flex items-center gap-1 shrink-0"
+      title={stage ? `stage: ${stage}` : 'starting…'}
+    >
+      {LIFECYCLE_STAGES.map((s, i) => (
+        <span
+          key={s.key}
+          className={cn(
+            'h-1.5 w-1.5 rounded-full transition-colors',
+            i < current
+              ? 'bg-blue-400'
+              : i === current
+                ? 'bg-blue-600 animate-pulse'
+                : 'bg-muted-foreground/25',
+          )}
+        />
+      ))}
+      <span className="text-[10px] text-blue-600 ml-1 font-mono">{label}</span>
+    </div>
+  )
+}
+
 function Row({
   r,
   repoMap,
@@ -1170,6 +1244,7 @@ function Row({
         <span className="text-sm text-foreground truncate flex-1" title={`${r.operator} · ${r.issue_title || '(no title)'}`}>
           {r.operator} · {r.issue_title || '(no title)'}
         </span>
+        {r.status === 'running' && <StageStepper stage={r.stage} />}
         {dur && <span className="text-xs text-muted-foreground shrink-0 tabular-nums w-14 text-right">{dur}</span>}
         <span className="text-xs text-muted-foreground shrink-0 w-16 text-right">{timeAgo(r.started_at)}</span>
         <ChevronRight className="w-4 h-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />

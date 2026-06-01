@@ -157,6 +157,68 @@ func TestRun_ClaudeFails_NoIssuePollution(t *testing.T) {
 	}
 }
 
+// TestRun_StageFunc_EmitsLifecycleStages locks the issue #199 contract: as Run
+// progresses through a successful operator invocation, StageFunc is invoked in
+// order with the fine-grained lifecycle markers. These feed the runner's
+// meta.json + runs.json rewrites that let the dashboard show intermediate
+// progress instead of a frozen start-of-run snapshot.
+func TestRun_StageFunc_EmitsLifecycleStages(t *testing.T) {
+	op := &Operator{
+		Name:      "test-op",
+		LockLabel: "agent-running",
+		Prompt:    "do the thing",
+		Outcomes:  []string{"agent-evaluated"},
+	}
+	sub := &Subject{Number: 7, Labels: []string{"bug"}}
+	v := newFakeVCS()
+
+	var stages []string
+	_, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo:    "acme/webapp",
+		Workdir: t.TempDir(),
+		Timeout: time.Second,
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return "done\n<!-- clawflow:outcome=agent-evaluated -->", nil
+		},
+		StageFunc: func(s string) { stages = append(stages, s) },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome != "agent-evaluated" {
+		t.Fatalf("outcome = %q, want agent-evaluated", outcome)
+	}
+
+	want := []string{
+		StageClaudeStarted,
+		StageParsingOutcome,
+		StagePostingComment,
+		StageApplyingLabel,
+	}
+	if !slices.Equal(stages, want) {
+		t.Errorf("stage sequence = %v, want %v", stages, want)
+	}
+}
+
+// TestRun_NilStageFunc_NoPanic confirms the nil callback (tests / non-dashboard
+// callers) is handled gracefully — emitStage must be a no-op, not a panic.
+func TestRun_NilStageFunc_NoPanic(t *testing.T) {
+	op := &Operator{Name: "x", LockLabel: "l", Prompt: "p", Outcomes: []string{"done"}}
+	sub := &Subject{Number: 1, Labels: []string{"bug"}}
+	v := newFakeVCS()
+
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return "ok\n<!-- clawflow:outcome=done -->", nil
+		},
+		// StageFunc intentionally left nil.
+	})
+	if err != nil {
+		t.Fatalf("unexpected error with nil StageFunc: %v", err)
+	}
+}
+
 func TestRun_EmptyClaudeOutput_NoComment(t *testing.T) {
 	op := &Operator{Name: "x", LockLabel: "running", Prompt: "p"}
 	sub := &Subject{Number: 1, Labels: []string{"bug"}}
