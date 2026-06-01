@@ -185,6 +185,29 @@ export function useIssueGroups({
   }, [issues, runs, pending])
 }
 
+// hasIncompleteSubIssues is true when a group is a parent (tracking) issue
+// whose sub-issues are not all completed. sub_total/sub_completed come from
+// the parent's GitHub sub_issues_summary, so this works even when some
+// children fall outside the snapshot window (the data-loss fallback the
+// feature evaluation called out). Closed parents are handled by the caller.
+export function hasIncompleteSubIssues(g: IssueGroup): boolean {
+  const total = g.sub_total ?? 0
+  if (total <= 0) return false
+  return (g.sub_completed ?? 0) < total
+}
+
+// effectiveStatus is the run status to display and bucket a group by. For a
+// parent (tracking) issue whose children aren't all done, the parent's own
+// latest run (often `success` from decompose / track-progress) masks the fact
+// that sub-tasks are still in flight — so we surface `running` instead, which
+// keeps the parent out of the Done section and off a misleading success badge.
+// Closed parents keep their real latest status so they stay in the Closed
+// bucket and don't get aggregation-overridden.
+export function effectiveStatus(g: IssueGroup): Run['status'] | undefined {
+  if (g.state !== 'closed' && hasIncompleteSubIssues(g)) return 'running'
+  return g.runs[0]?.status
+}
+
 // bucketize partitions groups across sections in declaration order.
 // Same `if/else if/...` semantics the repo page used inline, just
 // extracted so callers can swap section configurations.
@@ -215,7 +238,7 @@ export function bucketize(
 // list buckets that triagers care about most: in-flight work and the
 // "awaiting evaluation" bottleneck.
 export const REPO_SECTIONS: SectionConfig[] = [
-  { title: 'Running', tone: 'blue', filter: g => g.state !== 'closed' && g.runs[0]?.status === 'running' },
+  { title: 'Running', tone: 'blue', filter: g => g.state !== 'closed' && effectiveStatus(g) === 'running' },
   { title: 'Pending', tone: 'amber', filter: g => g.state !== 'closed' && g.pending.length > 0 },
   // Explicitly check state === 'open' so that issues with state 'unknown'
   // (run exists but no issues.json entry — see useIssueGroups) or 'closed'
@@ -228,7 +251,7 @@ export const PROJECT_SECTIONS: SectionConfig[] = [
   {
     title: 'In flight',
     tone: 'blue',
-    filter: g => g.state !== 'closed' && g.runs[0]?.status === 'running',
+    filter: g => g.state !== 'closed' && effectiveStatus(g) === 'running',
   },
   {
     title: 'Queued',
@@ -480,6 +503,10 @@ function IssueRow({
 }) {
   const chatDrawer = useChatDrawer()
   const latest = group.runs[0]
+  // For tracking issues with unfinished sub-issues this resolves to
+  // `running` so the badge reflects aggregate progress, not just the
+  // parent's own last run (see effectiveStatus).
+  const displayStatus = effectiveStatus(group)
   const k = rowKey(group)
   const isExpanded = expanded.has(k)
   const children = childrenOf.get(k) ?? []
@@ -578,7 +605,15 @@ function IssueRow({
         >
           #{group.issue_number}
         </a>
-        {latest && <StatusBadge status={latest.status} runnerAlive={latest.runner_alive} />}
+        {displayStatus && (
+          <StatusBadge
+            status={displayStatus}
+            // Only surface the live dot for a genuinely-running run; an
+            // aggregated `running` (parent with unfinished children) has no
+            // active runner on the parent itself.
+            runnerAlive={latest?.status === 'running' ? latest.runner_alive : undefined}
+          />
+        )}
         <span
           className={cn(
             'text-sm truncate flex-1',
