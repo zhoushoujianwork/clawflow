@@ -296,6 +296,13 @@ func TestBuildPilotContext_StandardPlays(t *testing.T) {
 	if !containsStr(prompt, "merged") || !containsStr(prompt, "default/base branch") {
 		t.Error("missing branch-cleanup safety bounds (merged-only, skip default)")
 	}
+	// Play 1 — local-branch cleanup (the local twin: clawflow branch delete)
+	if !containsStr(prompt, "clawflow branch delete --repo <owner/repo> --yes") {
+		t.Error("missing local-branch cleanup command (clawflow branch delete --yes)")
+	}
+	if !containsStr(prompt, "remote-clean does NOT imply local-clean") {
+		t.Error("missing instruction to run local cleanup even when remote is clean")
+	}
 
 	// Play 2 — conflict resolution
 	if !containsStr(prompt, "Merge-conflict resolution") {

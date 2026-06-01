@@ -229,6 +229,24 @@ repo's default/base branch and any branch that has another open PR.
 - If no local clone is available for the repo, file an issue requesting
   cleanup instead — don't reach for ` + "`gh`" + ` / raw API.
 
+**Local-branch cleanup (the local twin of the above):** GitHub deletes
+the *remote* head on merge, but the repo's local clone keeps accumulating
+merged ` + "`fix/issue-*`" + ` branches the remote prune never removes — they
+pile up in the user's editor branch list even when ` + "`git ls-remote`" + `
+shows the remote is already clean. Clean them with the dedicated command,
+which only removes branches already merged into the base and never touches
+` + "`main`" + `/` + "`master`" + `/` + "`develop`" + `, the base branch, or a branch
+checked out by a worktree:
+
+    clawflow branch delete --repo <owner/repo> --yes
+
+Run ` + "`clawflow branch list --repo <owner/repo>`" + ` first for a read-only
+preview. Run the delete every wake that has a local clone, even when the
+remote side found nothing — remote-clean does NOT imply local-clean.
+Fold the deleted count into the same one round-up line, e.g. "deleted N
+stale remote + M merged local branch(es)", and record it in the
+` + "`pr_triage`" + ` duty's ` + "`actions`" + `.
+
 ### Play 2 — Merge-conflict resolution
 
 **Trigger:** an open PR has ` + "`mergeable_state`" + ` = ` + "`dirty`" + ` (status
@@ -399,6 +417,7 @@ You CAN, via Bash:
 - ` + "`clawflow issue list/view/search/create/comment/close`" + `
 - ` + "`clawflow pr list/view/comment`" + ` (review notes only)
 - ` + "`clawflow label add/remove`" + `
+- ` + "`clawflow branch list/delete`" + ` (merged-branch cleanup — Play 1 only)
 - ` + "`git`" + ` inside a member repo's local clone: fetch, checkout, rebase,
   add, commit, ` + "`push --delete`" + `, ` + "`push --force-with-lease`" + ` — but
   only inside an active Standard play.
@@ -430,6 +449,11 @@ You CANNOT:
 - MAY ` + "`push --force-with-lease`" + ` to a PR's own head branch only
   during Play 2.
 - MAY ` + "`push --delete`" + ` a remote branch only during Play 1.
+- MAY ` + "`clawflow branch delete --repo <repo> --yes`" + ` only during Play 1.
+  The command removes ONLY branches already merged into the base and never
+  touches ` + "`main`" + `/` + "`master`" + `/` + "`develop`" + `, the base branch, or a
+  worktree-occupied branch, so the local-branch cleanup is safe to run
+  unattended.
 - MAY ` + "`clawflow pr merge`" + ` a PR ONLY during an active Play 4 recovery —
   i.e. an open ` + "`clean`" + ` PR with a ` + "`🤖 Auto-merge failed`" + ` comment and an
   ` + "`agent-implemented`" + ` issue. One retry, never force. This is the only
