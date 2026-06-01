@@ -1151,7 +1151,11 @@ func runPostAutomation(j *runJob, outcome, output, prefix string) {
 			return
 		}
 
-		if err := j.client.MergePR(j.repo, prNum); err != nil {
+		if err := mergeWithRetry(prefix,
+			func() error { return j.client.MergePR(j.repo, prNum) },
+			func() (vcs.MergeStatus, error) { return j.client.GetPRMergeability(j.repo, prNum) },
+			time.Sleep,
+		); err != nil {
 			// Keep the failure comment: the user explicitly enabled
 			// auto_merge, the merge attempt failed, and the reason
 			// (auth, branch protection, network) isn't otherwise
@@ -1646,6 +1650,67 @@ func findExistingWorktree(parent string, issueNum int, localPath, base string) (
 //   - "cannot lock ref" — ref lock conflict
 //   - "Another git process seems to be running" — general process lock
 //   - ".lock" — catch-all for any lock-file mention
+// mergeRetryAttempts is how many EXTRA merge attempts auto-merge makes
+// after a transient base-moved race, on top of the initial attempt.
+const mergeRetryAttempts = 2
+
+// mergeRetryDelay is the pause between transient-merge retries, giving
+// GitHub a moment to settle after a sibling PR lands on the base.
+const mergeRetryDelay = 3 * time.Second
+
+// isTransientMergeError reports whether a merge failure is a known
+// retryable race rather than a permanent rejection. GitHub returns
+// HTTP 405 "Base branch was modified" when the base HEAD moves between
+// the mergeability check and the merge call (a sibling PR landing at
+// the same instant) — GitHub's own docs say to re-fetch the base and
+// retry. Everything else (branch protection, auth, real conflicts) is
+// permanent and must NOT be retried. See issue #224.
+func isTransientMergeError(s string) bool {
+	for _, pattern := range []string{
+		"Base branch was modified",
+		"405",
+	} {
+		if strings.Contains(s, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeWithRetry runs merge() and, on a transient base-moved race (see
+// isTransientMergeError), retries up to mergeRetryAttempts times. Before
+// each retry it re-confirms via recheck() that the base is still
+// MergeStatusClean — if a real conflict appeared in the meantime it
+// stops and surfaces that instead of blindly hammering the merge API.
+// sleep is injected so tests can run without real delays. The initial
+// attempt plus retries means at most 1+mergeRetryAttempts merge calls.
+func mergeWithRetry(prefix string, merge func() error, recheck func() (vcs.MergeStatus, error), sleep func(time.Duration)) error {
+	err := merge()
+	if err == nil {
+		return nil
+	}
+	for attempt := 1; attempt <= mergeRetryAttempts && isTransientMergeError(err.Error()); attempt++ {
+		fmt.Fprintf(os.Stderr, "%s → auto-merge: transient race (%v), retry %d/%d after re-checking base\n",
+			prefix, err, attempt, mergeRetryAttempts)
+		sleep(mergeRetryDelay)
+		status, rerr := recheck()
+		if rerr != nil {
+			// Can't confirm the base is still clean — don't risk a
+			// blind retry. Surface the original transient error.
+			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge: mergeability re-check failed: %v\n", prefix, rerr)
+			return err
+		}
+		if status != vcs.MergeStatusClean {
+			return fmt.Errorf("base no longer mergeable after transient failure (status: %s): %w", status, err)
+		}
+		if err = merge(); err == nil {
+			fmt.Fprintf(os.Stderr, "%s ✓ auto-merge: succeeded on retry %d\n", prefix, attempt)
+			return nil
+		}
+	}
+	return err
+}
+
 func isGitLockError(output string) bool {
 	for _, pattern := range []string{
 		"index.lock",
