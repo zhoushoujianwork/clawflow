@@ -975,6 +975,14 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 	return &vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, State: raw.State}, nil
 }
 
+// UploadAttachment is not supported on GitHub: the REST API v3 has no public
+// endpoint for uploading issue/comment attachments (the web UI uses an
+// undocumented session-authenticated upload flow that does not accept PAT /
+// Bearer tokens). Callers should fall back to pasting images in the web UI.
+func (c *Client) UploadAttachment(repo string, filePath string) (string, error) {
+	return "", vcs.ErrNotSupported
+}
+
 func splitRepo(repo string) (owner, name string, err error) {
 	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) != 2 {

@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -764,4 +767,67 @@ func (c *Client) ListSubIssues(repo string, issueNumber int) ([]vcs.Issue, error
 
 func (c *Client) GetParentIssue(repo string, issueNumber int) (*vcs.Issue, error) {
 	return nil, vcs.ErrNotSupported
+}
+
+// UploadAttachment uploads a local file to the project's attachment storage via
+// POST /projects/:id/uploads and returns the ready-to-embed markdown GitLab
+// generates (e.g. "![file](/uploads/<hash>/file.png)"). The returned path is
+// project-relative, so it only renders inside issues/comments of the same
+// project — which is the only scope clawflow uses it for.
+func (c *Client) UploadAttachment(repo string, filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("open attachment %q: %w", filePath, err)
+	}
+	defer f.Close()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	part, err := mw.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(part, f); err != nil {
+		return "", err
+	}
+	if err := mw.Close(); err != nil {
+		return "", err
+	}
+
+	path := fmt.Sprintf("/projects/%s/uploads", projectID(repo))
+	req, err := http.NewRequestWithContext(c.reqContext(), "POST", c.baseURL+path, &buf)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("PRIVATE-TOKEN", c.token)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 201 && resp.StatusCode != 200 {
+		return "", fmt.Errorf("gitlab upload attachment: HTTP %d: %s", resp.StatusCode, data)
+	}
+	var out struct {
+		Markdown string `json:"markdown"`
+		URL      string `json:"url"`
+		Alt      string `json:"alt"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", err
+	}
+	if out.Markdown != "" {
+		return out.Markdown, nil
+	}
+	// Fallback: synthesize markdown if the instance omits the field.
+	if out.URL != "" {
+		return fmt.Sprintf("![%s](%s)", out.Alt, out.URL), nil
+	}
+	return "", fmt.Errorf("gitlab upload attachment: response missing markdown/url: %s", data)
 }

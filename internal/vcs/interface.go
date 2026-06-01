@@ -132,6 +132,15 @@ type Client interface {
 	// ErrNotSupported / nil if there is no parent.
 	GetParentIssue(repo string, issueNumber int) (*Issue, error)
 
+	// Attachments (GitLab native; GitHub returns ErrNotSupported).
+	// UploadAttachment uploads the local file at filePath to the repo's
+	// attachment storage and returns the ready-to-embed image markdown
+	// (e.g. "![file](/uploads/<hash>/file.png)"). GitHub has no public
+	// issue-attachment upload API, so its implementation returns
+	// ErrNotSupported — callers should tell the user to paste images via
+	// the web UI.
+	UploadAttachment(repo string, filePath string) (markdown string, err error)
+
 	// Labels
 	GetIssueLabels(repo string, issueNumber int) ([]string, error)
 	AddLabel(repo string, issueNumber int, labels ...string) error
