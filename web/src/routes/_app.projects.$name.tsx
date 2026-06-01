@@ -972,9 +972,14 @@ function ProjectDetail() {
                       </span>
                     </div>
                     {latestWakeWithDuties.duties.issue_digest.summary && (
-                      <div className="text-xs text-foreground/85 whitespace-pre-wrap leading-relaxed">
+                      // Render through Markdown so a single `\n` collapses to a
+                      // soft wrap (space) and the prose reflows to the container
+                      // width, instead of `whitespace-pre-wrap` faithfully
+                      // displaying every stray hard newline left over from
+                      // terminal-column wrapping. See issue #231.
+                      <Markdown className="text-xs text-foreground/85">
                         {latestWakeWithDuties.duties.issue_digest.summary}
-                      </div>
+                      </Markdown>
                     )}
                   </div>
                 )}
