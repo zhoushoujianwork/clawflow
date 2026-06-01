@@ -1,6 +1,11 @@
 package commands
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // IsNewerVersion is load-bearing for `clawflow update`'s "skip if already at
 // latest" short-circuit — one wrong case and users either re-download the
@@ -46,5 +51,59 @@ func TestIsNewerVersion(t *testing.T) {
 				t.Errorf("IsNewerVersion(%q, %q) = %v, want %v", c.current, c.latest, got, c.want)
 			}
 		})
+	}
+}
+
+// resolveBinaryPath underpins the issue #230 fix: `clawflow update` must
+// replace the binary at its REAL location (following symlinks), not a symlink
+// pointing at it, so the update stays on PATH and doesn't leave a stale copy.
+func TestResolveBinaryPath(t *testing.T) {
+	dir := t.TempDir()
+
+	real := filepath.Join(dir, "clawflow")
+	if err := os.WriteFile(real, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The canonical path of the real file — on macOS the temp dir itself sits
+	// under a /tmp -> /private/tmp symlink, so normalize via EvalSymlinks
+	// rather than comparing against the raw path.
+	want, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A plain regular file resolves to its canonical self.
+	if got := resolveBinaryPath(real); got != want {
+		t.Errorf("resolveBinaryPath(regular) = %q, want %q", got, want)
+	}
+
+	// A symlink resolves to its target — this is the /usr/local/bin/clawflow
+	// -> ~/.clawflow/bin/clawflow case we must follow on update.
+	link := filepath.Join(dir, "clawflow-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if resolved := resolveBinaryPath(link); resolved != want {
+		t.Errorf("resolveBinaryPath(symlink) = %q, want %q", resolved, want)
+	}
+
+	// An unresolvable (nonexistent) path falls back to the raw input rather
+	// than erroring out.
+	missing := filepath.Join(dir, "does-not-exist")
+	if resolved := resolveBinaryPath(missing); resolved != missing {
+		t.Errorf("resolveBinaryPath(missing) = %q, want %q", resolved, missing)
+	}
+}
+
+// permissionDeniedErr must surface the destination path and an actionable
+// sudo hint so users who installed into /usr/local/bin know how to recover.
+func TestPermissionDeniedErr(t *testing.T) {
+	err := permissionDeniedErr("/usr/local/bin/clawflow", os.ErrPermission)
+	msg := err.Error()
+	if !strings.Contains(msg, "/usr/local/bin/clawflow") {
+		t.Errorf("error message missing destination path: %q", msg)
+	}
+	if !strings.Contains(msg, "sudo clawflow update") {
+		t.Errorf("error message missing sudo hint: %q", msg)
 	}
 }

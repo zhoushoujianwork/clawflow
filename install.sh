@@ -124,20 +124,54 @@ if [[ -n "$CREATE_LABELS_REPO" ]]; then
   fi
 fi
 
+# ---------- 6. ensure ~/.clawflow/bin is on PATH ----------
+# install.sh always builds into ~/.clawflow/bin, which is NOT a standard PATH
+# directory. Mirror get.sh's behavior: idempotently append an export line to
+# the user's shell rc so `clawflow` works in new shells without manual setup.
+NEED_SOURCE=""
+PATH_MANUAL=""
+if ! printf ':%s:' "$PATH" | grep -q ":$CLAWFLOW_HOME/bin:"; then
+  PATH_LINE='export PATH="$HOME/.clawflow/bin:$PATH"'
+  SHELL_RC=""
+  case "${SHELL:-}" in
+    */zsh)  SHELL_RC="$HOME/.zshrc" ;;
+    */bash) SHELL_RC="$HOME/.bashrc" ;;
+  esac
+
+  if [[ -n "$SHELL_RC" ]] && ! grep -q '.clawflow/bin' "$SHELL_RC" 2>/dev/null; then
+    printf '\n# ClawFlow\n%s\n' "$PATH_LINE" >> "$SHELL_RC"
+    echo "  [ok]   PATH added to $SHELL_RC"
+    NEED_SOURCE="$SHELL_RC"
+  else
+    # Couldn't detect a known rc file (or it already mentions the dir) — tell
+    # the user how to do it manually.
+    PATH_MANUAL="$PATH_LINE"
+  fi
+fi
+
 # ---------- done ----------
 cat <<MSG
 
 Done. ClawFlow is installed.
 
 Next steps:
-  1. Add CLI to PATH (bash/zsh):
-       export PATH="\$HOME/.clawflow/bin:\$PATH"
-  2. Store a VCS token:
+MSG
+
+if [[ -n "$NEED_SOURCE" ]]; then
+  echo "  0. Reload your shell so clawflow is on PATH:"
+  echo "       source $NEED_SOURCE"
+elif [[ -n "$PATH_MANUAL" ]]; then
+  echo "  0. Add CLI to PATH (then restart your shell):"
+  echo "       echo '$PATH_MANUAL' >> ~/.zshrc   # or your shell's rc file"
+fi
+
+cat <<MSG
+  1. Store a VCS token:
        clawflow config set-token <ghp_...>         # GitHub
        clawflow config set-gitlab-token <glpat_..> # GitLab
-  3. Register a repo to monitor:
+  2. Register a repo to monitor:
        clawflow repo add <owner/repo | URL | local path>
-  4. Run the operator loop:
+  3. Run the operator loop:
        clawflow run
 
 Built-in operators:

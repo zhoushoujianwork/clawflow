@@ -33,10 +33,12 @@ func NewUpdateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Update the clawflow binary to the latest release",
-		Long: `Fetches the latest release from GitHub and replaces the clawflow binary
-at ~/.clawflow/bin/clawflow. Built-in operators ship inside the binary, so
-there is nothing else to sync. User operators in ~/.clawflow/skills/ are
-untouched.
+		Long: `Fetches the latest release from GitHub and replaces the currently
+running clawflow binary in place — wherever it lives (/usr/local/bin,
+~/.local/bin, ~/.clawflow/bin, ...) — so the updated binary stays on your
+PATH and no stale second copy is left behind. Built-in operators ship inside
+the binary, so there is nothing else to sync. User operators in
+~/.clawflow/skills/ are untouched.
 
 Use --from-source to rebuild from a local repo clone instead (dev flow).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -171,9 +173,29 @@ func rebuildFromSource(repoDir string) error {
 	return nil
 }
 
+// binaryPath returns the path of the binary that `clawflow update` should
+// replace. It resolves the currently-running executable (following symlinks)
+// so an update lands in the same location the user originally installed to —
+// /usr/local/bin, ~/.local/bin, or ~/.clawflow/bin — keeping it on PATH and
+// avoiding a second, stale copy. The legacy ~/.clawflow/bin/clawflow path is
+// only used as a fallback when the executable path can't be resolved.
 func binaryPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "bin", "clawflow")
+	exe, err := os.Executable()
+	if err != nil {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".clawflow", "bin", "clawflow")
+	}
+	return resolveBinaryPath(exe)
+}
+
+// resolveBinaryPath follows symlinks for exe so we replace the real binary,
+// not a symlink that points at it (common when /usr/local/bin/clawflow is a
+// link into ~/.clawflow/bin). Falls back to the raw path if EvalSymlinks fails.
+func resolveBinaryPath(exe string) string {
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		return resolved
+	}
+	return exe
 }
 
 // atomicReplace writes src to dest via a temp file, then renames — avoids
@@ -185,6 +207,9 @@ func atomicReplace(dest string, src io.Reader) error {
 	tmp := dest + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
+		if os.IsPermission(err) {
+			return permissionDeniedErr(dest, err)
+		}
 		return err
 	}
 	if _, err := io.Copy(f, src); err != nil {
@@ -196,6 +221,9 @@ func atomicReplace(dest string, src io.Reader) error {
 
 	if err := os.Rename(tmp, dest); err != nil {
 		os.Remove(tmp)
+		if os.IsPermission(err) {
+			return permissionDeniedErr(dest, err)
+		}
 		return err
 	}
 	if err := codesignIfDarwin(dest); err != nil {
@@ -206,6 +234,17 @@ func atomicReplace(dest string, src io.Reader) error {
 	}
 	fmt.Printf("  [ok] binary updated → %s\n", dest)
 	return nil
+}
+
+// permissionDeniedErr wraps a write-permission failure with an actionable
+// hint. This is the common case when clawflow was installed into a
+// system-owned directory like /usr/local/bin and the user runs `clawflow
+// update` without elevated privileges.
+func permissionDeniedErr(dest string, cause error) error {
+	return fmt.Errorf("no write permission for %s (%w)\n"+
+		"      clawflow lives in a directory that needs elevated privileges.\n"+
+		"      Re-run with sudo, e.g.:\n"+
+		"        sudo clawflow update", dest, cause)
 }
 
 // codesignIfDarwin ad-hoc signs `path` on macOS so Gatekeeper doesn't
