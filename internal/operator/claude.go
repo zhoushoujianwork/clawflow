@@ -305,7 +305,14 @@ func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, 
 	cmd := exec.CommandContext(ctx, claude.Resolve(), args...)
 	cmd.Dir = workdir
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
-	cmd.Stderr = os.Stderr
+	// Tee claude's stderr: the user still sees it live on os.Stderr, but we
+	// also retain its tail so a non-zero exit carries claude's actual failure
+	// text (rate-limit / auth 403 / panic) instead of a bare "exit status 1".
+	// Without this, cmd.Wait yields no claude context, so meta.Error is
+	// undiagnosable AND the rate-limit/auth classifiers below — which only
+	// inspect err.Error()+stdout — never see the stderr message (issue #222).
+	tail := newStderrTail(4096)
+	cmd.Stderr = io.MultiWriter(os.Stderr, tail)
 	// Run claude as its own process-group leader so the deadline kill below
 	// can reap the entire subtree, not just the direct child (issue #213).
 	setProcessGroup(cmd)
@@ -337,12 +344,67 @@ func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, 
 	result, parseErr := parseClaudeStream(stdout, events)
 	close(pipeGuardDone)
 	if err := cmd.Wait(); err != nil {
-		return result, err
+		// cmd.Wait has joined the stderr copy goroutine, so the tail is
+		// complete and race-free to read here.
+		return result, annotateClaudeErr(err, tail.String(), apiKey)
 	}
 	if parseErr != nil {
 		return result, fmt.Errorf("parse stream: %w", parseErr)
 	}
 	return result, nil
+}
+
+// stderrTail is a bounded io.Writer that retains only the last `max` bytes
+// written to it. claude's stderr is tee'd through it so a non-zero exit can
+// fold the tail (rate-limit / auth / panic text) into the returned error —
+// otherwise cmd.Wait yields only "exit status 1" with no claude context, and
+// the rate-limit/auth classifiers (which inspect err.Error()) stay blind to
+// messages claude writes to stderr (issue #222). Only the os/exec stderr-copy
+// goroutine writes to it, and reads happen after cmd.Wait joins that
+// goroutine, so no locking is needed.
+type stderrTail struct {
+	buf []byte
+	max int
+}
+
+func newStderrTail(max int) *stderrTail { return &stderrTail{max: max} }
+
+func (t *stderrTail) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *stderrTail) String() string { return strings.TrimSpace(string(t.buf)) }
+
+// annotateClaudeErr folds the captured claude stderr tail into err so both the
+// downstream classifiers (IsRateLimitError / IsAuthError / isFailoverError) and
+// the persisted meta.Error / pilot/end log see claude's real failure text
+// rather than a bare "exit status 1" (issue #222). The tail is API-key-scrubbed
+// and clipped to its last few non-empty lines to stay readable.
+func annotateClaudeErr(err error, tail, apiKey string) error {
+	tail = scrubAPIKey(strings.TrimSpace(tail), apiKey)
+	tail = lastLines(tail, 5)
+	if tail == "" {
+		return err
+	}
+	return fmt.Errorf("%w; claude stderr: %s", err, tail)
+}
+
+// lastLines returns the last n non-empty, trimmed lines of s joined by " | ".
+func lastLines(s string, n int) string {
+	var lines []string
+	for _, line := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, " | ")
 }
 
 // firstLineOf returns the first non-empty line of s, trimmed.
@@ -511,4 +573,3 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	}
 	return finalResult, nil
 }
-

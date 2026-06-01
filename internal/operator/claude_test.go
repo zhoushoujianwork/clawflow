@@ -7,6 +7,69 @@ import (
 	"testing"
 )
 
+func TestStderrTailRetainsLastBytes(t *testing.T) {
+	tail := newStderrTail(8)
+	if _, err := tail.Write([]byte("0123456789ABCDEF")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := tail.String(); got != "89ABCDEF" {
+		t.Fatalf("got %q, want last 8 bytes %q", got, "89ABCDEF")
+	}
+
+	// Multiple writes across the cap boundary keep only the tail.
+	tail = newStderrTail(4)
+	tail.Write([]byte("ab"))
+	tail.Write([]byte("cdef"))
+	if got := tail.String(); got != "cdef" {
+		t.Fatalf("got %q, want %q", got, "cdef")
+	}
+}
+
+func TestAnnotateClaudeErr(t *testing.T) {
+	base := errors.New("exit status 1")
+
+	t.Run("folds stderr tail into error", func(t *testing.T) {
+		err := annotateClaudeErr(base, "API error: 403\nrequest not allowed", "")
+		msg := err.Error()
+		if !strings.Contains(msg, "exit status 1") {
+			t.Fatalf("lost original error: %q", msg)
+		}
+		if !strings.Contains(msg, "403") || !strings.Contains(msg, "request not allowed") {
+			t.Fatalf("stderr tail not folded in: %q", msg)
+		}
+		// errors.Is must still see the wrapped sentinel through %w.
+		if !errors.Is(err, base) {
+			t.Fatalf("errors.Is broken after annotation")
+		}
+	})
+
+	t.Run("classifiers now see stderr-only auth message", func(t *testing.T) {
+		// Before #222 the auth text lived only on stderr, so IsAuthError(err,"")
+		// returned false. Folding it into err makes the classifier fire.
+		annotated := annotateClaudeErr(base, "Error: api error: 403", "")
+		if !IsAuthError(annotated, "") {
+			t.Fatalf("auth message on stderr not classified")
+		}
+		rl := annotateClaudeErr(base, "You've hit your limit", "")
+		if !IsRateLimitError(rl, "") {
+			t.Fatalf("rate-limit message on stderr not classified")
+		}
+	})
+
+	t.Run("scrubs api key", func(t *testing.T) {
+		err := annotateClaudeErr(base, "auth failed for sk-secret-123", "sk-secret-123")
+		if strings.Contains(err.Error(), "sk-secret-123") {
+			t.Fatalf("api key leaked: %q", err.Error())
+		}
+	})
+
+	t.Run("empty tail returns original error unchanged", func(t *testing.T) {
+		if got := annotateClaudeErr(base, "   \n  ", ""); got != base {
+			t.Fatalf("empty tail should return original error, got %v", got)
+		}
+	})
+}
+
 // buildAssistantEvent returns a stream-json line for an "assistant" event
 // carrying a single text content block.
 func buildAssistantEvent(text string) string {
@@ -234,10 +297,10 @@ func TestIsAuthError(t *testing.T) {
 
 func TestIsRateLimitError(t *testing.T) {
 	cases := []struct {
-		name    string
-		err     error
-		output  string
-		want    bool
+		name   string
+		err    error
+		output string
+		want   bool
 	}{
 		{
 			name:   "nil error",
