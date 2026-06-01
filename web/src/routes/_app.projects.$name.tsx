@@ -76,6 +76,22 @@ function previewMD(md: string): string {
   return (lines[0] ?? '').slice(0, 80)
 }
 
+// fmtDur renders a second count as a compact human duration: "17s",
+// "3m 2s", "1h 4m". Used by the live Pilot badge for both the elapsed
+// "running" timer and the "next wake in …" idle countdown (issue #240).
+function fmtDur(totalSec: number): string {
+  const s = Math.max(0, Math.floor(totalSec))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) {
+    const rem = s % 60
+    return rem ? `${m}m ${rem}s` : `${m}m`
+  }
+  const h = Math.floor(m / 60)
+  const remM = m % 60
+  return remM ? `${h}h ${remM}m` : `${h}h`
+}
+
 export const Route = createFileRoute('/_app/projects/$name')({
   component: ProjectDetail,
 })
@@ -115,6 +131,18 @@ function ProjectDetail() {
   // the newest entry without bouncing to the history page.
   const [pilotRuns, setPilotRuns] = useState<PilotRun[]>([])
   const [pilotRunDetail, setPilotRunDetail] = useState<PilotRun | null>(null)
+
+  // Live Pilot wake state (issue #240). Fed by the /api/project/pilot/stream
+  // SSE endpoint, which pushes the latest wake's meta.json (status /
+  // started_at / ended_at / error) as it changes — letting the top badge show
+  // a live "running" spinner + elapsed timer without a full refresh. null =
+  // no wake observed yet; falls back to pilotRuns[0] when the stream is
+  // unavailable so a dropped connection never blanks the badge.
+  const [livePilot, setLivePilot] = useState<PilotRun | null>(null)
+
+  // Ticks every second so the running elapsed timer and the idle "next wake
+  // in …" countdown stay live without re-fetching.
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   // Automation popover
   const [automationPopoverOpen, setAutomationPopoverOpen] = useState(false)
@@ -310,6 +338,57 @@ function ProjectDetail() {
       .catch(() => { /* idle */ })
     return () => { stopPolling(); stopDeploymentPolling() }
   }, [name])
+
+  // Live Pilot status stream (issue #240). The server pushes the latest
+  // wake's meta.json over SSE whenever it changes — including the start of a
+  // wake (status="running") and its completion — so the top badge reflects
+  // the live state at ~1s latency. Mirrors the dashboard's run-stream pattern
+  // (_app.dashboard.tsx): EventSource auto-reconnects on drop, and the
+  // pilot-runs poll below is KEPT as a graceful fallback so a dropped or
+  // unavailable stream never freezes the badge.
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return
+    let es: EventSource | null = null
+    try {
+      es = new EventSource(`/api/project/pilot/stream?project=${encodeURIComponent(name)}`)
+      es.onmessage = e => {
+        try {
+          const parsed = JSON.parse(e.data)
+          if (parsed && typeof parsed === 'object') {
+            setLivePilot(parsed as PilotRun)
+            // When a wake just finished, refresh the history so the "Latest
+            // Pilot wake" summary card below the header catches up too.
+            if (parsed.status === 'success' || parsed.status === 'failed' || parsed.status === 'auth-error') {
+              fetchPilotRuns()
+            }
+          } else {
+            setLivePilot(null) // "null" frame = no wake has happened yet
+          }
+        } catch {
+          /* ignore a malformed frame; the next frame or the poll recovers */
+        }
+      }
+      es.onerror = () => {} // EventSource reconnects on its own; poll covers the gap
+    } catch {
+      /* SSE construction failed; the pilot-runs poll fallback covers updates */
+    }
+    return () => es?.close()
+  }, [name])
+
+  // Polling fallback for the live badge: re-fetch pilot-runs every 5s so the
+  // running/idle state surfaces even when SSE is unavailable. Cheap and
+  // unobtrusive; mirrors the dashboard's 5s refetch cadence.
+  useEffect(() => {
+    const id = setInterval(() => fetchPilotRuns(), 5000)
+    return () => clearInterval(id)
+  }, [name])
+
+  // 1s ticker driving the running elapsed timer + idle countdown.
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
   useConfigChanged(() => {
     fetchProject()
     fetchAvailableRepos()
@@ -604,6 +683,23 @@ function ProjectDetail() {
   // an amber banner so the user sees the obstacle without grepping logs.
   const pilotSkipReason = (project?.automation?.last_skip_reason ?? '').trim()
 
+  // Live badge derivation (issue #240). Prefer the SSE-fed livePilot; fall
+  // back to the newest polled wake so the badge still animates when SSE is
+  // down. A wake counts as "running" only while its meta.json says so.
+  const effectivePilot = livePilot ?? (pilotRuns.length > 0 ? pilotRuns[0] : null)
+  const pilotRunning = effectivePilot?.status === 'running'
+  const pilotElapsedSec = pilotRunning && effectivePilot?.started_at
+    ? (nowMs - new Date(effectivePilot.started_at).getTime()) / 1000
+    : 0
+  // next wake = last_woken_at + cooldown_minutes (already exposed by
+  // /api/project/get). Only meaningful when automation is on with a cooldown.
+  const cooldownMin = project?.automation?.cooldown_minutes ?? 0
+  const lastWokenAt = project?.automation?.last_woken_at
+  const nextWakeMs = lastWokenAt && cooldownMin > 0
+    ? new Date(lastWokenAt).getTime() + cooldownMin * 60_000
+    : 0
+  const nextWakeInSec = nextWakeMs ? (nextWakeMs - nowMs) / 1000 : 0
+
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
       <Link
@@ -655,29 +751,51 @@ function ProjectDetail() {
                     onClick={() => setAutomationPopoverOpen(o => !o)}
                     className={cn(
                       'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium transition-colors',
-                      // Amber state: automation is on but Schedule recorded
-                      // a skip last pass — clearest signal that the pill's
-                      // "on" claim is currently a lie. Take precedence over
-                      // the green "enabled" colouring.
-                      project.automation?.enabled && pilotSkipReason
-                        ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-950/60'
-                        : project.automation?.enabled
-                          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-950/60'
-                          : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700/60',
-                    )}
-                    title={pilotSkipReason ? `Pilot enabled but last pass skipped: ${pilotSkipReason}` : 'Automation settings'}
-                  >
-                    <span
-                      className={cn(
-                        'inline-block w-1.5 h-1.5 rounded-full',
-                        project.automation?.enabled && pilotSkipReason
-                          ? 'bg-amber-500'
+                      // Running takes top precedence — a live wake is the most
+                      // informative state, so render it distinctly (indigo +
+                      // spinner) regardless of skip/enabled colouring.
+                      pilotRunning
+                        ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-950/60'
+                        // Amber state: automation is on but Schedule recorded
+                        // a skip last pass — clearest signal that the pill's
+                        // "on" claim is currently a lie. Take precedence over
+                        // the green "enabled" colouring.
+                        : project.automation?.enabled && pilotSkipReason
+                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-950/60'
                           : project.automation?.enabled
-                            ? 'bg-emerald-500 animate-pulse'
-                            : 'bg-slate-400',
-                      )}
-                    />
-                    Pilot {project.automation?.enabled ? (pilotSkipReason ? 'skipped' : 'on') : 'off'}
+                            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-950/60'
+                            : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700/60',
+                    )}
+                    title={
+                      pilotRunning
+                        ? `Pilot is running — ${fmtDur(pilotElapsedSec)} elapsed`
+                        : pilotSkipReason
+                          ? `Pilot enabled but last pass skipped: ${pilotSkipReason}`
+                          : 'Automation settings'
+                    }
+                  >
+                    {pilotRunning ? (
+                      <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                    ) : (
+                      <span
+                        className={cn(
+                          'inline-block w-1.5 h-1.5 rounded-full',
+                          project.automation?.enabled && pilotSkipReason
+                            ? 'bg-amber-500'
+                            : project.automation?.enabled
+                              ? 'bg-emerald-500 animate-pulse'
+                              : 'bg-slate-400',
+                        )}
+                      />
+                    )}
+                    {pilotRunning
+                      ? <>Pilot running · <span className="tabular-nums">{fmtDur(pilotElapsedSec)}</span></>
+                      : <>Pilot {project.automation?.enabled ? (pilotSkipReason ? 'skipped' : 'on') : 'off'}</>}
+                    {/* Idle countdown: only when on, not skipped, and a next
+                        wake is actually scheduled in the future. */}
+                    {!pilotRunning && project.automation?.enabled && !pilotSkipReason && nextWakeInSec > 0 && (
+                      <span className="opacity-70 tabular-nums">· next in {fmtDur(nextWakeInSec)}</span>
+                    )}
                     <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
                   </button>
                   {automationPopoverOpen && (
