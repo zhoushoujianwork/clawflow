@@ -14,6 +14,7 @@ package branch
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -96,16 +97,133 @@ func gitOut(dir string, args ...string) (string, error) {
 	return string(out), nil
 }
 
+// headlessEnv returns the process environment plus the guards that keep git
+// from blocking on interactive prompts when invoked without a TTY (background
+// fetch, dashboard-triggered pull/push). GIT_TERMINAL_PROMPT=0 blocks HTTP
+// credential prompts; the SSH BatchMode/ConnectTimeout options block key
+// passphrase prompts and bound the TCP connect for git-over-SSH. Without these
+// a background fetch can hang indefinitely on a credential prompt — the same
+// class of failure as issue #216. (clone.cloneRepo already sets these; the
+// background sync path must match.)
+func headlessEnv() []string {
+	return append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10",
+	)
+}
+
 // Fetch updates remote-tracking refs and prunes deleted ones so the
 // remote-tracking view is accurate before analysis. Failure is returned to the
 // caller, which may choose to proceed with cached refs.
 func Fetch(localPath string) error {
 	c := exec.Command("git", "fetch", "--prune", "origin")
 	c.Dir = localPath
+	c.Env = headlessEnv()
 	if out, err := c.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch --prune origin: %w\n%s", err, out)
 	}
 	return nil
+}
+
+// SyncStatus describes the configured base branch's position relative to its
+// remote-tracking counterpart (origin/<base>). Computed against the local
+// clone; callers should run Fetch first so origin/<base> reflects the remote
+// tip. All counts are zero and HasUpstream is false when origin/<base> is
+// missing (e.g. a brand-new branch never pushed).
+type SyncStatus struct {
+	Branch      string `json:"branch"`       // the base branch name compared
+	Ahead       int    `json:"ahead"`        // local commits not on origin → push needed
+	Behind      int    `json:"behind"`       // origin commits not local → pull needed
+	Dirty       bool   `json:"dirty"`        // worktree has uncommitted changes
+	HasUpstream bool   `json:"has_upstream"` // origin/<base> ref exists
+	Current     string `json:"current"`      // currently checked-out branch (may differ from base)
+}
+
+// GetSyncStatus computes the ahead/behind/dirty state of base relative to
+// origin/<base> for the clone at localPath. It does NOT fetch — run Fetch
+// first for an up-to-date comparison. base defaults to "main" when empty.
+func GetSyncStatus(localPath, base string) (SyncStatus, error) {
+	if base == "" {
+		base = "main"
+	}
+	st := SyncStatus{Branch: base}
+
+	// Currently checked-out branch (best-effort; detached HEAD yields "HEAD").
+	if cur, err := gitOut(localPath, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+		st.Current = strings.TrimSpace(cur)
+	}
+
+	// Dirty = any staged/unstaged/untracked change.
+	if out, err := gitOut(localPath, "status", "--porcelain"); err == nil {
+		st.Dirty = strings.TrimSpace(out) != ""
+	}
+
+	// Without origin/<base> there is nothing to compare against.
+	if _, err := gitOut(localPath, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+base); err != nil {
+		st.HasUpstream = false
+		return st, nil
+	}
+	st.HasUpstream = true
+
+	// `--left-right --count A...B` prints "<left>\t<right>": commits reachable
+	// from A but not B, then from B but not A. With A=origin/base, B=base:
+	// left = behind (remote ahead of us), right = ahead (we are ahead).
+	out, err := gitOut(localPath, "rev-list", "--left-right", "--count", "origin/"+base+"..."+base)
+	if err != nil {
+		return st, err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 2 {
+		st.Behind, _ = strconv.Atoi(fields[0])
+		st.Ahead, _ = strconv.Atoi(fields[1])
+	}
+	return st, nil
+}
+
+// runGitCombined runs a git command capturing combined stdout+stderr with the
+// headless env, returning the trimmed output and any error. The output is
+// surfaced to the user verbatim on failure so they can resolve it locally.
+func runGitCombined(localPath string, args ...string) (string, error) {
+	c := exec.Command("git", args...)
+	c.Dir = localPath
+	c.Env = headlessEnv()
+	out, err := c.CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if err != nil {
+		if text != "" {
+			return text, fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, text)
+		}
+		return text, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return text, nil
+}
+
+// Pull fast-forwards the base branch from origin. It refuses to run unless the
+// clone is currently on base (a non-ff or wrong-branch pull could move an
+// unrelated feature branch) and uses --ff-only so it never creates a merge
+// commit or attempts conflict resolution — matching the issue's "show the
+// error, let the user handle it locally" contract. Returns git's combined
+// output for display.
+func Pull(localPath, base string) (string, error) {
+	if base == "" {
+		base = "main"
+	}
+	cur, err := gitOut(localPath, "rev-parse", "--abbrev-ref", "HEAD")
+	if err == nil && strings.TrimSpace(cur) != base {
+		return "", fmt.Errorf("本地仓库当前在分支 %q，pull 仅在 %q 分支上执行；请先切换分支或在本地手动处理", strings.TrimSpace(cur), base)
+	}
+	return runGitCombined(localPath, "pull", "--ff-only", "origin", base)
+}
+
+// Push pushes the local base branch to origin/<base>. Pushing the ref
+// explicitly (origin <base>) works regardless of the currently checked-out
+// branch. A rejected push (e.g. local is behind) surfaces as an error with
+// git's message for the user to resolve.
+func Push(localPath, base string) (string, error) {
+	if base == "" {
+		base = "main"
+	}
+	return runGitCombined(localPath, "push", "origin", base)
 }
 
 // ListMerged returns local (and, when includeRemote is set, remote-tracking)
