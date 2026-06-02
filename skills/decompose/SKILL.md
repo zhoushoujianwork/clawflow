@@ -4,6 +4,7 @@ description: "Break a tracking issue into sub-issues via clawflow issue create +
 operator:
   trigger:
     target: "issue"
+    applies_to: "leaf"
     labels_required: ["ready-for-agent", "tracking"]
     labels_excluded: ["agent-decomposed", "agent-running", "agent-failed", "agent-skipped"]
   outcomes: ["agent-decomposed", "agent-skipped"]

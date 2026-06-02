@@ -4,6 +4,7 @@ description: "Implement a code fix for a ready-for-agent issue: create a branch,
 operator:
   trigger:
     target: "issue"
+    applies_to: "leaf"
     labels_required: ["ready-for-agent"]
     labels_excluded: ["agent-implemented", "agent-skipped", "agent-failed", "agent-running", "tracking"]
   outcomes: ["agent-implemented", "agent-failed", "agent-skipped"]

@@ -4,6 +4,7 @@ description: "Evaluate a bug-labeled issue for reproducibility, root cause, and 
 operator:
   trigger:
     target: "issue"
+    applies_to: "leaf"
     labels_required: ["bug"]
     labels_excluded: ["agent-evaluated", "agent-skipped", "agent-failed", "agent-running"]
   outcomes: ["agent-evaluated", "agent-skipped"]

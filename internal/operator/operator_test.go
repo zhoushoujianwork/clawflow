@@ -152,6 +152,55 @@ func TestParse_OutcomesOmitted_DefaultsToEmpty(t *testing.T) {
 	}
 }
 
+func TestParse_AppliesTo(t *testing.T) {
+	const skill = `---
+name: track-progress
+operator:
+  trigger:
+    target: issue
+    applies_to: parent
+    labels_required: [progress-check]
+---
+
+Body.`
+	op, err := Parse([]byte(skill), "track-progress/SKILL.md")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if op.Trigger.AppliesTo != AppliesParent {
+		t.Errorf("AppliesTo = %q, want %q", op.Trigger.AppliesTo, AppliesParent)
+	}
+}
+
+func TestParse_AppliesToDefaultsToAny(t *testing.T) {
+	op, err := Parse([]byte(validSkill), "test.md")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if op.Trigger.AppliesTo != AppliesAny {
+		t.Errorf("AppliesTo should default to %q when omitted; got %q", AppliesAny, op.Trigger.AppliesTo)
+	}
+}
+
+func TestParse_AppliesToInvalid(t *testing.T) {
+	const skill = `---
+name: foo
+operator:
+  trigger:
+    target: issue
+    applies_to: banana
+---
+
+Body.`
+	_, err := Parse([]byte(skill), "test")
+	if err == nil {
+		t.Fatal("expected error for invalid applies_to, got nil")
+	}
+	if !strings.Contains(err.Error(), "applies_to") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "applies_to")
+	}
+}
+
 func TestParse_PRTarget(t *testing.T) {
 	input := `---
 name: review-pr

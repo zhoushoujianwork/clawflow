@@ -4,6 +4,7 @@ description: "Check whether all sub-issues of a tracking issue are complete via 
 operator:
   trigger:
     target: "issue"
+    applies_to: "parent"
     labels_required: ["progress-check"]
     labels_excluded: ["agent-closed", "agent-running", "agent-failed"]
   outcomes: ["agent-closed", "agent-watching"]
