@@ -1679,6 +1679,33 @@ func LastPilotRunSummaries(projectName string, n int) []PilotRunMeta {
 	return out
 }
 
+// LatestPilotRunMetaPath returns the filesystem path to the most recent
+// Pilot run's meta.json for a project, or "" if none exists. Run directories
+// are named with a UTC timestamp (see PilotRunDir), which is lexically
+// sortable, so the newest run is the directory with the largest name.
+//
+// Unlike WritePilotRunsIndex (rewritten only at the END of a wake), the
+// per-run meta.json is written at the START of a wake with status="running"
+// and rewritten at the end — so reading it directly lets the pilot SSE stream
+// observe an in-progress wake in real time (issue #240).
+func LatestPilotRunMetaPath(project string) string {
+	root := filepath.Join(DataDir(), "pilot-runs", project)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	var latest string
+	for _, e := range entries {
+		if e.IsDir() && e.Name() > latest {
+			latest = e.Name()
+		}
+	}
+	if latest == "" {
+		return ""
+	}
+	return filepath.Join(root, latest, "meta.json")
+}
+
 func collectPilotRunEntries(root string) []PilotRunIndexEntry {
 	out := []PilotRunIndexEntry{}
 	if _, err := os.Stat(root); os.IsNotExist(err) {
