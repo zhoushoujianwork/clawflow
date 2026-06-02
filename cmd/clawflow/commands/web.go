@@ -22,6 +22,7 @@ import (
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/gitsync"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	ptyserver "github.com/zhoushoujianwork/clawflow/internal/pty"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -207,6 +208,33 @@ here — run 'clawflow run' first if you want fresh data.`,
 				}
 			}()
 
+			// Background git-status sync: low-frequency `git fetch` +
+			// ahead/behind recompute for every repo, cached to
+			// data/git-status.json. This is the "定时兜底" backstop for the
+			// Hook — the dashboard reads the cache instantly on render and
+			// only triggers an on-demand refresh when the user is looking.
+			// Kept deliberately infrequent (every 5 min) so we never hammer
+			// remotes; an initial run primes the cache shortly after start.
+			go func() {
+				prime := time.NewTimer(10 * time.Second)
+				defer prime.Stop()
+				<-prime.C
+				if cfg, err := config.Load(); err == nil {
+					gitsync.RefreshAll(cfg)
+				}
+				tick := time.NewTicker(5 * time.Minute)
+				defer tick.Stop()
+				for range tick.C {
+					cfg, err := config.Load()
+					if err != nil {
+						lg.Warn("web/gitstatus_tick", "err", err.Error())
+						continue
+					}
+					n := len(gitsync.RefreshAll(cfg))
+					lg.Info("web/gitstatus_tick", "repos", n)
+				}
+			}()
+
 			// Periodic auto-runner: when settings.run_interval_minutes > 0,
 			// fire `clawflow run` on a recurring tick. The ticker shares
 			// the runActive mutex with the manual Run button (via
@@ -254,6 +282,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/repo/remove", api.HandleRepoRemove)
 			mux.HandleFunc("/api/repo/clone", api.HandleClone)
 			mux.HandleFunc("/api/repo/refresh-issues", api.HandleRepoRefreshIssues)
+			mux.HandleFunc("/api/repo/git-status", api.HandleGitStatus)
+			mux.HandleFunc("/api/repo/git-status/refresh", api.HandleGitStatusRefresh)
+			mux.HandleFunc("/api/repo/git-pull", api.HandleGitPull)
+			mux.HandleFunc("/api/repo/git-push", api.HandleGitPush)
 			mux.HandleFunc("/api/repos/list-remote", api.HandleListRemoteRepos)
 			mux.HandleFunc("/api/repos/add-remote", api.HandleAddRemoteRepo)
 			mux.HandleFunc("/api/settings", api.HandleGetSettings)

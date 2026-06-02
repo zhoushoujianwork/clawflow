@@ -5,6 +5,7 @@ import { FolderOpen, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2 } 
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
+import { GitSyncCell, type GitStatus } from '../components/GitSyncCell'
 import { useConfigChanged } from '../lib/configEvents'
 
 interface Repo {
@@ -53,6 +54,11 @@ function RepoList() {
 
   const [repos, setRepos] = useState<Repo[]>([])
   const [runs, setRuns] = useState<RunEntry[]>([])
+  // Git sync status keyed by repo full_name. Seeded from the cached
+  // /api/repo/git-status (instant) then refreshed in the background (the
+  // Hook: git fetch + recompute) so the user sees ahead/behind without
+  // waiting on a live fetch per render.
+  const [gitStatus, setGitStatus] = useState<Record<string, GitStatus>>({})
   const [ideScheme, setIdeScheme] = useState('vscode://file/')
   const [hostname, setHostname] = useState<string>('')
   const [loading, setLoading] = useState(true)
@@ -74,9 +80,17 @@ function RepoList() {
       fetch('/api/settings', { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : null))
         .catch(() => null),
-    ]).then(([rp, rn, settings]) => {
+      fetch('/api/repo/git-status', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : []))
+        .catch(() => []),
+    ]).then(([rp, rn, settings, gs]) => {
       setRepos(Array.isArray(rp) ? rp : [])
       setRuns(Array.isArray(rn) ? rn : [])
+      if (Array.isArray(gs)) {
+        const m: Record<string, GitStatus> = {}
+        for (const s of gs as GitStatus[]) if (s?.repo) m[s.repo] = s
+        setGitStatus(m)
+      }
       if (settings?.global?.default_ide) {
         const ide = settings.global.default_ide as string
         const schemeMap: Record<string, string> = {
@@ -94,6 +108,31 @@ function RepoList() {
 
   useEffect(() => { loadAll() }, [loadAll])
   useConfigChanged(loadAll)
+
+  // Apply a single repo's refreshed git status into the map.
+  const updateGitStatus = useCallback((s: GitStatus) => {
+    if (!s?.repo) return
+    setGitStatus(prev => ({ ...prev, [s.repo]: s }))
+  }, [])
+
+  // Hook: once repos are loaded, kick off a background fetch+recompute for
+  // all of them so ahead/behind reflects the latest remote without blocking
+  // first paint. Runs once per mount; the cache covers subsequent renders and
+  // the 5-min web backstop keeps it warm.
+  const didRefreshGit = useRef(false)
+  useEffect(() => {
+    if (loading || didRefreshGit.current) return
+    didRefreshGit.current = true
+    fetch('/api/repo/git-status/refresh', { method: 'POST' })
+      .then(r => (r.ok ? r.json() : []))
+      .then((arr: GitStatus[]) => {
+        if (!Array.isArray(arr)) return
+        const m: Record<string, GitStatus> = {}
+        for (const s of arr) if (s?.repo) m[s.repo] = s
+        setGitStatus(m)
+      })
+      .catch(() => { /* background best-effort */ })
+  }, [loading])
 
   const counts = useMemo(() => {
     const c = new Map<string, number>()
@@ -369,6 +408,7 @@ function RepoList() {
                 <th className="text-left px-4 py-2 font-semibold">Repo</th>
                 <th className="text-left px-4 py-2 font-semibold">Last activity</th>
                 <th className="text-left px-4 py-2 font-semibold">Base</th>
+                <th className="text-left px-4 py-2 font-semibold">Sync</th>
                 <th className="text-left px-4 py-2 font-semibold">Enabled</th>
                 <th className="text-left px-4 py-2 font-semibold">Auto-approve</th>
                 <th className="text-left px-4 py-2 font-semibold">Auto-merge</th>
@@ -412,6 +452,13 @@ function RepoList() {
                     {lastActivityMap[r.full_name] ? timeAgo(lastActivityMap[r.full_name]) : '—'}
                   </td>
                   <td className="px-4 py-2 text-muted-foreground font-mono text-xs">{r.base_branch}</td>
+                  <td className="px-4 py-2">
+                    <GitSyncCell
+                      repo={r.full_name}
+                      status={gitStatus[r.full_name]}
+                      onUpdate={updateGitStatus}
+                    />
+                  </td>
                   <td className="px-4 py-2">
                     <TogglePill
                       on={r.enabled}
