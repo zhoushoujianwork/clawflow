@@ -163,6 +163,7 @@ description: "一句话说明算子做什么、何时会被触发"
 operator:
   trigger:
     target: "issue"                                           # "issue" | "pr"
+    applies_to: "leaf"                                        # "any"(默认) | "parent" | "leaf" —— 按子 issue 结构过滤
     labels_required: ["bug"]                                  # 必须全部存在(AND)
     labels_excluded: ["agent-evaluated", "agent-skipped", "agent-running"]  # 任一存在即跳过(OR NOT)
   lock_label: "agent-running"                                 # 执行前加、完成/失败后删,并发锁
@@ -179,6 +180,7 @@ operator:
 | `name` | 唯一标识,必须与目录名一致 |
 | `description` | 人读说明,也用于 `clawflow operators list` |
 | `operator.trigger.target` | 扫哪类对象。`issue` 或 `pr` |
+| `operator.trigger.applies_to` | 可选。按子 issue 结构硬约束触发:`parent`=必须有子 issue(协调类算子,如 track-progress);`leaf`=必须无子 issue(干活类算子,如 evaluate-*/decompose/implement);`any` 或空=不约束(向后兼容)。GitLab 无原生 sub-issue,所有 issue 恒为 leaf |
 | `operator.trigger.labels_required` | 必须**全部**存在才触发(AND) |
 | `operator.trigger.labels_excluded` | 有任意一个就跳过(OR NOT) |
 | `operator.lock_label` | 并发锁,执行前加、完成后删 |

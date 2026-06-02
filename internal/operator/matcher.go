@@ -17,6 +17,10 @@ type Subject struct {
 	IsPR       bool
 	HeadBranch string // PR only
 	URL        string // HTML URL, if the VCS exposes one
+	// SubTotal is the number of native sub-issues linked to this subject
+	// (GitHub sub_issues_summary.total). 0 = leaf (or a platform without
+	// native sub-issues, e.g. GitLab). Drives the AppliesTo structural gate.
+	SubTotal int
 }
 
 // HasLabel reports whether the subject carries the given label.
@@ -67,6 +71,17 @@ func MatchesWithReason(sub *Subject, op *Operator) (bool, string) {
 	for _, ex := range op.Trigger.LabelsExcluded {
 		if _, ok := labelSet[ex]; ok {
 			return false, fmt.Sprintf("excluded label %q present", ex)
+		}
+	}
+	// Structure-aware gate. "" and "any" impose no constraint (back-compat).
+	switch op.Trigger.AppliesTo {
+	case AppliesParent:
+		if sub.SubTotal <= 0 {
+			return false, "applies_to=parent but subject has no sub-issues (leaf)"
+		}
+	case AppliesLeaf:
+		if sub.SubTotal > 0 {
+			return false, fmt.Sprintf("applies_to=leaf but subject has %d sub-issue(s) (parent)", sub.SubTotal)
 		}
 	}
 	return true, "match"

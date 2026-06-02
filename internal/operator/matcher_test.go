@@ -99,13 +99,13 @@ func TestMatches_LabelsRequiredAny(t *testing.T) {
 		labels []string
 		want   bool
 	}{
-		"feat present":           {[]string{"feat"}, true},
-		"feature present":        {[]string{"feature"}, true},
-		"both present":           {[]string{"feat", "feature"}, true},
-		"neither present":        {[]string{"bug"}, false},
-		"empty":                  {[]string{}, false},
-		"feat plus extras":       {[]string{"feat", "urgent"}, true},
-		"feature plus extras":    {[]string{"feature", "urgent"}, true},
+		"feat present":        {[]string{"feat"}, true},
+		"feature present":     {[]string{"feature"}, true},
+		"both present":        {[]string{"feat", "feature"}, true},
+		"neither present":     {[]string{"bug"}, false},
+		"empty":               {[]string{}, false},
+		"feat plus extras":    {[]string{"feat", "urgent"}, true},
+		"feature plus extras": {[]string{"feature", "urgent"}, true},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -134,6 +134,52 @@ func TestMatches_LabelsRequiredAndRequiredAnyCombined(t *testing.T) {
 	// AND satisfied but OR missing
 	if Matches(&Subject{Labels: []string{"urgent", "bug"}}, op) {
 		t.Error("urgent + bug without feat/feature should not match")
+	}
+}
+
+func TestMatches_AppliesTo(t *testing.T) {
+	cases := map[string]struct {
+		appliesTo string
+		subTotal  int
+		want      bool
+	}{
+		"parent matches issue with sub-issues":  {AppliesParent, 3, true},
+		"parent rejects leaf issue":             {AppliesParent, 0, false},
+		"leaf matches issue without sub-issues": {AppliesLeaf, 0, true},
+		"leaf rejects parent issue":             {AppliesLeaf, 2, false},
+		"any matches parent":                    {AppliesAny, 5, true},
+		"any matches leaf":                      {AppliesAny, 0, true},
+		"empty (back-compat) matches parent":    {"", 5, true},
+		"empty (back-compat) matches leaf":      {"", 0, true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			op := &Operator{Trigger: Trigger{Target: "issue", AppliesTo: c.appliesTo}}
+			s := &Subject{SubTotal: c.subTotal}
+			if got := Matches(s, op); got != c.want {
+				t.Errorf("applies_to=%q subTotal=%d: got %v want %v", c.appliesTo, c.subTotal, got, c.want)
+			}
+		})
+	}
+}
+
+// Structural gate composes with label rules: required labels still apply, and
+// a structural miss is reported even when labels match.
+func TestMatches_AppliesToWithLabels(t *testing.T) {
+	op := &Operator{Trigger: Trigger{
+		Target:         "issue",
+		LabelsRequired: []string{"progress-check"},
+		AppliesTo:      AppliesParent,
+	}}
+	// Labels match but subject is a leaf → reject on structure.
+	if ok, reason := MatchesWithReason(&Subject{Labels: []string{"progress-check"}, SubTotal: 0}, op); ok {
+		t.Error("leaf should be rejected by applies_to=parent even with matching labels")
+	} else if reason == "" {
+		t.Error("expected a non-empty structural reason")
+	}
+	// Labels match and subject is a parent → match.
+	if !Matches(&Subject{Labels: []string{"progress-check"}, SubTotal: 2}, op) {
+		t.Error("parent with matching labels should match")
 	}
 }
 

@@ -531,12 +531,13 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	capturedAt := time.Now().UTC()
 	for _, iss := range issues {
 		sub := &operator.Subject{
-			Number: iss.Number,
-			Title:  iss.Title,
-			Body:   iss.Body,
-			Labels: iss.Labels,
-			State:  iss.State,
-			IsPR:   false,
+			Number:   iss.Number,
+			Title:    iss.Title,
+			Body:     iss.Body,
+			Labels:   iss.Labels,
+			State:    iss.State,
+			IsPR:     false,
+			SubTotal: iss.SubIssuesTotal,
 		}
 		debugf("[%s] #%d labels=%v title=%q", fullName, sub.Number, sub.Labels, sub.Title)
 		// Snapshot every operator that would match this issue's CURRENT
