@@ -42,14 +42,31 @@ If the command returns an error or empty list, fall back to parsing the checklis
 clawflow issue list --repo {repo} --state all --json
 ```
 
+### Step 1b: Fetch all PRs (needed to verify merges)
+
+Run:
+```
+clawflow pr list --repo {repo} --state all --json
+```
+
+This returns every PR as a JSON array. Each entry has `number`, `title`, `head_branch`, `body`, `state`, and `merged_at`. You will use this in Step 2 to confirm whether an implemented sub-issue's PR has actually been **merged** (not just opened).
+
+A PR is **merged** when `state == "merged"` OR `merged_at` is a non-empty string. An open PR (`state == "open"`, empty `merged_at`) is NOT merged, even if the sub-issue carries `agent-implemented`.
+
 ### Step 2: Determine completion status for each sub-issue
 
-A sub-issue is **done** if:
-- `state` is `"closed"`, OR
-- `labels` contains `"agent-implemented"`, OR
-- `labels` contains `"agent-skipped"`
+The critical distinction: `agent-implemented` only means a PR was **opened**, not that it **landed**. A sub-issue's work is not done until its PR is merged (or it was explicitly skipped). Use these rules, in order:
 
-Otherwise it is **pending**.
+A sub-issue is **done** if:
+- `state` is `"closed"` (a merged PR with `Fixes #N` auto-closes the sub-issue), OR
+- `labels` contains `"agent-skipped"`, OR
+- `labels` contains `"agent-implemented"` **AND its PR is merged** — locate the PR from Step 1b by matching `head_branch == "fix/issue-{N}"` or a `Fixes #{N}` reference in the PR `body`, then confirm it is merged (`state == "merged"` or non-empty `merged_at`).
+
+A sub-issue is **pending** if:
+- It carries `"agent-implemented"` but its PR is still open, or no matching PR can be found (the change has not landed yet — re-check next run), OR
+- It has none of the above signals.
+
+When a sub-issue is pending only because its PR is open/unmerged, note that in the status table (e.g. `⏳ PR open, not merged`) so the reason is visible.
 
 ### Step 3: Build status report
 
@@ -58,8 +75,9 @@ Otherwise it is **pending**.
 
 | Sub-issue | Title | Status |
 |---|---|---|
-| #{n1} | {title} | ✅ Done |
-| #{n2} | {title} | ⏳ Pending |
+| #{n1} | {title} | ✅ Done (merged) |
+| #{n2} | {title} | ⏳ PR open, not merged |
+| #{n3} | {title} | ⏳ Pending |
 
 **{done}/{total} sub-issues complete.**
 ```
@@ -92,4 +110,6 @@ Otherwise it is **pending**.
 
 - Always re-fetch sub-issue state fresh via `list-sub` — do not rely on checklist checkboxes in the body (they may be stale).
 - If `list-sub` fails for a sub-issue, treat it as pending and note the error in the table.
+- `agent-implemented` ≠ done. It means a PR was opened, not merged. Never close a tracking issue while a sub-issue's PR is still open — re-check on the next run instead.
+- If `pr list` fails or returns no matching PR for an `agent-implemented` sub-issue, treat that sub-issue as pending (its change has not been confirmed to land).
 - The outcome marker MUST be the last non-empty line of stdout.
