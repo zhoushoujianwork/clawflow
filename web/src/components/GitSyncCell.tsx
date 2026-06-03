@@ -1,5 +1,17 @@
 import { useState } from 'react'
-import { ArrowUp, ArrowDown, RefreshCw, AlertCircle, Check, Loader2, GitBranch } from 'lucide-react'
+import {
+  ArrowUp,
+  ArrowDown,
+  RefreshCw,
+  AlertCircle,
+  Check,
+  Loader2,
+  GitBranch,
+  Pencil,
+  Unlink,
+  CloudOff,
+  X,
+} from 'lucide-react'
 import { cn } from '../lib/utils'
 
 // GitStatus mirrors gitsync.Status from the backend (data/git-status.json and
@@ -29,8 +41,12 @@ interface GitActionResponse {
  * pull/push. It is surface-agnostic (repos table, repo detail, dashboard,
  * project page) — drop it anywhere a repo row is shown and feed it the cached
  * status. On pull/push it calls the backend, then reports the refreshed status
- * back up via onUpdate so the parent's map stays in sync. Git failures are
- * shown inline; the user resolves them locally (no auto-retry/conflict-fix).
+ * back up via onUpdate so the parent's map stays in sync.
+ *
+ * Status is conveyed entirely through icons (no inline text) so the cell stays
+ * compact across every surface. Git failures are surfaced as a single error
+ * icon that opens a modal with the full output — the row layout never grows or
+ * wraps. The user resolves errors locally (no auto-retry/conflict-fix).
  */
 export function GitSyncCell({
   repo,
@@ -42,7 +58,12 @@ export function GitSyncCell({
   onUpdate?: (s: GitStatus) => void
 }) {
   const [busy, setBusy] = useState<'pull' | 'push' | 'refresh' | null>(null)
+  // Live error from the last pull/push/refresh, plus which op produced it,
+  // so the modal can title itself. Falls back to status.error (cached fetch
+  // failure from the background hook) when there is no live error.
   const [error, setError] = useState<string>('')
+  const [errorKind, setErrorKind] = useState<'pull' | 'push' | 'fetch' | ''>('')
+  const [modalOpen, setModalOpen] = useState(false)
 
   async function action(kind: 'pull' | 'push') {
     if (busy) return
@@ -58,9 +79,13 @@ export function GitSyncCell({
       if (data.git_status) onUpdate?.(data.git_status)
       if (data.status === 'error') {
         setError(data.error || data.output || `git ${kind} failed`)
+        setErrorKind(kind)
+        setModalOpen(true)
       }
     } catch {
       setError('网络错误，请重试')
+      setErrorKind(kind)
+      setModalOpen(true)
     } finally {
       setBusy(null)
     }
@@ -80,21 +105,31 @@ export function GitSyncCell({
       if (Array.isArray(data) && data[0]) onUpdate?.(data[0])
     } catch {
       setError('网络错误，请重试')
+      setErrorKind('fetch')
+      setModalOpen(true)
     } finally {
       setBusy(null)
     }
   }
 
+  // Not configured locally — single muted icon, no text.
   if (!status || !status.has_clone) {
-    return <span className="text-xs text-muted-foreground/60">not cloned</span>
+    return (
+      <span className="inline-flex items-center text-muted-foreground/50" title="本地未 clone">
+        <CloudOff className="w-3.5 h-3.5" />
+      </span>
+    )
   }
 
   const { ahead, behind, dirty, has_upstream } = status
   const synced = has_upstream && ahead === 0 && behind === 0
   const refreshSpin = busy === 'refresh'
+  // The error icon surfaces either a live action error or a cached fetch error.
+  const activeError = error || status.error || ''
+  const activeErrorKind = error ? errorKind : status.error ? 'fetch' : ''
 
   return (
-    <div className="flex flex-col gap-1">
+    <>
       <div className="flex items-center gap-1.5">
         {/* branch chip */}
         <span
@@ -106,10 +141,12 @@ export function GitSyncCell({
         </span>
 
         {!has_upstream ? (
-          <span className="text-[10px] text-muted-foreground" title="origin 上没有对应分支">no upstream</span>
+          <span className="inline-flex items-center text-muted-foreground/70" title="origin 上没有对应分支 (no upstream)">
+            <Unlink className="w-3.5 h-3.5" />
+          </span>
         ) : synced ? (
-          <span className="inline-flex items-center gap-0.5 text-[11px] text-green-600" title="已与远端同步">
-            <Check className="w-3 h-3" /> up to date
+          <span className="inline-flex items-center text-green-600" title="已与远端同步 (up to date)">
+            <Check className="w-3.5 h-3.5" />
           </span>
         ) : (
           <>
@@ -149,7 +186,21 @@ export function GitSyncCell({
         )}
 
         {dirty && (
-          <span className="text-[10px] text-amber-600" title="工作区有未提交改动">dirty</span>
+          <span className="inline-flex items-center text-amber-600" title="工作区有未提交改动 (dirty)">
+            <Pencil className="w-3 h-3" />
+          </span>
+        )}
+
+        {/* error icon — opens the modal instead of growing the row */}
+        {activeError && (
+          <button
+            type="button"
+            onClick={() => setModalOpen(true)}
+            title="git 操作出错，点击查看详情"
+            className="inline-flex items-center text-destructive hover:opacity-80"
+          >
+            <AlertCircle className="w-3.5 h-3.5" />
+          </button>
         )}
 
         <button
@@ -163,15 +214,41 @@ export function GitSyncCell({
         </button>
       </div>
 
-      {(error || status.error) && (
+      {modalOpen && activeError && (
         <div
-          className="flex items-start gap-1 text-[10px] text-destructive max-w-[280px]"
-          title={error || status.error}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setModalOpen(false)}
         >
-          <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-          <span className="break-words line-clamp-3">{error || status.error}</span>
+          <div
+            className="bg-card border border-border rounded-lg shadow-xl max-w-lg w-full p-4 flex flex-col gap-3"
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-label="Git error"
+          >
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-destructive shrink-0" />
+              <span className="text-sm font-semibold text-foreground">
+                git {activeErrorKind || 'operation'} 失败
+              </span>
+              <span className="text-xs font-mono text-muted-foreground truncate" title={repo}>· {repo}</span>
+              <button
+                type="button"
+                onClick={() => setModalOpen(false)}
+                className="ml-auto text-muted-foreground hover:text-foreground"
+                aria-label="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <pre className="text-xs text-destructive whitespace-pre-wrap break-words bg-muted/50 rounded p-2 max-h-72 overflow-auto font-mono">
+              {activeError}
+            </pre>
+            <p className="text-[11px] text-muted-foreground">
+              ClawFlow 不会自动重试或解决冲突，请回到本地仓库手动处理后再操作。
+            </p>
+          </div>
         </div>
       )}
-    </div>
+    </>
   )
 }

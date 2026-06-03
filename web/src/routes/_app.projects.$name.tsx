@@ -15,6 +15,7 @@ import {
 } from '../components/IssueList'
 import { useRepoInfoMap } from '../lib/vcsUrls'
 import { useConfigChanged } from '../lib/configEvents'
+import { GitSyncCell, type GitStatus } from '../components/GitSyncCell'
 import {
   type PilotRun,
   DUTY_KEYS,
@@ -120,6 +121,11 @@ function ProjectDetail() {
   // automation rollup badges without waiting for the add-repo dropdown to
   // open. Empty until the fetch resolves.
   const [repoMeta, setRepoMeta] = useState<Record<string, RepoEntry>>({})
+
+  // Git sync status keyed by repo full_name, seeded from the cached
+  // /api/repo/git-status so the member-repo list shows the same main-branch
+  // ahead/behind/dirty state as the Repos page (issue #243 follow-up).
+  const [gitStatus, setGitStatus] = useState<Record<string, GitStatus>>({})
 
   // Remove repo state
   const [removingRepo, setRemovingRepo] = useState<string | null>(null)
@@ -306,6 +312,7 @@ function ProjectDetail() {
     fetchAvailableRepos()
     fetchPilotRuns()
     fetchBacklog()
+    fetchGitStatus()
     // Pull the current machine's hostname once so the bind button can
     // render the actual name. Best-effort: failing leaves the label as
     // "this machine" — the API will still resolve correctly on submit.
@@ -394,6 +401,27 @@ function ProjectDetail() {
     fetchAvailableRepos()
     fetchBacklog()
   })
+
+  // Seed git sync status from the cache (instant). The Repos page owns the
+  // background fetch+recompute hook; here we just read the shared cache so the
+  // member list reflects the latest known ahead/behind without a live fetch.
+  function fetchGitStatus() {
+    fetch('/api/repo/git-status', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : []))
+      .catch(() => [])
+      .then((gs: GitStatus[]) => {
+        if (!Array.isArray(gs)) return
+        const m: Record<string, GitStatus> = {}
+        for (const s of gs) if (s?.repo) m[s.repo] = s
+        setGitStatus(m)
+      })
+  }
+
+  // Apply a single repo's refreshed status (after pull/push/refresh) into the map.
+  function updateGitStatus(s: GitStatus) {
+    if (!s?.repo) return
+    setGitStatus(prev => ({ ...prev, [s.repo]: s }))
+  }
 
   function fetchAvailableRepos() {
     fetch('/data/repos.json', { cache: 'no-store' })
@@ -1270,6 +1298,11 @@ function ProjectDetail() {
                           {repo}
                         </Link>
                         <div className="flex items-center gap-1.5 shrink-0">
+                          <GitSyncCell
+                            repo={repo}
+                            status={gitStatus[repo]}
+                            onUpdate={updateGitStatus}
+                          />
                           <span
                             className={cn(
                               'px-1.5 py-0.5 rounded text-[10px] font-medium tabular-nums',
