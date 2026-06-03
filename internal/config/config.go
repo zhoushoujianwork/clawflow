@@ -78,6 +78,19 @@ type Settings struct {
 	GithubCloneDir      string   `yaml:"github_clone_dir,omitempty"` // default: ~/github
 	GitlabCloneDir      string   `yaml:"gitlab_clone_dir,omitempty"` // default: ~/gitlab
 
+	// CloneProtocol selects the git transport used when auto-cloning a repo.
+	// Supported values:
+	//   ""    / "ssh"   — clone via SSH (git@host:owner/repo.git), relying on
+	//                     the user's local SSH key. This is the default.
+	//   "https"         — clone via token-embedded HTTPS
+	//                     (https://x-access-token:<token>@host/owner/repo.git).
+	// SSH is the default because OAuth/PAT tokens are subject to scope limits
+	// (e.g. pushing commits that touch .github/workflows/* requires the
+	// `workflow` scope), whereas SSH keys are not. The token is still used for
+	// the VCS API (issues/PRs/labels) regardless of this setting — it only
+	// affects git transport (clone/fetch/pull/push via the origin remote).
+	CloneProtocol string `yaml:"clone_protocol,omitempty"`
+
 	// RunIntervalMinutes drives the optional periodic auto-runner that
 	// `clawflow web` embeds. 0 disables it (manual Run button only).
 	// Any positive integer N = fire `clawflow run` every N minutes,
@@ -154,6 +167,15 @@ func (s *Settings) ResolveGitlabCloneDir() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "gitlab")
+}
+
+// ResolveCloneProtocol returns the git transport used for auto-cloning.
+// Defaults to "ssh"; only an explicit "https" opts into token-embedded HTTPS.
+func (s *Settings) ResolveCloneProtocol() string {
+	if strings.EqualFold(s.CloneProtocol, "https") {
+		return "https"
+	}
+	return "ssh"
 }
 
 // ResolveIDEScheme returns the URI scheme prefix for the configured IDE.

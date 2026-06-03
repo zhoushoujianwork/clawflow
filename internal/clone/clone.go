@@ -34,13 +34,16 @@ type Token struct {
 // `progress` receives `git clone`'s stdout+stderr so the caller can
 // stream it (HTTP response, log file, …); pass io.Discard to silence it.
 //
-// `token` provides VCS credentials for HTTPS clone. If nil or empty,
-// falls back to SSH URL (git@host:owner/repo.git) which relies on the
-// user's local SSH key configuration.
+// `token` provides VCS credentials for HTTPS clone. The transport is chosen
+// by cfg.Settings.ResolveCloneProtocol() — SSH by default (git@host:owner/repo.git,
+// relying on the user's local SSH key), or token-embedded HTTPS when
+// `clone_protocol: https` is set. The token is always still used for the VCS
+// API regardless of transport.
 func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo, progress io.Writer, token *Token) (string, error) {
 	if progress == nil {
 		progress = io.Discard
 	}
+	protocol := cfg.Settings.ResolveCloneProtocol()
 
 	if repoCfg.LocalPath != "" {
 		expanded := ExpandHome(repoCfg.LocalPath)
@@ -48,7 +51,7 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 			return expanded, nil
 		}
 		fmt.Fprintf(progress, "local path %q not found, cloning %s ...\n", expanded, ownerRepo)
-		if err := cloneRepo(ownerRepo, expanded, repoCfg, progress, token); err != nil {
+		if err := cloneRepo(ownerRepo, expanded, repoCfg, progress, token, protocol); err != nil {
 			return "", fmt.Errorf("auto-clone failed: %w", err)
 		}
 		return expanded, nil
@@ -94,7 +97,7 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 			return "", fmt.Errorf("directory %s exists but is not a clone of %s (also tried %s)", candidate, ownerRepo, fallback)
 		}
 		fmt.Fprintf(progress, "path %s is occupied by another repo, cloning %s to %s instead ...\n", candidate, ownerRepo, fallback)
-		if err := cloneRepo(ownerRepo, fallback, repoCfg, progress, token); err != nil {
+		if err := cloneRepo(ownerRepo, fallback, repoCfg, progress, token, protocol); err != nil {
 			return "", fmt.Errorf("auto-clone failed: %w", err)
 		}
 		saveLocalPath(cfg, ownerRepo, fallback)
@@ -102,7 +105,7 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 	}
 
 	fmt.Fprintf(progress, "local clone not found, cloning %s to %s ...\n", ownerRepo, candidate)
-	if err := cloneRepo(ownerRepo, candidate, repoCfg, progress, token); err != nil {
+	if err := cloneRepo(ownerRepo, candidate, repoCfg, progress, token, protocol); err != nil {
 		return "", fmt.Errorf("auto-clone failed: %w", err)
 	}
 	saveLocalPath(cfg, ownerRepo, candidate)
@@ -110,21 +113,21 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 }
 
 // cloneRepo runs `git clone <url> <dest>`, deriving the URL from the
-// platform/base_url combo. Authentication strategy:
+// platform/base_url combo. Transport is chosen by `protocol`:
 //
-//  1. If a token is available → HTTPS URL with token embedded
-//     (https://x-access-token:<token>@github.com/owner/repo.git)
-//  2. If no token → SSH URL (git@host:owner/repo.git) relying on
-//     the user's local SSH key configuration.
+//  1. "ssh" (default) → SSH URL (git@host:owner/repo.git), relying on the
+//     user's local SSH key. Not subject to OAuth token scope limits.
+//  2. "https" → token-embedded HTTPS URL when a token is available
+//     (https://x-access-token:<token>@github.com/owner/repo.git), else SSH.
 //
 // GIT_TERMINAL_PROMPT=0 is always set to prevent git from hanging on
 // interactive credential prompts when running headless.
-func cloneRepo(ownerRepo, dest string, repoCfg config.Repo, progress io.Writer, token *Token) error {
+func cloneRepo(ownerRepo, dest string, repoCfg config.Repo, progress io.Writer, token *Token, protocol string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
 
-	cloneURL := buildCloneURL(ownerRepo, repoCfg, token)
+	cloneURL := buildCloneURL(ownerRepo, repoCfg, token, protocol)
 	// Log the URL without the embedded token for security
 	safeURL := sanitizeURLForLog(cloneURL)
 	fmt.Fprintf(progress, "clone url: %s\n", safeURL)
@@ -144,10 +147,26 @@ func cloneRepo(ownerRepo, dest string, repoCfg config.Repo, progress io.Writer, 
 	return c.Run()
 }
 
-// buildCloneURL constructs the clone URL based on available credentials.
-// Priority: token-based HTTPS > SSH fallback.
-func buildCloneURL(ownerRepo string, repoCfg config.Repo, token *Token) string {
+// buildCloneURL constructs the clone URL for the given transport.
+//
+// protocol == "ssh" (default): always return the SSH URL
+// (git@host:owner/repo.git), regardless of token — git transport then uses the
+// user's SSH key, sidestepping OAuth token scope limits. protocol == "https":
+// return a token-embedded HTTPS URL when a token is available, else fall back
+// to SSH.
+func buildCloneURL(ownerRepo string, repoCfg config.Repo, token *Token, protocol string) string {
 	isGitLab := repoCfg.Platform == "gitlab"
+
+	// SSH mode (default): ignore the token for git transport entirely.
+	if protocol != "https" {
+		if isGitLab && repoCfg.BaseURL != "" {
+			host := strings.TrimSuffix(repoCfg.BaseURL, "/")
+			host = strings.TrimPrefix(host, "https://")
+			host = strings.TrimPrefix(host, "http://")
+			return "git@" + host + ":" + ownerRepo + ".git"
+		}
+		return "git@github.com:" + ownerRepo + ".git"
+	}
 
 	// Determine the effective token
 	var effectiveToken string
