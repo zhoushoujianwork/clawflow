@@ -6,12 +6,30 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/clone"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
+
+// remoteReposPerPage is the page size requested from GitHub/GitLab list APIs.
+const remoteReposPerPage = 100
+
+// remoteReposMaxPages caps how many pages we will fetch so an unusually large
+// account cannot cause an unbounded number of API requests.
+const remoteReposMaxPages = 50
+
+// remoteHTTPClient carries a timeout so a hung VCS instance cannot stall the
+// dashboard request indefinitely (the previous code used http.DefaultClient,
+// which has no timeout).
+var remoteHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// linkNextRe extracts the next-page URL from a GitHub "Link" header entry,
+// e.g. `<https://api.github.com/user/repos?page=2>; rel="next"`.
+var linkNextRe = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 
 // RemoteRepo represents a repository available on GitHub/GitLab.
 type RemoteRepo struct {
@@ -218,7 +236,9 @@ func HandleAddRemoteRepo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// listGitHubRepos fetches repositories from GitHub API.
+// listGitHubRepos fetches repositories from GitHub API, following the
+// `Link: rel="next"` pagination header so accounts with more than one page of
+// repos (>100) are returned in full instead of being silently truncated.
 func listGitHubRepos(token string) ([]RemoteRepo, error) {
 	// GitHub API endpoint for listing user repos
 	type ghRepo struct {
@@ -228,42 +248,64 @@ func listGitHubRepos(token string) ([]RemoteRepo, error) {
 		Private       bool   `json:"private"`
 		HTMLURL       string `json:"html_url"`
 	}
-	req, err := http.NewRequest("GET", "https://api.github.com/user/repos?per_page=100&sort=updated", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	url := fmt.Sprintf("https://api.github.com/user/repos?per_page=%d&sort=updated", remoteReposPerPage)
+	var repos []RemoteRepo
 
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
-	}
-
-	var ghRepos []ghRepo
-	if err := json.NewDecoder(resp.Body).Decode(&ghRepos); err != nil {
-		return nil, err
-	}
-
-	repos := make([]RemoteRepo, len(ghRepos))
-	for i, r := range ghRepos {
-		repos[i] = RemoteRepo{
-			FullName:      r.FullName,
-			Platform:      "github",
-			Description:   r.Description,
-			DefaultBranch: r.DefaultBranch,
-			Private:       r.Private,
-			HTMLURL:       r.HTMLURL,
+	for page := 0; page < remoteReposMaxPages && url != ""; page++ {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
 		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		resp, err := remoteHTTPClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+		}
+
+		var ghRepos []ghRepo
+		if err := json.NewDecoder(resp.Body).Decode(&ghRepos); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		nextURL := parseLinkNext(resp.Header.Get("Link"))
+		resp.Body.Close()
+
+		for _, r := range ghRepos {
+			repos = append(repos, RemoteRepo{
+				FullName:      r.FullName,
+				Platform:      "github",
+				Description:   r.Description,
+				DefaultBranch: r.DefaultBranch,
+				Private:       r.Private,
+				HTMLURL:       r.HTMLURL,
+			})
+		}
+
+		url = nextURL
 	}
 
 	return repos, nil
+}
+
+// parseLinkNext returns the next-page URL from a GitHub Link header, or "" if
+// there is no further page.
+func parseLinkNext(link string) string {
+	if link == "" {
+		return ""
+	}
+	if m := linkNextRe.FindStringSubmatch(link); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // listGitLabRepos fetches repositories from GitLab API.
@@ -277,44 +319,67 @@ func listGitLabRepos(token, baseURL string) ([]RemoteRepo, error) {
 		WebURL            string `json:"web_url"`
 	}
 
-	apiURL := baseURL + "/api/v4/projects?membership=true&per_page=100&order_by=last_activity_at"
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("PRIVATE-TOKEN", token)
+	var repos []RemoteRepo
+	page := 1
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to GitLab: %v", err)
-	}
-	defer resp.Body.Close()
+	for fetched := 0; fetched < remoteReposMaxPages && page > 0; fetched++ {
+		apiURL := fmt.Sprintf("%s/api/v4/projects?membership=true&per_page=%d&order_by=last_activity_at&page=%d",
+			baseURL, remoteReposPerPage, page)
+		req, err := http.NewRequest("GET", apiURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("PRIVATE-TOKEN", token)
 
-	if resp.StatusCode == 401 {
-		return nil, fmt.Errorf("GitLab token is invalid or expired. Please update your token in Settings and test the connection.")
-	}
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitLab API returned status %d: %s", resp.StatusCode, string(body))
-	}
+		resp, err := remoteHTTPClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to GitLab: %v", err)
+		}
 
-	var glProjects []glProject
-	if err := json.NewDecoder(resp.Body).Decode(&glProjects); err != nil {
-		return nil, err
-	}
+		if resp.StatusCode == 401 {
+			resp.Body.Close()
+			return nil, fmt.Errorf("GitLab token is invalid or expired. Please update your token in Settings and test the connection.")
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("GitLab API returned status %d: %s", resp.StatusCode, string(body))
+		}
 
-	repos := make([]RemoteRepo, len(glProjects))
-	for i, p := range glProjects {
-		repos[i] = RemoteRepo{
-			FullName:      p.PathWithNamespace,
-			Platform:      "gitlab",
-			Description:   p.Description,
-			DefaultBranch: p.DefaultBranch,
-			Private:       p.Visibility == "private",
-			HTMLURL:       p.WebURL,
-			BaseURL:       baseURL,
+		var glProjects []glProject
+		if err := json.NewDecoder(resp.Body).Decode(&glProjects); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		// GitLab returns the next page number in X-Next-Page (empty/0 on last page).
+		page = parseNextPage(resp.Header.Get("X-Next-Page"))
+		resp.Body.Close()
+
+		for _, p := range glProjects {
+			repos = append(repos, RemoteRepo{
+				FullName:      p.PathWithNamespace,
+				Platform:      "gitlab",
+				Description:   p.Description,
+				DefaultBranch: p.DefaultBranch,
+				Private:       p.Visibility == "private",
+				HTMLURL:       p.WebURL,
+				BaseURL:       baseURL,
+			})
 		}
 	}
 
 	return repos, nil
+}
+
+// parseNextPage parses GitLab's X-Next-Page header. It returns 0 when there is
+// no further page (empty or unparseable header).
+func parseNextPage(header string) int {
+	if header == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(header)
+	if err != nil {
+		return 0
+	}
+	return n
 }
