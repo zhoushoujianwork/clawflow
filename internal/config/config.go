@@ -958,6 +958,47 @@ func ReadGitRemoteURL(dir string) (string, error) {
 	return "", fmt.Errorf("no remote origin found in %s/.git/config", dir)
 }
 
+// normalizeGitLabHost converts a configured gitlab_hosts entry into a full URL,
+// preserving an explicit scheme and port. A bare hostname defaults to https.
+//
+//	"gitlab.company.com"           → "https://gitlab.company.com"
+//	"http://git.internal.com:8080" → "http://git.internal.com:8080"
+//	"https://gitlab.com/"          → "https://gitlab.com"
+//
+// It mirrors internal/api.normalizeGitLabURL; the logic is duplicated here
+// because the api package imports config and cannot be imported back.
+func normalizeGitLabHost(host string) string {
+	host = strings.TrimSpace(host)
+	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
+		return strings.TrimSuffix(host, "/")
+	}
+	return "https://" + host
+}
+
+// gitlabHostName extracts the bare, lowercased hostname (no scheme or port)
+// from a configured gitlab_hosts entry, for comparison against an SSH/URL host.
+func gitlabHostName(entry string) string {
+	u, err := url.Parse(normalizeGitLabHost(entry))
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(entry))
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// resolveGitLabBaseURL returns the API base URL for an SSH/URL host. When the
+// host matches a configured gitlab_hosts entry, the entry's normalized full URL
+// is used so its scheme and port are honored (e.g. an http-only self-hosted
+// instance). Otherwise it falls back to "https://" + host.
+func resolveGitLabBaseURL(host string, gitlabHosts []string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	for _, h := range gitlabHosts {
+		if gitlabHostName(h) == host {
+			return normalizeGitLabHost(h)
+		}
+	}
+	return "https://" + host
+}
+
 // ParseRepoInput parses a repo argument which may be:
 //   - "owner/repo"                          → github (default)
 //   - "https://github.com/owner/repo"       → github
@@ -1004,13 +1045,9 @@ func ParseRepoInput(input string, gitlabHosts []string) (RepoInfo, error) {
 			parts := strings.SplitN(fullPath, "/", 3)
 			return RepoInfo{OwnerRepo: parts[0] + "/" + parts[1], Platform: "github"}, nil
 		}
-		// GitLab: keep full path
-		baseURL := "https://" + host
-		for _, h := range gitlabHosts {
-			if strings.ToLower(strings.TrimSpace(h)) == host {
-				return RepoInfo{OwnerRepo: fullPath, Platform: "gitlab", BaseURL: baseURL}, nil
-			}
-		}
+		// GitLab: keep full path. Honor the configured gitlab_hosts entry's
+		// scheme/port (e.g. http-only self-hosted) instead of assuming https.
+		baseURL := resolveGitLabBaseURL(host, gitlabHosts)
 		return RepoInfo{OwnerRepo: fullPath, Platform: "gitlab", BaseURL: baseURL}, nil
 	}
 
@@ -1043,12 +1080,15 @@ func ParseRepoInput(input string, gitlabHosts []string) (RepoInfo, error) {
 	if fullPath == "" || !strings.Contains(fullPath, "/") {
 		return RepoInfo{}, fmt.Errorf("URL %q does not contain a valid project path", input)
 	}
+	// Default to the scheme/host the user typed. If the host matches a
+	// configured gitlab_hosts entry, prefer that entry's scheme/port so an
+	// http-only self-hosted instance is honored even when an https URL is passed.
 	baseURL := u.Scheme + "://" + u.Host
 	for _, h := range gitlabHosts {
-		if strings.ToLower(strings.TrimSpace(h)) == host {
-			return RepoInfo{OwnerRepo: fullPath, Platform: "gitlab", BaseURL: baseURL}, nil
+		if gitlabHostName(h) == host {
+			baseURL = normalizeGitLabHost(h)
+			break
 		}
 	}
-	// unknown host — assume gitlab self-hosted
 	return RepoInfo{OwnerRepo: fullPath, Platform: "gitlab", BaseURL: baseURL}, nil
 }
