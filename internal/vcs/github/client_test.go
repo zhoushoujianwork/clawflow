@@ -181,6 +181,57 @@ func TestUpdateIssue(t *testing.T) {
 	}
 }
 
+func TestGetIssue(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/issues/7": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 200, map[string]any{
+				"id":         12345,
+				"number":     7,
+				"title":      "a bug",
+				"body":       "something broke",
+				"state":      "open",
+				"html_url":   "https://github.com/owner/repo/issues/7",
+				"created_at": "2026-01-01T00:00:00Z",
+				"updated_at": "2026-01-02T00:00:00Z",
+				"labels":     []map[string]string{{"name": "bug"}, {"name": "feat"}},
+			})
+		},
+	})
+
+	issue, err := client.GetIssue("owner/repo", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue == nil {
+		t.Fatal("expected issue, got nil")
+	}
+	if issue.Number != 7 || issue.Title != "a bug" || issue.Body != "something broke" {
+		t.Errorf("unexpected issue: %#v", issue)
+	}
+	if issue.State != "open" || issue.URL != "https://github.com/owner/repo/issues/7" {
+		t.Errorf("unexpected state/url: %#v", issue)
+	}
+	if !issue.HasLabel("bug") || !issue.HasLabel("feat") {
+		t.Errorf("expected labels bug+feat, got %v", issue.Labels)
+	}
+}
+
+func TestGetIssueNotFound(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/issues/999": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "not found", 404)
+		},
+	})
+
+	issue, err := client.GetIssue("owner/repo", 999)
+	if err != nil {
+		t.Fatalf("expected nil error on 404, got %v", err)
+	}
+	if issue != nil {
+		t.Fatalf("expected nil issue on 404, got %#v", issue)
+	}
+}
+
 func TestInitLabels_SkipsExisting(t *testing.T) {
 	created := []string{}
 	client := newTestClient(t, map[string]http.HandlerFunc{

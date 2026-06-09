@@ -964,15 +964,36 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 		return nil, fmt.Errorf("github get issue: HTTP %d: %s", status, data)
 	}
 	var raw struct {
-		ID     int64  `json:"id"`
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		State  string `json:"state"`
+		ID        int64  `json:"id"`
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		State     string `json:"state"`
+		HTMLURL   string `json:"html_url"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Labels    []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-	return &vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, State: raw.State}, nil
+	labels := make([]string, len(raw.Labels))
+	for i, l := range raw.Labels {
+		labels[i] = l.Name
+	}
+	return &vcs.Issue{
+		ID:        raw.ID,
+		Number:    raw.Number,
+		Title:     raw.Title,
+		Body:      raw.Body,
+		State:     raw.State,
+		Labels:    labels,
+		URL:       raw.HTMLURL,
+		CreatedAt: raw.CreatedAt,
+		UpdatedAt: raw.UpdatedAt,
+	}, nil
 }
 
 // UploadAttachment is not supported on GitHub: the REST API v3 has no public

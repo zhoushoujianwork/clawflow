@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -23,6 +24,7 @@ func NewIssueCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newIssueCreateCmd())
 	cmd.AddCommand(newIssueEditCmd())
+	cmd.AddCommand(newIssueViewCmd())
 	cmd.AddCommand(newIssueListCmd())
 	cmd.AddCommand(newIssueSearchCmd())
 	cmd.AddCommand(newIssueCommentCmd())
@@ -275,6 +277,59 @@ func newIssueEditCmd() *cobra.Command {
 		setTitle = cmd.Flags().Changed("title")
 		setBody = cmd.Flags().Changed("body")
 	}
+	return cmd
+}
+
+func newIssueViewCmd() *cobra.Command {
+	var repo string
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "view <id>",
+		Short: "View a single issue's details by number",
+		Long: `Show the core fields of a single issue: title, number, state (open/closed),
+labels, body, and web URL. <id> is the issue's display number (#number), not
+the platform-internal ID.`,
+		Example: "  clawflow issue view 7 --repo owner/repo\n  clawflow issue view 7 --repo owner/repo --json",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			number, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid issue id %q: must be a number", args[0])
+			}
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			issue, err := client.GetIssue(repo, number)
+			if err != nil {
+				return err
+			}
+			if issue == nil {
+				return fmt.Errorf("issue #%d not found in %s", number, repo)
+			}
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(issue)
+			}
+			fmt.Printf("#%d  %s\n", issue.Number, issue.Title)
+			fmt.Printf("State:  %s\n", issue.State)
+			if len(issue.Labels) > 0 {
+				fmt.Printf("Labels: %s\n", strings.Join(issue.Labels, ", "))
+			} else {
+				fmt.Printf("Labels: (none)\n")
+			}
+			if issue.URL != "" {
+				fmt.Printf("URL:    %s\n", issue.URL)
+			}
+			fmt.Printf("\n%s\n", issue.Body)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output the full issue as JSON")
+	_ = cmd.MarkFlagRequired("repo")
 	return cmd
 }
 

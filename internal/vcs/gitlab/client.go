@@ -769,6 +769,50 @@ func (c *Client) GetParentIssue(repo string, issueNumber int) (*vcs.Issue, error
 	return nil, vcs.ErrNotSupported
 }
 
+// GetIssue fetches a single issue by its IID (display number).
+func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
+	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), number)
+	data, status, err := c.doJSON("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status == 404 {
+		return nil, nil
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("gitlab get issue: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		ID        int64    `json:"id"`
+		IID       int      `json:"iid"`
+		Title     string   `json:"title"`
+		Body      string   `json:"description"`
+		State     string   `json:"state"`
+		Labels    []string `json:"labels"`
+		WebURL    string   `json:"web_url"`
+		CreatedAt string   `json:"created_at"`
+		UpdatedAt string   `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	state := raw.State
+	if state == "opened" {
+		state = "open"
+	}
+	return &vcs.Issue{
+		ID:        raw.ID,
+		Number:    raw.IID,
+		Title:     raw.Title,
+		Body:      raw.Body,
+		State:     state,
+		Labels:    raw.Labels,
+		URL:       raw.WebURL,
+		CreatedAt: raw.CreatedAt,
+		UpdatedAt: raw.UpdatedAt,
+	}, nil
+}
+
 // UploadAttachment uploads a local file to the project's attachment storage via
 // POST /projects/:id/uploads and returns the ready-to-embed markdown GitLab
 // generates (e.g. "![file](/uploads/<hash>/file.png)"). The returned path is
