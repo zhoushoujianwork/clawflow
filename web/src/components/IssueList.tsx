@@ -91,6 +91,13 @@ export interface SectionConfig {
   tone: 'blue' | 'amber' | 'muted' | 'gray' | 'red'
   filter: (g: IssueGroup) => boolean
   limit?: number
+  // perRepoLimit caps how many rows EACH repo may show in this section, used
+  // by cross-repo (project-level) lists so one active repo can't flood the
+  // whole section. When set and the section spans 2+ repos, rows are taken
+  // round-robin across repos (≤ perRepoLimit each) instead of global top-N;
+  // with a single repo it falls back to `limit` so per-repo views are
+  // unaffected. See limitSectionGroups.
+  perRepoLimit?: number
   emptyHidden?: boolean
 }
 
@@ -273,9 +280,53 @@ export const PROJECT_SECTIONS: SectionConfig[] = [
       return hasTrigger && !hasAgentLabel
     },
   },
-  { title: 'Done', tone: 'muted', filter: g => g.state === 'open', limit: 10 },
-  { title: 'Closed', tone: 'gray', filter: g => g.state === 'closed', limit: 10 },
+  // limit (10) is the single-repo fallback; perRepoLimit (3) kicks in once a
+  // project aggregates 2+ repos so each repo stays visible instead of the
+  // most active one flooding the whole bucket (issue #258).
+  { title: 'Done', tone: 'muted', filter: g => g.state === 'open', limit: 10, perRepoLimit: 3 },
+  { title: 'Closed', tone: 'gray', filter: g => g.state === 'closed', limit: 10, perRepoLimit: 3 },
 ]
+
+// limitSectionGroups decides which rows of a section are visible.
+//
+// Default behaviour is the historical global top-N (`groups.slice(0, limit)`).
+// When `perRepoLimit` is set AND the section spans 2+ repos, it switches to a
+// per-repo quota: groups are bucketed by repo (input is already issue-number
+// descending, so each bucket stays newest-first) and emitted round-robin so
+// every repo shows up to `perRepoLimit` rows and no single active repo floods
+// the section (issue #258). Repos are ordered by their newest issue number so
+// the most recently active repo leads each round. With a single repo it falls
+// back to `limit`, leaving per-repo views unchanged.
+export function limitSectionGroups(
+  groups: IssueGroup[],
+  config: Pick<SectionConfig, 'limit' | 'perRepoLimit'>,
+): { visible: IssueGroup[]; perRepoActive: boolean } {
+  const { limit, perRepoLimit } = config
+  if (!limit && !perRepoLimit) return { visible: groups, perRepoActive: false }
+
+  const repoCount = new Set(groups.map(g => g.repo)).size
+  if (perRepoLimit && repoCount > 1) {
+    const byRepo = new Map<string, IssueGroup[]>()
+    for (const g of groups) {
+      const arr = byRepo.get(g.repo) ?? []
+      arr.push(g)
+      byRepo.set(g.repo, arr)
+    }
+    const repos = Array.from(byRepo.keys()).sort(
+      (a, b) => (byRepo.get(b)![0]?.issue_number ?? 0) - (byRepo.get(a)![0]?.issue_number ?? 0),
+    )
+    const visible: IssueGroup[] = []
+    for (let round = 0; round < perRepoLimit; round++) {
+      for (const repo of repos) {
+        const g = byRepo.get(repo)![round]
+        if (g) visible.push(g)
+      }
+    }
+    return { visible, perRepoActive: true }
+  }
+
+  return { visible: limit ? groups.slice(0, limit) : groups, perRepoActive: false }
+}
 
 // IssueList is the visual root. Caller passes pre-computed groups and
 // the section configuration; the component handles bucketing, headers,
@@ -430,7 +481,7 @@ function IssueSection({
     gray: 'bg-gray-400',
     red: 'bg-red-400',
   }[config.tone]
-  const visible = config.limit ? groups.slice(0, config.limit) : groups
+  const { visible, perRepoActive } = limitSectionGroups(groups, config)
   const hidden = groups.length - visible.length
   // Closed gets the "view more on GitHub" footer link to a single repo.
   // Cross-repo lists (project page) skip this — there's no single repo
@@ -447,7 +498,9 @@ function IssueSection({
         </h3>
         {hidden > 0 && (
           <span className="text-[11px] text-muted-foreground">
-            · showing {visible.length} most recent
+            {perRepoActive
+              ? `· showing ${visible.length} (≤${config.perRepoLimit} per repo)`
+              : `· showing ${visible.length} most recent`}
           </span>
         )}
       </div>
