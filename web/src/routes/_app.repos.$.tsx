@@ -26,13 +26,15 @@ interface Repo {
   auto_merge: boolean
   bound_machine?: string
 }
-export const Route = createFileRoute('/_app/repos/$repoName')({
+export const Route = createFileRoute('/_app/repos/$')({
   component: RepoDetail,
 })
 
 function RepoDetail() {
-  const { repoName } = Route.useParams()
-  const fullName = decodeURIComponent(repoName)
+  const { _splat } = Route.useParams()
+  // Splat segment preserves `/` literally — `org/repo` arrives intact with
+  // no encoding, so no decodeURIComponent dance and no `%2F`/`%252F`.
+  const fullName = _splat ?? ''
   const chatDrawer = useChatDrawer()
 
   const [repo, setRepo] = useState<Repo | null>(null)

@@ -422,8 +422,8 @@ function RepoList() {
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2">
                       <Link
-                        to="/repos/$repoName"
-                        params={{ repoName: encodeURIComponent(r.full_name) }}
+                        to="/repos/$"
+                        params={{ _splat: r.full_name }}
                         className="font-mono text-foreground hover:underline"
                       >
                         {r.full_name}
