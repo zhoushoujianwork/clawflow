@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Settings2, Zap } from 'lucide-react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, FolderOpen, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Settings2, Zap } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
@@ -13,7 +13,8 @@ import {
   type PendingEntry,
   type Run,
 } from '../components/IssueList'
-import { useRepoInfoMap } from '../lib/vcsUrls'
+import { repoUrl, useRepoInfoMap } from '../lib/vcsUrls'
+import { VcsIcon } from '../components/VcsIcon'
 import { useConfigChanged } from '../lib/configEvents'
 import { GitSyncCell, type GitStatus } from '../components/GitSyncCell'
 import {
@@ -62,6 +63,9 @@ interface RepoEntry {
   auto_merge?: boolean
   enabled?: boolean
   bound_machine?: string
+  // Absolute path to the local clone, when one is configured. Drives the
+  // "open in IDE" shortcut; absent for repos with no local checkout.
+  local_path?: string
 }
 
 // previewMD returns a one-line preview suitable for a collapsed-card
@@ -158,6 +162,11 @@ function ProjectDetail() {
   // "Bind here". Comes from /api/settings.global.hostname — same source
   // the per-repo page uses, so the UX feels uniform.
   const [hostname, setHostname] = useState<string>('')
+
+  // IDE deep-link scheme for the per-repo "open in IDE" shortcut. Resolved
+  // from /api/settings.global.default_ide — same logic as the repo list page
+  // (_app.repos.index.tsx) so both surfaces honour the user's IDE choice.
+  const [ideScheme, setIdeScheme] = useState('vscode://file/')
 
   // Generate context state. Used only by the empty-state Initialize
   // button — once context.md exists, all further edits go through
@@ -321,6 +330,16 @@ function ProjectDetail() {
       .catch(() => null)
       .then(settings => {
         if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+        if (settings?.global?.default_ide) {
+          const ide = settings.global.default_ide as string
+          const schemeMap: Record<string, string> = {
+            vscode: 'vscode://file/',
+            cursor: 'cursor://file/',
+            qoder: 'qoder://file/',
+            'vscode-insiders': 'vscode-insiders://file/',
+          }
+          setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
+        }
       })
     // Check if a generate job is already running for this project so
     // navigating away mid-run and coming back resumes the spinner.
@@ -1325,6 +1344,24 @@ function ProjectDetail() {
                           >
                             merge {m?.auto_merge ? 'on' : 'off'}
                           </span>
+                          <a
+                            href={repoUrl(repo, repoInfoMap)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Open in VCS"
+                            className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0 ml-1"
+                          >
+                            <VcsIcon repo={repo} map={repoInfoMap} className="w-3.5 h-3.5" />
+                          </a>
+                          {m?.local_path && (
+                            <a
+                              href={`${ideScheme}${m.local_path}?windowId=_blank`}
+                              title={`Open in IDE: ${m.local_path}`}
+                              className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0"
+                            >
+                              <FolderOpen className="w-3.5 h-3.5" />
+                            </a>
+                          )}
                           <button
                             type="button"
                             onClick={() => handleRemoveRepo(repo)}
