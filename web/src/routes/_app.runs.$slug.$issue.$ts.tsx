@@ -153,8 +153,8 @@ function RunDetail() {
   return (
     <div className="max-w-4xl mx-auto px-4 py-6">
       <Link
-        to="/repos/$repoName"
-        params={{ repoName: encodeURIComponent(repo) }}
+        to="/repos/$"
+        params={{ _splat: repo }}
         className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-4"
       >
         <ChevronLeft className="w-3.5 h-3.5" /> <span className="font-mono">{repo}</span>

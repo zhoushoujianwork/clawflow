@@ -587,8 +587,8 @@ function IssueRow({
         />
         {showRepo && (
           <Link
-            to="/repos/$repoName"
-            params={{ repoName: encodeURIComponent(group.repo) }}
+            to="/repos/$"
+            params={{ _splat: group.repo }}
             onClick={e => e.stopPropagation()}
             className="font-mono text-[11px] text-muted-foreground hover:text-foreground hover:underline shrink-0 max-w-[14rem] truncate"
             title={group.repo}

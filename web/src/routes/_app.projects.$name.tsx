@@ -1290,8 +1290,8 @@ function ProjectDetail() {
                         className="flex items-center justify-between px-4 py-2 hover:bg-secondary/20 group gap-3"
                       >
                         <Link
-                          to="/repos/$repoName"
-                          params={{ repoName: encodeURIComponent(repo) }}
+                          to="/repos/$"
+                          params={{ _splat: repo }}
                           className="font-mono text-sm text-foreground hover:underline truncate"
                           title={repo}
                         >

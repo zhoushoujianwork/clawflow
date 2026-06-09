@@ -973,8 +973,8 @@ function PendingRow({ p, repoMap }: { p: Pending; repoMap: RepoInfoMap }) {
         {p.issue_title || '(no title)'}
       </span>
       <Link
-        to="/repos/$repoName"
-        params={{ repoName: encodeURIComponent(p.repo) }}
+        to="/repos/$"
+        params={{ _splat: p.repo }}
         onClick={e => e.stopPropagation()}
         className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 hidden sm:inline"
       >
@@ -1135,8 +1135,8 @@ function IssueGroupRow({
           {timeAgo(group.lastActivity)}
         </span>
         <Link
-          to="/repos/$repoName"
-          params={{ repoName: encodeURIComponent(group.repo) }}
+          to="/repos/$"
+          params={{ _splat: group.repo }}
           className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 hidden lg:inline"
           onClick={e => e.stopPropagation()}
         >
@@ -1259,8 +1259,8 @@ function Row({
         #{r.issue_number}
       </a>
       <Link
-        to="/repos/$repoName"
-        params={{ repoName: encodeURIComponent(r.repo) }}
+        to="/repos/$"
+        params={{ _splat: r.repo }}
         className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0 hidden sm:inline"
       >
         {r.repo}

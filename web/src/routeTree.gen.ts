@@ -19,7 +19,7 @@ import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppReposIndexRouteImport } from './routes/_app.repos.index'
 import { Route as AppProjectsIndexRouteImport } from './routes/_app.projects.index'
 import { Route as AppReposAddRouteImport } from './routes/_app.repos.add'
-import { Route as AppReposRepoNameRouteImport } from './routes/_app.repos.$repoName'
+import { Route as AppReposSplatRouteImport } from './routes/_app.repos.$'
 import { Route as AppProjectsNameRouteImport } from './routes/_app.projects.$name'
 import { Route as AppProjectsNamePilotRunsRouteImport } from './routes/_app.projects.$name_.pilot-runs'
 import { Route as AppRunsSlugIssueTsRouteImport } from './routes/_app.runs.$slug.$issue.$ts'
@@ -73,9 +73,9 @@ const AppReposAddRoute = AppReposAddRouteImport.update({
   path: '/repos/add',
   getParentRoute: () => AppRoute,
 } as any)
-const AppReposRepoNameRoute = AppReposRepoNameRouteImport.update({
-  id: '/repos/$repoName',
-  path: '/repos/$repoName',
+const AppReposSplatRoute = AppReposSplatRouteImport.update({
+  id: '/repos/$',
+  path: '/repos/$',
   getParentRoute: () => AppRoute,
 } as any)
 const AppProjectsNameRoute = AppProjectsNameRouteImport.update({
@@ -103,7 +103,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
   '/projects/$name': typeof AppProjectsNameRoute
-  '/repos/$repoName': typeof AppReposRepoNameRoute
+  '/repos/$': typeof AppReposSplatRoute
   '/repos/add': typeof AppReposAddRoute
   '/projects/': typeof AppProjectsIndexRoute
   '/repos/': typeof AppReposIndexRoute
@@ -117,7 +117,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
   '/projects/$name': typeof AppProjectsNameRoute
-  '/repos/$repoName': typeof AppReposRepoNameRoute
+  '/repos/$': typeof AppReposSplatRoute
   '/repos/add': typeof AppReposAddRoute
   '/projects': typeof AppProjectsIndexRoute
   '/repos': typeof AppReposIndexRoute
@@ -134,7 +134,7 @@ export interface FileRoutesById {
   '/_app/settings': typeof AppSettingsRoute
   '/_app/usage': typeof AppUsageRoute
   '/_app/projects/$name': typeof AppProjectsNameRoute
-  '/_app/repos/$repoName': typeof AppReposRepoNameRoute
+  '/_app/repos/$': typeof AppReposSplatRoute
   '/_app/repos/add': typeof AppReposAddRoute
   '/_app/projects/': typeof AppProjectsIndexRoute
   '/_app/repos/': typeof AppReposIndexRoute
@@ -151,7 +151,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/usage'
     | '/projects/$name'
-    | '/repos/$repoName'
+    | '/repos/$'
     | '/repos/add'
     | '/projects/'
     | '/repos/'
@@ -165,7 +165,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/usage'
     | '/projects/$name'
-    | '/repos/$repoName'
+    | '/repos/$'
     | '/repos/add'
     | '/projects'
     | '/repos'
@@ -181,7 +181,7 @@ export interface FileRouteTypes {
     | '/_app/settings'
     | '/_app/usage'
     | '/_app/projects/$name'
-    | '/_app/repos/$repoName'
+    | '/_app/repos/$'
     | '/_app/repos/add'
     | '/_app/projects/'
     | '/_app/repos/'
@@ -266,11 +266,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppReposAddRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/repos/$repoName': {
-      id: '/_app/repos/$repoName'
-      path: '/repos/$repoName'
-      fullPath: '/repos/$repoName'
-      preLoaderRoute: typeof AppReposRepoNameRouteImport
+    '/_app/repos/$': {
+      id: '/_app/repos/$'
+      path: '/repos/$'
+      fullPath: '/repos/$'
+      preLoaderRoute: typeof AppReposSplatRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/projects/$name': {
@@ -319,7 +319,7 @@ interface AppRouteChildren {
   AppProjectsRoute: typeof AppProjectsRouteWithChildren
   AppSettingsRoute: typeof AppSettingsRoute
   AppUsageRoute: typeof AppUsageRoute
-  AppReposRepoNameRoute: typeof AppReposRepoNameRoute
+  AppReposSplatRoute: typeof AppReposSplatRoute
   AppReposAddRoute: typeof AppReposAddRoute
   AppReposIndexRoute: typeof AppReposIndexRoute
   AppRunsSlugIssueTsRoute: typeof AppRunsSlugIssueTsRoute
@@ -331,7 +331,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppProjectsRoute: AppProjectsRouteWithChildren,
   AppSettingsRoute: AppSettingsRoute,
   AppUsageRoute: AppUsageRoute,
-  AppReposRepoNameRoute: AppReposRepoNameRoute,
+  AppReposSplatRoute: AppReposSplatRoute,
   AppReposAddRoute: AppReposAddRoute,
   AppReposIndexRoute: AppReposIndexRoute,
   AppRunsSlugIssueTsRoute: AppRunsSlugIssueTsRoute,
