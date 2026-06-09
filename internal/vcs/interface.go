@@ -23,8 +23,12 @@ type Issue struct {
 	Body      string   `json:"body"`
 	Labels    []string `json:"labels"`
 	State     string   `json:"state"`
-	CreatedAt string   `json:"created_at,omitempty"`
-	UpdatedAt string   `json:"updated_at,omitempty"`
+	// URL is the web (HTML) URL of the issue. Populated by GetIssue
+	// (GitHub html_url / GitLab web_url); other list calls may leave it
+	// empty.
+	URL       string `json:"url,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 	// ClosedAt is populated only when State == "closed". GitHub /
 	// GitLab both return null when open; clients normalize to "" here.
 	// Used by Pilot's issue_digest to count "closed in last 24h"
@@ -106,6 +110,10 @@ type Client interface {
 	// Issues
 	ListOpenIssues(repo string) ([]Issue, error)
 	ListIssues(repo string, state string, labels []string) ([]Issue, error)
+	// GetIssue fetches a single issue by its display number. Returns
+	// (nil, nil) when the issue does not exist (404), so callers can
+	// distinguish "not found" from a transport error.
+	GetIssue(repo string, number int) (*Issue, error)
 	ListIssueComments(repo string, issueNumber int) ([]string, error)
 	ListIssueCommentsDetail(repo string, issueNumber int) ([]IssueComment, error)
 	CloseIssue(repo string, issueNumber int) error

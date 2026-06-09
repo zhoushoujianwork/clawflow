@@ -209,6 +209,60 @@ func TestUpdateIssue(t *testing.T) {
 	}
 }
 
+func TestGetIssue(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET " + projectPath + "/issues/7": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 200, map[string]any{
+				"id":          98765,
+				"iid":         7,
+				"title":       "a bug",
+				"description": "something broke",
+				"state":       "opened",
+				"labels":      []string{"bug", "feat"},
+				"web_url":     "https://gitlab.com/ns/group/repo/-/issues/7",
+				"created_at":  "2026-01-01T00:00:00Z",
+				"updated_at":  "2026-01-02T00:00:00Z",
+			})
+		},
+	})
+
+	issue, err := client.GetIssue("ns/group/repo", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue == nil {
+		t.Fatal("expected issue, got nil")
+	}
+	if issue.Number != 7 || issue.Title != "a bug" || issue.Body != "something broke" {
+		t.Errorf("unexpected issue: %#v", issue)
+	}
+	if issue.State != "open" {
+		t.Errorf("expected normalized state 'open', got %q", issue.State)
+	}
+	if issue.URL != "https://gitlab.com/ns/group/repo/-/issues/7" {
+		t.Errorf("unexpected url: %q", issue.URL)
+	}
+	if !issue.HasLabel("bug") || !issue.HasLabel("feat") {
+		t.Errorf("expected labels bug+feat, got %v", issue.Labels)
+	}
+}
+
+func TestGetIssueNotFound(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET " + projectPath + "/issues/999": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "not found", 404)
+		},
+	})
+
+	issue, err := client.GetIssue("ns/group/repo", 999)
+	if err != nil {
+		t.Fatalf("expected nil error on 404, got %v", err)
+	}
+	if issue != nil {
+		t.Fatalf("expected nil issue on 404, got %#v", issue)
+	}
+}
+
 func TestInitLabels_SkipsExisting(t *testing.T) {
 	created := []string{}
 	client := newTestClient(t, map[string]http.HandlerFunc{
