@@ -153,7 +153,7 @@ function RunDetail() {
   const issueNum = issue.replace(/^issue-/, '')
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-6">
+    <div className="max-w-4xl mx-auto px-4 py-6 min-w-0">
       <Link
         to="/repos/$"
         params={{ _splat: repo }}
@@ -249,7 +249,7 @@ function RunDetail() {
         const toolNames = collectToolNames(events)
         const openByDefault = !meta || meta.status === 'running'
         return (
-          <details open={openByDefault} className="group">
+          <details open={openByDefault} className="group min-w-0">
             <summary className="cursor-pointer select-none flex items-center gap-2 text-sm font-semibold text-foreground hover:text-foreground/80">
               <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90" />
               Trace
@@ -279,7 +279,7 @@ function RunDetail() {
               <div
                 ref={terminalRef}
                 onScroll={handleTerminalScroll}
-                className="h-[500px] overflow-y-auto bg-[#1e1e1e] rounded-b-lg border border-[#3d3d3d] p-3 font-mono text-[13px] leading-relaxed"
+                className="h-[500px] overflow-y-auto overflow-x-hidden min-w-0 bg-[#1e1e1e] rounded-b-lg border border-[#3d3d3d] p-3 font-mono text-[13px] leading-relaxed"
               >
                 {rawLoading ? (
                   <p className="text-gray-500">Loading…</p>
@@ -660,15 +660,52 @@ function prettyValue(v: unknown): string {
   }
 }
 
+/**
+ * Pretty-print a value for human display in the Trace terminal.
+ * Well-known multiline string fields (command, content, new_string, etc.)
+ * are rendered raw so embedded \n/\t sequences appear as real whitespace
+ * instead of literal escape characters from JSON.stringify.
+ * Everything else falls back to JSON.stringify with a light unescape pass.
+ */
+function prettyValueForDisplay(v: unknown): string {
+  if (typeof v === 'string') return v
+
+  if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+    const obj = v as Record<string, unknown>
+    const MULTILINE_KEYS = ['command', 'content', 'new_string', 'old_string', 'description', 'text', 'body']
+    const parts: string[] = []
+    for (const [key, val] of Object.entries(obj)) {
+      if (MULTILINE_KEYS.includes(key) && typeof val === 'string') {
+        // render raw — preserves real newlines inside the string value
+        parts.push(`${key}: ${val}`)
+      } else {
+        try {
+          parts.push(`${key}: ${JSON.stringify(val, null, 2)}`)
+        } catch {
+          parts.push(`${key}: ${String(val)}`)
+        }
+      }
+    }
+    return parts.join('\n')
+  }
+
+  try {
+    const raw = JSON.stringify(v, null, 2)
+    return raw.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+  } catch {
+    return String(v)
+  }
+}
+
 function TerminalCollapsible({ text, maxLines = 8 }: { text: string; maxLines?: number }) {
   const [expanded, setExpanded] = useState(false)
   const lines = text.split('\n')
   if (lines.length <= maxLines) {
-    return <span className="text-gray-300 whitespace-pre-wrap">{text}</span>
+    return <span className="text-gray-300 whitespace-pre-wrap break-all">{text}</span>
   }
   if (!expanded) {
     return (
-      <span className="text-gray-300 whitespace-pre-wrap">
+      <span className="text-gray-300 whitespace-pre-wrap break-all">
         {lines.slice(0, maxLines).join('\n')}
         {'\n'}
         <button
@@ -681,7 +718,7 @@ function TerminalCollapsible({ text, maxLines = 8 }: { text: string; maxLines?: 
     )
   }
   return (
-    <span className="text-gray-300 whitespace-pre-wrap">
+    <span className="text-gray-300 whitespace-pre-wrap break-all">
       {text}
       {'\n'}
       <button
@@ -711,12 +748,12 @@ function TerminalLine({ ev, toolNames }: { ev: RawEvent; toolNames: Record<strin
             return (
               <div key={i} className="mb-1">
                 <span className="text-green-400">[reply] </span>
-                <span className="text-gray-200 whitespace-pre-wrap">{c.text}</span>
+                <span className="text-gray-200 whitespace-pre-wrap break-all">{c.text}</span>
               </div>
             )
           }
           if (c.type === 'tool_use') {
-            const inputStr = prettyValue(c.input ?? {})
+            const inputStr = prettyValueForDisplay(c.input ?? {})
             return (
               <div key={i} className="mb-1">
                 <span className="text-cyan-400">$ </span>
@@ -782,7 +819,7 @@ function TerminalLine({ ev, toolNames }: { ev: RawEvent; toolNames: Record<strin
         {ev.result && (
           <>
             {'\n'}
-            <span className="text-gray-200 whitespace-pre-wrap">{ev.result}</span>
+            <span className="text-gray-200 whitespace-pre-wrap break-all">{ev.result}</span>
           </>
         )}
         {!ev.result && (
