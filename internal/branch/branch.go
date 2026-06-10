@@ -269,6 +269,13 @@ func ListMerged(localPath, base string, includeRemote bool) ([]Branch, error) {
 	return result, nil
 }
 
+// ParseRefLinesExported is the exported wrapper for parseRefLines, allowing
+// other packages (e.g. internal/api) to reuse the git for-each-ref parsing
+// logic without duplicating it.
+func ParseRefLinesExported(out string, remote bool) []Branch {
+	return parseRefLines(out, remote)
+}
+
 // DeleteLocal removes a local branch. When force is false it uses `git branch
 // -d` (refuses unmerged branches); force switches to `-D`. Deleting the
 // currently checked-out branch or one held by a worktree fails with git's own

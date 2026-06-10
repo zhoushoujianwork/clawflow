@@ -286,6 +286,8 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/repo/git-status/refresh", api.HandleGitStatusRefresh)
 			mux.HandleFunc("/api/repo/git-pull", api.HandleGitPull)
 			mux.HandleFunc("/api/repo/git-push", api.HandleGitPush)
+			mux.HandleFunc("/api/repo/branches", api.HandleRepoBranches)
+			mux.HandleFunc("/api/repo/set-base-branch", api.HandleRepoSetBaseBranch)
 			mux.HandleFunc("/api/repos/list-remote", api.HandleListRemoteRepos)
 			mux.HandleFunc("/api/repos/add-remote", api.HandleAddRemoteRepo)
 			mux.HandleFunc("/api/settings", api.HandleGetSettings)
