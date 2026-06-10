@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off, FolderOpen } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
@@ -35,6 +36,7 @@ function RepoDetail() {
   // Splat segment preserves `/` literally — `org/repo` arrives intact with
   // no encoding, so no decodeURIComponent dance and no `%2F`/`%252F`.
   const fullName = _splat ?? ''
+  useDocumentTitle(fullName || undefined)
   const chatDrawer = useChatDrawer()
 
   const [repo, setRepo] = useState<Repo | null>(null)

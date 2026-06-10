@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { Receipt } from 'lucide-react'
 import { type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -102,6 +103,7 @@ function fmtPeriodLabel(start: string, end: string): string {
 }
 
 function UsagePage() {
+  useDocumentTitle('Usage')
   const [summary, setSummary] = useState<UsageSummary | null>(null)
   const [repos, setRepos] = useState<Repo[]>([])
   const [loading, setLoading] = useState(true)

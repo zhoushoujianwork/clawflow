@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { cn } from '../lib/utils'
 
 interface Operator {
@@ -54,6 +55,7 @@ export const Route = createFileRoute('/_app/operators')({
 })
 
 function OperatorsList() {
+  useDocumentTitle('Operators')
   const [ops, setOps] = useState<Operator[]>([])
   const [loading, setLoading] = useState(true)
 

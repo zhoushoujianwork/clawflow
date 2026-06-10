@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { Check, Loader2, AlertCircle, X, Eye, EyeOff, Folder, ChevronRight, Home, Copy, ExternalLink, RefreshCw, Upload, Download, LogOut } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { emitConfigChanged, useConfigChanged } from '../lib/configEvents'
@@ -49,6 +50,7 @@ async function revealSecret(which: 'claude_api_key' | 'gh_token' | 'gitlab_token
 }
 
 function SettingsPage() {
+  useDocumentTitle('Settings')
   const [data, setData] = useState<SettingsView | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)

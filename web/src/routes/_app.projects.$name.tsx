@@ -1,5 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, FolderOpen, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Settings2, Zap } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
@@ -103,6 +104,7 @@ export const Route = createFileRoute('/_app/projects/$name')({
 
 function ProjectDetail() {
   const { name } = Route.useParams()
+  useDocumentTitle(name)
   const navigate = useNavigate()
   const chatDrawer = useChatDrawer()
 

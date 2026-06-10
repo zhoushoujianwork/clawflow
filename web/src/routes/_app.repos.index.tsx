@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { FolderOpen, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
@@ -49,6 +50,7 @@ export const Route = createFileRoute('/_app/repos/')({
 })
 
 function RepoList() {
+  useDocumentTitle('Repos')
   const { provider } = Route.useSearch()
   const navigate = Route.useNavigate()
 
