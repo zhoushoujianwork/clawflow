@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { ChevronLeft, Activity, Copy, Check } from 'lucide-react'
 import { cn } from '../lib/utils'
 import {
@@ -19,6 +20,7 @@ export const Route = createFileRoute('/_app/projects/$name_/pilot-runs')({
 
 function PilotRunsPage() {
   const { name } = Route.useParams()
+  useDocumentTitle(`${name} · Pilot`)
   const [runs, setRuns] = useState<PilotRun[]>([])
   const [loading, setLoading] = useState(true)
   const [visible, setVisible] = useState(20)

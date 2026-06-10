@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, ChevronsUp, ChevronsDown, Square } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
@@ -85,6 +86,7 @@ export const Route = createFileRoute('/_app/runs/$slug/$issue/$ts')({
 
 function RunDetail() {
   const { slug, issue, ts } = Route.useParams()
+  useDocumentTitle(`${slug}#${issue}`)
   // Absolute path from the server root. `./data/...` would break here
   // because the current URL is /runs/slug/issue/ts and the dashboard
   // would try to fetch /runs/slug/issue/data/... instead of /data/...

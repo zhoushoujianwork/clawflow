@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import {
   Search,
   ExternalLink,
@@ -243,6 +244,7 @@ export const Route = createFileRoute('/_app/dashboard')({
 })
 
 function Dashboard() {
+  useDocumentTitle('Dashboard')
   const [runs, setRuns] = useState<Run[]>([])
   const [meta, setMeta] = useState<Meta | null>(null)
   const [repos, setRepos] = useState<Repo[]>([])
