@@ -855,21 +855,40 @@ type IssueEntry struct {
 // once an issue is known closed it must not silently disappear from the
 // snapshot — otherwise the dashboard would infer it is open and mis-classify
 // it as DONE rather than Closed.
+//
+// Per-entry merge is monotonic on CapturedAt: an incoming entry only
+// replaces the on-disk one when it was captured at the same time or later.
+// `clawflow run` snapshots issue state at scan start but writes after the
+// operator phase, which can run for many minutes — a Sync-all from the
+// dashboard landing in that window must not be rolled back by the older
+// scan-time data.
 func WriteIssues(entries []IssueEntry) error {
 	if entries == nil {
 		entries = []IssueEntry{}
 	}
 
-	// Merge in previously-known closed issues missing from the new batch.
+	key := func(e IssueEntry) string { return fmt.Sprintf("%s#%d", e.Repo, e.IssueNumber) }
 	newKeys := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		newKeys[fmt.Sprintf("%s#%d", e.Repo, e.IssueNumber)] = true
+		newKeys[key(e)] = true
 	}
 	if data, err := os.ReadFile(filepath.Join(DataDir(), "issues.json")); err == nil {
 		var old []IssueEntry
 		if json.Unmarshal(data, &old) == nil {
+			// Monotonic merge: keep the on-disk entry when it is fresher
+			// than the incoming one.
+			oldByKey := make(map[string]IssueEntry, len(old))
 			for _, e := range old {
-				if e.State == "closed" && !newKeys[fmt.Sprintf("%s#%d", e.Repo, e.IssueNumber)] {
+				oldByKey[key(e)] = e
+			}
+			for i, e := range entries {
+				if prev, ok := oldByKey[key(e)]; ok && prev.CapturedAt.After(e.CapturedAt) {
+					entries[i] = prev
+				}
+			}
+			// Merge in previously-known closed issues missing from the new batch.
+			for _, e := range old {
+				if e.State == "closed" && !newKeys[key(e)] {
 					entries = append(entries, e)
 				}
 			}

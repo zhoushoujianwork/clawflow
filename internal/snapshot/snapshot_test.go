@@ -1113,3 +1113,65 @@ func TestWriteIssues_StickyDoesNotDuplicateClosedInBatch(t *testing.T) {
 		t.Errorf("expected fresh CapturedAt to win; got %v", got[0].CapturedAt)
 	}
 }
+
+// TestWriteIssues_StaleWriterDoesNotRollBack verifies the monotonic merge:
+// a writer carrying data captured BEFORE what is already on disk (the
+// clawflow-run scan-start snapshot landing after a long operator phase,
+// while a dashboard Sync-all wrote fresher state in between) must not roll
+// individual entries back.
+func TestWriteIssues_StaleWriterDoesNotRollBack(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if err := os.MkdirAll(filepath.Join(tmp, ".clawflow", "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	scanStart := time.Now().UTC().Add(-10 * time.Minute)
+	syncTime := time.Now().UTC()
+
+	// Sync-all wrote fresh state: #1 closed, #2 picked up agent-implemented.
+	synced := []IssueEntry{
+		{Repo: "owner/repo", IssueNumber: 1, State: "closed", CapturedAt: syncTime},
+		{Repo: "owner/repo", IssueNumber: 2, State: "open", Labels: []string{"feat", "agent-implemented"}, CapturedAt: syncTime},
+	}
+	if err := WriteIssues(synced); err != nil {
+		t.Fatalf("first WriteIssues: %v", err)
+	}
+
+	// The run finishes and writes its scan-start snapshot: #1 still open,
+	// #2 without the new label, plus #3 the sync didn't know about.
+	stale := []IssueEntry{
+		{Repo: "owner/repo", IssueNumber: 1, State: "open", CapturedAt: scanStart},
+		{Repo: "owner/repo", IssueNumber: 2, State: "open", Labels: []string{"feat"}, CapturedAt: scanStart},
+		{Repo: "owner/repo", IssueNumber: 3, State: "open", CapturedAt: scanStart},
+	}
+	if err := WriteIssues(stale); err != nil {
+		t.Fatalf("second WriteIssues: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmp, ".clawflow", "data", "issues.json"))
+	if err != nil {
+		t.Fatalf("read issues.json: %v", err)
+	}
+	var got []IssueEntry
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	byNum := make(map[int]IssueEntry)
+	for _, e := range got {
+		byNum[e.IssueNumber] = e
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d entries, want 3", len(got))
+	}
+	if e := byNum[1]; e.State != "closed" || !e.CapturedAt.Equal(syncTime) {
+		t.Errorf("#1 rolled back: state=%q captured_at=%v, want closed @ %v", e.State, e.CapturedAt, syncTime)
+	}
+	if e := byNum[2]; len(e.Labels) != 2 {
+		t.Errorf("#2 labels rolled back: %v, want [feat agent-implemented]", e.Labels)
+	}
+	if _, ok := byNum[3]; !ok {
+		t.Error("#3 missing — entries new to the stale batch must still land")
+	}
+}

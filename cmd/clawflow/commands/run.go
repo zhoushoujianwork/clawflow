@@ -354,6 +354,44 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		})
 	}
 
+	// Re-capture issue state for repos where an operator actually fired:
+	// globalIssues was collected at scan start, but the operator phase can
+	// run for many minutes and mutates labels/state itself (issue closed,
+	// agent-* labels applied). Writing the scan-time data after that window
+	// would roll the dashboard back. Repos with no fired job keep their
+	// scan-time snapshot — Phase 2 was near-instant for them, so it's
+	// still fresh and costs no extra API call.
+	if len(fired) > 0 {
+		rerunRepos := make(map[string]bool, len(fired))
+		for _, f := range fired {
+			rerunRepos[f.Repo] = true
+		}
+		var recaptured []snapshot.IssueEntry
+		for repo := range rerunRepos {
+			client, cErr := newVCSClient(allRepos[repo])
+			if cErr != nil {
+				// Keep the scan-time entries for this repo rather than
+				// dropping it from the snapshot entirely.
+				fmt.Fprintf(os.Stderr, "[%s] snapshot re-capture client: %v\n", repo, cErr)
+				delete(rerunRepos, repo)
+				continue
+			}
+			fresh := captureIssuesSnapshot(client, repo)
+			if fresh == nil { // ListIssues failed — fall back to scan-time data
+				delete(rerunRepos, repo)
+				continue
+			}
+			recaptured = append(recaptured, fresh...)
+		}
+		kept := globalIssues[:0]
+		for _, e := range globalIssues {
+			if !rerunRepos[e.Repo] {
+				kept = append(kept, e)
+			}
+		}
+		globalIssues = append(kept, recaptured...)
+	}
+
 	// Refresh the runs index so the dashboard shows this run at the top.
 	// WriteRunsIndex returns the FULL entry set so we can hand it to
 	// WriteUsageSummary without re-walking the runs tree.
@@ -608,61 +646,72 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	// MVP: skip PRs. All 3 built-in operators target issues. When a
 	// pr-target operator appears we'll add the same loop over ListOpenPRs.
 
-	// Snapshot every issue (open + closed) for the dashboard via a
-	// single ListIssues("all") call — same shape as POST
-	// /api/repo/refresh-issues so the cron path and the manual Sync
-	// button can't disagree about which issues are open vs closed.
+	// Snapshot every issue (open + closed) for the dashboard — same shape
+	// as POST /api/repo/refresh-issues so the cron path and the manual
+	// Sync button can't disagree about which issues are open vs closed.
 	//
 	// Operator matching above keeps using ListOpenIssues so the
 	// per_page=100 budget for open issues is independent of any closed
-	// noise. Snapshot side accepts the implicit ~100-issue cap from
-	// the "all" call (sorted updated_at desc), which keeps stale
-	// ancient closed issues out of the view.
-	if snapshotIssues, sErr := client.ListIssues(fullName, "all", nil); sErr == nil {
-		// Resolve sub-issue parentage so the dashboard can nest sub-issues
-		// under their parent. Only issues whose sub_issues_summary reports
-		// children (SubIssuesTotal > 0) trigger the extra ListSubIssues
-		// call, so a repo with no sub-issues costs zero additional requests.
-		// GitLab has no native sub-issues (SubIssuesTotal stays 0), so this
-		// loop is a no-op there.
-		parentOf := map[int]int{} // child issue number → parent issue number
-		for _, iss := range snapshotIssues {
-			if iss.SubIssuesTotal == 0 {
-				continue
-			}
-			children, subErr := client.ListSubIssues(fullName, iss.Number)
-			if subErr != nil {
-				debugf("  · sub-issues of #%d: %v", iss.Number, subErr)
-				continue
-			}
-			for _, ch := range children {
-				parentOf[ch.Number] = iss.Number
-			}
-		}
-		for _, iss := range snapshotIssues {
-			entry := snapshot.IssueEntry{
-				Repo:         fullName,
-				IssueNumber:  iss.Number,
-				IssueTitle:   iss.Title,
-				Labels:       append([]string(nil), iss.Labels...),
-				State:        iss.State,
-				CapturedAt:   capturedAt,
-				CreatedAt:    iss.CreatedAt,
-				ClosedAt:     iss.ClosedAt,
-				SubTotal:     iss.SubIssuesTotal,
-				SubCompleted: iss.SubIssuesCompleted,
-			}
-			if p, ok := parentOf[iss.Number]; ok {
-				entry.ParentNumber = &p
-			}
-			*allIssues = append(*allIssues, entry)
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "[%s] snapshot list issues: %v\n", fullName, sErr)
-	}
+	// noise.
+	*allIssues = append(*allIssues, captureIssuesSnapshot(client, fullName)...)
 
 	runLog.Info("run/scan", "repo", fullName, "phase", "done", "issues", len(issues), "pending", len(pending), "jobs", len(jobs), "elapsed", time.Since(scanStart).Round(time.Millisecond))
 	return pending, jobs, nil
+}
+
+// captureIssuesSnapshot lists every issue (open + closed) in fullName via a
+// single ListIssues("all") call and converts them to dashboard snapshot
+// entries, resolving sub-issue parentage. The "all" call's implicit
+// ~100-issue cap (sorted updated_at desc) keeps stale ancient closed issues
+// out of the view. Errors are reported on stderr and yield an empty slice —
+// the snapshot is best-effort.
+func captureIssuesSnapshot(client vcs.Client, fullName string) []snapshot.IssueEntry {
+	capturedAt := time.Now().UTC()
+	snapshotIssues, err := client.ListIssues(fullName, "all", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] snapshot list issues: %v\n", fullName, err)
+		return nil
+	}
+	// Resolve sub-issue parentage so the dashboard can nest sub-issues
+	// under their parent. Only issues whose sub_issues_summary reports
+	// children (SubIssuesTotal > 0) trigger the extra ListSubIssues
+	// call, so a repo with no sub-issues costs zero additional requests.
+	// GitLab has no native sub-issues (SubIssuesTotal stays 0), so this
+	// loop is a no-op there.
+	parentOf := map[int]int{} // child issue number → parent issue number
+	for _, iss := range snapshotIssues {
+		if iss.SubIssuesTotal == 0 {
+			continue
+		}
+		children, subErr := client.ListSubIssues(fullName, iss.Number)
+		if subErr != nil {
+			debugf("  · sub-issues of #%d: %v", iss.Number, subErr)
+			continue
+		}
+		for _, ch := range children {
+			parentOf[ch.Number] = iss.Number
+		}
+	}
+	entries := make([]snapshot.IssueEntry, 0, len(snapshotIssues))
+	for _, iss := range snapshotIssues {
+		entry := snapshot.IssueEntry{
+			Repo:         fullName,
+			IssueNumber:  iss.Number,
+			IssueTitle:   iss.Title,
+			Labels:       append([]string(nil), iss.Labels...),
+			State:        iss.State,
+			CapturedAt:   capturedAt,
+			CreatedAt:    iss.CreatedAt,
+			ClosedAt:     iss.ClosedAt,
+			SubTotal:     iss.SubIssuesTotal,
+			SubCompleted: iss.SubIssuesCompleted,
+		}
+		if p, ok := parentOf[iss.Number]; ok {
+			entry.ParentNumber = &p
+		}
+		entries = append(entries, entry)
+	}
+	return entries
 }
 
 // runJobsParallel dispatches `jobs` across `workers` goroutines, gating
