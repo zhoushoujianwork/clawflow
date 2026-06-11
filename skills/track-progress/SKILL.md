@@ -84,13 +84,28 @@ When a sub-issue is pending only because its PR is open/unmerged, note that in t
 
 ### Step 4: Emit outcome
 
-**If ALL sub-issues are done:**
+**If ALL sub-issues are done:** emit the status table AND a one-time
+achievement summary, then close. The summary is the tracking issue's
+final wrap-up — it should let a reader understand what landed across all
+sub-issues without opening each one. For every sub-issue, write one line
+covering what it delivered and the PR/outcome that proves it (merged PR
+number, or `agent-skipped` if it was intentionally dropped). Pull the PR
+number and one-line description from the Step 1b PR list you already
+fetched; if a sub-issue was closed without a PR (e.g. duplicate, won't-do),
+say so briefly.
+
 ```
 ## 📊 Progress Check
 
 ...table...
 
 **{total}/{total} sub-issues complete. Closing tracking issue.**
+
+### ✅ Summary of what landed
+
+- #{n1} {title} — {what it delivered}, merged in #{pr1}
+- #{n2} {title} — {what it delivered}, merged in #{pr2}
+- #{n3} {title} — skipped (agent-skipped): {one-line reason}
 
 <!-- clawflow:outcome=agent-closed -->
 ```

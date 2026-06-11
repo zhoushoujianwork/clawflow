@@ -490,6 +490,54 @@ func deterministicSkipReason(op *operator.Operator, repoCfg config.Repo) string 
 	return ""
 }
 
+// operatorPriority ranks operators that match the same issue in one scan so
+// firstMatch fires the right one (issue #270). Lower value = runs first.
+// This makes the decompose-before-evaluate ordering EXPLICIT instead of
+// relying on Registry.All()'s alphabetical sort (which only happened to put
+// "decompose" before "evaluate-bug"): a tracking issue must be decomposed —
+// flipping it to a parent — before any leaf evaluator gets a turn, otherwise
+// the evaluator races the split. Unlisted operators land in a middle default
+// tier and keep their relative alphabetical order via the stable comparison.
+func operatorPriority(name string) int {
+	switch {
+	case name == "decompose":
+		return 0 // structural: split before anything evaluates the issue
+	case strings.HasPrefix(name, "evaluate-"):
+		return 10 // assessment
+	case name == "implement":
+		return 20 // execution: runs after the issue is assessed
+	default:
+		return 15
+	}
+}
+
+// subIssueLister is the narrow slice of vcs.Client that isStaleLeafJob needs.
+// Declaring it locally keeps the freshness recheck unit-testable with a tiny
+// fake instead of a full vcs.Client implementation.
+type subIssueLister interface {
+	ListSubIssues(repo string, issueNumber int) ([]vcs.Issue, error)
+}
+
+// isStaleLeafJob reports whether a leaf-gated operator job has gone stale
+// because sub-issues were attached to its subject between scan and execution
+// (issue #270). scanRepoOnce snapshots SubTotal at poll time, but a leaf
+// operator can run for minutes (the issue's #139 evaluate-bug took 7m19s);
+// if sub-issues land in that window the issue is now a parent and should
+// defer to its coordinator (track-progress) rather than run a leaf
+// evaluate/implement. Only operators declaring applies_to: leaf are checked.
+// GitHub-only: GitLab's ListSubIssues returns ErrNotSupported, treated here
+// as "not stale" so the recheck naturally short-circuits.
+func isStaleLeafJob(client subIssueLister, op *operator.Operator, repo string, issueNumber int) (stale bool, subCount int) {
+	if op == nil || op.Trigger.AppliesTo != operator.AppliesLeaf {
+		return false, 0
+	}
+	subs, err := client.ListSubIssues(repo, issueNumber)
+	if err != nil {
+		return false, 0
+	}
+	return len(subs) > 0, len(subs)
+}
+
 // scanRepoOnce lists every open issue in the repo and returns the full
 // set of (issue × matching-operator) pending entries plus the runJobs
 // that the executor should fire (at most one per issue, the first
@@ -608,7 +656,14 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 				Labels:      append([]string(nil), sub.Labels...),
 				CapturedAt:  capturedAt,
 			})
-			if firstMatch == nil {
+			// Pick the highest-priority matching operator to actually fire
+			// (issue #270). Explicit priority replaces the implicit reliance
+			// on Registry.All()'s alphabetical order: when both decompose and
+			// a leaf evaluator match the same issue, decompose MUST run first
+			// so the issue is split (and flips to non-leaf) before any
+			// evaluator races it. Equal-priority ties keep the stable
+			// alphabetical order from reg.All().
+			if firstMatch == nil || operatorPriority(op.Name) < operatorPriority(firstMatch.Name) {
 				firstMatch = op
 			}
 		}
@@ -826,6 +881,23 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
 			return false, false
 		}
+	}
+
+	// Sub-issue freshness recheck (issue #270). The scan captured SubTotal
+	// at poll time, but a leaf operator can sit queued — and then run — for
+	// minutes. If sub-issues were attached to this issue in that window it
+	// is now a parent and must defer to its coordinator (track-progress),
+	// not run a leaf evaluate/implement. Re-fetch the live sub-issue count
+	// and, if it became a parent, skip and mark agent-skipped so the leaf
+	// gate keeps it out of the queue on later passes. GitHub-only — GitLab
+	// short-circuits inside isStaleLeafJob.
+	if stale, n := isStaleLeafJob(j.client, j.op, j.repo, j.sub.Number); stale {
+		fmt.Printf("%s → skip (became parent since poll: %d sub-issue(s))\n", prefix, n)
+		if err := j.client.AddLabel(j.repo, j.sub.Number, "agent-skipped"); err != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ add agent-skipped label: %v\n", prefix, err)
+		}
+		runLog.Info("run/skip_became_parent", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "subs", n)
+		return false, false
 	}
 
 	// Persist per-run events.jsonl + meta.json under the dashboard
