@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ArrowUp,
   ArrowDown,
@@ -84,7 +85,11 @@ export function GitSyncCell({
   const [branchLoading, setBranchLoading] = useState(false)
   const [branchSwitching, setBranchSwitching] = useState(false)
   const [switchToast, setSwitchToast] = useState<string>('')
-  const branchRef = useRef<HTMLDivElement>(null)
+  // Position the popover via a body-level portal so the row container's
+  // `overflow-hidden` (needed for rounded-xl corners) doesn't clip it.
+  const [popoverPos, setPopoverPos] = useState<{ top: number; left: number } | null>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
 
   const fetchBranches = useCallback(async () => {
     setBranchLoading(true)
@@ -105,24 +110,46 @@ export function GitSyncCell({
     if (branchOpen) void fetchBranches()
   }, [branchOpen, fetchBranches])
 
-  // Close branch popover on outside click / Escape
+  // Close branch popover on outside click / Escape; also dismiss on
+  // scroll/resize since the popover position is captured at open time.
   useEffect(() => {
     if (!branchOpen) return
     function handleClick(e: MouseEvent) {
-      if (branchRef.current && !branchRef.current.contains(e.target as Node)) {
+      const target = e.target as Node
+      const inPopover = popoverRef.current?.contains(target)
+      const inTrigger = triggerRef.current?.contains(target)
+      if (!inPopover && !inTrigger) {
         setBranchOpen(false)
       }
     }
     function handleEsc(e: KeyboardEvent) {
       if (e.key === 'Escape') setBranchOpen(false)
     }
+    function handleDismiss() {
+      setBranchOpen(false)
+    }
     document.addEventListener('mousedown', handleClick)
     document.addEventListener('keydown', handleEsc)
+    window.addEventListener('scroll', handleDismiss, true)
+    window.addEventListener('resize', handleDismiss)
     return () => {
       document.removeEventListener('mousedown', handleClick)
       document.removeEventListener('keydown', handleEsc)
+      window.removeEventListener('scroll', handleDismiss, true)
+      window.removeEventListener('resize', handleDismiss)
     }
   }, [branchOpen])
+
+  function togglePopover() {
+    setBranchOpen(prev => {
+      const next = !prev
+      if (next && triggerRef.current) {
+        const rect = triggerRef.current.getBoundingClientRect()
+        setPopoverPos({ top: rect.bottom + 4, left: rect.left })
+      }
+      return next
+    })
+  }
 
   async function switchBranch(newBranch: string) {
     if (branchSwitching) return
@@ -225,52 +252,18 @@ export function GitSyncCell({
     <>
       <div className="flex items-center gap-1.5">
         {/* branch chip — clickable button that opens popover */}
-        <div ref={branchRef} className="relative">
-          <button
-            type="button"
-            onClick={() => setBranchOpen(v => !v)}
-            aria-expanded={branchOpen}
-            aria-haspopup="listbox"
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono text-muted-foreground bg-muted border border-border hover:bg-accent hover:text-foreground transition-colors"
-            title={`base: ${status.branch}${headOffBase ? ` (HEAD: ${status.current})` : ''} — 点击切换 base 分支`}
-          >
-            <GitBranch className="w-3 h-3" />
-            base: {status.branch}
-          </button>
-
-          {/* branch switcher popover */}
-          {branchOpen && (
-            <div
-              className="absolute left-0 top-full mt-1 w-56 rounded-lg border shadow-lg z-50 p-2 flex flex-col gap-1"
-              style={{ background: 'hsl(var(--bg-panel))', borderColor: 'hsl(var(--border))' }}
-              role="listbox"
-              aria-label="切换 base 分支"
-            >
-              {branchLoading ? (
-                <span className="text-xs text-muted-foreground flex items-center gap-1 px-2 py-1">
-                  <Loader2 className="w-3 h-3 animate-spin" /> 加载分支…
-                </span>
-              ) : branches.length === 0 ? (
-                <span className="text-xs text-muted-foreground px-2 py-1">暂无分支</span>
-              ) : (
-                <>
-                  {localBranches.length > 0 && (
-                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60 px-1 pt-0.5">本地</p>
-                  )}
-                  {localBranches.map(b => (
-                    <BranchItem key={b.name} b={b} onSelect={switchBranch} switching={branchSwitching} />
-                  ))}
-                  {remoteBranches.length > 0 && (
-                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60 px-1 pt-1">远端</p>
-                  )}
-                  {remoteBranches.map(b => (
-                    <BranchItem key={'r/' + b.name} b={b} onSelect={switchBranch} switching={branchSwitching} />
-                  ))}
-                </>
-              )}
-            </div>
-          )}
-        </div>
+        <button
+          ref={triggerRef}
+          type="button"
+          onClick={togglePopover}
+          aria-expanded={branchOpen}
+          aria-haspopup="listbox"
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono text-muted-foreground bg-muted border border-border hover:bg-accent hover:text-foreground transition-colors"
+          title={`base: ${status.branch}${headOffBase ? ` (HEAD: ${status.current})` : ''} — 点击切换 base 分支`}
+        >
+          <GitBranch className="w-3 h-3" />
+          base: {status.branch}
+        </button>
 
         {/* HEAD label when HEAD != base */}
         {headOffBase && (
@@ -397,6 +390,47 @@ export function GitSyncCell({
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 px-3 py-2 rounded-lg shadow-lg text-xs bg-foreground text-background max-w-sm text-center">
           {switchToast}
         </div>
+      )}
+
+      {/* branch switcher popover — rendered into body so the row's
+          overflow-hidden doesn't clip it */}
+      {branchOpen && popoverPos && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={popoverRef}
+          className="fixed w-56 rounded-lg border shadow-lg z-50 p-2 flex flex-col gap-1"
+          style={{
+            top: popoverPos.top,
+            left: popoverPos.left,
+            background: 'hsl(var(--bg-panel))',
+            borderColor: 'hsl(var(--border))',
+          }}
+          role="listbox"
+          aria-label="切换 base 分支"
+        >
+          {branchLoading ? (
+            <span className="text-xs text-muted-foreground flex items-center gap-1 px-2 py-1">
+              <Loader2 className="w-3 h-3 animate-spin" /> 加载分支…
+            </span>
+          ) : branches.length === 0 ? (
+            <span className="text-xs text-muted-foreground px-2 py-1">暂无分支</span>
+          ) : (
+            <>
+              {localBranches.length > 0 && (
+                <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60 px-1 pt-0.5">本地</p>
+              )}
+              {localBranches.map(b => (
+                <BranchItem key={b.name} b={b} onSelect={switchBranch} switching={branchSwitching} />
+              ))}
+              {remoteBranches.length > 0 && (
+                <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60 px-1 pt-1">远端</p>
+              )}
+              {remoteBranches.map(b => (
+                <BranchItem key={'r/' + b.name} b={b} onSelect={switchBranch} switching={branchSwitching} />
+              ))}
+            </>
+          )}
+        </div>,
+        document.body,
       )}
     </>
   )
