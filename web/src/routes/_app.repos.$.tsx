@@ -8,6 +8,7 @@ import { VcsIcon } from '../components/VcsIcon'
 import { useChatDrawer } from '../lib/chatContext'
 import { useConfigChanged } from '../lib/configEvents'
 import { findProjectsForRepo, type ProjectEntry } from '../lib/projectMembership'
+import { GitSyncCell, type GitStatus } from '../components/GitSyncCell'
 import {
   IssueList,
   REPO_SECTIONS,
@@ -58,6 +59,10 @@ function RepoDetail() {
   const [hostname, setHostname] = useState<string>('')
   const [ideScheme, setIdeScheme] = useState('vscode://file/')
   const [owningProjects, setOwningProjects] = useState<string[]>([])
+  // Git sync status for this single repo. Seeded from the cached
+  // /api/repo/git-status (instant) then refreshed in the background. Mirrors
+  // the index page's gitStatus map, scoped to one repo.
+  const [gitStatus, setGitStatus] = useState<GitStatus | undefined>(undefined)
 
   const cloneNow = useCallback(() => {
     if (!repo || cloning) return
@@ -92,7 +97,8 @@ function RepoDetail() {
       fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
       fetch('/api/settings', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
       fetch('/data/projects.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-    ]).then(([repos, allRuns, allPending, allIssuesData, settings, projects]) => {
+      fetch('/api/repo/git-status', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+    ]).then(([repos, allRuns, allPending, allIssuesData, settings, projects, gitStatuses]) => {
       const match = (Array.isArray(repos) ? repos : []).find((x: Repo) => x.full_name === fullName) || null
       setRepo(match)
       setRuns((Array.isArray(allRuns) ? allRuns : []).filter((r: Run) => r.repo === fullName))
@@ -110,7 +116,16 @@ function RepoDetail() {
         setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
       }
       setOwningProjects(findProjectsForRepo(fullName, Array.isArray(projects) ? projects as ProjectEntry[] : []))
+      if (Array.isArray(gitStatuses)) {
+        setGitStatus((gitStatuses as GitStatus[]).find(s => s?.repo === fullName))
+      }
     })
+  }, [fullName])
+
+  // Apply this repo's refreshed git status (called by GitSyncCell on pull/push).
+  const updateGitStatus = useCallback((s: GitStatus) => {
+    if (s?.repo !== fullName) return
+    setGitStatus(s)
   }, [fullName])
 
   const syncNow = useCallback(() => {
@@ -174,6 +189,26 @@ function RepoDetail() {
     refreshData().then(() => setLoading(false))
   }, [fullName, refreshData])
   useConfigChanged(refreshData)
+
+  // Background git fetch+recompute for this repo so ahead/behind reflects the
+  // latest remote without blocking first paint. Runs once per fullName.
+  useEffect(() => {
+    if (!fullName) return
+    let cancelled = false
+    fetch('/api/repo/git-status/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: fullName }),
+    })
+      .then(r => (r.ok ? r.json() : []))
+      .then((arr: GitStatus[]) => {
+        if (cancelled || !Array.isArray(arr)) return
+        const s = arr.find(x => x?.repo === fullName)
+        if (s) setGitStatus(s)
+      })
+      .catch(() => { /* background best-effort */ })
+    return () => { cancelled = true }
+  }, [fullName])
 
   const repoMap = useMemo<RepoInfoMap>(() => {
     if (!repo) return {}
@@ -321,6 +356,8 @@ function RepoDetail() {
                   </a>
                 </>
               )}
+              <span>·</span>
+              <GitSyncCell repo={fullName} status={gitStatus} onUpdate={updateGitStatus} />
             </div>
           </div>
 
