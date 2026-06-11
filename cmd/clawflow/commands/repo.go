@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -17,6 +18,7 @@ func NewRepoCmd() *cobra.Command {
 		Short: "Manage monitored repositories",
 	}
 	cmd.AddCommand(newRepoListCmd())
+	cmd.AddCommand(newRepoShowCmd())
 	cmd.AddCommand(newRepoAddCmd())
 	cmd.AddCommand(newRepoRemoveCmd())
 	cmd.AddCommand(newRepoEnableCmd())
@@ -58,6 +60,63 @@ func newRepoListCmd() *cobra.Command {
 				}
 				fmt.Printf("%-40s %-10s %-12s %-10s %-10s %s\n", name, status, r.BaseBranch, autoApprove, autoMerge, r.Description)
 			}
+			return nil
+		},
+	}
+}
+
+func newRepoShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <owner/repo>",
+		Short: "Show details for a repository, including the projects it belongs to",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ownerRepo := args[0]
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			r, exists := cfg.Repos[ownerRepo]
+			if !exists {
+				return fmt.Errorf("repo %q not found", ownerRepo)
+			}
+			status := "disabled"
+			if r.Enabled {
+				status = "enabled"
+			}
+			fmt.Printf("repo:         %s\n", ownerRepo)
+			fmt.Printf("status:       %s\n", status)
+			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
+			fmt.Printf("local_path:   %s\n", r.LocalPath)
+			if r.Description != "" {
+				fmt.Printf("description:  %s\n", r.Description)
+			}
+
+			// Multi-membership view (issue #267): list every project that
+			// claims this repo, and mark which one is authoritative for the
+			// project-context header injected into operators/chat.
+			projects, err := project.FindProjectsByRepo(ownerRepo)
+			if err != nil {
+				return err
+			}
+			if len(projects) == 0 {
+				fmt.Println("projects:     (none)")
+				return nil
+			}
+			primary, _ := project.FindProjectByRepo(ownerRepo)
+			primaryName := ""
+			if primary != nil {
+				primaryName = primary.Name
+			}
+			names := make([]string, 0, len(projects))
+			for _, p := range projects {
+				if p.Name == primaryName {
+					names = append(names, p.Name+" (primary)")
+				} else {
+					names = append(names, p.Name)
+				}
+			}
+			fmt.Printf("projects:     %s\n", strings.Join(names, ", "))
 			return nil
 		},
 	}
@@ -245,12 +304,13 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 func newRepoSetCmd() *cobra.Command {
 	var autoApprove string
 	var autoMerge string
+	var primaryProject string
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
 		Short:   "Set configuration flags for a repository",
 		Args:    cobra.ExactArgs(1),
-		Example: "  clawflow repo set owner/repo --auto-approve on\n  clawflow repo set owner/repo --auto-merge on",
+		Example: "  clawflow repo set owner/repo --auto-approve on\n  clawflow repo set owner/repo --auto-merge on\n  clawflow repo set owner/repo --primary-project myproj",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ownerRepo := args[0]
 			cfg, err := config.Load()
@@ -259,6 +319,28 @@ func newRepoSetCmd() *cobra.Command {
 			}
 			if _, exists := cfg.Repos[ownerRepo]; !exists {
 				return fmt.Errorf("repo %q not found", ownerRepo)
+			}
+			// --primary-project chooses the authoritative project whose
+			// context header is injected into operators/chat when the repo
+			// belongs to several projects (issue #267). Pass "" to clear it
+			// (falls back to the lexicographically first project). When set,
+			// the named project must already contain this repo.
+			primaryProjectSet := cmd.Flags().Changed("primary-project")
+			if primaryProjectSet && primaryProject != "" {
+				members, err := project.FindProjectsByRepo(ownerRepo)
+				if err != nil {
+					return err
+				}
+				ok := false
+				for _, p := range members {
+					if p.Name == primaryProject {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					return fmt.Errorf("project %q does not contain repo %q (add it first with: clawflow project add-repo %s %s)", primaryProject, ownerRepo, primaryProject, ownerRepo)
+				}
 			}
 			// Validate flags before mutating.
 			if autoApprove != "" {
@@ -292,6 +374,9 @@ func newRepoSetCmd() *cobra.Command {
 						r.AutoMerge = false
 					}
 				}
+				if primaryProjectSet {
+					r.PrimaryProject = primaryProject
+				}
 				return r
 			})
 			r := cfg.Repos[ownerRepo]
@@ -304,11 +389,19 @@ func newRepoSetCmd() *cobra.Command {
 			fmt.Printf("repo %q updated\n", ownerRepo)
 			fmt.Printf("  auto_approve: %v\n", r.AutoApprove)
 			fmt.Printf("  auto_merge:   %v\n", r.AutoMerge)
+			if primaryProjectSet {
+				if r.PrimaryProject == "" {
+					fmt.Printf("  primary_project: (cleared)\n")
+				} else {
+					fmt.Printf("  primary_project: %s\n", r.PrimaryProject)
+				}
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&autoApprove, "auto-approve", "", "enable/disable auto-approve: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
+	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
 	return cmd
 }
 

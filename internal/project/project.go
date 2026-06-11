@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -208,8 +209,12 @@ func Delete(name string) error {
 	return os.RemoveAll(dir)
 }
 
-// AddRepo associates a repo with the project. Returns an error if the
-// repo is already a member of this project or belongs to another project.
+// AddRepo associates a repo with the project. Returns an error only if the
+// repo is already a member of this same project. A repo may belong to
+// multiple projects (multi-membership, issue #267) — shared component or
+// tooling repos legitimately serve several projects, so cross-project
+// membership is no longer rejected. Runtime context injection stays
+// single-authority via the repo's primary project (see FindProjectByRepo).
 func AddRepo(name, repo string) error {
 	p, err := Get(name)
 	if err != nil {
@@ -219,11 +224,6 @@ func AddRepo(name, repo string) error {
 		if r == repo {
 			return fmt.Errorf("repo %q is already in project %q", repo, name)
 		}
-	}
-	// Enforce one-project constraint: scan all projects.
-	existing, err := FindProjectByRepo(repo)
-	if err == nil && existing != nil {
-		return fmt.Errorf("repo %q already belongs to project %q", repo, existing.Name)
 	}
 	p.Repos = append(p.Repos, repo)
 	sort.Strings(p.Repos)
@@ -266,21 +266,67 @@ func RemoveRepo(name, repo string) error {
 	return nil
 }
 
-// FindProjectByRepo scans all projects and returns the one containing
-// the given repo. Returns (nil, nil) if no project claims the repo.
-func FindProjectByRepo(repo string) (*Project, error) {
+// FindProjectsByRepo returns every project that contains the given repo,
+// sorted by name (List already returns name-sorted projects). Returns an
+// empty slice (not nil error) when no project claims the repo. This is the
+// multi-membership query (issue #267): a shared repo may legitimately belong
+// to several projects.
+func FindProjectsByRepo(repo string) ([]*Project, error) {
 	projects, err := List()
 	if err != nil {
 		return nil, err
 	}
+	var matched []*Project
 	for _, p := range projects {
 		for _, r := range p.Repos {
 			if r == repo {
+				matched = append(matched, p)
+				break
+			}
+		}
+	}
+	return matched, nil
+}
+
+// FindProjectByRepo returns the single authoritative ("primary") project for
+// the given repo. Returns (nil, nil) if no project claims the repo.
+//
+// Selection rule (issue #267, owner decision (b) — single authority):
+//   - if the repo's config sets primary_project AND that project still
+//     contains the repo, return it;
+//   - otherwise fall back to the lexicographically first project that
+//     contains the repo (deterministic; List is name-sorted).
+//
+// The fallback guarantees that a single-membership repo behaves exactly as
+// before, and that a stale/dangling primary_project (project deleted or repo
+// removed from it) degrades gracefully instead of injecting the wrong header.
+func FindProjectByRepo(repo string) (*Project, error) {
+	matched, err := FindProjectsByRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	if len(matched) == 0 {
+		return nil, nil
+	}
+	if primary := primaryProjectName(repo); primary != "" {
+		for _, p := range matched {
+			if p.Name == primary {
 				return p, nil
 			}
 		}
 	}
-	return nil, nil
+	return matched[0], nil
+}
+
+// primaryProjectName reads the repo's configured primary_project from
+// config.yaml. Returns "" when config is absent or the field is unset — both
+// are non-fatal and trigger the lexicographic fallback in FindProjectByRepo.
+func primaryProjectName(repo string) string {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.Repos[repo].PrimaryProject
 }
 
 // ReadContext reads the project's context.md. Returns "" if the file
