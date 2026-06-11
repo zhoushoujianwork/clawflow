@@ -294,3 +294,76 @@ func TestSetRequestContextCancelsHangingCall(t *testing.T) {
 		t.Errorf("request did not abort on context deadline: took %s (expected ~150ms)", elapsed)
 	}
 }
+
+// TestGetRetries_5xxThenSuccess verifies that idempotent GET requests are
+// automatically retried on 5xx responses (issue #278).
+func TestGetRetries_5xxThenSuccess(t *testing.T) {
+	calls := 0
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/issues": func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			if calls == 1 {
+				jsonResp(w, 503, map[string]string{"message": "service unavailable"})
+				return
+			}
+			jsonResp(w, 200, []map[string]any{
+				{"number": 1, "title": "ok issue", "body": "", "labels": []map[string]string{}},
+			})
+		},
+	})
+
+	issues, err := client.ListOpenIssues("owner/repo")
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("expected 1 issue after retry, got %d", len(issues))
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 HTTP calls (1 failure + 1 success), got %d", calls)
+	}
+}
+
+// TestPostIssueCommentIdempotent_DeduplicatesOnRetry verifies that a second
+// call with the same run-id does NOT post a duplicate comment (issue #278).
+func TestPostIssueCommentIdempotent_DeduplicatesOnRetry(t *testing.T) {
+	const runID = "test-run-42"
+	marker := "<!-- clawflow:run-id=" + runID + " -->"
+
+	postCalls := 0
+	listCalls := 0
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/issues/3/comments": func(w http.ResponseWriter, r *http.Request) {
+			listCalls++
+			if listCalls == 1 {
+				// First list: no existing comments.
+				jsonResp(w, 200, []map[string]any{})
+				return
+			}
+			// Subsequent lists: a comment with the marker already exists.
+			jsonResp(w, 200, []map[string]any{
+				{"id": 1, "body": "hello " + marker, "created_at": "2026-01-01T00:00:00Z", "user": map[string]string{"login": "bot"}},
+			})
+		},
+		"POST /repos/owner/repo/issues/3/comments": func(w http.ResponseWriter, r *http.Request) {
+			postCalls++
+			jsonResp(w, 201, map[string]any{"id": 1})
+		},
+	})
+
+	// First call: should post (no existing comment with marker).
+	if err := client.PostIssueCommentIdempotent("owner/repo", 3, "hello", runID); err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+	if postCalls != 1 {
+		t.Fatalf("expected 1 POST on first call, got %d", postCalls)
+	}
+
+	// Second call (simulating a retry): should detect the marker and skip.
+	if err := client.PostIssueCommentIdempotent("owner/repo", 3, "hello", runID); err != nil {
+		t.Fatalf("second call failed: %v", err)
+	}
+	if postCalls != 1 {
+		t.Errorf("expected still 1 POST after dedup retry, got %d (duplicate comment posted)", postCalls)
+	}
+}

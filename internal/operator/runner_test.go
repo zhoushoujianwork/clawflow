@@ -70,6 +70,11 @@ func (f *fakeVCS) PostIssueComment(repo string, issueNumber int, body string) er
 	return nil
 }
 
+func (f *fakeVCS) PostIssueCommentIdempotent(repo string, issueNumber int, body, runID string) error {
+	// In tests, delegate to PostIssueComment (no dedup needed).
+	return f.PostIssueComment(repo, issueNumber, body)
+}
+
 func (f *fakeVCS) CloseIssue(repo string, issueNumber int) error {
 	f.closeCalls++
 	if f.errOnClose {
@@ -574,6 +579,10 @@ func (b *blockingCommentVCS) RemoveLabel(repo string, issueNumber int, labels ..
 	return nil
 }
 func (b *blockingCommentVCS) PostIssueComment(repo string, issueNumber int, body string) error {
+	<-b.block // block until test cleanup closes the channel
+	return nil
+}
+func (b *blockingCommentVCS) PostIssueCommentIdempotent(repo string, issueNumber int, body, runID string) error {
 	<-b.block // block until test cleanup closes the channel
 	return nil
 }

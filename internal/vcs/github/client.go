@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -51,14 +52,19 @@ func New(token, baseURL string) *Client {
 	}
 }
 
-func (c *Client) do(method, path string, body any) ([]byte, int, error) {
-	var r io.Reader
+// doOnce sends a single HTTP request and returns the response body and status.
+func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
+	var bodyBytes []byte
 	if body != nil {
-		b, err := json.Marshal(body)
+		var err error
+		bodyBytes, err = json.Marshal(body)
 		if err != nil {
 			return nil, 0, err
 		}
-		r = bytes.NewReader(b)
+	}
+	var r io.Reader
+	if bodyBytes != nil {
+		r = bytes.NewReader(bodyBytes)
 	}
 	req, err := http.NewRequestWithContext(c.reqContext(), method, c.baseURL+path, r)
 	if err != nil {
@@ -67,7 +73,7 @@ func (c *Client) do(method, path string, body any) ([]byte, int, error) {
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if body != nil {
+	if bodyBytes != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.http.Do(req)
@@ -77,6 +83,111 @@ func (c *Client) do(method, path string, body any) ([]byte, int, error) {
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	return data, resp.StatusCode, err
+}
+
+// isRetryableStatus reports whether an HTTP status code is worth retrying.
+// 429 (rate limit) and transient 5xx (except 501 Not Implemented) are
+// retried. 4xx client errors and 501 are permanent failures.
+func isRetryableStatus(status int) bool {
+	return status == 429 || (status >= 500 && status != 501)
+}
+
+// do sends a request with automatic exponential-backoff retry for transient
+// network errors and retryable HTTP status codes (429, 5xx). POST requests
+// are NOT retried here because they are not idempotent; callers that need
+// retry semantics on POST must handle idempotency themselves (see
+// PostIssueCommentIdempotent).
+func (c *Client) do(method, path string, body any) ([]byte, int, error) {
+	// Only retry idempotent methods automatically.
+	if method == "POST" {
+		return c.doOnce(method, path, body)
+	}
+	cfg := retry.DefaultConfig
+	var (
+		data   []byte
+		status int
+	)
+	err := retry.Do(c.reqContext(), cfg, func() error {
+		var e error
+		data, status, e = c.doOnce(method, path, body)
+		if e != nil {
+			return e // network error — retryable
+		}
+		if isRetryableStatus(status) {
+			return fmt.Errorf("github %s %s: HTTP %d (transient)", method, path, status)
+		}
+		return nil
+	})
+	return data, status, err
+}
+
+// runIDMarker is the HTML comment appended to every result comment so a
+// retry can detect a previously delivered comment and skip re-posting.
+// Format: <!-- clawflow:run-id=<runID> -->
+func runIDMarker(runID string) string {
+	if runID == "" {
+		return ""
+	}
+	return "\n\n<!-- clawflow:run-id=" + runID + " -->"
+}
+
+// PostIssueCommentIdempotent posts a comment only if no existing comment
+// already contains the <!-- clawflow:run-id=<runID> --> marker. This makes
+// the POST safe to retry: if the first attempt succeeded but the HTTP
+// response was lost (context deadline exceeded after GitHub wrote the
+// comment), a retry will detect the duplicate and return nil without
+// posting again. When runID is empty the method falls back to a plain POST
+// without dedup.
+func (c *Client) PostIssueCommentIdempotent(repo string, issueNumber int, body, runID string) error {
+	if runID == "" {
+		return c.PostIssueComment(repo, issueNumber, body)
+	}
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	marker := "<!-- clawflow:run-id=" + runID + " -->"
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, name, issueNumber)
+	fullBody := body + runIDMarker(runID)
+
+	// Check for an existing comment with this run-id before the first attempt.
+	existing, listErr := c.ListIssueComments(repo, issueNumber)
+	if listErr == nil {
+		for _, cm := range existing {
+			if strings.Contains(cm, marker) {
+				return nil // already delivered
+			}
+		}
+	}
+
+	cfg := retry.DefaultConfig
+	attempt := 0
+	return retry.Do(c.reqContext(), cfg, func() error {
+		// On retries (not the first attempt), re-check for the marker in case
+		// the previous attempt succeeded but the HTTP response was lost.
+		if attempt > 0 {
+			comments, listErr := c.ListIssueComments(repo, issueNumber)
+			if listErr == nil {
+				for _, cm := range comments {
+					if strings.Contains(cm, marker) {
+						return nil // already delivered on a prior attempt
+					}
+				}
+			}
+		}
+		attempt++
+		_, status, doErr := c.doOnce("POST", path, map[string]string{"body": fullBody})
+		if doErr != nil {
+			return doErr
+		}
+		if status != 201 {
+			if isRetryableStatus(status) {
+				return fmt.Errorf("github post comment: HTTP %d (transient)", status)
+			}
+			return fmt.Errorf("github post comment: HTTP %d", status)
+		}
+		return nil
+	})
 }
 
 func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {

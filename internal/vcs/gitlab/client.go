@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -874,4 +875,54 @@ func (c *Client) UploadAttachment(repo string, filePath string) (string, error) 
 		return fmt.Sprintf("![%s](%s)", out.Alt, out.URL), nil
 	}
 	return "", fmt.Errorf("gitlab upload attachment: response missing markdown/url: %s", data)
+}
+
+// PostIssueCommentIdempotent posts a comment with run-id dedup. If a
+// comment containing <!-- clawflow:run-id=<runID> --> already exists the
+// method returns nil without posting again, making retries safe. Falls back
+// to a plain PostIssueComment when runID is empty (issue #278).
+func (c *Client) PostIssueCommentIdempotent(repo string, issueNumber int, body, runID string) error {
+	if runID == "" {
+		return c.PostIssueComment(repo, issueNumber, body)
+	}
+	marker := "<!-- clawflow:run-id=" + runID + " -->"
+	fullBody := body + "\n\n" + marker
+
+	// Pre-check: avoid posting if comment already exists.
+	existing, listErr := c.ListIssueComments(repo, issueNumber)
+	if listErr == nil {
+		for _, cm := range existing {
+			if strings.Contains(cm, marker) {
+				return nil
+			}
+		}
+	}
+
+	path := fmt.Sprintf("/projects/%s/issues/%d/notes", projectID(repo), issueNumber)
+	attempt := 0
+	return retry.Do(c.reqContext(), retry.DefaultConfig, func() error {
+		if attempt > 0 {
+			comments, err := c.ListIssueComments(repo, issueNumber)
+			if err == nil {
+				for _, cm := range comments {
+					if strings.Contains(cm, marker) {
+						return nil // delivered on prior attempt
+					}
+				}
+			}
+		}
+		attempt++
+		form := url.Values{"body": {fullBody}}
+		_, status, doErr := c.do("POST", path, form)
+		if doErr != nil {
+			return doErr
+		}
+		if status != 201 {
+			if status == 429 || (status >= 500 && status != 501) {
+				return fmt.Errorf("gitlab post comment: HTTP %d (transient)", status)
+			}
+			return fmt.Errorf("gitlab post comment: HTTP %d", status)
+		}
+		return nil
+	})
 }
