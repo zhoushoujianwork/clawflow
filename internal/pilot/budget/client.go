@@ -41,6 +41,13 @@ func (b *budgetClient) PostIssueComment(repo string, n int, body string) error {
 	return b.Client.PostIssueComment(repo, n, body)
 }
 
+func (b *budgetClient) PostIssueCommentIdempotent(repo string, n int, body, runID string) error {
+	if err := Reserve("PostIssueComment"); err != nil {
+		return err
+	}
+	return b.Client.PostIssueCommentIdempotent(repo, n, body, runID)
+}
+
 func (b *budgetClient) DeleteIssueComment(repo string, n int, commentID int64) error {
 	if err := Reserve("DeleteIssueComment"); err != nil {
 		return err

@@ -120,6 +120,10 @@ type Client interface {
 	CreateIssue(repo string, title, body string) (Issue, error)
 	UpdateIssue(repo string, issueNumber int, update IssueUpdate) (Issue, error)
 	PostIssueComment(repo string, issueNumber int, body string) error
+	// PostIssueCommentIdempotent posts a comment only if no existing comment
+	// carries the <!-- clawflow:run-id=<runID> --> marker, making retries
+	// safe. Falls back to PostIssueComment when runID is empty.
+	PostIssueCommentIdempotent(repo string, issueNumber int, body, runID string) error
 	DeleteIssueComment(repo string, issueNumber int, commentID int64) error
 	// ListIssuesByBodyKeyword returns open issues whose body contains keyword.
 	ListIssuesByBodyKeyword(repo string, keyword string) ([]Issue, error)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -74,6 +75,10 @@ type VCS interface {
 	AddLabel(repo string, issueNumber int, labels ...string) error
 	RemoveLabel(repo string, issueNumber int, labels ...string) error
 	PostIssueComment(repo string, issueNumber int, body string) error
+	// PostIssueCommentIdempotent posts a comment with dedup: if a comment
+	// carrying the given runID marker already exists it is a no-op. Falls
+	// back to a plain PostIssueComment when runID is empty.
+	PostIssueCommentIdempotent(repo string, issueNumber int, body, runID string) error
 	CloseIssue(repo string, issueNumber int) error
 }
 
@@ -126,6 +131,19 @@ type RunOptions struct {
 	// on the runner's goroutine, so callers should keep it cheap and must not
 	// block. Nil is the common case for tests and non-dashboard callers.
 	StageFunc func(stage string)
+
+	// RunID is a unique identifier for this operator invocation (typically the
+	// run directory timestamp slug). When non-empty it is embedded in the
+	// result comment as <!-- clawflow:run-id=<RunID> --> so that retried
+	// PostIssueComment calls can detect and skip duplicate deliveries.
+	RunID string
+
+	// CommentSaveDir, if non-empty, is a directory path where the operator's
+	// result comment body will be written as comment.md before the VCS
+	// write-back. This ensures the output survives even if all write-back
+	// retries are exhausted — a human (or future recovery logic) can read the
+	// file and re-post manually.
+	CommentSaveDir string
 }
 
 // emitStage safely invokes a (possibly nil) stage callback. Centralizing the
@@ -237,8 +255,20 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 // via a goroutine in Run.
 func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outcome string) error {
 	if body != "" {
+		// Persist the comment body to disk before attempting VCS write-back.
+		// If all retries are exhausted the output is not lost — it can be
+		// recovered from comment.md in the run directory (issue #278).
+		if opts.CommentSaveDir != "" {
+			savePath := filepath.Join(opts.CommentSaveDir, "comment.md")
+			if err := os.WriteFile(savePath, []byte(body), 0o644); err != nil {
+				// Non-fatal: log and continue. Losing the file is bad but
+				// should not prevent the VCS write-back attempt.
+				fmt.Fprintf(os.Stderr, "  ⚠ could not save comment to disk: %v\n", err)
+			}
+		}
+
 		emitStage(opts.StageFunc, StagePostingComment)
-		if err := v.PostIssueComment(opts.Repo, sub.Number, body); err != nil {
+		if err := v.PostIssueCommentIdempotent(opts.Repo, sub.Number, body, opts.RunID); err != nil {
 			return fmt.Errorf("post result comment: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "  ✓ comment posted (%d chars)\n", len(body))
