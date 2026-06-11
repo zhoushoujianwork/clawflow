@@ -55,6 +55,15 @@ type Repo struct {
 	// excluded from cloud sync (see syncableRepo in sync.go).
 	BoundMachine string `yaml:"bound_machine,omitempty"`
 
+	// PrimaryProject names the authoritative project for this repo when it
+	// belongs to more than one project (multi-membership, issue #267). The
+	// project header injected into operator/chat prompts (HeaderForRepo) is
+	// always taken from a single project to keep runtime context
+	// deterministic; PrimaryProject picks which one. When empty, the lookup
+	// falls back to the lexicographically first project that still contains
+	// the repo, so single-membership repos behave exactly as before.
+	PrimaryProject string `yaml:"primary_project,omitempty"`
+
 	// UpdatedAt is the RFC3339 UTC timestamp of the last write to this repo
 	// entry. Used by the LWW (Last-Write-Wins) merge strategy during Gist
 	// sync: the side with the newer timestamp wins the whole entry. A zero

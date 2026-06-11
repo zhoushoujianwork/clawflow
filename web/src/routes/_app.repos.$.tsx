@@ -27,6 +27,7 @@ interface Repo {
   auto_approve: boolean
   auto_merge: boolean
   bound_machine?: string
+  primary_project?: string
 }
 export const Route = createFileRoute('/_app/repos/$')({
   component: RepoDetail,
@@ -269,20 +270,30 @@ function RepoDetail() {
                   </Link>
                 </>
               )}
-              {owningProjects.length > 1 && owningProjects.map(pname => (
-                <span key={pname}>
-                  <span>·</span>
-                  <Link
-                    to="/projects/$name"
-                    params={{ name: pname }}
-                    title={`Belongs to project: ${pname}`}
-                    aria-label={`Open owning project: ${pname}`}
-                    className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline ml-1"
-                  >
-                    <FolderKanban className="w-3 h-3" /> {pname}
-                  </Link>
-                </span>
-              ))}
+              {owningProjects.length > 1 && (() => {
+                // Mirror the backend rule (FindProjectByRepo): the primary
+                // project is the configured one, else the lexicographically
+                // first owning project.
+                const fallbackPrimary = [...owningProjects].sort()[0]
+                const primaryName = repo.primary_project || fallbackPrimary
+                return owningProjects.map(pname => {
+                  const isPrimary = pname === primaryName
+                  return (
+                  <span key={pname}>
+                    <span>·</span>
+                    <Link
+                      to="/projects/$name"
+                      params={{ name: pname }}
+                      title={isPrimary ? `Primary project (context source): ${pname}` : `Belongs to project: ${pname}`}
+                      aria-label={`Open owning project: ${pname}`}
+                      className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline ml-1"
+                    >
+                      <FolderKanban className="w-3 h-3" /> {pname}{isPrimary ? ' ★' : ''}
+                    </Link>
+                  </span>
+                  )
+                })
+              })()}
               {repoVcsUrl && (
                 <>
                   <span>·</span>

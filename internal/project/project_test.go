@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
 
 func TestCreateAndGet(t *testing.T) {
@@ -82,16 +84,118 @@ func TestAddRemoveRepo(t *testing.T) {
 	}
 }
 
-func TestOneProjectConstraint(t *testing.T) {
+func TestMultiProjectMembership(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
 	Create("alpha")
 	Create("beta")
+	if err := AddRepo("alpha", "owner/shared"); err != nil {
+		t.Fatalf("AddRepo alpha: %v", err)
+	}
+	// A repo may now belong to multiple projects (issue #267).
+	if err := AddRepo("beta", "owner/shared"); err != nil {
+		t.Fatalf("AddRepo beta should succeed for a shared repo: %v", err)
+	}
+
+	// Both projects list the repo.
+	a, _ := Get("alpha")
+	b, _ := Get("beta")
+	if len(a.Repos) != 1 || len(b.Repos) != 1 {
+		t.Fatalf("both projects should contain the repo: alpha=%v beta=%v", a.Repos, b.Repos)
+	}
+
+	// Re-adding to the same project still fails.
+	if err := AddRepo("alpha", "owner/shared"); err == nil {
+		t.Fatal("duplicate add to the same project should fail")
+	}
+}
+
+func TestFindProjectsByRepo(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	Create("zebra")
+	Create("alpha")
+	AddRepo("zebra", "owner/shared")
 	AddRepo("alpha", "owner/shared")
 
-	if err := AddRepo("beta", "owner/shared"); err == nil {
-		t.Fatal("should reject repo already in another project")
+	got, err := FindProjectsByRepo("owner/shared")
+	if err != nil {
+		t.Fatalf("FindProjectsByRepo: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(got))
+	}
+	// Sorted by name.
+	if got[0].Name != "alpha" || got[1].Name != "zebra" {
+		t.Fatalf("expected name-sorted [alpha zebra], got [%s %s]", got[0].Name, got[1].Name)
+	}
+
+	// Unknown repo returns empty, not error.
+	none, err := FindProjectsByRepo("owner/unknown")
+	if err != nil {
+		t.Fatalf("FindProjectsByRepo unknown: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("expected no projects for unknown repo, got %d", len(none))
+	}
+}
+
+func TestFindProjectByRepoPrimaryFallback(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	Create("zebra")
+	Create("alpha")
+	AddRepo("zebra", "owner/shared")
+	AddRepo("alpha", "owner/shared")
+
+	// No primary_project configured → deterministic lexicographic-first.
+	p, err := FindProjectByRepo("owner/shared")
+	if err != nil {
+		t.Fatalf("FindProjectByRepo: %v", err)
+	}
+	if p == nil || p.Name != "alpha" {
+		t.Fatalf("expected fallback to lexicographic-first 'alpha', got %v", p)
+	}
+}
+
+func TestFindProjectByRepoPrimaryConfigured(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	Create("zebra")
+	Create("alpha")
+	AddRepo("zebra", "owner/shared")
+	AddRepo("alpha", "owner/shared")
+
+	// Configure primary_project = zebra (not the lexicographic-first).
+	cfg := &config.Config{Repos: map[string]config.Repo{
+		"owner/shared": {PrimaryProject: "zebra"},
+	}}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("config Save: %v", err)
+	}
+
+	p, err := FindProjectByRepo("owner/shared")
+	if err != nil {
+		t.Fatalf("FindProjectByRepo: %v", err)
+	}
+	if p == nil || p.Name != "zebra" {
+		t.Fatalf("expected configured primary 'zebra', got %v", p)
+	}
+
+	// Stale primary (repo no longer in that project) → graceful fallback.
+	if err := RemoveRepo("zebra", "owner/shared"); err != nil {
+		t.Fatalf("RemoveRepo: %v", err)
+	}
+	p, err = FindProjectByRepo("owner/shared")
+	if err != nil {
+		t.Fatalf("FindProjectByRepo after stale: %v", err)
+	}
+	if p == nil || p.Name != "alpha" {
+		t.Fatalf("expected fallback to 'alpha' after stale primary, got %v", p)
 	}
 }
 

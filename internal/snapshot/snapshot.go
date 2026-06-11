@@ -205,6 +205,13 @@ type RepoView struct {
 	// unbound. Exposed to the dashboard so the bind/unbind button can show
 	// the current binding state without a separate API call.
 	BoundMachine string `json:"bound_machine,omitempty"`
+	// Projects lists every project this repo belongs to, name-sorted
+	// (multi-membership, issue #267). PrimaryProject names the authoritative
+	// one whose context header is injected into operators/chat. Both are
+	// exposed so the repo detail card can render "belongs to projects: ..."
+	// and flag the primary without a separate API call.
+	Projects       []string `json:"projects,omitempty"`
+	PrimaryProject string   `json:"primary_project,omitempty"`
 }
 
 // OperatorView is the dashboard-facing view of one loaded operator.
@@ -615,16 +622,29 @@ func addUsage(agg *UsageAggregate, u *Usage) {
 func WriteRepos(cfg *config.Config) error {
 	views := make([]RepoView, 0, len(cfg.Repos))
 	for name, r := range cfg.Repos {
+		var projectNames []string
+		var primaryName string
+		if members, err := project.FindProjectsByRepo(name); err == nil && len(members) > 0 {
+			projectNames = make([]string, 0, len(members))
+			for _, p := range members {
+				projectNames = append(projectNames, p.Name)
+			}
+			if primary, _ := project.FindProjectByRepo(name); primary != nil {
+				primaryName = primary.Name
+			}
+		}
 		views = append(views, RepoView{
-			FullName:     name,
-			Platform:     r.Platform,
-			BaseURL:      r.BaseURL,
-			BaseBranch:   r.BaseBranch,
-			LocalPath:    r.LocalPath,
-			Enabled:      r.Enabled,
-			AutoApprove:  r.AutoApprove,
-			AutoMerge:    r.AutoMerge,
-			BoundMachine: r.BoundMachine,
+			FullName:       name,
+			Platform:       r.Platform,
+			BaseURL:        r.BaseURL,
+			BaseBranch:     r.BaseBranch,
+			LocalPath:      r.LocalPath,
+			Enabled:        r.Enabled,
+			AutoApprove:    r.AutoApprove,
+			AutoMerge:      r.AutoMerge,
+			BoundMachine:   r.BoundMachine,
+			Projects:       projectNames,
+			PrimaryProject: primaryName,
 		})
 	}
 	return writeJSON(filepath.Join(DataDir(), "repos.json"), views)
