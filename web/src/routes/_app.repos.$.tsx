@@ -1,12 +1,13 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off, FolderOpen } from 'lucide-react'
+import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off, FolderOpen, FolderKanban } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 import { useChatDrawer } from '../lib/chatContext'
 import { useConfigChanged } from '../lib/configEvents'
+import { findProjectsForRepo, type ProjectEntry } from '../lib/projectMembership'
 import {
   IssueList,
   REPO_SECTIONS,
@@ -55,6 +56,7 @@ function RepoDetail() {
   const [allIssues, setAllIssues] = useState<IssueEntry[]>([])
   const [hostname, setHostname] = useState<string>('')
   const [ideScheme, setIdeScheme] = useState('vscode://file/')
+  const [owningProjects, setOwningProjects] = useState<string[]>([])
 
   const cloneNow = useCallback(() => {
     if (!repo || cloning) return
@@ -88,7 +90,8 @@ function RepoDetail() {
       fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
       fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
       fetch('/api/settings', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
-    ]).then(([repos, allRuns, allPending, allIssuesData, settings]) => {
+      fetch('/data/projects.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+    ]).then(([repos, allRuns, allPending, allIssuesData, settings, projects]) => {
       const match = (Array.isArray(repos) ? repos : []).find((x: Repo) => x.full_name === fullName) || null
       setRepo(match)
       setRuns((Array.isArray(allRuns) ? allRuns : []).filter((r: Run) => r.repo === fullName))
@@ -105,6 +108,7 @@ function RepoDetail() {
         }
         setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
       }
+      setOwningProjects(findProjectsForRepo(fullName, Array.isArray(projects) ? projects as ProjectEntry[] : []))
     })
   }, [fullName])
 
@@ -251,6 +255,34 @@ function RepoDetail() {
               </span>
               <span>·</span>
               <span className="font-mono">base: {repo.base_branch}</span>
+              {owningProjects.length === 1 && (
+                <>
+                  <span>·</span>
+                  <Link
+                    to="/projects/$name"
+                    params={{ name: owningProjects[0] }}
+                    title={`Belongs to project: ${owningProjects[0]}`}
+                    aria-label={`Open owning project: ${owningProjects[0]}`}
+                    className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline"
+                  >
+                    <FolderKanban className="w-3 h-3" /> {owningProjects[0]}
+                  </Link>
+                </>
+              )}
+              {owningProjects.length > 1 && owningProjects.map(pname => (
+                <span key={pname}>
+                  <span>·</span>
+                  <Link
+                    to="/projects/$name"
+                    params={{ name: pname }}
+                    title={`Belongs to project: ${pname}`}
+                    aria-label={`Open owning project: ${pname}`}
+                    className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline ml-1"
+                  >
+                    <FolderKanban className="w-3 h-3" /> {pname}
+                  </Link>
+                </span>
+              ))}
               {repoVcsUrl && (
                 <>
                   <span>·</span>
