@@ -105,6 +105,27 @@ func (c *Client) doJSON(method, path string, body any) ([]byte, int, error) {
 	return data, resp.StatusCode, err
 }
 
+// GetRepoID returns GitLab's immutable numeric project ID. Like GitHub,
+// the namespace/name path is reused when a project is deleted and
+// recreated, but the ID is not — callers use this to detect recreation
+// and segregate local run history (issue #272).
+func (c *Client) GetRepoID(repo string) (int64, error) {
+	data, status, err := c.doJSON("GET", fmt.Sprintf("/projects/%s", projectID(repo)), nil)
+	if err != nil {
+		return 0, err
+	}
+	if status != 200 {
+		return 0, fmt.Errorf("gitlab get project: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return 0, err
+	}
+	return raw.ID, nil
+}
+
 func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 	path := fmt.Sprintf("/projects/%s/issues?state=opened&per_page=100", projectID(repo))
 	data, status, err := c.doJSON("GET", path, nil)

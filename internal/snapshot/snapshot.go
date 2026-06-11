@@ -719,6 +719,9 @@ func MigrateFailedToCancelled() int {
 		if err != nil || !d.IsDir() {
 			return nil
 		}
+		if isOrphanedRepoDir(d.Name()) {
+			return filepath.SkipDir
+		}
 		metaPath := filepath.Join(path, "meta.json")
 		data, err := os.ReadFile(metaPath)
 		if err != nil {
@@ -1194,6 +1197,9 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 		if err != nil || !d.IsDir() {
 			return nil
 		}
+		if isOrphanedRepoDir(d.Name()) {
+			return filepath.SkipDir
+		}
 		// A "run dir" is a leaf directory containing meta.json and/or
 		// events.jsonl. Skip the intermediate runs/<repo>/issue-<N> tree.
 		metaPath := filepath.Join(path, "meta.json")
@@ -1478,7 +1484,13 @@ func collectRunEntries(root string) []RunIndexEntry {
 	// are no runs yet — saves the dashboard a nullability check.
 	out := []RunIndexEntry{}
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || d.Name() != "meta.json" {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && isOrphanedRepoDir(d.Name()) {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || d.Name() != "meta.json" {
 			return nil
 		}
 		data, err := os.ReadFile(path)

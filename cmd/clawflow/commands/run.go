@@ -577,6 +577,22 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		return nil, nil, fmt.Errorf("list open issues: %w", err)
 	}
 
+	// Same-name recreation guard: owner/name is reused after delete+recreate
+	// on both platforms but the numeric repo ID is not, and issue numbering
+	// restarts at #1 — so without this check the new repo's runs land in (and
+	// display alongside) the old repo's history (issue #272). Best-effort: an
+	// ID lookup failure only skips the check for this pass.
+	if ider, ok := client.(interface{ GetRepoID(string) (int64, error) }); ok {
+		if repoID, idErr := ider.GetRepoID(fullName); idErr != nil {
+			debugf("[%s] get repo id: %v (recreation check skipped)", fullName, idErr)
+		} else if archived, recErr := snapshot.ReconcileRepoIdentity(fullName, repoID); recErr != nil {
+			runLog.Warn("run/scan", "repo", fullName, "phase", "repo_identity_err", "err", recErr.Error())
+		} else if archived != "" {
+			runLog.Info("run/scan", "repo", fullName, "phase", "repo_recreated", "archived_to", archived)
+			fmt.Fprintf(os.Stderr, "⚠ %s was deleted and recreated on the platform; previous run history archived to %s\n", fullName, archived)
+		}
+	}
+
 	// GitHub sub-issues are not returned by the standard /issues list API.
 	// Walk every open issue and append any sub-issues that aren't already
 	// in the list. Two levels deep covers the current tracking→sub→sub-sub
