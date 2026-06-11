@@ -53,6 +53,9 @@ func TestListOpenIssues(t *testing.T) {
 	if issues[0].Number != 1 || issues[0].Title != "real issue" {
 		t.Errorf("unexpected issue: %+v", issues[0])
 	}
+	if issues[0].State != "open" {
+		t.Errorf("expected State \"open\", got %q (issue #274: STATE column blank on default --state open)", issues[0].State)
+	}
 	if !issues[0].HasLabel("bug") {
 		t.Error("expected label 'bug'")
 	}

@@ -112,7 +112,11 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 		if r.PullRequest != nil {
 			continue // GitHub returns PRs in /issues — skip them
 		}
-		issue := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
+		// This endpoint is queried with state=open, so every returned issue is
+		// open. Set State explicitly — the list table prints i.State and would
+		// otherwise show a blank STATE column on the default --state open path
+		// (issue #274).
+		issue := vcs.Issue{Number: r.Number, State: "open", Title: r.Title, Body: r.Body, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
 		for _, l := range r.Labels {
 			issue.Labels = append(issue.Labels, l.Name)
 		}
