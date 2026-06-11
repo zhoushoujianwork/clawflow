@@ -2,12 +2,13 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { FolderOpen, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2 } from 'lucide-react'
+import { FolderOpen, FolderKanban, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 import { GitSyncCell, type GitStatus } from '../components/GitSyncCell'
 import { useConfigChanged } from '../lib/configEvents'
+import { findProjectsForRepo, type ProjectEntry } from '../lib/projectMembership'
 
 interface Repo {
   full_name: string
@@ -70,6 +71,7 @@ function RepoList() {
   // Kept as a Set so toggling one repo doesn't block the rest.
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [bindMenuFor, setBindMenuFor] = useState<string | null>(null)
+  const [projects, setProjects] = useState<ProjectEntry[]>([])
 
   const loadAll = useCallback(() => {
     return Promise.all([
@@ -85,7 +87,10 @@ function RepoList() {
       fetch('/api/repo/git-status', { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : []))
         .catch(() => []),
-    ]).then(([rp, rn, settings, gs]) => {
+      fetch('/data/projects.json', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : []))
+        .catch(() => []),
+    ]).then(([rp, rn, settings, gs, proj]) => {
       setRepos(Array.isArray(rp) ? rp : [])
       setRuns(Array.isArray(rn) ? rn : [])
       if (Array.isArray(gs)) {
@@ -104,6 +109,7 @@ function RepoList() {
         setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
       }
       if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+      setProjects(Array.isArray(proj) ? proj as ProjectEntry[] : [])
       setLoading(false)
     })
   }, [])
@@ -448,6 +454,18 @@ function RepoList() {
                           <FolderOpen className="w-3.5 h-3.5" />
                         </a>
                       )}
+                      {findProjectsForRepo(r.full_name, projects).map(pname => (
+                        <Link
+                          key={pname}
+                          to="/projects/$name"
+                          params={{ name: pname }}
+                          title={`Belongs to project: ${pname}`}
+                          aria-label={`Open owning project: ${pname}`}
+                          className="inline-flex items-center text-muted-foreground hover:text-foreground shrink-0"
+                        >
+                          <FolderKanban className="w-3.5 h-3.5" />
+                        </Link>
+                      ))}
                     </div>
                   </td>
                   <td className="px-4 py-2 text-muted-foreground text-xs tabular-nums">
