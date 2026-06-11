@@ -1,11 +1,12 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, ChevronsUp, ChevronsDown, Square } from 'lucide-react'
+import { ChevronLeft, CheckCircle2, XCircle, SkipForward, Loader2, ExternalLink, Square } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 import { Markdown } from '../components/Markdown'
+import { TraceView, type RawEvent } from '../components/TraceView'
 
 interface ModelUsage {
   input_tokens: number
@@ -40,46 +41,6 @@ interface RunMeta {
   usage?: Usage
 }
 
-/**
- * Content block inside an assistant or user message. The shapes we care about:
- *   - { type: "thinking", thinking: "…" }   — model's chain-of-thought
- *   - { type: "text", text: "…" }           — model's reply text
- *   - { type: "tool_use", id, name, input } — tool call from the model
- *   - { type: "tool_result", tool_use_id, content, is_error } — runner's reply
- * Anything else is ignored at render time.
- */
-interface ContentBlock {
-  type: string
-  text?: string
-  thinking?: string
-  name?: string
-  id?: string
-  input?: unknown
-  tool_use_id?: string
-  content?: unknown
-  is_error?: boolean
-}
-
-/**
- * Raw claude stream-json event. We only render a handful of shapes — the
- * incremental stream_event deltas are dropped entirely because the
- * aggregated `assistant` and `result` events carry the full content.
- */
-interface RawEvent {
-  type: string
-  subtype?: string
-  result?: string
-  session_id?: string
-  message?: {
-    role?: string
-    content?: ContentBlock[]
-  }
-  uuid?: string
-  is_error?: boolean
-  duration_ms?: number
-  total_cost_usd?: number
-}
-
 export const Route = createFileRoute('/_app/runs/$slug/$issue/$ts')({
   component: RunDetail,
 })
@@ -96,8 +57,6 @@ function RunDetail() {
   const [events, setEvents] = useState<RawEvent[]>([])
   const [rawLoading, setRawLoading] = useState(true)
   const repoMap = useRepoInfoMap()
-  const terminalRef = useRef<HTMLDivElement>(null)
-  const isAtBottom = useRef(true)
 
   useEffect(() => {
     let cancelled = false
@@ -136,18 +95,6 @@ function RunDetail() {
       cancelled = true
     }
   }, [basePath])
-
-  useEffect(() => {
-    if (isAtBottom.current && terminalRef.current) {
-      terminalRef.current.scrollTop = terminalRef.current.scrollHeight
-    }
-  }, [events])
-
-  const handleTerminalScroll = () => {
-    const el = terminalRef.current
-    if (!el) return
-    isAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-  }
 
   const repo = slug.replace(/__/g, '/')
   const issueNum = issue.replace(/^issue-/, '')
@@ -244,57 +191,12 @@ function RunDetail() {
 
       <UsagePanel meta={meta} />
 
-      {(() => {
-        const visible = visibleEvents(events)
-        const toolNames = collectToolNames(events)
-        const openByDefault = !meta || meta.status === 'running'
-        return (
-          <details open={openByDefault} className="group min-w-0">
-            <summary className="cursor-pointer select-none flex items-center gap-2 text-sm font-semibold text-foreground hover:text-foreground/80">
-              <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90" />
-              Trace
-              <span className="font-normal text-muted-foreground">({visible.length} steps)</span>
-            </summary>
-            <div className="mt-3">
-              <div className="flex items-center justify-between px-3 py-1.5 bg-[#2d2d2d] rounded-t-lg border border-[#3d3d3d] border-b-0">
-                <span className="text-xs text-gray-400 font-mono">trace</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500">{visible.length} steps</span>
-                  <button
-                    onClick={() => { if (terminalRef.current) terminalRef.current.scrollTop = 0 }}
-                    className="text-gray-500 hover:text-gray-300 cursor-pointer"
-                    title="Scroll to top"
-                  >
-                    <ChevronsUp className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => { if (terminalRef.current) terminalRef.current.scrollTop = terminalRef.current.scrollHeight }}
-                    className="text-gray-500 hover:text-gray-300 cursor-pointer"
-                    title="Scroll to bottom"
-                  >
-                    <ChevronsDown className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-              <div
-                ref={terminalRef}
-                onScroll={handleTerminalScroll}
-                className="h-[500px] overflow-y-auto overflow-x-hidden min-w-0 bg-[#1e1e1e] rounded-b-lg border border-[#3d3d3d] p-3 font-mono text-[13px] leading-relaxed"
-              >
-                {rawLoading ? (
-                  <p className="text-gray-500">Loading…</p>
-                ) : visible.length === 0 ? (
-                  <p className="text-gray-500">No trace yet.</p>
-                ) : (
-                  visible.map((ev, i) => (
-                    <TerminalLine key={i} ev={ev} toolNames={toolNames} />
-                  ))
-                )}
-              </div>
-            </div>
-          </details>
-        )
-      })()}
+      <TraceView
+        events={events}
+        loading={rawLoading}
+        running={!meta || meta.status === 'running'}
+        openByDefault={!meta || meta.status === 'running'}
+      />
     </div>
   )
 }
@@ -607,230 +509,3 @@ function durationStr(start: string, end: string) {
   return `${m}m${s % 60}s`
 }
 
-/**
- * visibleEvents narrows the raw stream-json log to the events that carry
- * semantic content — thinking, replies, tool calls/results, and the final
- * result. Everything else (token-level deltas, system init, status pings,
- * rate-limit notices) is metadata for the runtime and adds no signal for
- * a human reading the trace.
- */
-function visibleEvents(events: RawEvent[]): RawEvent[] {
-  return events.filter(ev => {
-    if (ev.type === 'assistant') {
-      return (ev.message?.content || []).some(c =>
-        c.type === 'thinking' || c.type === 'text' || c.type === 'tool_use'
-      )
-    }
-    if (ev.type === 'user') {
-      return (ev.message?.content || []).some(c => c.type === 'tool_result')
-    }
-    if (ev.type === 'result') return true
-    return false
-  })
-}
-
-/**
- * Build a tool_use_id → tool name map by scanning every assistant tool_use.
- * tool_result events only carry the id back, so we look up the name here to
- * label the result block with something meaningful instead of a UUID.
- */
-function collectToolNames(events: RawEvent[]): Record<string, string> {
-  const m: Record<string, string> = {}
-  for (const ev of events) {
-    if (ev.type !== 'assistant' || !ev.message?.content) continue
-    for (const c of ev.message.content) {
-      if (c.type === 'tool_use' && c.id && c.name) {
-        m[c.id] = c.name
-      }
-    }
-  }
-  return m
-}
-
-/**
- * Pretty-print a value that may already be a string. Falls back to JSON
- * with 2-space indent so deeply nested tool inputs/outputs stay readable.
- */
-function prettyValue(v: unknown): string {
-  if (typeof v === 'string') return v
-  try {
-    return JSON.stringify(v, null, 2)
-  } catch {
-    return String(v)
-  }
-}
-
-/**
- * Pretty-print a value for human display in the Trace terminal.
- * Well-known multiline string fields (command, content, new_string, etc.)
- * are rendered raw so embedded \n/\t sequences appear as real whitespace
- * instead of literal escape characters from JSON.stringify.
- * Everything else falls back to JSON.stringify with a light unescape pass.
- */
-function prettyValueForDisplay(v: unknown): string {
-  if (typeof v === 'string') return v
-
-  if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
-    const obj = v as Record<string, unknown>
-    const MULTILINE_KEYS = ['command', 'content', 'new_string', 'old_string', 'description', 'text', 'body']
-    const parts: string[] = []
-    for (const [key, val] of Object.entries(obj)) {
-      if (MULTILINE_KEYS.includes(key) && typeof val === 'string') {
-        // render raw — preserves real newlines inside the string value
-        parts.push(`${key}: ${val}`)
-      } else {
-        try {
-          parts.push(`${key}: ${JSON.stringify(val, null, 2)}`)
-        } catch {
-          parts.push(`${key}: ${String(val)}`)
-        }
-      }
-    }
-    return parts.join('\n')
-  }
-
-  try {
-    const raw = JSON.stringify(v, null, 2)
-    return raw.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
-  } catch {
-    return String(v)
-  }
-}
-
-function TerminalCollapsible({ text, maxLines = 8 }: { text: string; maxLines?: number }) {
-  const [expanded, setExpanded] = useState(false)
-  const lines = text.split('\n')
-  if (lines.length <= maxLines) {
-    return <span className="text-gray-300 whitespace-pre-wrap break-all">{text}</span>
-  }
-  if (!expanded) {
-    return (
-      <span className="text-gray-300 whitespace-pre-wrap break-all">
-        {lines.slice(0, maxLines).join('\n')}
-        {'\n'}
-        <button
-          onClick={() => setExpanded(true)}
-          className="text-cyan-400 hover:text-cyan-300 cursor-pointer"
-        >
-          ··· {lines.length - maxLines} more lines (click to expand)
-        </button>
-      </span>
-    )
-  }
-  return (
-    <span className="text-gray-300 whitespace-pre-wrap break-all">
-      {text}
-      {'\n'}
-      <button
-        onClick={() => setExpanded(false)}
-        className="text-cyan-400 hover:text-cyan-300 cursor-pointer"
-      >
-        ··· (collapse)
-      </button>
-    </span>
-  )
-}
-
-function TerminalLine({ ev, toolNames }: { ev: RawEvent; toolNames: Record<string, string> }) {
-  if (ev.type === 'assistant' && ev.message?.content) {
-    return (
-      <>
-        {ev.message.content.map((c, i) => {
-          if (c.type === 'thinking' && c.thinking) {
-            return (
-              <div key={i} className="mb-1">
-                <span className="text-purple-400 opacity-70">[thinking] </span>
-                <span className="text-gray-400 italic">{c.thinking.trim()}</span>
-              </div>
-            )
-          }
-          if (c.type === 'text' && c.text) {
-            return (
-              <div key={i} className="mb-1">
-                <span className="text-green-400">[reply] </span>
-                <span className="text-gray-200 whitespace-pre-wrap break-all">{c.text}</span>
-              </div>
-            )
-          }
-          if (c.type === 'tool_use') {
-            const inputStr = prettyValueForDisplay(c.input ?? {})
-            return (
-              <div key={i} className="mb-1">
-                <span className="text-cyan-400">$ </span>
-                <span className="text-cyan-300 font-semibold">{c.name || 'tool'}</span>
-                {inputStr.length > 0 && inputStr !== '{}' && (
-                  <>
-                    {'\n'}
-                    <TerminalCollapsible text={inputStr} maxLines={6} />
-                  </>
-                )}
-              </div>
-            )
-          }
-          return null
-        })}
-      </>
-    )
-  }
-
-  if (ev.type === 'user' && ev.message?.content) {
-    const results = ev.message.content.filter(c => c.type === 'tool_result')
-    if (results.length === 0) return null
-    return (
-      <>
-        {results.map((r, i) => {
-          const name = (r.tool_use_id && toolNames[r.tool_use_id]) || 'tool'
-          let body: string
-          if (typeof r.content === 'string') {
-            body = r.content
-          } else if (Array.isArray(r.content)) {
-            body = r.content
-              .map(p => (p && typeof p === 'object' && 'text' in p ? String((p as { text: unknown }).text) : prettyValue(p)))
-              .join('\n')
-          } else {
-            body = prettyValue(r.content)
-          }
-          return (
-            <div key={i} className="mb-1">
-              <span className={r.is_error ? 'text-red-400' : 'text-yellow-400'}>
-                ← {name}{r.is_error ? ' (error)' : ''}
-              </span>
-              {body && (
-                <>
-                  {'\n'}
-                  <TerminalCollapsible text={body} maxLines={8} />
-                </>
-              )}
-            </div>
-          )
-        })}
-      </>
-    )
-  }
-
-  if (ev.type === 'result') {
-    return (
-      <div className="mb-1 mt-2 pt-2 border-t border-gray-700">
-        <span className={ev.is_error ? 'text-red-400 font-bold' : 'text-green-400 font-bold'}>
-          [result] {ev.subtype || ''}
-        </span>
-        {ev.duration_ms != null && <span className="text-gray-500"> · {Math.round(ev.duration_ms / 1000)}s</span>}
-        {ev.total_cost_usd != null && <span className="text-gray-500"> · ${ev.total_cost_usd.toFixed(4)}</span>}
-        {ev.result && (
-          <>
-            {'\n'}
-            <span className="text-gray-200 whitespace-pre-wrap break-all">{ev.result}</span>
-          </>
-        )}
-        {!ev.result && (
-          <>
-            {'\n'}
-            <span className="text-gray-500 italic">(empty — no stdout)</span>
-          </>
-        )}
-      </div>
-    )
-  }
-
-  return null
-}
