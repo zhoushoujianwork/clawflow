@@ -22,6 +22,7 @@ func NewPRCmd() *cobra.Command {
 	cmd.AddCommand(newPRCommentCmd())
 	cmd.AddCommand(newPRCIWaitCmd())
 	cmd.AddCommand(newPRMergeCmd())
+	cmd.AddCommand(newPRCloseCmd())
 	cmd.AddCommand(newPRRebaseCmd())
 	return cmd
 }
@@ -272,6 +273,33 @@ func newPRMergeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().IntVar(&number, "pr", 0, "PR number (required)")
 	cmd.Flags().BoolVar(&noDeleteBranch, "no-delete-branch", false, "keep the source branch after merging (default: delete)")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("pr")
+	return cmd
+}
+
+func newPRCloseCmd() *cobra.Command {
+	var repo string
+	var number int
+
+	cmd := &cobra.Command{
+		Use:     "close",
+		Short:   "Close a pull request / merge request without merging",
+		Example: "  clawflow pr close --repo owner/repo --pr 7",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, _, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			if err := client.ClosePR(repo, number); err != nil {
+				return err
+			}
+			fmt.Printf("closed %s PR #%d\n", repo, number)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
+	cmd.Flags().IntVar(&number, "pr", 0, "PR number (required)")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("pr")
 	return cmd
