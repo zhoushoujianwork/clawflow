@@ -863,6 +863,25 @@ func (c *Client) MergePR(repo string, prNumber int) error {
 	return err
 }
 
+// ClosePR closes a PR without merging via PATCH /repos/:owner/:name/pulls/:n
+// with {"state":"closed"}. Note the path is /pulls/ (not /issues/), though
+// GitHub also accepts the issues endpoint for the shared number space.
+func (c *Client) ClosePR(repo string, prNumber int) error {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, name, prNumber)
+	data, status, err := c.do("PATCH", path, map[string]string{"state": "closed"})
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return fmt.Errorf("github close PR: HTTP %d: %s", status, data)
+	}
+	return nil
+}
+
 // MergePRDetailed merges a PR and returns the resulting merge commit SHA.
 // GitHub's PUT /pulls/:n/merge returns { sha, merged, message } on 200.
 func (c *Client) MergePRDetailed(repo string, prNumber int) (string, error) {

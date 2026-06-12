@@ -662,6 +662,21 @@ func (c *Client) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.Iss
 	return out, nil
 }
 
+// ClosePR closes a merge request without merging via
+// PUT /projects/:id/merge_requests/:iid with state_event=close.
+func (c *Client) ClosePR(repo string, prNumber int) error {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d", projectID(repo), prNumber)
+	form := url.Values{"state_event": {"close"}}
+	data, status, err := c.do("PUT", path, form)
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return fmt.Errorf("gitlab close MR: HTTP %d: %s", status, data)
+	}
+	return nil
+}
+
 func (c *Client) MergePR(repo string, prNumber int) error {
 	path := fmt.Sprintf("/projects/%s/merge_requests/%d/merge", projectID(repo), prNumber)
 	data, status, err := c.doJSON("PUT", path, map[string]string{"merge_when_pipeline_succeeds": "false"})

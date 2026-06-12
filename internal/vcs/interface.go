@@ -174,6 +174,10 @@ type Client interface {
 	MergePR(repo string, prNumber int) error
 	GetPRMergeability(repo string, prNumber int) (MergeStatus, error)
 
+	// Close
+	// ClosePR closes a pull request / merge request without merging it.
+	ClosePR(repo string, prNumber int) error
+
 	// Branches
 	// DeleteBranch removes a branch from the remote. Implementations should
 	// treat "branch already gone" as a non-error (idempotent).

@@ -110,6 +110,13 @@ func (b *budgetClient) MergePR(repo string, n int) error {
 	return b.Client.MergePR(repo, n)
 }
 
+func (b *budgetClient) ClosePR(repo string, n int) error {
+	if err := Reserve("ClosePR"); err != nil {
+		return err
+	}
+	return b.Client.ClosePR(repo, n)
+}
+
 func (b *budgetClient) DeleteBranch(repo, branch string) error {
 	if err := Reserve("DeleteBranch"); err != nil {
 		return err

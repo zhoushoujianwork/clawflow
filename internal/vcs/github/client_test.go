@@ -184,6 +184,30 @@ func TestUpdateIssue(t *testing.T) {
 	}
 }
 
+func TestClosePR(t *testing.T) {
+	var got map[string]string
+	hit := false
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"PATCH /repos/owner/repo/pulls/7": func(w http.ResponseWriter, r *http.Request) {
+			hit = true
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			jsonResp(w, 200, map[string]any{"number": 7, "state": "closed"})
+		},
+	})
+
+	if err := client.ClosePR("owner/repo", 7); err != nil {
+		t.Fatal(err)
+	}
+	if !hit {
+		t.Fatal("expected PATCH /pulls/7 to be called")
+	}
+	if got["state"] != "closed" {
+		t.Fatalf("payload = %#v, want state=closed", got)
+	}
+}
+
 func TestGetIssue(t *testing.T) {
 	client := newTestClient(t, map[string]http.HandlerFunc{
 		"GET /repos/owner/repo/issues/7": func(w http.ResponseWriter, r *http.Request) {
