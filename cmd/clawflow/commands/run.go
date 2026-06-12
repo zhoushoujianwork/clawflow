@@ -42,11 +42,17 @@ var runLog *clog.Logger
 // roleForOperator picks which config.Role slot an operator should
 // resolve its model from. evaluate-* operators read existing context
 // and produce structured analysis, so they get the heavier eval model
-// (Opus by default). Everything else (implement, reply-comment,
-// user-supplied skills) gets the cheaper operator model (Sonnet).
+// (Opus by default). Lightweight operators (classify, reply-comment,
+// reply-question, track-progress) use the cheap light model (Haiku by
+// default). Everything else (implement, user-supplied skills) gets the
+// operator model (Sonnet by default).
 func roleForOperator(opName string) string {
 	if strings.HasPrefix(opName, "evaluate-") {
 		return config.RoleEval
+	}
+	switch opName {
+	case "classify", "reply-comment", "reply-question", "track-progress":
+		return config.RoleLight
 	}
 	return config.RoleOperator
 }

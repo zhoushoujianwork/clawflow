@@ -19,7 +19,7 @@ import (
 // providerView is the safe representation of a ClaudeProvider for the API.
 // The api_key is never returned in full — only a masked hint.
 //
-// Each role (chat / eval / operator) has its own stored value plus the
+// Each role (chat / eval / operator / light) has its own stored value plus the
 // built-in default the runner will fall back to when the stored value
 // is empty. Exposing the default lets the dashboard render it as a
 // placeholder without having to duplicate the constants.
@@ -31,9 +31,11 @@ type providerView struct {
 	ChatModel            string `json:"chat_model"`
 	EvalModel            string `json:"eval_model"`
 	OperatorModel        string `json:"operator_model"`
+	LightModel           string `json:"light_model"`
 	ChatModelDefault     string `json:"chat_model_default"`
 	EvalModelDefault     string `json:"eval_model_default"`
 	OperatorModelDefault string `json:"operator_model_default"`
+	LightModelDefault    string `json:"light_model_default"`
 	Enabled              bool   `json:"enabled"`
 	Index                int    `json:"index"`
 }
@@ -47,9 +49,11 @@ func toProviderView(p config.ClaudeProvider, idx int) providerView {
 		ChatModel:            p.ChatModel,
 		EvalModel:            p.EvalModel,
 		OperatorModel:        p.OperatorModel,
+		LightModel:           p.LightModel,
 		ChatModelDefault:     config.DefaultChatModel,
 		EvalModelDefault:     config.DefaultEvalModel,
 		OperatorModelDefault: config.DefaultOperatorModel,
+		LightModelDefault:    config.DefaultLightModel,
 		Enabled:              p.Enabled,
 		Index:                idx,
 	}
@@ -81,6 +85,7 @@ type providerAddRequest struct {
 	ChatModel     string `json:"chat_model,omitempty"`
 	EvalModel     string `json:"eval_model,omitempty"`
 	OperatorModel string `json:"operator_model,omitempty"`
+	LightModel    string `json:"light_model,omitempty"`
 	Enabled       *bool  `json:"enabled,omitempty"`
 }
 
@@ -115,6 +120,7 @@ func HandleAddProvider(w http.ResponseWriter, r *http.Request) {
 		ChatModel:     strings.TrimSpace(req.ChatModel),
 		EvalModel:     strings.TrimSpace(req.EvalModel),
 		OperatorModel: strings.TrimSpace(req.OperatorModel),
+		LightModel:    strings.TrimSpace(req.LightModel),
 		Enabled:       enabled,
 	}
 	creds.ClaudeProviders = append(creds.ClaudeProviders, p)
@@ -135,6 +141,7 @@ type providerUpdateRequest struct {
 	ChatModel     *string `json:"chat_model,omitempty"`
 	EvalModel     *string `json:"eval_model,omitempty"`
 	OperatorModel *string `json:"operator_model,omitempty"`
+	LightModel    *string `json:"light_model,omitempty"`
 	Enabled       *bool   `json:"enabled,omitempty"`
 }
 
@@ -180,6 +187,9 @@ func HandleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.OperatorModel != nil {
 		p.OperatorModel = strings.TrimSpace(*req.OperatorModel)
+	}
+	if req.LightModel != nil {
+		p.LightModel = strings.TrimSpace(*req.LightModel)
 	}
 	if req.Enabled != nil {
 		p.Enabled = *req.Enabled

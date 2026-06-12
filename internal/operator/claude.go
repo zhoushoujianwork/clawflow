@@ -223,6 +223,7 @@ type providerEntry struct {
 	chatModel     string
 	evalModel     string
 	operatorModel string
+	lightModel    string
 }
 
 // modelForRole returns the model this provider should use for role,
@@ -236,6 +237,8 @@ func (p providerEntry) modelForRole(role string) string {
 		v = p.chatModel
 	case config.RoleEval:
 		v = p.evalModel
+	case config.RoleLight:
+		v = p.lightModel
 	default:
 		v = p.operatorModel
 	}
@@ -264,6 +267,7 @@ func buildProviderList(creds *config.Credentials) []providerEntry {
 				chatModel:     p.ChatModel,
 				evalModel:     p.EvalModel,
 				operatorModel: p.OperatorModel,
+				lightModel:    p.LightModel,
 			}
 		}
 		return out
