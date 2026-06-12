@@ -45,9 +45,11 @@ interface ProviderView {
   chat_model: string
   eval_model: string
   operator_model: string
+  light_model: string
   chat_model_default: string
   eval_model_default: string
   operator_model_default: string
+  light_model_default: string
   enabled: boolean
   index: number
 }
@@ -69,6 +71,7 @@ async function addProvider(body: {
   chat_model?: string
   eval_model?: string
   operator_model?: string
+  light_model?: string
   enabled: boolean
 }): Promise<ProviderView> {
   const r = await fetch('/api/providers', {
@@ -83,7 +86,7 @@ async function addProvider(body: {
 
 async function updateProvider(
   idx: number,
-  body: { name?: string; base_url?: string; api_key?: string; chat_model?: string; eval_model?: string; operator_model?: string; enabled?: boolean },
+  body: { name?: string; base_url?: string; api_key?: string; chat_model?: string; eval_model?: string; operator_model?: string; light_model?: string; enabled?: boolean },
 ): Promise<ProviderView> {
   const r = await fetch(`/api/providers/${idx}`, {
     method: 'PUT',
@@ -199,11 +202,12 @@ function SortableRow({ provider, onEdit, onDelete, onToggle, onTest, testState }
       </span>
 
       {/* Models */}
-      <span className="text-muted-foreground text-xs w-36 shrink-0 truncate" title={`chat:${provider.chat_model||'default'} eval:${provider.eval_model||'default'} op:${provider.operator_model||'default'}`}>
+      <span className="text-muted-foreground text-xs w-36 shrink-0 truncate" title={`chat:${provider.chat_model||'default'} eval:${provider.eval_model||'default'} op:${provider.operator_model||'default'} light:${provider.light_model||'default'}`}>
         {[
           provider.chat_model || provider.chat_model_default,
           provider.eval_model || provider.eval_model_default,
           provider.operator_model || provider.operator_model_default,
+          provider.light_model || provider.light_model_default,
         ].join(' / ')}
       </span>
 
@@ -300,6 +304,7 @@ interface ProviderModalProps {
     chat_model: string
     eval_model: string
     operator_model: string
+    light_model: string
     enabled: boolean
   }) => Promise<void>
   onClose: () => void
@@ -313,6 +318,7 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
   const [chatModel, setChatModel] = useState(initial?.chat_model ?? '')
   const [evalModel, setEvalModel] = useState(initial?.eval_model ?? '')
   const [operatorModel, setOperatorModel] = useState(initial?.operator_model ?? '')
+  const [lightModel, setLightModel] = useState(initial?.light_model ?? '')
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -335,7 +341,7 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
     if (!name.trim()) { setErr('Name is required'); return }
     setBusy(true); setErr(null)
     try {
-      await onSave({ name: name.trim(), base_url: baseURL.trim(), api_key: apiKey, chat_model: chatModel.trim(), eval_model: evalModel.trim(), operator_model: operatorModel.trim(), enabled })
+      await onSave({ name: name.trim(), base_url: baseURL.trim(), api_key: apiKey, chat_model: chatModel.trim(), eval_model: evalModel.trim(), operator_model: operatorModel.trim(), light_model: lightModel.trim(), enabled })
       onClose()
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -438,6 +444,15 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
             />
           </Field>
 
+          <Field label="Light model" hint={`default: ${initial?.light_model_default ?? 'haiku'}`}>
+            <ModelSelect
+              value={lightModel}
+              onChange={setLightModel}
+              defaultLabel={initial?.light_model_default ?? 'haiku'}
+              ariaLabel="Light model"
+            />
+          </Field>
+
           <div className="flex items-start gap-3">
             <div className="w-28 shrink-0" />
             <p className="flex-1 text-[10px] text-muted-foreground/70 leading-relaxed">
@@ -445,6 +460,12 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
               latest model; type a full model ID to pin that exact version;
               custom providers can enter any model name they expose. Leave blank
               to use the default shown above.
+              <br />
+              <span className="text-muted-foreground/50">
+                Eval = evaluate-* operators · Operator = implement + user skills ·
+                Light = classify / reply-comment / reply-question / track-progress ·
+                Chat = REPL &amp; project-gen
+              </span>
             </p>
           </div>
 

@@ -257,6 +257,7 @@ type ClaudeProvider struct {
 	ChatModel     string `yaml:"chat_model,omitempty"`     // used by `clawflow chat` and project Pilot
 	EvalModel     string `yaml:"eval_model,omitempty"`     // used by evaluate-* operators
 	OperatorModel string `yaml:"operator_model,omitempty"` // used by every other operator
+	LightModel    string `yaml:"light_model,omitempty"`    // used by lightweight operators (classify, reply-*, track-progress)
 	// Deprecated: Model is the legacy single-slot override. Non-empty on
 	// load triggers migration into the three role-specific fields above.
 	// Kept here so old credentials.yaml entries round-trip without loss.
@@ -292,8 +293,17 @@ func (p *ClaudeProvider) EffectiveOperatorModel() string {
 	return p.OperatorModel
 }
 
+// EffectiveLightModel returns the light model this provider should use,
+// falling back to DefaultLightModel when unset.
+func (p *ClaudeProvider) EffectiveLightModel() string {
+	if p == nil || p.LightModel == "" {
+		return DefaultLightModel
+	}
+	return p.LightModel
+}
+
 // EffectiveModelForRole returns the provider's model for the given role
-// ("chat" / "eval" / "operator"). Unknown roles fall back to the
+// ("chat" / "eval" / "operator" / "light"). Unknown roles fall back to the
 // operator model — the safest default for user-supplied skills.
 func (p *ClaudeProvider) EffectiveModelForRole(role string) string {
 	switch role {
@@ -301,6 +311,8 @@ func (p *ClaudeProvider) EffectiveModelForRole(role string) string {
 		return p.EffectiveChatModel()
 	case RoleEval:
 		return p.EffectiveEvalModel()
+	case RoleLight:
+		return p.EffectiveLightModel()
 	default:
 		return p.EffectiveOperatorModel()
 	}
@@ -379,8 +391,8 @@ type Credentials struct {
 	// `clawflow chat` overrides this per-session.
 	ChatDefaultMode string `yaml:"chat_default_mode,omitempty"`
 
-	// envChatModel / envEvalModel / envOperatorModel capture env-var
-	// overrides applied at LoadCredentials time. They take precedence
+	// envChatModel / envEvalModel / envOperatorModel / envLightModel capture
+	// env-var overrides applied at LoadCredentials time. They take precedence
 	// over per-provider fields in ResolveModelForRole, but are NOT
 	// consulted by the per-provider failover loop (which reads
 	// ClaudeProvider.*Model directly). Not persisted — the `-` tag
@@ -388,6 +400,7 @@ type Credentials struct {
 	envChatModel     string `yaml:"-"`
 	envEvalModel     string `yaml:"-"`
 	envOperatorModel string `yaml:"-"`
+	envLightModel    string `yaml:"-"`
 
 	// envClaudeAPIKey / envClaudeBaseURL capture env-var overrides so
 	// provider-aware callers can preserve env > provider > legacy
@@ -406,6 +419,7 @@ const (
 	RoleChat     = "chat"     // `clawflow chat` REPL + project-gen
 	RoleEval     = "eval"     // operators whose name starts with "evaluate-"
 	RoleOperator = "operator" // every other operator + project Pilot
+	RoleLight    = "light"    // lightweight operators: classify, reply-comment, reply-question, track-progress
 )
 
 // Default model identifiers used when no provider is configured for a
@@ -429,6 +443,7 @@ const (
 	DefaultChatModel     = "haiku"
 	DefaultEvalModel     = "opus"
 	DefaultOperatorModel = "sonnet"
+	DefaultLightModel    = "haiku" // lightweight operators use the cheapest tier
 )
 
 // DefaultModelForRole returns the built-in default for role. Unknown
@@ -439,6 +454,8 @@ func DefaultModelForRole(role string) string {
 		return DefaultChatModel
 	case RoleEval:
 		return DefaultEvalModel
+	case RoleLight:
+		return DefaultLightModel
 	default:
 		return DefaultOperatorModel
 	}
@@ -532,6 +549,8 @@ func (c *Credentials) envRoleOverride(role string) string {
 		return c.envEvalModel
 	case RoleOperator:
 		return c.envOperatorModel
+	case RoleLight:
+		return c.envLightModel
 	}
 	return ""
 }
@@ -780,6 +799,7 @@ func LoadCredentials() (*Credentials, error) {
 	c.envChatModel = os.Getenv("CLAWFLOW_CLAUDE_CHAT_MODEL")
 	c.envEvalModel = os.Getenv("CLAWFLOW_CLAUDE_EVAL_MODEL")
 	c.envOperatorModel = os.Getenv("CLAWFLOW_CLAUDE_OPERATOR_MODEL")
+	c.envLightModel = os.Getenv("CLAWFLOW_CLAUDE_LIGHT_MODEL")
 
 	// Auto-migrate legacy single-provider fields to the providers list,
 	// seed the built-in OAuth fallback entry on first load, and push old
