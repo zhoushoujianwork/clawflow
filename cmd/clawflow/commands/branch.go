@@ -159,10 +159,11 @@ never touched.`,
 				DeleteBranch(repo, branch string) error
 			}
 			if includeRemote {
-				c, _, cerr := newVCSClientForRepo(repo)
+				c, canon, _, cerr := newVCSClientForRepo(repo)
 				if cerr != nil {
 					return cerr
 				}
+				repo = canon
 				client = c
 			}
 

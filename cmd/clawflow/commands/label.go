@@ -29,7 +29,7 @@ func newLabelAddCmd() *cobra.Command {
 		Short:   "Add a label to an issue",
 		Example: "  clawflow label add --repo owner/repo --issue 7 --label in-progress",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -59,7 +59,7 @@ func newLabelRemoveCmd() *cobra.Command {
 		Short:   "Remove a label from an issue",
 		Example: "  clawflow label remove --repo owner/repo --issue 7 --label in-progress",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}

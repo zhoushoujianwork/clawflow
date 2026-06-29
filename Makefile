@@ -11,6 +11,11 @@ web:
 	@cd web && pnpm build
 	@echo "web built"
 
+# run web
+
+run: install
+	clawflow web restart
+
 # 构建并替换本地二进制（含前端）
 install: web
 	@mkdir -p $(BIN_DIR)

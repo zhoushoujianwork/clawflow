@@ -35,7 +35,7 @@ func newPRCreateCmd() *cobra.Command {
 		Short:   "Create a pull request / merge request",
 		Example: "  clawflow pr create --repo owner/repo --title \"fix: bug\" --head fix/issue-7 --base main --body \"Fixes #7\"",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -73,7 +73,7 @@ func newPRViewCmd() *cobra.Command {
 		Short:   "View a pull request / merge request",
 		Example: "  clawflow pr view --repo owner/repo --pr 7",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -107,7 +107,7 @@ func newPRListCmd() *cobra.Command {
 		Aliases: []string{"ls"},
 		Example: "  clawflow pr list --repo owner/repo\n  clawflow pr list --repo owner/repo --state merged\n  clawflow pr list --repo owner/repo --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -156,7 +156,7 @@ func newPRCommentCmd() *cobra.Command {
 		Short:   "Post a comment on a pull request",
 		Example: "  clawflow pr comment --repo owner/repo --pr 7 --body \"CI failed: ...\"",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -186,7 +186,7 @@ func newPRCIWaitCmd() *cobra.Command {
 		Short:   "Wait for CI checks on a pull request to complete",
 		Example: "  clawflow pr ci-wait --repo owner/repo --pr 7 --timeout 600",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -234,7 +234,7 @@ func newPRMergeCmd() *cobra.Command {
 		Short:   "Merge a pull request via the VCS API",
 		Example: "  clawflow pr merge --repo owner/repo --pr 7\n  clawflow pr merge --repo owner/repo --pr 7 --no-delete-branch",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -287,7 +287,7 @@ func newPRCloseCmd() *cobra.Command {
 		Short:   "Close a pull request / merge request without merging",
 		Example: "  clawflow pr close --repo owner/repo --pr 7",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}

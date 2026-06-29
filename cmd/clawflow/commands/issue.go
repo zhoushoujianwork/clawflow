@@ -114,7 +114,7 @@ func runSearch(repos []string, query, state string, limit int) ([]searchHit, err
 		wg.Add(1)
 		go func(r string) {
 			defer wg.Done()
-			client, _, err := newVCSClientForRepo(r)
+			client, r, _, err := newVCSClientForRepo(r)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] client: %v\n", r, err)
 				return
@@ -210,7 +210,7 @@ func newIssueCreateCmd() *cobra.Command {
 		Short:   "Create an issue in a repository",
 		Example: "  clawflow issue create --repo owner/repo --title \"bug: something broken\" --body \"details...\"",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -245,7 +245,7 @@ func newIssueEditCmd() *cobra.Command {
 		Short:   "Edit an issue title and/or body",
 		Example: "  clawflow issue edit --repo owner/repo --issue 7 --title \"fix: better title\"\n  clawflow issue edit --repo owner/repo --issue 7 --body \"updated details\"",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -297,7 +297,7 @@ the platform-internal ID.`,
 			if err != nil {
 				return fmt.Errorf("invalid issue id %q: must be a number", args[0])
 			}
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -344,7 +344,7 @@ func newIssueListCmd() *cobra.Command {
 		Aliases: []string{"ls"},
 		Example: "  clawflow issue list --repo owner/repo\n  clawflow issue list --repo owner/repo --state closed --label agent-evaluated\n  clawflow issue list --repo owner/repo --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -395,7 +395,7 @@ func newIssueCommentCmd() *cobra.Command {
 		Short:   "Post a comment on an issue",
 		Example: "  clawflow issue comment --repo owner/repo --issue 7 --body \"looks good\"\n  clawflow issue comment --repo owner/repo --issue 7 --body \"see screenshot\" --image bug.png",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -434,7 +434,7 @@ func newIssueCloseCmd() *cobra.Command {
 		Short:   "Close an issue",
 		Example: "  clawflow issue close --repo owner/repo --issue 7",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -462,7 +462,7 @@ func newIssueCommentListCmd() *cobra.Command {
 		Short:   "List comments on an issue with IDs and authors",
 		Example: "  clawflow issue comment-list --repo owner/repo --issue 7\n  clawflow issue comment-list --repo owner/repo --issue 7 --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -516,7 +516,7 @@ func newIssueCommentDeleteCmd() *cobra.Command {
 			if commentID == 0 && author == "" {
 				return fmt.Errorf("provide --comment-id or --author")
 			}
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -566,7 +566,7 @@ func newIssueAddSubCmd() *cobra.Command {
 		Short:   "Add a sub-issue to a parent issue (GitHub only)",
 		Example: "  clawflow issue add-sub --repo owner/repo --parent 10 --sub 11",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}
@@ -610,7 +610,7 @@ func newIssueListSubCmd() *cobra.Command {
 		Short:   "List sub-issues of an issue (GitHub only)",
 		Example: "  clawflow issue list-sub --repo owner/repo --issue 10\n  clawflow issue list-sub --repo owner/repo --issue 10 --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}

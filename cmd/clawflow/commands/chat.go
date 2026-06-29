@@ -76,10 +76,11 @@ Examples:
 }
 
 func runChat(_ context.Context, repo string, issueNum int, model string, modeFlag string) error {
-	client, repoCfg, err := newVCSClientForRepo(repo)
+	client, canonRepo, repoCfg, err := newVCSClientForRepo(repo)
 	if err != nil {
 		return err
 	}
+	repo = canonRepo
 
 	// Per-launch session id (timestamp-seeded). Two reasons we don't
 	// reuse the deterministic SessionID-by-(repo, issue) anymore:

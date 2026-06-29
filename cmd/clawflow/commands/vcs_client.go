@@ -43,16 +43,45 @@ func newVCSClient(repo config.Repo) (vcs.Client, error) {
 	return base, nil
 }
 
-// newVCSClientForRepo loads config and returns a client for the named repo.
-func newVCSClientForRepo(repoName string) (vcs.Client, config.Repo, error) {
+// newVCSClientForRepo loads config and returns a client for the named repo,
+// plus the canonical "owner/repo" (or GitLab "namespace/project") identifier
+// that VCS API calls expect. Callers MUST use the returned canonical name when
+// invoking client methods — repoName may be a full URL, which the API layer
+// cannot split into owner/name.
+//
+// The repo need not be added via `clawflow repo add`: when it isn't in the
+// config, a transient config is inferred from the argument and the API is
+// tried directly. Access is enforced by the VCS (401/403/404), not membership.
+func newVCSClientForRepo(repoName string) (vcs.Client, string, config.Repo, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, config.Repo{}, err
+		return nil, "", config.Repo{}, err
 	}
-	repo, ok := cfg.Repos[repoName]
-	if !ok {
-		return nil, config.Repo{}, fmt.Errorf("repo %q not found in config", repoName)
+	if repo, ok := cfg.Repos[repoName]; ok {
+		client, err := newVCSClient(repo)
+		return client, repoName, repo, err
+	}
+
+	// Not a configured repo. Infer a transient config from the argument. The
+	// arg may be "owner/repo", a github.com URL, or a self-hosted GitLab URL
+	// (https://git.example.com/group/proj) — the URL form is the only way to
+	// learn a self-hosted GitLab base_url, since it can't be inferred from
+	// "owner/repo" alone.
+	info, err := config.ParseRepoInput(repoName, cfg.Settings.GitLabHosts)
+	if err != nil {
+		return nil, "", config.Repo{}, fmt.Errorf("repo %q not in config and could not be parsed: %w", repoName, err)
+	}
+	// The URL might actually point at a repo that IS configured (added by its
+	// owner/repo key). Prefer the stored config so its settings apply.
+	if repo, ok := cfg.Repos[info.OwnerRepo]; ok {
+		client, err := newVCSClient(repo)
+		return client, info.OwnerRepo, repo, err
+	}
+	repo := config.Repo{
+		Platform: info.Platform,
+		BaseURL:  info.BaseURL,
+		Owner:    info.OwnerRepo,
 	}
 	client, err := newVCSClient(repo)
-	return client, repo, err
+	return client, info.OwnerRepo, repo, err
 }

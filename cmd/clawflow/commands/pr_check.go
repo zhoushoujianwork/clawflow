@@ -15,7 +15,7 @@ func NewPRCheckCmd() *cobra.Command {
 		Short:   "Check if an open PR already exists for an issue",
 		Example: "  clawflow pr-check --repo owner/repo --issue 7",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
 			}

@@ -99,6 +99,16 @@ installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 YAML
 echo "  [ok] install record saved"
 
+# ---------- install agent skill into detected AI tools ----------
+# The clawflow agent SKILL.md ships inside the binary (go:embed all:agent-skills),
+# so `install-skill` needs no repo checkout — it extracts the embedded copy into
+# whichever of ~/.claude, ~/.cursor, ~/.codex, ~/.windsurf are present. It's a
+# no-op (and exits 0) when none are detected, so this is safe to always run.
+# Use the full path because the binary may not be on PATH yet (~/.local/bin case).
+echo ""
+echo "  [skill] installing clawflow agent skill into detected AI tools..."
+"$BIN_DIR/clawflow" install-skill || echo "  [warn] install-skill skipped — run \`clawflow install-skill\` manually later"
+
 # ---------- PATH setup (only needed for ~/.local/bin) ----------
 NEED_SOURCE=""
 if [[ "$BIN_DIR" == "$HOME/.local/bin" ]]; then
@@ -132,6 +142,10 @@ echo "Common commands:"
 echo "  clawflow issue list --repo owner/repo      # view issues"
 echo "  clawflow pr list --repo owner/repo         # view PRs"
 echo "  clawflow label add --repo R --issue N --label bug"
+echo ""
+echo "AI tool skill:"
+echo "  clawflow install-skill --list              # show where the skill is installed"
+echo "  clawflow install-skill                     # (re)install into detected AI tools"
 echo ""
 echo "Advanced (optional):"
 echo "  clawflow run                               # run operator pipeline"
