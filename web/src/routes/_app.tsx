@@ -95,52 +95,6 @@ function AppLayout() {
                 local
               </span>
             </a>
-            {/* Version badge with upgrade indicator */}
-            {currentVersion && (
-              <div className="relative">
-                <button
-                  onClick={updateAvailable ? triggerUpdate : undefined}
-                  onMouseEnter={() => setShowTooltip(true)}
-                  onMouseLeave={() => setShowTooltip(false)}
-                  disabled={!updateAvailable || updating || restarting}
-                  className={`relative inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
-                    updateAvailable && !updating && !restarting
-                      ? 'cursor-pointer hover:bg-[hsl(var(--brand)/0.1)] text-[hsl(var(--text-mid,var(--text-low)))]'
-                      : 'cursor-default text-[hsl(var(--text-low))]'
-                  }`}
-                  style={{ color: 'hsl(var(--text-low))' }}
-                  aria-label={updateAvailable ? `Upgrade to ${latestVersion}` : `Version ${currentVersion}`}
-                >
-                  {restarting ? (
-                    <><Loader2 className="w-3 h-3 animate-spin" /> Restarting…</>
-                  ) : updating ? (
-                    <><Loader2 className="w-3 h-3 animate-spin" /> Updating…</>
-                  ) : (
-                    <>
-                      {currentVersion}
-                      {updateAvailable && (
-                        <svg className="w-2 h-2 shrink-0" viewBox="0 0 8 8" aria-hidden="true">
-                          <circle cx="4" cy="4" r="4" fill="#ef4444" />
-                        </svg>
-                      )}
-                    </>
-                  )}
-                </button>
-                {/* Tooltip */}
-                {showTooltip && updateAvailable && !updating && !restarting && (
-                  <div
-                    className="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 px-2.5 py-1.5 rounded-md text-[11px] whitespace-nowrap shadow-lg z-50 border"
-                    style={{
-                      background: 'hsl(var(--bg-panel))',
-                      borderColor: 'hsl(var(--border))',
-                      color: 'hsl(var(--text-high))',
-                    }}
-                  >
-                    Click to upgrade to <span className="font-semibold">{latestVersion}</span>
-                  </div>
-                )}
-              </div>
-            )}
             <nav className="flex gap-1">
               <Link
                 to="/dashboard"
@@ -194,6 +148,56 @@ function AppLayout() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Version badge with upgrade indicator.
+                Lives in the right-hand cluster (anchored to the right edge by
+                the header's justify-between) so its async appearance after the
+                /api/version fetch never shifts the left-side nav — regardless
+                of how long the version string is. See issue #284. */}
+            {currentVersion && (
+              <div className="relative">
+                <button
+                  onClick={updateAvailable ? triggerUpdate : undefined}
+                  onMouseEnter={() => setShowTooltip(true)}
+                  onMouseLeave={() => setShowTooltip(false)}
+                  disabled={!updateAvailable || updating || restarting}
+                  className={`relative inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono tabular-nums whitespace-nowrap transition-colors ${
+                    updateAvailable && !updating && !restarting
+                      ? 'cursor-pointer hover:bg-[hsl(var(--brand)/0.1)] text-[hsl(var(--text-mid,var(--text-low)))]'
+                      : 'cursor-default text-[hsl(var(--text-low))]'
+                  }`}
+                  style={{ color: 'hsl(var(--text-low))' }}
+                  aria-label={updateAvailable ? `Upgrade to ${latestVersion}` : `Version ${currentVersion}`}
+                >
+                  {restarting ? (
+                    <><Loader2 className="w-3 h-3 animate-spin" /> Restarting…</>
+                  ) : updating ? (
+                    <><Loader2 className="w-3 h-3 animate-spin" /> Updating…</>
+                  ) : (
+                    <>
+                      {currentVersion}
+                      {updateAvailable && (
+                        <svg className="w-2 h-2 shrink-0" viewBox="0 0 8 8" aria-hidden="true">
+                          <circle cx="4" cy="4" r="4" fill="#ef4444" />
+                        </svg>
+                      )}
+                    </>
+                  )}
+                </button>
+                {/* Tooltip */}
+                {showTooltip && updateAvailable && !updating && !restarting && (
+                  <div
+                    className="absolute top-full right-0 mt-1.5 px-2.5 py-1.5 rounded-md text-[11px] whitespace-nowrap shadow-lg z-50 border"
+                    style={{
+                      background: 'hsl(var(--bg-panel))',
+                      borderColor: 'hsl(var(--border))',
+                      color: 'hsl(var(--text-high))',
+                    }}
+                  >
+                    Click to upgrade to <span className="font-semibold">{latestVersion}</span>
+                  </div>
+                )}
+              </div>
+            )}
             <ReportIssueButton />
             <a
               href="https://github.com/zhoushoujianwork/clawflow"
