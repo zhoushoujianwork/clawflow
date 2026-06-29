@@ -478,3 +478,28 @@ func TestResolveClaudeCredentials(t *testing.T) {
 		}
 	})
 }
+
+// TestEffectiveMaxOutputTokens verifies the per-provider output-token ceiling
+// falls back to the built-in default when unset and honors explicit overrides
+// (issue #286).
+func TestEffectiveMaxOutputTokens(t *testing.T) {
+	var nilP *config.ClaudeProvider
+	if got := nilP.EffectiveMaxOutputTokens(); got != config.DefaultMaxOutputTokens {
+		t.Errorf("nil provider: got %d, want default %d", got, config.DefaultMaxOutputTokens)
+	}
+
+	unset := &config.ClaudeProvider{Name: "A"}
+	if got := unset.EffectiveMaxOutputTokens(); got != config.DefaultMaxOutputTokens {
+		t.Errorf("unset: got %d, want default %d", got, config.DefaultMaxOutputTokens)
+	}
+
+	custom := &config.ClaudeProvider{Name: "B", MaxOutputTokens: 96000}
+	if got := custom.EffectiveMaxOutputTokens(); got != 96000 {
+		t.Errorf("custom: got %d, want 96000", got)
+	}
+
+	zeroOrNeg := &config.ClaudeProvider{Name: "C", MaxOutputTokens: -1}
+	if got := zeroOrNeg.EffectiveMaxOutputTokens(); got != config.DefaultMaxOutputTokens {
+		t.Errorf("negative: got %d, want default %d", got, config.DefaultMaxOutputTokens)
+	}
+}

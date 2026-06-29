@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -67,4 +68,28 @@ func EnvWithCredentials(env []string, apiKey, baseURL string) []string {
 		out = append(out, "ANTHROPIC_BASE_URL="+baseURL)
 	}
 	return out
+}
+
+// EnvWithMaxOutputTokens returns env with CLAUDE_CODE_MAX_OUTPUT_TOKENS set to
+// maxTokens, UNLESS the variable is already present in env (an explicit
+// user/shell override always wins — env > config > built-in default, matching
+// the precedence used elsewhere in clawflow).
+//
+// maxTokens <= 0 is a no-op: the caller has nothing to inject, so the claude
+// CLI keeps its own built-in default (the historical behaviour). Operators
+// that emit large diffs (e.g. `implement`) hit the default 64000 ceiling and
+// fail with "Claude's response exceeded the N output token maximum" — raising
+// this ceiling via config is the fix (issue #286).
+func EnvWithMaxOutputTokens(env []string, maxTokens int) []string {
+	if maxTokens <= 0 {
+		return env
+	}
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "CLAUDE_CODE_MAX_OUTPUT_TOKENS=") {
+			return env // explicit override present — don't clobber it.
+		}
+	}
+	out := make([]string, len(env), len(env)+1)
+	copy(out, env)
+	return append(out, "CLAUDE_CODE_MAX_OUTPUT_TOKENS="+strconv.Itoa(maxTokens))
 }

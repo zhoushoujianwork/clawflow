@@ -258,6 +258,13 @@ type ClaudeProvider struct {
 	EvalModel     string `yaml:"eval_model,omitempty"`     // used by evaluate-* operators
 	OperatorModel string `yaml:"operator_model,omitempty"` // used by every other operator
 	LightModel    string `yaml:"light_model,omitempty"`    // used by lightweight operators (classify, reply-*, track-progress)
+	// MaxOutputTokens raises the CLAUDE_CODE_MAX_OUTPUT_TOKENS ceiling for
+	// this provider's subprocesses. Zero means "use the built-in default"
+	// (DefaultMaxOutputTokens). Operators that emit large diffs (implement)
+	// blow past claude's own 64000 default and fail; raising this fixes it
+	// (issue #286). Note: must not exceed the target model's real output
+	// ceiling, so it's configurable rather than hard-coded high.
+	MaxOutputTokens int `yaml:"max_output_tokens,omitempty"`
 	// Deprecated: Model is the legacy single-slot override. Non-empty on
 	// load triggers migration into the three role-specific fields above.
 	// Kept here so old credentials.yaml entries round-trip without loss.
@@ -300,6 +307,16 @@ func (p *ClaudeProvider) EffectiveLightModel() string {
 		return DefaultLightModel
 	}
 	return p.LightModel
+}
+
+// EffectiveMaxOutputTokens returns the CLAUDE_CODE_MAX_OUTPUT_TOKENS ceiling
+// this provider should inject, falling back to DefaultMaxOutputTokens when
+// unset (<= 0).
+func (p *ClaudeProvider) EffectiveMaxOutputTokens() int {
+	if p == nil || p.MaxOutputTokens <= 0 {
+		return DefaultMaxOutputTokens
+	}
+	return p.MaxOutputTokens
 }
 
 // EffectiveModelForRole returns the provider's model for the given role
@@ -445,6 +462,16 @@ const (
 	DefaultOperatorModel = "sonnet"
 	DefaultLightModel    = "haiku" // lightweight operators use the cheapest tier
 )
+
+// DefaultMaxOutputTokens is the CLAUDE_CODE_MAX_OUTPUT_TOKENS ceiling
+// clawflow injects when a provider doesn't override it. The claude CLI's
+// own built-in default is 64000; large-diff operators (implement) exceed it
+// and fail with "Claude's response exceeded the N output token maximum"
+// (issue #286). 64000 is a known per-model ceiling — we set the env var
+// explicitly to that value so the behaviour is visible/overridable rather
+// than relying on the CLI's implicit default, and let config raise it where
+// a model supports more.
+const DefaultMaxOutputTokens = 64000
 
 // DefaultModelForRole returns the built-in default for role. Unknown
 // roles fall back to the operator default (safest for user skills).

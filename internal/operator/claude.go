@@ -30,6 +30,23 @@ var ErrRateLimit = errors.New("claude rate limit")
 // or API-key configuration rather than burning quota on an infinite loop.
 var ErrAuthError = errors.New("claude auth error")
 
+// ErrOutputLimit is returned by RunClaude when the claude CLI aborts because
+// its response exceeded the configured CLAUDE_CODE_MAX_OUTPUT_TOKENS ceiling
+// ("Claude's response exceeded the N output token maximum"). Like rate limits
+// this is NOT a permanent operator failure — the issue keeps its trigger
+// labels and blindly retrying just burns more tokens. Callers should record a
+// distinct status and surface it so the owner can raise max_output_tokens
+// rather than counting it toward the circuit breaker (issue #286).
+var ErrOutputLimit = errors.New("claude output token limit")
+
+// outputLimitPatterns are substrings (case-insensitive) that identify an
+// output-token-ceiling abort from the claude CLI. The CLI emits a message of
+// the form "Claude's response exceeded the 64000 output token maximum."
+var outputLimitPatterns = []string{
+	"output token maximum",
+	"exceeded the maximum output",
+}
+
 // authErrorPatterns are substrings (case-insensitive) that identify a
 // 403 / authentication-failure response from the claude CLI. Matching any
 // one of them triggers ErrAuthError rather than the generic failure path.
@@ -89,6 +106,23 @@ func IsAuthError(err error, output string) bool {
 	}
 	combined := strings.ToLower(err.Error() + " " + output)
 	for _, pat := range authErrorPatterns {
+		if strings.Contains(combined, strings.ToLower(pat)) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsOutputLimitError reports whether err or the captured claude output text
+// indicates the response exceeded the CLAUDE_CODE_MAX_OUTPUT_TOKENS ceiling.
+// Both are checked because the claude CLI writes the human-readable message
+// to stdout while the Go error only carries "exit status 1".
+func IsOutputLimitError(err error, output string) bool {
+	if err == nil {
+		return false
+	}
+	combined := strings.ToLower(err.Error() + " " + output)
+	for _, pat := range outputLimitPatterns {
 		if strings.Contains(combined, strings.ToLower(pat)) {
 			return true
 		}
@@ -165,7 +199,7 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 
 	for i, p := range providers {
 		model := p.modelForRole(role)
-		output, err := runClaudeWithProvider(ctx, prompt, workdir, model, p.apiKey, p.baseURL, events, systemPrompt...)
+		output, err := runClaudeWithProvider(ctx, prompt, workdir, model, p.apiKey, p.baseURL, p.maxOutputTokens, events, systemPrompt...)
 		if err == nil {
 			if i > 0 {
 				fmt.Fprintf(os.Stderr, "  ✓ provider %q succeeded (after %d failed attempt(s))\n", p.name, i)
@@ -181,6 +215,17 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 		if IsAuthError(err, output) {
 			wrapped := fmt.Errorf("claude: %w", err)
 			return output, fmt.Errorf("%w: %w", ErrAuthError, wrapped)
+		}
+
+		// Output-token-limit aborts ("response exceeded the N output token
+		// maximum") are not fixable by retrying or switching provider — the
+		// operator needs a higher max_output_tokens ceiling. Return
+		// ErrOutputLimit immediately so the caller records a distinct status
+		// and skips the circuit breaker instead of blindly re-firing every
+		// run and burning tokens (issue #286).
+		if IsOutputLimitError(err, output) {
+			wrapped := fmt.Errorf("claude: %w", err)
+			return output, fmt.Errorf("%w: %w", ErrOutputLimit, wrapped)
 		}
 
 		// Determine whether this is a provider-level failure (failover) or
@@ -217,13 +262,14 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 // tuple used during a single RunClaude invocation. Constructed from
 // config.ClaudeProvider or the legacy single-provider fields.
 type providerEntry struct {
-	name          string
-	apiKey        string
-	baseURL       string
-	chatModel     string
-	evalModel     string
-	operatorModel string
-	lightModel    string
+	name            string
+	apiKey          string
+	baseURL         string
+	chatModel       string
+	evalModel       string
+	operatorModel   string
+	lightModel      string
+	maxOutputTokens int
 }
 
 // modelForRole returns the model this provider should use for role,
@@ -254,35 +300,37 @@ func (p providerEntry) modelForRole(role string) string {
 // zero-value entry is returned so the caller falls through to OAuth/keychain.
 func buildProviderList(creds *config.Credentials) []providerEntry {
 	if creds == nil {
-		return []providerEntry{{name: "default"}}
+		return []providerEntry{{name: "default", maxOutputTokens: config.DefaultMaxOutputTokens}}
 	}
 	enabled := creds.EnabledProviders()
 	if len(enabled) > 0 {
 		out := make([]providerEntry, len(enabled))
 		for i, p := range enabled {
 			out[i] = providerEntry{
-				name:          p.Name,
-				apiKey:        p.APIKey,
-				baseURL:       p.BaseURL,
-				chatModel:     p.ChatModel,
-				evalModel:     p.EvalModel,
-				operatorModel: p.OperatorModel,
-				lightModel:    p.LightModel,
+				name:            p.Name,
+				apiKey:          p.APIKey,
+				baseURL:         p.BaseURL,
+				chatModel:       p.ChatModel,
+				evalModel:       p.EvalModel,
+				operatorModel:   p.OperatorModel,
+				lightModel:      p.LightModel,
+				maxOutputTokens: p.EffectiveMaxOutputTokens(),
 			}
 		}
 		return out
 	}
 	// No providers list — use legacy fields (may both be empty = OAuth).
 	return []providerEntry{{
-		name:    "default",
-		apiKey:  creds.ClaudeAPIKey,
-		baseURL: creds.ClaudeBaseURL,
+		name:            "default",
+		apiKey:          creds.ClaudeAPIKey,
+		baseURL:         creds.ClaudeBaseURL,
+		maxOutputTokens: config.DefaultMaxOutputTokens,
 	}}
 }
 
 // runClaudeWithProvider executes a single claude subprocess with the given
 // provider credentials. It is the inner loop body extracted from RunClaude.
-func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, baseURL string, events io.Writer, systemPrompt ...string) (string, error) {
+func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, baseURL string, maxOutputTokens int, events io.Writer, systemPrompt ...string) (string, error) {
 	args := []string{
 		"-p",
 		"--dangerously-skip-permissions",
@@ -309,6 +357,11 @@ func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, 
 	cmd := exec.CommandContext(ctx, claude.Resolve(), args...)
 	cmd.Dir = workdir
 	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
+	// Raise the output-token ceiling so large-diff operators (implement)
+	// don't fail with "Claude's response exceeded the N output token
+	// maximum" (issue #286). A pre-existing CLAUDE_CODE_MAX_OUTPUT_TOKENS in
+	// the inherited env wins, so explicit user overrides are preserved.
+	cmd.Env = claude.EnvWithMaxOutputTokens(cmd.Env, maxOutputTokens)
 	// Tee claude's stderr: the user still sees it live on os.Stderr, but we
 	// also retain its tail so a non-zero exit carries claude's actual failure
 	// text (rate-limit / auth 403 / panic) instead of a bare "exit status 1".

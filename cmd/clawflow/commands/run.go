@@ -1078,6 +1078,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// auto-labeling agent-failed on a configuration problem (issue #204).
 	isAuthError := runErr != nil && errors.Is(runErr, operator.ErrAuthError)
 
+	// Detect output-token-limit aborts ("response exceeded the N output token
+	// maximum"). Like auth errors these are NOT fixable by retrying — the
+	// operator needs a higher max_output_tokens ceiling. Record a distinct
+	// status and skip the circuit breaker so we don't burn tokens re-firing
+	// the same doomed run every pass (issue #286).
+	isOutputLimit := runErr != nil && errors.Is(runErr, operator.ErrOutputLimit)
+
 	// Detect no-marker failures: claude produced output but omitted the
 	// outcome marker. operator.Run now returns ErrNoOutcomeMarker for this
 	// case so we can route it through the circuit breaker (status="failed")
@@ -1094,6 +1101,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			fmt.Fprintf(os.Stderr, "%s ✗ claude auth error 403 (check session/API key, NOT retrying): %v\n", prefix, runErr)
 		} else if isNoMarker {
 			fmt.Fprintf(os.Stderr, "%s ✗ claude produced no outcome marker (will count toward circuit breaker): %v\n", prefix, runErr)
+		} else if isOutputLimit {
+			runLog.Warn("run/output_limit", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", runErr.Error())
+			fmt.Fprintf(os.Stderr, "%s ✗ claude output token limit exceeded (raise max_output_tokens, NOT retrying): %v\n", prefix, runErr)
 		} else {
 			fmt.Fprintf(os.Stderr, "%s ✗ claude failed: %v\n", prefix, runErr)
 		}
@@ -1125,6 +1135,16 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// or configure an independent API key provider (issue #204).
 		rm.Status = "auth-error"
 		rm.Error = runErr.Error()
+	case isOutputLimit:
+		// Record as "output-limit" — distinct from "failed" so the dashboard
+		// surfaces the specific cause (raise max_output_tokens). Unlike
+		// rate-limit (self-resolves) and auth (fails fast), an output-limit run
+		// deterministically fails AND burns a full large-diff generation every
+		// pass, so it DOES count toward the circuit breaker to bound the token
+		// bleed — eventually labeling agent-failed until the owner raises the
+		// ceiling. Each pass also emits a WARN log for patrol (issue #286).
+		rm.Status = "output-limit"
+		rm.Error = runErr.Error()
 	case isNoMarker:
 		// No-marker runs are recorded as "no-marker" (distinct from generic
 		// "failed") so the dashboard can surface the specific cause. They DO
@@ -1150,7 +1170,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// partial work instead of starting from scratch.
 	// skipped-empty, no-marker, and auth-error have no partial work worth
 	// resuming, so clean up to avoid accumulating stale worktrees.
-	if rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "auth-error" {
+	if rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "auth-error" || rm.Status == "output-limit" {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
@@ -1165,7 +1185,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// Upgrade to WARN for non-success statuses so deployment.md patrol's
 	// "grep -E ERROR|WARN" actively catches failures (issue #204).
 	logFn := runLog.Info
-	if rm.Status == "failed" || rm.Status == "auth-error" {
+	if rm.Status == "failed" || rm.Status == "auth-error" || rm.Status == "output-limit" {
 		logFn = runLog.Warn
 	}
 	logFn("run/end",
@@ -1198,6 +1218,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		return false, false
 	case "no-marker":
 		fmt.Printf("%s ✗ no outcome marker (circuit breaker counting)\n", prefix)
+		checkCircuitBreaker(j, prefix)
+		return false, false
+	case "output-limit":
+		fmt.Printf("%s ✗ output token limit (raise max_output_tokens; circuit breaker counting)\n", prefix)
 		checkCircuitBreaker(j, prefix)
 		return false, false
 	case "skipped-empty":

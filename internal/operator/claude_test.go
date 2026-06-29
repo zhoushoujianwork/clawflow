@@ -295,6 +295,49 @@ func TestIsAuthError(t *testing.T) {
 	}
 }
 
+func TestIsOutputLimitError(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		output string
+		want   bool
+	}{
+		{name: "nil error", err: nil, output: "", want: false},
+		{
+			name:   "exact claude output token maximum message",
+			err:    errors.New("claude: exit status 1"),
+			output: "API Error: Claude's response exceeded the 64000 output token maximum.",
+			want:   true,
+		},
+		{
+			name:   "case-insensitive output token maximum",
+			err:    errors.New("claude: exit status 1"),
+			output: "EXCEEDED THE 64000 OUTPUT TOKEN MAXIMUM",
+			want:   true,
+		},
+		{
+			name:   "rate limit should not match",
+			err:    errors.New("claude: exit status 1"),
+			output: "You've hit your limit",
+			want:   false,
+		},
+		{
+			name:   "generic failure should not match",
+			err:    errors.New("claude: exit status 1"),
+			output: "some unrelated compilation error",
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsOutputLimitError(tc.err, tc.output)
+			if got != tc.want {
+				t.Errorf("IsOutputLimitError(%v, %q) = %v, want %v", tc.err, tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsRateLimitError(t *testing.T) {
 	cases := []struct {
 		name   string
