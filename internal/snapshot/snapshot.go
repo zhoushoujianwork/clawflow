@@ -1434,7 +1434,7 @@ func ConsecutiveFailures(repo string, issueNum int) int {
 	})
 	count := 0
 	for _, r := range runs {
-		if r.status != "failed" && r.status != "no-marker" && r.status != "skipped-empty" {
+		if r.status != "failed" && r.status != "no-marker" && r.status != "skipped-empty" && r.status != "output-limit" {
 			break
 		}
 		count++

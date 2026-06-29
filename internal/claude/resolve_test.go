@@ -57,3 +57,34 @@ func TestEnvWithCredentials_AddsBoth(t *testing.T) {
 		t.Errorf("expected both keys appended; got %v", got)
 	}
 }
+
+func TestEnvWithMaxOutputTokens_Injects(t *testing.T) {
+	in := []string{"PATH=/usr/bin"}
+	got := EnvWithMaxOutputTokens(in, 96000)
+	if !slices.Contains(got, "CLAUDE_CODE_MAX_OUTPUT_TOKENS=96000") {
+		t.Errorf("expected CLAUDE_CODE_MAX_OUTPUT_TOKENS=96000 in %v", got)
+	}
+}
+
+func TestEnvWithMaxOutputTokens_NonPositiveIsNoop(t *testing.T) {
+	in := []string{"PATH=/usr/bin"}
+	for _, n := range []int{0, -1} {
+		got := EnvWithMaxOutputTokens(in, n)
+		for _, kv := range got {
+			if len(kv) >= 30 && kv[:30] == "CLAUDE_CODE_MAX_OUTPUT_TOKENS=" {
+				t.Errorf("n=%d should be a no-op, got %v", n, got)
+			}
+		}
+	}
+}
+
+func TestEnvWithMaxOutputTokens_PreservesExistingOverride(t *testing.T) {
+	in := []string{"PATH=/usr/bin", "CLAUDE_CODE_MAX_OUTPUT_TOKENS=200000"}
+	got := EnvWithMaxOutputTokens(in, 64000)
+	if !slices.Contains(got, "CLAUDE_CODE_MAX_OUTPUT_TOKENS=200000") {
+		t.Errorf("explicit override should win; got %v", got)
+	}
+	if slices.Contains(got, "CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000") {
+		t.Errorf("should not append a second value; got %v", got)
+	}
+}
