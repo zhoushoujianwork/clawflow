@@ -85,3 +85,50 @@ func newVCSClientForRepo(repoName string) (vcs.Client, string, config.Repo, erro
 	client, err := newVCSClient(repo)
 	return client, info.OwnerRepo, repo, err
 }
+
+// newGitLabClientForRepo resolves repoName to a concrete *gitlab.Client for
+// GitLab-only operations (CI/CD runners, pipelines, job logs) that have no
+// platform-agnostic vcs.Client equivalent. It errors when the resolved repo is
+// not a GitLab project. Resolution mirrors newVCSClientForRepo: configured repo
+// first, then a transient config inferred from a URL / owner/repo argument.
+//
+// These calls are reads, so — unlike newVCSClient — the client is never wrapped
+// in the Pilot budget decorator (which only gates writes).
+func newGitLabClientForRepo(repoName string) (*gitlab.Client, string, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, "", err
+	}
+	build := func(repo config.Repo, canonical string) (*gitlab.Client, string, error) {
+		platform := repo.Platform
+		if platform == "" {
+			platform = "github"
+		}
+		if platform != "gitlab" {
+			return nil, "", fmt.Errorf("repo %q is not a GitLab project (platform=%q); ci commands are GitLab-only", canonical, platform)
+		}
+		if repo.BaseURL == "" {
+			return nil, "", fmt.Errorf("repo %q is gitlab but base_url is not set", canonical)
+		}
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			return nil, "", fmt.Errorf("load credentials: %w", err)
+		}
+		return gitlab.New(creds.GitLabToken, repo.BaseURL), canonical, nil
+	}
+	if repo, ok := cfg.Repos[repoName]; ok {
+		return build(repo, repoName)
+	}
+	info, err := config.ParseRepoInput(repoName, cfg.Settings.GitLabHosts)
+	if err != nil {
+		return nil, "", fmt.Errorf("repo %q not in config and could not be parsed: %w", repoName, err)
+	}
+	if repo, ok := cfg.Repos[info.OwnerRepo]; ok {
+		return build(repo, info.OwnerRepo)
+	}
+	return build(config.Repo{
+		Platform: info.Platform,
+		BaseURL:  info.BaseURL,
+		Owner:    info.OwnerRepo,
+	}, info.OwnerRepo)
+}
