@@ -46,6 +46,7 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewBranchCmd())
 	root.AddCommand(NewStatusCmd())
 	root.AddCommand(NewPRCheckCmd())
+	root.AddCommand(NewCICmd())
 	root.AddCommand(NewLangCmd())
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
