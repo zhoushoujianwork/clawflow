@@ -313,6 +313,59 @@ func TestRun_OutcomeMarker_StripsAndAddsLabel(t *testing.T) {
 	}
 }
 
+// TestRun_PromoFooter_AppendedToComment verifies that the posted comment ends
+// with the ClawFlow promo footer (issue #290) and that appending the footer
+// does not interfere with outcome marker parsing / label application.
+func TestRun_PromoFooter_AppendedToComment(t *testing.T) {
+	op := &Operator{
+		Name:      "evaluate-bug",
+		LockLabel: "agent-running",
+		Outcomes:  []string{"agent-evaluated"},
+	}
+	sub := &Subject{Number: 42, Labels: []string{"bug"}}
+	v := newFakeVCS()
+
+	body := "## Eval\n\nRepro: 8/10\n\n<!-- clawflow:outcome=agent-evaluated -->\n"
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(v.comments) != 1 {
+		t.Fatalf("want 1 comment, got %d", len(v.comments))
+	}
+	if !strings.HasSuffix(v.comments[0].body, promoFooter) {
+		t.Errorf("comment should end with promo footer; got %q", v.comments[0].body)
+	}
+	if !strings.Contains(v.comments[0].body, "[ClawFlow]("+repoURL+")") {
+		t.Errorf("footer should contain markdown inline repo link; got %q", v.comments[0].body)
+	}
+	// Footer must not break outcome parsing.
+	if !slices.Contains(v.labels[42], "agent-evaluated") {
+		t.Errorf("agent-evaluated should still be added; labels = %v", v.labels[42])
+	}
+}
+
+// TestAppendPromoFooter_Idempotent verifies the footer is not stacked twice and
+// that empty bodies pass through untouched (so the empty-body guard still fires).
+func TestAppendPromoFooter_Idempotent(t *testing.T) {
+	if got := appendPromoFooter(""); got != "" {
+		t.Errorf("empty body should stay empty; got %q", got)
+	}
+	once := appendPromoFooter("hello")
+	twice := appendPromoFooter(once)
+	if once != twice {
+		t.Errorf("footer should not stack: once=%q twice=%q", once, twice)
+	}
+	if !strings.HasSuffix(once, promoFooter) {
+		t.Errorf("footer not appended; got %q", once)
+	}
+}
+
 func TestRun_OutcomeMarker_NotInWhitelist_SkipsLabel(t *testing.T) {
 	op := &Operator{
 		Name:      "evaluate-bug",
