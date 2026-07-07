@@ -315,11 +315,15 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 			return fmt.Errorf("add outcome label %q: %w", outcome, err)
 		} else {
 			fmt.Fprintf(os.Stderr, "  ✓ outcome label %q added\n", outcome)
-			if len(op.Trigger.LabelsRequired) > 0 {
-				if err := v.RemoveLabel(opts.Repo, sub.Number, op.Trigger.LabelsRequired...); err != nil {
-					fmt.Fprintf(os.Stderr, "  ⚠ trigger label cleanup failed: %v\n", err)
+			// Only remove labels the operator explicitly declares as one-shot
+			// flow markers (LabelsConsumed). Persistent classification labels
+			// used as triggers (e.g. "bug"/"feat") stay put so type labels and
+			// flow-status labels remain independent (issue #292).
+			if len(op.Trigger.LabelsConsumed) > 0 {
+				if err := v.RemoveLabel(opts.Repo, sub.Number, op.Trigger.LabelsConsumed...); err != nil {
+					fmt.Fprintf(os.Stderr, "  ⚠ consumed label cleanup failed: %v\n", err)
 				} else {
-					fmt.Fprintf(os.Stderr, "  ✓ trigger labels removed: %v\n", op.Trigger.LabelsRequired)
+					fmt.Fprintf(os.Stderr, "  ✓ consumed labels removed: %v\n", op.Trigger.LabelsConsumed)
 				}
 			}
 		}

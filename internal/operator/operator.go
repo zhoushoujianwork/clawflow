@@ -58,6 +58,13 @@ type Trigger struct {
 	LabelsRequired    []string
 	LabelsRequiredAny []string // OR semantics: at least one must be present (empty = no constraint)
 	LabelsExcluded    []string
+	// LabelsConsumed lists trigger labels that are one-shot flow markers and
+	// should be removed after the operator writes back its outcome (e.g.
+	// "ready-for-agent"). Only labels declared here are cleaned up. Persistent
+	// classification labels used as triggers (e.g. "bug"/"feat") are left
+	// untouched by declaring them in LabelsRequired but NOT here — that keeps
+	// type labels and flow-status labels independent (issue #292).
+	LabelsConsumed []string
 	// AppliesTo is the sub-issue structure constraint: "" or "any" = no
 	// constraint (back-compat), "parent" = subject must have sub-issues,
 	// "leaf" = subject must have none. See the AppliesTo constants.
@@ -74,6 +81,7 @@ type frontmatter struct {
 			LabelsRequired    []string `yaml:"labels_required"`
 			LabelsRequiredAny []string `yaml:"labels_required_any"`
 			LabelsExcluded    []string `yaml:"labels_excluded"`
+			LabelsConsumed    []string `yaml:"labels_consumed"`
 			AppliesTo         string   `yaml:"applies_to"`
 		} `yaml:"trigger"`
 		LockLabel string   `yaml:"lock_label"`
@@ -131,6 +139,7 @@ func Parse(data []byte, source string) (*Operator, error) {
 			LabelsRequired:    fm.Operator.Trigger.LabelsRequired,
 			LabelsRequiredAny: fm.Operator.Trigger.LabelsRequiredAny,
 			LabelsExcluded:    fm.Operator.Trigger.LabelsExcluded,
+			LabelsConsumed:    fm.Operator.Trigger.LabelsConsumed,
 			AppliesTo:         appliesTo,
 		},
 		LockLabel: fm.Operator.LockLabel,

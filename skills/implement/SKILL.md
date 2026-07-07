@@ -6,6 +6,7 @@ operator:
     target: "issue"
     applies_to: "leaf"
     labels_required: ["ready-for-agent"]
+    labels_consumed: ["ready-for-agent"]
     labels_excluded: ["agent-implemented", "agent-skipped", "agent-failed", "agent-running", "tracking"]
   outcomes: ["agent-implemented", "agent-failed", "agent-skipped"]
 ---

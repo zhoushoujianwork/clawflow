@@ -6,6 +6,7 @@ operator:
     target: "issue"
     applies_to: "parent"
     labels_required: ["progress-check"]
+    labels_consumed: ["progress-check"]
     labels_excluded: ["agent-closed", "agent-running", "agent-failed"]
   outcomes: ["agent-closed", "agent-watching"]
 ---
