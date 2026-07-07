@@ -313,6 +313,46 @@ func TestRun_OutcomeMarker_StripsAndAddsLabel(t *testing.T) {
 	}
 }
 
+// TestRun_CommentPostFails_OutcomeLabelStillApplied is the issue #293
+// regression: when posting the result comment fails (e.g. POST hits
+// "context deadline exceeded" in write-back), the outcome label must still
+// be applied. Otherwise an `implement` run that already opened a PR leaves
+// the issue on `ready-for-agent`, and the next scan re-triggers the
+// operator and opens a duplicate PR. The comment body is persisted to
+// comment.md so it isn't lost; the label is what actually gates
+// re-triggering, so it takes priority.
+func TestRun_CommentPostFails_OutcomeLabelStillApplied(t *testing.T) {
+	op := &Operator{
+		Name:      "implement",
+		LockLabel: "agent-running",
+		Outcomes:  []string{"agent-implemented"},
+		Trigger:   Trigger{LabelsRequired: []string{"ready-for-agent"}},
+	}
+	sub := &Subject{Number: 50, Labels: []string{"ready-for-agent"}}
+	v := newFakeVCS()
+	v.errOnComment = true // simulate POST comment timeout
+
+	body := "## Done\n\nOpened PR.\n\n<!-- clawflow:outcome=agent-implemented -->\n"
+	_, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("comment failure should not fail the run; got: %v", err)
+	}
+	if outcome != "agent-implemented" {
+		t.Errorf("want outcome agent-implemented, got %q", outcome)
+	}
+	if !slices.Contains(v.labels[50], "agent-implemented") {
+		t.Errorf("agent-implemented must be applied despite comment failure; labels = %v", v.labels[50])
+	}
+	if slices.Contains(v.labels[50], "ready-for-agent") {
+		t.Errorf("ready-for-agent trigger label should be removed; labels = %v", v.labels[50])
+	}
+}
+
 // TestRun_PromoFooter_AppendedToComment verifies that the posted comment ends
 // with the ClawFlow promo footer (issue #290) and that appending the footer
 // does not interfere with outcome marker parsing / label application.
