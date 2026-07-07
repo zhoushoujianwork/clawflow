@@ -490,6 +490,7 @@ func TestRun_OutcomeMarker_RemovesTriggerLabels(t *testing.T) {
 		LockLabel: "agent-running",
 		Trigger: Trigger{
 			LabelsRequired: []string{"ready-for-agent"},
+			LabelsConsumed: []string{"ready-for-agent"},
 		},
 		Outcomes: []string{"agent-implemented", "agent-failed", "agent-skipped"},
 	}
@@ -528,12 +529,61 @@ func TestRun_OutcomeMarker_RemovesTriggerLabels(t *testing.T) {
 	}
 }
 
+// TestRun_OutcomeMarker_PreservesTypeTriggerLabel is the regression test for
+// issue #292: a persistent classification label (e.g. "bug") used as a trigger
+// but NOT declared in LabelsConsumed must survive write-back. Only labels
+// explicitly listed in LabelsConsumed are one-shot flow markers that get
+// removed. This keeps type labels and flow-status labels independent.
+func TestRun_OutcomeMarker_PreservesTypeTriggerLabel(t *testing.T) {
+	op := &Operator{
+		Name:      "evaluate-bug",
+		LockLabel: "agent-running",
+		Trigger: Trigger{
+			LabelsRequired: []string{"bug"},
+			// No LabelsConsumed: "bug" is a type label, not a flow marker.
+		},
+		Outcomes: []string{"agent-evaluated", "agent-skipped"},
+	}
+	sub := &Subject{Number: 42, Labels: []string{"bug"}}
+	v := newFakeVCS()
+	// Seed the existing "bug" label so we can assert it survives write-back
+	// (the fake tracks state in v.labels).
+	v.labels[42] = []string{"bug"}
+
+	body := "## 🔍 Evaluation\n\nConfidence below threshold.\n\n<!-- clawflow:outcome=agent-skipped -->\n"
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+
+	// Outcome label should be added.
+	if !slices.Contains(v.labels[42], "agent-skipped") {
+		t.Errorf("agent-skipped should be added; labels = %v", v.labels[42])
+	}
+
+	// The "bug" type label must NOT be removed — it was not declared consumed.
+	if !slices.Contains(v.labels[42], "bug") {
+		t.Errorf("bug type label should be preserved; labels = %v", v.labels[42])
+	}
+
+	// RemoveLabel must not be called at all when nothing is consumed.
+	if v.removeLabelCals != 0 {
+		t.Errorf("RemoveLabel called %d times, want 0 (no consumed labels)", v.removeLabelCals)
+	}
+}
+
 func TestRun_OutcomeAgentClosed_ClosesIssue(t *testing.T) {
 	op := &Operator{
 		Name:      "track-progress",
 		LockLabel: "agent-running",
 		Trigger: Trigger{
 			LabelsRequired: []string{"progress-check"},
+			LabelsConsumed: []string{"progress-check"},
 		},
 		Outcomes: []string{"agent-closed", "agent-watching"},
 	}
