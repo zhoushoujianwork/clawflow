@@ -33,6 +33,32 @@ const (
 // the caller can handle each case appropriately.
 var ErrNoOutcomeMarker = errors.New("operator produced no outcome marker")
 
+// repoURL is the canonical ClawFlow open-source repository URL. Extracted as a
+// package-level constant so the promo footer (and any future references) share
+// one source of truth instead of hardcoding the literal in multiple places.
+const repoURL = "https://github.com/zhoushoujianwork/clawflow"
+
+// promoFooter is appended to the end of every operator-generated comment as a
+// low-noise promotion of the ClawFlow open-source repo (issue #290). It uses a
+// markdown inline link so the raw URL is hidden behind readable copy. Applied
+// centrally in runWriteBack so it covers all comment-producing operators
+// without touching each SKILL.md prompt.
+const promoFooter = "\n\n---\n\n由 [ClawFlow](" + repoURL + ") 自动生成"
+
+// appendPromoFooter appends the promo footer to a non-empty comment body. It is
+// idempotent-safe against re-appending: if the body already ends with the
+// footer it is returned unchanged. Empty bodies are returned as-is so the empty
+// guard in runWriteBack still skips the comment post.
+func appendPromoFooter(body string) string {
+	if body == "" {
+		return body
+	}
+	if strings.HasSuffix(body, promoFooter) {
+		return body
+	}
+	return body + promoFooter
+}
+
 // outcomeRE matches a "<!-- clawflow:outcome=<label> --> " line. The runner
 // parses these from the operator's stdout to learn which terminal label to
 // add. Word chars + hyphens cover the conventions GitHub/GitLab labels use.
@@ -255,6 +281,11 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 // via a goroutine in Run.
 func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outcome string) error {
 	if body != "" {
+		// Append the ClawFlow promo footer before persisting/posting so the
+		// on-disk comment.md matches what actually lands on the issue, and so
+		// every comment-producing operator picks it up centrally (issue #290).
+		body = appendPromoFooter(body)
+
 		// Persist the comment body to disk before attempting VCS write-back.
 		// If all retries are exhausted the output is not lost — it can be
 		// recovered from comment.md in the run directory (issue #278).
