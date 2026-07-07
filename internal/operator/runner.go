@@ -300,9 +300,20 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 
 		emitStage(opts.StageFunc, StagePostingComment)
 		if err := v.PostIssueCommentIdempotent(opts.Repo, sub.Number, body, opts.RunID); err != nil {
-			return fmt.Errorf("post result comment: %w", err)
+			// Downgrade a comment-post failure to a WARN instead of aborting
+			// write-back. Previously a POST timeout (context deadline exceeded)
+			// returned here and the outcome-label write below never ran, so a
+			// PR that was already opened by `implement` never got its
+			// `agent-implemented` label — the issue stayed `ready-for-agent`
+			// and the next scan re-triggered the operator, opening a duplicate
+			// PR and burning tokens again (issue #293). The comment body is
+			// already persisted to comment.md above and can be recovered, so
+			// the outcome label (the thing that actually gates re-triggering)
+			// must take priority over the cosmetic comment.
+			fmt.Fprintf(os.Stderr, "  ⚠ post result comment failed (continuing to label): %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  ✓ comment posted (%d chars)\n", len(body))
 		}
-		fmt.Fprintf(os.Stderr, "  ✓ comment posted (%d chars)\n", len(body))
 	}
 
 	if outcome != "" {

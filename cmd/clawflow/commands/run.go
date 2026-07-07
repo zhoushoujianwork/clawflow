@@ -1025,6 +1025,19 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		resumeCtx = buildResumeContext(wtResult)
 	}
 
+	// Rebind the VCS client's request context before execution + write-back.
+	// The client was configured in scanRepoOnce with the scan-phase budget
+	// (scanCtx, clamped to 5–15 min via scanPhaseBudget). An implement run
+	// can take tens of minutes, by which point scanCtx has long expired.
+	// If we don't rebind, the write-back HTTP calls (post comment, add label)
+	// inherit that dead context and fail immediately with "context deadline
+	// exceeded" — the retry added in #278 never fires because retry.Do bails
+	// out on ctx.Err() before the first attempt. Rebind to this operator's
+	// full run context so write-back gets a live budget (issue #293).
+	if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
+		rc.SetRequestContext(ctx)
+	}
+
 	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
 		Repo:          j.repo,
 		Workdir:       workdir,
