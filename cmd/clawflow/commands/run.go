@@ -1195,6 +1195,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if err := snapshot.WriteRunMeta(runDir, rm); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ run meta: %v\n", prefix, err)
 	}
+	// Rewrite runs.json on the terminal transition too. The dashboard's Running
+	// list reads runs.json (not meta.json), and until now the only post-run
+	// rebuild was the end-of-pass Phase 3 write — so a finished operator kept
+	// showing "running" until every sibling in the pass also finished (or a
+	// sibling's emitStage incidentally re-walked the metas). Refreshing here
+	// flips this row to its final status immediately on completion.
+	if _, err := snapshot.WriteRunsIndex(50); err != nil {
+		fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (%s): %v\n", prefix, rm.Status, err)
+	}
 	// Upgrade to WARN for non-success statuses so deployment.md patrol's
 	// "grep -E ERROR|WARN" actively catches failures (issue #204).
 	logFn := runLog.Info
