@@ -142,10 +142,13 @@ func newWorktreePruneCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "prune",
-		Short: "Remove persistent analysis worktrees left over from past runs",
+		Short: "Remove persistent analysis worktrees and orphan Claude sub-worktrees",
 		Long: `Scans ~/.clawflow/worktrees/*/analysis-* and removes analysis worktrees
-that are no longer needed. By default every found analysis worktree is removed;
-use --dry-run to preview what would be deleted without making any changes.
+that are no longer needed. Also scans every configured repo's local_path for
+orphan Claude Code CLI sub-worktrees (<local_path>/.claude/worktrees/wf_*) left
+behind by past implement operator runs (issue #297).
+
+By default every found worktree is removed; use --dry-run to preview.
 
 Analysis worktrees are persistent by design (they are reused across runs for
 performance), but they can accumulate over time and remain registered in the
@@ -154,7 +157,7 @@ to clean them up.`,
 		Example: `  # Preview what would be removed
   clawflow worktree prune --dry-run
 
-  # Remove all analysis worktrees
+  # Remove all analysis + orphan Claude worktrees
   clawflow worktree prune`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			home, err := os.UserHomeDir()
@@ -204,12 +207,56 @@ to clean them up.`,
 
 			if found == 0 {
 				fmt.Println("no analysis worktrees found")
-				return nil
-			}
-			if dryRun {
+			} else if dryRun {
 				fmt.Printf("\n%d analysis worktree(s) would be removed (re-run without --dry-run to apply)\n", found)
 			} else {
 				fmt.Printf("\n%d/%d analysis worktree(s) removed\n", removed, found)
+			}
+
+			// Phase 2: clean orphan Claude Code sub-worktrees from each repo's local_path.
+			cfg, err := config.Load()
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warn: could not load config, skipping claude worktree prune: %v\n", err)
+				return nil
+			}
+			claudeFound := 0
+			claudeRemoved := 0
+			for ownerRepo, repoCfg := range cfg.Repos {
+				if repoCfg.LocalPath == "" {
+					continue
+				}
+				localPath := expandHomeStr(repoCfg.LocalPath)
+				claudeWtDir := filepath.Join(localPath, ".claude", "worktrees")
+				subEntries, readErr := os.ReadDir(claudeWtDir)
+				if readErr != nil {
+					continue // directory absent — nothing to do
+				}
+				for _, sub := range subEntries {
+					if !sub.IsDir() {
+						continue
+					}
+					subPath := filepath.Join(claudeWtDir, sub.Name())
+					claudeFound++
+					if dryRun {
+						fmt.Printf("would remove claude worktree: %s (repo: %s)\n", subPath, ownerRepo)
+						continue
+					}
+					rmCmd := exec.Command("git", "-C", localPath, "worktree", "remove", "--force", subPath)
+					rmCmd.Stderr = cmd.ErrOrStderr()
+					if rmErr := rmCmd.Run(); rmErr != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warn: claude worktree remove failed (%s): %v\n", subPath, rmErr)
+					} else {
+						fmt.Printf("removed claude worktree: %s\n", subPath)
+						claudeRemoved++
+					}
+				}
+			}
+			if claudeFound > 0 {
+				if dryRun {
+					fmt.Printf("%d orphan claude worktree(s) would be removed\n", claudeFound)
+				} else {
+					fmt.Printf("%d/%d orphan claude worktree(s) removed\n", claudeRemoved, claudeFound)
+				}
 			}
 			return nil
 		},
