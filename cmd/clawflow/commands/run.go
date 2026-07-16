@@ -2189,6 +2189,11 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 		}
 		cleanup := func() {
 			fmt.Fprintln(os.Stderr, "  → cleanup: removing worktree")
+			// Clean up Claude Code CLI sub-worktrees created inside our worktree
+			// during operator execution (e.g. <wtPath>/.claude/worktrees/wf_*).
+			// These are NOT cleaned up by claude -p itself when run non-interactively,
+			// causing git to refuse branch deletion later (issue #297).
+			cleanClaudeWorktrees(localPath, existingPath)
 			rm := exec.Command("git", "-C", localPath, "worktree", "remove", "--force", existingPath)
 			rm.Stdout = os.Stderr
 			rm.Stderr = os.Stderr
@@ -2236,6 +2241,11 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 	result := worktreeResult{Path: wtPath}
 	cleanup := func() {
 		fmt.Fprintln(os.Stderr, "  → cleanup: removing worktree")
+		// Clean up Claude Code CLI sub-worktrees created inside our worktree
+		// during operator execution (e.g. <wtPath>/.claude/worktrees/wf_*).
+		// These are NOT cleaned up by claude -p itself when run non-interactively,
+		// causing git to refuse branch deletion later (issue #297).
+		cleanClaudeWorktrees(localPath, wtPath)
 		rm := exec.Command("git", "-C", localPath, "worktree", "remove", "--force", wtPath)
 		rm.Stdout = os.Stderr
 		rm.Stderr = os.Stderr
@@ -2246,4 +2256,35 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 		fmt.Fprintln(os.Stderr, "  ✓ worktree removed")
 	}
 	return result, cleanup, nil
+}
+
+// cleanClaudeWorktrees removes the sub-worktrees that Claude Code CLI creates
+// inside a ClawFlow worktree during non-interactive (claude -p) execution.
+// Claude Code creates these under <wtPath>/.claude/worktrees/wf_<uuid> for
+// tool-call isolation but does not clean them up after the process exits.
+// Without this cleanup, git refuses to delete the associated branches
+// (worktree-wf_<uuid>), breaking Play 1 branch cleanup (issue #297).
+//
+// localPath is the repo root (used for `git -C`).
+// wtPath is the ClawFlow worktree directory that may contain a .claude/worktrees/ subdir.
+func cleanClaudeWorktrees(localPath, wtPath string) {
+	claudeWtDir := filepath.Join(wtPath, ".claude", "worktrees")
+	entries, err := os.ReadDir(claudeWtDir)
+	if err != nil {
+		// Directory doesn't exist — nothing to clean, not an error.
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		sub := filepath.Join(claudeWtDir, e.Name())
+		rm := exec.Command("git", "-C", localPath, "worktree", "remove", "--force", sub)
+		rm.Stderr = os.Stderr
+		if err := rm.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ claude worktree remove failed (%s): %v\n", sub, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  ✓ claude worktree removed: %s\n", sub)
+		}
+	}
 }
