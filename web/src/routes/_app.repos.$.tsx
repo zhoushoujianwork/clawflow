@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off, FolderOpen, FolderKanban } from 'lucide-react'
+import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off, FolderOpen, FolderKanban, AlertTriangle } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -29,6 +29,8 @@ interface Repo {
   auto_merge: boolean
   bound_machine?: string
   primary_project?: string
+  base_branch_valid?: boolean
+  base_branch_hint?: string
 }
 export const Route = createFileRoute('/_app/repos/$')({
   component: RepoDetail,
@@ -290,7 +292,20 @@ function RepoDetail() {
                 {repo.platform || 'github'}
               </span>
               <span>·</span>
-              <span className="font-mono">base: {repo.base_branch}</span>
+              {repo.base_branch_valid === false ? (
+                <span
+                  className="inline-flex items-center gap-1 font-mono text-destructive"
+                  title={repo.base_branch_hint || 'base_branch does not exist on origin'}
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  base: {repo.base_branch}
+                  <span className="sr-only">
+                    {repo.base_branch_hint || 'base_branch does not exist on origin'}
+                  </span>
+                </span>
+              ) : (
+                <span className="font-mono">base: {repo.base_branch}</span>
+              )}
               {owningProjects.length === 1 && (
                 <>
                   <span>·</span>

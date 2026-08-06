@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
+	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
@@ -322,6 +323,12 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 			debugf("repo %s has no bound_machine and require_binding is set, skipping", fullName)
 			continue
 		}
+		// Warn early when base_branch names a ref the remote doesn't have.
+		// Without this the misconfiguration only surfaces as an exit-128
+		// fetch failure inside every analysis operator, round after round
+		// (issue #300). Warn-only: never block a scan on it.
+		warnInvalidBaseBranch(lg, fullName, repoCfg)
+
 		executeHere := onlyRepo == "" || onlyRepo == fullName
 		repoPending, repoJobs, err := scanRepoOnce(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, &globalIssues)
 		if err != nil {
@@ -1687,10 +1694,11 @@ func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResul
 
 		fmt.Fprintf(os.Stderr, "  → analysis worktree: initializing at %s\n", wtPath)
 		fmt.Fprintf(os.Stderr, "  → analysis worktree: fetching origin/%s\n", base)
-		if err := runGitWithRetry(func() *exec.Cmd {
+		if out, err := runGitWithRetryOutput(func() *exec.Cmd {
 			return exec.Command("git", "-C", localPath, "fetch", "origin", base)
 		}); err != nil {
-			return worktreeResult{}, func() {}, fmt.Errorf("git fetch origin/%s: %w — cannot initialize analysis worktree without network access", base, err)
+			return worktreeResult{}, func() {}, describeGitFetchFailure(
+				base, localPath, out, branch.RemoteDefaultBranch(localPath), err)
 		}
 
 		if err := runGitWithRetry(func() *exec.Cmd {
@@ -1709,10 +1717,11 @@ func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResul
 	} else {
 		// Existing worktree: fetch + reset to latest origin/<base>.
 		fmt.Fprintf(os.Stderr, "  → analysis worktree: refreshing to origin/%s\n", base)
-		if err := runGitWithRetry(func() *exec.Cmd {
+		if out, err := runGitWithRetryOutput(func() *exec.Cmd {
 			return exec.Command("git", "-C", localPath, "fetch", "origin", base)
 		}); err != nil {
-			return worktreeResult{}, func() {}, fmt.Errorf("git fetch origin/%s: %w — analysis blocked to avoid stale-code evaluation", base, err)
+			return worktreeResult{}, func() {}, describeGitFetchFailure(
+				base, localPath, out, branch.RemoteDefaultBranch(localPath), err)
 		}
 
 		resetCmd := exec.Command("git", "-C", wtPath, "reset", "--hard", "origin/"+base)
@@ -2035,6 +2044,16 @@ func runBoundedGit(cmd *exec.Cmd, timeout time.Duration) error {
 }
 
 func runGitWithRetry(makeCmd func() *exec.Cmd) error {
+	_, err := runGitWithRetryOutput(makeCmd)
+	return err
+}
+
+// runGitWithRetryOutput is runGitWithRetry plus the git combined output of the
+// final attempt. Callers that need to classify *why* git failed (network vs
+// auth vs "remote has no such ref") need the stderr text — the exit status
+// alone is exit 128 for all three, which is what made the base_branch
+// misconfiguration in issue #300 read as a network outage for three weeks.
+func runGitWithRetryOutput(makeCmd func() *exec.Cmd) (string, error) {
 	const maxGitRetries = 5
 	const baseGitDelay = 100 * time.Millisecond
 
@@ -2057,7 +2076,7 @@ func runGitWithRetry(makeCmd func() *exec.Cmd) error {
 
 		err := runBoundedGit(cmd, gitAttemptTimeout)
 		if err == nil {
-			return nil
+			return buf.String(), nil
 		}
 
 		output := buf.String()
@@ -2065,10 +2084,10 @@ func runGitWithRetry(makeCmd func() *exec.Cmd) error {
 			// Permanent error (incl. attempt timeout) — return
 			// immediately, no retry. A timeout won't fix itself by
 			// retrying and would only delay surfacing the failure.
-			return err
+			return output, err
 		}
 		if attempt == maxGitRetries {
-			return fmt.Errorf("%w (retried %d times after git lock conflicts)", err, maxGitRetries)
+			return output, fmt.Errorf("%w (retried %d times after git lock conflicts)", err, maxGitRetries)
 		}
 
 		// Exponential backoff: baseGitDelay * 2^attempt, capped at 5 s,
@@ -2084,7 +2103,7 @@ func runGitWithRetry(makeCmd func() *exec.Cmd) error {
 			attempt+1, maxGitRetries, delay.Round(time.Millisecond))
 		time.Sleep(delay)
 	}
-	return nil // unreachable
+	return "", nil // unreachable
 }
 
 // setupWorktree provisions a git worktree for the implement operator.
@@ -2168,10 +2187,14 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 	// runGitWithRetry handles transient git lock conflicts from concurrent
 	// parallel implement jobs on the same repo.
 	fmt.Fprintf(os.Stderr, "  → setup: fetching origin/%s\n", base)
-	if err := runGitWithRetry(func() *exec.Cmd {
+	if out, err := runGitWithRetryOutput(func() *exec.Cmd {
 		return exec.Command("git", "-C", localPath, "fetch", "origin", base)
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠ fetch failed (continuing): %v\n", err)
+		// Non-fatal here (we can still start from a cached origin/<base>),
+		// but name the cause so a misconfigured base_branch is visible in
+		// the implement path too, not just the analysis path.
+		fmt.Fprintf(os.Stderr, "  ⚠ fetch failed (continuing): %v\n",
+			describeGitFetchFailure(base, localPath, out, branch.RemoteDefaultBranch(localPath), err))
 	}
 
 	fmt.Fprintf(os.Stderr, "  → setup: creating worktree at %s\n", wtPath)

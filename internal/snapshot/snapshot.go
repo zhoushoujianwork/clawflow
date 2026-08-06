@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
@@ -212,6 +213,14 @@ type RepoView struct {
 	// and flag the primary without a separate API call.
 	Projects       []string `json:"projects,omitempty"`
 	PrimaryProject string   `json:"primary_project,omitempty"`
+	// BaseBranchValid is false only when the remote was reachable and
+	// confirmed to have no such branch — a configuration error that makes
+	// every analysis operator on this repo fail with exit 128 (issue #300).
+	// Offline/unprobed repos stay true so the dashboard doesn't cry wolf.
+	BaseBranchValid bool `json:"base_branch_valid"`
+	// BaseBranchHint carries the remediation text when BaseBranchValid is
+	// false; empty otherwise.
+	BaseBranchHint string `json:"base_branch_hint,omitempty"`
 }
 
 // OperatorView is the dashboard-facing view of one loaded operator.
@@ -633,6 +642,17 @@ func WriteRepos(cfg *config.Config) error {
 				primaryName = primary.Name
 			}
 		}
+		// Validate base_branch for repos with a local clone. Local-ref hit
+		// is the fast path; ValidateBase only reaches the network when the
+		// remote-tracking ref is absent, and reports "valid" whenever the
+		// remote can't be probed.
+		baseValid, baseHint := true, ""
+		if r.Enabled && r.LocalPath != "" {
+			if v := branch.ValidateBase(r.LocalPath, r.BaseBranch); !v.Valid() {
+				baseValid, baseHint = false, v.Hint()
+			}
+		}
+
 		views = append(views, RepoView{
 			FullName:       name,
 			Platform:       r.Platform,
@@ -643,8 +663,10 @@ func WriteRepos(cfg *config.Config) error {
 			AutoApprove:    r.AutoApprove,
 			AutoMerge:      r.AutoMerge,
 			BoundMachine:   r.BoundMachine,
-			Projects:       projectNames,
-			PrimaryProject: primaryName,
+			Projects:        projectNames,
+			PrimaryProject:  primaryName,
+			BaseBranchValid: baseValid,
+			BaseBranchHint:  baseHint,
 		})
 	}
 	return writeJSON(filepath.Join(DataDir(), "repos.json"), views)
