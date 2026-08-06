@@ -704,8 +704,19 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		}
 	}
 
-	// MVP: skip PRs. All 3 built-in operators target issues. When a
-	// pr-target operator appears we'll add the same loop over ListOpenPRs.
+	// MVP: no PR-target operators yet. All built-in operators target
+	// issues. When a pr-target operator appears we'll add the same
+	// (subject × operator) loop over ListOpenPRs.
+	//
+	// PRs do get one pass here though: the auto-merge convergence sweep.
+	// It only runs when this repo has auto_merge enabled, and it exists
+	// because auto-merge used to be an inline side effect of a single
+	// `implement` run — a PR that missed that instant was never merged by
+	// anything (issue #299). Gated on executeHere so a `--repo`-narrowed
+	// run doesn't merge PRs across the whole config.
+	if executeHere && onlyIssue == 0 {
+		sweepAutoMergePRs(ctx, client, fullName, repoCfg)
+	}
 
 	// Snapshot every issue (open + closed) for the dashboard — same shape
 	// as POST /api/repo/refresh-issues so the cron path and the manual
@@ -1327,84 +1338,25 @@ func runPostAutomation(j *runJob, outcome, output, prefix string) {
 		fmt.Fprintf(os.Stderr, "%s ✓ auto-approved\n", prefix)
 	}
 
-	// Auto-merge: after implement produces agent-implemented, wait CI then merge
+	// Auto-merge: after implement produces agent-implemented, wait CI then
+	// merge. This is the low-latency path — the PR number comes straight
+	// from the run's stdout. sweepAutoMergePRs is the per-scan backstop for
+	// every PR this path misses (issue #299); both share attemptAutoMerge so
+	// the two can't drift.
 	if outcome == "agent-implemented" && j.repoCfg.AutoMerge {
 		prNum := extractPRNumber(output)
 		if prNum == 0 {
-			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge: could not extract PR number from output\n", prefix)
+			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge: could not extract PR number from output (sweep will retry next pass)\n", prefix)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "%s → auto-merge: PR #%d\n", prefix, prNum)
-
-		if j.repoCfg.CIRequired {
-			ciTimeout := j.repoCfg.CITimeout
-			if ciTimeout <= 0 {
-				ciTimeout = 600
-			}
-			status := waitForCI(j.client, j.repo, prNum, ciTimeout, prefix)
-			switch status {
-			case vcs.CIStatusSuccess, vcs.CIStatusNone:
-				// proceed to merge
-			case vcs.CIStatusFailure:
-				_ = j.client.PostIssueComment(j.repo, j.sub.Number,
-					"🤖 CI failed on PR #"+strconv.Itoa(prNum)+". Skipping auto-merge.")
-				fmt.Fprintf(os.Stderr, "%s ✗ CI failed, skipping auto-merge\n", prefix)
-				return
-			default:
-				_ = j.client.PostIssueComment(j.repo, j.sub.Number,
-					"🤖 CI did not pass within timeout for PR #"+strconv.Itoa(prNum)+". Skipping auto-merge.")
-				fmt.Fprintf(os.Stderr, "%s ✗ CI timeout, skipping auto-merge\n", prefix)
-				return
-			}
-		}
-
-		mergeStatus, err := j.client.GetPRMergeability(j.repo, prNum)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge: mergeability check failed: %v\n", prefix, err)
-			return
-		}
-		if mergeStatus != vcs.MergeStatusClean {
-			_ = j.client.PostIssueComment(j.repo, j.sub.Number,
-				"🤖 PR #"+strconv.Itoa(prNum)+" is not mergeable (status: "+string(mergeStatus)+"). Skipping auto-merge.")
-			fmt.Fprintf(os.Stderr, "%s ✗ PR not mergeable (%s)\n", prefix, mergeStatus)
-			return
-		}
-
-		if err := mergeWithRetry(prefix,
-			func() error { return j.client.MergePR(j.repo, prNum) },
-			func() (vcs.MergeStatus, error) { return j.client.GetPRMergeability(j.repo, prNum) },
-			time.Sleep,
-		); err != nil {
-			// Keep the failure comment: the user explicitly enabled
-			// auto_merge, the merge attempt failed, and the reason
-			// (auth, branch protection, network) isn't otherwise
-			// surfaced on the PR. This is the one auto-merge comment
-			// that pulls real weight.
-			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge failed: %v\n", prefix, err)
-			_ = j.client.PostIssueComment(j.repo, j.sub.Number,
-				"🤖 Auto-merge failed for PR #"+strconv.Itoa(prNum)+": "+err.Error())
-			return
-		}
-		// No success comment: the PR's "merged by clawflow-bot" state
-		// is already shown in GitHub/GitLab UI. Adding a comment on
-		// top was redundant noise.
-		fmt.Fprintf(os.Stderr, "%s ✓ auto-merged PR #%d\n", prefix, prNum)
-
-		// Clean up the remote head branch once the merge lands. We read
-		// the PR again instead of reusing an earlier fetch because the
-		// mergeability check happened before merge and the branch name
-		// lives on the PR object anyway. Failures here are non-fatal:
-		// the merge already succeeded, and stale branches are a minor
-		// housekeeping issue, not something worth surfacing on the issue.
-		if pr, err := j.client.GetPR(j.repo, prNum); err != nil {
-			fmt.Fprintf(os.Stderr, "%s ⚠ branch cleanup: lookup PR failed: %v\n", prefix, err)
-		} else if head := pr.HeadBranch; head != "" && head != j.repoCfg.BaseBranch {
-			if err := j.client.DeleteBranch(j.repo, head); err != nil {
-				fmt.Fprintf(os.Stderr, "%s ⚠ branch cleanup: delete %s failed: %v\n", prefix, head, err)
-			} else {
-				fmt.Fprintf(os.Stderr, "%s ✓ deleted branch %s\n", prefix, head)
-			}
-		}
+		attemptAutoMerge(autoMergeAttempt{
+			client:   j.client,
+			repo:     j.repo,
+			repoCfg:  j.repoCfg,
+			prNum:    prNum,
+			issueNum: j.sub.Number,
+			prefix:   prefix,
+		})
 	}
 
 	// Tracking issue: after decompose creates sub-issues, add progress-check
