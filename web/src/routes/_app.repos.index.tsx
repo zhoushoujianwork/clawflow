@@ -2,7 +2,7 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { FolderOpen, FolderKanban, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2 } from 'lucide-react'
+import { FolderOpen, FolderKanban, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2, AlertTriangle } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -20,6 +20,8 @@ interface Repo {
   auto_approve: boolean
   auto_merge: boolean
   bound_machine?: string
+  base_branch_valid?: boolean
+  base_branch_hint?: string
 }
 
 interface RunEntry {
@@ -471,7 +473,22 @@ function RepoList() {
                   <td className="px-4 py-2 text-muted-foreground text-xs tabular-nums">
                     {lastActivityMap[r.full_name] ? timeAgo(lastActivityMap[r.full_name]) : '—'}
                   </td>
-                  <td className="px-4 py-2 text-muted-foreground font-mono text-xs">{r.base_branch}</td>
+                  <td className="px-4 py-2 font-mono text-xs">
+                    {r.base_branch_valid === false ? (
+                      <span
+                        className="inline-flex items-center gap-1 text-destructive"
+                        title={r.base_branch_hint || 'base_branch does not exist on origin'}
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>{r.base_branch}</span>
+                        <span className="sr-only">
+                          {r.base_branch_hint || 'base_branch does not exist on origin'}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">{r.base_branch}</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2">
                     <GitSyncCell
                       repo={r.full_name}
