@@ -33,7 +33,7 @@ interface Run {
   issue_state?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'marker-recovered' | 'skipped-empty'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'marker-recovered' | 'skipped-empty' | 'cost-limit'
   /** fine-grained lifecycle phase while status === 'running' (issue #199):
    *  lock-acquired → claude-started → parsing-outcome → posting-comment → applying-label */
   stage?: string
@@ -184,6 +184,10 @@ const statusPill: Record<Run['status'], { label: string; cls: string; Icon: type
   'no-marker':   { label: 'no marker',    cls: 'bg-orange-100 text-orange-700 border-orange-200', Icon: XCircle },
   'marker-recovered': { label: 'marker recovered', cls: 'bg-amber-100 text-amber-800 border-amber-200', Icon: CheckCircle2 },
   'skipped-empty': { label: 'empty',      cls: 'bg-orange-50 text-orange-600 border-orange-200', Icon: SkipForward },
+  // Billing cap (issue #308): nothing ran and nothing was spent, and it stays
+  // that way until the provider's window resets — amber "waiting", not red
+  // "broken", so it doesn't read as an issue-level failure.
+  'cost-limit':   { label: 'cost limit',  cls: 'bg-amber-100 text-amber-800 border-amber-200',   Icon: Square },
 }
 
 function StatusChip({ status }: { status: Run['status'] }) {

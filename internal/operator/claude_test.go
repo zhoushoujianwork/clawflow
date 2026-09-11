@@ -415,3 +415,104 @@ func TestIsRateLimitError(t *testing.T) {
 		})
 	}
 }
+
+// TestIsCostLimitError covers the billing-cap classifier added for issue #308.
+// The exact report that regressed came back in Chinese from a proxy while every
+// pattern table was English, so the real-world string is asserted verbatim.
+func TestIsCostLimitError(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		output string
+		want   bool
+	}{
+		{
+			name:   "nil error",
+			err:    nil,
+			output: "",
+			want:   false,
+		},
+		{
+			// Verbatim from ~/.clawflow/data/runs/.../issue-306 meta.json.
+			name:   "402 chinese daily cost limit from summary",
+			err:    errors.New("claude: exit status 1"),
+			output: "API Error: 402 已达到每日费用限制 ($500)",
+			want:   true,
+		},
+		{
+			name:   "402 folded into stderr tail by annotateClaudeErr",
+			err:    annotateClaudeErr(errors.New("exit status 1"), "API Error: 402 已达到每日费用限制 ($500)", ""),
+			output: "",
+			want:   true,
+		},
+		{
+			name:   "402 payment required english",
+			err:    errors.New("claude: exit status 1"),
+			output: "402 Payment Required",
+			want:   true,
+		},
+		{
+			name:   "daily cost limit english",
+			err:    errors.New("claude: exit status 1"),
+			output: "You have reached your daily cost limit",
+			want:   true,
+		},
+		{
+			// A bare "402" must NOT match: diffs, line numbers and token
+			// counts routinely contain it, and up to 5 lines of free-form
+			// claude stderr are part of the match surface (issue #308).
+			name:   "bare 402 in unrelated text does not match",
+			err:    errors.New("claude: exit status 1"),
+			output: "main.go:402: undefined variable foo",
+			want:   false,
+		},
+		{
+			name:   "token count containing 402 does not match",
+			err:    errors.New("claude: exit status 1"),
+			output: "used 40200 output tokens",
+			want:   false,
+		},
+		{
+			name:   "rate limit is not a cost limit",
+			err:    errors.New("claude: exit status 1"),
+			output: "You've hit your limit · resets 3:20am",
+			want:   false,
+		},
+		{
+			name:   "403 auth error is not a cost limit",
+			err:    errors.New("claude: exit status 1"),
+			output: "API Error: 403 request not allowed",
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsCostLimitError(tc.err, tc.output)
+			if got != tc.want {
+				t.Errorf("IsCostLimitError(%v, %q) = %v, want %v", tc.err, tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCostLimitPrecedence pins the ordering guarantees the runner depends on:
+// a 402 must classify as a cost limit and NOT as an auth/output/rate-limit
+// error, since each of those routes to a different status and circuit-breaker
+// decision (issue #308).
+func TestCostLimitPrecedence(t *testing.T) {
+	err := errors.New("claude: exit status 1")
+	out := "API Error: 402 已达到每日费用限制 ($500)"
+
+	if !IsCostLimitError(err, out) {
+		t.Fatal("402 must classify as cost limit")
+	}
+	if IsAuthError(err, out) {
+		t.Error("402 must not classify as auth error")
+	}
+	if IsOutputLimitError(err, out) {
+		t.Error("402 must not classify as output limit")
+	}
+	if IsRateLimitError(err, out) {
+		t.Error("402 must not classify as rate limit — the recovery window differs")
+	}
+}

@@ -39,6 +39,34 @@ var ErrAuthError = errors.New("claude auth error")
 // rather than counting it toward the circuit breaker (issue #286).
 var ErrOutputLimit = errors.New("claude output token limit")
 
+// ErrCostLimit is returned by RunClaude when every provider refused the
+// request because a billing cap was reached ("API Error: 402 已达到每日费用限制").
+// Unlike a rate limit (minutes) this resets only when the provider's billing
+// window rolls over, and unlike a generic failure it says nothing about the
+// issue being worked on: the run is 1 turn / $0 and would fail identically for
+// any prompt. Callers must record a distinct status, keep it out of the circuit
+// breaker, and abort the remaining queue — otherwise a single account-level cap
+// cascades into every queued issue being labeled agent-failed (issue #308).
+var ErrCostLimit = errors.New("claude cost limit")
+
+// costLimitPatterns are substrings (case-insensitive) that identify a billing
+// cap (HTTP 402) response. Patterns are deliberately narrow: a bare "402"
+// would also match diffs, line numbers and token counts, and annotateClaudeErr
+// folds up to 5 lines of claude stderr into the matched text (issue #222), so
+// the match surface contains a lot of free-form prose.
+//
+// The Chinese entries are not defensive padding — 402 is the one code the
+// proxies in use phrase in Chinese, which is precisely why the all-English
+// failover table missed it for 11 consecutive runs (issue #308).
+var costLimitPatterns = []string{
+	"api error: 402",
+	"402 payment required",
+	"每日费用限制",
+	"每日消费限制",
+	"daily cost limit",
+	"cost limit exceeded",
+}
+
 // outputLimitPatterns are substrings (case-insensitive) that identify an
 // output-token-ceiling abort from the claude CLI. The CLI emits a message of
 // the form "Claude's response exceeded the 64000 output token maximum."
@@ -130,6 +158,23 @@ func IsOutputLimitError(err error, output string) bool {
 	return false
 }
 
+// IsCostLimitError reports whether err or the captured claude output text
+// indicates a billing cap (HTTP 402) refusal. Both are checked because the
+// claude CLI writes the human-readable message to stdout while the Go error
+// only carries "exit status 1".
+func IsCostLimitError(err error, output string) bool {
+	if err == nil {
+		return false
+	}
+	combined := strings.ToLower(err.Error() + " " + output)
+	for _, pat := range costLimitPatterns {
+		if strings.Contains(combined, strings.ToLower(pat)) {
+			return true
+		}
+	}
+	return false
+}
+
 // isFailoverError reports whether the combined error + output text matches
 // any of the given failover patterns (case-insensitive substring match).
 // Returns true when the provider should be skipped and the next one tried.
@@ -196,6 +241,10 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 	failoverPatterns := creds.EffectiveFailoverPatterns()
 
 	var attempts []providerAttempt
+	// costLimited records that at least one provider refused with a billing
+	// cap (402). It survives the loop so the exhaustion path below can return
+	// ErrCostLimit instead of the generic ErrRateLimit (issue #308).
+	costLimited := false
 
 	for i, p := range providers {
 		model := p.modelForRole(role)
@@ -228,6 +277,21 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 			return output, fmt.Errorf("%w: %w", ErrOutputLimit, wrapped)
 		}
 
+		// Billing caps (402) are provider-level, not operator-level: the run
+		// dies in 1 turn at $0 cost and would do so for any prompt. Try the
+		// next provider — separate billing accounts may still have headroom —
+		// but remember that a cap was hit so exhaustion reports ErrCostLimit
+		// rather than the generic ErrRateLimit. The two differ in recovery
+		// window (minutes vs. next billing period), which is what the operator
+		// reading the dashboard actually needs to know (issue #308).
+		if IsCostLimitError(err, output) {
+			costLimited = true
+			firstLine := firstLineOf(scrubAPIKey(err.Error(), p.apiKey))
+			attempts = append(attempts, providerAttempt{name: p.name, errMsg: firstLine})
+			fmt.Fprintf(os.Stderr, "  ⚠ provider %q hit its cost limit (failover): %s\n", p.name, firstLine)
+			continue
+		}
+
 		// Determine whether this is a provider-level failure (failover) or
 		// a genuine operator failure (bail out immediately).
 		if isFailoverError(err, output, failoverPatterns) {
@@ -250,7 +314,14 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 	// All providers exhausted.
 	if len(attempts) > 0 {
 		summary := buildFailureSummary(attempts)
-		return "", fmt.Errorf("%w: all %d provider(s) failed\n%s", ErrRateLimit, len(attempts), summary)
+		// A cost cap anywhere in the attempt chain wins over the generic
+		// rate-limit verdict: it is the strictly more specific diagnosis and
+		// the one with the longer recovery window (issue #308).
+		sentinel := ErrRateLimit
+		if costLimited {
+			sentinel = ErrCostLimit
+		}
+		return "", fmt.Errorf("%w: all %d provider(s) failed\n%s", sentinel, len(attempts), summary)
 	}
 
 	// No providers configured at all — this shouldn't happen after buildProviderList

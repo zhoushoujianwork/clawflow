@@ -26,7 +26,7 @@ export interface Run {
   issue_title?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'marker-recovered' | 'skipped-empty'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'marker-recovered' | 'skipped-empty' | 'cost-limit'
   summary?: string
   path: string
   pr_url?: string
@@ -873,6 +873,10 @@ export function StatusBadge({ status, runnerAlive }: { status: Run['status']; ru
           // inferred from the body rather than declared — amber = degraded ok.
           status === 'marker-recovered' && 'bg-amber-100 text-amber-800 border-amber-200',
           status === 'skipped-empty' && 'bg-orange-50 text-orange-600 border-orange-200',
+          // Billing cap (issue #308): the provider refused before any work
+          // happened, so this is "waiting for the window to reset", not a
+          // failure of the issue — amber rather than red.
+          status === 'cost-limit' && 'bg-amber-100 text-amber-800 border-amber-200',
         )}
       >
         {status}

@@ -275,6 +275,11 @@ type RunMeta struct {
 	// variant: deliberately excluded from the circuit breaker's failure list
 	// below, since a dropped marker line is a transient formatting slip.
 	// "skipped-empty" means claude produced empty output; same treatment.
+	// "cost-limit" means every provider refused with a billing cap (HTTP 402).
+	// Like "rate-limited" it is not the issue's fault and is excluded from the
+	// circuit breaker's failure list below, but it is kept separate because the
+	// recovery window is the provider's next billing period rather than the
+	// next few minutes (issue #308).
 	Status  string `json:"status"`
 	// Stage is the fine-grained lifecycle phase WITHIN the coarse Status.
 	// While Status=="running" it advances through the operator lifecycle so
@@ -1428,6 +1433,11 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 // (repo, issue) ended with status "failed", stopping at the first non-failed
 // run. This powers the circuit breaker: after N consecutive failures the
 // runner auto-labels the issue `agent-failed` to stop retrying.
+//
+// Statuses that describe an infrastructure refusal rather than a problem with
+// the issue — "rate-limited", "auth-error", "cost-limit" — break the streak
+// instead of extending it. Counting them lets one provider outage label every
+// queued issue agent-failed (issues #204, #308).
 func ConsecutiveFailures(repo string, issueNum int) int {
 	slug := strings.ReplaceAll(repo, "/", "__")
 	issueDir := filepath.Join(DataDir(), "runs", slug, fmt.Sprintf("issue-%d", issueNum))
