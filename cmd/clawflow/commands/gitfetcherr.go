@@ -2,12 +2,7 @@ package commands
 
 import (
 	"fmt"
-	"os"
 	"strings"
-
-	"github.com/zhoushoujianwork/clawflow/internal/branch"
-	"github.com/zhoushoujianwork/clawflow/internal/config"
-	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 )
 
 // gitFetchErrKind classifies why a `git fetch` failed. git exits 128 for a
@@ -107,24 +102,6 @@ func describeGitFetchFailure(base, localPath, output string, remoteDefault strin
 		"stale-code evaluation (see stderr above for git's own message)", base, err)
 }
 
-// warnInvalidBaseBranch validates a repo's configured base_branch against its
-// local clone once per scan and warns when the remote has no such branch.
-//
-// Cost is one local ref read in the healthy case; the ls-remote probe only
-// runs when the remote-tracking ref is missing. Warn-only by design: an
-// offline machine or a freshly cloned repo must not stop the scan.
-func warnInvalidBaseBranch(lg *clog.Logger, fullName string, repoCfg config.Repo) {
-	if !repoCfg.Enabled || repoCfg.LocalPath == "" {
-		return
-	}
-	v := branch.ValidateBase(repoCfg.LocalPath, repoCfg.BaseBranch)
-	if v.Valid() {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "  ⚠ %s: %s\n", fullName, v.Hint())
-	lg.Warn("run/base_branch_invalid",
-		"repo", fullName,
-		"base", v.Base,
-		"remote_default", v.RemoteDefault,
-	)
-}
+// The base_branch pre-flight check that used to live here moved to
+// basebranchguard.go (checkBaseBranch) when it stopped being warn-only and
+// started suppressing operator dispatch on a proven-invalid base (issue #315).

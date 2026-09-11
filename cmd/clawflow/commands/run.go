@@ -323,16 +323,39 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 			debugf("repo %s has no bound_machine and require_binding is set, skipping", fullName)
 			continue
 		}
-		// Warn early when base_branch names a ref the remote doesn't have.
-		// Without this the misconfiguration only surfaces as an exit-128
-		// fetch failure inside every analysis operator, round after round
-		// (issue #300). Warn-only: never block a scan on it.
-		warnInvalidBaseBranch(lg, fullName, repoCfg)
+		// Check base_branch before dispatching anything. When the remote has
+		// answered and confirmed it has no such ref, every analysis operator
+		// would fetch origin/<base>, fail with exit 128 and stamp
+		// agent-failed on the issue — round after round, once per auto-run
+		// tick (issue #315). Suppress dispatch instead; the scan itself still
+		// runs so the dashboard keeps showing the repo, its issues and the
+		// base_branch hint that explains the block.
+		//
+		// Unproven verdicts (offline, no credentials, probe timed out) never
+		// reach ProvenInvalid, so #300's rule that an offline machine must
+		// not be blocked by this check still holds.
+		baseCheck := checkBaseBranch(lg, fullName, repoCfg)
 
 		executeHere := onlyRepo == "" || onlyRepo == fullName
 		repoPending, repoJobs, err := scanRepoOnce(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, &globalIssues)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
+		}
+		// Drop the queue, keep the scan. The issue snapshot still reaches the
+		// dashboard, which already renders this repo's base_branch hint
+		// (snapshot.RepoView.BaseBranchHint), and the auto-merge sweep inside
+		// scanRepoOnce still converges PRs that predate the misconfig.
+		// Pending goes too, for the same reason deterministicSkip drops it:
+		// operators that config makes unrunnable must not pile up in the
+		// dashboard queue forever. Nothing has been locked at this point —
+		// locks are taken in the execution phase — so discarding is
+		// side-effect free.
+		if baseCheck.ProvenInvalid() {
+			if len(repoJobs) > 0 || len(repoPending) > 0 {
+				debugf("[%s] dropping %d queued job(s) / %d pending entry(ies): base_branch %q does not exist on origin",
+					fullName, len(repoJobs), len(repoPending), baseCheck.Base)
+			}
+			repoJobs, repoPending = nil, nil
 		}
 		// Propagate language preference to each job so the operator runner
 		// can inject the correct language directive into the system prompt.
