@@ -3,6 +3,8 @@ package operator
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -247,5 +249,102 @@ func TestRun_MarkerMissing_BelowThreshold_SalvagedAsSkipped(t *testing.T) {
 	}
 	if got := v.labels[152]; !slices.Contains(got, "agent-skipped") {
 		t.Errorf("labels = %v, want agent-skipped applied", got)
+	}
+}
+
+// TestSalvageOutcome_Issue313RealBody is a regression test built from a real,
+// already-paid-for run artifact rather than a hand-written fixture.
+//
+// testdata/issue-313-evaluate-bug-no-marker.md is the verbatim
+// meta.json.summary of clawflow run
+// runs/zhoushoujianwork__clawflow/issue-313/2026-09-11T16-50-30Z: a 6472-char
+// evaluate-bug body, complete with all three dimension lines and
+// "**Confidence:** 8.7/10", that stopped one line short of the outcome marker
+// and was discarded as status=no-marker for $1.21 — the second of two such
+// losses on #313, and occurrence 3 and 4 of the bug after PR #310 landed the
+// fix (issue #314).
+//
+// Its value is anchoring salvage's judgement to a body that a real model
+// really produced: prose in mixed Chinese/English, inline code spans, `%(...)`
+// git format placeholders and nested backticks that a hand-rolled fixture
+// would not think to include. A future tightening of confidenceRE or
+// dimensionScores that regresses on real-world formatting fails here.
+func TestSalvageOutcome_Issue313RealBody(t *testing.T) {
+	path := filepath.Join("testdata", "issue-313-evaluate-bug-no-marker.md")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	body := string(raw)
+
+	// Guard the fixture itself: if it is ever truncated or regenerated from a
+	// different run, the assertions below would silently test nothing.
+	if !strings.Contains(body, "**Confidence:** 8.7/10") {
+		t.Fatalf("fixture lost its Confidence line (%d bytes)", len(body))
+	}
+
+	op := &Operator{Name: "evaluate-bug", Outcomes: []string{"agent-evaluated", "agent-skipped"}}
+	outcome, conf, ok := salvageOutcome(op, body)
+	if !ok {
+		t.Fatalf("salvageOutcome ok = false, want true: this body was discarded for $1.21 (issue #314)")
+	}
+	if outcome != "agent-evaluated" {
+		t.Errorf("outcome = %q, want agent-evaluated", outcome)
+	}
+	if conf != 8.7 {
+		t.Errorf("confidence = %v, want 8.7", conf)
+	}
+}
+
+// TestRun_Issue313RealBody_SalvagedEndToEnd runs the same real #313 body
+// through Run, so the assertion covers the full path the money was lost on:
+// no marker on stdout → comment posted → agent-evaluated applied → nil error.
+// Before PR #310 this returned ErrNoOutcomeMarker and threw the body away.
+func TestRun_Issue313RealBody_SalvagedEndToEnd(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "issue-313-evaluate-bug-no-marker.md"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	op := &Operator{
+		Name:      "evaluate-bug",
+		LockLabel: "agent-running",
+		Prompt:    "evaluate",
+		Outcomes:  []string{"agent-evaluated", "agent-skipped"},
+	}
+	sub := &Subject{Number: 313, Labels: []string{"bug"}}
+	v := newFakeVCS()
+
+	var recoveredOutcome string
+	var recoveredConf float64
+
+	_, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo:    "zhoushoujianwork/clawflow",
+		Workdir: t.TempDir(),
+		Timeout: time.Second,
+		RunFunc: func(_ context.Context, _, _ string, _ time.Duration, _ io.Writer, _ string, _ ...string) (string, error) {
+			return string(raw), nil
+		},
+		MarkerRecovered: func(o string, c float64) {
+			recoveredOutcome, recoveredConf = o, c
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error, want nil (body must be salvaged): %v", err)
+	}
+	if outcome != "agent-evaluated" {
+		t.Errorf("outcome = %q, want agent-evaluated", outcome)
+	}
+	if recoveredOutcome != "agent-evaluated" || recoveredConf != 8.7 {
+		t.Errorf("MarkerRecovered got (%q, %v), want (agent-evaluated, 8.7)", recoveredOutcome, recoveredConf)
+	}
+	if len(v.comments) != 1 {
+		t.Fatalf("want 1 comment posted, got %d", len(v.comments))
+	}
+	if posted := v.comments[0].body; !strings.Contains(posted, "**Confidence:** 8.7/10") {
+		t.Errorf("posted comment lost the evaluation body (%d bytes)", len(posted))
+	}
+	if got := v.labels[313]; !slices.Contains(got, "agent-evaluated") {
+		t.Errorf("labels = %v, want agent-evaluated applied", got)
 	}
 }
