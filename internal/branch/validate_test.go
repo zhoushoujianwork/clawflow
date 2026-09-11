@@ -71,6 +71,30 @@ func TestValidateBase_MisconfiguredBranch(t *testing.T) {
 	}
 }
 
+// ProvenInvalid is the signal callers may block work on (issue #315): it must
+// fire only when the remote actually answered "no such ref".
+func TestProvenInvalid_OnlyWhenRemoteAnswered(t *testing.T) {
+	cases := []struct {
+		name string
+		v    BaseValidation
+		want bool
+	}{
+		{"proven invalid: remote answered, no such ref",
+			BaseValidation{Base: "origin", RemoteChecked: true}, true},
+		{"unproven: probe failed (offline / no creds / timeout)",
+			BaseValidation{Base: "origin"}, false},
+		{"valid: remote lists the branch",
+			BaseValidation{Base: "main", RemoteChecked: true, RemoteRefExists: true}, false},
+		{"valid: local remote-tracking ref present, no probe needed",
+			BaseValidation{Base: "main", LocalRefExists: true}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.v.ProvenInvalid(); got != tc.want {
+			t.Errorf("%s: ProvenInvalid() = %v, want %v (%+v)", tc.name, got, tc.want, tc.v)
+		}
+	}
+}
+
 func TestValidateBase_EmptyLocalPathIsUnproven(t *testing.T) {
 	v := ValidateBase("", "whatever")
 	if !v.Valid() {

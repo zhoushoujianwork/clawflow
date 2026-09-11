@@ -49,6 +49,15 @@ func (v BaseValidation) Valid() bool {
 	return !v.RemoteChecked
 }
 
+// ProvenInvalid reports the strong signal: the remote answered and does not
+// have this branch. Callers may block work on it — retrying can never help,
+// only a config change can (issue #315). It is deliberately distinct from
+// !Valid(): "unproven" (offline, no credentials, ls-remote timed out) must
+// never reach this branch, so an offline machine keeps scanning normally.
+func (v BaseValidation) ProvenInvalid() bool {
+	return v.RemoteChecked && !v.Valid()
+}
+
 // Hint returns a human-readable remediation string when the base branch is
 // definitely wrong, or "" when it is valid/unproven.
 func (v BaseValidation) Hint() string {
