@@ -1265,9 +1265,24 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 	// Upgrade to WARN for non-success statuses so deployment.md patrol's
 	// "grep -E ERROR|WARN" actively catches failures (issue #204).
+	//
+	// "no-marker" belongs on this list (issue #314): it means the run was paid
+	// for in full, produced no label, and — because the trigger labels are
+	// untouched — will be picked up and paid for again on the next pass. Eight
+	// such runs cost $8.54 while logging only at INFO, so patrol never flagged
+	// them and they were found by hand-grepping status=no-marker.
 	logFn := runLog.Info
-	if rm.Status == "failed" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "marker-recovered" {
+	switch rm.Status {
+	case "failed", "auth-error", "output-limit", "marker-recovered", "no-marker":
 		logFn = runLog.Warn
+	}
+	// cost is emitted for every status, not just the lossy ones: a single
+	// figure per run makes the per-status spend greppable straight from
+	// run.log, without cross-referencing each meta.json. 0 when events.jsonl
+	// carried no terminal result event (in-flight kill, ExtractUsage failure).
+	var runCost float64
+	if rm.Usage != nil {
+		runCost = rm.Usage.TotalCostUSD
 	}
 	logFn("run/end",
 		"repo", j.repo,
@@ -1277,6 +1292,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		"duration", runDur,
 		"outcome", outcome,
 		"pr", rm.PRUrl,
+		"cost", fmt.Sprintf("%.4f", runCost),
 	)
 
 	// Post-run automation: auto-approve and auto-merge.
