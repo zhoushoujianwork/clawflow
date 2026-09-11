@@ -73,7 +73,6 @@ Output exactly this Markdown, filling in the placeholders:
 ---
 
 👉 If this plan looks right, add the `ready-for-agent` label to kick off automatic implementation.
-
 <!-- clawflow:outcome={agent-evaluated|agent-skipped} -->
 ```
 
@@ -83,3 +82,4 @@ Output exactly this Markdown, filling in the placeholders:
 - If the feature description is too vague to evaluate, give 1-3 on Clarity and say *specifically* what's missing. Confidence below 7.0 → use `agent-skipped` in the marker.
 - Large scope is not automatic disqualification — score Scope honestly and flag it in the plan. The owner decides whether to split.
 - The marker MUST be the last non-empty line of stdout. **Do NOT call any tool after emitting the evaluation** — not `gh`, not `clawflow`, not anything. Your stdout is the comment; calling a tool to post it yourself will break the outcome label pipeline.
+- The `👉 If this plan looks right…` footer is **not** the end of your output. Exactly one more line follows it: the outcome marker. Stopping at the footer leaves the run without a label (issue #307).

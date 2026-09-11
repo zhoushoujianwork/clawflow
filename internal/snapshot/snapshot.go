@@ -257,7 +257,7 @@ type RunMeta struct {
 	// would render it as a giant negative offset.
 	EndedAt     *time.Time `json:"ended_at,omitempty"`
 	// Status is one of "running", "finalizing", "success", "failed", "skipped",
-	// "cancelled", "no-marker", "skipped-empty".
+	// "cancelled", "no-marker", "marker-recovered", "skipped-empty".
 	// "cancelled" is set only by /api/run/cancel after the runner process
 	// is killed — it lets the dashboard distinguish a user-initiated kill
 	// from an organic crash ("failed").
@@ -265,8 +265,15 @@ type RunMeta struct {
 	// successfully, before usage extraction and meta cleanup. If the process
 	// is killed in this window, the reconciler treats it as completed (not
 	// stale) and promotes it to "success" without re-queuing the issue.
-	// "no-marker" means claude produced output but omitted the outcome marker;
-	// the issue stays unlabeled and the circuit breaker counts this run.
+	// "no-marker" means claude produced output but omitted the outcome marker
+	// AND the output was not recognisable as a complete operator body (the
+	// short self-post summary of issue #143); the issue stays unlabeled and
+	// the circuit breaker counts this run.
+	// "marker-recovered" means the marker was missing but the body WAS a
+	// complete evaluation, so the label was inferred from its Confidence score
+	// and the write-back happened normally (issue #307). It is a success
+	// variant: deliberately excluded from the circuit breaker's failure list
+	// below, since a dropped marker line is a transient formatting slip.
 	// "skipped-empty" means claude produced empty output; same treatment.
 	Status  string `json:"status"`
 	// Stage is the fine-grained lifecycle phase WITHIN the coarse Status.

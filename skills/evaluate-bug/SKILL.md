@@ -93,7 +93,6 @@ Output exactly this Markdown, filling the placeholders. No code fences around th
 ---
 
 👉 If this plan looks right, add the `ready-for-agent` label to kick off automatic implementation.
-
 <!-- clawflow:outcome={agent-evaluated|agent-skipped} -->
 ```
 
@@ -102,3 +101,4 @@ Output exactly this Markdown, filling the placeholders. No code fences around th
 - Output **only** the Markdown comment body and the closing marker line. No "I will now evaluate…" preamble, no code fences around the whole output.
 - If the issue has too little information to score, give 1-3 on the affected dimension(s) and say *specifically what is missing*. Confidence below 7.0 → use `agent-skipped` in the marker.
 - The marker MUST be the last non-empty line of stdout. **Do NOT call any tool after emitting the evaluation** — not `gh`, not `clawflow`, not anything. Your stdout is the comment; calling a tool to post it yourself will break the outcome label pipeline.
+- The `👉 If this plan looks right…` footer is **not** the end of your output. Exactly one more line follows it: the outcome marker. Stopping at the footer leaves the run without a label (issue #307).

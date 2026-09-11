@@ -107,8 +107,11 @@ func TestRun_HappyPath(t *testing.T) {
 			return "evaluation posted", nil
 		},
 	})
-	// No outcome marker → Run now returns ErrNoOutcomeMarker so the circuit
-	// breaker upstream can count consecutive occurrences (issue #143).
+	// No outcome marker and the output is a short summary, not a recognisable
+	// operator body → Run returns ErrNoOutcomeMarker so the circuit breaker
+	// upstream can count consecutive occurrences (issue #143). The salvage
+	// path added in #307 deliberately does not fire here: it only recognises
+	// complete evaluate-* bodies (Confidence + dimension score lines).
 	if !errors.Is(err, ErrNoOutcomeMarker) {
 		t.Fatalf("expected ErrNoOutcomeMarker, got: %v", err)
 	}
@@ -125,7 +128,8 @@ func TestRun_HappyPath(t *testing.T) {
 	if v.removeLabelCals != 0 {
 		t.Errorf("RemoveLabel called %d times, want 0", v.removeLabelCals)
 	}
-	// No outcome marker → runner skips comment post (no VCS side-effects).
+	// No outcome marker + unsalvageable body → runner skips comment post
+	// (no VCS side-effects).
 	if len(v.comments) != 0 {
 		t.Fatalf("want 0 comments (no outcome marker → guard skips post), got %d", len(v.comments))
 	}

@@ -1072,6 +1072,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rc.SetRequestContext(ctx)
 	}
 
+	// Set when the runner had to infer the outcome label from the body's
+	// Confidence score because the marker line was missing (issue #307).
+	// The run itself succeeds; this only selects a distinct run status.
+	var markerRecovered bool
+	var recoveredConfidence float64
+
 	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
 		Repo:          j.repo,
 		Workdir:       workdir,
@@ -1082,6 +1088,16 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		ResumeContext: resumeCtx,
 		Language:      j.language,
 		StageFunc:     emitStage,
+		MarkerRecovered: func(inferred string, conf float64) {
+			markerRecovered = true
+			recoveredConfidence = conf
+			// WARN-level so deployment.md patrol's grep -E "ERROR|WARN"
+			// surfaces the degraded path and the prompt-side frequency can
+			// be tracked over time.
+			runLog.Warn("run/marker_recovered",
+				"repo", j.repo, "issue", j.sub.Number, "op", j.op.Name,
+				"inferred_outcome", inferred, "confidence", conf)
+		},
 	})
 	runDur := time.Since(runStart).Round(time.Second)
 	if eventsFile != nil {
@@ -1208,6 +1224,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// the circuit breaker so a stuck issue eventually gets agent-failed
 		// instead of looping forever (issue #143).
 		rm.Status = "skipped-empty"
+	case markerRecovered:
+		// Salvaged run: the body was a complete evaluation missing only its
+		// marker line, so the comment was posted and the label applied from
+		// the Confidence score. Functionally a success — recorded under a
+		// distinct status so it is not conflated with the discarded
+		// short-summary form of no-marker, and deliberately NOT counted by
+		// the circuit breaker (issue #307).
+		rm.Status = "marker-recovered"
+		rm.Error = fmt.Sprintf("outcome marker missing; label inferred from Confidence %.1f/10", recoveredConfidence)
 	default:
 		rm.Status = "success"
 	}
@@ -1217,7 +1242,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// partial work instead of starting from scratch.
 	// skipped-empty, no-marker, and auth-error have no partial work worth
 	// resuming, so clean up to avoid accumulating stale worktrees.
-	if rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "auth-error" || rm.Status == "output-limit" {
+	if rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "auth-error" || rm.Status == "output-limit" {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
@@ -1241,7 +1266,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// Upgrade to WARN for non-success statuses so deployment.md patrol's
 	// "grep -E ERROR|WARN" actively catches failures (issue #204).
 	logFn := runLog.Info
-	if rm.Status == "failed" || rm.Status == "auth-error" || rm.Status == "output-limit" {
+	if rm.Status == "failed" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "marker-recovered" {
 		logFn = runLog.Warn
 	}
 	logFn("run/end",
@@ -1254,14 +1279,24 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		"pr", rm.PRUrl,
 	)
 
-	// Post-run automation: auto-approve and auto-merge
-	if rm.Status == "success" {
+	// Post-run automation: auto-approve and auto-merge.
+	// "marker-recovered" is included: the outcome label was applied for real,
+	// so auto-approve of agent-evaluated must still fire — otherwise salvaging
+	// the body would only half-recover the run (issue #307).
+	if rm.Status == "success" || rm.Status == "marker-recovered" {
 		runPostAutomation(j, outcome, output, prefix)
 	}
 
 	switch rm.Status {
 	case "success":
 		fmt.Printf("%s ✓ done\n", prefix)
+		return true, false
+	case "marker-recovered":
+		// Counts as a completed run (comment posted, label applied) and does
+		// NOT reach checkCircuitBreaker — a one-off missing marker line is a
+		// transient formatting slip, not a reason to label the issue
+		// agent-failed (issue #307).
+		fmt.Printf("%s ✓ done (outcome marker missing; label inferred from Confidence %.1f/10)\n", prefix, recoveredConfidence)
 		return true, false
 	case "rate-limited":
 		// Signal the caller to abort the queue; do NOT call checkCircuitBreaker.
