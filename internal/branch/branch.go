@@ -226,18 +226,40 @@ func Push(localPath, base string) (string, error) {
 	return runGitCombined(localPath, "push", "origin", base)
 }
 
+// MergeBaseRef resolves which ref merge status should be judged against for
+// base. origin/<base> is preferred: it is the upstream truth, and a local clone
+// whose <base> lags behind (the norm — ClawFlow never pulls member clones, see
+// issue #302) would otherwise hide branches that are already merged upstream.
+// Falls back to the bare local <base> only when refs/remotes/origin/<base> is
+// absent — a repo without an origin, or a base branch never pushed — so
+// offline/fresh clones keep working instead of erroring out.
+func MergeBaseRef(localPath, base string) string {
+	if base == "" {
+		base = "main"
+	}
+	if _, err := gitOut(localPath, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+base); err == nil {
+		return "origin/" + base
+	}
+	return base
+}
+
 // ListMerged returns local (and, when includeRemote is set, remote-tracking)
 // branches that are merged into base. The base branch itself, HEAD, and
 // protected branches are excluded. Results are sorted by LastCommit ascending
 // (oldest first) so the most stale, safest-to-delete branches surface first.
+//
+// Both the local and the remote-tracking query judge merge status against the
+// same ref (see MergeBaseRef) so a lagging local base cannot produce two
+// different answers within one call.
 func ListMerged(localPath, base string, includeRemote bool) ([]Branch, error) {
 	if base == "" {
 		base = "main"
 	}
+	mergeRef := MergeBaseRef(localPath, base)
 
 	var result []Branch
 
-	localOut, err := gitOut(localPath, "for-each-ref", "--merged="+base, "--format="+refFormat, "refs/heads/")
+	localOut, err := gitOut(localPath, "for-each-ref", "--merged="+mergeRef, "--format="+refFormat, "refs/heads/")
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +272,7 @@ func ListMerged(localPath, base string, includeRemote bool) ([]Branch, error) {
 	}
 
 	if includeRemote {
-		remoteOut, err := gitOut(localPath, "for-each-ref", "--merged=origin/"+base, "--format="+refFormat, "refs/remotes/origin/")
+		remoteOut, err := gitOut(localPath, "for-each-ref", "--merged="+mergeRef, "--format="+refFormat, "refs/remotes/origin/")
 		if err != nil {
 			return nil, err
 		}
