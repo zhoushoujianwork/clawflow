@@ -1080,6 +1080,31 @@ func (c *Client) GetParentIssue(repo string, issueNumber int) (*vcs.Issue, error
 	return &vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, State: raw.State}, nil
 }
 
+// GetRepoID returns GitHub's immutable numeric repository ID. The
+// owner/name pair is NOT stable — deleting a repo and recreating it under
+// the same name mints a new ID — so callers use this to detect recreation
+// and segregate local run history (issue #272).
+func (c *Client) GetRepoID(repo string) (int64, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return 0, err
+	}
+	data, status, err := c.do("GET", fmt.Sprintf("/repos/%s/%s", owner, name), nil)
+	if err != nil {
+		return 0, err
+	}
+	if status != 200 {
+		return 0, fmt.Errorf("github get repo: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return 0, err
+	}
+	return raw.ID, nil
+}
+
 // GetIssue fetches a single issue by number.
 func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 	owner, name, err := splitRepo(repo)
