@@ -170,6 +170,14 @@ type RunOptions struct {
 	// retries are exhausted — a human (or future recovery logic) can read the
 	// file and re-post manually.
 	CommentSaveDir string
+
+	// MarkerRecovered, if non-nil, is invoked when the outcome label was
+	// salvaged from the body's Confidence score instead of read from an
+	// outcome marker (issue #307). The run still succeeds — the comment is
+	// posted and the label applied — but the caller records a distinct
+	// "marker-recovered" status so the degraded path stays visible on the
+	// dashboard and in the logs instead of hiding inside "success".
+	MarkerRecovered func(outcome string, confidence float64)
 }
 
 // emitStage safely invokes a (possibly nil) stage callback. Centralizing the
@@ -237,6 +245,25 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	// Without this, the issue stays unlabeled and re-fires on every subsequent
 	// pass until claude happens to produce a valid marker — potentially looping
 	// indefinitely (see issue #143).
+	//
+	// Exception: the model sometimes prints the operator's ENTIRE template —
+	// dimension scores, Confidence line, footer — and stops one line short of
+	// the marker. Discarding that is pure loss: the analysis is complete and
+	// already paid for, and the next pass pays for it a second time (issue
+	// #307). salvageOutcome recognises that shape by template skeleton and
+	// derives the label from the Confidence score, so the body still lands.
+	if outcome == "" {
+		if inferred, conf, ok := salvageOutcome(op, trimmed); ok {
+			outcome = inferred
+			body = prependSalvageNotice(trimmed, inferred, conf)
+			fmt.Fprintf(os.Stderr,
+				"  ⚠ operator %q stdout has no outcome marker but body matches the evaluation template — salvaging: Confidence %.1f/10 → %q\n",
+				op.Name, conf, inferred)
+			if opts.MarkerRecovered != nil {
+				opts.MarkerRecovered(inferred, conf)
+			}
+		}
+	}
 	if outcome == "" {
 		fmt.Fprintf(os.Stderr,
 			"  ⚠ operator %q stdout has no outcome marker — operator may have self-posted via a tool call; recording as failure to prevent infinite retry loop\n",

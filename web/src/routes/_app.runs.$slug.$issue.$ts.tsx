@@ -34,7 +34,7 @@ interface RunMeta {
   issue_title?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'skipped-empty'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'marker-recovered' | 'skipped-empty'
   summary?: string
   pr_url?: string
   error?: string
@@ -483,6 +483,8 @@ function StatusBadge({ status }: { status: RunMeta['status'] }) {
     skipped:         { cls: 'bg-muted text-muted-foreground border-border',    Icon: SkipForward },
     cancelled:       { cls: 'bg-amber-50 text-amber-700 border-amber-200',     Icon: Square },
     'no-marker':     { cls: 'bg-orange-100 text-orange-700 border-orange-200', Icon: XCircle },
+    // Salvaged run (issue #307): completed, but with an inferred outcome label.
+    'marker-recovered': { cls: 'bg-amber-100 text-amber-800 border-amber-200',  Icon: CheckCircle2 },
     'skipped-empty': { cls: 'bg-orange-50 text-orange-600 border-orange-200',  Icon: SkipForward },
   }[status] ?? { cls: 'bg-muted text-muted-foreground border-border', Icon: SkipForward }
   const Icon = cfg.Icon
