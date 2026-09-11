@@ -70,6 +70,14 @@ func (v BaseValidation) Hint() string {
 // localPath must be a git clone; an empty localPath yields a zero-value
 // result with RemoteChecked=false, i.e. Valid()==true (nothing to check).
 func ValidateBase(localPath, base string) BaseValidation {
+	return ValidateBaseWithin(localPath, base, lsRemoteTimeout)
+}
+
+// ValidateBaseWithin is ValidateBase with an explicit budget for the single
+// ls-remote probe. Interactive callers (the dashboard POST that writes
+// base_branch) pass a short timeout so a black-holed remote cannot hold an HTTP
+// request open for the full scan-path deadline.
+func ValidateBaseWithin(localPath, base string, probeTimeout time.Duration) BaseValidation {
 	if base == "" {
 		base = "main"
 	}
@@ -88,7 +96,10 @@ func ValidateBase(localPath, base string) BaseValidation {
 	// Bounded: this runs on the scan path and on every snapshot write, so a
 	// black-holed remote must not wedge either. headlessEnv already stops git
 	// from waiting on a credential prompt; the deadline covers the rest.
-	ctx, cancel := context.WithTimeout(context.Background(), lsRemoteTimeout)
+	if probeTimeout <= 0 {
+		probeTimeout = lsRemoteTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, "git", "ls-remote", "--heads", "origin", base)
 	c.Dir = localPath

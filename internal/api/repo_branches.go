@@ -108,7 +108,15 @@ func HandleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// parseTabRefLines parses TAB-delimited "name\tdate" output from gitForEachRef.
+// parseTabRefLines parses TAB-delimited "refname\tdate" output from
+// gitForEachRef and returns short branch names.
+//
+// Names arrive as full refs (%(refname)) on purpose: %(refname:short) abbreviates
+// refs/remotes/origin/HEAD to plain "origin", which used to slip through as a
+// ghost "origin" branch in the dropdown — clicking it wrote base_branch: origin
+// and broke every `git fetch origin <base>` for that repo (issue #306). The
+// short-name spelling is git's display logic, not a data contract, so we strip
+// the prefix ourselves and drop the symbolic HEAD refs explicitly.
 func parseTabRefLines(out string, remote bool) []string {
 	var names []string
 	for _, line := range strings.Split(out, "\n") {
@@ -116,13 +124,27 @@ func parseTabRefLines(out string, remote bool) []string {
 		if line == "" {
 			continue
 		}
-		name := strings.SplitN(line, "\t", 2)[0]
-		name = strings.TrimSpace(name)
-		if name == "" {
+		ref := strings.TrimSpace(strings.SplitN(line, "\t", 2)[0])
+		if ref == "" {
 			continue
 		}
+		var name string
 		if remote {
-			name = strings.TrimPrefix(name, "origin/")
+			if ref == "refs/remotes/origin/HEAD" {
+				continue
+			}
+			if !strings.HasPrefix(ref, "refs/remotes/origin/") {
+				continue
+			}
+			name = strings.TrimPrefix(ref, "refs/remotes/origin/")
+		} else {
+			if !strings.HasPrefix(ref, "refs/heads/") {
+				continue
+			}
+			name = strings.TrimPrefix(ref, "refs/heads/")
+		}
+		if name == "" || name == "HEAD" {
+			continue
 		}
 		names = append(names, name)
 	}
@@ -132,7 +154,7 @@ func parseTabRefLines(out string, remote bool) []string {
 // gitForEachRef lists refs under pattern using TAB as field separator.
 // TAB avoids the NUL-in-args exec rejection on macOS.
 func gitForEachRef(dir, pattern string) (string, error) {
-	c := exec.Command("git", "for-each-ref", "--format=%(refname:short)\t%(committerdate:unix)", pattern)
+	c := exec.Command("git", "for-each-ref", "--format=%(refname)\t%(committerdate:unix)", pattern)
 	c.Dir = dir
 	out, err := c.Output()
 	return string(out), err

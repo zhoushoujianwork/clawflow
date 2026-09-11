@@ -6,11 +6,17 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/gitsync"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
+
+// setBaseProbeTimeout bounds the ls-remote fallback on this interactive path. A
+// var so tests can shrink it.
+var setBaseProbeTimeout = 4 * time.Second
 
 type setBaseBranchRequest struct {
 	Repo      string `json:"repo"`
@@ -56,6 +62,22 @@ func HandleRepoSetBaseBranch(w http.ResponseWriter, r *http.Request) {
 	local := gitsync.LocalPath(cfg, req.Repo)
 	if local == "" {
 		writeJSON(w, 404, map[string]string{"error": "repo not cloned locally"})
+		return
+	}
+
+	// Defense in depth: never persist a base_branch that does not resolve on
+	// origin. A bad value makes `git fetch origin <base>` exit 128 forever, so
+	// every analysis operator for the repo fails round after round (issue #306).
+	// Unlike the scan path, an unproven result is rejected here: this POST is
+	// interactive, the caller is sitting in front of a dashboard that just
+	// listed branches, so "cannot confirm" is a better answer than a silent
+	// write. The probe budget is short for the same reason.
+	if v := branch.ValidateBaseWithin(local, req.NewBranch, setBaseProbeTimeout); !v.LocalRefExists && !v.RemoteRefExists {
+		hint := v.Hint()
+		if hint == "" {
+			hint = fmt.Sprintf("could not verify that branch %q exists on origin — check connectivity and try again", req.NewBranch)
+		}
+		writeJSON(w, 400, map[string]string{"error": hint})
 		return
 	}
 
