@@ -298,3 +298,198 @@ func TestMergeBaseRefFallback(t *testing.T) {
 		t.Errorf("ListMerged should succeed without origin/main: %v", err)
 	}
 }
+
+// laggingCloneFixture builds a bare origin plus a clone whose local main lags
+// origin/main by a merge commit. It returns the clone path; the clone holds
+// "merged-upstream" (contained in origin/main only) and "never-merged"
+// (contained in neither base).
+func laggingCloneFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	clone := filepath.Join(root, "clone")
+
+	bare := gitRunner(t, root)
+	bare("init", "--bare", "-b", "main", origin)
+	bare("clone", origin, clone)
+
+	run := gitRunner(t, clone)
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(clone, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	run("checkout", "-b", "main")
+	write("a.txt", "1")
+	run("add", ".")
+	run("commit", "-m", "init")
+	run("push", "-u", "origin", "main")
+
+	run("checkout", "-b", "merged-upstream")
+	write("b.txt", "2")
+	run("add", ".")
+	run("commit", "-m", "feature")
+	run("checkout", "main")
+	run("merge", "--no-ff", "-m", "merge feature", "merged-upstream")
+	run("push", "origin", "main")
+	// Rewind local main so it lags origin/main — the state ClawFlow clones
+	// drift into, since PRs are merged server-side and clones never pull.
+	run("reset", "--hard", "HEAD~1")
+
+	run("checkout", "-b", "never-merged")
+	write("c.txt", "3")
+	run("add", ".")
+	run("commit", "-m", "wip")
+	run("checkout", "main")
+
+	return clone
+}
+
+func localBranchExists(t *testing.T, dir, name string) bool {
+	t.Helper()
+	_, err := gitOut(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+name)
+	return err == nil
+}
+
+// TestDeleteLocalLaggingLocalBase locks the core invariant of issue #311: a
+// branch ListMerged reports as eligible must actually be deletable, even when
+// local main lags origin/main (where plain `git branch -d` refuses).
+func TestDeleteLocalLaggingLocalBase(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	clone := laggingCloneFixture(t)
+
+	got, err := ListMerged(clone, "main", false)
+	if err != nil {
+		t.Fatalf("ListMerged: %v", err)
+	}
+	listed := false
+	for _, b := range got {
+		if b.Name == "merged-upstream" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("fixture invalid: merged-upstream not listed as eligible, got %v", got)
+	}
+
+	// Sanity: this is precisely the case git's own -d rejects.
+	if err := exec.Command("git", "-C", clone, "branch", "-d", "merged-upstream").Run(); err == nil {
+		t.Fatalf("fixture invalid: git branch -d unexpectedly succeeded, bug no longer reproducible")
+	}
+
+	mergeRef := MergeBaseRef(clone, "main")
+	if err := DeleteLocal(clone, "merged-upstream", mergeRef, false); err != nil {
+		t.Fatalf("DeleteLocal(merged-upstream) must succeed when listed as merged: %v", err)
+	}
+	if localBranchExists(t, clone, "merged-upstream") {
+		t.Errorf("refs/heads/merged-upstream still present after DeleteLocal")
+	}
+}
+
+// TestDeleteLocalRefusesUnmerged guards against the fix degrading into an
+// unconditional -D: a genuinely unmerged branch must survive force=false.
+func TestDeleteLocalRefusesUnmerged(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	clone := laggingCloneFixture(t)
+	mergeRef := MergeBaseRef(clone, "main")
+
+	err := DeleteLocal(clone, "never-merged", mergeRef, false)
+	if err == nil {
+		t.Fatalf("DeleteLocal must refuse a branch not contained in %s", mergeRef)
+	}
+	if !strings.Contains(err.Error(), "never-merged") {
+		t.Errorf("error should name the branch, got: %v", err)
+	}
+	if !localBranchExists(t, clone, "never-merged") {
+		t.Fatalf("unmerged branch was deleted despite force=false")
+	}
+
+	// force is the explicit override and must still work.
+	if err := DeleteLocal(clone, "never-merged", mergeRef, true); err != nil {
+		t.Fatalf("DeleteLocal with force=true: %v", err)
+	}
+	if localBranchExists(t, clone, "never-merged") {
+		t.Errorf("refs/heads/never-merged still present after forced delete")
+	}
+}
+
+// TestDeleteLocalNoOriginFallback covers the offline path: without an
+// origin/<base>, MergeBaseRef yields the local base and deletion still works.
+func TestDeleteLocalNoOriginFallback(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	run := gitRunner(t, dir)
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	run("init", "-b", "main")
+	write("a.txt", "1")
+	run("add", ".")
+	run("commit", "-m", "init")
+	run("checkout", "-b", "done")
+	write("b.txt", "2")
+	run("add", ".")
+	run("commit", "-m", "feature")
+	run("checkout", "main")
+	run("merge", "--no-ff", "-m", "merge", "done")
+
+	mergeRef := MergeBaseRef(dir, "main")
+	if mergeRef != "main" {
+		t.Fatalf("MergeBaseRef = %q, want main (no origin present)", mergeRef)
+	}
+	if err := DeleteLocal(dir, "done", mergeRef, false); err != nil {
+		t.Fatalf("DeleteLocal on local-only repo: %v", err)
+	}
+	if localBranchExists(t, dir, "done") {
+		t.Errorf("refs/heads/done still present after DeleteLocal")
+	}
+}
+
+// TestDeleteLocalCheckedOutBranchProtected confirms the safety net that git
+// itself provides survives the switch to -D: the current branch and
+// worktree-held branches are still refused.
+func TestDeleteLocalCheckedOutBranchProtected(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	clone := laggingCloneFixture(t)
+	run := gitRunner(t, clone)
+	run("checkout", "merged-upstream")
+
+	mergeRef := MergeBaseRef(clone, "main")
+	if err := DeleteLocal(clone, "merged-upstream", mergeRef, false); err == nil {
+		t.Fatalf("deleting the checked-out branch must fail")
+	}
+	if !localBranchExists(t, clone, "merged-upstream") {
+		t.Errorf("checked-out branch was deleted")
+	}
+}
+
+// TestDeleteLocalEmptyMergeRef keeps the legacy delegation path intact for
+// callers that pass no mergeRef.
+func TestDeleteLocalEmptyMergeRef(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	clone := laggingCloneFixture(t)
+
+	// With mergeRef == "" this is plain `git branch -d`, which refuses the
+	// branch because local main lags — the pre-fix behaviour, preserved.
+	if err := DeleteLocal(clone, "merged-upstream", "", false); err == nil {
+		t.Errorf("empty mergeRef should delegate to git branch -d and refuse here")
+	}
+	if !localBranchExists(t, clone, "merged-upstream") {
+		t.Errorf("branch deleted despite git branch -d refusing")
+	}
+}
