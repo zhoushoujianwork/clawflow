@@ -841,11 +841,12 @@ func captureIssuesSnapshot(client vcs.Client, fullName string) []snapshot.IssueE
 // Returns the set of jobs whose operator produced output (i.e. fired),
 // so the caller can deduplicate pending entries.
 //
-// Rate-limit circuit breaker: when any worker detects a transient rate-limit
-// from claude, it sets a shared atomic flag. Subsequent workers check the flag
-// before starting and skip their job (recording status="rate-limited") so the
-// entire queue doesn't cascade into failures. The skipped issues retain their
-// trigger labels and will be retried on the next run pass.
+// Provider-limit circuit breaker: when any worker detects a claude refusal
+// that is account-wide rather than issue-specific — a transient rate limit or
+// a billing cap (402, issue #308) — it sets a shared atomic flag. Subsequent
+// workers check the flag before starting and skip their job so the entire
+// queue doesn't cascade into failures. The skipped issues retain their trigger
+// labels and will be retried on the next run pass.
 func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout time.Duration) []firedKey {
 	if len(jobs) == 0 {
 		return nil
@@ -881,7 +882,7 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 				// keep their trigger labels and will be retried next pass.
 				if rateLimited.Load() {
 					prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
-					fmt.Fprintf(os.Stderr, "%s → skipped (rate limit hit earlier in this pass)\n", prefix)
+					fmt.Fprintf(os.Stderr, "%s → skipped (provider limit hit earlier in this pass)\n", prefix)
 					runLog.Info("run/skipped_rate_limit", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
 					continue
 				}
@@ -913,8 +914,9 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 // persists meta.json + events.jsonl under the dashboard data dir.
 // Returns (didFire, hitRateLimit):
 //   - didFire: true when the operator produced non-empty stdout (outcome label applied)
-//   - hitRateLimit: true when claude exited with a transient rate-limit error;
-//     the caller should stop dispatching remaining jobs this pass
+//   - hitRateLimit: true when claude refused for an account-level reason (a
+//     transient rate limit, or a billing cap per issue #308); the caller should
+//     stop dispatching remaining jobs this pass
 //
 // All log lines are prefixed with "[<repo>#<issue> <op>]" so output
 // from concurrent workers stays disentangleable.
@@ -1171,6 +1173,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// the same doomed run every pass (issue #286).
 	isOutputLimit := runErr != nil && errors.Is(runErr, operator.ErrOutputLimit)
 
+	// Detect billing-cap refusals (HTTP 402, "已达到每日费用限制"). These behave
+	// like rate limits — the queue must abort and the issue keeps its trigger
+	// labels — but they are recorded under their own status because the
+	// recovery window is the next billing period, not the next few minutes.
+	// Critically they must NOT count toward the circuit breaker: the run dies
+	// in 1 turn at $0 and says nothing about the issue, so counting it labels
+	// healthy issues agent-failed the moment an account cap is hit (issue #308).
+	isCostLimit := runErr != nil && errors.Is(runErr, operator.ErrCostLimit)
+
 	// Detect no-marker failures: claude produced output but omitted the
 	// outcome marker. operator.Run now returns ErrNoOutcomeMarker for this
 	// case so we can route it through the circuit breaker (status="failed")
@@ -1179,7 +1190,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	isNoMarker := runErr != nil && errors.Is(runErr, operator.ErrNoOutcomeMarker)
 
 	if runErr != nil {
-		if isRateLimit {
+		if isCostLimit {
+			// Warn-level so patrol's grep -E "ERROR|WARN" catches the one
+			// condition that silently stalls every repo at once (issue #308).
+			runLog.Warn("run/cost_limit", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", runErr.Error())
+			fmt.Fprintf(os.Stderr, "%s ✗ claude cost limit reached — every provider is capped until its billing window resets (aborting this pass): %v\n", prefix, runErr)
+		} else if isRateLimit {
 			fmt.Fprintf(os.Stderr, "%s ✗ claude rate limited (will retry next pass): %v\n", prefix, runErr)
 		} else if isAuthError {
 			// Use Warn-level so patrol grep -E "ERROR|WARN" catches this.
@@ -1208,6 +1224,17 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Summary:     output,
 	}
 	switch {
+	case isCostLimit:
+		// Record as "cost-limit" — deliberately distinct from "rate-limited"
+		// because the two need different operator responses: a rate limit
+		// clears on its own within minutes, a billing cap holds until the
+		// provider's window resets, so the dashboard should read "don't bother
+		// running today" rather than "retrying shortly". Excluded from the
+		// circuit breaker (see snapshot.ConsecutiveFailures) — semantically
+		// this is closer to auth-error than to output-limit: there is no token
+		// bleed to bound, since each capped run is 1 turn at $0 (issue #308).
+		rm.Status = "cost-limit"
+		rm.Error = runErr.Error()
 	case isRateLimit:
 		// Record as "rate-limited" so the dashboard shows the real reason
 		// and ConsecutiveFailures doesn't count this toward the circuit breaker.
@@ -1265,7 +1292,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// partial work instead of starting from scratch.
 	// skipped-empty, no-marker, and auth-error have no partial work worth
 	// resuming, so clean up to avoid accumulating stale worktrees.
-	if rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "auth-error" || rm.Status == "output-limit" {
+	// cost-limit joins them: the run was refused before claude did any work,
+	// so the worktree is empty and keeping it only accumulates garbage across
+	// however many passes happen before the billing window resets (issue #308).
+	if rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
@@ -1296,7 +1326,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// them and they were found by hand-grepping status=no-marker.
 	logFn := runLog.Info
 	switch rm.Status {
-	case "failed", "auth-error", "output-limit", "marker-recovered", "no-marker":
+	case "failed", "auth-error", "output-limit", "marker-recovered", "no-marker", "cost-limit":
 		logFn = runLog.Warn
 	}
 	// cost is emitted for every status, not just the lossy ones: a single
@@ -1339,6 +1369,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		return true, false
 	case "rate-limited":
 		// Signal the caller to abort the queue; do NOT call checkCircuitBreaker.
+		return false, true
+	case "cost-limit":
+		// Abort the queue exactly like a rate limit — a billing cap is
+		// account-level, so every remaining job in this pass would fail
+		// identically. Without this the whole queue re-fires and each issue
+		// burns a circuit-breaker slot on someone else's spend (issue #308).
+		fmt.Printf("%s ✗ cost limit reached (aborting pass; retries when the billing window resets)\n", prefix)
 		return false, true
 	case "auth-error":
 		// Do NOT signal queue abort (unlike rate-limit, other issues may still
