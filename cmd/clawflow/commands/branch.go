@@ -47,14 +47,29 @@ func resolveBranchContext(repo string, fetch bool) (localPath, base string, err 
 	if base == "" {
 		base = "main"
 	}
-	// Fetching matters most when we report on remote-tracking branches; for a
-	// local-only view it is best-effort and a failure should not abort.
+	// Fetching matters for every analysis, not just --remote listings: merge
+	// status is judged against origin/<base>, so a stale remote-tracking ref
+	// hides branches that were merged upstream (issue #302). Still best-effort
+	// — an offline machine must fall back to cached refs, never abort.
 	if fetch {
 		if ferr := branch.Fetch(localPath); ferr != nil {
 			fmt.Fprintf(os.Stderr, "warn: fetch failed, using cached refs: %v\n", ferr)
 		}
 	}
 	return localPath, base, nil
+}
+
+// baseLagNote returns a one-line hint when local <base> is behind
+// origin/<base>. Merge status is judged against origin/<base>, so a lagging
+// local base no longer hides branches — but the user still wants to know their
+// clone is stale, and it keeps "0 eligible" from looking like a silent miss.
+func baseLagNote(localPath, base string) string {
+	st, err := branch.GetSyncStatus(localPath, base)
+	if err != nil || !st.HasUpstream || st.Behind == 0 {
+		return ""
+	}
+	return fmt.Sprintf("note: local %s is %d commit(s) behind origin/%s (merge status judged against origin/%s) — run 'git -C %s pull --ff-only origin %s' to sync",
+		base, st.Behind, base, base, localPath, base)
 }
 
 func newBranchListCmd() *cobra.Command {
@@ -71,7 +86,7 @@ func newBranchListCmd() *cobra.Command {
   # Include merged remote-tracking branches
   clawflow branch list --repo owner/repo --remote`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			localPath, base, err := resolveBranchContext(repo, !noFetch && includeRemote)
+			localPath, base, err := resolveBranchContext(repo, !noFetch)
 			if err != nil {
 				return err
 			}
@@ -81,17 +96,23 @@ func newBranchListCmd() *cobra.Command {
 			}
 			if len(branches) == 0 {
 				fmt.Printf("no merged branches to clean up (base: %s)\n", base)
+				if note := baseLagNote(localPath, base); note != "" {
+					fmt.Println(note)
+				}
 				return nil
 			}
 			printBranches(cmd.OutOrStdout(), branches)
 			fmt.Printf("\n%d merged branch(es) eligible for cleanup (base: %s)\n", len(branches), base)
+			if note := baseLagNote(localPath, base); note != "" {
+				fmt.Println(note)
+			}
 			fmt.Println("run 'clawflow branch delete --repo " + repo + "' to preview deletion")
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().BoolVar(&includeRemote, "remote", false, "also list merged remote-tracking branches")
-	cmd.Flags().BoolVar(&noFetch, "no-fetch", false, "skip 'git fetch --prune' before analyzing remote branches")
+	cmd.Flags().BoolVar(&noFetch, "no-fetch", false, "skip 'git fetch --prune' before analyzing (uses cached remote refs)")
 	_ = cmd.MarkFlagRequired("repo")
 	return cmd
 }
@@ -121,7 +142,7 @@ never touched.`,
   # Delete merged local + remote branches older than 30 days
   clawflow branch delete --repo owner/repo --remote --stale 30 --yes`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			localPath, base, err := resolveBranchContext(repo, !noFetch && includeRemote)
+			localPath, base, err := resolveBranchContext(repo, !noFetch)
 			if err != nil {
 				return err
 			}
@@ -145,6 +166,9 @@ never touched.`,
 
 			if len(targets) == 0 {
 				fmt.Printf("no branches match the cleanup criteria (base: %s)\n", base)
+				if note := baseLagNote(localPath, base); note != "" {
+					fmt.Println(note)
+				}
 				return nil
 			}
 
@@ -199,7 +223,7 @@ never touched.`,
 	cmd.Flags().BoolVar(&apply, "yes", false, "actually delete (default is a dry-run preview)")
 	cmd.Flags().BoolVar(&force, "force", false, "use 'git branch -D' for local branches (force-delete)")
 	cmd.Flags().IntVar(&staleDays, "stale", 0, "only branches whose last commit is older than N days")
-	cmd.Flags().BoolVar(&noFetch, "no-fetch", false, "skip 'git fetch --prune' before analyzing remote branches")
+	cmd.Flags().BoolVar(&noFetch, "no-fetch", false, "skip 'git fetch --prune' before analyzing (uses cached remote refs)")
 	_ = cmd.MarkFlagRequired("repo")
 	return cmd
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -173,5 +174,127 @@ func TestListMergedIntegration(t *testing.T) {
 	}
 	if names["main"] {
 		t.Errorf("base branch main must never be reported")
+	}
+}
+
+// gitRunner returns a helper that runs git in dir with a deterministic identity.
+func gitRunner(t *testing.T, dir string) func(args ...string) {
+	t.Helper()
+	return func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		c.Env = append(c.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// TestListMergedLaggingLocalBase reproduces issue #302: the branch was merged
+// upstream (it is an ancestor of origin/main) but the local main has not been
+// pulled yet, so `--merged=main` cannot see it. ListMerged must judge against
+// origin/main and still report the branch.
+func TestListMergedLaggingLocalBase(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	clone := filepath.Join(root, "clone")
+
+	bare := gitRunner(t, root)
+	bare("init", "--bare", "-b", "main", origin)
+
+	run := gitRunner(t, clone)
+	bare("clone", origin, clone)
+
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(clone, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	run("checkout", "-b", "main")
+	write("a.txt", "1")
+	run("add", ".")
+	run("commit", "-m", "init")
+	run("push", "-u", "origin", "main")
+
+	// merged-upstream: merged into main and pushed, so origin/main contains it.
+	run("checkout", "-b", "merged-upstream")
+	write("b.txt", "2")
+	run("add", ".")
+	run("commit", "-m", "feature")
+	run("checkout", "main")
+	run("merge", "--no-ff", "-m", "merge feature", "merged-upstream")
+	run("push", "origin", "main")
+
+	// Rewind local main so it lags origin/main by the merge commit — exactly
+	// the state ClawFlow clones drift into (auto_merge merges server-side).
+	run("reset", "--hard", "HEAD~1")
+
+	// Sanity: the local base genuinely cannot see the branch anymore.
+	if out, err := gitOut(clone, "for-each-ref", "--merged=main", "--format=%(refname:short)", "refs/heads/"); err != nil {
+		t.Fatalf("for-each-ref: %v", err)
+	} else if strings.Contains(out, "merged-upstream") {
+		t.Fatalf("fixture invalid: local main still contains merged-upstream:\n%s", out)
+	}
+
+	if ref := MergeBaseRef(clone, "main"); ref != "origin/main" {
+		t.Errorf("MergeBaseRef = %q, want origin/main", ref)
+	}
+
+	got, err := ListMerged(clone, "main", false)
+	if err != nil {
+		t.Fatalf("ListMerged: %v", err)
+	}
+	found := false
+	for _, b := range got {
+		if b.Name == "merged-upstream" {
+			found = true
+		}
+		if b.Name == "main" {
+			t.Errorf("base branch main must never be reported")
+		}
+	}
+	if !found {
+		t.Errorf("expected merged-upstream to be reported (merged into origin/main), got %v", got)
+	}
+
+	// The lag must be reportable so the CLI can print its note.
+	st, err := GetSyncStatus(clone, "main")
+	if err != nil {
+		t.Fatalf("GetSyncStatus: %v", err)
+	}
+	if !st.HasUpstream || st.Behind == 0 {
+		t.Errorf("expected local main behind origin/main, got %+v", st)
+	}
+}
+
+// TestMergeBaseRefFallback locks the offline path: with no origin/<base> ref,
+// merge status must fall back to the local base instead of erroring.
+func TestMergeBaseRefFallback(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	run := gitRunner(t, dir)
+	run("init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("1"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	run("add", ".")
+	run("commit", "-m", "init")
+
+	if ref := MergeBaseRef(dir, "main"); ref != "main" {
+		t.Errorf("MergeBaseRef = %q, want main (no origin/main present)", ref)
+	}
+	if _, err := ListMerged(dir, "main", false); err != nil {
+		t.Errorf("ListMerged should succeed without origin/main: %v", err)
 	}
 }
