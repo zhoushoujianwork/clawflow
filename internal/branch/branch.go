@@ -243,6 +243,24 @@ func MergeBaseRef(localPath, base string) string {
 	return base
 }
 
+// isAncestor reports whether name's tip is reachable from mergeRef, i.e. the
+// branch is already contained in the base and deleting it loses no commits.
+// A non-nil error means "do not delete": either the branch is genuinely
+// unmerged (exit 1) or the ancestry could not be established at all (bad ref,
+// exit >1) — both must refuse rather than fall through to a delete.
+func isAncestor(localPath, name, mergeRef string) error {
+	c := exec.Command("git", "merge-base", "--is-ancestor", name, mergeRef)
+	c.Dir = localPath
+	out, err := c.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	if text := strings.TrimSpace(string(out)); text != "" {
+		return fmt.Errorf("branch %q is not an ancestor of %s, refusing to delete: %w\n%s", name, mergeRef, err, text)
+	}
+	return fmt.Errorf("branch %q is not an ancestor of %s, refusing to delete (use --force to override)", name, mergeRef)
+}
+
 // ListMerged returns local (and, when includeRemote is set, remote-tracking)
 // branches that are merged into base. The base branch itself, HEAD, and
 // protected branches are excluded. Results are sorted by LastCommit ascending
@@ -298,13 +316,31 @@ func ParseRefLinesExported(out string, remote bool) []Branch {
 	return parseRefLines(out, remote)
 }
 
-// DeleteLocal removes a local branch. When force is false it uses `git branch
-// -d` (refuses unmerged branches); force switches to `-D`. Deleting the
-// currently checked-out branch or one held by a worktree fails with git's own
-// error, which is returned verbatim.
-func DeleteLocal(localPath, name string, force bool) error {
+// DeleteLocal removes a local branch, judging "is this safe to delete" against
+// mergeRef — the same ref ListMerged used (see MergeBaseRef), so a branch that
+// list reported as eligible is always actually deletable (issue #311).
+//
+// `git branch -d` cannot be trusted for this: its safety check only accepts the
+// current HEAD or the branch's local upstream, so with a local base lagging
+// origin/<base> (the norm for ClawFlow clones) it rejects branches that are
+// long merged upstream. Hence when mergeRef is set we run the ancestry check
+// ourselves and then pass -D. **-D here is not "force"** — it merely bypasses
+// git's narrower local-base semantics after ClawFlow has confirmed the branch
+// is an ancestor of mergeRef.
+//
+// force skips the ancestry check entirely (explicit user override). An empty
+// mergeRef falls back to plain `git branch -d` so offline callers keep working.
+// Deleting the currently checked-out branch or one held by a worktree still
+// fails with git's own error, which is returned verbatim.
+func DeleteLocal(localPath, name, mergeRef string, force bool) error {
 	flag := "-d"
-	if force {
+	switch {
+	case force:
+		flag = "-D"
+	case mergeRef != "":
+		if err := isAncestor(localPath, name, mergeRef); err != nil {
+			return err
+		}
 		flag = "-D"
 	}
 	c := exec.Command("git", "branch", flag, name)

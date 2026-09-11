@@ -130,9 +130,10 @@ func newBranchDeleteCmd() *cobra.Command {
 		Short: "Delete merged branches (dry-run unless --yes)",
 		Long: `Delete branches that are merged into the base branch. Without --yes this is
 a dry-run that only previews what would be deleted. Local branches are removed
-via 'git branch -d' (use --force for -D); remote branches are removed via the
-VCS API. The base branch and protected branches (main/master/develop) are
-never touched.`,
+only after confirming they are an ancestor of origin/<base> — the same check the
+listing uses — so a local base lagging behind origin does not block cleanup;
+--force skips that check. Remote branches are removed via the VCS API. The base
+branch and protected branches (main/master/develop) are never touched.`,
 		Example: `  # Preview which merged local branches would be deleted
   clawflow branch delete --repo owner/repo
 
@@ -150,6 +151,9 @@ never touched.`,
 			if err != nil {
 				return err
 			}
+			// Same ruler the listing above used, so anything reported as
+			// eligible is actually deletable (issue #311).
+			mergeRef := branch.MergeBaseRef(localPath, base)
 
 			// Apply scope and staleness filters.
 			cutoff := time.Time{}
@@ -206,7 +210,7 @@ never touched.`,
 					deleted++
 					continue
 				}
-				if derr := branch.DeleteLocal(localPath, b.Name, force); derr != nil {
+				if derr := branch.DeleteLocal(localPath, b.Name, mergeRef, force); derr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warn: delete local %s: %v\n", b.Name, derr)
 					failed++
 					continue
