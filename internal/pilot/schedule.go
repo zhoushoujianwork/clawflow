@@ -38,6 +38,7 @@ package pilot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -158,17 +159,50 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 		// Stamp BEFORE the wake so a slow Pilot doesn't get re-fired
 		// the instant it returns. If the wake fails we still want
 		// the cooldown to apply — repeated failures shouldn't busy-
-		// loop claude.
+		// loop claude. The one exception is a billing cap, rolled back
+		// below: see restoreCooldownAfterCostLimit.
+		prevWokenAt := p.Automation.LastWokenAt
 		if err := project.MarkWoken(p.Name); err != nil {
 			fmt.Fprintf(os.Stderr, "[pilot] %s: mark-woken failed: %v — continuing anyway\n", p.Name, err)
 		}
 		if err := wake(ctx, p, cfg, creds, perWakeTimeout); err != nil {
 			fmt.Fprintf(os.Stderr, "[pilot] %s: wake failed: %v\n", p.Name, err)
+			if errors.Is(err, operator.ErrCostLimit) {
+				restoreCooldownAfterCostLimit(p.Name, prevWokenAt)
+				// Abort the rest of the pass instead of continuing: the cap is
+				// account-level, so every remaining project would fail
+				// identically — and each would burn its own cooldown doing so.
+				// Same reasoning as run.go's cost-limit queue abort (#308);
+				// pilot kept fanning out and took 18 wakes down in one day
+				// before this (issue #320).
+				skipLog.Warn("pilot/abort", "reason", "cost-limit", "project", p.Name,
+					"remaining", len(ready)-woken-1)
+				fmt.Fprintf(os.Stderr, "[pilot] cost limit reached — aborting this pass (%d project(s) not woken; cooldowns untouched)\n", len(ready)-woken-1)
+				break
+			}
 			continue
 		}
 		woken++
 	}
 	return woken, nil
+}
+
+// restoreCooldownAfterCostLimit undoes the pre-wake MarkWoken stamp when the
+// wake died on a billing cap. A capped wake runs ~4 seconds at $0 and does no
+// work, but the stamp alone would silence the project for its full cooldown
+// (60 min typical, 120 min on some projects) — so a cap that clears in ten
+// minutes still cost an hour of idleness. Rolling the timestamp back lets the
+// very next tick retry (issue #320).
+//
+// LastSkipReason is deliberately left alone: MarkWoken cleared it, and the
+// dashboard treating "no obstacle recorded" as the current truth is correct —
+// the cap is transient and reported through pilot.log, not project.yaml.
+func restoreCooldownAfterCostLimit(name, prevWokenAt string) {
+	if err := project.SetLastWokenAt(name, prevWokenAt); err != nil {
+		fmt.Fprintf(os.Stderr, "[pilot] %s: cooldown rollback after cost limit failed: %v — next wake waits out the full cooldown\n", name, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[pilot] %s: cooldown not consumed (cost limit) — eligible again on the next pass\n", name)
 }
 
 // WakeOne triggers a Pilot wake for a single project on demand. Used by
@@ -229,12 +263,19 @@ func WakeOne(ctx context.Context, projectName string, timeout time.Duration) err
 	// get re-fired by an impatient click. MarkWoken also clears
 	// LastSkipReason — a manual wake is unambiguous proof the prior
 	// skip no longer applies.
+	prevWokenAt := p.Automation.LastWokenAt
 	if err := project.MarkWoken(p.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "[pilot] %s: mark-woken failed: %v — continuing anyway\n", p.Name, err)
 	}
 
 	fmt.Fprintf(os.Stderr, "[pilot] manual wake project=%q\n", p.Name)
-	return wake(ctx, p, cfg, creds, timeout)
+	err = wake(ctx, p, cfg, creds, timeout)
+	// A click that lands on a billing cap must not cost the user their whole
+	// cooldown window — nothing was attempted (issue #320).
+	if err != nil && errors.Is(err, operator.ErrCostLimit) {
+		restoreCooldownAfterCostLimit(p.Name, prevWokenAt)
+	}
+	return err
 }
 
 // wake builds the digest for one project, constructs the Pilot prompt,
@@ -317,6 +358,25 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		_ = eventsFile.Close()
 	}
 
+	// A billing cap (402) is the one failure where whatever the wake already
+	// produced is still trustworthy: it interrupts the work that comes NEXT,
+	// it doesn't corrupt the fenced blocks already written. But RunClaude's
+	// provider-exhaustion path returns "" for output, so the only surviving
+	// copy of the partial transcript is the events.jsonl we just teed. Read it
+	// back so a wake that got as far as writing PILOT-RESULT / duties /
+	// context.md keeps them instead of being recorded as a blank failure
+	// (issue #320).
+	costLimited := err != nil && (errors.Is(err, operator.ErrCostLimit) || operator.IsCostLimitError(err, output))
+	if costLimited && strings.TrimSpace(output) == "" {
+		if raw, rerr := os.ReadFile(filepath.Join(runDir, "events.jsonl")); rerr == nil {
+			if salvaged := strings.TrimSpace(chat.CollectAssistantText(string(raw))); salvaged != "" {
+				output = salvaged
+				fmt.Fprintf(os.Stderr, "[pilot] %s: cost limit hit — salvaged %d bytes of partial output from events.jsonl\n", p.Name, len(salvaged))
+				lg.Info("pilot/salvage", "project", p.Name, "reason", "cost-limit", "bytes", len(salvaged))
+			}
+		}
+	}
+
 	if budgetPath != "" {
 		if s, rerr := budget.Read(budgetPath); rerr == nil {
 			fmt.Fprintf(os.Stderr, "[pilot] %s: budget %d/%d ops used\n", p.Name, s.Used, s.Max)
@@ -346,16 +406,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	}
 
 	if err != nil {
-		// Distinguish auth errors (403 / "request not allowed") from
-		// generic failures. Auth errors are not transient — retrying
-		// immediately will reproduce the same error — so they deserve a
-		// distinct status and a louder log level. This mirrors the
-		// operator runner path fixed in issue #204.
-		if operator.IsAuthError(err, output) {
-			meta.Status = "auth-error"
-		} else {
-			meta.Status = "failed"
-		}
+		meta.Status = classifyWakeStatus(err, output)
 		meta.Error = err.Error()
 		// When the top-level deadline fires, resultLine is empty because
 		// claude never emitted a PILOT-RESULT. Fill it with a diagnostic
@@ -367,23 +418,25 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		}
 	} else {
 		meta.Status = "success"
-		// On success, look for an updated context.md in the output and
-		// persist it. The Pilot is the sole writer of context.md; we
-		// only honour writes when the wake didn't error out (a failed
-		// wake's view of the project may be inconsistent).
-		if updated := chat.ExtractLastContextMD(output); updated != "" && strings.TrimSpace(updated) != strings.TrimSpace(contextMD) {
+	}
+
+	// Doc write-back. Honoured on success and on cost-limit only: a 402 stops
+	// the work that would have FOLLOWED the block, it doesn't invalidate a
+	// block the model already finished writing. auth-error and timeout stay
+	// excluded — those can truncate mid-block, so their output really may be
+	// half a document (issue #320).
+	if err == nil || costLimited {
+		// The Pilot is the sole writer of context.md.
+		if updated := extractContextMD(output); updated != "" && strings.TrimSpace(updated) != strings.TrimSpace(contextMD) {
 			if werr := project.WriteContext(p.Name, updated); werr != nil {
 				fmt.Fprintf(os.Stderr, "[pilot] %s: write context.md: %v\n", p.Name, werr)
 			} else {
 				fmt.Fprintf(os.Stderr, "[pilot] %s: context.md updated by Pilot\n", p.Name)
 			}
 		}
-		// On success, look for an updated deployment.md in the output and
-		// persist it. Symmetric to context.md: Pilot may rewrite the runtime
-		// SOP when Play 3 detects that the existing log commands don't match
-		// the project's actual log layout (SOP drift). Only honour writes on
-		// a successful wake — a failed wake's view of the environment may be
-		// inconsistent.
+		// Symmetric to context.md: Pilot may rewrite the runtime SOP when
+		// Play 3 detects that the existing log commands don't match the
+		// project's actual log layout (SOP drift).
 		if updated := chat.ExtractFencedBlock(output, "deployment.md"); updated != "" && strings.TrimSpace(updated) != strings.TrimSpace(deploymentMD) {
 			if werr := project.WriteDeployment(p.Name, updated); werr != nil {
 				fmt.Fprintf(os.Stderr, "[pilot] %s: write deployment.md: %v\n", p.Name, werr)
@@ -416,6 +469,12 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		fmt.Fprintf(os.Stderr, "[pilot] %s: auth error 403 (check session/API key — subprocess cannot inherit interactive credentials): %v\n", p.Name, err)
 	case "failed":
 		lg.Warn("pilot/end", endLogKV...)
+	case "cost-limit":
+		// WARN, matching run.go's run/cost_limit level: an account-level cap
+		// stalls every project at once, so patrol's grep -E "ERROR|WARN" has
+		// to see it. At INFO it was indistinguishable from a healthy wake.
+		lg.Warn("pilot/end", endLogKV...)
+		fmt.Fprintf(os.Stderr, "[pilot] %s: cost limit reached — every provider is capped until its billing window resets (cooldown not consumed): %v\n", p.Name, err)
 	default:
 		lg.Info("pilot/end", endLogKV...)
 	}
@@ -434,6 +493,13 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	// this one) all ended in failure, emit an ERROR so patrol grep surfaces it.
 	// De-bounced to log at exactly the threshold and then every threshold
 	// increment (e.g. 3, 6, 9, …) to avoid spamming the log on prolonged outages.
+	//
+	// "cost-limit" is deliberately absent from both the entry condition and the
+	// streak count, and breaks the streak like any other non-failure — the same
+	// rule snapshot.ConsecutiveFailures applies to operator runs. A billing cap
+	// says nothing about credentials or config, so counting it produced ERROR
+	// alerts advising "check credentials" while the credentials were fine
+	// (issue #320).
 	if meta.Status == "failed" || meta.Status == "auth-error" {
 		const consecutiveFailThreshold = 3
 		recentN := pilotRecentSummaries(p.Name, consecutiveFailThreshold*3)
@@ -463,6 +529,50 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		fmt.Fprintf(os.Stderr, "[pilot] %s: completed (no PILOT-RESULT line found)\n", p.Name)
 	}
 	return err
+}
+
+// classifyWakeStatus maps a failed wake to the status recorded in meta.json.
+//
+//   - "cost-limit": every provider refused with a billing cap (HTTP 402). An
+//     account-level condition — the wake dies in ~4 seconds at $0 and would do
+//     so for any project — so it gets its own status, exactly as run.go
+//     records for operator runs (#308). Checked FIRST, and via the sentinel
+//     before the text patterns, because RunClaude's provider-exhaustion path
+//     returns an empty output, leaving errors.Is as the only reliable signal.
+//   - "auth-error": 403 / "request not allowed". Not transient — retrying
+//     reproduces it — so it earns a distinct status and a louder log level
+//     (issue #204).
+//   - "failed": everything else, including timeouts.
+//
+// Returns "" for a nil error; callers only reach it on the failure path.
+func classifyWakeStatus(err error, output string) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, operator.ErrCostLimit) || operator.IsCostLimitError(err, output):
+		return "cost-limit"
+	case operator.IsAuthError(err, output):
+		return "auth-error"
+	default:
+		return "failed"
+	}
+}
+
+// extractContextMD pulls the last fenced ```context.md block out of a wake's
+// output, accepting both shapes the value can take:
+//
+//   - plain assistant text — what operator.RunClaude returns, and what the
+//     cost-limit salvage above reconstructs from events.jsonl
+//   - raw stream-json — the shape chat.ExtractLastContextMD expects
+//
+// Trying the plain form first matters for the salvage path: the recovered
+// transcript is already flattened text, so the stream-json parser would find
+// no JSON lines and report "no block" on a block that is plainly there.
+func extractContextMD(output string) string {
+	if block := chat.ExtractFencedBlock(output, "context.md"); block != "" {
+		return block
+	}
+	return chat.ExtractLastContextMD(output)
 }
 
 // buildDigests collects per-repo open-issue and open-PR snapshots.

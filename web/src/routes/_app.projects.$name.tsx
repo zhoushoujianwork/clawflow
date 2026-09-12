@@ -386,7 +386,11 @@ function ProjectDetail() {
             setLivePilot(parsed as PilotRun)
             // When a wake just finished, refresh the history so the "Latest
             // Pilot wake" summary card below the header catches up too.
-            if (parsed.status === 'success' || parsed.status === 'failed' || parsed.status === 'auth-error') {
+            // Every terminal wake status must be listed here; anything missing
+            // leaves the badge stuck on "running" until the poll below catches
+            // up. 'cost-limit' was added with issue #320.
+            if (parsed.status === 'success' || parsed.status === 'failed' ||
+                parsed.status === 'auth-error' || parsed.status === 'cost-limit') {
               fetchPilotRuns()
             }
           } else {

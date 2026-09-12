@@ -67,6 +67,28 @@ export const DUTY_LABELS: Record<keyof PilotDuties, string> = {
   backlog_hygiene: 'Backlog hygiene',
 }
 
+// wakeStatusDot is the colour of the small dot next to a wake's timestamp.
+// Only 'running' pulses: the previous inline form pulsed everything that was
+// neither success nor failed, so a finished-but-not-successful wake
+// ('auth-error', and 'cost-limit' as of issue #320) sat in the history list
+// looking permanently in-flight.
+export function wakeStatusDot(status: string): string {
+  switch (status) {
+    case 'success':
+      return 'bg-emerald-500'
+    case 'failed':
+      return 'bg-red-500'
+    case 'auth-error':
+      return 'bg-red-500'
+    case 'cost-limit':
+      return 'bg-amber-500'
+    case 'running':
+      return 'bg-amber-500 animate-pulse'
+    default:
+      return 'bg-amber-500'
+  }
+}
+
 export function dutyStatusColour(status: string): string {
   switch (status) {
     case 'action_taken':
@@ -103,7 +125,7 @@ export function PilotRunDetailModal({ run, onClose }: { run: PilotRun; onClose: 
             <span
               className={cn(
                 'inline-block w-2.5 h-2.5 rounded-full shrink-0',
-                run.status === 'success' ? 'bg-emerald-500' : run.status === 'failed' ? 'bg-red-500' : 'bg-amber-500 animate-pulse',
+                wakeStatusDot(run.status),
               )}
             />
             <h2 className="text-sm font-semibold text-foreground">Pilot Run Detail</h2>

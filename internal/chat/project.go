@@ -256,6 +256,19 @@ func ExtractLastTestingMD(output string) string {
 	return extractFencedBlock(collectAssistantText(output), "testing.md")
 }
 
+// CollectAssistantText concatenates every assistant text fragment in a raw
+// stream-json transcript (e.g. the contents of a run's events.jsonl) and
+// returns it as plain text.
+//
+// Exported for callers that need to recover a partial transcript AFTER the
+// claude invocation failed: operator.RunClaude drops its accumulated output
+// on the provider-exhaustion path, so the only surviving copy of whatever the
+// model already wrote is the teed events.jsonl. Pilot uses this to salvage a
+// wake that a billing cap (402) cut short (issue #320).
+func CollectAssistantText(output string) string {
+	return collectAssistantText(output)
+}
+
 // collectAssistantText concatenates every assistant text fragment in
 // a stream-json output. Claude emits assistant text in multiple
 // shapes (inline `content` string, content_block delta, `message`
