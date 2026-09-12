@@ -26,7 +26,7 @@ export interface Run {
   issue_title?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'marker-recovered' | 'skipped-empty' | 'cost-limit'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'disallowed-outcome' | 'marker-recovered' | 'skipped-empty' | 'cost-limit'
   summary?: string
   path: string
   pr_url?: string
@@ -869,6 +869,10 @@ export function StatusBadge({ status, runnerAlive }: { status: Run['status']; ru
           status === 'running' && 'bg-blue-100 text-blue-700 border-blue-200',
           status === 'cancelled' && 'bg-amber-50 text-amber-700 border-amber-200',
           status === 'no-marker' && 'bg-orange-100 text-orange-700 border-orange-200',
+          // Marker present, label outside the operator's whitelist (issue #326):
+          // the comment landed but no terminal label did — same broken-write-back
+          // family as no-marker.
+          status === 'disallowed-outcome' && 'bg-orange-100 text-orange-700 border-orange-200',
           // Salvaged run (issue #307): succeeded, but the outcome label was
           // inferred from the body rather than declared — amber = degraded ok.
           status === 'marker-recovered' && 'bg-amber-100 text-amber-800 border-amber-200',

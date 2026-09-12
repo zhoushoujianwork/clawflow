@@ -223,6 +223,33 @@ func TestParseClaudeStream_MultipleMarkerTurns_LastWins(t *testing.T) {
 	}
 }
 
+// TestParseClaudeStream_QuotedMarkerTurnNotPreferred guards the #75/#326
+// interaction. The multi-turn fallback picks the last turn "containing a
+// marker"; once #326 anchored the marker to the trailing lines, that predicate
+// had to be anchored too. Otherwise a turn that merely quotes a marker mid-body
+// looks like a marker turn, gets chosen over the real verdict turn, and is then
+// parsed as no-marker — turning the #75 fix into a new bug.
+func TestParseClaudeStream_QuotedMarkerTurnNotPreferred(t *testing.T) {
+	fullEval := "## Eval\n\nRepro: 8/10\n\n<!-- clawflow:outcome=agent-evaluated -->\n"
+	// A later turn that discusses the marker but does not end with one.
+	quoting := "顺带说明：正文里缺 `<!-- clawflow:outcome=... -->` 行时会走 no-marker。\n\n已完成。"
+
+	stream := strings.Join([]string{
+		buildAssistantEvent(fullEval), // turn N: the real verdict
+		buildAssistantEvent(quoting),  // turn N+1: quotes a marker, no verdict
+		buildResultEvent(quoting),
+	}, "\n") + "\n"
+
+	got, err := parseClaudeStream(strings.NewReader(stream), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	label, _ := parseOutcome(got)
+	if label != "agent-evaluated" {
+		t.Errorf("parseOutcome label = %q, want %q — a turn that merely quotes a marker was preferred over the real verdict turn", label, "agent-evaluated")
+	}
+}
+
 func TestIsAuthError(t *testing.T) {
 	cases := []struct {
 		name   string

@@ -426,8 +426,11 @@ func TestRun_OutcomeMarker_NotInWhitelist_SkipsLabel(t *testing.T) {
 			return body, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
+	// Must surface as ErrDisallowedOutcome, not nil. Returning nil filed this
+	// as status="success" upstream — the one path applying no label, tripping
+	// no circuit breaker and leaving no greppable failure signal (issue #326).
+	if !errors.Is(err, ErrDisallowedOutcome) {
+		t.Fatalf("err = %v, want ErrDisallowedOutcome", err)
 	}
 	if len(v.comments) != 1 {
 		t.Fatalf("want comment posted even on disallowed outcome, got %d", len(v.comments))
@@ -466,6 +469,86 @@ func TestRun_OutcomeMarker_LastWins(t *testing.T) {
 	}
 	if slices.Contains(v.labels[2], "agent-skipped") {
 		t.Errorf("earlier marker should be ignored; labels = %v", v.labels[2])
+	}
+}
+
+// TestRun_QuotedMarkerInBody_NotTreatedAsVerdict is the end-to-end shape of
+// issue #326: an evaluate-bug body that *documents* the marker mechanism in a
+// repro step, and whose model forgot the real trailing marker. Before the fix
+// the quoted placeholder was the only regex match, so outcome became the
+// literal "...", outcomeAllowed rejected it, no label was applied, and the run
+// was still filed as success — with the quoted marker stripped out of the
+// posted comment for good measure.
+//
+// Post-fix the quoted marker is prose: the run reports no verdict (routing into
+// the no-marker / salvage path) and the body reaches the caller intact.
+func TestRun_QuotedMarkerInBody_NotTreatedAsVerdict(t *testing.T) {
+	op := &Operator{
+		Name:      "evaluate-bug",
+		LockLabel: "lock",
+		Outcomes:  []string{"agent-evaluated", "agent-skipped"},
+	}
+	sub := &Subject{Number: 326}
+	v := newFakeVCS()
+
+	// No Confidence/dimension lines, so salvageOutcome deliberately declines
+	// and the no-marker guard is what we observe.
+	body := "### Repro steps\n\n" +
+		"1. 让某个 issue 的 `evaluate-bug` 连续三次以 `no-marker` 收尾\n" +
+		"   （正文完整、缺 `<!-- clawflow:outcome=... -->` 行）。\n" +
+		"2. 观察 run/end 记 status=success。\n"
+
+	out, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return body, nil
+		},
+	})
+	if !errors.Is(err, ErrNoOutcomeMarker) {
+		t.Fatalf("err = %v, want ErrNoOutcomeMarker (quoted placeholder must not count as a verdict)", err)
+	}
+	if outcome != "" {
+		t.Errorf("outcome = %q, want empty — a marker quoted mid-body is prose", outcome)
+	}
+	if slices.Contains(v.labels[326], "...") {
+		t.Errorf("literal %q label was applied: %v", "...", v.labels[326])
+	}
+	// The quoted marker must survive in the output: stripping it is what
+	// mangled the posted comment down to a pair of empty backticks.
+	if !strings.Contains(out, "<!-- clawflow:outcome=... -->") {
+		t.Errorf("quoted marker was stripped from the body; got:\n%s", out)
+	}
+}
+
+// TestRun_DisallowedOutcome_ConsumesTriggerLabels pins the second half of the
+// #326 fix: when the label is rejected the comment has already landed, so the
+// trigger label must still be consumed. Leaving it in place re-fired the
+// operator on the next pass, paying a second time for a duplicate comment.
+func TestRun_DisallowedOutcome_ConsumesTriggerLabels(t *testing.T) {
+	op := &Operator{
+		Name:      "implement",
+		LockLabel: "lock",
+		Outcomes:  []string{"agent-implemented"},
+	}
+	op.Trigger.LabelsConsumed = []string{"ready-for-agent"}
+	sub := &Subject{Number: 7}
+	v := newFakeVCS()
+	v.labels[7] = []string{"ready-for-agent"}
+
+	_, _, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return "## Done\n\n<!-- clawflow:outcome=bogus-label -->\n", nil
+		},
+	})
+	if !errors.Is(err, ErrDisallowedOutcome) {
+		t.Fatalf("err = %v, want ErrDisallowedOutcome", err)
+	}
+	if len(v.comments) != 1 {
+		t.Fatalf("want the comment posted, got %d", len(v.comments))
+	}
+	if slices.Contains(v.labels[7], "ready-for-agent") {
+		t.Errorf("trigger label was not consumed; labels = %v — the issue will re-fire and pay twice", v.labels[7])
 	}
 }
 
@@ -746,7 +829,42 @@ func TestParseOutcome_Direct(t *testing.T) {
 		{"single", "body\n<!-- clawflow:outcome=agent-evaluated -->\n", "agent-evaluated", "body"},
 		{"label with hyphens and dots", "x\n<!-- clawflow:outcome=v1.2-rc -->\n", "v1.2-rc", "x"},
 		{"trailing whitespace tolerant", "x\n<!-- clawflow:outcome=agent-skipped --> \n", "agent-skipped", "x"},
-		{"multiple — last wins", "<!-- clawflow:outcome=a -->\nfoo\n<!-- clawflow:outcome=b -->\n", "b", "foo"},
+		// "last wins" now only applies among markers inside the trailing
+		// window; an earlier one is prose and stays in the body (issue #326).
+		{"multiple at tail — last wins", "foo\n<!-- clawflow:outcome=a -->\n<!-- clawflow:outcome=b -->\n", "b", "foo\n<!-- clawflow:outcome=a -->"},
+		{"marker mid-body is prose, not a verdict", "<!-- clawflow:outcome=a -->\nfoo\n<!-- clawflow:outcome=b -->\n", "b", "<!-- clawflow:outcome=a -->\nfoo"},
+		// The #326 shape itself: a body that quotes the placeholder in a repro
+		// step and forgets the real trailing marker must yield NO outcome, so
+		// the no-marker/salvage path runs instead of labeling the issue "...".
+		{
+			"quoted placeholder far from tail yields no outcome",
+			"1. 让某个 issue 连续三次以 `no-marker` 收尾\n   （正文完整、缺 `<!-- clawflow:outcome=... -->` 行）。\n\nline3\nline4\nline5\n",
+			"",
+			"1. 让某个 issue 连续三次以 `no-marker` 收尾\n   （正文完整、缺 `<!-- clawflow:outcome=... -->` 行）。\n\nline3\nline4\nline5\n",
+		},
+		// Inline quoting inside a sentence is never a verdict, even at the very
+		// end: the marker must own the whole line. This is what previously
+		// mangled a posted comment down to a pair of empty backticks.
+		{
+			"inline quoted marker on the last line is not a verdict",
+			"缺 `<!-- clawflow:outcome=... -->` 行\n",
+			"",
+			"缺 `<!-- clawflow:outcome=... -->` 行\n",
+		},
+		// Tail tolerance: a stray sign-off after the marker must not discard a
+		// complete, already-paid-for body (the #307/#314 loss shape).
+		{
+			"marker within the trailing window still counts",
+			"body\n\n<!-- clawflow:outcome=agent-evaluated -->\n\nDone.\n",
+			"agent-evaluated",
+			"body\n\nDone.",
+		},
+		{
+			"marker beyond the trailing window does not count",
+			"<!-- clawflow:outcome=agent-evaluated -->\na\nb\nc\n",
+			"",
+			"<!-- clawflow:outcome=agent-evaluated -->\na\nb\nc\n",
+		},
 		// thinking-block stripping (issue #196)
 		{
 			"single thinking block stripped",

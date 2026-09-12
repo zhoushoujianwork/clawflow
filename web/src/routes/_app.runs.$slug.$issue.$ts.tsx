@@ -38,7 +38,7 @@ interface RunMeta {
   issue_title?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'marker-recovered' | 'skipped-empty' | 'cost-limit'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'disallowed-outcome' | 'marker-recovered' | 'skipped-empty' | 'cost-limit'
   summary?: string
   pr_url?: string
   error?: string
@@ -308,6 +308,30 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
     )
   }
 
+  if (meta.status === 'disallowed-outcome') {
+    return (
+      <section className="mb-6">
+        <h2 className="text-sm font-semibold mb-2" style={{ color: 'hsl(var(--error))' }}>
+          Conclusion · disallowed outcome label
+        </h2>
+        <div
+          className="rounded-lg p-4 text-sm whitespace-pre-wrap"
+          style={{
+            background: 'hsl(var(--bg-secondary))',
+            border: '1px solid hsl(var(--border))',
+            borderLeft: '3px solid hsl(var(--error))',
+            color: 'hsl(var(--text-high))',
+          }}
+        >
+          <p className="mb-2">The operator emitted an outcome marker whose label is not in its declared <code>outcomes</code> list. The comment was posted, but no terminal label was applied to the issue.</p>
+          {meta.error && <p className="mb-2 text-xs" style={{ color: 'hsl(var(--text-low))' }}>{meta.error}</p>}
+          <p className="text-xs" style={{ color: 'hsl(var(--text-low))' }}>This run counts toward the circuit breaker (issue #326).</p>
+          {meta.summary && <pre className="mt-3 text-xs overflow-auto">{meta.summary}</pre>}
+        </div>
+      </section>
+    )
+  }
+
   if (meta.status === 'skipped-empty') {
     return (
       <section className="mb-6">
@@ -491,6 +515,8 @@ function StatusBadge({ status }: { status: RunMeta['status'] }) {
     skipped:         { cls: 'bg-muted text-muted-foreground border-border',    Icon: SkipForward },
     cancelled:       { cls: 'bg-amber-50 text-amber-700 border-amber-200',     Icon: Square },
     'no-marker':     { cls: 'bg-orange-100 text-orange-700 border-orange-200', Icon: XCircle },
+    // Marker present, label outside the operator's whitelist (issue #326).
+    'disallowed-outcome': { cls: 'bg-orange-100 text-orange-700 border-orange-200', Icon: XCircle },
     // Salvaged run (issue #307): completed, but with an inferred outcome label.
     'marker-recovered': { cls: 'bg-amber-100 text-amber-800 border-amber-200',  Icon: CheckCircle2 },
     'skipped-empty': { cls: 'bg-orange-50 text-orange-600 border-orange-200',  Icon: SkipForward },

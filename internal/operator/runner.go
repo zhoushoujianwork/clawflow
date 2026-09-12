@@ -33,6 +33,16 @@ const (
 // the caller can handle each case appropriately.
 var ErrNoOutcomeMarker = errors.New("operator produced no outcome marker")
 
+// ErrDisallowedOutcome is returned by Run when the operator emitted a trailing
+// outcome marker whose label is not in the operator's declared Outcomes
+// whitelist. Before issue #326 this only produced a stderr warning while the
+// run was still recorded as status="success" with the bogus label echoed into
+// run/end — so the one path that applies no label, triggers no salvage and
+// trips no circuit breaker was also the only one invisible to log patrol.
+// Recorded as its own status ("disallowed-outcome") and counted by the circuit
+// breaker, since the trigger labels stay put and the issue re-fires otherwise.
+var ErrDisallowedOutcome = errors.New("operator produced a disallowed outcome label")
+
 // repoURL is the canonical ClawFlow open-source repository URL. Extracted as a
 // package-level constant so the promo footer (and any future references) share
 // one source of truth instead of hardcoding the literal in multiple places.
@@ -59,12 +69,40 @@ func appendPromoFooter(body string) string {
 	return body + promoFooter
 }
 
-// outcomeRE matches a "<!-- clawflow:outcome=<label> --> " line. The runner
-// parses these from the operator's stdout to learn which terminal label to
-// add. Word chars + hyphens cover the conventions GitHub/GitLab labels use.
-// We eat the trailing newline so stripping the marker doesn't leave a blank
-// line at the end of the comment.
-var outcomeRE = regexp.MustCompile(`[ \t]*<!--\s*clawflow:outcome=([\w./:-]+)\s*-->[ \t]*\n?`)
+// trailingOutcomeRE matches a whole line consisting of nothing but a
+// "<!-- clawflow:outcome=<label> -->" marker. The runner parses this from the
+// operator's stdout to learn which terminal label to add. Word chars + hyphens
+// (plus . / :) cover the conventions GitHub/GitLab labels use.
+//
+// The anchors are the fix for issue #326. The previous pattern was unanchored
+// and scanned the whole body, so an operator whose output *discusses* the
+// marker mechanism (a routine shape in this repo) had its own prose parsed as
+// a verdict: a repro step quoting the placeholder `<!-- clawflow:outcome=... -->`
+// produced the literal label "..." (`.` is inside the character class), which
+// outcomeAllowed then rejected and silently dropped while the run still logged
+// status=success. Anchoring also stops the marker-stripping pass from eating
+// quoted markers out of the posted comment (the same run shipped a repro step
+// mangled down to a pair of empty backticks).
+var trailingOutcomeRE = regexp.MustCompile(`^[ \t]*<!--\s*clawflow:outcome=([\w./:-]+)\s*-->[ \t\r]*$`)
+
+// markerTailLines is how many trailing non-blank lines may hold the verdict.
+// Strictly the last line would be the literal contract, but models routinely
+// add a stray blank-ish line or a one-word sign-off after the marker, and
+// discarding a complete paid-for body over that is the exact loss #307/#314
+// were about. Three lines is loose enough to absorb that slip and still far
+// away from a marker quoted in the middle of a repro section.
+const markerTailLines = 3
+
+// hasTrailingOutcome reports whether `body` carries a verdict marker in its
+// trailing lines, i.e. whether parseOutcome would extract a label from it.
+// Used by the multi-turn recovery in claude.go so the turn it falls back to is
+// one that actually ended with a verdict — not one that merely mentioned a
+// marker in passing (which, post-#326 anchoring, would then parse as no-marker
+// and throw away the real turn).
+func hasTrailingOutcome(body string) bool {
+	label, _ := parseOutcome(body)
+	return label != ""
+}
 
 // thinkingRE strips literal <thinking>…</thinking> blocks that some Claude
 // variants emit as plain text inside an assistant turn. This is distinct from
@@ -78,19 +116,48 @@ var outcomeRE = regexp.MustCompile(`[ \t]*<!--\s*clawflow:outcome=([\w./:-]+)\s*
 // preferable to silently swallowing the rest of the output.
 var thinkingRE = regexp.MustCompile(`(?s)<thinking>.*?</thinking>\s*`)
 
-// parseOutcome scans `body` for outcome markers, returning the label of the
-// LAST marker (so a model that emits multiple drafts has its final pick
-// honored) and a copy of `body` with every marker line removed.
+// parseOutcome extracts the operator's verdict from `body` and returns the body
+// with the verdict line removed.
 //
-// Returns ("", body) when no marker is found — preserves back-compat for
-// older skills that don't use the marker contract.
+// Only a marker occupying a whole line within the last markerTailLines
+// non-blank lines counts (issue #326). A marker anywhere earlier is prose —
+// documentation, a quoted placeholder, an earlier draft — and is left in the
+// body verbatim. When several qualify (a draft plus its correction, both at the
+// tail) the LAST one wins, preserving the previous "final pick honored" rule
+// for the case it was written for.
+//
+// Returns ("", body) when no trailing marker is found — preserves back-compat
+// for older skills that don't use the marker contract, and routes a body that
+// only *mentions* a marker into the no-marker/salvage path rather than labeling
+// the issue with a fragment of prose.
 func parseOutcome(body string) (label, cleaned string) {
-	matches := outcomeRE.FindAllStringSubmatch(body, -1)
-	if len(matches) == 0 {
+	lines := strings.Split(body, "\n")
+
+	// Walk backwards over the trailing non-blank lines looking for the verdict.
+	markerIdx, scanned := -1, 0
+	for i := len(lines) - 1; i >= 0 && scanned < markerTailLines; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue // blank lines are free: they don't consume the budget
+		}
+		scanned++
+		if m := trailingOutcomeRE.FindStringSubmatch(lines[i]); m != nil {
+			label, markerIdx = m[1], i
+			break
+		}
+	}
+	if markerIdx < 0 {
 		return "", body
 	}
-	label = matches[len(matches)-1][1]
-	cleaned = outcomeRE.ReplaceAllString(body, "")
+
+	// Drop the marker line. If it sat between two blank lines, drop one of them
+	// too — otherwise removing the line welds its neighbours into a
+	// three-newline gap in the middle of the posted comment.
+	rest := lines[markerIdx+1:]
+	if markerIdx > 0 && strings.TrimSpace(lines[markerIdx-1]) == "" &&
+		len(rest) > 0 && strings.TrimSpace(rest[0]) == "" {
+		rest = rest[1:]
+	}
+	cleaned = strings.Join(append(lines[:markerIdx:markerIdx], rest...), "\n")
 	cleaned = thinkingRE.ReplaceAllString(cleaned, "")
 	return label, strings.TrimSpace(cleaned)
 }
@@ -343,27 +410,40 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 		}
 	}
 
+	// disallowed records that the outcome label was rejected by the whitelist,
+	// so it can be reported to the caller AFTER the rest of write-back runs.
+	// Returning early would skip the consumed-label cleanup below and the issue
+	// would re-fire with its trigger labels intact — paying a second time for a
+	// comment that already landed (issue #326).
+	var disallowed error
+
 	if outcome != "" {
 		emitStage(opts.StageFunc, StageApplyingLabel)
 		if !outcomeAllowed(op, outcome) {
 			fmt.Fprintf(os.Stderr,
 				"  ⚠ operator %q produced disallowed outcome %q (allowed: %v); skipping label add\n",
 				op.Name, outcome, op.Outcomes)
+			disallowed = fmt.Errorf("%w: %q not in %v (operator %q)", ErrDisallowedOutcome, outcome, op.Outcomes, op.Name)
 		} else if err := v.AddLabel(opts.Repo, sub.Number, outcome); err != nil {
 			return fmt.Errorf("add outcome label %q: %w", outcome, err)
 		} else {
 			fmt.Fprintf(os.Stderr, "  ✓ outcome label %q added\n", outcome)
-			// Only remove labels the operator explicitly declares as one-shot
-			// flow markers (LabelsConsumed). Persistent classification labels
-			// used as triggers (e.g. "bug"/"feat") stay put so type labels and
-			// flow-status labels remain independent (issue #292).
-			if len(op.Trigger.LabelsConsumed) > 0 {
-				if err := v.RemoveLabel(opts.Repo, sub.Number, op.Trigger.LabelsConsumed...); err != nil {
-					fmt.Fprintf(os.Stderr, "  ⚠ consumed label cleanup failed: %v\n", err)
-				} else {
-					fmt.Fprintf(os.Stderr, "  ✓ consumed labels removed: %v\n", op.Trigger.LabelsConsumed)
-				}
-			}
+		}
+	}
+
+	// Only remove labels the operator explicitly declares as one-shot flow
+	// markers (LabelsConsumed). Persistent classification labels used as
+	// triggers (e.g. "bug"/"feat") stay put so type labels and flow-status
+	// labels remain independent (issue #292).
+	//
+	// Runs whenever the comment landed, including the disallowed-outcome case:
+	// the operator did its work and the body is on the issue, so leaving the
+	// trigger label in place only buys a duplicate comment and a second bill.
+	if outcome != "" && len(op.Trigger.LabelsConsumed) > 0 {
+		if err := v.RemoveLabel(opts.Repo, sub.Number, op.Trigger.LabelsConsumed...); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ consumed label cleanup failed: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  ✓ consumed labels removed: %v\n", op.Trigger.LabelsConsumed)
 		}
 	}
 
@@ -378,7 +458,10 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 		}
 	}
 
-	return nil
+	// Reported last so the comment post and the consumed-label cleanup above
+	// both complete first: the run IS degraded (no terminal label landed) but
+	// everything recoverable has been recovered.
+	return disallowed
 }
 
 // outcomeAllowed reports whether `label` is in the operator's declared
