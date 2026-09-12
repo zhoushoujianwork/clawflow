@@ -35,6 +35,32 @@ func Matches(sub *Subject, op *Operator) bool {
 	return ok
 }
 
+// ExcludedBy reports the excluded label that blocked `op` from firing on `sub`,
+// but only when that exclusion is the SOLE reason for the miss: target,
+// required / required_any labels and the applies_to structural gate must all
+// pass. Callers use it to log why an operator stayed silent on an issue whose
+// trigger labels look satisfied (issue #323) — the case where a human adds a
+// label, nothing happens, and there is no trace to grep.
+//
+// Returns ("", false) when the subject matches, or when it was rejected by some
+// other rule (in which case the exclusion list was never the deciding factor).
+func ExcludedBy(sub *Subject, op *Operator) (string, bool) {
+	// Re-check everything except the exclusion list. Cheaper and less
+	// error-prone than duplicating the gates: clear LabelsExcluded on a shallow
+	// copy and see whether the rest of the trigger accepts the subject.
+	relaxed := *op
+	relaxed.Trigger.LabelsExcluded = nil
+	if ok, _ := MatchesWithReason(sub, &relaxed); !ok {
+		return "", false
+	}
+	for _, ex := range op.Trigger.LabelsExcluded {
+		if sub.HasLabel(ex) {
+			return ex, true
+		}
+	}
+	return "", false
+}
+
 // MatchesWithReason is Matches plus a human-readable reason string explaining
 // the decision. On match the reason is "match"; on miss it names the rule
 // that rejected the subject (e.g. `missing required label "feat"`). Used by

@@ -691,6 +691,17 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 			ok, reason := operator.MatchesWithReason(sub, op)
 			if !ok {
 				debugf("  ✗ %s: %s", op.Name, reason)
+				// An exclusion-only miss is the one skip reason a human can
+				// trigger by hand and get zero feedback on: the trigger labels
+				// are all there, so the operator "should" fire, but a leftover
+				// agent-* label silently vetoes it (issue #323). Log those to
+				// run.log so "I labelled it and nothing ran" is one grep away.
+				// Scoped to exclusion-only misses on purpose — logging every
+				// (issue × operator) rejection would flood run.log.
+				if by, excluded := operator.ExcludedBy(sub, op); excluded {
+					runLog.Info("run/skip_excluded",
+						"repo", fullName, "issue", sub.Number, "op", op.Name, "by", by)
+				}
 				continue
 			}
 			// Drop "deterministic skip" cases from pending so they don't
@@ -947,6 +958,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		freshSub.Labels = freshLabels
 		if ok, reason := operator.MatchesWithReason(&freshSub, j.op); !ok {
 			fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
+			if by, excluded := operator.ExcludedBy(&freshSub, j.op); excluded {
+				runLog.Info("run/skip_excluded",
+					"repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "by", by, "when", "post_poll")
+			}
 			return false, false
 		}
 	}
@@ -1205,7 +1220,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			runLog.Warn("run/auth_error", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", runErr.Error())
 			fmt.Fprintf(os.Stderr, "%s ✗ claude auth error 403 (check session/API key, NOT retrying): %v\n", prefix, runErr)
 		} else if isNoMarker {
-			fmt.Fprintf(os.Stderr, "%s ✗ claude produced no outcome marker (will count toward circuit breaker): %v\n", prefix, runErr)
+			fmt.Fprintf(os.Stderr, "%s ✗ claude produced no outcome marker (write-back defect, NOT counted toward circuit breaker): %v\n", prefix, runErr)
 		} else if isOutputLimit {
 			runLog.Warn("run/output_limit", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", runErr.Error())
 			fmt.Fprintf(os.Stderr, "%s ✗ claude output token limit exceeded (raise max_output_tokens, NOT retrying): %v\n", prefix, runErr)
@@ -1263,9 +1278,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rm.Error = runErr.Error()
 	case isNoMarker:
 		// No-marker runs are recorded as "no-marker" (distinct from generic
-		// "failed") so the dashboard can surface the specific cause. They DO
-		// count toward the circuit breaker — the issue stays unlabeled and
-		// will re-fire on every subsequent pass otherwise (issue #143).
+		// "failed") so the dashboard can surface the specific cause. They do
+		// NOT count toward the circuit breaker (issue #323): the run completed
+		// and produced a body, only the write-back marker was missing, so
+		// agent-failed would freeze the issue for every operator that excludes
+		// that label instead of letting a human push it forward. The re-fire
+		// loop the counting was meant to bound (issue #143) is now handled by
+		// the salvage path ("marker-recovered", issue #307).
 		rm.Status = "no-marker"
 		rm.Error = runErr.Error()
 	case runErr != nil:
@@ -1389,8 +1408,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		fmt.Printf("%s ✗ auth error (check session/API key)\n", prefix)
 		return false, false
 	case "no-marker":
-		fmt.Printf("%s ✗ no outcome marker (circuit breaker counting)\n", prefix)
-		checkCircuitBreaker(j, prefix)
+		// Do NOT call checkCircuitBreaker: a missing marker line is a
+		// write-back defect, not an unprocessable issue (issue #323).
+		fmt.Printf("%s ✗ no outcome marker (not counted toward circuit breaker)\n", prefix)
 		return false, false
 	case "output-limit":
 		fmt.Printf("%s ✗ output token limit (raise max_output_tokens; circuit breaker counting)\n", prefix)
