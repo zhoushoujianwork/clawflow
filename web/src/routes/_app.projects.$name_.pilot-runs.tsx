@@ -6,6 +6,7 @@ import { cn } from '../lib/utils'
 import {
   type PilotRun,
   PilotRunDetailModal,
+  wakeStatusDot,
 } from '../components/PilotRun'
 
 // Pilot wake history — every recorded wake for one project, with the
@@ -105,7 +106,7 @@ function PilotRunsPage() {
                 <span
                   className={cn(
                     'inline-block w-2 h-2 rounded-full shrink-0',
-                    run.status === 'success' ? 'bg-emerald-500' : run.status === 'failed' ? 'bg-red-500' : 'bg-amber-500 animate-pulse',
+                    wakeStatusDot(run.status),
                   )}
                 />
                 <span className="text-xs text-muted-foreground tabular-nums">

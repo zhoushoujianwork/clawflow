@@ -1928,16 +1928,21 @@ func WriteProjects() error {
 // of Pilot's stdout. Absent on legacy / failed-to-parse runs, in which
 // case the UI falls back to the free-form Summary.
 type PilotRunMeta struct {
-	Project   string        `json:"project"`
-	StartedAt time.Time     `json:"started_at"`
-	EndedAt   *time.Time    `json:"ended_at,omitempty"`
-	Status    string        `json:"status"` // "running", "success", "failed"
-	Result    string        `json:"result,omitempty"`
-	Error     string        `json:"error,omitempty"`
-	Summary   string        `json:"summary,omitempty"`
-	Usage     *Usage        `json:"usage,omitempty"`
-	Duties    *PilotDuties  `json:"duties,omitempty"`
-	Verdict   string        `json:"verdict,omitempty"`
+	Project   string     `json:"project"`
+	StartedAt time.Time  `json:"started_at"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"`
+	// Status is "running", "success", "failed", "auth-error", or "cost-limit".
+	// "cost-limit" (HTTP 402 billing cap) is separate from "failed" because it
+	// is account-level rather than project-level: it must not count toward the
+	// consecutive-failure alert and must not consume the project's cooldown
+	// (issue #320).
+	Status  string       `json:"status"`
+	Result  string       `json:"result,omitempty"`
+	Error   string       `json:"error,omitempty"`
+	Summary string       `json:"summary,omitempty"`
+	Usage   *Usage       `json:"usage,omitempty"`
+	Duties  *PilotDuties `json:"duties,omitempty"`
+	Verdict string       `json:"verdict,omitempty"`
 }
 
 // PilotDuty is the shape every actionable duty (pr_triage, monitoring,

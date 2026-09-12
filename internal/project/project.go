@@ -480,6 +480,25 @@ func MarkWoken(name string) error {
 	return save(p)
 }
 
+// SetLastWokenAt overwrites LastWokenAt with an explicit timestamp (RFC3339,
+// or "" to clear it). Used to ROLL BACK the stamp MarkWoken laid down before a
+// wake that then died on an account-level billing cap: a 402 wake does no work
+// (often 3–4 seconds, $0) yet would otherwise burn the project's full cooldown
+// — up to two hours of silence bought with zero attempts (issue #320).
+//
+// Deliberately not folded into MarkWoken: that one also clears
+// LastSkipReason / LastSkipAt, which a rollback must leave exactly as it found
+// them.
+func SetLastWokenAt(name, ts string) error {
+	p, err := Get(name)
+	if err != nil {
+		return err
+	}
+	p.Automation.LastWokenAt = ts
+	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return save(p)
+}
+
 // MarkSkipped records why the most recent Schedule pass declined to
 // wake this project's Pilot. Persisted so the dashboard can show
 // "skipped: <reason>" instead of "no recent activity (silent)".
