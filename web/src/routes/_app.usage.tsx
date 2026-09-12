@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { Receipt } from 'lucide-react'
+import { Bot, Receipt } from 'lucide-react'
 import { type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 
@@ -174,9 +174,12 @@ function UsagePage() {
   const viewByRepo = activeDay?.by_repo ?? activePeriod?.by_repo ?? summary?.by_repo ?? {}
   const viewByModel = activeDay?.by_model ?? activePeriod?.by_model ?? summary?.by_model ?? {}
 
+  // Pilot wakes are namespaced "pilot:<project>" by the backend (issue #321)
+  // so their cost — an order of magnitude above a single operator run — is
+  // visible instead of folded into an operator bucket.
   const operatorRows = useMemo(() => {
     return Object.entries(viewByOperator)
-      .map(([name, v]) => ({ name, ...v }))
+      .map(([name, v]) => ({ name, isPilot: name.startsWith('pilot:'), ...v }))
       .sort((a, b) => b.total_cost_usd - a.total_cost_usd)
   }, [viewByOperator])
 
@@ -186,8 +189,12 @@ function UsagePage() {
       .sort((a, b) => b.cost_usd - a.cost_usd)
   }, [viewByModel])
 
+  // Drop nameless buckets: a Pilot wake spans every repo in its project so
+  // it is intentionally not attributed to one. New summaries omit the key
+  // entirely; this also cleans up usage.json files written before the fix.
   const repoRows = useMemo(() => {
     return Object.entries(viewByRepo)
+      .filter(([name]) => name !== '')
       .map(([name, v]) => ({ name, ...v }))
       .sort((a, b) => b.total_cost_usd - a.total_cost_usd)
   }, [viewByRepo])
@@ -245,6 +252,7 @@ function UsagePage() {
                 label="Total cost"
                 value={fmtCost(viewTotals.total_cost_usd)}
                 tone="brand"
+                hint="includes Pilot wakes"
               />
               <StatCard
                 label="Total tokens (in + out)"
@@ -267,7 +275,7 @@ function UsagePage() {
             </Section>
           )}
 
-          <Section title="By operator">
+          <Section title="By operator (Pilot wakes listed as pilot:&lt;project&gt;)">
             <table className="w-full text-sm">
               <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
                 <tr>
@@ -283,7 +291,16 @@ function UsagePage() {
               <tbody className="divide-y divide-border tabular-nums">
                 {operatorRows.map(r => (
                   <tr key={r.name} className="hover:bg-secondary/20">
-                    <td className="px-4 py-2 font-mono text-foreground">{r.name}</td>
+                    <td className="px-4 py-2 font-mono text-foreground">
+                      {r.isPilot ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <Bot className="w-3.5 h-3.5 text-brand shrink-0" />
+                          <span>{r.name}</span>
+                        </span>
+                      ) : (
+                        r.name
+                      )}
+                    </td>
                     <td className="px-4 py-2 text-right text-muted-foreground">{r.runs}</td>
                     <td className="px-4 py-2 text-right text-foreground font-medium">
                       {fmtCost(r.total_cost_usd)}
@@ -462,16 +479,19 @@ function StatCard({
   label,
   value,
   tone = 'neutral',
+  hint,
 }: {
   label: string
   value: string
   tone?: 'neutral' | 'brand'
+  hint?: string
 }) {
   const valueCls = tone === 'brand' ? 'text-brand' : 'text-foreground'
   return (
     <div className="bg-card border border-border rounded-xl p-3">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className={`text-2xl font-bold mt-0.5 tabular-nums ${valueCls}`}>{value}</div>
+      {hint && <div className="text-[11px] text-muted-foreground mt-0.5">{hint}</div>}
     </div>
   )
 }

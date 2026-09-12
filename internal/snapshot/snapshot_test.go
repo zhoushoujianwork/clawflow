@@ -229,6 +229,193 @@ func TestUsageSummaryAggregation(t *testing.T) {
 	}
 }
 
+// TestUsageSummaryIncludesPilot is the regression test for issue #321:
+// Pilot wakes live in data/pilot-runs/ and were absent from usage.json
+// entirely, under-reporting total spend by ~3x. Asserts pilot cost lands
+// in totals, gets its own by_operator key, and does not pollute any
+// operator bucket or produce a nameless by_repo row.
+func TestUsageSummaryIncludesPilot(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	now := time.Now().UTC()
+	operatorEntries := []RunIndexEntry{
+		{
+			RunMeta: RunMeta{
+				Operator:    "evaluate-bug",
+				Repo:        "owner/repo-a",
+				IssueNumber: 1,
+				StartedAt:   now,
+				Status:      "success",
+				Usage: &Usage{
+					TotalCostUSD: 1.00,
+					InputTokens:  100,
+					OutputTokens: 50,
+					ModelUsage:   map[string]ModelUsage{"opus": {InputTokens: 100, OutputTokens: 50, CostUSD: 1.00}},
+				},
+			},
+		},
+	}
+	pilotEntries := []PilotRunIndexEntry{
+		{
+			PilotRunMeta: PilotRunMeta{
+				Project:   "clawflow",
+				StartedAt: now,
+				Status:    "success",
+				Usage: &Usage{
+					TotalCostUSD: 14.00,
+					InputTokens:  900,
+					OutputTokens: 400,
+					ModelUsage:   map[string]ModelUsage{"opus": {InputTokens: 900, OutputTokens: 400, CostUSD: 14.00}},
+				},
+			},
+			Path: "./data/pilot-runs/clawflow/x/",
+		},
+		{
+			// In-flight wake with no usage yet — must be dropped.
+			PilotRunMeta: PilotRunMeta{Project: "clawflow", StartedAt: now, Status: "running"},
+		},
+	}
+
+	merged := append(operatorEntries, PilotEntriesAsRuns(pilotEntries)...)
+	if err := WriteUsageSummary(merged, 1); err != nil {
+		t.Fatalf("WriteUsageSummary: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(DataDir(), "usage.json"))
+	if err != nil {
+		t.Fatalf("read usage.json: %v", err)
+	}
+	var sum UsageSummary
+	if err := json.Unmarshal(data, &sum); err != nil {
+		t.Fatalf("unmarshal usage.json: %v", err)
+	}
+
+	if sum.Totals.Runs != 2 {
+		t.Errorf("Totals.Runs = %d, want 2 (1 operator + 1 pilot, in-flight wake ignored)", sum.Totals.Runs)
+	}
+	if !floatEq(sum.Totals.TotalCostUSD, 15.00) {
+		t.Errorf("Totals.TotalCostUSD = %v, want 15.00 (pilot cost must be included)", sum.Totals.TotalCostUSD)
+	}
+
+	pilotKey := PilotOperatorPrefix + "clawflow"
+	pk := sum.ByOperator[pilotKey]
+	if pk.Runs != 1 || !floatEq(pk.TotalCostUSD, 14.00) {
+		t.Errorf("ByOperator[%s] = %+v, want runs=1 cost=14.00", pilotKey, pk)
+	}
+	// Pilot must not be folded into an operator bucket.
+	if op := sum.ByOperator["evaluate-bug"]; op.Runs != 1 || !floatEq(op.TotalCostUSD, 1.00) {
+		t.Errorf("ByOperator[evaluate-bug] = %+v, want runs=1 cost=1.00 (pilot must not leak in)", op)
+	}
+	// A wake spans every repo in the project, so it gets no by_repo row.
+	if _, ok := sum.ByRepo[""]; ok {
+		t.Error("ByRepo has a nameless bucket — pilot entries must be excluded from by_repo")
+	}
+	if a := sum.ByRepo["owner/repo-a"]; a.Runs != 1 || !floatEq(a.TotalCostUSD, 1.00) {
+		t.Errorf("ByRepo[owner/repo-a] = %+v, want runs=1 cost=1.00", a)
+	}
+	if m := sum.ByModel["opus"]; !floatEq(m.CostUSD, 15.00) {
+		t.Errorf("ByModel[opus].CostUSD = %v, want 15.00", m.CostUSD)
+	}
+
+	// Period + daily trend must agree with the all-time totals.
+	if len(sum.Periods) != 1 {
+		t.Fatalf("len(Periods) = %d, want 1", len(sum.Periods))
+	}
+	p := sum.Periods[0]
+	if !floatEq(p.Totals.TotalCostUSD, 15.00) {
+		t.Errorf("Periods[0].Totals.TotalCostUSD = %v, want 15.00", p.Totals.TotalCostUSD)
+	}
+	if _, ok := p.ByRepo[""]; ok {
+		t.Error("Periods[0].ByRepo has a nameless bucket")
+	}
+	today := now.Format("2006-01-02")
+	var found bool
+	for _, d := range p.DailyTrend {
+		if d.Date != today {
+			continue
+		}
+		found = true
+		if d.Runs != 2 || !floatEq(d.TotalCostUSD, 15.00) {
+			t.Errorf("DailyTrend[%s] = runs=%d cost=%v, want runs=2 cost=15.00", today, d.Runs, d.TotalCostUSD)
+		}
+		if _, ok := d.ByRepo[""]; ok {
+			t.Errorf("DailyTrend[%s].ByRepo has a nameless bucket", today)
+		}
+	}
+	if !found {
+		t.Errorf("DailyTrend has no point for %s", today)
+	}
+}
+
+// TestPilotEntriesAsRunsPreservesFields asserts the adapter carries the
+// timing/status fields the aggregator keys off, and namespaces per project.
+func TestPilotEntriesAsRunsPreservesFields(t *testing.T) {
+	started := time.Now().UTC().Add(-time.Hour)
+	ended := started.Add(30 * time.Minute)
+	out := PilotEntriesAsRuns([]PilotRunIndexEntry{
+		{
+			PilotRunMeta: PilotRunMeta{
+				Project:   "bbclaw",
+				StartedAt: started,
+				EndedAt:   &ended,
+				Status:    "success",
+				Usage:     &Usage{TotalCostUSD: 2.5},
+			},
+			Path: "./data/pilot-runs/bbclaw/y/",
+		},
+	})
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1", len(out))
+	}
+	got := out[0]
+	if got.Operator != "pilot:bbclaw" {
+		t.Errorf("Operator = %q, want %q", got.Operator, "pilot:bbclaw")
+	}
+	if got.Repo != "" {
+		t.Errorf("Repo = %q, want empty (a wake spans every repo)", got.Repo)
+	}
+	if !got.StartedAt.Equal(started) {
+		t.Errorf("StartedAt = %v, want %v", got.StartedAt, started)
+	}
+	if got.EndedAt == nil || !got.EndedAt.Equal(ended) {
+		t.Errorf("EndedAt = %v, want %v", got.EndedAt, ended)
+	}
+	if got.Status != "success" || got.Path != "./data/pilot-runs/bbclaw/y/" {
+		t.Errorf("Status/Path = %q/%q, want success/./data/pilot-runs/bbclaw/y/", got.Status, got.Path)
+	}
+}
+
+// TestUsageEntriesWithPilotWalksDisk asserts the merge helper picks pilot
+// wakes off disk (the path both call sites use) rather than needing the
+// caller to pre-collect them.
+func TestUsageEntriesWithPilotWalksDisk(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	runDir := PilotRunDir("pop", time.Now().UTC())
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := WritePilotRunMeta(runDir, PilotRunMeta{
+		Project:   "pop",
+		StartedAt: time.Now().UTC(),
+		Status:    "success",
+		Usage:     &Usage{TotalCostUSD: 7.5},
+	}); err != nil {
+		t.Fatalf("WritePilotRunMeta: %v", err)
+	}
+
+	merged := UsageEntriesWithPilot(nil)
+	if len(merged) != 1 {
+		t.Fatalf("len(merged) = %d, want 1", len(merged))
+	}
+	if merged[0].Operator != "pilot:pop" || !floatEq(merged[0].Usage.TotalCostUSD, 7.5) {
+		t.Errorf("merged[0] = operator=%q cost=%v, want pilot:pop / 7.5",
+			merged[0].Operator, merged[0].Usage.TotalCostUSD)
+	}
+}
+
 func joinLines(lines []string) string {
 	out := ""
 	for _, l := range lines {

@@ -423,6 +423,12 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	if _, ierr := snapshot.WritePilotRunsIndex(20); ierr != nil {
 		fmt.Fprintf(os.Stderr, "[pilot] %s: snapshot pilot-runs index: %v\n", p.Name, ierr)
 	}
+	// usage.json is written in Phase 3 of `clawflow run`, before Pilot wakes
+	// in Phase 4 — refresh it here so this wake's cost lands on the dashboard
+	// in the same pass instead of one pass late (issue #321).
+	if uerr := snapshot.RefreshUsageSummary(cfg.Settings.BillingCycleDay); uerr != nil {
+		fmt.Fprintf(os.Stderr, "[pilot] %s: snapshot usage summary: %v\n", p.Name, uerr)
+	}
 
 	// Consecutive failure threshold alerting: when the last N wakes (including
 	// this one) all ended in failure, emit an ERROR so patrol grep surfaces it.

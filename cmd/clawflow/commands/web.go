@@ -178,7 +178,9 @@ here — run 'clawflow run' first if you want fresh data.`,
 				if cfg, err := config.Load(); err == nil {
 					billingDay = cfg.Settings.BillingCycleDay
 				}
-				if err := snapshot.WriteUsageSummary(allEntries, billingDay); err != nil {
+				// Merge Pilot wakes in — they are the priciest runs and
+				// were absent from usage.json entirely (issue #321).
+				if err := snapshot.WriteUsageSummary(snapshot.UsageEntriesWithPilot(allEntries), billingDay); err != nil {
 					fmt.Fprintf(os.Stderr, "⚠ snapshot usage summary on startup: %v\n", err)
 				}
 			}

@@ -435,7 +435,10 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot runs index: %v\n", err)
 	}
-	if err := snapshot.WriteUsageSummary(allEntries, cfg.Settings.BillingCycleDay); err != nil {
+	// Pilot wakes live in a parallel tree (data/pilot-runs/) and are the most
+	// expensive class of run, so they must be merged in or usage.json
+	// under-reports total spend by ~3x (issue #321).
+	if err := snapshot.WriteUsageSummary(snapshot.UsageEntriesWithPilot(allEntries), cfg.Settings.BillingCycleDay); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot usage summary: %v\n", err)
 	}
 	if err := snapshot.WritePending(pending); err != nil {
