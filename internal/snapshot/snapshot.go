@@ -473,10 +473,77 @@ type DailyPoint struct {
 	ByModel      map[string]ModelAggregate `json:"by_model,omitempty"`
 }
 
+// PilotOperatorPrefix namespaces Pilot wakes inside the by_operator
+// breakdown. A wake costs an order of magnitude more than a single
+// operator run (~$14 vs ~$1), so it gets its own bucket per project
+// instead of being folded into an existing operator key — mixing them
+// would distort per-operator cost analysis.
+const PilotOperatorPrefix = "pilot:"
+
+// PilotEntriesAsRuns adapts Pilot wakes into the RunIndexEntry shape so
+// WriteUsageSummary can aggregate both pipelines without changing its
+// signature. Wakes with no usage yet (in flight, or killed before the
+// terminal "result" event) are dropped, mirroring how WriteUsageSummary
+// skips usage-less operator runs.
+//
+// Repo is deliberately left empty: one wake spans every repo in the
+// project, so attributing its cost to a single repo would be wrong.
+// WriteUsageSummary skips empty repo keys for that reason.
+func PilotEntriesAsRuns(pilot []PilotRunIndexEntry) []RunIndexEntry {
+	out := make([]RunIndexEntry, 0, len(pilot))
+	for _, p := range pilot {
+		if p.Usage == nil {
+			continue
+		}
+		out = append(out, RunIndexEntry{
+			RunMeta: RunMeta{
+				Operator:  PilotOperatorPrefix + p.Project,
+				StartedAt: p.StartedAt,
+				EndedAt:   p.EndedAt,
+				Status:    p.Status,
+				Summary:   p.Summary,
+				Usage:     p.Usage,
+			},
+			Path: p.Path,
+		})
+	}
+	return out
+}
+
+// UsageEntriesWithPilot returns the operator entries plus every Pilot wake
+// on disk, adapted to the same shape — the full input WriteUsageSummary
+// needs to report total spend. Pilot was previously invisible in
+// usage.json even though it is the most expensive class of run (issue #321).
+//
+// Walking data/pilot-runs/ here also backfills usage into any pilot
+// meta.json that predates usage capture, exactly like collectRunEntries
+// does for operator runs.
+func UsageEntriesWithPilot(operatorEntries []RunIndexEntry) []RunIndexEntry {
+	pilot := PilotEntriesAsRuns(collectPilotRunEntries(filepath.Join(DataDir(), "pilot-runs")))
+	merged := make([]RunIndexEntry, 0, len(operatorEntries)+len(pilot))
+	merged = append(merged, operatorEntries...)
+	merged = append(merged, pilot...)
+	return merged
+}
+
+// RefreshUsageSummary rebuilds data/usage.json from both run trees without
+// rewriting runs.json / pilot-runs.json. Used at the end of a Pilot wake:
+// `clawflow run` writes usage.json in Phase 3, BEFORE Pilot runs in Phase 4,
+// so without this the wake's spend would stay invisible until the next pass.
+func RefreshUsageSummary(billingCycleDay int) error {
+	entries := collectRunEntries(filepath.Join(DataDir(), "runs"))
+	return WriteUsageSummary(UsageEntriesWithPilot(entries), billingCycleDay)
+}
+
 // WriteUsageSummary aggregates usage across the supplied entries and writes
 // data/usage.json. billingCycleDay (1-28) controls when monthly periods start;
 // 0 defaults to 1 (calendar month). Entries without usage (run still in flight,
 // or pre-feature data on disk) are simply skipped.
+//
+// Entries with an empty Repo (Pilot wakes — see PilotEntriesAsRuns) still
+// count toward Totals / ByOperator / ByModel but are left out of ByRepo,
+// so the per-repo table never carries a nameless bucket. ByRepo therefore
+// sums to less than Totals whenever Pilot ran.
 func WriteUsageSummary(entries []RunIndexEntry, billingCycleDay int) error {
 	if billingCycleDay < 1 || billingCycleDay > 28 {
 		billingCycleDay = 1
@@ -504,9 +571,11 @@ func WriteUsageSummary(entries []RunIndexEntry, billingCycleDay int) error {
 		op := sum.ByOperator[e.Operator]
 		addUsage(&op, u)
 		sum.ByOperator[e.Operator] = op
-		repo := sum.ByRepo[e.Repo]
-		addUsage(&repo, u)
-		sum.ByRepo[e.Repo] = repo
+		if e.Repo != "" {
+			repo := sum.ByRepo[e.Repo]
+			addUsage(&repo, u)
+			sum.ByRepo[e.Repo] = repo
+		}
 		for name, m := range u.ModelUsage {
 			cur := sum.ByModel[name]
 			cur.CostUSD += m.CostUSD
@@ -535,9 +604,11 @@ func WriteUsageSummary(entries []RunIndexEntry, billingCycleDay int) error {
 		pop := ps.ByOperator[e.Operator]
 		addUsage(&pop, u)
 		ps.ByOperator[e.Operator] = pop
-		prepo := ps.ByRepo[e.Repo]
-		addUsage(&prepo, u)
-		ps.ByRepo[e.Repo] = prepo
+		if e.Repo != "" {
+			prepo := ps.ByRepo[e.Repo]
+			addUsage(&prepo, u)
+			ps.ByRepo[e.Repo] = prepo
+		}
 		for name, m := range u.ModelUsage {
 			cur := ps.ByModel[name]
 			cur.CostUSD += m.CostUSD
@@ -608,9 +679,11 @@ func buildDailyTrend(entries []RunIndexEntry, periodStart, periodEnd time.Time) 
 		addUsage(&op, e.Usage)
 		dp.ByOperator[e.Operator] = op
 
-		repo := dp.ByRepo[e.Repo]
-		addUsage(&repo, e.Usage)
-		dp.ByRepo[e.Repo] = repo
+		if e.Repo != "" {
+			repo := dp.ByRepo[e.Repo]
+			addUsage(&repo, e.Usage)
+			dp.ByRepo[e.Repo] = repo
+		}
 
 		for name, m := range e.Usage.ModelUsage {
 			cur := dp.ByModel[name]
