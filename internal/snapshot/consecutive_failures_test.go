@@ -89,11 +89,53 @@ func TestConsecutiveFailuresIgnoresInfraRefusals(t *testing.T) {
 	t.Run("genuine failures still count", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
 		writeRunWithStatus(t, repo, 401, 1, "failed")
-		writeRunWithStatus(t, repo, 401, 2, "no-marker")
+		writeRunWithStatus(t, repo, 401, 2, "failed")
 		writeRunWithStatus(t, repo, 401, 3, "failed")
 		writeRunWithStatus(t, repo, 401, 4, "success")
 		if got := ConsecutiveFailures(repo, 401); got != 3 {
 			t.Errorf("ConsecutiveFailures = %d, want 3 (real failures must still arm the breaker)", got)
+		}
+	})
+
+	// Issue #323: no-marker joins the infra-refusal family. The operator ran to
+	// completion and produced a paid-for body; only the write-back marker was
+	// missing. Escalating that to agent-failed froze the issue for the 7
+	// operators that exclude the label, including `implement` — the very
+	// operator a human uses to unblock it.
+	t.Run("three no-marker passes stay below the default threshold", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		// The exact shape from daboluocc/daboluo-office#24: three consecutive
+		// evaluate-bug runs, every body complete, every one missing the marker.
+		writeRunWithStatus(t, repo, 323, 1, "no-marker")
+		writeRunWithStatus(t, repo, 323, 3, "no-marker")
+		writeRunWithStatus(t, repo, 323, 5, "no-marker")
+		if got := ConsecutiveFailures(repo, 323); got >= 3 {
+			t.Errorf("ConsecutiveFailures = %d, want < 3 (a missing marker must not trip max_consecutive_failures)", got)
+		}
+	})
+
+	t.Run("no-marker breaks the streak like other write-back refusals", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		// Newest first: no-marker on top of two genuine failures. Same
+		// break-the-streak semantics as cost-limit / rate-limited / auth-error.
+		writeRunWithStatus(t, repo, 324, 1, "no-marker")
+		writeRunWithStatus(t, repo, 324, 2, "failed")
+		writeRunWithStatus(t, repo, 324, 3, "failed")
+		if got := ConsecutiveFailures(repo, 324); got != 0 {
+			t.Errorf("ConsecutiveFailures = %d, want 0 (no-marker must not extend a failure streak)", got)
+		}
+	})
+
+	t.Run("skipped-empty and output-limit keep counting", func(t *testing.T) {
+		for _, status := range []string{"skipped-empty", "output-limit"} {
+			t.Run(status, func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				writeRunWithStatus(t, repo, 402, 1, status)
+				writeRunWithStatus(t, repo, 402, 2, "failed")
+				if got := ConsecutiveFailures(repo, 402); got != 2 {
+					t.Errorf("ConsecutiveFailures with newest=%q = %d, want 2 (behavior unchanged)", status, got)
+				}
+			})
 		}
 	})
 }

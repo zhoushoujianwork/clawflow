@@ -1727,6 +1727,14 @@ func reconcilePilotRunsAt(pilotRoot string, staleAfter time.Duration) (int, erro
 // the issue — "rate-limited", "auth-error", "cost-limit" — break the streak
 // instead of extending it. Counting them lets one provider outage label every
 // queued issue agent-failed (issues #204, #308).
+//
+// "no-marker" belongs to that same family (issue #323): the operator ran to
+// completion and produced a paid-for body, and the only thing that broke was
+// the write-back step (the marker line). It has its own salvage path
+// ("marker-recovered", issue #307), so escalating it to agent-failed freezes
+// the issue for the 7 operators that exclude that label — including
+// `implement`, which is exactly the operator a human reaches for to unblock
+// the issue by hand.
 func ConsecutiveFailures(repo string, issueNum int) int {
 	slug := strings.ReplaceAll(repo, "/", "__")
 	issueDir := filepath.Join(DataDir(), "runs", slug, fmt.Sprintf("issue-%d", issueNum))
@@ -1768,7 +1776,7 @@ func ConsecutiveFailures(repo string, issueNum int) int {
 	})
 	count := 0
 	for _, r := range runs {
-		if r.status != "failed" && r.status != "no-marker" && r.status != "skipped-empty" && r.status != "output-limit" {
+		if r.status != "failed" && r.status != "skipped-empty" && r.status != "output-limit" {
 			break
 		}
 		count++
