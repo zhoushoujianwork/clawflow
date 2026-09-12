@@ -1362,3 +1362,273 @@ func TestWriteIssues_StaleWriterDoesNotRollBack(t *testing.T) {
 		t.Error("#3 missing — entries new to the stale batch must still land")
 	}
 }
+
+// TestExtractUsageKilledRunFallsBackToAssistantEvents covers issue #322: a run
+// killed before claude emits its terminal "result" event still carries exact
+// per-message token counts, which must be summed rather than dropped. The
+// dedup key is message.id — claude re-emits the same envelope as a turn
+// streams, so a naive sum would multiply the tokens.
+func TestExtractUsageKilledRunFallsBackToAssistantEvents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	lines := []string{
+		`{"type":"system","subtype":"init"}`,
+		`{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}`,
+		// duplicate envelope for the same turn — must NOT be counted twice
+		`{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}`,
+		`{"type":"assistant","message":{"id":"msg_2","model":"claude-opus-5","usage":{"input_tokens":400,"output_tokens":20,"cache_read_input_tokens":1,"cache_creation_input_tokens":3}}}`,
+	}
+	if err := os.WriteFile(path, []byte(joinLines(lines)), 0o644); err != nil {
+		t.Fatalf("write events.jsonl: %v", err)
+	}
+	u, err := ExtractUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractUsage: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected estimated Usage for killed run, got nil")
+	}
+	if !u.Estimated {
+		t.Error("expected Estimated=true on the fallback path")
+	}
+	if u.EstimatedReason == "" {
+		t.Error("expected a non-empty EstimatedReason")
+	}
+	if u.InputTokens != 500 {
+		t.Errorf("InputTokens = %d, want 500 (deduped by message.id)", u.InputTokens)
+	}
+	if u.OutputTokens != 30 {
+		t.Errorf("OutputTokens = %d, want 30", u.OutputTokens)
+	}
+	if u.CacheReadInputTokens != 6 {
+		t.Errorf("CacheReadInputTokens = %d, want 6", u.CacheReadInputTokens)
+	}
+	if u.CacheCreationInputTokens != 5 {
+		t.Errorf("CacheCreationInputTokens = %d, want 5", u.CacheCreationInputTokens)
+	}
+	if u.NumTurns != 2 {
+		t.Errorf("NumTurns = %d, want 2 (unique assistant messages)", u.NumTurns)
+	}
+	// Cost is unknowable without a result event and there is no price table
+	// in this repo — it must stay 0 rather than be invented.
+	if u.TotalCostUSD != 0 {
+		t.Errorf("TotalCostUSD = %v, want 0 on the estimated path", u.TotalCostUSD)
+	}
+	m, ok := u.ModelUsage["claude-opus-5"]
+	if !ok {
+		t.Fatalf("expected per-model breakdown keyed by message.model, got %+v", u.ModelUsage)
+	}
+	if m.InputTokens != 500 || m.OutputTokens != 30 {
+		t.Errorf("ModelUsage = %+v, want input 500 / output 30", m)
+	}
+}
+
+// TestExtractUsageResultEventWins asserts the fallback never shadows real
+// data: when a result event exists its figures are used verbatim and the
+// entry is not marked Estimated.
+func TestExtractUsageResultEventWins(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	lines := []string{
+		`{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":10}}}`,
+		`{"type":"result","duration_ms":1234,"num_turns":3,"total_cost_usd":0.5,"usage":{"input_tokens":900,"output_tokens":90}}`,
+	}
+	if err := os.WriteFile(path, []byte(joinLines(lines)), 0o644); err != nil {
+		t.Fatalf("write events.jsonl: %v", err)
+	}
+	u, err := ExtractUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractUsage: %v", err)
+	}
+	if u == nil {
+		t.Fatal("expected Usage, got nil")
+	}
+	if u.Estimated {
+		t.Error("Estimated must stay false when a result event is present")
+	}
+	if u.InputTokens != 900 || u.OutputTokens != 90 || !floatEq(u.TotalCostUSD, 0.5) {
+		t.Errorf("result event figures not used verbatim: %+v", u)
+	}
+}
+
+// TestExtractUsageNoUsageAnywhereStaysNil keeps the "usage pending" contract
+// for a run that has started but not yet billed anything.
+func TestExtractUsageNoUsageAnywhereStaysNil(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	lines := []string{
+		`{"type":"system","subtype":"init"}`,
+		`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"hi"}]}}`,
+	}
+	if err := os.WriteFile(path, []byte(joinLines(lines)), 0o644); err != nil {
+		t.Fatalf("write events.jsonl: %v", err)
+	}
+	u, err := ExtractUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractUsage: %v", err)
+	}
+	if u != nil {
+		t.Errorf("expected nil Usage when no tokens were billed, got %+v", u)
+	}
+}
+
+// makePilotRunDir lays out <root>/<project>/<ts>/{meta.json,events.jsonl}
+// the way pilot.wake does, so the reconciler can be exercised on a tempdir.
+func makePilotRunDir(t *testing.T, root, project string, startedAt time.Time, m PilotRunMeta, events string) string {
+	t.Helper()
+	dir := filepath.Join(root, project, startedAt.Format("2006-01-02T15-04-05Z"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir pilot run dir: %v", err)
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal pilot meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), data, 0o644); err != nil {
+		t.Fatalf("write pilot meta: %v", err)
+	}
+	if events != "" {
+		if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(events), 0o644); err != nil {
+			t.Fatalf("write pilot events: %v", err)
+		}
+		// Backdate mtime so the quiet-window check sees a silent stream.
+		old := startedAt.Add(time.Minute)
+		if err := os.Chtimes(filepath.Join(dir, "events.jsonl"), old, old); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+	}
+	return dir
+}
+
+func readPilotMeta(t *testing.T, dir string) PilotRunMeta {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatalf("read pilot meta: %v", err)
+	}
+	var m PilotRunMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal pilot meta: %v", err)
+	}
+	return m
+}
+
+// Issue #322 cause B: pilot-runs was outside ReconcileStaleRuns' walk, so a
+// killed wake stayed status="running" forever and never became eligible for
+// usage backfill. Reconciling it flips the status AND recovers the spend.
+func TestReconcilePilotRuns_StuckRunning_RewrittenToFailedAndBackfilled(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-3 * time.Hour)
+	events := `{"type":"system","subtype":"init"}` + "\n" +
+		`{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","usage":{"input_tokens":1000,"output_tokens":50}}}` + "\n"
+	dir := makePilotRunDir(t, root, "eda", start, PilotRunMeta{
+		Project:   "eda",
+		StartedAt: start,
+		Status:    "running",
+	}, events)
+
+	n, err := reconcilePilotRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcilePilotRunsAt: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("fixed=%d, want 1", n)
+	}
+	got := readPilotMeta(t, dir)
+	if got.Status != "failed" {
+		t.Errorf("status=%q, want failed", got.Status)
+	}
+	if got.Error == "" {
+		t.Error("Error should describe the reconciliation reason")
+	}
+	if got.EndedAt == nil {
+		t.Error("EndedAt should be stamped")
+	}
+	if got.Usage == nil {
+		t.Fatal("usage should be backfilled from assistant events, got nil")
+	}
+	if got.Usage.InputTokens != 1000 || !got.Usage.Estimated {
+		t.Errorf("usage = %+v, want 1000 input tokens flagged estimated", got.Usage)
+	}
+}
+
+// A live wake — recent start, events.jsonl freshly touched — must be left
+// alone so the dashboard keeps showing it as running.
+func TestReconcilePilotRuns_LiveWake_Untouched(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-2 * time.Minute)
+	dir := filepath.Join(root, "clawflow", start.Format("2006-01-02T15-04-05Z"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	data, _ := json.Marshal(PilotRunMeta{Project: "clawflow", StartedAt: start, Status: "running"})
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), data, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	// fresh mtime (written just now) => stream is not quiet
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"),
+		[]byte(`{"type":"system","subtype":"init"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	n, err := reconcilePilotRunsAt(root, time.Hour)
+	if err != nil {
+		t.Fatalf("reconcilePilotRunsAt: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("fixed=%d, want 0 (live wake must not be reconciled)", n)
+	}
+	if got := readPilotMeta(t, dir); got.Status != "running" {
+		t.Errorf("status=%q, want running", got.Status)
+	}
+}
+
+// Terminal wakes are not rewritten, and a second pass is a no-op.
+func TestReconcilePilotRuns_Idempotent(t *testing.T) {
+	root := t.TempDir()
+	start := time.Now().UTC().Add(-3 * time.Hour)
+	makePilotRunDir(t, root, "eda", start, PilotRunMeta{
+		Project:   "eda",
+		StartedAt: start,
+		Status:    "running",
+	}, `{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":5}}}`+"\n")
+
+	if n, err := reconcilePilotRunsAt(root, time.Hour); err != nil || n != 1 {
+		t.Fatalf("first pass: n=%d err=%v, want 1/nil", n, err)
+	}
+	if n, err := reconcilePilotRunsAt(root, time.Hour); err != nil || n != 0 {
+		t.Fatalf("second pass: n=%d err=%v, want 0/nil", n, err)
+	}
+}
+
+// A wake killed mid-flight ends up in the usage aggregate now that both the
+// fallback sum and the status rewrite are in place — this is the end-to-end
+// shape of issue #322's fix.
+func TestCollectPilotRunEntries_BackfillsFrozenRunningWake(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	root := filepath.Join(DataDir(), "pilot-runs")
+	start := time.Now().UTC().Add(-3 * time.Hour)
+	// Status left at "running" (reconcile hasn't run yet) but the stream has
+	// been silent for hours — the old guard skipped this row forever.
+	makePilotRunDir(t, root, "eda", start, PilotRunMeta{
+		Project:   "eda",
+		StartedAt: start,
+		Status:    "running",
+	}, `{"type":"assistant","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":777}}}`+"\n")
+
+	entries := collectPilotRunEntries(root)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%d, want 1", len(entries))
+	}
+	if entries[0].Usage == nil {
+		t.Fatal("frozen running wake should have usage backfilled")
+	}
+	if entries[0].Usage.InputTokens != 777 {
+		t.Errorf("InputTokens=%d, want 777", entries[0].Usage.InputTokens)
+	}
+	// And it must reach WriteUsageSummary's input.
+	if got := PilotEntriesAsRuns(entries); len(got) != 1 {
+		t.Errorf("PilotEntriesAsRuns dropped the recovered wake: %+v", got)
+	}
+}

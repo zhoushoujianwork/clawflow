@@ -25,6 +25,10 @@ interface Usage {
   cache_read_input_tokens: number
   cache_creation_input_tokens: number
   model_usage?: Record<string, ModelUsage>
+  // Tokens summed from per-message usage because the run was killed before
+  // claude's terminal result event. Cost is unknown on this path (issue #322).
+  estimated?: boolean
+  estimated_reason?: string
 }
 
 interface RunMeta {
@@ -397,7 +401,11 @@ function UsagePanel({ meta }: { meta: RunMeta | null }) {
         }}
       >
         <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm tabular-nums">
-          <Stat label="cost" value={`$${u.total_cost_usd.toFixed(4)}`} highlight />
+          <Stat
+            label="cost"
+            value={u.estimated ? 'n/a (killed mid-run)' : `$${u.total_cost_usd.toFixed(4)}`}
+            highlight
+          />
           <Stat label="duration" value={msToShort(u.duration_ms)} />
           <Stat label="turns" value={String(u.num_turns)} />
           <Stat label="input" value={u.input_tokens.toLocaleString()} />

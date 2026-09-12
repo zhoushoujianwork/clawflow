@@ -118,8 +118,13 @@ function PilotRunsPage() {
                 )}
                 {run.usage && (
                   <>
-                    <span className="text-xs text-muted-foreground tabular-nums">
-                      · ${run.usage.total_cost_usd.toFixed(2)}
+                    <span
+                      className="text-xs text-muted-foreground tabular-nums"
+                      title={run.usage.estimated ? run.usage.estimated_reason : undefined}
+                    >
+                      {run.usage.estimated
+                        ? `· cost n/a · ${(run.usage.input_tokens / 1000).toFixed(0)}k tok`
+                        : `· $${run.usage.total_cost_usd.toFixed(2)}`}
                     </span>
                     <span className="text-xs text-muted-foreground tabular-nums">
                       · {run.usage.num_turns} turns
