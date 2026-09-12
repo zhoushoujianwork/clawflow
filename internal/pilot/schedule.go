@@ -393,7 +393,10 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		}
 	}
 
-	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil {
+	// Guard on u != nil, not just uerr == nil: ExtractUsage reports "nothing
+	// to account for yet" as (nil, nil), and assigning that would blank an
+	// already-recorded Usage (issue #322).
+	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil && u != nil {
 		meta.Usage = u
 	}
 	_ = snapshot.WritePilotRunMeta(runDir, meta)

@@ -1304,7 +1304,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
 	}
 
-	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil {
+	// u != nil guard: ExtractUsage returns (nil, nil) when there is nothing to
+	// account for, and assigning that would blank a recorded Usage (issue #322).
+	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil && u != nil {
 		rm.Usage = u
 	}
 	if err := snapshot.WriteRunMeta(runDir, rm); err != nil {

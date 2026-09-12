@@ -46,6 +46,11 @@ export interface PilotRun {
     total_cost_usd: number
     input_tokens: number
     output_tokens: number
+    // Set when the wake was killed before claude emitted its terminal
+    // result event: tokens were summed from per-message usage and cost is
+    // unavailable, so the UI must not present $0.000 as the real spend.
+    estimated?: boolean
+    estimated_reason?: string
   }
 }
 
@@ -129,8 +134,13 @@ export function PilotRunDetailModal({ run, onClose }: { run: PilotRun; onClose: 
             )}
             {run.usage && (
               <>
-                <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
-                  Cost: ${run.usage.total_cost_usd.toFixed(3)}
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums"
+                  title={run.usage.estimated ? run.usage.estimated_reason : undefined}
+                >
+                  {run.usage.estimated
+                    ? 'Cost: n/a (killed mid-run)'
+                    : `Cost: $${run.usage.total_cost_usd.toFixed(3)}`}
                 </span>
                 <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
                   Turns: {run.usage.num_turns}

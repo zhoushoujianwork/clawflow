@@ -309,6 +309,17 @@ type Usage struct {
 	CacheReadInputTokens     int64                  `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64                  `json:"cache_creation_input_tokens"`
 	ModelUsage               map[string]ModelUsage  `json:"model_usage,omitempty"`
+	// Estimated marks a Usage that was summed from per-message `assistant`
+	// events instead of read off the terminal "result" event. Runs killed
+	// mid-flight (deadline, SIGKILL, OOM) never emit a result event, and
+	// those are precisely the most expensive runs — without this fallback
+	// their entire spend was recorded as `null` and disappeared from every
+	// aggregate (issue #322). Token counts are exact; TotalCostUSD is 0
+	// because cost only ever arrives with the result event.
+	Estimated bool `json:"estimated,omitempty"`
+	// EstimatedReason explains why Estimated is set, so the dashboard can
+	// tell the user why cost reads 0 next to a large token count.
+	EstimatedReason string `json:"estimated_reason,omitempty"`
 }
 
 // ModelUsage is the per-model slice of a single run. The keys mirror Usage
@@ -347,11 +358,41 @@ type rawModelUsage struct {
 	CostUSD                  float64 `json:"costUSD"`
 }
 
+// rawAssistantEvent is the private projection of an `"type":"assistant"` line
+// in events.jsonl. Only the fields needed to sum per-message usage are
+// declared. message.id is the dedup key: claude re-emits the same assistant
+// message envelope as the turn streams in, so summing blindly would multiply
+// the token counts.
+type rawAssistantEvent struct {
+	Type    string `json:"type"`
+	Message struct {
+		ID    string `json:"id"`
+		Model string `json:"model"`
+		Usage struct {
+			InputTokens              int64 `json:"input_tokens"`
+			OutputTokens             int64 `json:"output_tokens"`
+			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+}
+
 // ExtractUsage scans an events.jsonl file for the LAST `"type":"result"` line
-// and parses out usage data. Returns (nil, nil) if no result line exists yet
-// — the run is still in flight and the caller should retry on the next refresh.
-// File-not-found is treated the same way (the run was created without an
-// events sink, e.g. tests).
+// and parses out usage data.
+//
+// When no result event exists, it falls back to summing the per-message usage
+// carried on `"type":"assistant"` events (deduped by message.id) and returns a
+// Usage flagged Estimated. That path covers runs killed before claude could
+// emit its terminal event — deadline, SIGKILL, OOM — which are the longest and
+// therefore most expensive runs. Returning nil for them silently erased their
+// entire spend from meta.json, the dashboard, and usage.json (issue #322).
+// TotalCostUSD stays 0 on this path: cost is only ever reported by claude in
+// the result event, and there is no model price table in this repo to derive
+// it from. Tokens are exact.
+//
+// Returns (nil, nil) only when there is nothing to account for at all: no
+// file (run created without an events sink, e.g. tests) or a file with no
+// assistant events yet (run still starting up).
 func ExtractUsage(eventsPath string) (*Usage, error) {
 	f, err := os.Open(eventsPath)
 	if err != nil {
@@ -368,27 +409,87 @@ func ExtractUsage(eventsPath string) (*Usage, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	var lastResult *rawResultEvent
+	// Per-message usage accumulated in the same pass, keyed by message.id so
+	// repeated envelopes for one turn are counted once. Only used when no
+	// result event turns up.
+	seenMsg := map[string]bool{}
+	var fb Usage
+	var fbMsgs int
 	for sc.Scan() {
 		line := sc.Bytes()
-		// Cheap pre-check before unmarshal — most lines are not result events.
-		if !strings.Contains(string(line), `"type":"result"`) {
-			continue
+		text := string(line)
+		// Cheap pre-check before unmarshal — most lines are neither result
+		// nor assistant events.
+		switch {
+		case strings.Contains(text, `"type":"result"`):
+			var ev rawResultEvent
+			if err := json.Unmarshal(line, &ev); err != nil {
+				continue
+			}
+			if ev.Type != "result" {
+				continue
+			}
+			copy := ev
+			lastResult = &copy
+		case strings.Contains(text, `"type":"assistant"`):
+			var ev rawAssistantEvent
+			if err := json.Unmarshal(line, &ev); err != nil {
+				continue
+			}
+			if ev.Type != "assistant" {
+				continue
+			}
+			// An empty id cannot be deduped; count it (dropping it would
+			// under-report) but keep the dedup map keyed only on real ids.
+			if ev.Message.ID != "" {
+				if seenMsg[ev.Message.ID] {
+					continue
+				}
+				seenMsg[ev.Message.ID] = true
+			}
+			fbMsgs++
+			u := ev.Message.Usage
+			fb.InputTokens += u.InputTokens
+			fb.OutputTokens += u.OutputTokens
+			fb.CacheReadInputTokens += u.CacheReadInputTokens
+			fb.CacheCreationInputTokens += u.CacheCreationInputTokens
+			if model := ev.Message.Model; model != "" {
+				if fb.ModelUsage == nil {
+					fb.ModelUsage = map[string]ModelUsage{}
+				}
+				m := fb.ModelUsage[model]
+				m.InputTokens += u.InputTokens
+				m.OutputTokens += u.OutputTokens
+				m.CacheReadInputTokens += u.CacheReadInputTokens
+				m.CacheCreationInputTokens += u.CacheCreationInputTokens
+				fb.ModelUsage[model] = m
+			}
 		}
-		var ev rawResultEvent
-		if err := json.Unmarshal(line, &ev); err != nil {
-			continue
-		}
-		if ev.Type != "result" {
-			continue
-		}
-		copy := ev
-		lastResult = &copy
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
 	if lastResult == nil {
-		return nil, nil
+		totalTokens := fb.InputTokens + fb.OutputTokens +
+			fb.CacheReadInputTokens + fb.CacheCreationInputTokens
+		// Nothing billable observed yet (no assistant events, or events that
+		// carry no usage at all): keep the historical (nil, nil) contract so
+		// in-flight runs stay "usage pending" rather than gaining a row of
+		// zeros.
+		if fbMsgs == 0 || totalTokens == 0 {
+			return nil, nil
+		}
+		fb.NumTurns = fbMsgs
+		fb.Estimated = true
+		fb.EstimatedReason = "no terminal result event (run killed mid-flight); tokens summed from assistant events, cost unavailable"
+		ReconcileLog.Warn("usage/estimated",
+			"events", eventsPath,
+			"messages", fbMsgs,
+			"input_tokens", fb.InputTokens,
+			"output_tokens", fb.OutputTokens,
+			"reason", "no_result_event",
+		)
+		return &fb, nil
 	}
 
 	u := &Usage{
@@ -1283,11 +1384,22 @@ func extractTerminalResult(eventsPath string) (subtype string, resultText string
 // Also cleans up stale lockfiles (~/.clawflow/locks/) whose owner PID
 // is no longer running, so crashed processes don't permanently block
 // issues from being re-processed.
+//
+// data/pilot-runs/* is reconciled too (see reconcilePilotRunsAt) — the
+// returned count covers both trees.
 func ReconcileStaleRuns(staleAfter time.Duration) (int, error) {
 	if n := CleanStaleLocks(); n > 0 {
 		fmt.Fprintf(os.Stderr, "✓ cleaned %d stale lockfile(s)\n", n)
 	}
-	return reconcileStaleRunsAt(filepath.Join(DataDir(), "runs"), staleAfter)
+	fixed, err := reconcileStaleRunsAt(filepath.Join(DataDir(), "runs"), staleAfter)
+	// data/pilot-runs/ used to be outside this walk, so a killed wake stayed
+	// "running" forever and its spend was never backfilled (issue #322).
+	pilotFixed, pErr := reconcilePilotRunsAt(filepath.Join(DataDir(), "pilot-runs"), staleAfter)
+	fixed += pilotFixed
+	if err == nil {
+		err = pErr
+	}
+	return fixed, err
 }
 
 // reconcileStaleRunsAt is the testable core of ReconcileStaleRuns. Tests
@@ -1496,6 +1608,110 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 		}
 		if err := WriteRunMeta(path, m); err == nil {
 			fixed++
+		}
+		return nil
+	})
+	return fixed, nil
+}
+
+// PilotQuietWindow is the events.jsonl silence threshold for a Pilot wake.
+// Wider than DefaultQuietWindow: a wake spends long stretches inside single
+// tool calls (log patrol over large files, `Task` subagents, issue triage
+// round-trips) without emitting a stream event.
+var PilotQuietWindow = 15 * time.Minute
+
+// reconcilePilotRunsAt is the Pilot-side counterpart of reconcileStaleRunsAt:
+// it rewrites wakes frozen in status="running" to "failed" so the existing
+// usage backfill (which deliberately skips in-flight rows) can eventually
+// account for them.
+//
+// Liveness is judged purely from events.jsonl mtime plus started_at, not from
+// ~/.clawflow/locks/: pilot wakes take no issue-level lock and PilotRunMeta
+// carries neither repo nor issue number, so runnerStillAlive is inapplicable.
+// A wake is declared gone when it has been running past staleAfter OR its
+// events.jsonl has been silent past PilotQuietWindow. Without this, a killed
+// wake stayed "running" forever and never became eligible for backfill —
+// 13 such wakes had accumulated on disk, the oldest four months old
+// (issue #322).
+//
+// Idempotent: only status=="running" rows are touched.
+func reconcilePilotRunsAt(pilotRoot string, staleAfter time.Duration) (int, error) {
+	if _, err := os.Stat(pilotRoot); os.IsNotExist(err) {
+		return 0, nil
+	}
+	cutoff := time.Now().UTC().Add(-staleAfter)
+	var fixed int
+
+	_ = filepath.WalkDir(pilotRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != "meta.json" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var m PilotRunMeta
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil
+		}
+		if m.Status != "running" {
+			return nil
+		}
+		runDir := filepath.Dir(path)
+		eventsPath := filepath.Join(runDir, "events.jsonl")
+
+		tooOld := !m.StartedAt.After(cutoff)
+		var lastTouch time.Time
+		var eventsQuiet bool
+		if st, err := os.Stat(eventsPath); err == nil {
+			lastTouch = st.ModTime().UTC()
+			eventsQuiet = time.Since(lastTouch) > PilotQuietWindow
+		} else {
+			// No events.jsonl: a healthy wake opens it and gets claude's
+			// system-init line within seconds, so silence past the window
+			// means the process never got that far.
+			eventsQuiet = time.Since(m.StartedAt) > PilotQuietWindow
+		}
+		if !tooOld && !eventsQuiet {
+			return nil
+		}
+
+		m.Status = "failed"
+		switch {
+		case tooOld && eventsQuiet:
+			m.Error = fmt.Sprintf(
+				"reconciled: stuck in running for >%s and events.jsonl quiet for >%s; wake process is gone",
+				staleAfter, PilotQuietWindow)
+		case tooOld:
+			m.Error = fmt.Sprintf(
+				"reconciled: stuck in running for >%s; wake exited without finalizing meta",
+				staleAfter)
+		default:
+			m.Error = fmt.Sprintf(
+				"reconciled: events.jsonl quiet for >%s (wake interrupted/killed)",
+				PilotQuietWindow)
+		}
+		if m.EndedAt == nil || m.EndedAt.IsZero() {
+			t := time.Now().UTC()
+			if !lastTouch.IsZero() {
+				t = lastTouch
+			}
+			m.EndedAt = &t
+		}
+		// Backfill in the same pass so the recovered spend lands immediately
+		// rather than one index refresh later.
+		if m.Usage == nil {
+			if u, uErr := ExtractUsage(eventsPath); uErr == nil && u != nil {
+				m.Usage = u
+			}
+		}
+		if err := WritePilotRunMeta(runDir, m); err == nil {
+			fixed++
+			ReconcileLog.Warn("pilot/reconcile",
+				"project", m.Project,
+				"started_at", m.StartedAt.Format(time.RFC3339),
+				"reason", m.Error,
+			)
 		}
 		return nil
 	})
@@ -1869,6 +2085,20 @@ func LatestPilotRunMetaPath(project string) string {
 	return filepath.Join(root, latest, "meta.json")
 }
 
+// pilotBackfillEligible reports whether a wake's usage may be read off disk.
+// Terminal statuses always qualify. A "running"/"finalizing" row qualifies
+// only once its events.jsonl has been quiet past PilotQuietWindow, which
+// means the process is gone even if reconcile hasn't rewritten the status yet.
+func pilotBackfillEligible(m PilotRunMeta, runDir string) bool {
+	if m.Status != "running" && m.Status != "finalizing" {
+		return true
+	}
+	if st, err := os.Stat(filepath.Join(runDir, "events.jsonl")); err == nil {
+		return time.Since(st.ModTime()) > PilotQuietWindow
+	}
+	return time.Since(m.StartedAt) > PilotQuietWindow
+}
+
 func collectPilotRunEntries(root string) []PilotRunIndexEntry {
 	out := []PilotRunIndexEntry{}
 	if _, err := os.Stat(root); os.IsNotExist(err) {
@@ -1886,8 +2116,14 @@ func collectPilotRunEntries(root string) []PilotRunIndexEntry {
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil
 		}
-		if m.Usage == nil && m.Status != "" && m.Status != "running" && m.Status != "finalizing" {
-			runDir := filepath.Dir(path)
+		// Backfill usage on wakes that are done. Rows still in flight are
+		// skipped so a live wake isn't given a partial figure — but a row
+		// whose events.jsonl has gone silent past PilotQuietWindow is not
+		// in flight, it is frozen, and skipping it meant its spend was
+		// never accounted for at all (issue #322). Writes only when Usage
+		// is nil, so this stays idempotent.
+		runDir := filepath.Dir(path)
+		if m.Usage == nil && m.Status != "" && pilotBackfillEligible(m, runDir) {
 			if u, err := ExtractUsage(filepath.Join(runDir, "events.jsonl")); err == nil && u != nil {
 				m.Usage = u
 				_ = WritePilotRunMeta(runDir, m)
