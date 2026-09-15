@@ -272,6 +272,16 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		lg.Info("run/prune_analysis_worktrees", "pruned", n)
 	}
 
+	// GC empty issue-* implement worktrees left behind by early-exit
+	// failures that used to be preserved on status alone regardless of
+	// content (issue #329). Covers both new accumulation (going forward,
+	// runOneOperator's cleanup decision now checks content too) and the
+	// pre-existing pile of empty shells from before this fix.
+	if n := pruneEmptyIssueWorktrees(cfg); n > 0 {
+		fmt.Fprintf(os.Stderr, "✓ pruned %d empty issue worktree(s)\n", n)
+		lg.Info("run/prune_empty_issue_worktrees", "pruned", n)
+	}
+
 	// Snapshot the static state so the dashboard can render it even if no
 	// operator fires this run. Failures are best-effort logged, not fatal.
 	if err := snapshot.WriteRepos(cfg); err != nil {
@@ -1350,7 +1360,34 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// cost-limit joins them: the run was refused before claude did any work,
 	// so the worktree is empty and keeping it only accumulates garbage across
 	// however many passes happen before the billing window resets (issue #308).
-	if rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" {
+	//
+	// status == "failed" is different from the others above: it covers
+	// EVERY way claude -p can exit non-zero, not just the specific reasons
+	// enumerated by name. Some of those (mid-edit crash, timeout after
+	// partial writes) really do leave partial work worth resuming — but
+	// others (claude erroring before writing a single file, e.g. an
+	// unrecognized early-exit code not yet classified as cost-limit/
+	// auth-error/output-limit) leave the worktree exactly as empty as a
+	// fresh checkout. Deciding solely on status caused those to be kept
+	// forever: findExistingWorktree's resume check looks at *content*
+	// (hasUncommitted || hasCommitsAhead), so it never picks an empty
+	// "failed" worktree back up, and no cleanup path ever collected it
+	// either — a monotonically growing pile of empty dirs (issue #329).
+	// Probe content here with the same detectPartialWork logic so both
+	// sides of the resume decision agree: keep only if there's something
+	// to resume, otherwise treat it like the other no-partial-work statuses.
+	hasPartialWork := true
+	if rm.Status == "failed" {
+		base := overrideBranch
+		if base == "" {
+			base = j.repoCfg.BaseBranch
+		}
+		if base == "" {
+			base = "main"
+		}
+		hasPartialWork, _, _ = detectPartialWork(workdir, base)
+	}
+	if rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork) {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
@@ -1807,6 +1844,87 @@ func pruneOrphanedAnalysisWorktrees(cfg *config.Config) int {
 	return removed
 }
 
+// issueWorktreeDirRE matches the issue-<N>-<timestamp> directory naming
+// scheme used by setupWorktree for per-issue implement worktrees.
+var issueWorktreeDirRE = regexp.MustCompile(`^issue-(\d+)-`)
+
+// pruneEmptyIssueWorktrees scans ~/.clawflow/worktrees/<slug>/issue-<N>-* for
+// every enabled repo and removes any worktree that has no partial work
+// (detectPartialWork returns false) and is not currently locked by an
+// in-flight run. This is the one-time-and-ongoing GC for the empty-shell
+// accumulation described in issue #329: before the runOneOperator cleanup
+// fix, every "failed" status preserved its worktree regardless of content,
+// so early-exit failures (claude erroring before writing any file) piled up
+// permanent empty directories that findExistingWorktree would never resume
+// and no other cleanup path ever collected.
+//
+// Runs during each `clawflow run` reconcile pass, same as
+// pruneOrphanedAnalysisWorktrees. Skips locked issues so a worktree backing
+// an in-flight run is never touched.
+//
+// Returns the number of worktrees removed.
+func pruneEmptyIssueWorktrees(cfg *config.Config) int {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0
+	}
+	wtRoot := filepath.Join(home, ".clawflow", "worktrees")
+
+	removed := 0
+	for fullName, repoCfg := range cfg.Repos {
+		if !repoCfg.Enabled || repoCfg.LocalPath == "" {
+			continue
+		}
+		base := repoCfg.BaseBranch
+		if base == "" {
+			base = "main"
+		}
+		slug := strings.ReplaceAll(fullName, "/", "__")
+		slugDir := filepath.Join(wtRoot, slug)
+		entries, err := os.ReadDir(slugDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() || !strings.HasPrefix(e.Name(), "issue-") {
+				continue
+			}
+			m := issueWorktreeDirRE.FindStringSubmatch(e.Name())
+			if m == nil {
+				continue
+			}
+			issueNum, err := strconv.Atoi(m[1])
+			if err != nil {
+				continue
+			}
+			// Never touch a worktree backing a run that's currently
+			// in flight, even if it looks empty right now (it may be
+			// about to receive its first write).
+			if snapshot.IsLocked(fullName, issueNum) {
+				continue
+			}
+			candidate := filepath.Join(slugDir, e.Name())
+			if _, err := os.Stat(filepath.Join(candidate, ".git")); err != nil {
+				continue
+			}
+			if hasWork, _, _ := detectPartialWork(candidate, base); hasWork {
+				continue // real WIP — leave it for resume
+			}
+			cleanClaudeWorktrees(repoCfg.LocalPath, candidate)
+			rm := exec.Command("git", "-C", repoCfg.LocalPath, "worktree", "remove", "--force", candidate)
+			rm.Stdout = os.Stderr
+			rm.Stderr = os.Stderr
+			if rmErr := rm.Run(); rmErr != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠ prune empty worktree %s: %v\n", candidate, rmErr)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "  ✓ pruned empty issue worktree: %s\n", candidate)
+			removed++
+		}
+	}
+	return removed
+}
+
 // removeAnalysisWorktree removes a single analysis worktree directory along
 // with its git registration. It reads the .git pointer file inside the
 // worktree to locate the owning repository, then calls
@@ -1963,6 +2081,68 @@ type worktreeResult struct {
 	BranchName string // branch checked out in the worktree (non-empty only when Resumed)
 }
 
+// detectPartialWork inspects a worktree directory and reports whether it
+// holds any work worth preserving: uncommitted changes (working tree or
+// staged), untracked files, or commits ahead of origin/<base>. This is the
+// single source of truth for "does this worktree have partial work" —
+// shared by findExistingWorktree (resume decision) and the post-run cleanup
+// decision in runOneOperator, so the two can no longer disagree about an
+// empty worktree the way they did before issue #329 (worktrees preserved on
+// status="failed" that findExistingWorktree would never resume because they
+// had no content, and no cleanup path ever collected them either).
+//
+// Returns hasWork plus a diff summary and the checked-out branch name for
+// callers that want to log/report on the discovered work.
+func detectPartialWork(candidate, base string) (hasWork bool, diffStat, branch string) {
+	// Check for uncommitted changes
+	diffCmd := exec.Command("git", "-C", candidate, "diff", "--stat", "HEAD")
+	diffOut, _ := diffCmd.Output()
+	// Check for staged changes
+	stagedCmd := exec.Command("git", "-C", candidate, "diff", "--stat", "--cached")
+	stagedOut, _ := stagedCmd.Output()
+	// Check for untracked files
+	untrackedCmd := exec.Command("git", "-C", candidate, "ls-files", "--others", "--exclude-standard")
+	untrackedOut, _ := untrackedCmd.Output()
+	// Check current branch
+	branchCmd := exec.Command("git", "-C", candidate, "rev-parse", "--abbrev-ref", "HEAD")
+	branchOut, _ := branchCmd.Output()
+	currentBranch := strings.TrimSpace(string(branchOut))
+
+	hasUncommitted := len(strings.TrimSpace(string(diffOut))) > 0 ||
+		len(strings.TrimSpace(string(stagedOut))) > 0 ||
+		len(strings.TrimSpace(string(untrackedOut))) > 0
+
+	// Check for commits ahead of origin/base (branch was created and committed to)
+	hasCommitsAhead := false
+	if currentBranch != "" && currentBranch != "HEAD" {
+		aheadCmd := exec.Command("git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
+		aheadOut, _ := aheadCmd.Output()
+		hasCommitsAhead = len(strings.TrimSpace(string(aheadOut))) > 0
+	}
+
+	if !hasUncommitted && !hasCommitsAhead {
+		return false, "", currentBranch
+	}
+
+	// Build a combined diff stat for the resume context
+	var statParts []string
+	if s := strings.TrimSpace(string(diffOut)); s != "" {
+		statParts = append(statParts, s)
+	}
+	if s := strings.TrimSpace(string(stagedOut)); s != "" {
+		statParts = append(statParts, "(staged)\n"+s)
+	}
+	if s := strings.TrimSpace(string(untrackedOut)); s != "" {
+		statParts = append(statParts, "(untracked)\n"+s)
+	}
+	if hasCommitsAhead {
+		aheadCmd := exec.Command("git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
+		aheadOut, _ := aheadCmd.Output()
+		statParts = append(statParts, "(commits ahead of origin/"+base+")\n"+strings.TrimSpace(string(aheadOut)))
+	}
+	return true, strings.Join(statParts, "\n"), currentBranch
+}
+
 // findExistingWorktree scans ~/.clawflow/worktrees/<slug>/issue-<N>-* for a
 // worktree that has uncommitted changes or commits ahead of origin/<base>.
 // Returns the path and a short diff summary if found, or ("", "", "") if none.
@@ -1981,50 +2161,8 @@ func findExistingWorktree(parent string, issueNum int, localPath, base string) (
 		if _, err := os.Stat(filepath.Join(candidate, ".git")); err != nil {
 			continue
 		}
-		// Check for uncommitted changes
-		diffCmd := exec.Command("git", "-C", candidate, "diff", "--stat", "HEAD")
-		diffOut, _ := diffCmd.Output()
-		// Check for staged changes
-		stagedCmd := exec.Command("git", "-C", candidate, "diff", "--stat", "--cached")
-		stagedOut, _ := stagedCmd.Output()
-		// Check for untracked files
-		untrackedCmd := exec.Command("git", "-C", candidate, "ls-files", "--others", "--exclude-standard")
-		untrackedOut, _ := untrackedCmd.Output()
-		// Check current branch
-		branchCmd := exec.Command("git", "-C", candidate, "rev-parse", "--abbrev-ref", "HEAD")
-		branchOut, _ := branchCmd.Output()
-		currentBranch := strings.TrimSpace(string(branchOut))
-
-		hasUncommitted := len(strings.TrimSpace(string(diffOut))) > 0 ||
-			len(strings.TrimSpace(string(stagedOut))) > 0 ||
-			len(strings.TrimSpace(string(untrackedOut))) > 0
-
-		// Check for commits ahead of origin/base (branch was created and committed to)
-		hasCommitsAhead := false
-		if currentBranch != "" && currentBranch != "HEAD" {
-			aheadCmd := exec.Command("git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
-			aheadOut, _ := aheadCmd.Output()
-			hasCommitsAhead = len(strings.TrimSpace(string(aheadOut))) > 0
-		}
-
-		if hasUncommitted || hasCommitsAhead {
-			// Build a combined diff stat for the resume context
-			var statParts []string
-			if s := strings.TrimSpace(string(diffOut)); s != "" {
-				statParts = append(statParts, s)
-			}
-			if s := strings.TrimSpace(string(stagedOut)); s != "" {
-				statParts = append(statParts, "(staged)\n"+s)
-			}
-			if s := strings.TrimSpace(string(untrackedOut)); s != "" {
-				statParts = append(statParts, "(untracked)\n"+s)
-			}
-			if hasCommitsAhead {
-				aheadCmd := exec.Command("git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
-				aheadOut, _ := aheadCmd.Output()
-				statParts = append(statParts, "(commits ahead of origin/"+base+")\n"+strings.TrimSpace(string(aheadOut)))
-			}
-			return candidate, strings.Join(statParts, "\n"), currentBranch
+		if hasWork, stat, currentBranch := detectPartialWork(candidate, base); hasWork {
+			return candidate, stat, currentBranch
 		}
 	}
 	return "", "", ""
