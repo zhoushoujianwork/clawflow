@@ -612,12 +612,23 @@ func (c *Client) CloseIssue(repo string, issueNumber int) error {
 	return nil
 }
 
+// ListPRs lists PRs for repo filtered by state, where state is one of
+// "open"/"closed"/"merged"/"all". GitHub's REST API (GET /pulls) only
+// accepts state=open|closed|all — "merged" is not a real API state, it's
+// a derived property (closed + merged_at != nil). Passing "merged"
+// straight through silently falls back to the API's default ("open"),
+// so we translate it here: request state=closed and filter the results
+// by MergedAt client-side. See issue #330.
 func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return nil, err
 	}
-	path := fmt.Sprintf("/repos/%s/%s/pulls?state=%s&per_page=100", owner, name, state)
+	apiState := state
+	if apiState == "merged" {
+		apiState = "closed"
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls?state=%s&per_page=100", owner, name, apiState)
 	data, status, err := c.do("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -641,13 +652,16 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-	prs := make([]vcs.PR, len(raw))
-	for i, r := range raw {
+	prs := make([]vcs.PR, 0, len(raw))
+	for _, r := range raw {
+		if state == "merged" && r.MergedAt == "" {
+			continue
+		}
 		s := r.State
 		if r.MergedAt != "" {
 			s = "merged"
 		}
-		prs[i] = vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: s, HeadBranch: r.Head.Ref, MergedAt: r.MergedAt, URL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		prs = append(prs, vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: s, HeadBranch: r.Head.Ref, MergedAt: r.MergedAt, URL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
 	}
 	return prs, nil
 }
