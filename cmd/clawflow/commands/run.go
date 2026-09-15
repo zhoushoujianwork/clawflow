@@ -980,15 +980,21 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// at poll time, but a leaf operator can sit queued — and then run — for
 	// minutes. If sub-issues were attached to this issue in that window it
 	// is now a parent and must defer to its coordinator (track-progress),
-	// not run a leaf evaluate/implement. Re-fetch the live sub-issue count
-	// and, if it became a parent, skip and mark agent-skipped so the leaf
-	// gate keeps it out of the queue on later passes. GitHub-only — GitLab
-	// short-circuits inside isStaleLeafJob.
+	// not run a leaf evaluate/implement.
+	//
+	// This is a purely structural skip, not a verdict on the issue's
+	// requirement — it must NOT write a terminal label. Marking it
+	// agent-skipped used to make track-progress (and anything else keyed
+	// off that label) treat "became a parent mid-flight" as "this
+	// requirement is done", which is wrong: the issue is open and its
+	// sub-issues haven't shipped anything yet (issue #335). The
+	// applies_to: leaf gate on the operator's own trigger already keeps it
+	// out of the queue on later passes (SubTotal > 0 no longer matches
+	// leaf), so no label is needed to prevent a re-fire — only the log line
+	// records that this pass was skipped for this reason. GitHub-only —
+	// GitLab short-circuits inside isStaleLeafJob.
 	if stale, n := isStaleLeafJob(j.client, j.op, j.repo, j.sub.Number); stale {
 		fmt.Printf("%s → skip (became parent since poll: %d sub-issue(s))\n", prefix, n)
-		if err := j.client.AddLabel(j.repo, j.sub.Number, "agent-skipped"); err != nil {
-			fmt.Fprintf(os.Stderr, "%s ⚠ add agent-skipped label: %v\n", prefix, err)
-		}
 		runLog.Info("run/skip_became_parent", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "subs", n)
 		return false, false
 	}
