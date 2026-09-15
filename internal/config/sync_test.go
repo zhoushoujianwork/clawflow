@@ -118,10 +118,11 @@ repos:
 // TestMergeConfigs_SettingsCloudWins verifies that settings from the remote
 // overwrite local settings entirely.
 func TestMergeConfigs_SettingsCloudWins(t *testing.T) {
+	localThreshold := 7
 	local := &config.Config{
 		Settings: config.Settings{
 			PollInterval:        5,
-			ConfidenceThreshold: 7,
+			ConfidenceThreshold: &localThreshold,
 			AgentTimeout:        120,
 		},
 		Repos: map[string]config.Repo{},
@@ -143,8 +144,8 @@ settings:
 	if merged.Settings.PollInterval != 10 {
 		t.Errorf("poll_interval: got %d, want 10", merged.Settings.PollInterval)
 	}
-	if merged.Settings.ConfidenceThreshold != 8 {
-		t.Errorf("confidence_threshold: got %d, want 8", merged.Settings.ConfidenceThreshold)
+	if merged.Settings.EffectiveConfidenceThreshold() != 8 {
+		t.Errorf("confidence_threshold: got %v, want 8", merged.Settings.EffectiveConfidenceThreshold())
 	}
 	if merged.Settings.AgentTimeout != 300 {
 		t.Errorf("agent_timeout: got %d, want 300", merged.Settings.AgentTimeout)
@@ -608,7 +609,7 @@ func TestMigrateTimestamps(t *testing.T) {
 	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	cfg := &config.Config{
 		Repos: map[string]config.Repo{
-			"owner/legacy": {Enabled: true, BaseBranch: "main"},
+			"owner/legacy":  {Enabled: true, BaseBranch: "main"},
 			"owner/stamped": {Enabled: true, BaseBranch: "main", UpdatedAt: ts},
 		},
 	}

@@ -383,10 +383,13 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 			}
 			repoJobs, repoPending = nil, nil
 		}
-		// Propagate language preference to each job so the operator runner
-		// can inject the correct language directive into the system prompt.
+		// Propagate language preference and the resolved confidence threshold
+		// to each job so the operator runner can inject them into the system
+		// prompt / salvage judgement (issue #336: config is the single
+		// threshold source, not the SKILL.md hardcoded "Threshold = 7.0").
 		for _, j := range repoJobs {
 			j.language = cfg.Settings.Language
+			j.confidenceThreshold = cfg.Settings.EffectiveConfidenceThreshold()
 		}
 		pending = append(pending, repoPending...)
 		jobs = append(jobs, repoJobs...)
@@ -512,6 +515,12 @@ type runJob struct {
 	repoCfg  config.Repo
 	client   vcs.Client
 	language string // Settings.Language propagated from cfg at job creation time
+	// confidenceThreshold is Settings.EffectiveConfidenceThreshold() propagated
+	// from cfg at job creation time (issue #336). Passed through to both the
+	// evaluate-* system prompt and the marker-less salvage judgement so all
+	// three paths compare against the same configured value instead of each
+	// hardcoding 7.0 independently.
+	confidenceThreshold float64
 }
 
 // firedKey identifies a (repo, issue, operator) triple that ran to a
@@ -1168,15 +1177,16 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	var recoveredConfidence float64
 
 	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
-		Repo:          j.repo,
-		Workdir:       workdir,
-		Timeout:       timeout,
-		Comments:      comments,
-		Role:          role,
-		EventWriter:   eventsFile,
-		ResumeContext: resumeCtx,
-		Language:      j.language,
-		StageFunc:     emitStage,
+		Repo:                j.repo,
+		Workdir:             workdir,
+		Timeout:             timeout,
+		Comments:            comments,
+		Role:                role,
+		EventWriter:         eventsFile,
+		ResumeContext:       resumeCtx,
+		Language:            j.language,
+		ConfidenceThreshold: &j.confidenceThreshold,
+		StageFunc:           emitStage,
 		MarkerRecovered: func(inferred string, conf float64) {
 			markerRecovered = true
 			recoveredConfidence = conf
@@ -2199,6 +2209,7 @@ func findExistingWorktree(parent string, issueNum int, localPath, base string) (
 //   - "cannot lock ref" — ref lock conflict
 //   - "Another git process seems to be running" — general process lock
 //   - ".lock" — catch-all for any lock-file mention
+//
 // mergeRetryAttempts is how many EXTRA merge attempts auto-merge makes
 // after a transient base-moved race, on top of the initial attempt.
 const mergeRetryAttempts = 2

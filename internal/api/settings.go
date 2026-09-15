@@ -33,7 +33,12 @@ type settingsView struct {
 		GitlabHint string `json:"gitlab_hint,omitempty"`
 	} `json:"tokens"`
 	Global struct {
-		PollInterval        int    `json:"poll_interval"`
+		PollInterval int `json:"poll_interval"`
+		// ConfidenceThreshold is the resolved *effective* threshold (issue
+		// #336: config.Settings.EffectiveConfidenceThreshold), not the raw
+		// stored value — so the dashboard always shows what evaluate-*
+		// operators and the salvage path actually compare Confidence scores
+		// against, including the "unset → 7" and "invalid → 7" defaults.
 		ConfidenceThreshold int    `json:"confidence_threshold"`
 		AgentTimeout        int    `json:"agent_timeout"`
 		MaxConcurrentAgents int    `json:"max_concurrent_agents"`
@@ -81,7 +86,7 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	if v.Global.PollInterval <= 0 {
 		v.Global.PollInterval = 30
 	}
-	v.Global.ConfidenceThreshold = cfg.Settings.ConfidenceThreshold
+	v.Global.ConfidenceThreshold = int(cfg.Settings.EffectiveConfidenceThreshold())
 	v.Global.AgentTimeout = cfg.Settings.AgentTimeout
 	if v.Global.AgentTimeout <= 0 {
 		v.Global.AgentTimeout = 3600
@@ -227,7 +232,13 @@ func HandleUpdateGlobalSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.Settings.PollInterval = *req.PollInterval
 	}
 	if req.ConfidenceThreshold != nil {
-		cfg.Settings.ConfidenceThreshold = *req.ConfidenceThreshold
+		// Store the raw explicit value (including 0) so Settings.ConfidenceThreshold
+		// keeps distinguishing "never configured" (nil) from "explicitly 0"
+		// (issue #336). The dashboard always sends the field when the user
+		// edits it, so this preserves an intentional 0 rather than silently
+		// upgrading it back to the default 7.
+		v := *req.ConfidenceThreshold
+		cfg.Settings.ConfidenceThreshold = &v
 	}
 	if req.AgentTimeout != nil {
 		cfg.Settings.AgentTimeout = *req.AgentTimeout
@@ -314,4 +325,3 @@ func lastFour(s string) string {
 	}
 	return "…" + s[len(s)-4:]
 }
-

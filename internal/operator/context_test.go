@@ -97,6 +97,28 @@ func TestBuildPrompt_TaskSectionAppearsAfterContext(t *testing.T) {
 	}
 }
 
+// TestBuildSystemPrompt_ConfidenceThresholdOverride verifies issue #336's
+// injection mechanism: evaluate-* operators get an explicit override
+// directive carrying the resolved threshold, so the model's own marker
+// judgement (not just the marker-less salvage path) uses the configured
+// value instead of the SKILL.md's hardcoded "Threshold = 7.0" wording.
+func TestBuildSystemPrompt_ConfidenceThresholdOverride(t *testing.T) {
+	op := &Operator{Name: "evaluate-bug", Prompt: "Confidence = average of the three. Threshold = 7.0."}
+	p := BuildSystemPrompt(op, "acme/webapp", "", 6)
+	mustContain(t, p, "6")
+	mustContain(t, p, "Confidence threshold override")
+}
+
+// TestBuildSystemPrompt_NonEvalOperator_NoOverrideInjected verifies the
+// override directive is only appended for operators evaluate.go's
+// evalDimensions map recognises — a non-evaluator's prompt never references
+// a threshold, so appending one would be dead text.
+func TestBuildSystemPrompt_NonEvalOperator_NoOverrideInjected(t *testing.T) {
+	op := &Operator{Name: "implement", Prompt: "implement the fix"}
+	p := BuildSystemPrompt(op, "acme/webapp", "", 6)
+	mustNotContain(t, p, "Confidence threshold override")
+}
+
 func mustContain(t *testing.T, s, sub string) {
 	t.Helper()
 	if !strings.Contains(s, sub) {

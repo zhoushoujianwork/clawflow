@@ -42,16 +42,18 @@ var evalDimensions = map[string][]string{
 	"evaluate-feat": {"Clarity", "Scope", "Architecture fit"},
 }
 
-// evalConfidenceThreshold mirrors the "Threshold = 7.0" line in both evaluate
-// SKILL.md templates: at or above it the operator declares agent-evaluated,
-// below it agent-skipped.
-const evalConfidenceThreshold = 7.0
-
 // salvageOutcome inspects a marker-less operator body and reports the outcome
 // label it should have declared, when the body is recognisably a complete
 // evaluation. ok is false for anything else — including operators that are not
 // evaluators — in which case the caller keeps the existing no-marker discard.
-func salvageOutcome(op *Operator, body string) (outcome string, confidence float64, ok bool) {
+//
+// threshold is the resolved Settings.EffectiveConfidenceThreshold (issue
+// #336): at or above it the outcome is agent-evaluated, below it
+// agent-skipped. Previously hardcoded to 7.0 to mirror the SKILL.md wording;
+// now the caller (Run) passes the same value it injected into the system
+// prompt, so a marker-less body salvages to the same label a marker-carrying
+// one would have gotten under the current config.
+func salvageOutcome(op *Operator, body string, threshold float64) (outcome string, confidence float64, ok bool) {
 	dims, isEval := evalDimensions[op.Name]
 	if !isEval {
 		return "", 0, false
@@ -85,7 +87,7 @@ func salvageOutcome(op *Operator, body string) (outcome string, confidence float
 		conf = mean(scores)
 	}
 
-	if conf >= evalConfidenceThreshold {
+	if conf >= threshold {
 		return "agent-evaluated", conf, true
 	}
 	return "agent-skipped", conf, true
@@ -134,15 +136,19 @@ func mean(vals []float64) float64 {
 }
 
 // salvageNotice is the banner prepended to a salvaged comment so the issue
-// thread records that the label was inferred rather than declared.
-func salvageNotice(outcome string, confidence float64) string {
+// thread records that the label was inferred rather than declared. threshold
+// is the effective configured value (issue #336) so the notice matches
+// whatever bar was actually applied, not the historical hardcoded 7.0.
+func salvageNotice(outcome string, confidence, threshold float64) string {
 	return fmt.Sprintf(
-		"> ⚠️ 本次运行未产出 outcome marker，标签 `%s` 由正文的 **Confidence: %s/10** 与 7.0 阈值推断（issue #307）。",
-		outcome, strconv.FormatFloat(confidence, 'f', -1, 64),
+		"> ⚠️ 本次运行未产出 outcome marker，标签 `%s` 由正文的 **Confidence: %s/10** 与 %s 阈值推断（issue #307/#336）。",
+		outcome,
+		strconv.FormatFloat(confidence, 'f', -1, 64),
+		strconv.FormatFloat(threshold, 'f', -1, 64),
 	)
 }
 
 // prependSalvageNotice puts the notice above the salvaged body.
-func prependSalvageNotice(body, outcome string, confidence float64) string {
-	return salvageNotice(outcome, confidence) + "\n\n" + strings.TrimSpace(body)
+func prependSalvageNotice(body, outcome string, confidence, threshold float64) string {
+	return salvageNotice(outcome, confidence, threshold) + "\n\n" + strings.TrimSpace(body)
 }

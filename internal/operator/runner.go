@@ -213,6 +213,19 @@ type RunOptions struct {
 	// operator output (comments, verdicts) uses the configured language.
 	Language string
 
+	// ConfidenceThreshold is the resolved Settings.EffectiveConfidenceThreshold
+	// (issue #336): the single score (0-10) evaluate-bug/evaluate-feat compare
+	// their Confidence average against, and the value the marker-less salvage
+	// path (salvage.go) uses for the same judgement.
+	//
+	// A pointer so nil (the zero RunOptions — every pre-#336 test and any
+	// caller that doesn't go through the config layer) preserves the
+	// historical hardcoded 7.0 default, while an explicit &0.0 (what the
+	// config layer sends after EffectiveConfidenceThreshold resolves a
+	// deliberate "confidence_threshold: 0") means "every valid score clears
+	// the bar" instead of being mistaken for "unset".
+	ConfidenceThreshold *float64
+
 	// RunFunc executes the claude subprocess. Leave nil to use the real
 	// RunClaude; tests inject a fake that returns canned output without
 	// spawning a process.
@@ -266,10 +279,27 @@ func emitStage(fn func(string), stage string) {
 // real 5-minute wait.
 var writeBackTimeout = 5 * time.Minute
 
+// defaultConfidenceThreshold mirrors config.DefaultConfidenceThreshold
+// (avoiding an import cycle: config already can't depend on operator). Used
+// when RunOptions.ConfidenceThreshold is nil — i.e. every caller that
+// predates issue #336 or doesn't route through the config layer.
+const defaultConfidenceThreshold = 7.0
+
+// resolveConfidenceThreshold applies the RunOptions contract documented on
+// ConfidenceThreshold: nil → default, explicit pointer (including &0.0) →
+// that value verbatim.
+func resolveConfidenceThreshold(t *float64) float64 {
+	if t == nil {
+		return defaultConfidenceThreshold
+	}
+	return *t
+}
+
 // Run executes one operator against one subject and returns the operator's
 // final stdout text, the outcome label (empty if none), or an error.
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
-	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language)
+	threshold := resolveConfidenceThreshold(opts.ConfidenceThreshold)
+	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language, threshold)
 	userMessage := BuildUserMessage(sub, opts.Repo, opts.Comments)
 	if opts.ResumeContext != "" {
 		userMessage += "\n---\n\n" + opts.ResumeContext
@@ -320,12 +350,12 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	// #307). salvageOutcome recognises that shape by template skeleton and
 	// derives the label from the Confidence score, so the body still lands.
 	if outcome == "" {
-		if inferred, conf, ok := salvageOutcome(op, trimmed); ok {
+		if inferred, conf, ok := salvageOutcome(op, trimmed, threshold); ok {
 			outcome = inferred
-			body = prependSalvageNotice(trimmed, inferred, conf)
+			body = prependSalvageNotice(trimmed, inferred, conf, threshold)
 			fmt.Fprintf(os.Stderr,
-				"  ⚠ operator %q stdout has no outcome marker but body matches the evaluation template — salvaging: Confidence %.1f/10 → %q\n",
-				op.Name, conf, inferred)
+				"  ⚠ operator %q stdout has no outcome marker but body matches the evaluation template — salvaging: Confidence %.1f/10 vs threshold %.1f → %q\n",
+				op.Name, conf, threshold, inferred)
 			if opts.MarkerRecovered != nil {
 				opts.MarkerRecovered(inferred, conf)
 			}

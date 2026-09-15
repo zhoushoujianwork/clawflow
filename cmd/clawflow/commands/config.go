@@ -159,7 +159,10 @@ func newConfigShowCmd() *cobra.Command {
 
 			fmt.Printf("Settings:\n")
 			fmt.Printf("  poll_interval:        %d min\n", cfg.Settings.PollInterval)
-			fmt.Printf("  confidence_threshold: %d/10\n", cfg.Settings.ConfidenceThreshold)
+			// Print the resolved effective threshold (issue #336), not the raw
+			// field, so this line matches what evaluate-bug/evaluate-feat and
+			// the salvage path actually compare Confidence scores against.
+			fmt.Printf("  confidence_threshold: %g/10 (effective)\n", cfg.Settings.EffectiveConfidenceThreshold())
 			fmt.Printf("  agent_timeout:        %d sec\n", cfg.Settings.AgentTimeout)
 			fmt.Printf("  max_concurrent:       %d\n", cfg.Settings.MaxConcurrentAgents)
 			billingDay := cfg.Settings.BillingCycleDay
@@ -185,4 +188,3 @@ func newConfigShowCmd() *cobra.Command {
 	cmd.Flags().StringVar(&fieldFlag, "field", "", "Single field to print (auto_approve, auto_merge, enabled, ...)")
 	return cmd
 }
-
