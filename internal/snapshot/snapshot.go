@@ -257,7 +257,8 @@ type RunMeta struct {
 	// would render it as a giant negative offset.
 	EndedAt     *time.Time `json:"ended_at,omitempty"`
 	// Status is one of "running", "finalizing", "success", "failed", "skipped",
-	// "cancelled", "no-marker", "marker-recovered", "skipped-empty".
+	// "cancelled", "no-marker", "disallowed-outcome", "marker-recovered",
+	// "skipped-empty".
 	// "cancelled" is set only by /api/run/cancel after the runner process
 	// is killed — it lets the dashboard distinguish a user-initiated kill
 	// from an organic crash ("failed").
@@ -274,6 +275,10 @@ type RunMeta struct {
 	// and the write-back happened normally (issue #307). It is a success
 	// variant: deliberately excluded from the circuit breaker's failure list
 	// below, since a dropped marker line is a transient formatting slip.
+	// "disallowed-outcome" means the operator emitted a trailing marker whose
+	// label is not in its declared outcomes whitelist: the comment was posted
+	// but no terminal label could be applied, so the write-back is incomplete
+	// and the circuit breaker counts the run (issue #326).
 	// "skipped-empty" means claude produced empty output; same treatment.
 	// "cost-limit" means every provider refused with a billing cap (HTTP 402).
 	// Like "rate-limited" it is not the issue's fault and is excluded from the
@@ -1776,7 +1781,13 @@ func ConsecutiveFailures(repo string, issueNum int) int {
 	})
 	count := 0
 	for _, r := range runs {
-		if r.status != "failed" && r.status != "skipped-empty" && r.status != "output-limit" {
+		// no-marker deliberately excluded (issue #323/#307: write-back
+		// defect, not an operator failure — salvage handles the recovery).
+		// disallowed-outcome IS counted: the run completed but landed no
+		// terminal label at all, so an issue that keeps tripping this would
+		// otherwise re-fire (and re-bill) forever with zero circuit-breaker
+		// signal (issue #326).
+		if r.status != "failed" && r.status != "disallowed-outcome" && r.status != "skipped-empty" && r.status != "output-limit" {
 			break
 		}
 		count++

@@ -1207,6 +1207,14 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// re-fire indefinitely (see issue #143).
 	isNoMarker := runErr != nil && errors.Is(runErr, operator.ErrNoOutcomeMarker)
 
+	// Detect disallowed-outcome runs: the operator emitted a trailing marker
+	// whose label is not in its declared outcomes whitelist, so no terminal
+	// label could be applied. Previously this returned nil and was filed as
+	// status="success" with the bogus label echoed into run/end at INFO — the
+	// only path that applied no label, left the trigger labels in place, and
+	// produced no greppable failure signal (issue #326).
+	isDisallowedOutcome := runErr != nil && errors.Is(runErr, operator.ErrDisallowedOutcome)
+
 	if runErr != nil {
 		if isCostLimit {
 			// Warn-level so patrol's grep -E "ERROR|WARN" catches the one
@@ -1221,6 +1229,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			fmt.Fprintf(os.Stderr, "%s ✗ claude auth error 403 (check session/API key, NOT retrying): %v\n", prefix, runErr)
 		} else if isNoMarker {
 			fmt.Fprintf(os.Stderr, "%s ✗ claude produced no outcome marker (write-back defect, NOT counted toward circuit breaker): %v\n", prefix, runErr)
+		} else if isDisallowedOutcome {
+			fmt.Fprintf(os.Stderr, "%s ✗ operator produced a disallowed outcome label — comment landed but no terminal label: %v\n", prefix, runErr)
 		} else if isOutputLimit {
 			runLog.Warn("run/output_limit", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", runErr.Error())
 			fmt.Fprintf(os.Stderr, "%s ✗ claude output token limit exceeded (raise max_output_tokens, NOT retrying): %v\n", prefix, runErr)
@@ -1287,6 +1297,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// the salvage path ("marker-recovered", issue #307).
 		rm.Status = "no-marker"
 		rm.Error = runErr.Error()
+	case isDisallowedOutcome:
+		// Recorded as "disallowed-outcome" rather than "success": the comment
+		// landed but no terminal label did, so the run is genuinely degraded.
+		// It DOES count toward the circuit breaker for the same reason
+		// no-marker does — the write-back is incomplete and, if the operator
+		// keeps picking a label outside its whitelist, every pass pays again
+		// (issue #326).
+		rm.Status = "disallowed-outcome"
+		rm.Error = runErr.Error()
 	case runErr != nil:
 		rm.Status = "failed"
 		rm.Error = runErr.Error()
@@ -1317,7 +1336,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// cost-limit joins them: the run was refused before claude did any work,
 	// so the worktree is empty and keeping it only accumulates garbage across
 	// however many passes happen before the billing window resets (issue #308).
-	if rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" {
+	if rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
@@ -1350,7 +1369,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// them and they were found by hand-grepping status=no-marker.
 	logFn := runLog.Info
 	switch rm.Status {
-	case "failed", "auth-error", "output-limit", "marker-recovered", "no-marker", "cost-limit":
+	case "failed", "auth-error", "output-limit", "marker-recovered", "no-marker", "disallowed-outcome", "cost-limit":
 		logFn = runLog.Warn
 	}
 	// cost is emitted for every status, not just the lossy ones: a single
@@ -1361,6 +1380,16 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if rm.Usage != nil {
 		runCost = rm.Usage.TotalCostUSD
 	}
+	// appliedLabel is the label that actually landed on the issue, as opposed to
+	// `outcome`, which is only what the operator asked for. The two diverge on
+	// the disallowed-outcome path, and logging just `outcome` there made run.log
+	// assert a label the issue never received — the most misleading part of
+	// issue #326. Emitted alongside rather than replacing `outcome` so existing
+	// greps over run.log keep working.
+	appliedLabel := outcome
+	if isDisallowedOutcome {
+		appliedLabel = ""
+	}
 	logFn("run/end",
 		"repo", j.repo,
 		"issue", j.sub.Number,
@@ -1368,6 +1397,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		"status", rm.Status,
 		"duration", runDur,
 		"outcome", outcome,
+		"applied_label", appliedLabel,
 		"pr", rm.PRUrl,
 		"cost", fmt.Sprintf("%.4f", runCost),
 	)
@@ -1411,6 +1441,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// Do NOT call checkCircuitBreaker: a missing marker line is a
 		// write-back defect, not an unprocessable issue (issue #323).
 		fmt.Printf("%s ✗ no outcome marker (not counted toward circuit breaker)\n", prefix)
+		return false, false
+	case "disallowed-outcome":
+		fmt.Printf("%s ✗ disallowed outcome label %q (comment landed, no terminal label; circuit breaker counting)\n", prefix, outcome)
+		checkCircuitBreaker(j, prefix)
 		return false, false
 	case "output-limit":
 		fmt.Printf("%s ✗ output token limit (raise max_output_tokens; circuit breaker counting)\n", prefix)

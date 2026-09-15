@@ -33,7 +33,7 @@ interface Run {
   issue_state?: string
   started_at: string
   ended_at?: string
-  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'marker-recovered' | 'skipped-empty' | 'cost-limit'
+  status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'disallowed-outcome' | 'marker-recovered' | 'skipped-empty' | 'cost-limit'
   /** fine-grained lifecycle phase while status === 'running' (issue #199):
    *  lock-acquired → claude-started → parsing-outcome → posting-comment → applying-label */
   stage?: string
@@ -164,7 +164,7 @@ function splitIssueTree(groups: IssueGroup[]): {
 function issueOverallStatus(stages: Map<string, Run>): Run['status'] {
   const statuses = Array.from(stages.values()).map(r => r.status)
   if (statuses.some(s => s === 'running')) return 'running'
-  if (statuses.some(s => s === 'failed' || s === 'no-marker' || s === 'skipped-empty')) return 'failed'
+  if (statuses.some(s => s === 'failed' || s === 'no-marker' || s === 'disallowed-outcome' || s === 'skipped-empty')) return 'failed'
   // marker-recovered is a success variant (comment posted, label applied via
   // inferred Confidence), so it must not hold an issue out of the success
   // bucket (issue #307).
@@ -182,6 +182,10 @@ const statusPill: Record<Run['status'], { label: string; cls: string; Icon: type
   skipped:       { label: 'skipped',      cls: 'bg-muted text-muted-foreground border-border',   Icon: SkipForward },
   cancelled:     { label: 'cancelled',    cls: 'bg-amber-50 text-amber-700 border-amber-200',    Icon: Square },
   'no-marker':   { label: 'no marker',    cls: 'bg-orange-100 text-orange-700 border-orange-200', Icon: XCircle },
+  // Marker present but its label is outside the operator's whitelist: the
+  // comment landed, the terminal label did not (issue #326). Same orange
+  // "write-back is broken" family as no-marker.
+  'disallowed-outcome': { label: 'bad outcome', cls: 'bg-orange-100 text-orange-700 border-orange-200', Icon: XCircle },
   'marker-recovered': { label: 'marker recovered', cls: 'bg-amber-100 text-amber-800 border-amber-200', Icon: CheckCircle2 },
   'skipped-empty': { label: 'empty',      cls: 'bg-orange-50 text-orange-600 border-orange-200', Icon: SkipForward },
   // Billing cap (issue #308): nothing ran and nothing was spent, and it stays
@@ -444,7 +448,7 @@ function Dashboard() {
       // them under "failed" for the stat cards so they surface as actionable.
       // marker-recovered is NOT one of them — the write-back completed, so it
       // counts as a success (issue #307).
-      const bucket = (r.status === 'no-marker' || r.status === 'skipped-empty')
+      const bucket = (r.status === 'no-marker' || r.status === 'disallowed-outcome' || r.status === 'skipped-empty')
         ? 'failed'
         : r.status === 'marker-recovered' ? 'success' : r.status
       if (bucket in c) c[bucket as keyof typeof c]++
@@ -470,7 +474,7 @@ function Dashboard() {
       }
       const status = issueOverallStatus(stages)
       // Bucket no-marker / skipped-empty as failed at the issue level too
-      const bucket = (status === 'no-marker' || status === 'skipped-empty')
+      const bucket = (status === 'no-marker' || status === 'disallowed-outcome' || status === 'skipped-empty')
         ? 'failed'
         : status === 'marker-recovered' ? 'success' : status
       if (bucket in c) c[bucket as keyof typeof c]++
@@ -523,7 +527,7 @@ function Dashboard() {
       if (statusFilter !== 'all') {
         // "failed" filter also captures no-marker and skipped-empty since they
         // are bucketed under failed in the stat cards (issue #143).
-        const effectiveStatus = (r.status === 'no-marker' || r.status === 'skipped-empty')
+        const effectiveStatus = (r.status === 'no-marker' || r.status === 'disallowed-outcome' || r.status === 'skipped-empty')
           ? 'failed'
           : r.status === 'marker-recovered' ? 'success' : r.status
         if (effectiveStatus !== statusFilter) return false
