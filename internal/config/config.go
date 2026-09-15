@@ -78,8 +78,18 @@ type Repo struct {
 
 // Settings holds global ClawFlow settings.
 type Settings struct {
-	PollInterval        int      `yaml:"poll_interval"`
-	ConfidenceThreshold int      `yaml:"confidence_threshold"`
+	PollInterval int `yaml:"poll_interval"`
+
+	// ConfidenceThreshold is the score (0-10) evaluate-bug/evaluate-feat and
+	// their marker-less salvage path (internal/operator/salvage.go) compare a
+	// run's Confidence average against to choose agent-evaluated vs
+	// agent-skipped. A pointer so the config can distinguish "never
+	// configured" (nil → default 7, matching every evaluate-* SKILL.md's
+	// historical hardcoded wording) from "explicitly set to 0" (issue #336:
+	// a user who deliberately sets 0 wants every valid numeric score to
+	// clear the bar). Read via EffectiveConfidenceThreshold, never directly —
+	// that resolver also clamps out-of-range values back to the default.
+	ConfidenceThreshold *int     `yaml:"confidence_threshold,omitempty"`
 	AgentTimeout        int      `yaml:"agent_timeout"`
 	MaxConcurrentAgents int      `yaml:"max_concurrent_agents"`
 	NotificationChannel string   `yaml:"notification_channel"`
@@ -211,6 +221,32 @@ func (s *Settings) ResolveCloneProtocol() string {
 		return "https"
 	}
 	return "ssh"
+}
+
+// DefaultConfidenceThreshold is the score (0-10) evaluate-bug/evaluate-feat
+// compare their Confidence average against when Settings.ConfidenceThreshold
+// is unset. It mirrors the "Threshold = 7.0" wording both SKILL.md templates
+// have hardcoded since before this field existed (issue #336).
+const DefaultConfidenceThreshold = 7
+
+// EffectiveConfidenceThreshold resolves the configured threshold, applying
+// the issue #336 rules:
+//   - nil (never configured)          → DefaultConfidenceThreshold (7)
+//   - explicit 0                      → 0 (every valid score clears the bar;
+//     this does NOT bypass other gates like identity/lock/marker validity)
+//   - out of [0, 10] range             → DefaultConfidenceThreshold, since a
+//     negative or >10 value can never be compared meaningfully against a
+//     0-10 Confidence score
+//   - any other explicit value        → that value, unchanged
+func (s *Settings) EffectiveConfidenceThreshold() float64 {
+	if s == nil || s.ConfidenceThreshold == nil {
+		return DefaultConfidenceThreshold
+	}
+	v := *s.ConfidenceThreshold
+	if v < 0 || v > 10 {
+		return DefaultConfidenceThreshold
+	}
+	return float64(v)
 }
 
 // ResolveIDEScheme returns the URI scheme prefix for the configured IDE.

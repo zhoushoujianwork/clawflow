@@ -55,13 +55,14 @@ do the thing
 👉 If this plan looks right, add the ` + "`ready-for-agent`" + ` label to kick off automatic implementation.`
 
 	tests := []struct {
-		name     string
-		op       string
-		outcomes []string
-		body     string
-		want     string
-		wantConf float64
-		wantOK   bool
+		name      string
+		op        string
+		outcomes  []string
+		body      string
+		threshold float64 // zero value in the table means "use the default 7.0"; the explicit-zero-threshold case below uses 0.0001 to stay distinguishable
+		want      string
+		wantConf  float64
+		wantOK    bool
 	}{
 		{
 			name: "evaluate-bug above threshold", op: "evaluate-bug", outcomes: evalOutcomes,
@@ -82,6 +83,30 @@ do the thing
 			// SKILL.md wording ("below 7.0 → agent-skipped").
 			name: "exactly at threshold", op: "evaluate-bug", outcomes: evalOutcomes,
 			body: evalBody("7.0"), want: "agent-evaluated", wantConf: 7, wantOK: true,
+		},
+		{
+			// Issue #336: a configured threshold of 6 lets a 6.0 score pass
+			// that the historical hardcoded 7.0 would have skipped.
+			name: "custom threshold 6, score above it", op: "evaluate-bug", outcomes: evalOutcomes,
+			body: evalBody("6.0"), threshold: 6, want: "agent-evaluated", wantConf: 6, wantOK: true,
+		},
+		{
+			// A configured threshold of 8 rejects a 7.9 score the default
+			// 7.0 would have accepted.
+			name: "custom threshold 8, score below it", op: "evaluate-bug", outcomes: evalOutcomes,
+			body: evalBody("7.9"), threshold: 8, want: "agent-skipped", wantConf: 7.9, wantOK: true,
+		},
+		{
+			// Exactly at a non-default threshold still passes (>=, not >).
+			name: "custom threshold 8, score exactly at it", op: "evaluate-bug", outcomes: evalOutcomes,
+			body: evalBody("8.0"), threshold: 8, want: "agent-evaluated", wantConf: 8, wantOK: true,
+		},
+		{
+			// Issue #336's explicit-0 case: every valid numeric score clears
+			// the bar. This does not bypass the dimension/Confidence
+			// well-formedness gates — those still ran above.
+			name: "explicit zero threshold accepts any valid score", op: "evaluate-bug", outcomes: evalOutcomes,
+			body: evalBody("0.1"), threshold: 0.0001, want: "agent-evaluated", wantConf: 0.1, wantOK: true,
 		},
 		{
 			// evaluate-feat uses different dimension names (issue #307 comment):
@@ -148,8 +173,12 @@ do it`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			threshold := tt.threshold
+			if threshold == 0 {
+				threshold = defaultConfidenceThreshold
+			}
 			op := &Operator{Name: tt.op, Outcomes: tt.outcomes}
-			got, conf, ok := salvageOutcome(op, tt.body)
+			got, conf, ok := salvageOutcome(op, tt.body, threshold)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v (outcome %q)", ok, tt.wantOK, got)
 			}
@@ -284,7 +313,7 @@ func TestSalvageOutcome_Issue313RealBody(t *testing.T) {
 	}
 
 	op := &Operator{Name: "evaluate-bug", Outcomes: []string{"agent-evaluated", "agent-skipped"}}
-	outcome, conf, ok := salvageOutcome(op, body)
+	outcome, conf, ok := salvageOutcome(op, body, defaultConfidenceThreshold)
 	if !ok {
 		t.Fatalf("salvageOutcome ok = false, want true: this body was discarded for $1.21 (issue #314)")
 	}
@@ -412,5 +441,118 @@ func TestRun_Issue326RealBody_SalvagedEndToEnd(t *testing.T) {
 	// is what mangled the real comment's repro step to a pair of empty backticks.
 	if !strings.Contains(out, "<!-- clawflow:outcome=... -->") {
 		t.Error("quoted marker was stripped from the body — the posted comment would be mangled")
+	}
+}
+
+// TestRun_ConfidenceThreshold_ConsistentAcrossMarkerAndSalvage is the issue
+// #336 end-to-end contract: the same Confidence score must land on the same
+// outcome label whether the operator emits an explicit marker or drops it
+// (routing through salvage), and both paths must honour a configured
+// threshold instead of the historical hardcoded 7.0.
+func TestRun_ConfidenceThreshold_ConsistentAcrossMarkerAndSalvage(t *testing.T) {
+	customThreshold := 6.0
+
+	newOp := func() *Operator {
+		return &Operator{
+			Name:      "evaluate-bug",
+			LockLabel: "agent-running",
+			Prompt:    "evaluate",
+			Outcomes:  []string{"agent-evaluated", "agent-skipped"},
+		}
+	}
+
+	// 6.0 is below the historical hardcoded 7.0 but at-or-above a configured
+	// threshold of 6 — both the marker path and the salvage path must agree
+	// it clears the bar.
+	t.Run("marker path honours custom threshold", func(t *testing.T) {
+		op := newOp()
+		sub := &Subject{Number: 1, Labels: []string{"bug"}}
+		v := newFakeVCS()
+
+		body := "## Eval\n\n**Confidence:** 6.0/10\n\n<!-- clawflow:outcome=agent-evaluated -->\n"
+		_, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+			Repo:                "r",
+			ConfidenceThreshold: &customThreshold,
+			RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+				return body, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected: %v", err)
+		}
+		if outcome != "agent-evaluated" {
+			t.Errorf("outcome = %q, want agent-evaluated", outcome)
+		}
+	})
+
+	t.Run("salvage path honours the same custom threshold", func(t *testing.T) {
+		op := newOp()
+		sub := &Subject{Number: 2, Labels: []string{"bug"}}
+		v := newFakeVCS()
+
+		_, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+			Repo:                "r",
+			ConfidenceThreshold: &customThreshold,
+			RunFunc: func(_ context.Context, _, _ string, _ time.Duration, _ io.Writer, _ string, _ ...string) (string, error) {
+				return evalBody("6.0"), nil // full template, no marker → salvage
+			},
+		})
+		if err != nil {
+			t.Fatalf("Run returned error, want nil (body should be salvaged): %v", err)
+		}
+		if outcome != "agent-evaluated" {
+			t.Errorf("outcome = %q, want agent-evaluated (6.0 clears a configured threshold of 6)", outcome)
+		}
+	})
+
+	// A score that would have passed the default 7.0 must NOT be salvaged as
+	// a pass once the configured threshold is raised above it.
+	t.Run("salvage does not wrongly pass a score below a raised threshold", func(t *testing.T) {
+		op := newOp()
+		sub := &Subject{Number: 3, Labels: []string{"bug"}}
+		v := newFakeVCS()
+		raised := 8.0
+
+		_, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+			Repo:                "r",
+			ConfidenceThreshold: &raised,
+			RunFunc: func(_ context.Context, _, _ string, _ time.Duration, _ io.Writer, _ string, _ ...string) (string, error) {
+				return evalBody("7.5"), nil // above the old 7.0 default, below the configured 8
+			},
+		})
+		if err != nil {
+			t.Fatalf("Run returned error, want nil: %v", err)
+		}
+		if outcome != "agent-skipped" {
+			t.Errorf("outcome = %q, want agent-skipped (7.5 must not clear a configured threshold of 8)", outcome)
+		}
+	})
+}
+
+// TestRun_ConfidenceThreshold_Unset_KeepsHistoricalDefault verifies that
+// omitting RunOptions.ConfidenceThreshold (the zero-value RunOptions every
+// pre-#336 caller and test uses) still applies the historical 7.0 bar,
+// preserving back-compat for callers that don't route through config.
+func TestRun_ConfidenceThreshold_Unset_KeepsHistoricalDefault(t *testing.T) {
+	op := &Operator{
+		Name:      "evaluate-bug",
+		LockLabel: "agent-running",
+		Prompt:    "evaluate",
+		Outcomes:  []string{"agent-evaluated", "agent-skipped"},
+	}
+	sub := &Subject{Number: 4, Labels: []string{"bug"}}
+	v := newFakeVCS()
+
+	_, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo: "r",
+		RunFunc: func(_ context.Context, _, _ string, _ time.Duration, _ io.Writer, _ string, _ ...string) (string, error) {
+			return evalBody("6.9"), nil // below 7.0, would pass a threshold of 6
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error, want nil: %v", err)
+	}
+	if outcome != "agent-skipped" {
+		t.Errorf("outcome = %q, want agent-skipped (unset RunOptions must keep the 7.0 default)", outcome)
 	}
 }

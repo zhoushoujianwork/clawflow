@@ -50,7 +50,7 @@ The correct flow is:
 Five hard rules:
 
 1. **No tool calls that mutate VCS state.** Do NOT run `clawflow label`, `clawflow issue comment`, `clawflow pr`, `gh`, or any other command that changes labels / comments / PRs. ClawFlow owns those side-effects — your job is to produce text only.
-2. **End with exactly one outcome marker line.** The very last line of stdout must be either `<!-- clawflow:outcome=agent-evaluated -->` (confidence ≥ 7.0) or `<!-- clawflow:outcome=agent-skipped -->` (confidence < 7.0). ClawFlow strips this line before posting and uses it to decide which label to add.
+2. **End with exactly one outcome marker line.** The very last line of stdout must be either `<!-- clawflow:outcome=agent-evaluated -->` (confidence ≥ threshold) or `<!-- clawflow:outcome=agent-skipped -->` (confidence < threshold). Default threshold is 7.0 — use the value from a "Confidence threshold override" directive in this system prompt instead, when present (issue #336). ClawFlow strips this line before posting and uses it to decide which label to add.
 3. **Do NOT append attribution footers** like "Powered by ClawFlow" or 🤖 signatures. The visible comment ends at the human-facing reminder line; the marker comes after that.
 4. **Produce a full, fresh evaluation every time.** If you see a prior evaluation comment in the thread, ignore it — the operator is triggering now because the owner removed `agent-evaluated` to request a new pass. Do not abbreviate into a "status update". Emit the complete Markdown template below.
 5. **Be concise. This is a triage comment, not a design doc.** The reader needs to decide "does this deserve `ready-for-agent`?" in 30 seconds, not read a full RCA. Cite `file.go:123` / `FuncName` to prove you found the code — do NOT paste multi-line code blocks or quote whole functions. Do NOT restate the same explanation twice (e.g. once in a score reason, again in a section below); each section adds new information, it doesn't repeat the previous one. If you catch yourself writing a paragraph, cut it to a sentence or a bullet.
@@ -67,7 +67,7 @@ Output no preamble ("I will now evaluate…"), no code fences wrapping the whole
 | **Root cause** | Is the likely cause identifiable in specific code? Do we know where to look? |
 | **Fix difficulty** | Is this a localized change or a systemic refactor? Lower score = harder. |
 
-**Confidence = average of the three.** Threshold = 7.0.
+**Confidence = average of the three.** Default threshold = 7.0, unless overridden by a "Confidence threshold override" directive elsewhere in this system prompt — that value always wins (issue #336).
 
 ## Output format (stdout)
 
@@ -100,7 +100,7 @@ Output exactly this Markdown, filling the placeholders. No code fences around th
 ## Constraints
 
 - Output **only** the Markdown comment body and the closing marker line. No "I will now evaluate…" preamble, no code fences around the whole output.
-- If the issue has too little information to score, give 1-3 on the affected dimension(s) and say *specifically what is missing*. Confidence below 7.0 → use `agent-skipped` in the marker.
+- If the issue has too little information to score, give 1-3 on the affected dimension(s) and say *specifically what is missing*. Confidence below the threshold (default 7.0, or the override value above) → use `agent-skipped` in the marker.
 - The marker MUST be the last non-empty line of stdout. **Do NOT call any tool after emitting the evaluation** — not `gh`, not `clawflow`, not anything. Your stdout is the comment; calling a tool to post it yourself will break the outcome label pipeline.
 - The `👉 If this plan looks right…` footer is **not** the end of your output. Exactly one more line follows it: the outcome marker. Stopping at the footer leaves the run without a label (issue #307).
 - **Length budget: aim for well under 200 words in the three template sections combined** (Repro steps / Root cause analysis / Suggested fix). The score-line reasons can carry the "why"; the sections below carry only what's new — file/line references, the concrete fix steps, nothing else. No pasted code blocks except a single-line symbol reference like `` `pkg/foo.go:123` ``.
