@@ -510,6 +510,10 @@ func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("claude start: %w", err)
 	}
+	// Track this subprocess so the run-level self-watchdog can terminate it
+	// on a forced exit instead of orphaning it (issue #325).
+	registerActiveCmd(cmd)
+	defer unregisterActiveCmd(cmd)
 
 	// Guard: when the context fires (deadline / cancellation), exec.CommandContext
 	// only SIGKILLs the direct claude child — its Bash tool grandchildren

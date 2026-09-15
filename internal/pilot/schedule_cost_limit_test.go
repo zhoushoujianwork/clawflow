@@ -256,7 +256,7 @@ func TestScheduleAbortsOnCostLimit(t *testing.T) {
 		}
 	}
 
-	woken, err := Schedule(context.Background(), 30*time.Second)
+	woken, err := Schedule(context.Background(), 30*time.Second, time.Time{})
 	if err != nil {
 		t.Fatalf("Schedule returned error: %v", err)
 	}
@@ -318,4 +318,95 @@ exit 1
 		t.Fatalf("write claude stub: %v", err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestScheduleSkipsWhenBudgetInsufficient is the regression guard for issue
+// #325: `clawflow run`'s self-watchdog bounds the WHOLE process, but Pilot
+// wakes run sequentially inside Phase 4 with no awareness of how much of
+// that budget is left. A wake started with less time remaining than its own
+// perWakeTimeout is guaranteed to be killed mid-flight by the watchdog,
+// orphaning a claude subprocess that keeps writing to the VCS with nothing
+// ever recorded in meta.json. Schedule must refuse to start it.
+//
+// No claude stub is needed here — the check runs before wake() is ever
+// invoked, so a real production incident (pop project, 2026-09-12) never
+// reaches the point that produced the orphan.
+func TestScheduleSkipsWhenBudgetInsufficient(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := os.MkdirAll(filepath.Join(home, ".clawflow", "config"), 0o755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".clawflow", "config", "repos.yaml"), []byte("repos: {}\n"), 0o644); err != nil {
+		t.Fatalf("write repos.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".clawflow", "config", "config.yaml"), []byte("settings:\n  language: en\n"), 0o644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	names := []string{"budget-a", "budget-b"}
+	for _, n := range names {
+		if _, err := project.Create(n); err != nil {
+			t.Fatalf("create %s: %v", n, err)
+		}
+		if err := project.SetAutomation(n, true, 60); err != nil {
+			t.Fatalf("enable automation %s: %v", n, err)
+		}
+	}
+
+	// The watchdog is about to fire in 1 second, but each wake claims it
+	// needs a full hour — nowhere near enough runway to start one.
+	deadline := time.Now().Add(1 * time.Second)
+	woken, err := Schedule(context.Background(), time.Hour, deadline)
+	if err != nil {
+		t.Fatalf("Schedule returned error: %v", err)
+	}
+	if woken != 0 {
+		t.Errorf("woken = %d, want 0 — no wake should start when remaining budget < perWakeTimeout", woken)
+	}
+
+	for _, n := range names {
+		if entries, rerr := os.ReadDir(filepath.Join(home, ".clawflow", "data", "pilot-runs", n)); rerr == nil && len(entries) > 0 {
+			t.Errorf("project %s: %d pilot-run dir(s) found, want 0 — wake must never have been attempted", n, len(entries))
+		}
+	}
+}
+
+// TestScheduleProceedsWhenBudgetSufficient is the flip side: a generous
+// deadline must not trip the new guard and block wakes that would have
+// succeeded before issue #325's fix.
+func TestScheduleProceedsWhenBudgetSufficient(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stub402Claude(t) // fast, deterministic subprocess; outcome doesn't matter here
+
+	if err := os.MkdirAll(filepath.Join(home, ".clawflow", "config"), 0o755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".clawflow", "config", "repos.yaml"), []byte("repos: {}\n"), 0o644); err != nil {
+		t.Fatalf("write repos.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".clawflow", "config", "config.yaml"), []byte("settings:\n  language: en\n"), 0o644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	const name = "budget-sufficient"
+	if _, err := project.Create(name); err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	if err := project.SetAutomation(name, true, 60); err != nil {
+		t.Fatalf("enable automation %s: %v", name, err)
+	}
+
+	// Plenty of runway relative to the wake's own timeout.
+	deadline := time.Now().Add(time.Hour)
+	if _, err := Schedule(context.Background(), 30*time.Second, deadline); err != nil {
+		t.Fatalf("Schedule returned error: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(home, ".clawflow", "data", "pilot-runs", name))
+	if err != nil || len(entries) == 0 {
+		t.Errorf("project %s: expected a pilot-run dir (wake attempted), got err=%v entries=%d", name, err, len(entries))
+	}
 }
