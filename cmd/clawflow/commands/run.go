@@ -1044,6 +1044,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		now := time.Now().UTC()
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
+		// Pre-claude failure: run/end below (line ~1393) is never reached from
+		// this early return, so without this WARN the failure is invisible to
+		// deployment.md's patrol grep (issue #333). stage is included because
+		// it is the only signal that distinguishes claude-before vs claude-after
+		// failures once this line and the real run/end converge on the same slug.
+		runLog.Warn("run/end", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name,
+			"status", "failed", "stage", runningMeta.Stage, "err", overrideErr.Error(), "cost", "0.0000")
 		checkCircuitBreaker(j, prefix)
 		return false, false
 	}
@@ -1065,6 +1072,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		now := time.Now().UTC()
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
+		// Same rationale as the base-branch-marker failure above: this early
+		// return skips run/end entirely, so this WARN is the only structured
+		// record of a claude-before-launch failure (issue #333). This is the
+		// path that covers base_branch misconfiguration (git fetch failures),
+		// the highest-volume pre-claude failure family in production.
+		runLog.Warn("run/end", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name,
+			"status", "failed", "stage", runningMeta.Stage, "err", err.Error(), "cost", "0.0000")
 		checkCircuitBreaker(j, prefix)
 		return false, false
 	}
@@ -1503,6 +1517,10 @@ func checkCircuitBreaker(j *runJob, prefix string) {
 	count := snapshot.ConsecutiveFailures(j.repo, j.sub.Number)
 	if count < maxFails {
 		fmt.Fprintf(os.Stderr, "%s ⚠ failure %d/%d (circuit breaker at %d)\n", prefix, count, maxFails, maxFails)
+		// Structured trail for the running failure count, not just stderr
+		// (issue #333) — cron/web scheduler runs never surface stderr, so
+		// this was the only place the pre-threshold count existed.
+		runLog.Info("run/failure_count", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "count", count, "max", maxFails)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "%s ✗ circuit breaker: %d consecutive failures, adding agent-failed\n", prefix, count)
@@ -1510,6 +1528,11 @@ func checkCircuitBreaker(j *runJob, prefix string) {
 		fmt.Fprintf(os.Stderr, "%s ⚠ circuit breaker label failed: %v\n", prefix, err)
 		return
 	}
+	// Every agent-failed application must be auditable from run.log alone
+	// (issue #333): before this, the label landed on production issues with
+	// zero trace in structured logs, so patrol had no timestamp or count to
+	// justify later removing it.
+	runLog.Warn("run/circuit_breaker", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "count", count, "label", "agent-failed")
 	// No accompanying comment by design: the failure trail lives in
 	// events.jsonl + dashboard runs, and chatter on the issue itself
 	// just adds noise users have to scroll past. PM patrol may remove
