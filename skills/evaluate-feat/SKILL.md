@@ -27,12 +27,13 @@ The correct flow is:
 - ✅ You print the full evaluation to stdout → ClawFlow posts it as a comment and applies the label.
 - ❌ You call `gh issue comment` or `clawflow issue comment` → ClawFlow sees only your summary line, finds no outcome marker, never applies the label, fires again next run.
 
-Four hard rules:
+Five hard rules:
 
 1. **No tool calls that mutate VCS state.** Do NOT run `clawflow label`, `clawflow issue comment`, `clawflow pr`, `gh`, or any other command that changes labels / comments / PRs. ClawFlow owns those side-effects — your job is to produce text only.
 2. **End with exactly one outcome marker line.** The very last line of stdout must be either `<!-- clawflow:outcome=agent-evaluated -->` (confidence ≥ 7.0) or `<!-- clawflow:outcome=agent-skipped -->` (confidence < 7.0). ClawFlow strips this line before posting and uses it to decide which label to add.
 3. **Do NOT append attribution footers** like "Powered by ClawFlow" or 🤖 signatures. The visible comment ends at the human-facing reminder line; the marker comes after that.
 4. **Produce a full, fresh evaluation every time.** If you see a prior evaluation comment in the thread, ignore it — the operator is triggering now because the owner removed `agent-evaluated` to request a new pass. Do not abbreviate into a "status update". Emit the complete Markdown template below.
+5. **Be concise. This is a triage comment, not a design doc.** The reader needs to decide "does this deserve `ready-for-agent`?" in 30 seconds. Cite specific files/modules to prove you looked — do NOT paste code blocks or write multi-paragraph explanations. Each section adds new information; it doesn't repeat what the score reasons already said. If you catch yourself writing a paragraph, cut it to a sentence or a bullet.
 
 Output no preamble ("I will now evaluate…"), no code fences wrapping the whole output.
 
@@ -62,13 +63,13 @@ Output exactly this Markdown, filling in the placeholders:
 **Confidence:** {avg}/10 {✅ above threshold / ⚠️ below threshold}
 
 ### Summary of the ask
-{one paragraph restating what the feature does, in your own words}
+{1-2 sentences restating what the feature does — not a paragraph}
 
 ### Implementation sketch
-{bulleted high-level plan — files/modules affected, key decisions}
+{bulleted high-level plan, one bullet per file/module/decision — not prose}
 
 ### Risks / Open questions
-{anything the owner should resolve before tagging ready-for-agent}
+{bulleted, only if real open questions exist — omit filler}
 
 ---
 
@@ -83,3 +84,4 @@ Output exactly this Markdown, filling in the placeholders:
 - Large scope is not automatic disqualification — score Scope honestly and flag it in the plan. The owner decides whether to split.
 - The marker MUST be the last non-empty line of stdout. **Do NOT call any tool after emitting the evaluation** — not `gh`, not `clawflow`, not anything. Your stdout is the comment; calling a tool to post it yourself will break the outcome label pipeline.
 - The `👉 If this plan looks right…` footer is **not** the end of your output. Exactly one more line follows it: the outcome marker. Stopping at the footer leaves the run without a label (issue #307).
+- **Length budget: aim for well under 200 words in the three template sections combined** (Summary / Implementation sketch / Risks). The score-line reasons carry the "why"; the sections below carry only what's new.
