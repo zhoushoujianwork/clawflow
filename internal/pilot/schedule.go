@@ -61,10 +61,22 @@ import (
 // past its cooldown. Sequential by design: Pilots are heavy claude
 // invocations, parallelism here would mostly buy rate-limit pain.
 //
+// budgetDeadline is the wall-clock moment `clawflow run`'s self-watchdog
+// will force-exit the whole process (cmd/clawflow/commands/run.go). Before
+// starting each wake, Schedule checks whether there's still at least
+// perWakeTimeout left before that deadline; if not, it skips the remaining
+// ready projects with reason=insufficient_budget instead of starting a wake
+// that is mathematically guaranteed to be killed mid-flight. The watchdog's
+// budget bounds the WHOLE run, not any single wake — pilot wakes are
+// sequential, so a 5th project starting with 4 minutes of budget left would
+// otherwise be started anyway and orphaned by the watchdog kill (issue #325).
+// Pass the zero Time to disable the check (e.g. tests that don't care about
+// the outer run's budget, or WakeOne's on-demand single wake).
+//
 // Errors per-project are logged and swallowed — one stuck project
 // must never block the rest. Returns the count of Pilots actually
 // woken, for the caller's run summary.
-func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
+func Schedule(ctx context.Context, perWakeTimeout time.Duration, budgetDeadline time.Time) (int, error) {
 	projects, err := project.ListAutomationEnabled()
 	if err != nil {
 		return 0, fmt.Errorf("list automation-enabled projects: %w", err)
@@ -147,12 +159,32 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration) (int, error) {
 	}
 
 	woken := 0
-	for _, p := range ready {
+	for i, p := range ready {
 		select {
 		case <-ctx.Done():
 			fmt.Fprintf(os.Stderr, "[pilot] context canceled — stopping after %d wake(s)\n", woken)
 			return woken, ctx.Err()
 		default:
+		}
+
+		// Budget-aware pilot phase (issue #325): wakes run sequentially and
+		// each can legitimately take close to perWakeTimeout, but the
+		// run-level self-watchdog bounds the WHOLE process. Starting a wake
+		// that plainly can't finish before the watchdog fires just means it
+		// gets SIGTERM'd mid-flight with nothing recorded — same outcome as
+		// never starting it, minus the wasted tokens and the orphan risk.
+		// Skip it (and everything after it, since remaining budget only
+		// shrinks) and let the next `clawflow run` pass pick it up fresh.
+		// The zero Time disables the check for callers that don't share a
+		// budget with an outer watchdog (WakeOne, tests).
+		if !budgetDeadline.IsZero() {
+			if remaining := time.Until(budgetDeadline); remaining < perWakeTimeout {
+				reason := fmt.Sprintf("insufficient_budget remaining=%s need=%s", remaining.Round(time.Second), perWakeTimeout)
+				fmt.Fprintf(os.Stderr, "[pilot] %s: %s — skipping (%d project(s) not woken this pass)\n", p.Name, reason, len(ready)-i)
+				skipLog.Warn("pilot/skip", "project", p.Name, "reason", "insufficient_budget",
+					"remaining", remaining.Round(time.Second).String(), "need", perWakeTimeout.String())
+				break
+			}
 		}
 
 		fmt.Fprintf(os.Stderr, "[pilot] waking project %q (cooldown=%dmin)\n", p.Name, p.Automation.CooldownMinutes)

@@ -25,7 +25,10 @@ func setProcessGroup(cmd *exec.Cmd) {
 // claude can flush its stream-json (keeping the run's events.jsonl useful for
 // diagnosis), then SIGKILL after a short grace for anything that ignored it.
 // Safe to call once Start has succeeded; a no-op otherwise. Mirrors the
-// killGroup pattern already used in internal/pty/server.go.
+// killGroup pattern already used in internal/pty/server.go. The SIGKILL
+// escalation runs on its own goroutine because the caller (the ctx-deadline
+// guard in runClaudeWithProvider) is already blocked in cmd.Wait(), so it can
+// afford to let this return immediately.
 func terminateProcessGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
@@ -47,4 +50,28 @@ func terminateProcessGroup(cmd *exec.Cmd) {
 			_ = cmd.Process.Kill()
 		}
 	}()
+}
+
+// terminateProcessGroupSync is terminateProcessGroup's blocking twin: SIGTERM
+// the group, sleep out the grace period IN THIS GOROUTINE, then SIGKILL
+// anything still alive — and only then return. Callers about to os.Exit
+// (the run-level self-watchdog, issue #325) cannot use the async escalation
+// above: if SIGTERM alone doesn't finish the job before the process image is
+// replaced, the SIGKILL goroutine never runs and the child is orphaned —
+// exactly the bug this function exists to close.
+func terminateProcessGroupSync(cmd *exec.Cmd, grace time.Duration) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	if pid <= 0 {
+		return
+	}
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+	}
+	time.Sleep(grace)
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
 }

@@ -185,10 +185,26 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// web-spawned runs are additionally bounded by api.TriggerRun's
 	// process-level watchdog.
 	overall := overallRunBudget(timeout)
+	// watchdogDeadline is the wall-clock moment the self-watchdog below force-
+	// exits the process. Threaded into pilot.Schedule (Phase 4) so it can
+	// refuse to start a wake that plainly won't fit in what's left — see the
+	// call site below and issue #325.
+	watchdogDeadline := time.Now().Add(overall)
 	selfWatchdog := time.AfterFunc(overall, func() {
 		lg.Warn("run/watchdog", "pid", os.Getpid(), "msg", "overall run budget exceeded — likely a hung git/network call; dumping stacks and exiting", "budget", overall.String())
 		fmt.Fprintf(os.Stderr, "\n⚠ clawflow run exceeded its overall budget %s — likely a hung git/network call.\n  Dumping goroutine stacks and exiting (issue #216 safeguard).\n", overall)
 		dumpGoroutineStacks(lg)
+		// Kill whatever claude subprocess is still in flight (operator or
+		// Pilot wake) BEFORE exiting. Without this, os.Exit orphans it: it
+		// keeps running, keeps spending, and keeps writing to the VCS with
+		// no meta.json ever reaching a terminal status because the parent
+		// that would write it is already gone (issue #325). The budget
+		// tripping here does not mean the child is hung — a Pilot wake is
+		// often a legitimate long-running claude call that simply didn't
+		// fit in what was left of the overall budget; killing it is about
+		// making sure it doesn't run and write unrecorded, not about it
+		// having misbehaved.
+		operator.TerminateAllActiveCmds()
 		snapshot.ReleaseRunLock()
 		// os.Exit skips the deferred run/exit, so emit it here with the
 		// reason — this is the observable signature the watchdog path must
@@ -470,7 +486,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// shouldn't wake every project's PM. Only the unscoped pass
 	// (the one a cron / hook normally invokes) triggers PMs.
 	if onlyRepo == "" && onlyIssue == 0 {
-		if n, err := pilot.Schedule(ctx, timeout); err != nil {
+		if n, err := pilot.Schedule(ctx, timeout, watchdogDeadline); err != nil {
 			fmt.Fprintf(os.Stderr, "[pilot] schedule: %v\n", err)
 		} else if n > 0 {
 			fmt.Fprintf(os.Stderr, "[pilot] woke %d project(s)\n", n)
