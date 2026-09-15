@@ -158,6 +158,32 @@ type Settings struct {
 	// so all current and future operators inherit the setting automatically.
 	// Synced via Gist as a shared preference.
 	Language string `yaml:"language,omitempty"`
+
+	// PilotMaxBudgetUSD caps the dollar spend of a single Pilot wake via
+	// `claude -p --max-budget-usd`. Unlike the wall-clock --timeout (shared
+	// with every operator), this bounds cost directly: without it, a wake
+	// that wanders into a long tool-call loop is only stopped by the 60min
+	// deadline, which kills the subprocess outright and leaves PILOT-RESULT
+	// empty — the run is fully wasted. --max-budget-usd instead lets claude
+	// see its remaining budget each turn and wrap up with a PILOT-RESULT
+	// before hitting the ceiling, so most of the wake's work still lands.
+	// 0 or unset uses DefaultPilotMaxBudgetUSD.
+	PilotMaxBudgetUSD float64 `yaml:"pilot_max_budget_usd,omitempty"`
+}
+
+// DefaultPilotMaxBudgetUSD is the per-wake budget cap applied when
+// Settings.PilotMaxBudgetUSD is unset. Sized above the typical wake
+// ($2-$16 observed in production) but well under the runaway outliers
+// ($20-$34) that motivated this cap in the first place.
+const DefaultPilotMaxBudgetUSD = 15.0
+
+// EffectivePilotMaxBudgetUSD returns the configured Pilot wake budget cap,
+// falling back to DefaultPilotMaxBudgetUSD when unset or non-positive.
+func (s *Settings) EffectivePilotMaxBudgetUSD() float64 {
+	if s.PilotMaxBudgetUSD <= 0 {
+		return DefaultPilotMaxBudgetUSD
+	}
+	return s.PilotMaxBudgetUSD
 }
 
 // ResolveGithubCloneDir returns the configured GitHub clone directory, defaulting to ~/github.

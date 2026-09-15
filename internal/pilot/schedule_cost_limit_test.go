@@ -76,6 +76,22 @@ func TestClassifyWakeStatus_OtherStatuses(t *testing.T) {
 	}
 }
 
+// TestClassifyWakeStatus_BudgetCapped guards the wake-side half of the
+// --max-budget-usd fix: a session that hit its own budget ceiling must be
+// recorded as "budget-capped", distinct from both "cost-limit" (an
+// account-level provider refusal) and "failed" (a genuine error) — it must
+// never count toward the consecutive-failure alert, since the run did real,
+// paid-for work and stopped exactly as configured.
+func TestClassifyWakeStatus_BudgetCapped(t *testing.T) {
+	sentinel := fmt.Errorf("%w: Reached maximum budget ($15.00)", operator.ErrBudgetExceeded)
+	if got := classifyWakeStatus(sentinel, "PILOT-RESULT: partial work done"); got != "budget-capped" {
+		t.Errorf("classifyWakeStatus(ErrBudgetExceeded, ...) = %q, want budget-capped", got)
+	}
+	if got := classifyWakeStatus(sentinel, ""); got == "cost-limit" {
+		t.Error("ErrBudgetExceeded must not be classified as cost-limit — they have different causes and different dashboard semantics")
+	}
+}
+
 // TestRestoreCooldownAfterCostLimit verifies the cooldown rollback: after a
 // capped wake, LastWokenAt must be back to its pre-wake value so the project is
 // eligible again on the very next tick. Without this a 4-second $0 failure

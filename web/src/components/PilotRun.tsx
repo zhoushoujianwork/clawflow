@@ -87,6 +87,12 @@ export function wakeStatusDot(status: string): string {
       return 'bg-red-500'
     case 'cost-limit':
       return 'bg-amber-500'
+    // budget-capped is a clean, intentional stop (the wake hit its own
+    // configured --max-budget-usd ceiling and salvaged its output) — closer
+    // to success than to a real problem, so it gets its own colour rather
+    // than sharing cost-limit's amber "something's wrong" signal.
+    case 'budget-capped':
+      return 'bg-sky-500'
     case 'running':
       return 'bg-amber-500 animate-pulse'
     default:

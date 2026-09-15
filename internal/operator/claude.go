@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,6 +49,19 @@ var ErrOutputLimit = errors.New("claude output token limit")
 // breaker, and abort the remaining queue — otherwise a single account-level cap
 // cascades into every queued issue being labeled agent-failed (issue #308).
 var ErrCostLimit = errors.New("claude cost limit")
+
+// ErrBudgetExceeded is returned by RunClaude when the caller opted in via
+// WithMaxBudgetUSD and the session's own `--max-budget-usd` ceiling was hit
+// (claude stream-json result event: subtype "error_max_budget_usd"). Unlike
+// ErrCostLimit this is a per-session guard the caller asked for, not an
+// account-level provider refusal: the session still did real (paid) work up
+// to the cap, and claude exits cleanly (exit code 1, but a well-formed
+// terminal result) rather than being killed mid-turn by the wall-clock
+// --timeout. Callers should treat whatever output survived as trustworthy —
+// same reasoning as the cost-limit salvage path — and must not fail over to
+// another provider (the cap is a property of this session's budget, not of
+// the provider that hit it).
+var ErrBudgetExceeded = errors.New("claude budget exceeded")
 
 // costLimitPatterns are substrings (case-insensitive) that identify a billing
 // cap (HTTP 402) response. Patterns are deliberately narrow: a bare "402"
@@ -197,6 +211,38 @@ type providerAttempt struct {
 	errMsg string // first line of error, api_key scrubbed
 }
 
+// maxBudgetUSDKey is the context key used to carry an optional per-run
+// --max-budget-usd cap into runClaudeWithProvider. Threaded via context
+// rather than a new RunClaude parameter because RunOptions.RunFunc in
+// runner.go is a func type that must match RunClaude's signature exactly —
+// every test across the package that assigns a fake RunFunc would need
+// updating for a feature only Pilot currently uses. Context avoids that
+// blast radius; RunClaude already takes ctx for cancellation, so this piggy-
+// backs on a value already threaded through every call site.
+type ctxKey int
+
+const maxBudgetUSDKey ctxKey = iota
+
+// WithMaxBudgetUSD returns a context that makes RunClaude pass
+// `--max-budget-usd <usd>` to the claude subprocess. When the budget is
+// approached, claude is nudged (via its own budget_usd turn reminder) to
+// wrap up and emit a result instead of being killed mid-turn by the
+// caller's wall-clock --timeout — which discards partial output entirely.
+// usd <= 0 is a no-op (no flag is added).
+func WithMaxBudgetUSD(ctx context.Context, usd float64) context.Context {
+	if usd <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, maxBudgetUSDKey, usd)
+}
+
+// maxBudgetUSDFromContext reads back the value set by WithMaxBudgetUSD,
+// returning 0 (meaning: no cap) when absent.
+func maxBudgetUSDFromContext(ctx context.Context) float64 {
+	usd, _ := ctx.Value(maxBudgetUSDKey).(float64)
+	return usd
+}
+
 // scrubAPIKey removes any occurrence of apiKey from s. Used to prevent
 // accidental key leakage in error messages that some providers echo back.
 func scrubAPIKey(s, apiKey string) string {
@@ -275,6 +321,15 @@ func RunClaude(ctx context.Context, prompt, workdir string, timeout time.Duratio
 		if IsOutputLimitError(err, output) {
 			wrapped := fmt.Errorf("claude: %w", err)
 			return output, fmt.Errorf("%w: %w", ErrOutputLimit, wrapped)
+		}
+
+		// --max-budget-usd was hit (only possible when the caller opted in via
+		// WithMaxBudgetUSD). This is a property of the session's own budget,
+		// not of this provider, so switching providers would just restart the
+		// same work at the same cost — return immediately rather than
+		// failing over or exhausting the provider list.
+		if errors.Is(err, ErrBudgetExceeded) {
+			return output, err
 		}
 
 		// Billing caps (402) are provider-level, not operator-level: the run
@@ -424,6 +479,9 @@ func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, 
 	if len(systemPrompt) > 0 && systemPrompt[0] != "" {
 		args = append(args, "--system-prompt", systemPrompt[0])
 	}
+	if usd := maxBudgetUSDFromContext(ctx); usd > 0 {
+		args = append(args, "--max-budget-usd", strconv.FormatFloat(usd, 'f', 2, 64))
+	}
 	args = append(args, prompt)
 	cmd := exec.CommandContext(ctx, claude.Resolve(), args...)
 	cmd.Dir = workdir
@@ -469,9 +527,20 @@ func runClaudeWithProvider(ctx context.Context, prompt, workdir, model, apiKey, 
 		}
 	}()
 
-	result, parseErr := parseClaudeStream(stdout, events)
+	var budgetExceeded bool
+	result, parseErr := parseClaudeStream(stdout, events, &budgetExceeded)
 	close(pipeGuardDone)
 	if err := cmd.Wait(); err != nil {
+		// claude exits non-zero (exit status 1) when --max-budget-usd is hit,
+		// same as a crash — but the stream-json result was well-formed and
+		// `result` holds whatever the model produced before the cap. Report
+		// ErrBudgetExceeded instead of the generic exit-status wrap so callers
+		// can treat this like a clean stop, not a failure (issue #320-style
+		// salvage, applied to the caller-side budget cap instead of a
+		// provider-side 402).
+		if budgetExceeded {
+			return result, fmt.Errorf("%w: %s", ErrBudgetExceeded, firstLineOf(scrubAPIKey(tail.String(), apiKey)))
+		}
 		// cmd.Wait has joined the stderr copy goroutine, so the tail is
 		// complete and race-free to read here.
 		return result, annotateClaudeErr(err, tail.String(), apiKey)
@@ -561,7 +630,8 @@ func buildFailureSummary(attempts []providerAttempt) string {
 // line. Unknown events still pass through verbatim to the events writer.
 type streamEnvelope struct {
 	Type    string `json:"type"`
-	Result  string `json:"result"` // present on terminal "result" events
+	Subtype string `json:"subtype"` // e.g. "error_max_budget_usd" on a terminal "result" event
+	Result  string `json:"result"`  // present on terminal "result" events
 	Message struct {
 		Content []struct {
 			Type string `json:"type"`
@@ -601,7 +671,13 @@ type streamEnvelope struct {
 // assistant turn that contained a valid outcome marker — so the runner can
 // still parse the outcome and fire post-automation. A warning is printed to
 // stderr so the prompt can be improved upstream.
-func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
+//
+// budgetExceeded, if non-nil, is set to true when the terminal "result" event
+// carries subtype "error_max_budget_usd" — i.e. the run stopped because a
+// caller-supplied WithMaxBudgetUSD ceiling was hit, not because of a crash or
+// provider failure. Callers that don't care (most existing call sites) pass
+// nil.
+func parseClaudeStream(r io.Reader, events io.Writer, budgetExceededOut *bool) (string, error) {
 	sc := bufio.NewScanner(r)
 	// Claude stream-json lines can carry full assistant messages; bump the
 	// default 64KB cap to something that won't truncate on long responses.
@@ -610,6 +686,7 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	var finalResult string
 	var lastAssistantText string           // last assistant turn that emitted any text
 	var lastAssistantTextWithMarker string // last assistant turn that contained an outcome marker
+	budgetExceeded := false                // terminal result carried subtype "error_max_budget_usd"
 	printedAnyDelta := false
 
 	for sc.Scan() {
@@ -636,6 +713,9 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 			// session result causes the runner to miss the outcome label.
 			if finalResult == "" {
 				finalResult = env.Result
+			}
+			if env.Subtype == "error_max_budget_usd" {
+				budgetExceeded = true
 			}
 		case env.Type == "assistant":
 			// Concatenate every text block in this assistant turn. Skip
@@ -703,6 +783,9 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 		fmt.Fprintf(os.Stderr,
 			"  ⚠ outcome marker found in intermediate assistant turn but not in final result — using intermediate turn (consider tightening the operator prompt)\n")
 		finalResult = lastAssistantTextWithMarker
+	}
+	if budgetExceededOut != nil {
+		*budgetExceededOut = budgetExceeded
 	}
 	return finalResult, nil
 }

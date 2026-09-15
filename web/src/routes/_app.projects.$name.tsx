@@ -388,9 +388,12 @@ function ProjectDetail() {
             // Pilot wake" summary card below the header catches up too.
             // Every terminal wake status must be listed here; anything missing
             // leaves the badge stuck on "running" until the poll below catches
-            // up. 'cost-limit' was added with issue #320.
+            // up. 'cost-limit' was added with issue #320; 'budget-capped' is
+            // the per-wake --max-budget-usd ceiling, a clean stop rather than
+            // a failure.
             if (parsed.status === 'success' || parsed.status === 'failed' ||
-                parsed.status === 'auth-error' || parsed.status === 'cost-limit') {
+                parsed.status === 'auth-error' || parsed.status === 'cost-limit' ||
+                parsed.status === 'budget-capped') {
               fetchPilotRuns()
             }
           } else {

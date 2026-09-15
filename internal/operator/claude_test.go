@@ -113,7 +113,7 @@ func TestParseClaudeStream_MarkerInFinalTurn(t *testing.T) {
 		buildResultEvent(body),
 	}, "\n") + "\n"
 
-	got, err := parseClaudeStream(strings.NewReader(stream), nil)
+	got, err := parseClaudeStream(strings.NewReader(stream), nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestParseClaudeStream_MarkerInIntermediateTurn(t *testing.T) {
 		buildResultEvent(wrapUp),      // result event mirrors the final turn
 	}, "\n") + "\n"
 
-	got, err := parseClaudeStream(strings.NewReader(stream), nil)
+	got, err := parseClaudeStream(strings.NewReader(stream), nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestParseClaudeStream_MarkerInIntermediateTurn_EmptyResult(t *testing.T) {
 		buildResultEvent(""),          // empty result (trailing tool_use)
 	}, "\n") + "\n"
 
-	got, err := parseClaudeStream(strings.NewReader(stream), nil)
+	got, err := parseClaudeStream(strings.NewReader(stream), nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestParseClaudeStream_NoMarkerAnywhere(t *testing.T) {
 		buildResultEvent(wrapUp),
 	}, "\n") + "\n"
 
-	got, err := parseClaudeStream(strings.NewReader(stream), nil)
+	got, err := parseClaudeStream(strings.NewReader(stream), nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestParseClaudeStream_MultipleMarkerTurns_LastWins(t *testing.T) {
 		buildResultEvent(wrapUp),
 	}, "\n") + "\n"
 
-	got, err := parseClaudeStream(strings.NewReader(stream), nil)
+	got, err := parseClaudeStream(strings.NewReader(stream), nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestParseClaudeStream_QuotedMarkerTurnNotPreferred(t *testing.T) {
 		buildResultEvent(quoting),
 	}, "\n") + "\n"
 
-	got, err := parseClaudeStream(strings.NewReader(stream), nil)
+	got, err := parseClaudeStream(strings.NewReader(stream), nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -297,6 +297,16 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	// Cap the session's own dollar spend, independent of the wall-clock
+	// timeout above. Without this, a wake that wanders into a long tool-call
+	// loop is only stopped by the 60min deadline, which SIGKILLs the
+	// subprocess and discards whatever PILOT-RESULT it hadn't yet written —
+	// the entire (already paid-for) wake is wasted. --max-budget-usd instead
+	// lets claude see its remaining budget each turn and wrap up with a
+	// result before hitting the ceiling, so most of the wake's work still
+	// lands. Two outlier wakes ($34 / 119 turns, $20 / 114 turns) motivated
+	// this; typical wakes run $2-$16.
+	ctx = operator.WithMaxBudgetUSD(ctx, cfg.Settings.EffectivePilotMaxBudgetUSD())
 
 	// Pilot wakes happen inside `clawflow run` (process owns the run.log
 	// handle) but emitting them on a separate "pilot" log keeps the run
@@ -377,6 +387,26 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		}
 	}
 
+	// Hitting our own --max-budget-usd ceiling always needs the full
+	// transcript, not just the empty-output check the cost-limit branch uses
+	// above: `output` here is whatever runClaudeWithProvider returned, which
+	// on this path is only the LAST assistant turn's text (RunClaude's normal
+	// non-exhaustion return value), not the full session. A wake that wrote
+	// its context.md block several turns before the final PILOT-RESULT turn
+	// would otherwise lose that block even though output is non-empty. Always
+	// re-read the full transcript from events.jsonl and prefer it — it is a
+	// strict superset of the single final turn.
+	budgetExceeded := err != nil && errors.Is(err, operator.ErrBudgetExceeded)
+	if budgetExceeded {
+		if raw, rerr := os.ReadFile(filepath.Join(runDir, "events.jsonl")); rerr == nil {
+			if salvaged := strings.TrimSpace(chat.CollectAssistantText(string(raw))); salvaged != "" {
+				output = salvaged
+				fmt.Fprintf(os.Stderr, "[pilot] %s: budget cap hit — salvaged %d bytes of full transcript from events.jsonl\n", p.Name, len(salvaged))
+				lg.Info("pilot/salvage", "project", p.Name, "reason", "budget-capped", "bytes", len(salvaged))
+			}
+		}
+	}
+
 	if budgetPath != "" {
 		if s, rerr := budget.Read(budgetPath); rerr == nil {
 			fmt.Fprintf(os.Stderr, "[pilot] %s: budget %d/%d ops used\n", p.Name, s.Used, s.Max)
@@ -420,12 +450,12 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		meta.Status = "success"
 	}
 
-	// Doc write-back. Honoured on success and on cost-limit only: a 402 stops
-	// the work that would have FOLLOWED the block, it doesn't invalidate a
-	// block the model already finished writing. auth-error and timeout stay
-	// excluded — those can truncate mid-block, so their output really may be
-	// half a document (issue #320).
-	if err == nil || costLimited {
+	// Doc write-back. Honoured on success, cost-limit, and budget-capped: all
+	// three stop the work that would have FOLLOWED a fenced block without
+	// invalidating a block the model already finished writing (claude only
+	// gets cut off mid-block on a hard kill — the wall-clock --timeout —
+	// which stays excluded, same as auth-error). issue #320.
+	if err == nil || costLimited || budgetExceeded {
 		// The Pilot is the sole writer of context.md.
 		if updated := extractContextMD(output); updated != "" && strings.TrimSpace(updated) != strings.TrimSpace(contextMD) {
 			if werr := project.WriteContext(p.Name, updated); werr != nil {
@@ -478,6 +508,13 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		// to see it. At INFO it was indistinguishable from a healthy wake.
 		lg.Warn("pilot/end", endLogKV...)
 		fmt.Fprintf(os.Stderr, "[pilot] %s: cost limit reached — every provider is capped until its billing window resets (cooldown not consumed): %v\n", p.Name, err)
+	case "budget-capped":
+		// INFO, not WARN: this is the mechanism working as designed — the wake
+		// chose to stop rather than run indefinitely, and salvage above already
+		// preserved its output. Surfacing it on stderr keeps it visible without
+		// implying an outage the way cost-limit's WARN does.
+		lg.Info("pilot/end", endLogKV...)
+		fmt.Fprintf(os.Stderr, "[pilot] %s: hit its --max-budget-usd cap (Settings.PilotMaxBudgetUSD=%.2f) — output salvaged, cooldown applies normally\n", p.Name, cfg.Settings.EffectivePilotMaxBudgetUSD())
 	default:
 		lg.Info("pilot/end", endLogKV...)
 	}
@@ -531,6 +568,14 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	} else if err == nil {
 		fmt.Fprintf(os.Stderr, "[pilot] %s: completed (no PILOT-RESULT line found)\n", p.Name)
 	}
+	// A budget cap is a clean, intentional stop — claude did real paid work
+	// and returned a well-formed result, salvaged above into meta.Result /
+	// meta.Summary / the doc write-back. Report success to the caller so
+	// Schedule counts it as woken (not "wake failed") and logs nothing at
+	// WARN/ERROR: the mechanism worked exactly as configured.
+	if budgetExceeded {
+		return nil
+	}
 	return err
 }
 
@@ -542,6 +587,11 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 //     records for operator runs (#308). Checked FIRST, and via the sentinel
 //     before the text patterns, because RunClaude's provider-exhaustion path
 //     returns an empty output, leaving errors.Is as the only reliable signal.
+//   - "budget-capped": the wake hit its own --max-budget-usd ceiling
+//     (Settings.PilotMaxBudgetUSD). Unlike cost-limit this is expected,
+//     self-inflicted, and the run did real paid work up to the cap — it is
+//     not evidence of a broken project or credentials, so it must not count
+//     toward the consecutive-failure alert.
 //   - "auth-error": 403 / "request not allowed". Not transient — retrying
 //     reproduces it — so it earns a distinct status and a louder log level
 //     (issue #204).
@@ -554,6 +604,8 @@ func classifyWakeStatus(err error, output string) string {
 		return ""
 	case errors.Is(err, operator.ErrCostLimit) || operator.IsCostLimitError(err, output):
 		return "cost-limit"
+	case errors.Is(err, operator.ErrBudgetExceeded):
+		return "budget-capped"
 	case operator.IsAuthError(err, output):
 		return "auth-error"
 	default:
