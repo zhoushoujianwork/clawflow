@@ -658,7 +658,12 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 				// in an intermediate turn and the final turn is a short
 				// wrap-up with no marker (see multi-turn outcome recovery
 				// comment above).
-				if outcomeRE.MatchString(turn) {
+				// Uses the same trailing-line judgement as parseOutcome
+				// (issue #326): a turn that merely quotes a marker mid-body
+				// is not a verdict, and falling back to it would hand the
+				// runner a turn it then parses as no-marker while the real
+				// verdict turn is discarded.
+				if hasTrailingOutcome(turn) {
 					lastAssistantTextWithMarker = turn
 				}
 			}
@@ -694,7 +699,7 @@ func parseClaudeStream(r io.Reader, events io.Writer) (string, error) {
 	// turn did, fall back to that turn. This handles the multi-turn case
 	// where the model emits the full structured output (including the marker)
 	// in turn N and then produces a brief wrap-up in turn N+1.
-	if !outcomeRE.MatchString(finalResult) && lastAssistantTextWithMarker != "" {
+	if !hasTrailingOutcome(finalResult) && lastAssistantTextWithMarker != "" {
 		fmt.Fprintf(os.Stderr,
 			"  ⚠ outcome marker found in intermediate assistant turn but not in final result — using intermediate turn (consider tightening the operator prompt)\n")
 		finalResult = lastAssistantTextWithMarker

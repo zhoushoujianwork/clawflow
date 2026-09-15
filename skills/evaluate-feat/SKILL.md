@@ -36,7 +36,7 @@ Four hard rules:
 
 Output no preamble ("I will now evaluate…"), no code fences wrapping the whole output.
 
-**After you emit the final `<!-- clawflow:outcome=... -->` line, stop. Do NOT call any tool.**
+**After you emit the final `<!-- clawflow:outcome={label} -->` line, stop. Do NOT call any tool.**
 
 ## Score three dimensions (1-10 each)
 

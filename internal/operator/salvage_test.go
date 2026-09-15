@@ -348,3 +348,69 @@ func TestRun_Issue313RealBody_SalvagedEndToEnd(t *testing.T) {
 		t.Errorf("labels = %v, want agent-evaluated applied", got)
 	}
 }
+
+// TestRun_Issue326RealBody_SalvagedEndToEnd runs the actual stdout of the
+// evaluate-bug run on clawflow#323 — the body that cost $1.67 and applied no
+// label. It quotes the marker placeholder in a repro step and never emits a
+// real trailing marker, so the old unanchored regex captured the literal "..."
+// as the verdict: outcomeAllowed rejected it, no label landed, the trigger
+// labels stayed put, and run/end still logged status=success outcome=...
+//
+// Post-#326 the quoted placeholder is prose, so the body falls through to the
+// #307 salvage path it should have taken all along: agent-evaluated derived
+// from its Confidence 8.3/10, comment posted, label applied.
+func TestRun_Issue326RealBody_SalvagedEndToEnd(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "issue-326-quoted-marker-body.md"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	body := string(raw)
+
+	// Guard the fixture: both properties below are what make this a #326 case.
+	if !strings.Contains(body, "<!-- clawflow:outcome=... -->") {
+		t.Fatalf("fixture lost its quoted marker placeholder (%d bytes)", len(body))
+	}
+	if !strings.Contains(body, "**Confidence:** 8.3/10") {
+		t.Fatalf("fixture lost its Confidence line (%d bytes)", len(body))
+	}
+
+	// The old behaviour, asserted directly so a regression is unambiguous.
+	if label, _ := parseOutcome(body); label != "" {
+		t.Errorf("parseOutcome label = %q, want empty — a quoted placeholder is not a verdict", label)
+	}
+
+	op := &Operator{
+		Name:      "evaluate-bug",
+		LockLabel: "agent-running",
+		Prompt:    "evaluate",
+		Outcomes:  []string{"agent-evaluated", "agent-skipped"},
+	}
+	sub := &Subject{Number: 323, Labels: []string{"bug"}}
+	v := newFakeVCS()
+
+	out, outcome, err := Run(context.Background(), op, sub, v, RunOptions{
+		Repo:    "zhoushoujianwork/clawflow",
+		Workdir: t.TempDir(),
+		Timeout: time.Second,
+		RunFunc: func(_ context.Context, _, _ string, _ time.Duration, _ io.Writer, _ string, _ ...string) (string, error) {
+			return body, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error, want nil (body must be salvaged): %v", err)
+	}
+	if outcome != "agent-evaluated" {
+		t.Errorf("outcome = %q, want agent-evaluated (salvaged from Confidence 8.3)", outcome)
+	}
+	if got := v.labels[323]; !slices.Contains(got, "agent-evaluated") {
+		t.Errorf("labels = %v, want agent-evaluated applied", got)
+	}
+	if slices.Contains(v.labels[323], "...") {
+		t.Errorf("literal %q label was applied: %v", "...", v.labels[323])
+	}
+	// The quoted placeholder must survive into the posted comment: stripping it
+	// is what mangled the real comment's repro step to a pair of empty backticks.
+	if !strings.Contains(out, "<!-- clawflow:outcome=... -->") {
+		t.Error("quoted marker was stripped from the body — the posted comment would be mangled")
+	}
+}
