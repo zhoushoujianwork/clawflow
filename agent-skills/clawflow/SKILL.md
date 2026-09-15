@@ -1,6 +1,6 @@
 ---
 name: clawflow
-description: "Use the `clawflow` CLI to manage GitHub/GitLab projects locally: view and operate on issues, PRs, and labels without leaving the terminal. Trigger on ANY of: user mentions 'clawflow' or 'ClawFlow'; user asks to list/create/view/comment on issues or PRs; user asks to manage labels; user asks to add/manage repos; user mentions local git project operations or VCS management."
+description: "Use the `clawflow` CLI to manage GitHub/GitLab projects locally: view and operate on issues, PRs, and labels without leaving the terminal. Trigger on ANY of: user mentions 「clawflow」 or 「ClawFlow」; user asks to list/create/view/comment on issues or PRs; user asks to manage labels; user asks to add/manage repos; user mentions local git project operations or VCS management."
 ---
 
 # ClawFlow
