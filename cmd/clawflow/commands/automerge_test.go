@@ -3,11 +3,15 @@ package commands
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	clog "github.com/zhoushoujianwork/clawflow/internal/log"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -229,6 +233,63 @@ func TestSweepAutoMergePRs_DirtyIsSilentlySkipped(t *testing.T) {
 	}
 	if len(f.comments) != 0 {
 		t.Errorf("dirty PR must not be commented on every pass, got %v", f.comments)
+	}
+}
+
+// withRunLog points the package-level runLog at a fresh run.log under a
+// temp HOME and returns a function to read back its contents. See issue
+// #334: skip reasons must land in run.log, not stderr/debugf.
+func withRunLog(t *testing.T) func() string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	old := runLog
+	lg, err := clog.Open("run")
+	if err != nil {
+		t.Fatalf("clog.Open: %v", err)
+	}
+	runLog = lg
+	t.Cleanup(func() {
+		lg.Close()
+		runLog = old
+	})
+	return func() string {
+		data, err := os.ReadFile(filepath.Join(clog.LogsDir(), "run.log"))
+		if err != nil {
+			t.Fatalf("read run.log: %v", err)
+		}
+		return string(data)
+	}
+}
+
+func TestSweepAutoMergePRs_NotCleanReasonInRunLog(t *testing.T) {
+	readLog := withRunLog(t)
+	f := &sweepFake{
+		openPRs:      []vcs.PR{{Number: 10, Body: "Closes #9"}},
+		mergeability: map[int]vcs.MergeStatus{10: vcs.MergeStatusConflict},
+	}
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true})
+	log := readLog()
+	if !strings.Contains(log, "run/automerge_skip") || !strings.Contains(log, "reason=not_clean") || !strings.Contains(log, "status=conflict") {
+		t.Errorf("expected a run/automerge_skip line with reason=not_clean status=conflict, got:\n%s", log)
+	}
+	if !strings.Contains(log, "skip_not_clean=1") {
+		t.Errorf("expected aggregate line to break out skip_not_clean, got:\n%s", log)
+	}
+}
+
+func TestSweepAutoMergePRs_LockedReasonInRunLog(t *testing.T) {
+	readLog := withRunLog(t) // also sets HOME, so snapshot.AcquireLock lands in the same temp dir
+	f := &sweepFake{
+		openPRs: []vcs.PR{{Number: 10, Body: "Closes #9"}},
+	}
+	if err := snapshot.AcquireLock("o/r", 9, "implement"); err != nil {
+		t.Fatalf("AcquireLock: %v", err)
+	}
+	t.Cleanup(func() { snapshot.ReleaseLock("o/r", 9) })
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true})
+	log := readLog()
+	if !strings.Contains(log, "run/automerge_skip") || !strings.Contains(log, "reason=locked") {
+		t.Errorf("expected a run/automerge_skip line with reason=locked, got:\n%s", log)
 	}
 }
 

@@ -64,14 +64,23 @@ func newPRCreateCmd() *cobra.Command {
 	return cmd
 }
 
+// prViewOutput is the --json shape for `pr view`. It's a standalone struct
+// rather than vcs.PR itself: mergeable is an extra N+1 API call, fine for a
+// single `pr view` but not something `pr list` should pay for every row.
+type prViewOutput struct {
+	vcs.PR
+	Mergeable string `json:"mergeable,omitempty"`
+}
+
 func newPRViewCmd() *cobra.Command {
 	var repo string
 	var number int
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:     "view",
 		Short:   "View a pull request / merge request",
-		Example: "  clawflow pr view --repo owner/repo --pr 7",
+		Example: "  clawflow pr view --repo owner/repo --pr 7\n  clawflow pr view --repo owner/repo --pr 7 --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
@@ -81,9 +90,24 @@ func newPRViewCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Best-effort: mergeability is a second API call, so a failure
+			// here must not hide the rest of the PR info that already
+			// succeeded.
+			var mergeable string
+			if status, mErr := client.GetPRMergeability(repo, number); mErr == nil {
+				mergeable = string(status)
+			}
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(prViewOutput{PR: pr, Mergeable: mergeable})
+			}
 			fmt.Printf("#%d  [%s]  %s\n", pr.Number, pr.State, pr.Title)
 			fmt.Printf("branch: %s\n", pr.HeadBranch)
 			fmt.Printf("url:    %s\n", pr.URL)
+			if mergeable != "" {
+				fmt.Printf("mergeable: %s\n", mergeable)
+			}
 			if pr.MergedAt != "" {
 				fmt.Printf("merged: %s\n", pr.MergedAt)
 			}
@@ -92,6 +116,7 @@ func newPRViewCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	cmd.Flags().IntVar(&number, "pr", 0, "PR number (required)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output full PR as JSON, including mergeable status")
 	_ = cmd.MarkFlagRequired("repo")
 	_ = cmd.MarkFlagRequired("pr")
 	return cmd

@@ -219,6 +219,7 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 	}
 
 	var candidates, merged, skipped int
+	skipReasons := map[string]int{}
 	for _, pr := range prs {
 		if ctx != nil && ctx.Err() != nil {
 			break
@@ -228,6 +229,8 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 		}
 		if isDraftPR(pr.Title) {
 			skipped++
+			skipReasons["draft"]++
+			runLog.Info("run/automerge_skip", "repo", fullName, "pr", pr.Number, "reason", "draft")
 			continue
 		}
 		// A PR with no closing keyword isn't ClawFlow's to merge: it may be
@@ -236,25 +239,33 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 		issueNum := extractClosesIssue(pr.Body)
 		if issueNum == 0 {
 			skipped++
+			skipReasons["no_closing_keyword"]++
+			runLog.Info("run/automerge_skip", "repo", fullName, "pr", pr.Number, "reason", "no_closing_keyword")
 			continue
 		}
 		candidates++
 		// Silent skip on non-clean: the sweep sees the same dirty PR every
-		// pass, so commenting here would spam the issue forever.
+		// pass, so commenting here would spam the issue forever. The reason
+		// still lands in run.log (see #334) so patrol can tell a stuck
+		// candidate from "nothing to do".
 		status, mErr := client.GetPRMergeability(fullName, pr.Number)
 		if mErr != nil {
 			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge sweep: mergeability of PR #%d: %v\n", prefix, pr.Number, mErr)
 			skipped++
+			skipReasons["mergeability_error"]++
+			runLog.Warn("run/automerge_skip", "repo", fullName, "pr", pr.Number, "issue", issueNum, "reason", "mergeability_error", "err", mErr.Error())
 			continue
 		}
 		if status != vcs.MergeStatusClean {
-			debugf("%s · auto-merge sweep: PR #%d not clean (%s), leaving it", prefix, pr.Number, status)
 			skipped++
+			skipReasons["not_clean"]++
+			runLog.Warn("run/automerge_skip", "repo", fullName, "pr", pr.Number, "issue", issueNum, "reason", "not_clean", "status", string(status))
 			continue
 		}
 		if snapshot.IsLocked(fullName, issueNum) {
-			debugf("%s · auto-merge sweep: issue #%d locked by another process, skipping PR #%d", prefix, issueNum, pr.Number)
 			skipped++
+			skipReasons["locked"]++
+			runLog.Info("run/automerge_skip", "repo", fullName, "pr", pr.Number, "issue", issueNum, "reason", "locked")
 			continue
 		}
 		if attemptAutoMerge(autoMergeAttempt{
@@ -270,10 +281,18 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 			merged++
 		} else {
 			skipped++
+			skipReasons["merge_failed"]++
+			runLog.Warn("run/automerge_skip", "repo", fullName, "pr", pr.Number, "issue", issueNum, "reason", "merge_failed")
 		}
 	}
 
-	runLog.Info("run/automerge_sweep", "repo", fullName, "open_prs", len(prs), "candidates", candidates, "merged", merged, "skipped", skipped)
+	fields := []any{"repo", fullName, "open_prs", len(prs), "candidates", candidates, "merged", merged, "skipped", skipped}
+	for _, reason := range []string{"draft", "no_closing_keyword", "mergeability_error", "not_clean", "locked", "merge_failed"} {
+		if n := skipReasons[reason]; n > 0 {
+			fields = append(fields, "skip_"+reason, n)
+		}
+	}
+	runLog.Info("run/automerge_sweep", fields...)
 	if merged > 0 {
 		fmt.Fprintf(os.Stderr, "%s ✓ auto-merge sweep: merged %d PR(s)\n", prefix, merged)
 	}
