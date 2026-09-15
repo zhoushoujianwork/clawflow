@@ -172,9 +172,15 @@ export function useIssueGroups({
         }
         map.set(k, g)
       }
-      // Skip if a running run for the same operator already exists — the
-      // pending entry is stale from the previous scan cycle.
-      if (g.runs.some(r => r.operator === p.operator && r.status === 'running')) continue
+      // Skip if a run for the same operator already exists that started at
+      // or after this entry was captured — the pending entry is stale from
+      // a previous scan cycle whose pending.json rewrite never landed (e.g.
+      // the `clawflow run` process was interrupted before reaching its
+      // final snapshot write). Any status counts, not just 'running': a run
+      // that already finished (success/failed/skipped/...) means this
+      // operator is no longer actually queued, regardless of what the
+      // backend's pending.json still says.
+      if (g.runs.some(r => r.operator === p.operator && r.started_at >= p.captured_at)) continue
       g.pending.push(p)
       if (!g.issue_title && p.issue_title) g.issue_title = p.issue_title
       if (p.labels && g.labels) {

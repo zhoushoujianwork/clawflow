@@ -98,6 +98,14 @@ func TriggerRun(repo string, issue int) bool {
 	cmd.Env = os.Environ()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Detach into its own session (same as chat_spawn's detachAttr) so a
+	// signal delivered to `clawflow web`'s process group (e.g. Ctrl-C in the
+	// terminal it was started from) doesn't also kill this subprocess
+	// mid-scan. Without this, a run that had already fired an operator to a
+	// terminal status could be killed before reaching its Phase 3 pending.json
+	// rewrite, leaving a stale "queued" entry in the dashboard for an
+	// operator that actually already finished.
+	cmd.SysProcAttr = detachAttr()
 	// exec.CommandContext's default cancel only SIGKILLs the direct
 	// child; the run spawns its own descendants (claude, git, ssh) that
 	// would be orphaned. Reuse killProcessTree so the whole tree dies.

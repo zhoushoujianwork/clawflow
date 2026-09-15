@@ -4,11 +4,17 @@ import { FolderKanban, ChevronRight, Plus, Loader2, X } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useConfigChanged } from '../lib/configEvents'
 
+interface ProjectAutomation {
+  enabled: boolean
+  cooldown_minutes: number
+}
+
 interface Project {
   name: string
   repos: string[]
   created_at?: string
   context_md?: string
+  automation?: ProjectAutomation
 }
 
 export const Route = createFileRoute('/_app/projects/')({
@@ -34,6 +40,11 @@ function ProjectList() {
   const [createName, setCreateName] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  // pilotSaving tracks which project's toggle is mid-flight so only that
+  // row's switch disables/spins — a slow save on one project shouldn't
+  // freeze every other row's switch.
+  const [pilotSaving, setPilotSaving] = useState<string | null>(null)
+  const [pilotError, setPilotError] = useState<{ name: string; message: string } | null>(null)
 
   function fetchProjects() {
     fetch('/data/projects.json', { cache: 'no-store' })
@@ -49,6 +60,44 @@ function ProjectList() {
     fetchProjects()
   }, [])
   useConfigChanged(fetchProjects)
+
+  // togglePilot flips automation.enabled for one project without leaving
+  // this page. Cooldown is passed straight through unchanged (the detail
+  // page owns editing it) — this switch only ever toggles on/off.
+  async function togglePilot(p: Project) {
+    const nextEnabled = !p.automation?.enabled
+    setPilotSaving(p.name)
+    setPilotError(null)
+    // Optimistic update so the switch flips immediately; reverted on error.
+    setProjects(prev => prev.map(proj =>
+      proj.name === p.name
+        ? { ...proj, automation: { enabled: nextEnabled, cooldown_minutes: proj.automation?.cooldown_minutes ?? 30 } }
+        : proj,
+    ))
+    try {
+      const r = await fetch('/api/project/automation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project: p.name,
+          enabled: nextEnabled,
+          cooldown_minutes: p.automation?.cooldown_minutes ?? 30,
+        }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
+    } catch (e) {
+      // Revert the optimistic flip and surface the error inline.
+      setProjects(prev => prev.map(proj =>
+        proj.name === p.name
+          ? { ...proj, automation: { enabled: !nextEnabled, cooldown_minutes: proj.automation?.cooldown_minutes ?? 30 } }
+          : proj,
+      ))
+      setPilotError({ name: p.name, message: e instanceof Error ? e.message : 'Unknown error' })
+    } finally {
+      setPilotSaving(null)
+    }
+  }
 
   async function handleCreate() {
     const name = createName.trim()
@@ -157,6 +206,7 @@ function ProjectList() {
                 <th className="text-left px-4 py-2 font-semibold">Project</th>
                 <th className="text-left px-4 py-2 font-semibold">Repos</th>
                 <th className="text-left px-4 py-2 font-semibold">Created</th>
+                <th className="text-left px-4 py-2 font-semibold">Pilot</th>
                 <th className="w-8" />
               </tr>
             </thead>
@@ -178,6 +228,29 @@ function ProjectList() {
                   </td>
                   <td className="px-4 py-2 text-muted-foreground text-xs tabular-nums">
                     {p.created_at ? timeAgo(p.created_at) : '—'}
+                  </td>
+                  <td className="px-4 py-2">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => togglePilot(p)}
+                        disabled={pilotSaving === p.name}
+                        role="switch"
+                        aria-checked={p.automation?.enabled ?? false}
+                        title={p.automation?.enabled ? 'Pilot on — click to disable' : 'Pilot off — click to enable'}
+                        className={cn(
+                          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
+                          p.automation?.enabled ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700',
+                          pilotSaving === p.name && 'opacity-50 cursor-not-allowed',
+                        )}
+                      >
+                        <span className={cn('inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform', p.automation?.enabled ? 'translate-x-4' : 'translate-x-0.5')} />
+                      </button>
+                      {pilotSaving === p.name && <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />}
+                      {pilotError?.name === p.name && (
+                        <span className="text-[11px] text-red-600" title={pilotError.message}>failed</span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-2">
                     <Link

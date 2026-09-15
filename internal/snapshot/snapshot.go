@@ -1155,6 +1155,15 @@ func WriteIssues(entries []IssueEntry) error {
 //     (we only prune when we both have a hostname AND a non-empty
 //     bound_machine that differs — otherwise we can't be confident)
 //   - the issue is known closed in data/issues.json
+//   - a run for the same (repo, issue, operator) already started at or
+//     after the entry's CapturedAt — the operator has already fired
+//     (any status, not just success) since this entry was queued, so it
+//     is stale regardless of the outcome. This covers the case where the
+//     `clawflow run` process that fired it was interrupted before
+//     reaching its own end-of-pass pending.json rewrite (e.g. killed
+//     along with `clawflow web`'s process group), which otherwise leaves
+//     a "queued" row on the dashboard for an operator that already
+//     finished.
 //
 // Idempotent: a clean pending.json comes through unchanged. Returns
 // the number of entries removed so the caller can log it.
@@ -1196,6 +1205,23 @@ func PrunePending() int {
 		}
 	}
 
+	// Latest StartedAt per (repo, issue, operator), read from runs.json
+	// (already indexed by WriteRunsIndex, so no filesystem walk here). A
+	// pending entry is stale once a run of the same operator started at or
+	// after the entry was captured, regardless of the run's outcome.
+	latestRunStart := make(map[string]time.Time) // key: "repo#num#operator"
+	if data, err := os.ReadFile(filepath.Join(DataDir(), "runs.json")); err == nil {
+		var runs []RunIndexEntry
+		if json.Unmarshal(data, &runs) == nil {
+			for _, r := range runs {
+				k := fmt.Sprintf("%s#%d#%s", r.Repo, r.IssueNumber, r.Operator)
+				if cur, ok := latestRunStart[k]; !ok || r.StartedAt.After(cur) {
+					latestRunStart[k] = r.StartedAt
+				}
+			}
+		}
+	}
+
 	kept := pending[:0]
 	for _, p := range pending {
 		if !repoExists[p.Repo] {
@@ -1205,6 +1231,10 @@ func PrunePending() int {
 			continue
 		}
 		if closedIssues[fmt.Sprintf("%s#%d", p.Repo, p.IssueNumber)] {
+			continue
+		}
+		runKey := fmt.Sprintf("%s#%d#%s", p.Repo, p.IssueNumber, p.Operator)
+		if started, ok := latestRunStart[runKey]; ok && !started.Before(p.CapturedAt) {
 			continue
 		}
 		kept = append(kept, p)

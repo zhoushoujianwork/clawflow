@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off, FolderOpen, FolderKanban, AlertTriangle } from 'lucide-react'
 import { cn } from '../lib/utils'
@@ -13,6 +13,7 @@ import {
   IssueList,
   REPO_SECTIONS,
   useIssueGroups,
+  rowKey,
   type IssueEntry,
   type PendingEntry,
   type Run,
@@ -239,6 +240,27 @@ function RepoDetail() {
   // hook. Single-repo page → no extra filtering needed (the `setX`
   // callers in refreshData already scope to this repo).
   const issueGroups = useIssueGroups({ issues: allIssues, runs, pending })
+
+  // Auto-expand parent (tracking) issues so their sub-issues are visible by
+  // default — a tracking issue with unopened sub-issues collapsed looks like
+  // dead-end progress, and the ring alone doesn't show *what* is in flight.
+  // Tracked per-key so a user who deliberately collapses a parent isn't
+  // fought on the next data refresh: each parent only gets auto-expanded
+  // once, the first time it's seen.
+  const autoExpandedParents = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const toAdd = issueGroups
+      .filter(g => (g.sub_total ?? 0) > 0)
+      .map(rowKey)
+      .filter(k => !autoExpandedParents.current.has(k))
+    if (toAdd.length === 0) return
+    for (const k of toAdd) autoExpandedParents.current.add(k)
+    setExpanded(prev => {
+      const next = new Set(prev)
+      for (const k of toAdd) next.add(k)
+      return next
+    })
+  }, [issueGroups])
 
   // Same 4-bucket layout the page has shipped with for months — Running,
   // Pending, Done, Closed (capped at 10 most recent). Encoded in
