@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,6 +206,57 @@ func TestClosePR(t *testing.T) {
 	}
 	if got["state"] != "closed" {
 		t.Fatalf("payload = %#v, want state=closed", got)
+	}
+}
+
+// TestListPRs_MergedStateTranslatesToClosedAndFilters covers issue #330:
+// GitHub's /pulls endpoint only accepts state=open|closed|all, so
+// ListPRs("merged") must request state=closed and filter the results by
+// MergedAt rather than passing "merged" straight through (which GitHub
+// silently treats as "open").
+func TestListPRs_MergedStateTranslatesToClosedAndFilters(t *testing.T) {
+	var gotQuery string
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/pulls": func(w http.ResponseWriter, r *http.Request) {
+			gotQuery = r.URL.RawQuery
+			jsonResp(w, 200, []map[string]any{
+				{"number": 1, "title": "merged pr", "state": "closed", "merged_at": "2026-01-01T00:00:00Z", "head": map[string]string{"ref": "feat/a"}},
+				{"number": 2, "title": "closed without merge", "state": "closed", "merged_at": "", "head": map[string]string{"ref": "feat/b"}},
+			})
+		},
+	})
+
+	prs, err := client.ListPRs("owner/repo", "merged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotQuery, "state=closed") {
+		t.Fatalf("expected API request to use state=closed, got query %q", gotQuery)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("expected 1 merged PR after filtering, got %d: %+v", len(prs), prs)
+	}
+	if prs[0].Number != 1 || prs[0].State != "merged" {
+		t.Fatalf("unexpected PR: %+v", prs[0])
+	}
+}
+
+func TestListPRs_ClosedStateIncludesMergedAndUnmerged(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/pulls": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 200, []map[string]any{
+				{"number": 1, "title": "merged pr", "state": "closed", "merged_at": "2026-01-01T00:00:00Z", "head": map[string]string{"ref": "feat/a"}},
+				{"number": 2, "title": "closed without merge", "state": "closed", "merged_at": "", "head": map[string]string{"ref": "feat/b"}},
+			})
+		},
+	})
+
+	prs, err := client.ListPRs("owner/repo", "closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 2 {
+		t.Fatalf("expected 2 PRs (closed state stays inclusive), got %d", len(prs))
 	}
 }
 
