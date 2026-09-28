@@ -1,6 +1,6 @@
 ---
 name: clawflow
-description: "Use the `clawflow` CLI to manage GitHub/GitLab projects locally: view and operate on issues, PRs, and labels without leaving the terminal. Trigger on ANY of: user mentions 「clawflow」 or 「ClawFlow」; user asks to list/create/view/comment on issues or PRs; user asks to manage labels; user asks to add/manage repos; user mentions local git project operations or VCS management."
+description: "Use the `clawflow` CLI for GitHub/GitLab issues, PRs, labels, repositories, and GitLab CI job logs. Trigger when the user mentions clawflow, asks about GitLab CI jobs or pipelines, or requests local project/VCS operations."
 ---
 
 # ClawFlow
@@ -55,6 +55,17 @@ project goes through an issue, so past issues (open + closed) are the project's
 decision archive. Before doing analysis on a new issue, search for related ones —
 duplicates, prior decisions, and related code-area history are usually the
 strongest signal. Pass `--json` for structured output.
+
+### GitLab CI job logs (read-only)
+```
+clawflow ci job log --repo <full GitLab project URL> --job <job-id>
+```
+
+For a GitLab job URL, use its project URL and numeric job ID. A full URL identifies
+self-hosted GitLab instances reliably. Check `clawflow ci job log --help` for
+supported flags. This command uses the configured GitLab authentication; ClawFlow
+is not a general HTTP proxy. Report the command's actual authentication or network
+error rather than assuming the job is unreachable.
 
 ### Repo management
 ```
