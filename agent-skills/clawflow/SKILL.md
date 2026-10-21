@@ -56,10 +56,20 @@ decision archive. Before doing analysis on a new issue, search for related ones 
 duplicates, prior decisions, and related code-area history are usually the
 strongest signal. Pass `--json` for structured output.
 
-### GitLab CI job logs (read-only)
+### GitLab CI pipelines and manual jobs
 ```
+clawflow ci pipeline list --repo <full GitLab project URL> --ref <branch>
+clawflow ci pipeline view --repo <full GitLab project URL> --id <pipeline-id>
+clawflow ci job play --repo <full GitLab project URL> --id <job-id> [--json]
 clawflow ci job log --repo <full GitLab project URL> --job <job-id>
 ```
+
+`job play` (alias `job trigger`) is equivalent to clicking GitLab's play button
+for an existing `manual` job. Use `pipeline view` to identify the job ID, stage,
+and status. After the user approves the target deployment, play that job and
+inspect the pipeline/logs for the result. Keep `when: manual` in CI configuration.
+A successful play response means GitLab accepted the job, not that it finished.
+GitLab permissions and protected-environment approvals still apply.
 
 For a GitLab job URL, use its project URL and numeric job ID. A full URL identifies
 self-hosted GitLab instances reliably. Check `clawflow ci job log --help` for

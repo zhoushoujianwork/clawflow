@@ -10,6 +10,26 @@ The local dashboard (`clawflow web`) gives you a filterable timeline of every op
 
 ---
 
+## Trigger a manual GitLab deployment
+
+After approving a change and its target environment, start an existing manual
+deployment job from the CLI:
+
+```bash
+clawflow ci pipeline list --repo https://gitlab.company.com/group/project --ref main
+clawflow ci pipeline view --repo https://gitlab.company.com/group/project --id 12345
+# Select the manual deployment job ID from the pipeline's job list.
+clawflow ci job play --repo https://gitlab.company.com/group/project --id 67890
+clawflow ci job log --repo https://gitlab.company.com/group/project --job 67890
+```
+
+`job play` (alias `job trigger`) calls GitLab's
+[manual job API](https://docs.gitlab.com/api/jobs/#run-a-job), equivalent to its
+play button. Keep `when: manual`; the selected job defines the deployment target.
+The command returns the accepted job status and URL; check the pipeline and logs
+for completion. Add `--json` for structured output. Your GitLab token needs `api`
+scope and permission to run the job; protected-environment approvals still apply.
+
 ## Why ClawFlow
 
 ![Before ClawFlow vs. after](docs/images/pain-points.jpg)

@@ -8,18 +8,19 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot/budget"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
 )
 
-// NewCICmd exposes GitLab CI/CD read operations: runners, pipelines, and job
-// logs. These are GitLab-only (GitHub Actions has no equivalent object model),
+// NewCICmd exposes GitLab CI/CD inspection and manual job execution.
+// These are GitLab-only (GitHub Actions has no equivalent object model),
 // so every subcommand resolves a concrete *gitlab.Client and errors on
 // non-GitLab repos.
 func NewCICmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ci",
-		Short: "Query GitLab CI/CD runners, pipelines, and job logs",
-		Long:  "GitLab-only. Inspect project runners, list/view pipelines, and read job logs (traces).",
+		Short: "Inspect GitLab CI/CD and trigger manual jobs",
+		Long:  "GitLab-only. Inspect runners and pipelines, trigger manual jobs, and read job logs (traces).",
 	}
 	cmd.AddCommand(newCIRunnerCmd())
 	cmd.AddCommand(newCIPipelineCmd())
@@ -219,9 +220,56 @@ func newCIPipelineViewCmd() *cobra.Command {
 func newCIJobCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "job",
-		Short: "Inspect CI/CD jobs",
+		Short: "Inspect and trigger CI/CD jobs",
 	}
 	cmd.AddCommand(newCIJobLogCmd())
+	cmd.AddCommand(newCIJobPlayCmd())
+	return cmd
+}
+
+func newCIJobPlayCmd() *cobra.Command {
+	var repo string
+	var id int64
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:     "play",
+		Aliases: []string{"trigger"},
+		Short:   "Start a manual job in an existing pipeline",
+		Long:    "Equivalent to clicking a manual job's play button in GitLab. Triggers the job immediately; success means GitLab accepted it, not that deployment has finished.",
+		Example: "  clawflow ci job play --repo group/proj --id 67890",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if id <= 0 {
+				return fmt.Errorf("job id must be positive")
+			}
+			client, canonical, err := newGitLabClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			if err := budget.Reserve("ci job play"); err != nil {
+				return err
+			}
+			job, err := client.PlayJob(canonical, id)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(job)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Triggered job #%d %s [%s]\n", job.ID, job.Name, job.Status)
+			if job.WebURL != "" {
+				fmt.Fprintln(cmd.OutOrStdout(), job.WebURL)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "GitLab group/project or URL (required)")
+	cmd.Flags().Int64Var(&id, "id", 0, "manual job id (required; not pipeline id)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("id")
 	return cmd
 }
 

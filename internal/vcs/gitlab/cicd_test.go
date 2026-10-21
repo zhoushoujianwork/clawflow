@@ -167,3 +167,49 @@ func TestGetJobLogNotFound(t *testing.T) {
 		t.Fatal("expected error on HTTP 404")
 	}
 }
+
+func TestPlayJob(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"POST " + projectPath + "/jobs/5002/play": func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("PRIVATE-TOKEN") != "test-token" {
+				t.Error("missing authentication")
+			}
+			jsonResp(w, 200, map[string]any{"id": 5002, "name": "deploy-staging", "status": "pending", "web_url": "https://gl/ns/group/repo/-/jobs/5002"})
+		},
+	})
+	job, err := client.PlayJob("ns/group/repo", 5002)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID != 5002 || job.Name != "deploy-staging" || job.Status != "pending" || job.WebURL == "" {
+		t.Fatalf("unexpected played job: %+v", job)
+	}
+}
+
+func TestPlayJobErrors(t *testing.T) {
+	for _, status := range []int{400, 401, 403, 404, 409, 429, 500} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			client := newTestClient(t, map[string]http.HandlerFunc{
+				"POST " + projectPath + "/jobs/5002/play": func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, "job cannot be played", status)
+				},
+			})
+			if _, err := client.PlayJob("ns/group/repo", 5002); err == nil || !strings.Contains(err.Error(), "job cannot be played") {
+				t.Fatalf("expected API error, got %v", err)
+			}
+		})
+	}
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"POST " + projectPath + "/jobs/5002/play": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("invalid json"))
+		},
+	})
+	if _, err := client.PlayJob("ns/group/repo", 5002); err == nil {
+		t.Fatal("expected JSON decode error")
+	}
+	for _, id := range []int64{0, -1} {
+		if _, err := client.PlayJob("ns/group/repo", id); err == nil {
+			t.Fatalf("expected invalid ID error for %d", id)
+		}
+	}
+}

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// GitLab CI/CD read helpers: runners, pipelines, jobs and job logs (traces).
+// GitLab CI/CD helpers: runners, pipelines, manual jobs and job logs (traces).
 //
 // These are GitLab-specific — GitHub Actions has no equivalent object model —
 // so they live on the concrete *gitlab.Client rather than the platform-agnostic
@@ -149,6 +149,26 @@ func (c *Client) ListPipelineJobs(repo string, pipelineID int64) ([]Job, error) 
 		return nil, err
 	}
 	return jobs, nil
+}
+
+// PlayJob starts an existing manual job, like the play button in GitLab.
+func (c *Client) PlayJob(repo string, jobID int64) (Job, error) {
+	if jobID <= 0 {
+		return Job{}, fmt.Errorf("job id must be positive")
+	}
+	path := fmt.Sprintf("/projects/%s/jobs/%d/play", projectID(repo), jobID)
+	data, status, err := c.doJSON("POST", path, nil)
+	if err != nil {
+		return Job{}, err
+	}
+	if status != 200 {
+		return Job{}, fmt.Errorf("gitlab play job %d: HTTP %d: %s", jobID, status, strings.TrimSpace(string(data)))
+	}
+	var job Job
+	if err := json.Unmarshal(data, &job); err != nil {
+		return Job{}, fmt.Errorf("decode played job: %w", err)
+	}
+	return job, nil
 }
 
 // GetJobLog returns the raw trace (console log) of a job. The trace endpoint
