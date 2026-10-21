@@ -20,11 +20,12 @@ func NewCICmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ci",
 		Short: "Inspect GitLab CI/CD and trigger manual jobs",
-		Long:  "GitLab-only. Inspect runners and pipelines, trigger manual jobs, and read job logs (traces).",
+		Long:  "GitLab-only. Inspect runners and pipelines, trigger manual jobs, read job logs, and manage project CI/CD variables.",
 	}
 	cmd.AddCommand(newCIRunnerCmd())
 	cmd.AddCommand(newCIPipelineCmd())
 	cmd.AddCommand(newCIJobCmd())
+	cmd.AddCommand(newCIVariableCmd())
 	return cmd
 }
 

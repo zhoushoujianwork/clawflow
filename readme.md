@@ -30,6 +30,32 @@ The command returns the accepted job status and URL; check the pipeline and logs
 for completion. Add `--json` for structured output. Your GitLab token needs `api`
 scope and permission to run the job; protected-environment approvals still apply.
 
+## Manage project CI/CD variables
+
+Manage the variables on GitLab's **Settings > CI/CD** page:
+
+```bash
+clawflow ci variable list --repo https://gitlab.company.com/group/project
+clawflow ci variable view --repo https://gitlab.company.com/group/project --key DEPLOY_TARGET
+clawflow ci variable create --repo https://gitlab.company.com/group/project --key DEPLOY_TARGET --value staging
+clawflow ci variable update --repo https://gitlab.company.com/group/project --key DEPLOY_TARGET --value qa
+clawflow ci variable delete --repo https://gitlab.company.com/group/project --key DEPLOY_TARGET
+```
+
+Values are redacted by default, including `--json` output. Add `--show-values`
+to display values explicitly. For secrets or multiline/file variables, use
+`--value-file /path/to/value` or `--value-file -` for stdin instead of putting
+the value on the command line. Create and update require a value, which can be
+an explicit empty string (`--value ''`). Optional flags include `--type env_var|file`,
+`--protected`, `--masked`, `--raw`, and `--description`; omitted settings are
+preserved during updates, and explicit boolean false values are supported.
+
+For environment-specific variables, `--scope production` sets the scope on
+create and selects the exact existing scope on view/update/delete. These use
+GitLab's [project variables API](https://docs.gitlab.com/api/project_level_variables/);
+newer attributes and environment scopes depend on your server's support. The
+commands reuse the configured GitLab token and enforce the Pilot write budget.
+
 ## Why ClawFlow
 
 ![Before ClawFlow vs. after](docs/images/pain-points.jpg)

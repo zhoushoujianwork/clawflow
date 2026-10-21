@@ -1,6 +1,6 @@
 ---
 name: clawflow
-description: "Use the `clawflow` CLI for GitHub/GitLab issues, PRs, labels, repositories, and GitLab CI job logs. Trigger when the user mentions clawflow, asks about GitLab CI jobs or pipelines, or requests local project/VCS operations."
+description: "Use the `clawflow` CLI for GitHub/GitLab issues, PRs, labels, repositories, GitLab CI jobs, pipelines, and project CI/CD variables. Trigger when the user mentions clawflow or requests local project/VCS operations."
 ---
 
 # ClawFlow
@@ -76,6 +76,30 @@ self-hosted GitLab instances reliably. Check `clawflow ci job log --help` for
 supported flags. This command uses the configured GitLab authentication; ClawFlow
 is not a general HTTP proxy. Report the command's actual authentication or network
 error rather than assuming the job is unreachable.
+
+### GitLab project CI/CD variables
+```
+clawflow ci variable list --repo <R> [--json]
+clawflow ci variable view --repo <R> --key <KEY> [--scope <exact-scope>] [--show-values]
+clawflow ci variable create --repo <R> --key <KEY> --value-file <path-or-> [--scope <scope>]
+clawflow ci variable update --repo <R> --key <KEY> --value-file <path-or-> [--scope <exact-scope>]
+clawflow ci variable delete --repo <R> --key <KEY> [--scope <exact-scope>]
+```
+
+These manage the project variables in GitLab Settings > CI/CD, using configured
+GitLab authentication. `variables` is an alias for `variable`. Reads and write
+responses redact values by default, including JSON; request `--show-values` only
+when values are needed. `--value` is also supported (including an empty string);
+`--value-file -` reads stdin and preserves newlines. Create and update require a
+value. Optional write flags: `--protected`, `--masked`, `--raw`, `--type env_var|file`,
+and `--description`. Updates preserve fields whose flags were omitted; use
+`--protected=false` or `--masked=false` to explicitly clear them.
+
+Scope selects an existing variable on view/update/delete; on create it sets the
+new variable's environment scope. Use an exact scope when the key exists in
+multiple environments. Newer attributes and environment scopes require server
+support. Only change variables within the user's requested key/value/scope;
+never replace existing deployment variables merely to test the CLI.
 
 ### Repo management
 ```
