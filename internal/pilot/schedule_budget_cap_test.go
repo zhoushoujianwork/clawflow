@@ -50,7 +50,7 @@ func TestWakeSucceedsOnBudgetCap(t *testing.T) {
 		t.Fatalf("enable automation: %v", err)
 	}
 
-	woken, err := Schedule(context.Background(), 30*time.Second)
+	woken, err := Schedule(context.Background(), 30*time.Second, time.Time{})
 	if err != nil {
 		t.Fatalf("Schedule returned error: %v", err)
 	}
