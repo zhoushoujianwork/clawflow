@@ -39,6 +39,7 @@ Storage: ~/.clawflow/projects/<name>/project.yaml + context.md`,
 	cmd.AddCommand(newProjectChatCmd())
 	cmd.AddCommand(newProjectDeleteCmd())
 	cmd.AddCommand(newProjectAutomationCmd())
+	cmd.AddCommand(newProjectCheckCmd())
 	return cmd
 }
 

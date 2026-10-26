@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -326,6 +327,7 @@ func newRepoSetCmd() *cobra.Command {
 	var autoApprove string
 	var autoMerge string
 	var primaryProject string
+	var boundMachine string
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
@@ -364,6 +366,12 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			// Validate flags before mutating.
+			boundMachineSet := cmd.Flags().Changed("bound-machine")
+			if boundMachineSet && strings.ContainsFunc(boundMachine, func(r rune) bool {
+				return unicode.IsSpace(r) || unicode.IsControl(r) || r == '/' || r == '\\'
+			}) {
+				return fmt.Errorf("--bound-machine must not contain whitespace, control characters, or slashes")
+			}
 			if autoApprove != "" {
 				switch autoApprove {
 				case "on", "true", "1", "off", "false", "0":
@@ -398,6 +406,9 @@ func newRepoSetCmd() *cobra.Command {
 				if primaryProjectSet {
 					r.PrimaryProject = primaryProject
 				}
+				if boundMachineSet {
+					r.BoundMachine = boundMachine
+				}
 				return r
 			})
 			r := cfg.Repos[ownerRepo]
@@ -410,6 +421,13 @@ func newRepoSetCmd() *cobra.Command {
 			fmt.Printf("repo %q updated\n", ownerRepo)
 			fmt.Printf("  auto_approve: %v\n", r.AutoApprove)
 			fmt.Printf("  auto_merge:   %v\n", r.AutoMerge)
+			if boundMachineSet {
+				if r.BoundMachine == "" {
+					fmt.Printf("  bound_machine: (cleared)\n")
+				} else {
+					fmt.Printf("  bound_machine: %s\n", r.BoundMachine)
+				}
+			}
 			if primaryProjectSet {
 				if r.PrimaryProject == "" {
 					fmt.Printf("  primary_project: (cleared)\n")
@@ -423,6 +441,7 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&autoApprove, "auto-approve", "", "enable/disable auto-approve: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
+	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
 	return cmd
 }
 

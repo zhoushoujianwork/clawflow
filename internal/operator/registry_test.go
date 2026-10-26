@@ -217,7 +217,7 @@ func TestDiagnose_NoOutcomes(t *testing.T) {
 	}
 }
 
-func TestDiagnose_OverlappingTriggers(t *testing.T) {
+func TestDiagnose_DuplicateTriggers(t *testing.T) {
 	sys := fstest.MapFS{
 		"skills/a/SKILL.md": {Data: []byte(makeSkillFull("a", "desc", "issue", "lock-a", []string{"bug", "urgent"}, nil, []string{"done"}))},
 		"skills/b/SKILL.md": {Data: []byte(makeSkillFull("b", "desc", "issue", "lock-b", []string{"urgent", "bug"}, nil, []string{"done"}))},
@@ -229,12 +229,12 @@ func TestDiagnose_OverlappingTriggers(t *testing.T) {
 	diags := reg.Diagnose()
 	found := false
 	for _, d := range diags {
-		if d.Severity == SeverityError && strings.Contains(d.Message, "overlapping trigger") {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "duplicate trigger") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected error about overlapping triggers; got %+v", diags)
+		t.Errorf("expected error about duplicate triggers; got %+v", diags)
 	}
 }
 
@@ -251,6 +251,68 @@ func TestDiagnose_DifferentTargetNoOverlap(t *testing.T) {
 	for _, d := range diags {
 		if d.Severity == SeverityError {
 			t.Errorf("same labels on different targets should not conflict; got %+v", d)
+		}
+	}
+}
+
+func TestDiagnose_TriggerConstraints(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		change    func(*Operator)
+		duplicate bool
+	}{
+		{"equivalent_sets", func(op *Operator) {
+			op.Trigger.LabelsRequired = []string{"b", "a", "a"}
+			op.Trigger.LabelsRequiredAny = []string{"y", "x", "x"}
+			op.Trigger.LabelsExcluded = []string{"n", "m", "m"}
+			op.Trigger.AppliesTo = ""
+		}, true},
+		{"different_any", func(op *Operator) { op.Trigger.LabelsRequiredAny = []string{"z"} }, false},
+		{"different_excluded", func(op *Operator) { op.Trigger.LabelsExcluded = []string{"z"} }, false},
+		{"different_applies", func(op *Operator) { op.Trigger.AppliesTo = AppliesLeaf }, false},
+		{"different_target", func(op *Operator) { op.Trigger.Target = "pr" }, false},
+		{"consumed_and_outcomes_ignored", func(op *Operator) {
+			op.Trigger.LabelsConsumed = []string{"a"}
+			op.Outcomes = []string{"other"}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &Operator{Name: "a", Description: "a", Outcomes: []string{"done"}, Trigger: Trigger{Target: "issue", AppliesTo: AppliesAny, LabelsRequired: []string{"a", "b"}, LabelsRequiredAny: []string{"x", "y"}, LabelsExcluded: []string{"m", "n"}}}
+			b := *a
+			b.Name = "b"
+			tc.change(&b)
+			r := NewRegistry()
+			r.ops[a.Name], r.ops[b.Name] = a, &b
+			found := false
+			for _, d := range r.Diagnose() {
+				if d.Severity == SeverityError {
+					found = true
+				}
+			}
+			if found != tc.duplicate {
+				t.Fatalf("duplicate=%t, diagnostics=%+v", tc.duplicate, r.Diagnose())
+			}
+		})
+	}
+}
+
+func TestDiagnose_BuiltinClassifyAndEvaluateFeat(t *testing.T) {
+	r := NewRegistry()
+	for _, name := range []string{"classify", "evaluate-feat"} {
+		path := filepath.Join("..", "..", "skills", name, "SKILL.md")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		op, err := Parse(data, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.ops[op.Name] = op
+	}
+	for _, d := range r.Diagnose() {
+		if d.Severity == SeverityError {
+			t.Fatalf("builtins conflict: %+v", d)
 		}
 	}
 }

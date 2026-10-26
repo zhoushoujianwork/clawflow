@@ -119,8 +119,8 @@ namespace match the requested repo; paths are stored as absolute paths.
 
 Use `repo list`/`repo show <R>` and `project list`/`project show <project>` first
 when entries may already exist. Do not delete/recreate them to bypass errors.
-Existing registration updates support `repo set --auto-approve`, `--auto-merge`
-and `--primary-project`; base/local-path changes have no generic CLI setter.
+Existing registration updates support `repo set --auto-approve`, `--auto-merge`,
+`--primary-project` and `--bound-machine`; base/local-path changes have no generic CLI setter.
 Report that limitation instead of inventing a flag.
 
 Verify disabled state with:
@@ -139,7 +139,42 @@ one repository. `repo disable` stops future monitoring; it does not cancel an
 operator already running. `project automation disable` stops scheduled Pilot
 wakes; manual `pilot wake` is a separate authorized action.
 
+When readiness reports a required machine binding, bind the repository and
+project to the intended execution host without enabling automation:
+
+```bash
+clawflow repo set <R> --bound-machine <hostname>
+clawflow project automation bind <project> --machine <hostname>
+```
+
+Use the actual execution host name. Omitted `--bound-machine` preserves the
+existing binding; `--bound-machine=""` explicitly clears it. Repository binding
+does not change monitoring, approval, merge or primary-project settings.
+
 ## Provider, operator and test readiness
+
+Use the local readiness check after registration:
+
+```bash
+clawflow project check <project> --json
+```
+
+This command performs local reads only: project/repo and primary bindings,
+checkout origin and cached base commit, dirty state, context/testing document
+presence, Git/Claude executable availability, operator definitions, automation
+controls and local sync pause state. It does not migrate config, fetch, probe
+providers, start agents, run tests or write snapshots. Missing cached base is
+blocked; a cached commit does not establish remote freshness. Disabled automation,
+missing project instructions and dirty checkouts are warnings; preserve existing work.
+
+JSON stdout contains one document with `schema_version: 1`, `project`,
+`status` (`ready` or `blocked`), `checks` and `unverified`. Each check has stable
+`id`, `scope`, `status` (`passed`, `warning`, `blocked`), `message` and optional
+`next_action`. Blockers return nonzero with the structured result still on stdout.
+Branch on IDs/statuses, not English messages. `ready` covers local prerequisites
+only: `remote_auth`, `remote_freshness`, `provider_execution`, `project_tests` and
+`issue_workflow` remain explicitly unverified. Sync credentials and remote sync
+configuration are not inspected. Check command help when using an older binary.
 
 ```bash
 clawflow config provider list
@@ -194,9 +229,12 @@ clawflow run --repo <R> --issue <N> --timeout 60m
 
 Inspect the issue and operator triggers before running. `run` has no dry-run
 flag and can post comments, change labels and launch implementation/PR work.
-A single-issue run is not a sandbox: it still participates in normal runner
-sync/post-processing and project automation. Keep sync paused and PM/merge
-settings disabled when those effects are outside the authorized scope.
+A single-issue run still performs normal runner sync, history reconciliation,
+worktree cleanup and snapshot writes, and scans other eligible enabled repos.
+Scoped runs suppress scheduled project Pilot wakes; a nonzero `--issue` also
+suppresses the scan-level auto-merge sweep. The selected operator can still
+perform its normal implementation, PR and post-processing writes. Keep sync
+paused and approval/merge settings disabled when outside the authorized scope.
 
 Per-project Pilot scheduling is a separate opt-in:
 

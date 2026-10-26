@@ -4,6 +4,8 @@ Status: Proposed · Date: 2026-10-26
 
 This document defines product scope and architectural choices. [Implementation notes](managed-development-design-detail.md) describe the proposed contracts and recovery rules. Names and configuration examples there are proposals, not supported commands or configuration today.
 
+The [CLI interaction design](cli-interaction-design.md) defines the user and external-AI control surface and its incremental validation sequence.
+
 ## Goal
 
 Turn ClawFlow into a service that takes an accepted Git issue through planning, implementation, testing, review, and merge, then verifies the result. Users configure how their projects work by installing and binding skills. ClawFlow continuously advances work within those configured permissions and resource limits.

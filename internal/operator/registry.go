@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -97,7 +98,7 @@ func (r *Registry) Get(name string) (*Operator, bool) {
 type Severity int
 
 const (
-	SeverityError   Severity = iota
+	SeverityError Severity = iota
 	SeverityWarning
 )
 
@@ -138,20 +139,37 @@ func (r *Registry) Diagnose() []Diagnostic {
 	}
 
 	type triggerKey struct {
-		target string
-		labels string
+		target   string
+		applies  string
+		required string
+		any      string
+		excluded string
+	}
+	labelSet := func(labels []string) string {
+		set := make(map[string]bool)
+		for _, label := range labels {
+			set[label] = true
+		}
+		sorted := make([]string, 0, len(set))
+		for label := range set {
+			sorted = append(sorted, label)
+		}
+		sort.Strings(sorted)
+		data, _ := json.Marshal(sorted)
+		return string(data)
 	}
 	seen := make(map[triggerKey]string)
 	for _, op := range ops {
-		sorted := make([]string, len(op.Trigger.LabelsRequired))
-		copy(sorted, op.Trigger.LabelsRequired)
-		sort.Strings(sorted)
-		k := triggerKey{target: op.Trigger.Target, labels: strings.Join(sorted, ",")}
+		applies := op.Trigger.AppliesTo
+		if applies == "" {
+			applies = AppliesAny
+		}
+		k := triggerKey{op.Trigger.Target, applies, labelSet(op.Trigger.LabelsRequired), labelSet(op.Trigger.LabelsRequiredAny), labelSet(op.Trigger.LabelsExcluded)}
 		if first, ok := seen[k]; ok {
 			diags = append(diags, Diagnostic{
 				Operator: op.Name,
 				Severity: SeverityError,
-				Message:  fmt.Sprintf("overlapping trigger with %q (target=%s, labels_required=[%s])", first, k.target, k.labels),
+				Message:  fmt.Sprintf("duplicate trigger with %q (target=%s, applies_to=%s)", first, k.target, k.applies),
 			})
 		} else {
 			seen[k] = op.Name
