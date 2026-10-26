@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -348,11 +349,19 @@ func completeRecord(r Record) error {
 	return nil
 }
 
-// decodeStrict rejects duplicate keys, unknown fields and trailing JSON values.
+// decodeStrict rejects duplicate keys, nonexact schema keys and trailing JSON
+// values before encoding/json can apply its case-insensitive struct matching.
+// RawMessage bodies receive their own typed validation when loaded below.
 func decodeStrict(b []byte, value any) error {
 	d := json.NewDecoder(bytes.NewReader(b))
-	var walk func() error
-	walk = func() error {
+	var walk func(reflect.Type) error
+	walk = func(typ reflect.Type) error {
+		for typ != nil && typ.Kind() == reflect.Pointer {
+			typ = typ.Elem()
+		}
+		if typ == reflect.TypeOf(json.RawMessage{}) {
+			typ = nil
+		}
 		t, err := d.Token()
 		if err != nil {
 			return err
@@ -363,6 +372,13 @@ func decodeStrict(b []byte, value any) error {
 		}
 		switch delim {
 		case '{':
+			var fields map[string]reflect.Type
+			if typ != nil {
+				if typ.Kind() != reflect.Struct {
+					return errors.New("JSON object does not match schema")
+				}
+				fields = exactFields(typ)
+			}
 			seen := map[string]bool{}
 			for d.More() {
 				k, err := d.Token()
@@ -370,17 +386,33 @@ func decodeStrict(b []byte, value any) error {
 					return err
 				}
 				key, ok := k.(string)
-				if !ok || seen[key] {
+				folded := strings.ToLower(key)
+				if !ok || seen[folded] {
 					return errors.New("duplicate or invalid JSON key")
 				}
-				seen[key] = true
-				if err := walk(); err != nil {
+				seen[folded] = true
+				var child reflect.Type
+				if fields != nil {
+					var exists bool
+					child, exists = fields[key]
+					if !exists {
+						return fmt.Errorf("unknown or nonexact JSON key %q", key)
+					}
+				}
+				if err := walk(child); err != nil {
 					return err
 				}
 			}
 		case '[':
+			var elem reflect.Type
+			if typ != nil {
+				if typ.Kind() != reflect.Array && typ.Kind() != reflect.Slice {
+					return errors.New("JSON array does not match schema")
+				}
+				elem = typ.Elem()
+			}
 			for d.More() {
-				if err := walk(); err != nil {
+				if err := walk(elem); err != nil {
 					return err
 				}
 			}
@@ -390,7 +422,7 @@ func decodeStrict(b []byte, value any) error {
 		_, err = d.Token()
 		return err
 	}
-	if err := walk(); err != nil {
+	if err := walk(reflect.TypeOf(value)); err != nil {
 		return err
 	}
 	if _, err := d.Token(); err != io.EOF {
@@ -399,4 +431,31 @@ func decodeStrict(b []byte, value any) error {
 	d = json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	return d.Decode(value)
+}
+
+// exactFields mirrors the JSON tags used by our fixed schemas, including
+// exported fields promoted from anonymous structs such as Native.Identity.
+func exactFields(typ reflect.Type) map[string]reflect.Type {
+	fields := make(map[string]reflect.Type)
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("json"), ",")[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" && field.Anonymous && field.Type.Kind() == reflect.Struct {
+			for key, child := range exactFields(field.Type) {
+				fields[key] = child
+			}
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields[name] = field.Type
+	}
+	return fields
 }
