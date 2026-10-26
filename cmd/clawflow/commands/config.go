@@ -119,10 +119,6 @@ func newConfigShowCmd() *cobra.Command {
 					return fmt.Errorf("repo %q not found", repoFlag)
 				}
 				switch fieldFlag {
-				case "workflow":
-					fmt.Println(r.EffectiveWorkflow())
-				case "auto_approve":
-					fmt.Println(r.AutoApprove)
 				case "auto_merge":
 					fmt.Println(r.AutoMerge)
 				case "enabled":
@@ -161,10 +157,6 @@ func newConfigShowCmd() *cobra.Command {
 
 			fmt.Printf("Settings:\n")
 			fmt.Printf("  poll_interval:        %d min\n", cfg.Settings.PollInterval)
-			// Print the resolved effective threshold (issue #336), not the raw
-			// field, so this line matches what evaluate-bug/evaluate-feat and
-			// the salvage path actually compare Confidence scores against.
-			fmt.Printf("  confidence_threshold: %g/10 (effective)\n", cfg.Settings.EffectiveConfidenceThreshold())
 			fmt.Printf("  agent_timeout:        %d sec\n", cfg.Settings.AgentTimeout)
 			fmt.Printf("  max_concurrent:       %d\n", cfg.Settings.MaxConcurrentAgents)
 			billingDay := cfg.Settings.BillingCycleDay
@@ -180,13 +172,13 @@ func newConfigShowCmd() *cobra.Command {
 				if r.Enabled {
 					status = "enabled"
 				}
-				fmt.Printf("  %-40s [%s] workflow=%s\n", name, status, r.EffectiveWorkflow())
+				fmt.Printf("  %-40s [%s]\n", name, status)
 			}
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&repoFlag, "repo", "", "Repo to query (owner/repo)")
-	cmd.Flags().StringVar(&fieldFlag, "field", "", "Single field to print (auto_approve, auto_merge, enabled, ...)")
+	cmd.Flags().StringVar(&fieldFlag, "field", "", "Single field to print (auto_merge, enabled, ...)")
 	return cmd
 }

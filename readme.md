@@ -2,7 +2,7 @@
 
 > **Label-driven automation that turns issues into PRs on GitHub and GitLab.**
 >
-> ClawFlow polls the repositories you configure, matches each open issue/PR against a set of **operators** (self-contained `SKILL.md` files), and runs the matching operator through `claude -p`. State lives entirely in VCS labels and comments — there is no database, no SaaS backend, and no orchestrator service. Run it once, run it on cron, run it from your editor — it's the same binary either way.
+> ClawFlow polls the repositories you configure, matches each open issue/PR against a set of **operators** (self-contained `SKILL.md` files), and runs the matching operator through `claude -p`. VCS labels and comments expose progress; local files retain run history, execution locks and bounded CI-repair attempts. There is no SaaS backend. Run it once, run it on cron, run it from your editor — it's the same binary either way.
 
 ![ClawFlow dashboard](dashbroad.png)
 
@@ -62,7 +62,7 @@ commands reuse the configured GitLab token and enforce the Pilot write budget.
 
 Two pain points the project targets head-on:
 
-- **Big feature issues get stuck.** A tracking issue explodes into a dozen implicit sub-tasks nobody breaks down. The `decompose` operator splits it into native GitHub sub-issues plus a parent checklist; `track-progress` polls completion each run and auto-closes the parent when the last child lands.
+- **Issues wait for manual handoffs.** Eligible open leaf issues go directly to `implement`, which analyzes the request, writes code, tests and repairs internally, then opens a PR. Humans set direction and describe features; parent issues retain `track-progress` monitoring.
 - **Config drift across machines.** Repos you added on the work laptop don't exist on the home laptop. `clawflow sync push/pull` ships your `config.yaml` (minus tokens and local paths) through a private GitHub Gist — `clawflow login` auto-discovers or creates it. No SaaS, no extra account.
 
 ---
@@ -127,6 +127,7 @@ clawflow repo add ns/repo --platform gitlab --base-url https://gitlab.company.co
 Manage repos:
 ```bash
 clawflow repo list
+clawflow repo set owner/repo --auto-merge on --ci-required on
 clawflow repo enable  owner/repo
 clawflow repo disable owner/repo
 clawflow repo remove  owner/repo
@@ -140,27 +141,16 @@ Labels are created automatically on `repo add`. To (re)create them manually:
 clawflow label init owner/repo
 ```
 
-**Trigger labels** — gate which operator fires on an issue:
+Eligible open leaf issues enter implementation automatically. Questions retain their reply path; `agent-mentioned` triggers comment replies, and `progress-check` is the operational trigger for parent tracking.
 
-| Label | Fires operator |
+| State | Meaning |
 |---|---|
-| `bug` | `evaluate-bug` |
-| `feat` | `evaluate-feat` *(planned, post-MVP)* |
-| `ready-for-agent` | `implement` — you add this manually after reviewing the evaluation |
-| `agent-mentioned` | `reply-comment` |
+| `agent-implemented` | Implementation produced a PR. |
+| `agent-failed` | Execution failed; inspect its report before retrying. |
+| `agent-skipped` | Work was declined or excluded. |
+| `agent-replied` | The latest mention was answered. |
 
-**State labels** — written back by operators:
-
-| Label | Meaning |
-|---|---|
-| `agent-running` | Universal execution lock. Added before an operator runs, removed after (success or fail). |
-| `agent-evaluated` | An `evaluate-*` operator has posted its assessment. Stops re-evaluation. |
-| `agent-skipped` | Confidence too low — operator declined to proceed. |
-| `agent-implemented` | `implement` finished — PR is open. |
-| `agent-failed` | An operator errored; see the failure comment on the issue. |
-| `agent-replied` | `reply-comment` has replied to the latest mention. |
-
-ClawFlow never adds `ready-for-agent` itself — owner approval is always required to cross from evaluation to implementation.
+Execution uses local lockfiles in `~/.clawflow/locks/`. The old `agent-running` label is not a concurrency lock. Pause/cancel controls, machine bindings, terminal exclusions and bounded retries still apply.
 
 ### 4. Run
 
@@ -168,7 +158,7 @@ ClawFlow never adds `ready-for-agent` itself — owner approval is always requir
 clawflow run
 ```
 
-Scans every enabled repo once, runs any matching operators, exits. Schedule it with cron, launchd, or your editor's agent — ClawFlow holds no long-running state.
+Scans every enabled repo once, runs any matching operators, exits. Schedule it with cron, launchd, or your editor's agent; local history persists between invocations.
 
 ---
 
@@ -176,30 +166,24 @@ Scans every enabled repo once, runs any matching operators, exits. Schedule it w
 
 ![ClawFlow architecture](docs/images/architecture.jpg)
 
-A single CLI binary, labels and comments as the only shared state, and `claude -p` as the execution engine — the whole system fits on one diagram.
+A single CLI binary scans enabled, machine-bound repositories and runs eligible work through `claude -p`:
 
+1. Route ordinary open leaf issues directly to `implement`; keep question/comment replies and parent tracking on their own paths.
+2. Acquire a local execution lock and prepare an isolated implementation worktree.
+3. Analyze, plan, implement, run focused tests and repair inside the implementation attempt.
+4. Publish the result and PR, then release the lock. Required CI must succeed before configured auto-merge; missing, pending, failed or unreadable checks block merging.
+
+For unattended delivery:
+
+```bash
+clawflow repo set owner/repo --auto-merge on --ci-required on
+clawflow repo enable owner/repo
+clawflow run --repo owner/repo
 ```
-clawflow run
-  └─ for each configured repo
-       └─ list open issues and PRs
-            └─ for each one, match its labels against every registered operator
-                 └─ on first match:
-                      1. add the operator's lock label (concurrency guard)
-                      2. invoke `claude -p` with the operator's SKILL.md + issue context
-                      3. the operator posts its comment / label / PR
-                      4. remove the lock label
-```
 
-No orchestrator, no sub-agents, no DAG. Operators only coordinate through the labels and comments they read and write — one operator's output becomes the next operator's trigger, implicitly.
+Failed CI repair is limited to supported same-repository GitHub managed PRs. It reproduces failures locally, updates the existing branch without force, reserves at most three attempts per PR and waits five minutes between attempts. It does not ingest CI logs or repair forks or GitLab MRs. Other GitLab issue, MR and CI commands remain available.
 
-![ClawFlow run pipeline](docs/images/workflow.jpg)
-
-Example end-to-end flow for a bug:
-
-1. Someone opens an issue and labels it `bug`.
-2. Next `clawflow run` — `evaluate-bug` matches, writes an evaluation comment, adds `agent-evaluated`.
-3. Owner reads the evaluation, adds `ready-for-agent`.
-4. Next `clawflow run` — `implement` matches, creates a branch, writes code, opens a PR, adds `agent-implemented`.
+This is the current runner, with local history and repair bookkeeping. The [managed development design](docs/managed-development-design.md) proposes a broader durable task/effect engine; that engine is not implemented by these controls.
 
 ---
 
@@ -208,7 +192,7 @@ Example end-to-end flow for a bug:
 An **operator** is a single `SKILL.md` file — frontmatter plus a prompt — that declares:
 
 - **Trigger**: which issues/PRs it runs on (target type + required labels + excluded labels)
-- **Lock label**: the label used as a per-run mutex
+- **Outcome**: the result label emitted in stdout; `lock_label` is compatibility metadata, not a mutex
 - **Body**: the prompt that `claude -p` receives, with issue context injected
 
 Operators live in two places:
@@ -216,7 +200,9 @@ Operators live in two places:
 - **Built-in**: `skills/<name>/SKILL.md` inside this repo — embedded into the binary at build time.
 - **User overrides**: `~/.clawflow/skills/<name>/SKILL.md` — same name overrides the built-in.
 
-That's the whole extension model. To add a new operator, drop a `SKILL.md` in one of those directories. No plugin API, no registration step.
+The exact names `classify`, `evaluate-bug`, `evaluate-feat` and `decompose` are retired and rejected in user overrides too. Other custom operators and historical records remain. The eval model role is used only by custom `evaluate-*` extensions, with no built-in evaluation pipeline.
+
+That is the current extension model. To add a new operator, drop a `SKILL.md` in one of those directories. No plugin API, no registration step.
 
 See [`CLAUDE.md`](CLAUDE.md) for the frontmatter schema and operator design principles.
 
@@ -228,21 +214,11 @@ For large features that span multiple implementation tasks, ClawFlow supports a 
 
 ### How it works
 
-1. Create an issue and add the `tracking` label.
-2. Let it flow through `classify` → `evaluate-feat` → add `ready-for-agent`.
-3. The `decompose` operator fires, reads the issue body, creates sub-issues via `clawflow issue create` + `clawflow issue add-sub`, and posts a checklist comment.
-4. Sub-issues flow through the normal pipeline independently: `classify` → `evaluate` → `ready-for-agent` → `implement`.
-5. After each `clawflow run`, the `track-progress` operator checks sub-issue completion via `clawflow issue list-sub`. When all sub-issues are done, it emits `agent-closed` and ClawFlow closes the parent automatically.
+1. Create a parent and link its implementation tasks using the sub-issue commands below.
+2. Eligible leaf issues proceed through implementation independently; normal analysis stays inside `implement`.
+3. Each scan supplies `progress-check` to `track-progress` for eligible parents. Pending children produce `agent-watching`; when all children finish, `agent-closed` closes the parent.
 
-### Labels involved
-
-| Label | Role |
-|---|---|
-| `tracking` | Marks the parent issue; prevents `implement` from touching it directly |
-| `agent-decomposed` | Set after `decompose` creates sub-issues |
-| `progress-check` | Ephemeral trigger for `track-progress`; re-added each run until all sub-issues are done |
-| `agent-watching` | Outcome when sub-issues are still pending |
-| `agent-closed` | Terminal outcome; triggers automatic close of the parent issue |
+`tracking` marks coordinating work and excludes direct implementation. `progress-check` is an operational trigger, not a user approval stage. No automatic decomposition operator is provided.
 
 ### CLI commands
 
@@ -255,9 +231,13 @@ clawflow issue list-sub --repo owner/repo --issue 10
 clawflow issue list-sub --repo owner/repo --issue 10 --json
 ```
 
-GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return an error on GitLab repos. The `decompose` operator still creates the issues; `track-progress` falls back to parsing the checklist in the issue body.
+GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return an error on GitLab repos. Existing checklist-based tracking remains available where supported; native sub-issue commands remain GitHub-only.
 
 ---
+
+## Configuration migration
+
+There is one autonomous lifecycle and no workflow selector. Old configuration input remains readable; explicit legacy selection produces a migration notice and continues autonomously. Rewritten configuration omits `workflow`, `auto_approve`, `auto_evaluate_all_issues` and `confidence_threshold`, preserving enablement, bindings, merge/CI settings and other supported settings. Old labels and history are retained as records, not implementation prerequisites.
 
 ## Config Sync (multi-machine)
 
@@ -299,7 +279,7 @@ clawflow project automation enable my-project --cooldown 30
 
 Or flip the toggle in the dashboard's project detail page.
 
-When on, every `clawflow run` pass — after operators finish — wakes a per-project Pilot (a non-interactive `claude -p` invocation rooted at `~/.clawflow/projects/<name>/`). The Pilot triages the backlog at the **edges** of the operator pipeline: file new work, fix missing trigger labels, close stale/duplicate issues, comment to explain decisions. The middle of the pipeline (evaluate → ready-for-agent → implement → merge) stays owned by operators + repo-level `auto_approve` / `auto_merge`.
+When on, every `clawflow run` pass — after operators finish — wakes a per-project Pilot (a non-interactive `claude -p` invocation rooted at `~/.clawflow/projects/<name>/`). The Pilot triages the backlog at the **edges** of the operator pipeline: file new work, fix missing trigger labels, close stale/duplicate issues, comment to explain decisions. Implementation and delivery stay owned by the runner, operators and repo-level merge/CI controls.
 
 #### Pilot's working files
 
@@ -360,7 +340,7 @@ clawflow/ (this repo)
 │   ├── project/                      ← project grouping CRUD
 │   └── vcs/                          ← platform-agnostic VCS client (GitHub + GitLab)
 ├── skills/                           ← built-in operators (embedded at build time)
-│   ├── evaluate-bug/SKILL.md
+│   ├── track-progress/SKILL.md
 │   ├── implement/SKILL.md
 │   └── reply-comment/SKILL.md
 └── agent-skills/                     ← agent skills for AI coding tools
@@ -387,7 +367,7 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 | **Update** | `clawflow update` — fetch the latest binary |
 | **Operator helpers** *(invoked from SKILL.md bodies)* | `clawflow worktree` — create/remove per-issue git worktrees · `clawflow pr-check` — has an open PR for this issue? · `clawflow lang` — detect build/test commands for changed files · `clawflow status` — per-repo health summary |
 
-> **Tool discipline:** inside operators, always use `clawflow` commands for VCS actions, never `gh` — see `CLAUDE.md` for the rationale.
+> **Tool discipline:** return comments and outcome markers through stdout for runner write-back. Implementation has its documented Git/PR exception. Use `clawflow` for permitted VCS actions, never `gh`; see `CLAUDE.md`.
 
 ---
 
@@ -404,7 +384,7 @@ What it shows:
 - **Dashboard** — filterable timeline of recent operator runs across every monitored repo, with status, duration, and PR links
 - **Run detail** — replay of the full `claude -p` stream-json event log (tool calls, assistant messages, final result) for any past run
 - **Repos** — read-only view of every repo in `config.yaml` with per-repo run history
-- **Operators** — all built-in and user operators with triggers, lock labels, and descriptions
+- **Operators** — active built-in and user operators with triggers, outcomes, and descriptions
 
 The dashboard is a static SPA (React + Vite + Tailwind) read-only view — it does not call the GitHub/GitLab API itself. All state comes from files the CLI wrote. To refresh, run `clawflow run` and reload the page. The bundle is shipped inside the binary via `embed.FS`, so there is no Node toolchain required at install time.
 
@@ -453,7 +433,7 @@ clawflow update --from-source      # rebuild from cloned repo (dev)
 The project is deliberately small. To change behavior, you almost always want to edit or add an operator, not Go code:
 
 1. Create `skills/<operator-name>/SKILL.md` (built-in) or `~/.clawflow/skills/<operator-name>/SKILL.md` (user).
-2. Declare the frontmatter: `name`, `description`, `operator.trigger`, `operator.lock_label`.
+2. Declare the frontmatter: `name`, `description`, `operator.trigger` and allowed `operator.outcomes`.
 3. Write the prompt body.
 4. Run `clawflow operators list` to confirm it's registered, then `clawflow run` to exercise it on a test issue.
 

@@ -342,7 +342,7 @@ func newIssueListCmd() *cobra.Command {
 		Use:     "list",
 		Short:   "List issues in a repository",
 		Aliases: []string{"ls"},
-		Example: "  clawflow issue list --repo owner/repo\n  clawflow issue list --repo owner/repo --state closed --label agent-evaluated\n  clawflow issue list --repo owner/repo --json",
+		Example: "  clawflow issue list --repo owner/repo\n  clawflow issue list --repo owner/repo --state closed --label agent-implemented\n  clawflow issue list --repo owner/repo --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {

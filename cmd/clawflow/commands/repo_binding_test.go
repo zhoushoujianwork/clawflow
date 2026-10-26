@@ -25,8 +25,8 @@ func TestRepoSetBoundMachine(t *testing.T) {
 			t.Run(tc.name+"/automation="+map[bool]string{false: "off", true: "on"}[automation], func(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
 				cfg := &config.Config{Repos: map[string]config.Repo{"ns/repo": {
-					Enabled: automation, AutoApprove: automation, AutoMerge: automation,
-					AutoEvaluateAllIssues: automation, BoundMachine: "old-host",
+					Enabled: automation, AutoMerge: automation,
+					BoundMachine:   "old-host",
 					PrimaryProject: "existing-project", BaseBranch: "develop",
 					LocalPath: "/isolated/checkout", Description: "keep description",
 					Labels: map[string]string{"trigger": "ready"},
@@ -69,7 +69,7 @@ func TestRepoSetBoundMachinePreservedWithAutomationFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := newRepoSetCmd()
-	cmd.SetArgs([]string{"ns/repo", "--auto-approve", "on", "--auto-merge", "off"})
+	cmd.SetArgs([]string{"ns/repo", "--auto-merge", "off"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestRepoSetBoundMachinePreservedWithAutomationFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := loaded.Repos["ns/repo"]
-	if r.BoundMachine != "Work-Mac.local" || r.Enabled || !r.AutoApprove || r.AutoMerge || r.PrimaryProject != "existing-project" {
+	if r.BoundMachine != "Work-Mac.local" || r.Enabled || r.AutoMerge || r.PrimaryProject != "existing-project" {
 		t.Fatalf("unexpected repository settings: %+v", r)
 	}
 }
@@ -88,7 +88,7 @@ func TestRepoSetBoundMachineRejectsInvalidWithoutMutation(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			cfg := &config.Config{Repos: map[string]config.Repo{"ns/repo": {
-				BoundMachine: "old-host", AutoApprove: false, AutoMerge: true,
+				BoundMachine: "old-host", AutoMerge: true,
 			}}}
 			if err := cfg.Save(); err != nil {
 				t.Fatal(err)
@@ -100,7 +100,7 @@ func TestRepoSetBoundMachineRejectsInvalidWithoutMutation(t *testing.T) {
 			cmd := newRepoSetCmd()
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
-			cmd.SetArgs([]string{"ns/repo", "--bound-machine", value, "--auto-approve", "on", "--auto-merge", "off"})
+			cmd.SetArgs([]string{"ns/repo", "--bound-machine", value, "--auto-merge", "off"})
 			if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--bound-machine") {
 				t.Fatalf("expected binding validation error, got %v", err)
 			}

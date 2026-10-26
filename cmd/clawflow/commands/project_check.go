@@ -192,7 +192,7 @@ func inspectProject(name string) projectCheckResult {
 			continue
 		}
 		r.add("repo_registration", repo, "passed", "Repository registered", "")
-		r.add("repo_automation", repo, stateWarning(rc.Enabled), fmt.Sprintf("Monitoring enabled=%t, workflow=%s, auto_approve=%t, auto_merge=%t, ci_required=%t", rc.Enabled, rc.EffectiveWorkflow(), rc.AutoApprove, rc.AutoMerge, rc.CIRequired), "")
+		r.add("repo_automation", repo, stateWarning(rc.Enabled), fmt.Sprintf("Monitoring enabled=%t, auto_merge=%t, ci_required=%t", rc.Enabled, rc.AutoMerge, rc.CIRequired), "")
 		if rc.PrimaryProject == "" {
 			r.add("primary_project", repo, "warning", "Primary project unset; runtime uses membership fallback", "Set an explicit primary project when authoritative context matters")
 		} else if !validCheckProjectName(rc.PrimaryProject) {

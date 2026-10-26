@@ -9,17 +9,15 @@ import (
 )
 
 type repoConfigRequest struct {
-	Repo        string `json:"repo"`
-	Enabled     *bool  `json:"enabled,omitempty"`
-	AutoApprove *bool  `json:"auto_approve,omitempty"`
-	AutoMerge   *bool  `json:"auto_merge,omitempty"`
+	Repo      string `json:"repo"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+	AutoMerge *bool  `json:"auto_merge,omitempty"`
 }
 
 type repoConfigResponse struct {
-	Status      string `json:"status"`
-	Enabled     bool   `json:"enabled"`
-	AutoApprove bool   `json:"auto_approve"`
-	AutoMerge   bool   `json:"auto_merge"`
+	Status    string `json:"status"`
+	Enabled   bool   `json:"enabled"`
+	AutoMerge bool   `json:"auto_merge"`
 }
 
 // HandleRepoConfig handles POST /api/repo/config — updates repo toggles.
@@ -55,9 +53,6 @@ func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
 		if req.Enabled != nil {
 			r.Enabled = *req.Enabled
 		}
-		if req.AutoApprove != nil {
-			r.AutoApprove = *req.AutoApprove
-		}
 		if req.AutoMerge != nil {
 			r.AutoMerge = *req.AutoMerge
 		}
@@ -76,15 +71,14 @@ func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Push to Gist so the next AutoPull (any machine) can't silently
-	// revert this toggle. Without this, auto_approve / auto_merge /
+	// revert this toggle. Without this, auto_merge /
 	// enabled flips made via the dashboard would be wiped on the next
 	// clawflow run start.
 	AutoPush()
 
 	writeJSON(w, 200, repoConfigResponse{
-		Status:      "ok",
-		Enabled:     repo.Enabled,
-		AutoApprove: repo.AutoApprove,
-		AutoMerge:   repo.AutoMerge,
+		Status:    "ok",
+		Enabled:   repo.Enabled,
+		AutoMerge: repo.AutoMerge,
 	})
 }

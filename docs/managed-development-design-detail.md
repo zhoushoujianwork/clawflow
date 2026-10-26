@@ -6,23 +6,31 @@ Status: Proposed · Date: 2026-10-26
 
 ## Current autonomous dispatch policy
 
-Repository `workflow` defaults to `autonomous`; explicit `legacy` preserves the earlier classify/evaluate/approval pipeline. Autonomous dispatch sends eligible open leaf issues directly to implementation, where analysis, planning, headless tests and repair occur internally. It removes the built-in `ready-for-agent` prerequisite without discarding custom trigger constraints, terminal exclusions, machine binding or execution locks. The same routing applies during scanning and the fresh-label recheck. Questions retain their reply path, and parents retain tracking behavior.
+The runner has one autonomous lifecycle, with no mode selector. Eligible open leaf issues enter implementation, where analysis, planning, headless tests and repair happen internally. Custom trigger constraints, terminal exclusions, machine binding and local execution locks remain. Scanning and fresh-label rechecks use the same routing. Questions/comments retain reply paths; parents retain `track-progress` through `progress-check`.
 
-`repo set --workflow autonomous --auto-merge on --ci-required on` selects unattended delivery. Merge authorization remains separate from dispatch; required CI accepts only success, never missing/pending/failed/unreadable results. These changes use the existing runner and merge sweep. The first post-PR repair slice is restricted to same-repository GitHub managed branches linked to an open implemented issue. Failed CI queues repair against a captured PR head; pending, missing or unreadable CI does not. Rechecking identity and failure under the issue lock, strictly fetching the expected head, and a durable three-attempt budget with a five-minute cooldown prevent stale or unbounded repair. The agent reproduces tests locally, commits and pushes to the same branch without force. This slice does not ingest CI logs or implement the full durable workflow contracts below.
+```bash
+clawflow repo set owner/repo --auto-merge on --ci-required on
+clawflow repo enable owner/repo
+clawflow run --repo owner/repo
+```
+
+Required CI accepts only success. Supported same-repository GitHub managed PRs linked to open implemented issues can receive failed-CI repair. Pending, missing or unreadable CI does not queue repair. The runner captures the PR head, rechecks identity and failure under the local issue lock, strictly fetches that head, and reserves at most three total attempts with a five-minute cooldown. The agent reproduces tests locally, commits and pushes normally to the same branch. No CI-log ingestion, fork or GitLab repair is included; other GitLab capabilities remain. This repair ledger does not implement the general durable contracts below.
+
+Old config input remains readable. Explicit legacy selection emits a migration notice and proceeds autonomously. Rewrites omit `workflow`, `auto_approve`, `auto_evaluate_all_issues` and `confidence_threshold`, preserving enablement, bindings, merge/CI and other supported settings. Retired exact names `classify`, `evaluate-bug`, `evaluate-feat` and `decompose` are rejected for built-ins and user overrides. Non-retired custom operators and history remain; the eval model role only serves custom `evaluate-*` extensions.
 
 ## Existing code and migration map
 
-Source paths below refer to base commit `dff005a`; line numbers are inspection landmarks, not stable APIs.
+The source map below records the earlier review at base commit `dff005a`; it is historical inspection context, not the current supported control surface. Line numbers are landmarks, not stable APIs.
 
 | Existing location | Verified role | Proposed evolution |
 |---|---|---|
-| `internal/operator/operator.go:17` | Operator schema; `lock_label` is retained only for compatibility | Keep a legacy parser; add versioned managed contracts |
+| `internal/operator/operator.go:17` | Operator schema; `lock_label` is retained only for compatibility | Keep schema compatibility; add versioned managed contracts |
 | `internal/operator/registry.go:12` | Embedded loading and user overrides by name | Add package resource resolution, validation and digest pinning |
 | `internal/operator/context.go:29` | Agent context assembly | Supply pinned skill resources and explicit step inputs |
 | `internal/operator/claude.go:274` | Agent execution and failover | Reuse behind an execution adapter |
 | `internal/operator/runner.go:426` | Idempotent comment write; comment failure does not prevent outcome-label progress | Persist effect intentions and individual effect completion |
 | `cmd/clawflow/commands/run.go:802` | PR operator scan deferred; auto-merge sweep present | Route normalized issue/PR events into the managed scheduler |
-| `cmd/clawflow/commands/run.go:1612` | Automated outcome follow-up including approval/merge | Move managed transitions into the workflow engine |
+| `cmd/clawflow/commands/run.go:1612` | Historical automated outcome follow-up | Move managed transitions into the workflow engine |
 | `cmd/clawflow/commands/run.go:1711` | Workspace selection and implementation worktrees | Reuse Git handling under durable task/attempt ownership |
 | `internal/snapshot/snapshot.go:1425` | Stale lock/run reconciliation | Preserve history; project managed ledger state into existing views |
 | `internal/pilot/schedule.go` | Project-level scheduling | Retain backlog intake; hand eligible work to one execution authority |
@@ -60,7 +68,6 @@ managed:
     tests: repo/project-tests@1
     policy: repo/development-policy@1
   parameters:
-    mode: through-merge
     max_repair_attempts: 3
 ```
 
@@ -100,7 +107,7 @@ An execution request contains the pinned skill, inputs, workspace, deadline, res
 
 The structured result contains status, outputs, artifact references, evidence references, requested effects, and a failure category. A zero process exit code is necessary for some adapters but never sufficient to certify task completion. Invalid or absent output becomes a protocol failure.
 
-Agents may edit their workspace and request effects. Pushes, PR creation, labels/comments, merge, and task closure go through the effect gateway. Existing skills that directly write VCS state need an explicit legacy execution mode during migration; managed mode must not claim the stronger guarantee until those paths are removed or constrained.
+Agents may edit their workspace and request effects. Pushes, PR creation, labels/comments, merge, and task closure go through the effect gateway. Existing custom skills that directly write VCS state need a constrained compatibility adapter during migration. Do not introduce another repository execution mode. The engine must not claim gateway enforcement until those paths are removed or constrained.
 
 ## External effects and crash recovery
 
@@ -157,9 +164,9 @@ After merging, record the actual resulting target SHA and run or observe target-
 
 ## Migration and framework validation
 
-Introduce managed mode alongside the existing label-driven path. Map old trigger/outcome definitions into a compatibility adapter and preserve their documented behavior. New managed packages require strict declared results; permissive legacy outcome labels must not bypass new gates. Prevent both schedulers from owning the same issue concurrently.
+Replace runner internals incrementally under the single autonomous lifecycle. Map non-retired custom trigger/outcome definitions into a compatibility adapter and preserve their constraints and history. New packages require strict declared results; permissive old outcome labels must not bypass new gates. Keep one execution authority per issue.
 
-Migrate one built-in flow end to end before converting every skill. Keep historical records readable. Rollback stops managed dispatch and reconciles in-flight effects before returning a repository to legacy ownership; do not delete the ledger or replay pending writes under another scheduler.
+Migrate the autonomous implementation path end to end before extending package coverage. Keep historical records readable and reject retired override names. Rollback pauses dispatch and reconciles in-flight effects before restoring a compatible runner revision; it does not restore a selectable legacy pipeline. Do not delete the ledger or replay pending writes under another scheduler.
 
 Framework acceptance checks should include:
 

@@ -36,7 +36,7 @@ for VCS operations and `git` for local checkout inspection. Never use `gh`.
    or print credentials.yaml, complete tokens or API keys. `GH_TOKEN` and
    `GITLAB_TOKEN` override stored tokens. Only request authentication for the
    platform actually needed. `config show --repo <R> --field <field>` can query
-   enabled, platform, local_path, base_branch, auto_approve, auto_merge or ci_required.
+   enabled, platform, local_path, base_branch, auto_merge or ci_required.
 4. Run `clawflow sync status` before maintenance/onboarding. Keep an existing
    pause in effect. Do not run login or automatically resume synchronization.
 
@@ -120,7 +120,7 @@ clawflow repo add <full-project-URL> --platform gitlab \
 clawflow project create <project>
 clawflow project add-repo <project> <namespace/repo>
 clawflow repo set <namespace/repo> --primary-project <project>
-clawflow repo set <namespace/repo> --auto-approve off --auto-merge off
+clawflow repo set <namespace/repo> --auto-merge off
 clawflow project automation disable <project>
 ```
 
@@ -132,8 +132,7 @@ namespace match the requested repo; paths are stored as absolute paths.
 
 Use `repo list`/`repo show <R>` and `project list`/`project show <project>` first
 when entries may already exist. Do not delete/recreate them to bypass errors.
-Existing registration updates support `repo set --workflow`, `--ci-required`,
-`--auto-approve`, `--auto-merge`,
+Existing registration updates support `repo set --ci-required`, `--auto-merge`,
 `--primary-project` and `--bound-machine`; base/local-path changes have no generic CLI setter.
 Report that limitation instead of inventing a flag.
 
@@ -142,7 +141,6 @@ Verify disabled state with:
 ```bash
 clawflow repo show <R>
 clawflow config show --repo <R> --field enabled
-clawflow config show --repo <R> --field auto_approve
 clawflow config show --repo <R> --field auto_merge
 clawflow project automation show <project>
 ```
@@ -163,7 +161,7 @@ clawflow project automation bind <project> --machine <hostname>
 
 Use the actual execution host name. Omitted `--bound-machine` preserves the
 existing binding; `--bound-machine=""` explicitly clears it. Repository binding
-does not change monitoring, approval, merge or primary-project settings.
+does not change monitoring, merge or primary-project settings.
 
 ## Provider, operator and test readiness
 
@@ -231,7 +229,7 @@ commands; list/view redact by default and `--show-values` reveals secrets.
 ## Explicit enable and bounded execution
 
 Enabling monitoring permits future scheduler scans; only enable after the user
-authorizes automation. Keep auto-approve, auto-merge and PM automation off unless
+authorizes automation. Keep auto-merge and PM automation off unless
 separately authorized. A disabled repo cannot be processed with `run --repo`.
 Label initialization is a remote write; perform it only when authorized/needed.
 
@@ -248,7 +246,7 @@ worktree cleanup and snapshot writes, and scans other eligible enabled repos.
 Scoped runs suppress scheduled project Pilot wakes; a nonzero `--issue` also
 suppresses the scan-level auto-merge sweep. The selected operator can still
 perform its normal implementation, PR and post-processing writes. Keep sync
-paused and approval/merge settings disabled when outside the authorized scope.
+paused and merge settings disabled when outside the authorized scope.
 
 Per-project Pilot scheduling is a separate opt-in:
 
@@ -302,27 +300,39 @@ backup evidence and never claim tests or live operations that were not run.
 
 ## Autonomous issue implementation
 
-The default repository workflow is `autonomous`, including configurations with no
-`workflow` field. Once project direction, repository binding and automation are
+ClawFlow has one autonomous lifecycle with no workflow selector. Once project direction, repository binding and automation are
 authorized, configure the project endpoint explicitly:
 
 ```bash
-clawflow repo set <R> --workflow autonomous --auto-merge on --ci-required on
-clawflow config show --repo <R> --field workflow
+clawflow repo set <R> --auto-merge on --ci-required on
 clawflow repo enable <R>
 clawflow run --repo <R>
 ```
 
-Ordinary open leaf issues go directly to implementation without classification,
-evaluation or a `ready-for-agent` label. Analysis, focused headless tests and
-repair happen inside implementation before commit and PR creation. Questions
+Ordinary open leaf issues go directly to `implement`. Analysis, planning, focused
+headless tests and repair happen internally before commit and PR creation. Questions
 keep their reply path; tracking/parent issues are not direct implementation work.
 Terminal labels, machine binding, local locks and failure limits still apply.
 Auto-merge remains separately configured and required CI must report success;
 missing, pending, failed or unreadable CI blocks merging.
 
-Use `clawflow repo set <R> --workflow legacy` to retain the older label-driven
-classification/evaluation/approval pipeline. The `auto_approve` setting belongs
-to that legacy pipeline. Setting workflow alone does not enable auto-merge.
+Old config input remains readable. Explicit legacy selection emits a migration
+notice and continues autonomously; it does not select another execution path.
+Rewritten configs omit `workflow`, `auto_approve`, `auto_evaluate_all_issues` and
+`confidence_threshold`, retaining enablement, bindings, merge/CI and other
+supported settings. Do not teach retired flags as supported setup commands.
+
+The exact built-ins `classify`, `evaluate-bug`, `evaluate-feat` and `decompose`
+are retired; same-name user overrides are rejected. Other custom operators and
+history remain. The eval model role serves only custom `evaluate-*` extensions,
+not a built-in evaluation pipeline. Parent tracking retains `progress-check` as
+an operational trigger. Pause/cancel controls and bounded retries still apply;
+use only the controls actually exposed by the installed CLI or dashboard.
+
 The bounded GitHub CI repair path above complements dispatch; it is not a
 general durable event engine. Report blocked runs and unverified outcomes honestly.
+
+Old user-installed `implement` overrides are normalized in memory: the obsolete
+`ready-for-agent` required/consumed label is removed, while other custom
+constraints and the skill file are preserved. Retired packages are ignored with
+a diagnostic; they do not prevent unrelated custom operators from loading.

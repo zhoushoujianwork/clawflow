@@ -1,119 +1,52 @@
 # Fully managed Git development
 
-Status: Proposed, with autonomous delivery policy updated · Date: 2026-10-26
+Status: Proposed durable engine; current autonomous lifecycle retained · Date: 2026-10-26
 
-This document defines product scope and architectural choices. [Implementation notes](managed-development-design-detail.md) describe the proposed contracts and recovery rules. Names and configuration examples there are proposals, not supported commands or configuration today.
+Humans set project direction and describe features. ClawFlow should carry eligible work through implementation, testing, repair and delivery within configured permissions and resource limits. There is one autonomous lifecycle; normal analysis and planning happen inside implementation.
 
-The [CLI interaction design](cli-interaction-design.md) defines the user and external-AI control surface and its incremental validation sequence.
+[Implementation notes](managed-development-design-detail.md) hold the proposed data contracts, recovery rules and acceptance matrix. [CLI interaction design](cli-interaction-design.md) describes the control surface. Proposed schemas and commands are not current capabilities.
 
-## Goal
+## Current runner
 
-Turn ClawFlow into a service that takes an accepted Git issue through planning, implementation, testing, review, and merge, then verifies the result. Users configure how their projects work by installing and binding skills. ClawFlow continuously advances work within those configured permissions and resource limits.
+Eligible open leaf issues enter `implement` directly. Questions/comments retain their reply paths, and parents retain `track-progress` with the operational `progress-check` trigger. Local lockfiles, machine bindings, pause/cancel controls, terminal exclusions, bounded retries and historical records remain.
 
-“Fully managed” means automatic progress and recovery for supported work, with an explicit blocked state when requirements, credentials, infrastructure, or policy prevent progress. It does not mean treating every agent response as success or retrying indefinitely.
+```bash
+clawflow repo set owner/repo --auto-merge on --ci-required on
+clawflow repo enable owner/repo
+clawflow run --repo owner/repo
+```
 
-The default product direction is unattended development: humans specify project direction and requested features; AI implements, tests, repairs and delivers them. Classification, separate issue scoring, and manual approval labels are not mandatory workflow stages. The implementation agent performs any needed analysis and planning internally. Human confirmation is not a per-issue transition requirement.
+Required CI must succeed before configured merge; missing, pending, failed or unreadable checks block it. Failed-CI repair currently targets supported same-repository GitHub managed PRs: reproduce locally, update the same branch without force, reserve at most three attempts per PR, and wait five minutes between attempts. CI logs, forks and GitLab repair are excluded; other GitLab capabilities remain.
 
-## Current project assessment
+The exact built-ins `classify`, `evaluate-bug`, `evaluate-feat` and `decompose` are retired, including same-name user overrides. Other custom operators and history remain. The eval model role serves only custom `evaluate-*` extensions. Old configuration remains readable; explicit legacy selection emits a migration notice and continues autonomously. Rewrites omit `workflow`, `auto_approve`, `auto_evaluate_all_issues` and `confidence_threshold`, preserving enablement, bindings, merge/CI and other supported settings.
 
-Source review at base commit `dff005a` shows a useful automation foundation already exists. This assessment is static inspection, not a claim that the current full test suite or live integrations passed.
+## Proposed durable engine
 
-| Area | Current capability | Change needed for managed development |
-|---|---|---|
-| Skills | Embedded and user-overridden `SKILL.md` operators; label matching and outcome markers | Versioned packages, typed results, explicit workflow and test contracts |
-| Execution | Claude execution, provider failover, parallel jobs, isolated implementation worktrees and partial-work reuse | Durable step ownership, checkpoints, and bounded transition rules |
-| Recovery | Local run metadata/events, lock cleanup and stale-run reconciliation | Reconcile unfinished external effects and prove each required step completed |
-| Git delivery | Auto-approval, CI-gated auto-merge and recurring merge sweep already exist | Centralize these actions behind revision-bound evidence and project policy |
-| Testing | Project test instructions and CI tooling exist | Enforce normalized test evidence in the runner; manage test-profile setup and activation |
-| Triggers | Issue/label scanning; PR merge sweep | General PR-step dispatch and normalized events; complete pagination and reconciliation |
+Evolve the existing Go application, CLI, Web views, VCS adapters and execution backend. Add one durable authority for tasks, attempts, evidence and pending external effects. Keep labels and comments as visible coordination surfaces. Start with one scheduler and a local transactional store; distributed scheduling is deferred.
 
-The old documentation's label-lock description is stale: runtime locking now uses local lockfiles. The existing PR merge sweep also must not be confused with general PR operator dispatch, which remains deferred in the scanner. [Source references and migration map](managed-development-design-detail.md#existing-code-and-migration-map) distinguish reused capabilities from proposed additions.
+Versioned skill packages describe activities, tests, policy and bounded execution steps. Project bindings pin their resources. The engine validates results, owns transitions and enforces permissions; a prompt cannot waive checks. This does not introduce a repository workflow-mode selector or a second legacy pipeline.
 
-## User experience
+Users connect a repository and execution environment, provide project/test instructions, validate readiness, then enable automation. They observe progress and blocking reasons, pause/cancel or supply missing information. CLI task planning, durable status/retry commands and package binding contracts remain proposed where marked in the detailed design.
 
-1. Connect a GitHub or GitLab repository and select an execution environment.
-2. Select a workflow skill and compatible development, review, and test skills. ClawFlow validates the configuration and displays the resolved workflow, required credentials, test gates, and merge policy.
-3. Run onboarding checks against a disposable workspace. Review proposed CI changes through a configuration PR when needed.
-4. Enable managed mode. New eligible issues enter the workflow automatically; existing labels and manual triggers remain useful entry points.
-5. Follow a single task timeline showing its current step, code revision, tests, cost or usage where available, retries, and any blocking reason. Pause, cancel, resume, or supply missing information from the same view.
-
-The default built-in workflow is:
+The intended delivery path is:
 
 ```mermaid
 flowchart LR
-    A[Eligible issue] --> C[Implement and plan internally in isolated workspace]
-    C --> D[Required tests]
-    D --> E[Review]
-    E --> F[Merge eligibility]
-    F --> G[Merge]
-    G --> H[Verify target branch]
-    D -- Code failure, within budget --> C
-    E -- Changes requested, within budget --> C
-    F -- Base changed --> D
-    H -- Failure --> I[Recovery task]
+    A[Eligible issue] --> B[Implement and analyze internally]
+    B --> C[Required tests and review]
+    C -- Failure within budget --> B
+    C --> D[Merge eligibility]
+    D --> E[Merge]
+    E --> F[Verify target branch]
 ```
 
-Infrastructure failures retry the affected test operation with backoff; they do not automatically become code changes. Any new code revision invalidates affected test and review evidence. Planning can create dependent subtasks; the parent finishes only after their required outcomes are verified.
+Tests and review evidence must match the current revision and configuration. Infrastructure failures use bounded backoff; missing evidence blocks completion. Provider protections remain authoritative. Production release/deployment remains separately configured work. Target-branch verification and general crash recovery are proposed guarantees, not established by PR creation or the current repair ledger.
 
-## Architectural choice
+## Scope and implementation order
 
-Keep the Go application as the orchestration kernel and evolve the existing skill system into versioned executable contracts. Keep the CLI, Web interface, VCS adapters, and existing agent execution integrations. This is an evolution of the existing product, not a separate SaaS rewrite.
+1. Establish durable task/attempt ownership, typed results and reconciliation of interrupted writes, preserving existing custom operators and history.
+2. Add pinned skill resources and validated test profiles with explicit environment requirements and normalized evidence.
+3. Prove one issue through test failure, bounded repair, successful checks, permitted merge and target-branch verification, including process restart.
+4. Add dependent tasks, fairness, richer Web/CLI views and provider parity after the vertical path is reliable.
 
-| Layer | Responsibility |
-|---|---|
-| Git integration | Normalize issues, PRs/MRs, comments, refs, CI runs, and merge capabilities into events and commands |
-| Workflow engine | Persist tasks and attempts; schedule eligible steps; enforce dependencies, budgets, leases, and recovery |
-| Skill registry | Validate, resolve, pin, and load workflow, activity, test, and policy packages |
-| Execution adapters | Run agents or deterministic commands in isolated workspaces; collect structured outputs and artifacts |
-| Evidence and policy | Determine whether required tests, reviews, and merge conditions hold for the current revision |
-| CLI and Web | Configure projects and inspect or control the same durable workflow state |
-
-Labels and comments remain visible coordination surfaces. Managed runs need their own durable execution ledger as the authority for scheduling and recovery; labels alone cannot represent attempts, leases, revisions, and partial external writes. Use a single-host store first, with one active scheduler per store. Multi-host scheduling is a later deployment capability.
-
-This deliberately changes the earlier direction of keeping all coordination in labels and avoiding explicit workflow definitions. The existing [trigger expansion ADR](adr/0001-trigger-surface-expansion.md) is still Proposed; this design proposes a small validated workflow graph inside skills for managed mode, while retaining label-driven legacy mode. It does not change that ADR's status or claim an accepted migration decision.
-
-## Everything configurable through skills
-
-Use one package format with different responsibilities:
-
-- **Workflow skills** declare steps, dependencies, allowed transitions, and bounded repair loops.
-- **Activity skills** implement planning, coding, review, or other bounded work through an agent or command adapter.
-- **Test skills** describe test discovery, environment requirements, execution, report collection, and gate evaluation.
-- **Policy skills** declare permitted actions, required evidence, retry and usage limits, and escalation rules.
-
-Each package has a `SKILL.md` entry point, machine-readable metadata, and optional scripts, templates, and referenced documents. Project bindings select versions and provide parameters; they do not become a second independent workflow definition. The framework validates metadata before execution and only injects the selected instructions and resources into an agent.
-
-The kernel remains responsible for enforcing contracts. A skill can request a merge, but cannot override required checks or expand the permissions granted by its project. Agents propose changes and results; platform adapters perform controlled Git/VCS side effects.
-
-## Automated testing as a complete workflow
-
-Test configuration must have its own lifecycle: **discover → propose → validate → activate → execute → collect evidence → repair or advance**.
-
-During onboarding, a discovery skill identifies existing test commands, CI jobs, dependencies, and missing configuration. A setup skill proposes additions without silently replacing existing CI. Activation requires a successful preflight and a pinned test profile. Missing credentials, unavailable runners, or no collected tests remain visible blockers unless project policy explicitly permits that condition.
-
-During development, test skills run local checks and/or provider CI, publish logs and reports, and return normalized results. Required checks are tied to the code revision, test configuration, and environment. A test plan can select checks based on change scope, but cannot remove the project's minimum required checks. CI pending, missing evidence, and infrastructure errors are distinct from pass or code failure.
-
-Configuration changes use a separate configuration workflow: validate the new profile, create its PR, run the existing required gates plus the new profile's acceptance checks, then activate the new version for future runs. Active runs retain their pinned configuration unless explicitly restarted. Code-writing agents cannot silently weaken tests to make a task pass.
-
-## Autonomy and completion
-
-Offer project-level modes using the same workflow: plan only, develop through PR, or manage through merge. A project may authorize automatic merge once its required gates pass; repository protections and actual provider capabilities still apply. Release and production deployment are separate opt-in workflows.
-
-For the unattended mode, PR review and merge eligibility are automated checks, not requests for a human to approve each issue. Failed tests stay with the implementation/repair loop. Missing CI evidence must never count as a passing required check. Legacy evaluate/approve behavior is available only through an explicit legacy configuration; it is not the default path for eligible work. The first CI recovery slice targets same-repository GitHub PRs created for managed issues: an AI repair attempt reproduces the failure locally and updates the existing PR. It has a durable attempt limit and cooldown, rather than waiting for approval or retrying indefinitely. Other providers and CI-log ingestion remain separate work.
-
-A development task is complete only when its requested changes have merged and required target-branch checks have passed, or when the selected mode's explicit endpoint has been reached. PR creation, a successful agent process, and an agent's written claim of completion are intermediate facts.
-
-For a changed base branch, revalidate the integration revision before merge. If the provider cannot enforce that required revision or an equivalent merge-queue check, automatic merge remains blocked. Post-merge failures create a linked recovery task; automatic revert requires an explicit project policy and verified applicability.
-
-## Delivery scope and order
-
-| Phase | Deliverable | Acceptance condition |
-|---|---|---|
-| 1. Reliable kernel | Durable tasks/attempts, typed results, leases, reconciliation, legacy skill adapter | Restart during execution or VCS write recovers without blindly duplicating work |
-| 2. Skill loading and tests | Versioned packages, project bindings, configuration preflight, command and CI test adapters | One repository runs a pinned test profile and distinguishes code failure, infrastructure failure, and missing evidence |
-| 3. Managed development | Issue-to-PR flow, review, bounded repair, merge gate, target-branch verification | One issue completes unattended on a test repository with an auditable evidence chain |
-| 4. Platform operation | Dependent tasks, project fairness, Web configuration/timeline, additional provider parity | Multiple projects progress independently; one blocked or expensive task cannot monopolize execution |
-
-Start with one concrete workflow and the existing execution backend. Make GitHub and GitLab capability differences explicit and test both adapters; do not assume every feature is interchangeable. Defer arbitrary workflow scripting, a marketplace, distributed scheduling, and automatic production deployment.
-
-The first milestone should prove one full vertical path: **issue → implementation → test failure → repair → successful tests → reviewed PR → permitted merge → target-branch verification**, including a process restart. Adding more prompt-based operators before this path is reliable would leave the central orchestration problem unresolved.
+Defer arbitrary scripting, a marketplace, distributed scheduling and automatic production deployment. The [trigger expansion ADR](adr/0001-trigger-surface-expansion.md) remains a historical Proposed decision; this design does not change its status. Existing runtime/source observations and future contracts are separated in the [detailed design](managed-development-design-detail.md).

@@ -194,14 +194,13 @@ func RunDir(repo string, issueNum int, startedAt time.Time) string {
 // are deliberately NOT included — the dashboard is local but still renders
 // in a browser and we don't want tokens in the DOM.
 type RepoView struct {
-	FullName     string `json:"full_name"`
-	Platform     string `json:"platform"`
-	BaseURL      string `json:"base_url,omitempty"`
-	BaseBranch   string `json:"base_branch"`
-	LocalPath    string `json:"local_path,omitempty"`
-	Enabled      bool   `json:"enabled"`
-	AutoApprove  bool   `json:"auto_approve"`
-	AutoMerge    bool   `json:"auto_merge"`
+	FullName   string `json:"full_name"`
+	Platform   string `json:"platform"`
+	BaseURL    string `json:"base_url,omitempty"`
+	BaseBranch string `json:"base_branch"`
+	LocalPath  string `json:"local_path,omitempty"`
+	Enabled    bool   `json:"enabled"`
+	AutoMerge  bool   `json:"auto_merge"`
 	// BoundMachine is the hostname this repo is restricted to, or empty if
 	// unbound. Exposed to the dashboard so the bind/unbind button can show
 	// the current binding state without a separate API call.
@@ -845,15 +844,14 @@ func WriteRepos(cfg *config.Config) error {
 		}
 
 		views = append(views, RepoView{
-			FullName:       name,
-			Platform:       r.Platform,
-			BaseURL:        r.BaseURL,
-			BaseBranch:     r.BaseBranch,
-			LocalPath:      r.LocalPath,
-			Enabled:        r.Enabled,
-			AutoApprove:    r.AutoApprove,
-			AutoMerge:      r.AutoMerge,
-			BoundMachine:   r.BoundMachine,
+			FullName:        name,
+			Platform:        r.Platform,
+			BaseURL:         r.BaseURL,
+			BaseBranch:      r.BaseBranch,
+			LocalPath:       r.LocalPath,
+			Enabled:         r.Enabled,
+			AutoMerge:       r.AutoMerge,
+			BoundMachine:    r.BoundMachine,
 			Projects:        projectNames,
 			PrimaryProject:  primaryName,
 			BaseBranchValid: baseValid,
@@ -1051,7 +1049,6 @@ type PendingEntry struct {
 	Labels      []string  `json:"labels,omitempty"`
 	CapturedAt  time.Time `json:"captured_at"`
 }
-
 
 // IssueEntry represents a single issue from the repository, regardless of
 // whether it has pending operators. Used by the dashboard to show all issues
@@ -1765,11 +1762,9 @@ func reconcilePilotRunsAt(pilotRoot string, staleAfter time.Duration) (int, erro
 //
 // "no-marker" belongs to that same family (issue #323): the operator ran to
 // completion and produced a paid-for body, and the only thing that broke was
-// the write-back step (the marker line). It has its own salvage path
-// ("marker-recovered", issue #307), so escalating it to agent-failed freezes
-// the issue for the 7 operators that exclude that label — including
-// `implement`, which is exactly the operator a human reaches for to unblock
-// the issue by hand.
+// the write-back step (the marker line). Escalating it to agent-failed freezes
+// the issue for operators that exclude that label. Keep this retryable
+// independently of issue-level failures.
 func ConsecutiveFailures(repo string, issueNum int) int {
 	slug := strings.ReplaceAll(repo, "/", "__")
 	issueDir := filepath.Join(DataDir(), "runs", slug, fmt.Sprintf("issue-%d", issueNum))
@@ -1812,7 +1807,7 @@ func ConsecutiveFailures(repo string, issueNum int) int {
 	count := 0
 	for _, r := range runs {
 		// no-marker deliberately excluded (issue #323/#307: write-back
-		// defect, not an operator failure — salvage handles the recovery).
+		// defect, not an operator failure; another run can retry write-back).
 		// disallowed-outcome IS counted: the run completed but landed no
 		// terminal label at all, so an issue that keeps tripping this would
 		// otherwise re-fire (and re-bill) forever with zero circuit-breaker

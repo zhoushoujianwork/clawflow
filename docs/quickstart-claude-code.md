@@ -47,7 +47,7 @@ clawflow --help
 clawflow operators list     # 确认内置算子已加载
 ```
 
-> 内置算子(`evaluate-bug`、`evaluate-feat`、`implement`、`reply-comment`)随 binary 一起分发(embed.FS),不需要单独安装到 agent 目录。
+> 内置算子(`implement`、`reply-comment`、`track-progress`)随 binary 一起分发(embed.FS),不需要单独安装到 agent 目录。
 
 ---
 
@@ -114,88 +114,39 @@ clawflow repo list
 clawflow label init your-org/your-repo
 ```
 
-标签分两类。**触发类** —— 决定哪个算子会跑:
+普通 open leaf issue 会直接进入 `implement`，无需分类、独立评估或人工批准标签。实现过程中内部完成分析、计划、测试和修复。Question/comment 保留回复路径，父任务通过 `progress-check` 触发 `track-progress`；父任务不会直接执行实现。
 
-| Label | 触发算子 |
-|-------|------|
-| `bug` | `evaluate-bug` |
-| `feat` | `evaluate-feat`(规划中) |
-| `ready-for-agent` | `implement`(你手动添加,表示同意修复方案) |
-| `agent-mentioned` | `reply-comment` |
+状态标签包括 `agent-implemented`（已开 PR）、`agent-failed`（失败待检查）、`agent-skipped`（跳过）和 `agent-replied`（已回复）。并发控制使用 `~/.clawflow/locks/` 的本地锁文件；不要通过删除远端标签绕过锁。
 
-**状态类** —— 算子写回的标记:
+## 运行与交付
 
-| Label | 含义 |
-|-------|------|
-| `agent-running` | 算子正在运行,并发锁 |
-| `agent-evaluated` | 评估算子已完成,避免重复评估 |
-| `agent-skipped` | 置信度低,算子拒绝继续 |
-| `agent-implemented` | `implement` 完成,PR 已开 |
-| `agent-failed` | 某个算子执行失败 |
-| `agent-replied` | `reply-comment` 已回复 |
-
----
-
-## 运行
+人负责方向和需求，ClawFlow 在配置范围内自主实现与交付：
 
 ```bash
-clawflow run
-```
-
-一次性扫描所有启用的仓库,对每个 open issue/PR 匹配已注册算子,命中即执行。流程:
-
-```
-clawflow run
-   → 扫到带 bug 标签的 issue
-     → evaluate-bug 算子给出评估 comment + agent-evaluated 标签
-   → 你阅读评估,手动加 ready-for-agent 标签
-     → 下一次 clawflow run
-       → implement 算子创建分支、写代码、开 PR + agent-implemented 标签
-```
-
-想定时跑就挂 cron / launchd;想即时跑就在终端执行。ClawFlow 自身不保持后台进程。
-
----
-
-## 典型工作流
-
-```bash
-# 1. 创建一个测试 issue 并打上 bug 标签
+clawflow repo set your-org/your-repo --auto-merge on --ci-required on
+clawflow repo enable your-org/your-repo
 clawflow issue create --repo your-org/your-repo --title "bug: something broken" --body "details..."
-clawflow label add --repo your-org/your-repo --issue 7 --label bug
-
-# 2. 触发评估
-clawflow run
-
-# 3. 查看 ClawFlow 在 issue 下的评估 comment
-#    确认方案后,手动添加 ready-for-agent 标签
-clawflow label add --repo your-org/your-repo --issue 7 --label ready-for-agent
-
-# 4. 再次运行,触发 implement 算子
-clawflow run
-
-# 5. 查看生成的 PR,review 后合并
-clawflow pr view --repo your-org/your-repo <pr-number>
+clawflow run --repo your-org/your-repo
+clawflow pr list --repo your-org/your-repo --state open
 ```
 
----
+一次扫描所有符合条件的工作；可用 cron / launchd 定时执行。需要 CI 时，只有成功结果允许合并，缺失、等待、失败或不可读都不会放行。暂停、取消、机器绑定、终态排除和重试上限仍然生效。
 
-## 常用命令
+失败 CI 的自动修复仅支持同仓库 GitHub 的受管 PR：本地复现测试失败并正常推送到原分支，每个 PR 最多三次尝试，间隔五分钟。不会读取 CI 日志，不支持 fork 或 GitLab 自动修复；GitLab 其他 issue/MR/CI 功能继续保留。
+
+## 迁移与扩展
+
+只有一条自主生命周期，没有模式选择器。旧配置仍可读取；显式 legacy 选择会提示迁移并按自主流程执行。重写配置会去除 `workflow`、`auto_approve`、`auto_evaluate_all_issues` 和 `confidence_threshold`，保留启用状态、绑定、合并与 CI 等有效设置。
+
+`classify`、`evaluate-bug`、`evaluate-feat`、`decompose` 已退役，同名用户覆盖也会被拒绝。其他自定义算子、历史标签和记录保留；eval model 角色仅供自定义 `evaluate-*` 扩展使用，不构成内置评估流水线。
 
 ```bash
-# 看已注册的算子
 clawflow operators list
-
-# 列出 open issues
 clawflow issue list --repo owner/repo
-
-# 手动管理标签
-clawflow label add --repo owner/repo --issue 7 --label ready-for-agent
-clawflow label remove --repo owner/repo --issue 7 --label agent-running
-
-# 更新 ClawFlow 到最新版
 clawflow update
 ```
+
+当前 runner 不等同于拟议的持久任务引擎，详见[托管开发设计](managed-development-design.md)。
 
 ---
 

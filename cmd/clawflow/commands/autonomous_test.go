@@ -3,8 +3,6 @@ package commands
 import (
 	"context"
 	"os"
-	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +40,7 @@ func TestAutonomousEligibility(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sub := &operator.Subject{State: "open", Labels: tc.labels, SubTotal: tc.children}
-			effective := effectiveOperator(op, sub, config.Repo{})
+			effective := effectiveOperator(op, sub)
 			got := effective != nil && operator.Matches(sub, effective)
 			if got != tc.want {
 				t.Fatalf("matched=%t, want %t", got, tc.want)
@@ -50,19 +48,19 @@ func TestAutonomousEligibility(t *testing.T) {
 			if effective != nil && len(effective.Trigger.LabelsConsumed) != 0 {
 				t.Fatal("autonomous implementation consumes obsolete approval label")
 			}
-			if !reflect.DeepEqual(op.Trigger.LabelsRequired, []string{"ready-for-agent"}) {
+			if len(op.Trigger.LabelsRequired) != 0 {
 				t.Fatal("registry operator mutated")
 			}
 		})
 	}
 	for _, name := range []string{"classify", "evaluate-bug", "evaluate-feat", "decompose"} {
-		if effectiveOperator(&operator.Operator{Name: name}, &operator.Subject{}, config.Repo{}) != nil {
+		if effectiveOperator(&operator.Operator{Name: name}, &operator.Subject{}) != nil {
 			t.Fatalf("%s was not suppressed", name)
 		}
 	}
 	question := &operator.Operator{Name: "reply-question", Trigger: operator.Trigger{LabelsRequired: []string{"question"}}}
 	sub := &operator.Subject{State: "open", Labels: []string{"question"}}
-	if !operator.Matches(sub, effectiveOperator(question, sub, config.Repo{})) {
+	if !operator.Matches(sub, effectiveOperator(question, sub)) {
 		t.Fatal("question reply suppressed")
 	}
 }
@@ -73,22 +71,19 @@ func TestAutonomousDefaultDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name     string
-		labels   []string
-		workflow string
-		want     string
+		name   string
+		labels []string
+		want   string
 	}{
-		{"default leaf", nil, "", "implement"},
-		{"evaluated leaf", []string{"bug", "agent-evaluated"}, "", "implement"},
-		{"explicit autonomous", nil, "autonomous", "implement"},
-		{"question", []string{"question"}, "", "reply-question"},
-		{"legacy bug", []string{"bug"}, "legacy", "evaluate-bug"},
+		{"default leaf", nil, "implement"},
+		{"evaluated leaf", []string{"bug", "agent-evaluated"}, "implement"},
+		{"question", []string{"question"}, "reply-question"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sub := &operator.Subject{State: "open", Labels: tc.labels}
 			var best *operator.Operator
 			for _, original := range reg.All() {
-				op := effectiveOperator(original, sub, config.Repo{Workflow: tc.workflow})
+				op := effectiveOperator(original, sub)
 				if op != nil && operator.Matches(sub, op) && (best == nil || operatorPriority(op.Name) < operatorPriority(best.Name)) {
 					best = op
 				}
@@ -100,34 +95,32 @@ func TestAutonomousDefaultDispatch(t *testing.T) {
 	}
 }
 
-func TestAutonomousCustomConditionsAndLegacy(t *testing.T) {
+func TestAutonomousCustomConditions(t *testing.T) {
 	op := implementationForTest(t)
-	op.Trigger.LabelsRequired = []string{"ready-for-agent", "custom"}
-	op.Trigger.LabelsRequiredAny = []string{"ready-for-agent", "one", "two"}
+	op.Trigger.LabelsRequired = []string{"custom"}
+	op.Trigger.LabelsRequiredAny = []string{"one", "two"}
 	sub := &operator.Subject{State: "open", Labels: []string{"custom", "one"}}
-	if !operator.Matches(sub, effectiveOperator(op, sub, config.Repo{})) {
+	if !operator.Matches(sub, effectiveOperator(op, sub)) {
 		t.Fatal("custom matching issue rejected")
 	}
 	sub.Labels = []string{"custom"}
-	if operator.Matches(sub, effectiveOperator(op, sub, config.Repo{})) {
+	if operator.Matches(sub, effectiveOperator(op, sub)) {
 		t.Fatal("required_any lost")
 	}
 	sub.Labels = []string{"one"}
-	if operator.Matches(sub, effectiveOperator(op, sub, config.Repo{})) {
+	if operator.Matches(sub, effectiveOperator(op, sub)) {
 		t.Fatal("custom requirement lost")
 	}
 	sub.Labels = []string{"custom", "one"}
-	legacy := config.Repo{Workflow: config.WorkflowLegacy}
-	if operator.Matches(sub, effectiveOperator(op, sub, legacy)) {
-		t.Fatal("legacy bypassed approval")
-	}
-	sub.Labels = append(sub.Labels, "ready-for-agent")
-	if !operator.Matches(sub, effectiveOperator(op, sub, legacy)) {
-		t.Fatal("legacy approved issue rejected")
-	}
 	op.Trigger.Target = "pr"
-	if operator.Matches(sub, effectiveOperator(op, sub, config.Repo{})) {
+	if operator.Matches(sub, effectiveOperator(op, sub)) {
 		t.Fatal("custom target lost")
+	}
+}
+
+func TestCustomEvaluatorModelRole(t *testing.T) {
+	if got := roleForOperator("evaluate-custom"); got != config.RoleEval {
+		t.Fatalf("custom evaluator role = %q", got)
 	}
 }
 
@@ -156,7 +149,7 @@ func TestAutonomousFreshRecheck(t *testing.T) {
 			withRunLog(t)
 			fake := &autonomousRecheckFake{labels: tc.labels}
 			sub := &operator.Subject{Number: 42, State: "open"}
-			op := effectiveOperator(implementationForTest(t), sub, config.Repo{})
+			op := effectiveOperator(implementationForTest(t), sub)
 			fired, limited := runOneOperator(context.Background(), &runJob{op: op, sub: sub, repo: "o/r", client: fake}, time.Second)
 			if fired || limited {
 				t.Fatal("structural skip should not fire")
@@ -168,43 +161,32 @@ func TestAutonomousFreshRecheck(t *testing.T) {
 	}
 }
 
-func TestRepoWorkflowCLI(t *testing.T) {
+func TestRepoCIRequiredCLI(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {AutoMerge: true}}}
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)
 	}
-	cmd := newRepoSetCmd()
-	cmd.SetArgs([]string{"o/r", "--workflow", "legacy", "--ci-required", "on"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatal(err)
+	for _, required := range []string{"on", "off"} {
+		cmd := newRepoSetCmd()
+		cmd.SetArgs([]string{"o/r", "--ci-required", required})
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := got.Repos["o/r"]
+		if r.CIRequired != (required == "on") || !r.AutoMerge || r.Enabled {
+			t.Fatalf("unexpected repo: %+v", r)
+		}
 	}
-	got, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := got.Repos["o/r"]
-	if r.EffectiveWorkflow() != "legacy" || !r.CIRequired || !r.AutoMerge {
-		t.Fatalf("unexpected repo: %+v", r)
-	}
-	cmd = newRepoSetCmd()
-	cmd.SetArgs([]string{"o/r", "--workflow", "autonomous", "--ci-required", "off"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	got, err = config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	r = got.Repos["o/r"]
-	if r.EffectiveWorkflow() != "autonomous" || r.CIRequired || !r.AutoMerge {
-		t.Fatalf("unexpected repo: %+v", r)
-	}
-	for _, args := range [][]string{{"--workflow", "typo"}, {"--workflow="}, {"--ci-required", "true"}, {"--ci-required="}} {
+	for _, args := range [][]string{{"--workflow", "legacy"}, {"--auto-approve", "on"}, {"--ci-required", "true"}, {"--ci-required="}} {
 		cmd := newRepoSetCmd()
 		cmd.SetArgs(append([]string{"o/r"}, args...))
-		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "must be") {
-			t.Fatalf("args=%v err=%v", args, err)
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("retired or invalid flags accepted: %v", args)
 		}
 	}
 }

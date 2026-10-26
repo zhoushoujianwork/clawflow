@@ -43,7 +43,7 @@ var runLog *clog.Logger
 // roleForOperator picks which config.Role slot an operator should
 // resolve its model from. evaluate-* operators read existing context
 // and produce structured analysis, so they get the heavier eval model
-// (Opus by default). Lightweight operators (classify, reply-comment,
+// (Opus by default). Lightweight operators (reply-comment,
 // reply-question, track-progress) use the cheap light model (Haiku by
 // default). Everything else (implement, user-supplied skills) gets the
 // operator model (Sonnet by default).
@@ -52,7 +52,7 @@ func roleForOperator(opName string) string {
 		return config.RoleEval
 	}
 	switch opName {
-	case "classify", "reply-comment", "reply-question", "track-progress":
+	case "reply-comment", "reply-question", "track-progress":
 		return config.RoleLight
 	}
 	return config.RoleOperator
@@ -383,13 +383,9 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 			}
 			repoJobs, repoPending = nil, nil
 		}
-		// Propagate language preference and the resolved confidence threshold
-		// to each job so the operator runner can inject them into the system
-		// prompt / salvage judgement (issue #336: config is the single
-		// threshold source, not the SKILL.md hardcoded "Threshold = 7.0").
+		// Propagate the output language to each job.
 		for _, j := range repoJobs {
 			j.language = cfg.Settings.Language
-			j.confidenceThreshold = cfg.Settings.EffectiveConfidenceThreshold()
 		}
 		pending = append(pending, repoPending...)
 		jobs = append(jobs, repoJobs...)
@@ -402,7 +398,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	//   - per-issue mutex: within this process, at most one operator per issue
 	//   - per-repo mutex: serializes `implement` against the shared local
 	//     git clone (worktree add + fetch are not safe in parallel).
-	//     Read-only operators (classify, evaluate-*, reply-comment) skip
+	//     Read-only operators (custom assessments, reply-comment) skip
 	//     the per-repo lock and run freely.
 	fired := runJobsParallel(ctx, jobs, workers, timeout)
 
@@ -480,7 +476,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// Phase 4 (sequential): wake the project-manager for every project
 	// with automation enabled and past its cooldown. PMs run AFTER
 	// operators so they see the post-pass state — any issue an
-	// operator just marked agent-evaluated is visible to the PM
+	// operator just updated is visible to the PM
 	// scheduling decision. PM failures are non-fatal: the run as a
 	// whole is reported successful as long as the operator phase
 	// completed.
@@ -516,12 +512,6 @@ type runJob struct {
 	repoCfg  config.Repo
 	client   vcs.Client
 	language string // Settings.Language propagated from cfg at job creation time
-	// confidenceThreshold is Settings.EffectiveConfidenceThreshold() propagated
-	// from cfg at job creation time (issue #336). Passed through to both the
-	// evaluate-* system prompt and the marker-less salvage judgement so all
-	// three paths compare against the same configured value instead of each
-	// hardcoding 7.0 independently.
-	confidenceThreshold float64
 }
 
 // firedKey identifies a (repo, issue, operator) triple that ran to a
@@ -565,60 +555,23 @@ func deterministicSkipReason(op *operator.Operator, repoCfg config.Repo) string 
 	return ""
 }
 
-// operatorPriority ranks operators that match the same issue in one scan so
-// firstMatch fires the right one (issue #270). Lower value = runs first.
-// This makes the decompose-before-evaluate ordering EXPLICIT instead of
-// relying on Registry.All()'s alphabetical sort (which only happened to put
-// "decompose" before "evaluate-bug"): a tracking issue must be decomposed —
-// flipping it to a parent — before any leaf evaluator gets a turn, otherwise
-// the evaluator races the split. Unlisted operators land in a middle default
-// tier and keep their relative alphabetical order via the stable comparison.
+// operatorPriority lets custom operators run before the default implementation.
 func operatorPriority(name string) int {
-	switch {
-	case name == "decompose":
-		return 0 // structural: split before anything evaluates the issue
-	case strings.HasPrefix(name, "evaluate-"):
-		return 10 // assessment
-	case name == "implement":
-		return 20 // execution: runs after the issue is assessed
-	default:
-		return 15
+	if name == "implement" {
+		return 20
 	}
+	return 15
 }
 
-// effectiveOperator applies repository routing without changing shared registry data.
-// Autonomous implementation still respects custom triggers and terminal exclusions.
-func effectiveOperator(op *operator.Operator, sub *operator.Subject, repoCfg config.Repo) *operator.Operator {
-	if op == nil || op.Name == "repair-ci" || config.ValidateWorkflow(repoCfg.Workflow) != nil {
+// effectiveOperator applies lifecycle eligibility without changing custom triggers.
+func effectiveOperator(op *operator.Operator, sub *operator.Subject) *operator.Operator {
+	if op == nil || op.Name == "repair-ci" || operator.IsRetiredBuiltin(op.Name) {
 		return nil
 	}
-	if repoCfg.EffectiveWorkflow() == config.WorkflowLegacy {
-		return op
-	}
-	switch op.Name {
-	case "classify", "evaluate-bug", "evaluate-feat", "decompose":
+	if op.Name == "implement" && (sub.IsPR || sub.State != "open" || sub.SubTotal > 0 || sub.HasLabel("tracking") || sub.HasLabel("question")) {
 		return nil
-	case "implement":
-		if sub.IsPR || sub.State != "open" || sub.SubTotal > 0 || sub.HasLabel("tracking") || sub.HasLabel("question") {
-			return nil
-		}
-		copyOp := *op
-		withoutApproval := func(labels []string) []string {
-			var result []string
-			for _, label := range labels {
-				if label != "ready-for-agent" {
-					result = append(result, label)
-				}
-			}
-			return result
-		}
-		copyOp.Trigger.LabelsRequired = withoutApproval(op.Trigger.LabelsRequired)
-		copyOp.Trigger.LabelsRequiredAny = withoutApproval(op.Trigger.LabelsRequiredAny)
-		copyOp.Trigger.LabelsConsumed = withoutApproval(op.Trigger.LabelsConsumed)
-		return &copyOp
-	default:
-		return op
 	}
+	return op
 }
 
 // subIssueLister is the narrow slice of vcs.Client that isStaleLeafJob needs.
@@ -631,7 +584,7 @@ type subIssueLister interface {
 // isStaleLeafJob reports whether a leaf-gated operator job has gone stale
 // because sub-issues were attached to its subject between scan and execution
 // (issue #270). scanRepoOnce snapshots SubTotal at poll time, but a leaf
-// operator can run for minutes (the issue's #139 evaluate-bug took 7m19s);
+// operator can run for minutes;
 // if sub-issues land in that window the issue is now a parent and should
 // defer to its coordinator (track-progress) rather than run a leaf
 // evaluate/implement. Only operators declaring applies_to: leaf are checked.
@@ -759,7 +712,7 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		// post-run state.
 		var firstMatch *operator.Operator
 		for _, op := range reg.All() {
-			op = effectiveOperator(op, sub, repoCfg)
+			op = effectiveOperator(op, sub)
 			if op == nil {
 				continue
 			}
@@ -797,20 +750,14 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 				Labels:      append([]string(nil), sub.Labels...),
 				CapturedAt:  capturedAt,
 			})
-			// Pick the highest-priority matching operator to actually fire
-			// (issue #270). Explicit priority replaces the implicit reliance
-			// on Registry.All()'s alphabetical order: when both decompose and
-			// a leaf evaluator match the same issue, decompose MUST run first
-			// so the issue is split (and flips to non-leaf) before any
-			// evaluator races it. Equal-priority ties keep the stable
-			// alphabetical order from reg.All().
+			// Custom operators run before the default implementation; ties
+			// retain the registry's stable alphabetical ordering.
 			if firstMatch == nil || operatorPriority(op.Name) < operatorPriority(firstMatch.Name) {
 				firstMatch = op
 			}
 		}
 		if firstMatch == nil {
-			debugf("  → no operator matched #%d (label its required trigger to enqueue, e.g. \"clawflow label add --repo %s --issue %d --label feat\")",
-				sub.Number, fullName, sub.Number)
+			debugf("  → no eligible operator matched #%d (check terminal labels, issue structure and custom triggers)", sub.Number)
 		}
 		// Execution scope: skip queuing operators on this issue when the
 		// caller restricted the run to a different repo / different issue.
@@ -1042,12 +989,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	// Re-fetch the issue's current labels to guard against the race where
 	// labels were added between the initial poll and now (e.g. user manually
-	// labelled the issue while classify was already queued).
+	// labelled the issue while an operator was already queued).
 	if j.repair == nil {
 		if freshLabels, err := j.client.GetIssueLabels(j.repo, j.sub.Number); err == nil {
 			freshSub := *j.sub
 			freshSub.Labels = freshLabels
-			freshOp := effectiveOperator(j.op, &freshSub, j.repoCfg)
+			freshOp := effectiveOperator(j.op, &freshSub)
 			if freshOp == nil {
 				return false, false
 			}
@@ -1248,33 +1195,16 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rc.SetRequestContext(ctx)
 	}
 
-	// Set when the runner had to infer the outcome label from the body's
-	// Confidence score because the marker line was missing (issue #307).
-	// The run itself succeeds; this only selects a distinct run status.
-	var markerRecovered bool
-	var recoveredConfidence float64
-
 	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
-		Repo:                j.repo,
-		Workdir:             workdir,
-		Timeout:             timeout,
-		Comments:            comments,
-		Role:                role,
-		EventWriter:         eventsFile,
-		ResumeContext:       resumeCtx,
-		Language:            j.language,
-		ConfidenceThreshold: &j.confidenceThreshold,
-		StageFunc:           emitStage,
-		MarkerRecovered: func(inferred string, conf float64) {
-			markerRecovered = true
-			recoveredConfidence = conf
-			// WARN-level so deployment.md patrol's grep -E "ERROR|WARN"
-			// surfaces the degraded path and the prompt-side frequency can
-			// be tracked over time.
-			runLog.Warn("run/marker_recovered",
-				"repo", j.repo, "issue", j.sub.Number, "op", j.op.Name,
-				"inferred_outcome", inferred, "confidence", conf)
-		},
+		Repo:          j.repo,
+		Workdir:       workdir,
+		Timeout:       timeout,
+		Comments:      comments,
+		Role:          role,
+		EventWriter:   eventsFile,
+		ResumeContext: resumeCtx,
+		Language:      j.language,
+		StageFunc:     emitStage,
 	})
 	runDur := time.Since(runStart).Round(time.Second)
 	if eventsFile != nil {
@@ -1427,8 +1357,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// and produced a body, only the write-back marker was missing, so
 		// agent-failed would freeze the issue for every operator that excludes
 		// that label instead of letting a human push it forward. The re-fire
-		// loop the counting was meant to bound (issue #143) is now handled by
-		// the salvage path ("marker-recovered", issue #307).
+		// behavior remains retryable so a later run can produce a valid marker.
 		rm.Status = "no-marker"
 		rm.Error = runErr.Error()
 	case isDisallowedOutcome:
@@ -1452,15 +1381,6 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	case j.repair != nil && outcome == "agent-failed":
 		rm.Status = "failed"
 		rm.Error = "CI repair could not update existing PR"
-	case markerRecovered:
-		// Salvaged run: the body was a complete evaluation missing only its
-		// marker line, so the comment was posted and the label applied from
-		// the Confidence score. Functionally a success — recorded under a
-		// distinct status so it is not conflated with the discarded
-		// short-summary form of no-marker, and deliberately NOT counted by
-		// the circuit breaker (issue #307).
-		rm.Status = "marker-recovered"
-		rm.Error = fmt.Sprintf("outcome marker missing; label inferred from Confidence %.1f/10", recoveredConfidence)
 	default:
 		rm.Status = "success"
 	}
@@ -1500,7 +1420,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 		hasPartialWork, _, _ = detectPartialWork(workdir, base)
 	}
-	if (j.repair == nil || (rm.Status == "success" && outcome == "agent-implemented")) && (rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork)) {
+	if (j.repair == nil || (rm.Status == "success" && outcome == "agent-implemented")) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork)) {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree evidence: %s\n", prefix, workdir)
@@ -1533,7 +1453,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// them and they were found by hand-grepping status=no-marker.
 	logFn := runLog.Info
 	switch rm.Status {
-	case "failed", "auth-error", "output-limit", "marker-recovered", "no-marker", "disallowed-outcome", "cost-limit":
+	case "failed", "auth-error", "output-limit", "no-marker", "disallowed-outcome", "cost-limit":
 		logFn = runLog.Warn
 	}
 	// cost is emitted for every status, not just the lossy ones: a single
@@ -1566,24 +1486,14 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		"cost", fmt.Sprintf("%.4f", runCost),
 	)
 
-	// Post-run automation: auto-approve and auto-merge.
-	// "marker-recovered" is included: the outcome label was applied for real,
-	// so auto-approve of agent-evaluated must still fire — otherwise salvaging
-	// the body would only half-recover the run (issue #307).
-	if rm.Status == "success" || rm.Status == "marker-recovered" {
+	// Apply successful lifecycle follow-up.
+	if rm.Status == "success" {
 		runPostAutomation(j, outcome, output, prefix)
 	}
 
 	switch rm.Status {
 	case "success":
 		fmt.Printf("%s ✓ done\n", prefix)
-		return true, false
-	case "marker-recovered":
-		// Counts as a completed run (comment posted, label applied) and does
-		// NOT reach checkCircuitBreaker — a one-off missing marker line is a
-		// transient formatting slip, not a reason to label the issue
-		// agent-failed (issue #307).
-		fmt.Printf("%s ✓ done (outcome marker missing; label inferred from Confidence %.1f/10)\n", prefix, recoveredConfidence)
 		return true, false
 	case "rate-limited":
 		// Signal the caller to abort the queue; do NOT call checkCircuitBreaker.
@@ -1689,21 +1599,8 @@ func checkCircuitBreaker(j *runJob, prefix string) {
 	// `agent-failed` later if the underlying issue looks recoverable.
 }
 
-// runPostAutomation handles auto-approve and auto-merge after an operator completes.
+// runPostAutomation handles merge and parent-progress follow-up.
 func runPostAutomation(j *runJob, outcome, output, prefix string) {
-	// Auto-approve: after evaluate produces agent-evaluated, auto-add ready-for-agent.
-	// No accompanying comment by design — the label change itself is the
-	// signal, and the issue timeline shows clawflow as the actor. Adding
-	// a "Auto-approved by ClawFlow" comment was duplicating that.
-	if outcome == "agent-evaluated" && j.repoCfg.AutoApprove {
-		fmt.Fprintf(os.Stderr, "%s → auto-approve: adding ready-for-agent\n", prefix)
-		if err := j.client.AddLabel(j.repo, j.sub.Number, "ready-for-agent"); err != nil {
-			fmt.Fprintf(os.Stderr, "%s ⚠ auto-approve failed: %v\n", prefix, err)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "%s ✓ auto-approved\n", prefix)
-	}
-
 	// Auto-merge: after implement produces agent-implemented, wait CI then
 	// merge. This is the low-latency path — the PR number comes straight
 	// from the run's stdout. sweepAutoMergePRs is the per-scan backstop for
@@ -1723,16 +1620,6 @@ func runPostAutomation(j *runJob, outcome, output, prefix string) {
 			issueNum: j.sub.Number,
 			prefix:   prefix,
 		})
-	}
-
-	// Tracking issue: after decompose creates sub-issues, add progress-check
-	// so track-progress fires on the next run.
-	if outcome == "agent-decomposed" {
-		if err := j.client.AddLabel(j.repo, j.sub.Number, "progress-check"); err != nil {
-			fmt.Fprintf(os.Stderr, "%s ⚠ progress-check label failed: %v\n", prefix, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "%s ✓ progress-check added\n", prefix)
-		}
 	}
 
 	// Tracking issue: sub-issues still pending — re-add progress-check so

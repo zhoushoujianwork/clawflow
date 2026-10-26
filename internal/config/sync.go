@@ -26,25 +26,22 @@ const GistDescription = "clawflow-config"
 // every machine in the fleet would have to be re-bound by hand, which
 // defeats the purpose of the binding.
 type syncableRepo struct {
-	Workflow              string            `yaml:"workflow,omitempty"`
-	Enabled               bool              `yaml:"enabled"`
-	Platform              string            `yaml:"platform,omitempty"`
-	BaseURL               string            `yaml:"base_url,omitempty"`
-	BaseBranch            string            `yaml:"base_branch"`
-	Owner                 string            `yaml:"owner"`
-	Description           string            `yaml:"description"`
-	AddedAt               string            `yaml:"added_at"`
-	WebhookConfigured     bool              `yaml:"webhook_configured"`
-	Labels                map[string]string `yaml:"labels"`
-	TestCommand           string            `yaml:"test_command,omitempty"`
-	CIRequired            bool              `yaml:"ci_required,omitempty"`
-	CITimeout             int               `yaml:"ci_timeout,omitempty"`
-	AutoMerge             bool              `yaml:"auto_merge,omitempty"`
-	AutoApprove           bool              `yaml:"auto_approve,omitempty"`
-	AutoEvaluateAllIssues bool              `yaml:"auto_evaluate_all_issues,omitempty"`
-	BoundMachine          string            `yaml:"bound_machine,omitempty"`
-	UpdatedAt             time.Time         `yaml:"updated_at,omitempty"`
-	UpdatedBy             string            `yaml:"updated_by,omitempty"`
+	Enabled           bool              `yaml:"enabled"`
+	Platform          string            `yaml:"platform,omitempty"`
+	BaseURL           string            `yaml:"base_url,omitempty"`
+	BaseBranch        string            `yaml:"base_branch"`
+	Owner             string            `yaml:"owner"`
+	Description       string            `yaml:"description"`
+	AddedAt           string            `yaml:"added_at"`
+	WebhookConfigured bool              `yaml:"webhook_configured"`
+	Labels            map[string]string `yaml:"labels"`
+	TestCommand       string            `yaml:"test_command,omitempty"`
+	CIRequired        bool              `yaml:"ci_required,omitempty"`
+	CITimeout         int               `yaml:"ci_timeout,omitempty"`
+	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
+	BoundMachine      string            `yaml:"bound_machine,omitempty"`
+	UpdatedAt         time.Time         `yaml:"updated_at,omitempty"`
+	UpdatedBy         string            `yaml:"updated_by,omitempty"`
 	// local_path is intentionally absent — genuinely machine-local
 	// (paths differ across OSes and home dirs).
 }
@@ -52,25 +49,22 @@ type syncableRepo struct {
 // toSyncable converts a Repo to its syncable representation (strips local_path).
 func toSyncable(r Repo) syncableRepo {
 	return syncableRepo{
-		Workflow:              r.Workflow,
-		Enabled:               r.Enabled,
-		Platform:              r.Platform,
-		BaseURL:               r.BaseURL,
-		BaseBranch:            r.BaseBranch,
-		Owner:                 r.Owner,
-		Description:           r.Description,
-		AddedAt:               r.AddedAt,
-		WebhookConfigured:     r.WebhookConfigured,
-		Labels:                r.Labels,
-		TestCommand:           r.TestCommand,
-		CIRequired:            r.CIRequired,
-		CITimeout:             r.CITimeout,
-		AutoMerge:             r.AutoMerge,
-		AutoApprove:           r.AutoApprove,
-		AutoEvaluateAllIssues: r.AutoEvaluateAllIssues,
-		BoundMachine:          r.BoundMachine,
-		UpdatedAt:             r.UpdatedAt,
-		UpdatedBy:             r.UpdatedBy,
+		Enabled:           r.Enabled,
+		Platform:          r.Platform,
+		BaseURL:           r.BaseURL,
+		BaseBranch:        r.BaseBranch,
+		Owner:             r.Owner,
+		Description:       r.Description,
+		AddedAt:           r.AddedAt,
+		WebhookConfigured: r.WebhookConfigured,
+		Labels:            r.Labels,
+		TestCommand:       r.TestCommand,
+		CIRequired:        r.CIRequired,
+		CITimeout:         r.CITimeout,
+		AutoMerge:         r.AutoMerge,
+		BoundMachine:      r.BoundMachine,
+		UpdatedAt:         r.UpdatedAt,
+		UpdatedBy:         r.UpdatedBy,
 	}
 }
 
@@ -78,26 +72,23 @@ func toSyncable(r Repo) syncableRepo {
 // local_path (the only genuinely machine-local field).
 func fromSyncable(s syncableRepo, localPath string) Repo {
 	return Repo{
-		Workflow:              s.Workflow,
-		Enabled:               s.Enabled,
-		Platform:              s.Platform,
-		BaseURL:               s.BaseURL,
-		BaseBranch:            s.BaseBranch,
-		LocalPath:             localPath,
-		Owner:                 s.Owner,
-		Description:           s.Description,
-		AddedAt:               s.AddedAt,
-		WebhookConfigured:     s.WebhookConfigured,
-		Labels:                s.Labels,
-		TestCommand:           s.TestCommand,
-		CIRequired:            s.CIRequired,
-		CITimeout:             s.CITimeout,
-		AutoMerge:             s.AutoMerge,
-		AutoApprove:           s.AutoApprove,
-		AutoEvaluateAllIssues: s.AutoEvaluateAllIssues,
-		BoundMachine:          s.BoundMachine,
-		UpdatedAt:             s.UpdatedAt,
-		UpdatedBy:             s.UpdatedBy,
+		Enabled:           s.Enabled,
+		Platform:          s.Platform,
+		BaseURL:           s.BaseURL,
+		BaseBranch:        s.BaseBranch,
+		LocalPath:         localPath,
+		Owner:             s.Owner,
+		Description:       s.Description,
+		AddedAt:           s.AddedAt,
+		WebhookConfigured: s.WebhookConfigured,
+		Labels:            s.Labels,
+		TestCommand:       s.TestCommand,
+		CIRequired:        s.CIRequired,
+		CITimeout:         s.CITimeout,
+		AutoMerge:         s.AutoMerge,
+		BoundMachine:      s.BoundMachine,
+		UpdatedAt:         s.UpdatedAt,
+		UpdatedBy:         s.UpdatedBy,
 	}
 }
 
@@ -113,9 +104,6 @@ type gistPayload struct {
 // Any repo entry without an updated_at timestamp is stamped with the current
 // time before serialisation (one-shot migration for legacy configs).
 func MarshalForGist(cfg *Config) ([]byte, error) {
-	if err := cfg.validateWorkflows(); err != nil {
-		return nil, err
-	}
 	// Migrate any legacy entries in-place so the Gist always carries timestamps.
 	MigrateTimestamps(cfg)
 
@@ -165,14 +153,6 @@ func mergeConfigsInternal(local *Config, remoteYAML []byte, conflictFatal bool) 
 	var remote gistPayload
 	if err := yaml.Unmarshal(remoteYAML, &remote); err != nil {
 		return nil, fmt.Errorf("cannot parse remote config: %w", err)
-	}
-	if err := local.validateWorkflows(); err != nil {
-		return nil, err
-	}
-	for name, repo := range remote.Repos {
-		if err := ValidateWorkflow(repo.Workflow); err != nil {
-			return nil, fmt.Errorf("remote repo %q: %w", name, err)
-		}
 	}
 
 	merged := &Config{

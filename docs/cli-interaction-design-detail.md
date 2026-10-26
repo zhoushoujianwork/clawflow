@@ -23,7 +23,7 @@ Inspect without mutation or remote access:
 - Context and testing instructions are present/nonempty, or their absence is reported with a concrete setup action.
 - Required local executables such as Git and Claude are discoverable. Presence does not prove authentication or provider health.
 - Embedded/user operator definitions parse and diagnostics identify actual duplicate trigger definitions without false positives from omitted trigger fields.
-- Repository enablement, auto-approval, auto-merge, Pilot and sync state are visible. Disabled automation is expected during onboarding and is not an instruction to enable it automatically.
+- Repository enablement, auto-merge, required CI, Pilot and sync state are visible. Disabled automation is expected during onboarding and is not an instruction to enable it automatically.
 
 No `config.Load` legacy migration, metadata save, snapshot refresh, lock cleanup, label initialization, provider probe, Git fetch, project generation or test command is permitted in the inspection path. Missing configuration is a reported prerequisite, not an invitation to initialize it. Inspect authoritative config files without side effects.
 
@@ -41,12 +41,22 @@ These commands should use the same services as the Web API, not make a running W
 
 Contract tests should parse JSON for both ready and blocked results, assert stable check IDs, verify stdout purity and exit behavior, and assert that project/config/credential fixtures remain byte-for-byte unchanged. Use fake executables or temporary Git repositories to check absent tooling, mismatched origin, missing base, dirty worktree and invalid operator definitions. Never make unit tests depend on the user's configured repositories or real provider credentials.
 
-Operator diagnostic regression cases should cover the built-in classify/evaluate-feat definitions, reordered equivalent label sets, and trigger differences in OR labels, exclusions and parent/leaf scope. Keep dispatch and matching behavior unchanged in a diagnostic-only fix.
+Operator diagnostic regression cases should cover active built-ins and non-retired custom definitions, reordered equivalent label sets, and trigger differences in OR labels, exclusions and parent/leaf scope. Retired exact names must be rejected in user overrides without discarding other custom operators or history.
 
 For live offload validation, record observed state and the command/build revision. A successful local readiness check does not establish remote authentication, test success, agent execution, PR creation or merge. Report each of those separately when exercised.
 
 ## Autonomous repository controls
 
-`repo set <R> --workflow autonomous|legacy` selects dispatch. An omitted workflow defaults to autonomous. `repo show`, `config show --repo <R> --field workflow` and `project check` expose the effective mode. `repo set <R> --ci-required on|off` controls the existing required-CI gate. Select `--auto-merge on --ci-required on` for unattended delivery after successful checks; this does not require `--auto-approve on` or a per-issue ready label. Explicit legacy mode retains the earlier label-driven pipeline.
+There is one autonomous lifecycle, with no workflow mode selector. Configure unattended delivery using supported commands:
 
-Regression coverage includes omitted/explicit mode serialization and sync, invalid values, direct unlabeled/evaluated issue dispatch, custom constraints, terminal/parent/question exclusions, fresh-label rechecks and missing-CI rejection. These are changes to execution behavior, separate from the earlier diagnostic-only milestone.
+```bash
+clawflow repo set <R> --auto-merge on --ci-required on
+clawflow repo enable <R>
+clawflow run --repo <R>
+```
+
+Merge remains separately configured; required CI accepts success only. Old config input remains readable. Explicit legacy selection emits a migration notice and proceeds autonomously. Config rewrites omit `workflow`, `auto_approve`, `auto_evaluate_all_issues` and `confidence_threshold`, retaining enabled state, bindings, merge/CI and other supported settings.
+
+The exact built-ins `classify`, `evaluate-bug`, `evaluate-feat` and `decompose` are retired, including same-name user overrides. Other custom operators and historical records remain; the eval model role is only for custom `evaluate-*` extensions.
+
+Regression coverage should include compatibility input and rewrite/sync omission, migration notices, direct issue dispatch, custom constraints, terminal/parent/question exclusions, fresh-label rechecks, pause/cancel/locks, bounded retries and missing-CI rejection. Same-repository GitHub CI repair reproduces failures locally, updates the existing branch without force, and permits at most three attempts with a five-minute cooldown. CI-log ingestion, forks and GitLab repair are outside this slice; other GitLab capabilities remain. These runner controls do not implement the proposed general durable task API above.

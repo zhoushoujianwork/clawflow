@@ -8,7 +8,7 @@ This extends the [managed development design](managed-development-design.md). Th
 
 The normal path is **inspect → configure → check → preview → execute → observe → recover**. An external AI should complete it using documented commands and structured results, without editing internal JSON/YAML state or scraping dashboard pages.
 
-These are capabilities, not mandatory human checkpoints. Under the unattended policy, project setup authorizes the delivery endpoint once; each eligible issue proceeds directly to implementation and test/repair. Preview remains an optional inspection tool, and execution plans can be produced and consumed internally. No separate evaluation score or manual approval label is required for each issue.
+ClawFlow has one autonomous issue lifecycle with no workflow selector. These are capabilities, not mandatory human checkpoints. Under the unattended policy, project setup authorizes the delivery endpoint once; each eligible issue proceeds directly to implementation and test/repair. Preview remains an optional inspection tool, and execution plans can be produced and consumed internally. Normal analysis and planning stay inside implementation. Questions/comments and parent tracking retain their own paths; `progress-check` remains an operational trigger.
 
 Skills teach the workflow and project-specific choices. The CLI owns validation, persistence, execution identifiers and side effects. A skill must not claim a command exists before it is implemented.
 
@@ -19,7 +19,7 @@ Skills teach the workflow and project-specific choices. The CLI owns validation,
 - Writes are explicit verbs. Commands that only launch work return an identifier and an accepted/running state, never an unearned success result.
 - Expected states such as a disabled repository, pending CI or a missing test profile have stable machine-readable identifiers. An AI should not have to parse English error text to choose the next action.
 - Long operations support bounded waits and eventual status retrieval. Disconnecting the client and cancelling the task are distinct actions.
-- Automation settings are visible and independently controlled: monitoring, issue approval, merge, project Pilot, and config sync. One toggle must not silently authorize the others.
+- Automation settings are visible and independently controlled: monitoring, merge, required CI, project Pilot, and config sync. One toggle must not silently authorize the others.
 
 ## Command surface and delivery order
 

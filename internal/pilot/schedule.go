@@ -3,20 +3,16 @@
 // to a non-interactive `claude -p` invocation that triages the
 // backlog at the EDGES of the operator pipeline:
 //
-//   - upstream: files new issues, fixes missing trigger labels
-//     (e.g. user opened a clear bug without the `bug` label)
+//   - upstream: files new issues, maintains optional category labels
+//     (e.g. a descriptive `bug` label for backlog organization)
 //   - downstream: closes stale, duplicate, or already-fixed issues
 //
-// Pilot stays out of the middle (evaluate → ready-for-agent → implement
-// → merge), which is fully owned by operators + repo-level
-// `auto_approve` (auto-adds ready-for-agent after evaluate) +
-// `auto_merge` (auto-merges agent-implemented PRs after CI). Pilot does
-// NOT add ready-for-agent — that's auto_approve's domain. Trying to
-// have Pilot apply judgment there would just race auto_approve.
+// Operators own autonomous implementation and CI repair; repo-level
+// auto_merge owns merge eligibility. Pilot coordinates the project backlog.
 //
 // Closed loop:
 //
-//	clawflow run → operators process labeled issues →
+//	clawflow run → operators process eligible issues →
 //	  pilot.Schedule wakes the Pilot →
 //	  Pilot triages backlog (file/label/close/comment) →
 //	  next `clawflow run` pass executes the changes

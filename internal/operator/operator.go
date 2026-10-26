@@ -43,7 +43,7 @@ type Operator struct {
 // that have none, and "any" (the default) ignores structure entirely.
 //
 // This lets coordinator operators (track-progress) run exclusively on tracking
-// parents while work operators (evaluate-*, decompose, implement) stay on
+// parents while work operators (implement and custom leaf operators) stay on
 // leaves — turning the previous prompt-level soft convention ("skip if I'm a
 // parent") into a hard matcher constraint.
 const (
@@ -60,7 +60,7 @@ type Trigger struct {
 	LabelsExcluded    []string
 	// LabelsConsumed lists trigger labels that are one-shot flow markers and
 	// should be removed after the operator writes back its outcome (e.g.
-	// "ready-for-agent"). Only labels declared here are cleaned up. Persistent
+	// "progress-check"). Only labels declared here are cleaned up. Persistent
 	// classification labels used as triggers (e.g. "bug"/"feat") are left
 	// untouched by declaring them in LabelsRequired but NOT here — that keeps
 	// type labels and flow-status labels independent (issue #292).
@@ -92,18 +92,42 @@ type frontmatter struct {
 // Parse decodes a SKILL.md into an Operator. `source` is used for error
 // context and stored on the returned Operator.Source.
 func Parse(data []byte, source string) (*Operator, error) {
+	fmText, body, err := skillParts(data, source)
+	if err != nil {
+		return nil, err
+	}
+	return parseParts(fmText, body, source)
+}
+
+func skillParts(data []byte, source string) (string, string, error) {
 	s := strings.ReplaceAll(string(data), "\r\n", "\n")
 	if !strings.HasPrefix(s, "---\n") {
-		return nil, fmt.Errorf("%s: missing '---' frontmatter opener", source)
+		return "", "", fmt.Errorf("%s: missing '---' frontmatter opener", source)
 	}
 	rest := s[4:]
 	end := strings.Index(rest, "\n---\n")
 	if end < 0 {
-		return nil, fmt.Errorf("%s: frontmatter not closed with '---'", source)
+		return "", "", fmt.Errorf("%s: frontmatter not closed with '---'", source)
 	}
-	fmText := rest[:end]
-	body := rest[end+5:]
+	return rest[:end], rest[end+5:], nil
+}
 
+// skillName reads identity before validating retired operators' old schemas.
+func skillName(data []byte, source string) string {
+	fmText, _, err := skillParts(data, source)
+	if err != nil {
+		return ""
+	}
+	var identity struct {
+		Name string `yaml:"name"`
+	}
+	if yaml.Unmarshal([]byte(fmText), &identity) != nil {
+		return ""
+	}
+	return identity.Name
+}
+
+func parseParts(fmText, body, source string) (*Operator, error) {
 	var fm frontmatter
 	if err := yaml.Unmarshal([]byte(fmText), &fm); err != nil {
 		return nil, fmt.Errorf("%s: yaml parse: %w", source, err)

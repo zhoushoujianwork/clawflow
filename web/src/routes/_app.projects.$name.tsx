@@ -60,7 +60,6 @@ interface ProjectAutomation {
 
 interface RepoEntry {
   full_name: string
-  auto_approve?: boolean
   auto_merge?: boolean
   enabled?: boolean
   bound_machine?: string
@@ -122,7 +121,7 @@ function ProjectDetail() {
   const [addingRepo, setAddingRepo] = useState<string | null>(null)
   const [repoError, setRepoError] = useState<string | null>(null)
 
-  // Per-repo auto_approve / auto_merge state, keyed by full_name. Populated
+  // Per-repo auto_merge state, keyed by full_name. Populated
   // from /data/repos.json on mount so the member-repo list can render the
   // automation rollup badges without waiting for the add-repo dropdown to
   // open. Empty until the fetch resolves.
@@ -318,7 +317,7 @@ function ProjectDetail() {
   useEffect(() => {
     fetchProject()
     // Always fetch repo metadata on mount so the member-repo list can
-    // render auto_approve / auto_merge badges immediately. The add-repo
+    // render auto_merge badges immediately. The add-repo
     // dropdown re-fetches on open to catch any repos added since.
     fetchAvailableRepos()
     fetchPilotRuns()
@@ -1287,25 +1286,14 @@ function ProjectDetail() {
                 {(() => {
                   const meta = project.repos.map(r => repoMeta[r] ?? null)
                   const known = meta.filter(m => m !== null) as RepoEntry[]
-                  const approveOn = known.filter(m => m.auto_approve).length
                   const mergeOn = known.filter(m => m.auto_merge).length
                   const pmOn = project.automation?.enabled
-                  const allOn = pmOn && approveOn === project.repos.length && mergeOn === project.repos.length
                   return (
                     <div className="text-xs text-muted-foreground mb-2 flex items-center gap-3 flex-wrap">
                       <span className="tabular-nums">
-                        auto-approve: <span className="font-medium text-foreground">{approveOn}/{project.repos.length}</span>
-                      </span>
-                      <span className="tabular-nums">
                         auto-merge: <span className="font-medium text-foreground">{mergeOn}/{project.repos.length}</span>
                       </span>
-                      {allOn ? (
-                        <span className="text-emerald-700 dark:text-emerald-400 font-medium">· fully autopiloted</span>
-                      ) : pmOn ? (
-                        <span>· Pilot scheduling on; some repos need manual approve/merge</span>
-                      ) : (
-                        <span>· Pilot scheduling off — toggle Automation above</span>
-                      )}
+                      <span>Pilot scheduling {pmOn ? 'on' : 'off'} · independent of issue execution</span>
                     </div>
                   )
                 })()}
@@ -1331,17 +1319,6 @@ function ProjectDetail() {
                             status={gitStatus[repo]}
                             onUpdate={updateGitStatus}
                           />
-                          <span
-                            className={cn(
-                              'px-1.5 py-0.5 rounded text-[10px] font-medium tabular-nums',
-                              m?.auto_approve
-                                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
-                                : 'bg-secondary text-muted-foreground',
-                            )}
-                            title={m?.auto_approve ? 'auto_approve enabled' : 'auto_approve off'}
-                          >
-                            approve {m?.auto_approve ? 'on' : 'off'}
-                          </span>
                           <span
                             className={cn(
                               'px-1.5 py-0.5 rounded text-[10px] font-medium tabular-nums',
@@ -1614,7 +1591,7 @@ function ProjectDetail() {
               user can see project progress without bouncing into each
               repo page. Same renderer as the per-repo page (shared
               IssueList component); the project-level section config
-              adds an "Awaiting evaluation" bucket up front and shows
+              adds an "Awaiting implementation" bucket up front and shows
               the repo column on each row. */}
           <BacklogSection
             project={project}

@@ -20,7 +20,7 @@ import (
 // local_path piled up forever in the dashboard's Pending list.
 func TestDeterministicSkip(t *testing.T) {
 	implement := &operator.Operator{Name: "implement"}
-	evalBug := &operator.Operator{Name: "evaluate-bug"}
+	evalBug := &operator.Operator{Name: "evaluate-custom"}
 
 	cases := []struct {
 		name string
@@ -41,7 +41,7 @@ func TestDeterministicSkip(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "evaluate-bug never deterministically skipped (no local_path needed)",
+			name: "evaluate-custom never deterministically skipped (no local_path needed)",
 			op:   evalBug,
 			repo: config.Repo{LocalPath: ""},
 			want: false,

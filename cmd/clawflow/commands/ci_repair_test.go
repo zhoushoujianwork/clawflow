@@ -125,7 +125,7 @@ func TestCIRepairDispatch(t *testing.T) {
 	if got := scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, normal); len(got) != 0 {
 		t.Fatal("duplicate issue job")
 	}
-	for _, change := range []func(*config.Repo){func(c *config.Repo) { c.Workflow = "legacy" }, func(c *config.Repo) { c.AutoMerge = false }, func(c *config.Repo) { c.CIRequired = false }, func(c *config.Repo) { c.Platform = "gitlab" }, func(c *config.Repo) { c.BoundMachine = "not-this-host" }} {
+	for _, change := range []func(*config.Repo){func(c *config.Repo) { c.AutoMerge = false }, func(c *config.Repo) { c.CIRequired = false }, func(c *config.Repo) { c.Platform = "gitlab" }, func(c *config.Repo) { c.BoundMachine = "not-this-host" }} {
 		other := cfg
 		change(&other)
 		before := f.listCalls
@@ -135,10 +135,8 @@ func TestCIRepairDispatch(t *testing.T) {
 	}
 	for _, original := range reg.All() {
 		if original.Name == "repair-ci" {
-			for _, workflow := range []string{"", "legacy"} {
-				if effectiveOperator(original, &operator.Subject{State: "open", Labels: []string{"agent-implemented"}}, config.Repo{Workflow: workflow}) != nil {
-					t.Fatal("normal matcher dispatched repair")
-				}
+			if effectiveOperator(original, &operator.Subject{State: "open", Labels: []string{"agent-implemented"}}) != nil {
+				t.Fatal("normal matcher dispatched repair")
 			}
 		}
 	}

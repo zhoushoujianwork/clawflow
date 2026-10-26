@@ -27,7 +27,7 @@ type ciRepairContext struct {
 var repairSHA = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 
 func ciRepairEnabled(cfg config.Repo) bool {
-	return config.ValidateWorkflow(cfg.Workflow) == nil && cfg.EffectiveWorkflow() == config.WorkflowAutonomous && cfg.AutoMerge && cfg.CIRequired
+	return cfg.AutoMerge && cfg.CIRequired
 }
 
 func ciRepairCandidate(repo string, pr vcs.PR, issue *vcs.Issue) error {

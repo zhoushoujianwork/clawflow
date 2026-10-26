@@ -101,7 +101,7 @@ type ViewMode = 'run' | 'issue'
 
 /** Ordered list of known pipeline stages for badge display. Unknown operators
  *  are appended after these in discovery order. */
-const KNOWN_STAGES = ['classify', 'implement', 'evaluate-feat', 'evaluate-bug', 'reply-comment', 'decompose']
+const KNOWN_STAGES = ['implement', 'repair-ci', 'track-progress', 'reply-question', 'reply-comment']
 
 /** Ordered lifecycle phases an operator passes through WHILE running (issue
  *  #199). Distinct from KNOWN_STAGES (which lists *which operators* ran on an

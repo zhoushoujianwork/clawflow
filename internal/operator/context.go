@@ -18,15 +18,7 @@ import (
 // or "" for the historical auto-detect behaviour). A non-empty value appends
 // a language directive so all operator output (comments, verdicts) uses the
 // configured language.
-//
-// confidenceThreshold is the resolved Settings.EffectiveConfidenceThreshold
-// (issue #336). For evaluate-bug/evaluate-feat it is injected as an explicit
-// directive that overrides those SKILL.md templates' hardcoded "Threshold =
-// 7.0" wording, so the model's own above/below-threshold judgement and the
-// posted marker agree with whatever the operator (config, salvage) uses.
-// Non-evaluator operators simply ignore an appended directive their prompt
-// never references.
-func BuildSystemPrompt(op *Operator, repo string, lang string, confidenceThreshold float64) string {
+func BuildSystemPrompt(op *Operator, repo string, lang string) string {
 	var b strings.Builder
 
 	if header := project.HeaderForRepo(repo); header != "" {
@@ -37,11 +29,6 @@ func BuildSystemPrompt(op *Operator, repo string, lang string, confidenceThresho
 	fmt.Fprint(&b, op.Prompt)
 	if directive := config.LanguageDirective(lang); directive != "" {
 		b.WriteString(directive)
-	}
-	if _, isEval := evalDimensions[op.Name]; isEval {
-		fmt.Fprintf(&b,
-			"\n\n**Confidence threshold override:** Use %g (not the SKILL.md's hardcoded 7.0) as the pass/fail bar for the Confidence score and the outcome marker in this run. Everything else in the template above is unchanged.\n",
-			confidenceThreshold)
 	}
 	return b.String()
 }
@@ -100,7 +87,7 @@ func BuildUserMessage(sub *Subject, repo string, comments []string) string {
 // hardcoded 7.0 confidence threshold, preserving the pre-#336 default
 // behaviour for callers that don't route through the config layer.
 func BuildPrompt(op *Operator, sub *Subject, repo string, comments []string) string {
-	sys := BuildSystemPrompt(op, repo, "", defaultConfidenceThreshold)
+	sys := BuildSystemPrompt(op, repo, "")
 	usr := BuildUserMessage(sub, repo, comments)
 	return usr + "---\n\n" + sys
 }

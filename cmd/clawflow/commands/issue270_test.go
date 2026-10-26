@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -25,7 +24,7 @@ func (f fakeSubLister) ListSubIssues(repo string, issueNumber int) ([]vcs.Issue,
 
 func leafOp() *operator.Operator {
 	return &operator.Operator{
-		Name:    "evaluate-bug",
+		Name:    "inspect-leaf",
 		Trigger: operator.Trigger{AppliesTo: operator.AppliesLeaf},
 	}
 }
@@ -87,31 +86,10 @@ func TestIsStaleLeafJob(t *testing.T) {
 	}
 }
 
-// TestOperatorPriority pins the explicit dispatch order (issue #270):
-// decompose must outrank every evaluator, which in turn outrank implement,
-// so a tracking issue is split before it is evaluated regardless of how the
-// operators happen to sort alphabetically.
+// Custom operators retain precedence over the default implementation.
 func TestOperatorPriority(t *testing.T) {
-	if operatorPriority("decompose") >= operatorPriority("evaluate-bug") {
-		t.Error("decompose must run before evaluate-bug")
-	}
-	if operatorPriority("decompose") >= operatorPriority("evaluate-feat") {
-		t.Error("decompose must run before evaluate-feat")
-	}
-	if operatorPriority("evaluate-bug") >= operatorPriority("implement") {
-		t.Error("evaluators must run before implement")
-	}
-	// A leaf issue matching both decompose and evaluate-bug must pick
-	// decompose, mirroring the firstMatch selection in scanRepoOnce.
-	ops := []string{"evaluate-bug", "decompose"}
-	best := ops[0]
-	for _, name := range ops[1:] {
-		if operatorPriority(name) < operatorPriority(best) {
-			best = name
-		}
-	}
-	if best != "decompose" {
-		t.Errorf("firstMatch among %v = %q, want decompose", ops, best)
+	if operatorPriority("inspect-leaf") >= operatorPriority("implement") {
+		t.Fatal("custom operator must run before default implementation")
 	}
 }
 
@@ -154,7 +132,7 @@ func TestRunOneOperator_BecameParent_NoTerminalLabel(t *testing.T) {
 	readLog := withRunLog(t) // sets HOME so snapshot.AcquireLock lands in a temp dir
 
 	op := &operator.Operator{
-		Name:    "evaluate-bug",
+		Name:    "inspect-leaf",
 		Trigger: operator.Trigger{Target: "issue", LabelsRequired: []string{"bug"}, AppliesTo: operator.AppliesLeaf},
 	}
 	sub := &operator.Subject{Number: 42, Title: "some bug", Labels: []string{"bug"}, State: "open"}
@@ -162,7 +140,7 @@ func TestRunOneOperator_BecameParent_NoTerminalLabel(t *testing.T) {
 		labels: []string{"bug"},
 		subs:   []vcs.Issue{{Number: 43}, {Number: 44}},
 	}
-	job := &runJob{op: op, sub: sub, repo: "owner/repo", repoCfg: config.Repo{Workflow: config.WorkflowLegacy}, client: client}
+	job := &runJob{op: op, sub: sub, repo: "owner/repo", client: client}
 
 	didFire, hitRateLimit := runOneOperator(context.Background(), job, 5*time.Second)
 	if didFire || hitRateLimit {

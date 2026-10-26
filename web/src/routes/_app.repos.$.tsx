@@ -26,7 +26,6 @@ interface Repo {
   base_branch: string
   local_path?: string
   enabled: boolean
-  auto_approve: boolean
   auto_merge: boolean
   bound_machine?: string
   primary_project?: string
@@ -169,7 +168,7 @@ function RepoDetail() {
       .finally(() => setBinding(false))
   }, [repo, fullName, binding])
 
-  const toggleConfig = useCallback((field: 'enabled' | 'auto_approve' | 'auto_merge') => {
+  const toggleConfig = useCallback((field: 'enabled' | 'auto_merge') => {
     if (!repo || saving) return
     const newVal = !(repo as any)[field]
     setSaving(true)
@@ -400,7 +399,6 @@ function RepoDetail() {
 
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 mb-6">
             <ToggleCard label="Status" enabled={repo.enabled} onToggle={() => toggleConfig('enabled')} disabled={saving || inactive} />
-            <ToggleCard label="Auto-approve" enabled={repo.auto_approve} onToggle={() => toggleConfig('auto_approve')} disabled={saving || inactive} />
             <ToggleCard label="Auto-merge" enabled={repo.auto_merge} onToggle={() => toggleConfig('auto_merge')} disabled={saving || inactive} />
             <div className="bg-card border border-border rounded-xl p-3 min-w-0">
               <div className="text-xs text-muted-foreground">Local path</div>

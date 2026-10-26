@@ -202,15 +202,13 @@ const (
 // are written back by operators to record progress.
 var ClawFlowLabels = []Label{
 	// Trigger labels
-	{"bug", "D73A4A", "Bug report — triggers evaluate-bug operator"},
-	{"feat", "0E8A16", "Feature request — triggers evaluate-feat operator (planned)"},
-	{"ready-for-agent", "00FF00", "Owner approved — triggers implement operator"},
+	{"bug", "D73A4A", "Bug report"},
+	{"feat", "0E8A16", "Feature request"},
 	{"agent-mentioned", "BFD4F2", "Issue mentioned @agent — triggers reply-comment operator"},
 	// State labels
 	{"agent-running", "FFA500", "An operator is running on this subject (concurrency lock)"},
-	{"agent-evaluated", "0075CA", "An evaluate-* operator has posted its assessment"},
-	{"agent-skipped", "BDBDBD", "Operator declined — confidence too low or info missing"},
+	{"agent-skipped", "BDBDBD", "Operator paused work — prerequisites or information missing"},
 	{"agent-implemented", "6E7681", "implement operator finished — PR opened"},
-	{"agent-failed", "FF0000", "An operator errored; see failure comment"},
+	{"agent-failed", "FF0000", "An operator failed; see run history"},
 	{"agent-replied", "E99695", "reply-comment operator has responded to a mention"},
 }

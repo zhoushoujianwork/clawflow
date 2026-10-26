@@ -10,7 +10,7 @@ import { useChatDrawer } from '../lib/chatContext'
 // between the per-repo page and the project-level backlog. The per-repo
 // page hides the repo column and uses a 4-section layout (Running /
 // Pending / Done / Closed); the project page shows the repo column
-// and uses a 5-section layout that adds an "Awaiting evaluation"
+// and uses a 5-section layout that adds an "Awaiting implementation"
 // bucket so users can spot the bottleneck.
 //
 // Inputs are the raw arrays read from /data/issues.json /data/runs.json
@@ -202,7 +202,7 @@ export function useIssueGroups({
 // whose sub-issues are not all completed. sub_total/sub_completed come from
 // the parent's GitHub sub_issues_summary, so this works even when some
 // children fall outside the snapshot window (the data-loss fallback the
-// feature evaluation called out). Closed parents are handled by the caller.
+// snapshot needs to cover). Closed parents are handled by the caller.
 export function hasIncompleteSubIssues(g: IssueGroup): boolean {
   const total = g.sub_total ?? 0
   if (total <= 0) return false
@@ -211,7 +211,7 @@ export function hasIncompleteSubIssues(g: IssueGroup): boolean {
 
 // effectiveStatus is the run status to display and bucket a group by. For a
 // parent (tracking) issue whose children aren't all done, the parent's own
-// latest run (often `success` from decompose / track-progress) masks the fact
+// latest run (often `success` from track-progress) masks the fact
 // that sub-tasks are still in flight — so we surface `running` instead, which
 // keeps the parent out of the Done section and off a misleading success badge.
 // Closed parents keep their real latest status so they stay in the Closed
@@ -249,7 +249,7 @@ export function bucketize(
 // REPO_SECTIONS matches the historical repo-page layout exactly so the
 // migration is a no-op visually. PROJECT_SECTIONS adds two front-of-
 // list buckets that triagers care about most: in-flight work and the
-// "awaiting evaluation" bottleneck.
+// "awaiting implementation" backlog.
 export const REPO_SECTIONS: SectionConfig[] = [
   { title: 'Running', tone: 'blue', filter: g => g.state !== 'closed' && effectiveStatus(g) === 'running' },
   { title: 'Pending', tone: 'amber', filter: g => g.state !== 'closed' && g.pending.length > 0 },
@@ -272,18 +272,13 @@ export const PROJECT_SECTIONS: SectionConfig[] = [
     filter: g => g.state !== 'closed' && g.pending.length > 0,
   },
   {
-    // Has a trigger label (bug / feature) but no operator has touched
-    // it yet — the actual progress bottleneck on most projects. Sits
-    // ahead of "Done" so PMs see it first.
-    title: 'Awaiting evaluation',
+    // Eligible leaf issues with no run history; queued work matches above.
+    title: 'Awaiting implementation',
     tone: 'red',
     filter: g => {
-      if (g.state === 'closed') return false
-      if (g.runs.length > 0) return false
-      const labels = g.labels ?? []
-      const hasTrigger = labels.includes('bug') || labels.includes('feature')
-      const hasAgentLabel = labels.some(l => l.startsWith('agent-'))
-      return hasTrigger && !hasAgentLabel
+      if (g.state !== 'open' || (g.sub_total ?? 0) > 0 || g.runs.length > 0) return false
+      const excluded = ['question', 'tracking', 'agent-implemented', 'agent-failed', 'agent-skipped', 'agent-running', 'agent-closed']
+      return !(g.labels ?? []).some(label => excluded.includes(label))
     },
   },
   // limit (10) is the single-repo fallback; perRepoLimit (3) kicks in once a

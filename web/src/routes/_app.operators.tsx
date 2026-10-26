@@ -16,38 +16,30 @@ interface Operator {
 // Maps built-in operator names to their pipeline stage.
 // TODO: when SKILL.md frontmatter gains a `stage:` field, use that as the
 // primary source and fall back to this map for operators that don't declare one.
-type Stage = 'triage' | 'evaluation' | 'execution' | 'interaction' | 'custom'
+type Stage = 'execution' | 'ci' | 'interaction' | 'custom'
 
 const STAGE_MAP: Record<string, Stage> = {
-  classify: 'triage',
-  'evaluate-bug': 'evaluation',
-  'evaluate-feat': 'evaluation',
-  decompose: 'execution',
   implement: 'execution',
+  'repair-ci': 'ci',
   'track-progress': 'execution',
   'reply-comment': 'interaction',
   'reply-question': 'interaction',
 }
 
-// Explicit ordering within each stage so the natural flow is preserved
-// (e.g. decompose → implement → track-progress for Execution).
+// Preserve the natural order within each stage.
 const STAGE_ORDER: Record<string, number> = {
-  classify: 0,
-  'evaluate-bug': 0,
-  'evaluate-feat': 1,
-  decompose: 0,
-  implement: 1,
-  'track-progress': 2,
+  implement: 0,
+  'track-progress': 1,
+  'repair-ci': 0,
   'reply-comment': 0,
   'reply-question': 1,
 }
 
 const STAGES: { key: Stage; title: string; blurb: string }[] = [
-  { key: 'triage',      title: '1. Triage',      blurb: 'Route incoming issues to the right evaluator.' },
-  { key: 'evaluation',  title: '2. Evaluation',  blurb: 'Score bugs and features and decide if they are ready for an agent.' },
-  { key: 'execution',   title: '3. Execution',   blurb: 'Break down, implement, and track the work.' },
-  { key: 'interaction', title: '4. Interaction', blurb: 'Reply to human comments and questions on issues and PRs.' },
-  { key: 'custom',      title: 'Custom / Other', blurb: 'Operators not mapped to a built-in pipeline stage.' },
+  { key: 'execution', title: 'Implementation', blurb: 'Implement issues, test and repair the work, and track progress toward a PR.' },
+  { key: 'ci', title: 'PR / CI', blurb: 'Repair failing PR checks so changes can merge under repository settings.' },
+  { key: 'interaction', title: 'Interaction', blurb: 'Reply to human comments and questions on issues and PRs.' },
+  { key: 'custom', title: 'Custom / Other', blurb: 'User operators and operators outside the built-in lifecycle.' },
 ]
 
 export const Route = createFileRoute('/_app/operators')({
@@ -80,7 +72,7 @@ function OperatorsList() {
       <div className="mb-5">
         <h1 className="text-2xl font-bold text-foreground">Registered operators</h1>
         <p className="text-xs text-muted-foreground mt-1">
-          Built-in operators ship inside the binary via embed.FS. Drop a SKILL.md into{' '}
+          Issues flow through implementation, tests and repair, PR checks, then merge. Drop a SKILL.md into{' '}
           <code className="px-1 py-0.5 bg-secondary rounded text-[10px]">~/.clawflow/skills/&lt;name&gt;/</code> to override by name.
         </p>
       </div>
