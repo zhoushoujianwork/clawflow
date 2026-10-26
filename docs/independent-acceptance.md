@@ -18,7 +18,7 @@ Enrollment preserves monitoring and automatic-merge settings. The scan sweep nev
 
 ## Automatic harvest
 
-`clawflow run` has an acceptance phase after the operator phase. It needs `auto_merge` on and `acceptance_required` on, and it skips single-issue runs (`--issue`).
+`clawflow run` has an acceptance phase after the operator phase. It needs `auto_merge` on and `acceptance_required` on, and it only runs for the whole pass or a [targeted run](#targeted-run).
 
 - Per repo and pass, at most one acceptance runs, for the first open PR that passes the sweep's filters, has successful required CI and has no evidence for its current contract.
 - A passing result goes straight to the conditional merge path with the accepted head SHA.
@@ -29,6 +29,14 @@ Enrollment preserves monitoring and automatic-merge settings. The scan sweep nev
 The PR must be open, non-draft, from the same repository, and reference an open issue with a closing keyword. A successful managed development run must have captured that issue's requirements and trustworthy native execution events. Historical runs missing the requirements snapshot need a new managed development run. The configured acceptance profile must support the existing Offload execution protocol.
 
 The latest completed acceptance attempt must pass for the current requirements, developer identity, head, base and policy. New submissions or changed requirements/configuration need fresh acceptance. A newer failed or cancelled attempt supersedes an older pass. Both automatic merge and explicit `clawflow pr merge` enforce the policy for enrolled repositories, along with required CI and provider protections.
+
+## Targeted run
+
+```bash
+clawflow run --repo owner/repo --issue 123
+```
+
+`--repo` plus `--issue` is a targeted run. The repo must be configured but may be disabled, so the web auto-run scheduler never picks up its other issues. Only issue 123 is dispatched. The acceptance phase and the auto-merge sweep consider only open PRs whose closing keyword names issue 123, so an earlier PR is accepted and merged on a later targeted pass. All other rules are unchanged: `auto_merge` and `acceptance_required` enrollment, required CI, `bound_machine` and `require_binding`, and the retry limits. An unknown repo fails, and `--repo` without `--issue` still needs an enabled repo. If no operator matches the issue, the run prints `[owner/repo#123] no operator matches this issue (labels: ...)` and exits successfully.
 
 ## Scope
 

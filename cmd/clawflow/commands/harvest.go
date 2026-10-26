@@ -42,9 +42,10 @@ var harvestNow = time.Now
 // sequentially. Failures (setup/provider errors, not recorded verdicts) are
 // returned so the run exits non-zero (issue #354).
 //
-// A single-issue run (onlyIssue != 0) skips the phase entirely.
+// A targeted run (onlyRepo and onlyIssue both set) processes only that repo,
+// which may be disabled, and only PRs whose closing keyword names the issue.
 func runHarvestPhase(ctx context.Context, cfg *config.Config, onlyRepo string, onlyIssue int, timeout time.Duration, watchdogDeadline time.Time) []firedKey {
-	if onlyIssue != 0 || cfg == nil {
+	if cfg == nil || (onlyIssue != 0 && onlyRepo == "") {
 		return nil
 	}
 	if ctx == nil {
@@ -52,6 +53,12 @@ func runHarvestPhase(ctx context.Context, cfg *config.Config, onlyRepo string, o
 	}
 	hostname, _ := os.Hostname()
 	repos := cfg.EnabledRepos()
+	if onlyIssue != 0 {
+		repos = map[string]config.Repo{}
+		if repoCfg, ok := cfg.Repos[onlyRepo]; ok {
+			repos[onlyRepo] = repoCfg
+		}
+	}
 	names := make([]string, 0, len(repos))
 	for name := range repos {
 		names = append(names, name)
@@ -74,7 +81,7 @@ func runHarvestPhase(ctx context.Context, cfg *config.Config, onlyRepo string, o
 		if cfg.Settings.RequireBinding && repoCfg.BoundMachine == "" && hostname != "" {
 			continue
 		}
-		if f := harvestRepo(ctx, fullName, repoCfg, timeout, watchdogDeadline); f != nil {
+		if f := harvestRepo(ctx, fullName, repoCfg, onlyIssue, timeout, watchdogDeadline); f != nil {
 			failed = append(failed, *f)
 		}
 	}
@@ -83,7 +90,7 @@ func runHarvestPhase(ctx context.Context, cfg *config.Config, onlyRepo string, o
 
 // harvestRepo handles one repo and returns a failure key when the acceptance
 // run hit an infrastructure error, or nil otherwise.
-func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, timeout time.Duration, watchdogDeadline time.Time) *firedKey {
+func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, onlyIssue int, timeout time.Duration, watchdogDeadline time.Time) *firedKey {
 	skip := func(reason string, extra ...any) {
 		runLog.Info("run/harvest_skip", append([]any{"repo", fullName, "reason", reason}, extra...)...)
 	}
@@ -139,6 +146,9 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, time
 	for _, pr := range prs {
 		if ctx.Err() != nil || candidates >= sweepMaxCandidates {
 			break
+		}
+		if onlyIssue != 0 && extractClosesIssue(pr.Body) != onlyIssue {
+			continue
 		}
 		issueNum, isCandidate, prSkipped := autoMergeCandidate(client, fullName, pr)
 		if isCandidate {

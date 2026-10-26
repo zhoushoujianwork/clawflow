@@ -287,8 +287,9 @@ func autoMergeCandidate(client vcs.Client, fullName string, pr vcs.PR) (issueNum
 // than a one-shot side effect.
 //
 // It is a no-op unless repoCfg.AutoMerge is set: repos without auto-merge
-// spend zero API calls here.
-func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, repoCfg config.Repo) {
+// spend zero API calls here. A non-zero onlyIssue restricts the sweep to PRs
+// whose closing keyword names that issue (targeted runs); 0 considers all.
+func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, repoCfg config.Repo, onlyIssue int) {
 	if !repoCfg.AutoMerge {
 		return
 	}
@@ -308,6 +309,9 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 		}
 		if candidates >= sweepMaxCandidates || merged >= sweepMaxMergesPerPass {
 			break
+		}
+		if onlyIssue != 0 && extractClosesIssue(pr.Body) != onlyIssue {
+			continue
 		}
 		issueNum, isCandidate, skip := autoMergeCandidate(client, fullName, pr)
 		if isCandidate {

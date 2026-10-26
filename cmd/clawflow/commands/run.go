@@ -81,7 +81,13 @@ Concurrency is gated by an in-process per-issue mutex; up to
 settings.max_concurrent_agents (default 4) operators run in parallel
 across issues. The "implement" operator is additionally serialized
 per-repo because it shares a local git clone. Pass --repo and/or
---issue to narrow the scan.`,
+--issue to narrow the scan.
+
+Targeted run: --repo owner/repo --issue N works on a configured repo even
+when it is disabled (so the web auto-run scheduler never sees it). Only that
+issue is dispatched, and only PRs that close it are considered by the
+acceptance harvest and the auto-merge sweep. Unknown repos still fail, and
+bound_machine / require_binding apply as usual.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if onlyIssue != 0 && onlyRepo == "" {
 				return fmt.Errorf("--issue requires --repo")
@@ -89,7 +95,7 @@ per-repo because it shares a local git clone. Pass --repo and/or
 			return runOnce(cmd.Context(), onlyRepo, onlyIssue, timeout)
 		},
 	}
-	cmd.Flags().StringVar(&onlyRepo, "repo", "", "Restrict to a single repo (owner/repo); default: all enabled repos")
+	cmd.Flags().StringVar(&onlyRepo, "repo", "", "Restrict to a single repo (owner/repo); default: all enabled repos (with --issue the repo may be disabled)")
 	cmd.Flags().IntVar(&onlyIssue, "issue", 0, "Restrict to a single issue number (requires --repo)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator Offload execution timeout")
 	return cmd
@@ -109,6 +115,31 @@ func loadRegistry() (*operator.Registry, error) {
 		return nil, fmt.Errorf("load user operators from %s: %w", userDir, err)
 	}
 	return reg, nil
+}
+
+// resolveRunRepos returns the repos a pass scans and, for a targeted run on a
+// disabled repo, that repo's name as hidden. A targeted run (--repo plus
+// --issue) may name any configured repo, enabled or not; every other run keeps
+// requiring the repo to be enabled. A hidden repo is added to the returned map
+// so scanning and execution use the normal path, and callers keep it out of
+// the dashboard snapshots.
+func resolveRunRepos(cfg *config.Config, onlyRepo string, onlyIssue int) (repos map[string]config.Repo, hidden string, err error) {
+	repos = cfg.EnabledRepos()
+	if onlyRepo == "" {
+		return repos, "", nil
+	}
+	if _, ok := repos[onlyRepo]; ok {
+		return repos, "", nil
+	}
+	if onlyIssue != 0 {
+		repoCfg, ok := cfg.Repos[onlyRepo]
+		if !ok {
+			return nil, "", fmt.Errorf("repo %q not found in config", onlyRepo)
+		}
+		repos[onlyRepo] = repoCfg
+		return repos, onlyRepo, nil
+	}
+	return nil, "", fmt.Errorf("repo %q not found or not enabled", onlyRepo)
 }
 
 func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.Duration) error {
@@ -238,11 +269,9 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	allRepos := cfg.EnabledRepos()
-	if onlyRepo != "" {
-		if _, ok := allRepos[onlyRepo]; !ok {
-			return fmt.Errorf("repo %q not found or not enabled", onlyRepo)
-		}
+	allRepos, hiddenRepo, err := resolveRunRepos(cfg, onlyRepo, onlyIssue)
+	if err != nil {
+		return err
 	}
 	if len(allRepos) == 0 {
 		fmt.Println("no enabled repos to scan")
@@ -365,7 +394,13 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		baseCheck := checkBaseBranch(lg, fullName, repoCfg)
 
 		executeHere := onlyRepo == "" || onlyRepo == fullName
-		repoPending, repoJobs, err := scanRepoOnce(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, &globalIssues)
+		// A disabled repo reached through a targeted run stays out of the
+		// dashboard snapshots: it is not part of the enabled set.
+		issueSink := &globalIssues
+		if fullName == hiddenRepo {
+			issueSink = new([]snapshot.IssueEntry)
+		}
+		repoPending, repoJobs, err := scanRepoOnce(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, issueSink)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
 		}
@@ -389,7 +424,9 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		for _, j := range repoJobs {
 			j.language = cfg.Settings.Language
 		}
-		pending = append(pending, repoPending...)
+		if fullName != hiddenRepo {
+			pending = append(pending, repoPending...)
+		}
 		jobs = append(jobs, repoJobs...)
 	}
 
@@ -432,7 +469,9 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if len(fired) > 0 {
 		rerunRepos := make(map[string]bool, len(fired))
 		for _, f := range fired {
-			rerunRepos[f.Repo] = true
+			if f.Repo != hiddenRepo {
+				rerunRepos[f.Repo] = true
+			}
 		}
 		var recaptured []snapshot.IssueEntry
 		for repo := range rerunRepos {
@@ -722,6 +761,7 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
 	capturedAt := time.Now().UTC()
+	targetMatch := "" // operator matched for the --issue target, if any
 	for _, iss := range issues {
 		sub := &operator.Subject{
 			Number:   iss.Number,
@@ -816,6 +856,9 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 			continue
 		}
 		if firstMatch != nil {
+			targetMatch = firstMatch.Name
+		}
+		if firstMatch != nil {
 			// Pre-flight: skip deterministic failures early. implement
 			// needs a local clone but the repo may not have local_path set.
 			if deterministicSkip(firstMatch, repoCfg) {
@@ -839,6 +882,12 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		jobs = append(jobs, scanCIRepairJobs(ctx, reg, client, fullName, repoCfg, onlyIssue, jobs)...)
 	}
 
+	// Targeted run: say why nothing will happen instead of exiting silently.
+	// Not a failure; the issue simply is not eligible right now.
+	if executeHere && onlyIssue != 0 {
+		reportTargetSkip(fullName, onlyIssue, targetMatch, issues, jobs)
+	}
+
 	// MVP: no PR-target operators yet. All built-in operators target
 	// issues. When a pr-target operator appears we'll add the same
 	// (subject × operator) loop over ListOpenPRs.
@@ -849,8 +898,9 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	// `implement` run — a PR that missed that instant was never merged by
 	// anything (issue #299). Gated on executeHere so a `--repo`-narrowed
 	// run doesn't merge PRs across the whole config.
-	if executeHere && onlyIssue == 0 {
-		sweepAutoMergePRs(ctx, client, fullName, repoCfg)
+	// A targeted run sweeps only PRs that close its issue.
+	if executeHere {
+		sweepAutoMergePRs(ctx, client, fullName, repoCfg, onlyIssue)
 	}
 
 	// Snapshot every issue (open + closed) for the dashboard — same shape
@@ -864,6 +914,42 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 
 	runLog.Info("run/scan", "repo", fullName, "phase", "done", "issues", len(issues), "pending", len(pending), "jobs", len(jobs), "elapsed", time.Since(scanStart).Round(time.Millisecond))
 	return pending, jobs, nil
+}
+
+// reportTargetSkip prints one stderr line and logs run/target_skip when a
+// targeted run queued nothing for its issue (no operator matched, no CI-repair
+// job, or the issue is not open).
+func reportTargetSkip(fullName string, issueNum int, matched string, issues []vcs.Issue, jobs []*runJob) {
+	for _, j := range jobs {
+		if j.sub != nil && j.sub.Number == issueNum {
+			return
+		}
+	}
+	var target *vcs.Issue
+	for i := range issues {
+		if issues[i].Number == issueNum {
+			target = &issues[i]
+			break
+		}
+	}
+	if target == nil {
+		fmt.Fprintf(os.Stderr, "[%s#%d] issue is not open or not found; nothing to run\n", fullName, issueNum)
+		runLog.Info("run/target_skip", "repo", fullName, "issue", issueNum, "reason", "issue_not_open")
+		return
+	}
+	if matched != "" {
+		// Matched but not queued: locked by another process or config makes
+		// it unrunnable. The reason is in the debug output.
+		fmt.Fprintf(os.Stderr, "[%s#%d] operator %s matched but was not dispatched (locked or unrunnable)\n", fullName, issueNum, matched)
+		runLog.Info("run/target_skip", "repo", fullName, "issue", issueNum, "reason", "not_dispatched", "op", matched)
+		return
+	}
+	labels := "none"
+	if len(target.Labels) > 0 {
+		labels = strings.Join(target.Labels, ", ")
+	}
+	fmt.Fprintf(os.Stderr, "[%s#%d] no operator matches this issue (labels: %s)\n", fullName, issueNum, labels)
+	runLog.Info("run/target_skip", "repo", fullName, "issue", issueNum, "reason", "no_operator_match", "labels", target.Labels)
 }
 
 // captureIssuesSnapshot lists every issue (open + closed) in fullName via a
