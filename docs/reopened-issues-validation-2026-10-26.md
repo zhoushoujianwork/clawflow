@@ -55,3 +55,17 @@ All work reused session `01a176d5-e56c-7802-bcc5-f42f48ba2c5f`, profile
 The worker sandbox could not run some socket-based tests; the supervising
 agent ran the affected packages independently without that limitation.
 Worker costs are not verified billing and exclude supervising-agent usage.
+
+## Installed acceptance
+
+Implementation commit: `f917882` on `refactor/autonomous-only`; no source push
+or merge. The binary was built from an isolated archive of that commit, with
+dashboard assets rebuilt and TypeScript checked there. The first archive-only
+build correctly failed because generated `web/dist` is not tracked; generating
+those assets resolved it. Existing Browserslist/chunk-size warnings remain.
+
+Installed binaries report `f917882`. The background service restarted at
+06:39:33 UTC with PID 6822 and returned HTTP 200 at `127.0.0.1:8090`.
+Installed `issue history --help` passed. The external skill was refreshed for
+Codex, Claude Code and Cursor. Sync remained paused. Previous binaries are
+backed up under `~/.clawflow/backups/runtime-before-f917882/`.
