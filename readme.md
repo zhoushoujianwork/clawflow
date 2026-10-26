@@ -152,6 +152,12 @@ Eligible open leaf issues enter implementation automatically. Questions retain t
 
 Execution uses local lockfiles in `~/.clawflow/locks/`. The old `agent-running` label is not a concurrency lock. Pause/cancel controls, machine bindings, terminal exclusions and bounded retries still apply.
 
+Reopened issues can start another implementation cycle when lifecycle history proves a close/reopen after the previous implementation label and no linked PR remains open. Earlier branches and worktrees are preserved. Read [reopened issues and history](docs/reopened-issues.md) for details.
+
+```bash
+clawflow issue history 7 --repo owner/repo --json
+```
+
 ### 4. Run
 
 ```bash

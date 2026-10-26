@@ -44,7 +44,7 @@ func ciRepairCandidate(repo string, pr vcs.PR, issue *vcs.Issue) error {
 	if n == 0 || issue == nil || issue.Number != n || issue.State != "open" || issue.SubIssuesTotal != 0 || !issue.HasLabel("agent-implemented") {
 		return fmt.Errorf("linked issue is not an implemented open leaf")
 	}
-	if pr.HeadBranch != fmt.Sprintf("fix/issue-%d", n) && pr.HeadBranch != fmt.Sprintf("feat/issue-%d", n) {
+	if !vcs.ManagedIssueBranch(pr.HeadBranch, n) {
 		return fmt.Errorf("unmanaged branch")
 	}
 	for _, l := range []string{"agent-failed", "agent-skipped", "agent-running", "tracking", "question"} {

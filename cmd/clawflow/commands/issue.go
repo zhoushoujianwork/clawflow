@@ -25,6 +25,7 @@ func NewIssueCmd() *cobra.Command {
 	cmd.AddCommand(newIssueCreateCmd())
 	cmd.AddCommand(newIssueEditCmd())
 	cmd.AddCommand(newIssueViewCmd())
+	cmd.AddCommand(newIssueHistoryCmd())
 	cmd.AddCommand(newIssueListCmd())
 	cmd.AddCommand(newIssueSearchCmd())
 	cmd.AddCommand(newIssueCommentCmd())

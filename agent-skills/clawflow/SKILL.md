@@ -266,6 +266,7 @@ scheduler and auto-sync; it is not a read-only status command.
 ```bash
 clawflow status
 clawflow issue view <N> --repo <R> --json
+clawflow issue history <N> --repo <R> --json
 clawflow pr list --repo <R> --state open
 clawflow repo disable <R>
 clawflow project automation disable <project>
@@ -290,6 +291,9 @@ clawflow label add/remove --repo <R> --issue <N> --label <L>
 
 Read subcommand help for required write fields. `issue view` takes a positional issue number;
 `issue comment-list` instead uses `--issue <N>` and supports `--json`.
+`issue history <N>` reads full issue discussion, lifecycle events and linked PR/MR delivery summaries, plus machine-local run metadata. It excludes arbitrary PR review threads and raw tool/provider transcripts. Partial retrieval is explicitly marked incomplete and exits with an error.
+
+Reopening a previously implemented issue can start a new implementation cycle after a verified close/reopen sequence following the implementation label. Linked open PRs block duplicate work; failure/skipped/running exclusions and local locks still apply. New cycles use a separate branch/worktree and retain earlier work. Missing or ambiguous history fails closed.
 Search related historical issues before creating duplicates. `repo remove <R>` only unregisters the repo;
 `project delete <project>` deletes its metadata; neither is a history reset.
 

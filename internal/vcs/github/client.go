@@ -236,49 +236,15 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 	return issues, nil
 }
 
-func (c *Client) ListOpenPRs(repo string) ([]vcs.PR, error) {
-	owner, name, err := splitRepo(repo)
-	if err != nil {
-		return nil, err
-	}
-	path := fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100", owner, name)
-	data, status, err := c.do("GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != 200 {
-		return nil, fmt.Errorf("github list PRs: HTTP %d: %s", status, data)
-	}
-	var raw []struct {
-		Number    int    `json:"number"`
-		Title     string `json:"title"`
-		Body      string `json:"body"`
-		State     string `json:"state"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Head      struct {
-			Ref string `json:"ref"`
-		} `json:"head"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	prs := make([]vcs.PR, len(raw))
-	for i, r := range raw {
-		prs[i] = vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, HeadBranch: r.Head.Ref, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
-	}
-	return prs, nil
-}
+func (c *Client) ListOpenPRs(repo string) ([]vcs.PR, error) { return c.ListPRs(repo, "open") }
 
 func (c *Client) PRExistsForIssue(repo string, issueNumber int) (bool, error) {
 	prs, err := c.ListOpenPRs(repo)
 	if err != nil {
 		return false, err
 	}
-	needle := fmt.Sprintf("issue-%d", issueNumber)
-	fixes := fmt.Sprintf("Fixes #%d", issueNumber)
 	for _, pr := range prs {
-		if strings.Contains(pr.HeadBranch, needle) || strings.Contains(pr.Body, fixes) {
+		if vcs.PRReferencesIssue(pr, issueNumber) {
 			return true, nil
 		}
 	}
@@ -346,27 +312,13 @@ func (c *Client) RemoveLabel(repo string, issueNumber int, labels ...string) err
 }
 
 func (c *Client) ListIssueComments(repo string, issueNumber int) ([]string, error) {
-	owner, name, err := splitRepo(repo)
+	comments, err := c.ListIssueCommentsDetail(repo, issueNumber)
 	if err != nil {
 		return nil, err
 	}
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", owner, name, issueNumber)
-	data, status, err := c.do("GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != 200 {
-		return nil, fmt.Errorf("github list comments: HTTP %d: %s", status, data)
-	}
-	var raw []struct {
-		Body string `json:"body"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	out := make([]string, len(raw))
-	for i, r := range raw {
-		out[i] = r.Body
+	out := make([]string, len(comments))
+	for i, comment := range comments {
+		out[i] = comment.Body
 	}
 	return out, nil
 }
@@ -393,12 +345,9 @@ func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.Is
 		return nil, err
 	}
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", owner, name, issueNumber)
-	data, status, err := c.do("GET", path, nil)
+	data, err := c.allPages(path)
 	if err != nil {
 		return nil, err
-	}
-	if status != 200 {
-		return nil, fmt.Errorf("github list comments: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
 		ID        int64  `json:"id"`
@@ -629,12 +578,9 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		apiState = "closed"
 	}
 	path := fmt.Sprintf("/repos/%s/%s/pulls?state=%s&per_page=100", owner, name, apiState)
-	data, status, err := c.do("GET", path, nil)
+	data, err := c.allPages(path)
 	if err != nil {
 		return nil, err
-	}
-	if status != 200 {
-		return nil, fmt.Errorf("github list PRs: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
 		Number    int    `json:"number"`
@@ -642,6 +588,7 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		Body      string `json:"body"`
 		State     string `json:"state"`
 		HTMLURL   string `json:"html_url"`
+		ClosedAt  string `json:"closed_at"`
 		MergedAt  string `json:"merged_at"`
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
@@ -661,7 +608,7 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		if r.MergedAt != "" {
 			s = "merged"
 		}
-		prs = append(prs, vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: s, HeadBranch: r.Head.Ref, MergedAt: r.MergedAt, URL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+		prs = append(prs, vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: s, HeadBranch: r.Head.Ref, MergedAt: r.MergedAt, ClosedAt: r.ClosedAt, URL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
 	}
 	return prs, nil
 }
@@ -718,6 +665,7 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 		Body     string `json:"body"`
 		State    string `json:"state"`
 		HTMLURL  string `json:"html_url"`
+		ClosedAt string `json:"closed_at"`
 		MergedAt string `json:"merged_at"`
 		Draft    bool   `json:"draft"`
 		Head     struct {
@@ -735,7 +683,7 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 	if raw.MergedAt != "" {
 		s = "merged"
 	}
-	return vcs.PR{Number: raw.Number, Title: raw.Title, Body: raw.Body, State: s, HeadBranch: raw.Head.Ref, HeadSHA: raw.Head.SHA, HeadRepo: raw.Head.Repo.FullName, Draft: raw.Draft, MergedAt: raw.MergedAt, URL: raw.HTMLURL}, nil
+	return vcs.PR{Number: raw.Number, Title: raw.Title, Body: raw.Body, State: s, HeadBranch: raw.Head.Ref, HeadSHA: raw.Head.SHA, HeadRepo: raw.Head.Repo.FullName, Draft: raw.Draft, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.HTMLURL}, nil
 }
 
 func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
@@ -1142,15 +1090,20 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 		return nil, fmt.Errorf("github get issue: HTTP %d: %s", status, data)
 	}
 	var raw struct {
-		ID        int64  `json:"id"`
-		Number    int    `json:"number"`
-		Title     string `json:"title"`
-		Body      string `json:"body"`
-		State     string `json:"state"`
-		HTMLURL   string `json:"html_url"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Labels    []struct {
+		ID               int64  `json:"id"`
+		Number           int    `json:"number"`
+		Title            string `json:"title"`
+		Body             string `json:"body"`
+		State            string `json:"state"`
+		HTMLURL          string `json:"html_url"`
+		CreatedAt        string `json:"created_at"`
+		UpdatedAt        string `json:"updated_at"`
+		ClosedAt         string `json:"closed_at"`
+		SubIssuesSummary struct {
+			Total     int `json:"total"`
+			Completed int `json:"completed"`
+		} `json:"sub_issues_summary"`
+		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 	}
@@ -1170,7 +1123,7 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 		Labels:    labels,
 		URL:       raw.HTMLURL,
 		CreatedAt: raw.CreatedAt,
-		UpdatedAt: raw.UpdatedAt,
+		UpdatedAt: raw.UpdatedAt, ClosedAt: raw.ClosedAt, SubIssuesTotal: raw.SubIssuesSummary.Total, SubIssuesCompleted: raw.SubIssuesSummary.Completed,
 	}, nil
 }
 

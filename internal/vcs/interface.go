@@ -73,6 +73,7 @@ type PR struct {
 	Body       string `json:"body"`
 	State      string `json:"state"`
 	MergedAt   string `json:"merged_at,omitempty"`
+	ClosedAt   string `json:"closed_at,omitempty"`
 	URL        string `json:"url,omitempty"`
 	CreatedAt  string `json:"created_at,omitempty"`
 	UpdatedAt  string `json:"updated_at,omitempty"`

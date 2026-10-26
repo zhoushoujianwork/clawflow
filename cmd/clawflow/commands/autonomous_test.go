@@ -130,6 +130,14 @@ type autonomousRecheckFake struct {
 	structuralChecks int
 }
 
+func (f *autonomousRecheckFake) GetIssue(string, int) (*vcs.Issue, error) {
+	return &vcs.Issue{Number: 42, State: "open", Labels: f.labels}, nil
+}
+func (f *autonomousRecheckFake) ListOpenPRs(string) ([]vcs.PR, error) { return nil, nil }
+func (f *autonomousRecheckFake) ListIssueCommentsDetail(string, int) ([]vcs.IssueComment, error) {
+	return nil, nil
+}
+
 func (f *autonomousRecheckFake) GetIssueLabels(string, int) ([]string, error) { return f.labels, nil }
 func (f *autonomousRecheckFake) ListSubIssues(string, int) ([]vcs.Issue, error) {
 	f.structuralChecks++

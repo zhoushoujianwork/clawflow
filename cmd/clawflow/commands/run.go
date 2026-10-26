@@ -506,6 +506,8 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 // eligible to fire. The worker pool in runJobsParallel consumes these.
 type runJob struct {
 	repair   *ciRepairContext
+	reopen   *reopenContext
+	comments []vcs.IssueComment
 	op       *operator.Operator
 	sub      *operator.Subject
 	repo     string
@@ -710,13 +712,30 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		// mutate labels, but pending.json captures the queue as it looked
 		// at the start of this run — the next refresh will show the
 		// post-run state.
+		var reopened *reopenContext
+		var reopenErr error
+		if implementationSubjectAllowed(sub) {
+			reopened, reopenErr = discoverReopen(client, fullName, sub)
+			if reopenErr != nil {
+				runLog.Warn("run/reopen_skip", "repo", fullName, "issue", sub.Number, "err", reopenErr.Error())
+			}
+		}
 		var firstMatch *operator.Operator
 		for _, op := range reg.All() {
 			op = effectiveOperator(op, sub)
 			if op == nil {
 				continue
 			}
-			ok, reason := operator.MatchesWithReason(sub, op)
+			matchSub := sub
+			if op.Name == "implement" {
+				if reopenErr != nil {
+					continue
+				}
+				if reopened != nil {
+					matchSub = withoutImplemented(sub)
+				}
+			}
+			ok, reason := operator.MatchesWithReason(matchSub, op)
 			if !ok {
 				debugf("  ✗ %s: %s", op.Name, reason)
 				// An exclusion-only miss is the one skip reason a human can
@@ -782,7 +801,11 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 				debugf("  · skipping #%d: locked by another process", iss.Number)
 				continue
 			}
-			jobs = append(jobs, &runJob{op: firstMatch, sub: sub, repo: fullName, repoCfg: repoCfg, client: client})
+			var selectedReopen *reopenContext
+			if firstMatch.Name == "implement" {
+				selectedReopen = reopened
+			}
+			jobs = append(jobs, &runJob{op: firstMatch, sub: sub, repo: fullName, repoCfg: repoCfg, client: client, reopen: selectedReopen})
 		}
 	}
 
@@ -976,10 +999,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	runLog.Info("run/lock", "pid", os.Getpid(), "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
 	defer runLog.Info("run/unlock", "repo", j.repo, "issue", j.sub.Number)
 
+	// Queued jobs may outlive the scan deadline. Fresh eligibility/history
+	// reads must use this execution's context rather than the expired scan.
+	if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
+		rc.SetRequestContext(ctx)
+	}
 	if j.repair != nil {
-		if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
-			rc.SetRequestContext(ctx)
-		}
 		if err := prepareCIRepair(j, time.Now().UTC()); err != nil {
 			fmt.Fprintf(os.Stderr, "%s → repair skipped: %v\n", prefix, err)
 			runLog.Warn("run/ci_repair_skip", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
@@ -987,10 +1012,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 	}
 
+	if j.op.Name == "implement" {
+		if err := prepareImplementation(j); err != nil {
+			fmt.Fprintf(os.Stderr, "%s → implementation skipped: %v\n", prefix, err)
+			runLog.Warn("run/implementation_skip", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
+			return false, false
+		}
+	}
+
 	// Re-fetch the issue's current labels to guard against the race where
 	// labels were added between the initial poll and now (e.g. user manually
 	// labelled the issue while an operator was already queued).
-	if j.repair == nil {
+	if j.repair == nil && j.op.Name != "implement" {
 		if freshLabels, err := j.client.GetIssueLabels(j.repo, j.sub.Number); err == nil {
 			freshSub := *j.sub
 			freshSub.Labels = freshLabels
@@ -1080,7 +1113,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// ClawFlow-Base-Branch: marker and plumb the override into worktree
 	// setup. Using ListIssueCommentsDetail gives us CreatedAt for correct
 	// newest-first ordering and avoids a second round-trip at line 736.
-	detailComments, _ := j.client.ListIssueCommentsDetail(j.repo, j.sub.Number)
+	detailComments := j.comments
+	if j.op.Name != "implement" {
+		var commentErr error
+		detailComments, commentErr = j.client.ListIssueCommentsDetail(j.repo, j.sub.Number)
+		if commentErr != nil {
+			fmt.Fprintf(os.Stderr, "%s → comments unavailable: %v\n", prefix, commentErr)
+			runningMeta.Status = "skipped"
+			runningMeta.Error = commentErr.Error()
+			_ = snapshot.WriteRunMeta(runDir, runningMeta)
+			return false, false
+		}
+	}
 
 	// Parse optional per-issue base-branch override.
 	overrideBranch, overrideSource, hasOverride, overrideErr := ParseBaseBranchOverride(j.sub.Body, detailComments)
@@ -1114,6 +1158,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	var err error
 	if j.repair != nil {
 		wtResult, cleanup, err = setupCIRepairWorkdir(ctx, j.repoCfg, j.repo, j.repair.PR)
+	} else if j.reopen != nil {
+		wtResult, cleanup, err = setupReopenWorktree(j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch, j.reopen)
 	} else {
 		wtResult, cleanup, err = resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch)
 	}
@@ -1153,14 +1199,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 
 	// Extract comment bodies from the already-fetched detail slice.
-	comments := make([]string, len(detailComments))
-	for i, c := range detailComments {
-		comments[i] = c.Body
-	}
+	comments := formattedComments(detailComments)
 
 	eventsFile, eventsErr := os.Create(filepath.Join(runDir, "events.jsonl"))
 	if eventsErr != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ events sink: %v\n", prefix, eventsErr)
+	} else {
+		defer eventsFile.Close()
 	}
 
 	creds, _ := config.LoadCredentials()
@@ -1193,6 +1238,17 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// full run context so write-back gets a live budget (issue #293).
 	if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
 		rc.SetRequestContext(ctx)
+	}
+
+	if j.reopen != nil {
+		resumeCtx += j.reopen.prompt(j.sub.Number)
+		if err := removeStaleImplementation(j); err != nil {
+			fmt.Fprintf(os.Stderr, "%s → reopen skipped: %v\n", prefix, err)
+			runningMeta.Status = "skipped"
+			runningMeta.Error = err.Error()
+			_ = snapshot.WriteRunMeta(runDir, runningMeta)
+			return false, false
+		}
 	}
 
 	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{

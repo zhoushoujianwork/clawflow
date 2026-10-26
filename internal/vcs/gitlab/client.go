@@ -150,48 +150,20 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 	}
 	issues := make([]vcs.Issue, len(raw))
 	for i, r := range raw {
-		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
+		issues[i] = vcs.Issue{Number: r.IID, State: "open", Title: r.Title, Body: r.Body, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
 	}
 	return issues, nil
 }
 
-func (c *Client) ListOpenPRs(repo string) ([]vcs.PR, error) {
-	path := fmt.Sprintf("/projects/%s/merge_requests?state=opened&per_page=100", projectID(repo))
-	data, status, err := c.doJSON("GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != 200 {
-		return nil, fmt.Errorf("gitlab list MRs: HTTP %d: %s", status, data)
-	}
-	var raw []struct {
-		IID          int    `json:"iid"`
-		Title        string `json:"title"`
-		Description  string `json:"description"`
-		State        string `json:"state"`
-		SourceBranch string `json:"source_branch"`
-		CreatedAt    string `json:"created_at"`
-		UpdatedAt    string `json:"updated_at"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	prs := make([]vcs.PR, len(raw))
-	for i, r := range raw {
-		prs[i] = vcs.PR{Number: r.IID, Title: r.Title, Body: r.Description, State: r.State, HeadBranch: r.SourceBranch, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
-	}
-	return prs, nil
-}
+func (c *Client) ListOpenPRs(repo string) ([]vcs.PR, error) { return c.ListPRs(repo, "open") }
 
 func (c *Client) PRExistsForIssue(repo string, issueNumber int) (bool, error) {
 	prs, err := c.ListOpenPRs(repo)
 	if err != nil {
 		return false, err
 	}
-	needle := fmt.Sprintf("issue-%d", issueNumber)
-	fixes := fmt.Sprintf("Fixes #%d", issueNumber)
 	for _, pr := range prs {
-		if strings.Contains(pr.HeadBranch, needle) || strings.Contains(pr.Body, fixes) {
+		if vcs.PRReferencesIssue(pr, issueNumber) {
 			return true, nil
 		}
 	}
@@ -276,26 +248,13 @@ func (c *Client) RemoveLabel(repo string, issueNumber int, labels ...string) err
 }
 
 func (c *Client) ListIssueComments(repo string, issueNumber int) ([]string, error) {
-	path := fmt.Sprintf("/projects/%s/issues/%d/notes?per_page=100", projectID(repo), issueNumber)
-	data, status, err := c.doJSON("GET", path, nil)
+	comments, err := c.ListIssueCommentsDetail(repo, issueNumber)
 	if err != nil {
 		return nil, err
 	}
-	if status != 200 {
-		return nil, fmt.Errorf("gitlab list comments: HTTP %d: %s", status, data)
-	}
-	var raw []struct {
-		Body   string `json:"body"`
-		System bool   `json:"system"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, r := range raw {
-		if !r.System {
-			out = append(out, r.Body)
-		}
+	out := make([]string, len(comments))
+	for i, comment := range comments {
+		out[i] = comment.Body
 	}
 	return out, nil
 }
@@ -315,12 +274,9 @@ func (c *Client) PostIssueComment(repo string, issueNumber int, body string) err
 
 func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.IssueComment, error) {
 	path := fmt.Sprintf("/projects/%s/issues/%d/notes?per_page=100", projectID(repo), issueNumber)
-	data, status, err := c.doJSON("GET", path, nil)
+	data, err := c.allPages(path)
 	if err != nil {
 		return nil, err
-	}
-	if status != 200 {
-		return nil, fmt.Errorf("gitlab list comments: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
 		ID        int64  `json:"id"`
@@ -474,12 +430,9 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		glState = "merged"
 	}
 	path := fmt.Sprintf("/projects/%s/merge_requests?state=%s&per_page=100", projectID(repo), glState)
-	data, status, err := c.doJSON("GET", path, nil)
+	data, err := c.allPages(path)
 	if err != nil {
 		return nil, err
-	}
-	if status != 200 {
-		return nil, fmt.Errorf("gitlab list MRs: HTTP %d: %s", status, data)
 	}
 	var raw []struct {
 		IID          int    `json:"iid"`
@@ -487,6 +440,7 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		Description  string `json:"description"`
 		State        string `json:"state"`
 		WebURL       string `json:"web_url"`
+		ClosedAt     string `json:"closed_at"`
 		MergedAt     string `json:"merged_at"`
 		SourceBranch string `json:"source_branch"`
 		CreatedAt    string `json:"created_at"`
@@ -501,7 +455,7 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 		if s == "opened" {
 			s = "open"
 		}
-		prs[i] = vcs.PR{Number: r.IID, Title: r.Title, Body: r.Description, State: s, HeadBranch: r.SourceBranch, MergedAt: r.MergedAt, URL: r.WebURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		prs[i] = vcs.PR{Number: r.IID, Title: r.Title, Body: r.Description, State: s, HeadBranch: r.SourceBranch, MergedAt: r.MergedAt, ClosedAt: r.ClosedAt, URL: r.WebURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 	}
 	return prs, nil
 }
@@ -553,6 +507,7 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 		Description  string `json:"description"`
 		State        string `json:"state"`
 		WebURL       string `json:"web_url"`
+		ClosedAt     string `json:"closed_at"`
 		MergedAt     string `json:"merged_at"`
 		SourceBranch string `json:"source_branch"`
 	}
@@ -563,7 +518,7 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 	if s == "opened" {
 		s = "open"
 	}
-	return vcs.PR{Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, MergedAt: raw.MergedAt, URL: raw.WebURL}, nil
+	return vcs.PR{Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.WebURL}, nil
 }
 
 func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
@@ -829,6 +784,7 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 		WebURL    string   `json:"web_url"`
 		CreatedAt string   `json:"created_at"`
 		UpdatedAt string   `json:"updated_at"`
+		ClosedAt  string   `json:"closed_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -846,7 +802,7 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 		Labels:    raw.Labels,
 		URL:       raw.WebURL,
 		CreatedAt: raw.CreatedAt,
-		UpdatedAt: raw.UpdatedAt,
+		UpdatedAt: raw.UpdatedAt, ClosedAt: raw.ClosedAt,
 	}, nil
 }
 
