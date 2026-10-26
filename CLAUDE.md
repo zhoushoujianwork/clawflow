@@ -261,7 +261,10 @@ GitHub Actions（`.github/workflows/release.yml`）会自动完成：
 
 #### Release Tag 描述规范
 
-Tag message 即 GitHub Release 的标题和正文，格式：
+Use an annotated tag message in the following format. The release workflow
+currently generates GitHub release notes automatically; it does not copy the
+tag message into the release body. After the workflow completes, explicitly
+set the release title/body and include migration or breaking-change notes.
 
 ```
 {一句话概括本版本核心变化}
