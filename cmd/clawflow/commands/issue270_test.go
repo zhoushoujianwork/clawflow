@@ -142,9 +142,9 @@ func TestRunOneOperator_BecameParent_NoTerminalLabel(t *testing.T) {
 	}
 	job := &runJob{op: op, sub: sub, repo: "owner/repo", client: client}
 
-	didFire, hitRateLimit := runOneOperator(context.Background(), job, 5*time.Second)
-	if didFire || hitRateLimit {
-		t.Errorf("runOneOperator() = (%v, %v), want (false, false)", didFire, hitRateLimit)
+	didFire, hitRateLimit, failed := runOneOperator(context.Background(), job, 5*time.Second)
+	if didFire || hitRateLimit || failed {
+		t.Errorf("runOneOperator() = (%v, %v, %v), want (false, false, false)", didFire, hitRateLimit, failed)
 	}
 	if len(client.addLabelCalls) != 0 {
 		t.Errorf("became-parent skip must not write any label, got AddLabel(%v)", client.addLabelCalls)

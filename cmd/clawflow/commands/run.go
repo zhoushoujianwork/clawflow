@@ -70,6 +70,8 @@ func NewRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Scan configured repos and run matching operators",
+		// A failed pass returns an error for the exit code; usage text is noise.
+		SilenceUsage: true,
 		Long: `Execute one pass of the operator loop:
   - for each enabled repo, list open issues
   - for each issue, match against registered operators
@@ -400,7 +402,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	//     git clone (worktree add + fetch are not safe in parallel).
 	//     Read-only operators (custom assessments, reply-comment) skip
 	//     the per-repo lock and run freely.
-	fired := runJobsParallel(ctx, jobs, workers, timeout)
+	fired, failed := runJobsParallel(ctx, jobs, workers, timeout)
 
 	// Phase 3 (sequential): drop pending entries that fired, then write
 	// the snapshots so the dashboard reflects the post-run state.
@@ -499,7 +501,26 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		fmt.Fprintf(os.Stderr, "✓ auto-pushed config to Gist\n")
 	}
 
-	return nil
+	// Exit non-zero when any dispatched operator job ended in a terminal
+	// non-success state (issue #354). Reported last so Phases 3/4 and
+	// auto-push still run for the failed pass.
+	return failedRunsError(failed)
+}
+
+// failedRunsError builds the error `clawflow run` returns when operator jobs
+// failed in this pass, or nil when there were none. Entries are formatted as
+// "repo#issue op" and sorted so the message is deterministic regardless of
+// worker completion order.
+func failedRunsError(failed []firedKey) error {
+	if len(failed) == 0 {
+		return nil
+	}
+	items := make([]string, 0, len(failed))
+	for _, f := range failed {
+		items = append(items, fmt.Sprintf("%s#%d %s", f.Repo, f.IssueNumber, f.Operator))
+	}
+	slices.Sort(items)
+	return fmt.Errorf("%d operator run(s) failed: %s", len(items), strings.Join(items, ", "))
 }
 
 // runJob is one (issue, operator) pair that scanRepoOnce decided is
@@ -895,6 +916,11 @@ func captureIssuesSnapshot(client vcs.Client, fullName string) []snapshot.IssueE
 	return entries
 }
 
+// runOneOperatorFn is the per-job executor used by runJobsParallel. It is a
+// variable only so tests can drive the worker pool's aggregation without
+// launching Offload.
+var runOneOperatorFn = runOneOperator
+
 // runJobsParallel dispatches `jobs` across `workers` goroutines, gating
 // concurrency with a per-issue lock (always) so two operators never race
 // on the same (repo, issue). The previous per-repo lock for `implement`
@@ -902,7 +928,10 @@ func captureIssuesSnapshot(client vcs.Client, fullName string) []snapshot.IssueE
 // operations are handled by runGitWithRetry (exponential backoff on git
 // lock errors) so same-repo implement jobs can now run in parallel.
 // Returns the set of jobs whose operator produced output (i.e. fired),
-// so the caller can deduplicate pending entries.
+// so the caller can deduplicate pending entries, and the set of jobs that
+// reached a terminal non-success state (failed), so the caller can exit
+// non-zero (issue #354). Jobs skipped by the provider-limit circuit breaker
+// below are neither fired nor failed; only the job that hit the limit counts.
 //
 // Provider-limit circuit breaker: when any worker detects a claude refusal
 // that is account-wide rather than issue-specific — a transient rate limit or
@@ -910,9 +939,9 @@ func captureIssuesSnapshot(client vcs.Client, fullName string) []snapshot.IssueE
 // workers check the flag before starting and skip their job so the entire
 // queue doesn't cascade into failures. The skipped issues retain their trigger
 // labels and will be retried on the next run pass.
-func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout time.Duration) []firedKey {
+func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout time.Duration) (fired []firedKey, failed []firedKey) {
 	if len(jobs) == 0 {
-		return nil
+		return nil, nil
 	}
 	if workers < 1 {
 		workers = 1
@@ -922,9 +951,8 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 	}
 
 	var (
-		issueLocks  sync.Map // key: "<repo>#<issue>" → *sync.Mutex
-		fired       []firedKey
-		firedMu     sync.Mutex
+		issueLocks  sync.Map    // key: "<repo>#<issue>" → *sync.Mutex
+		firedMu     sync.Mutex  // guards fired and failed
 		rateLimited atomic.Bool // set when any worker hits a rate limit
 	)
 
@@ -952,14 +980,20 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 
 				iMu := mu(&issueLocks, fmt.Sprintf("%s#%d", j.repo, j.sub.Number))
 				iMu.Lock()
-				didFire, hitRateLimit := runOneOperator(ctx, j, timeout)
+				didFire, hitRateLimit, jobFailed := runOneOperatorFn(ctx, j, timeout)
 				iMu.Unlock()
 				if hitRateLimit {
 					rateLimited.Store(true)
 				}
-				if didFire {
+				if didFire || jobFailed {
+					key := firedKey{Repo: j.repo, IssueNumber: j.sub.Number, Operator: j.op.Name}
 					firedMu.Lock()
-					fired = append(fired, firedKey{Repo: j.repo, IssueNumber: j.sub.Number, Operator: j.op.Name})
+					if didFire {
+						fired = append(fired, key)
+					}
+					if jobFailed {
+						failed = append(failed, key)
+					}
 					firedMu.Unlock()
 				}
 			}
@@ -970,20 +1004,25 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 	}
 	close(jobCh)
 	wg.Wait()
-	return fired
+	return fired, failed
 }
 
 // runOneOperator executes a single operator against its issue and
 // persists meta.json + events.jsonl under the dashboard data dir.
-// Returns (didFire, hitRateLimit):
+// Returns (didFire, hitRateLimit, failed):
 //   - didFire: true when the operator produced non-empty stdout (outcome label applied)
 //   - hitRateLimit: true when claude refused for an account-level reason (a
 //     transient rate limit, or a billing cap per issue #308); the caller should
 //     stop dispatching remaining jobs this pass
+//   - failed: true when the job reached a terminal non-success run status
+//     (failed, auth-error, no-marker, disallowed-outcome, output-limit,
+//     skipped-empty, rate-limited, cost-limit). Lock contention, precondition
+//     skips and other non-terminal early returns are NOT failures. `clawflow
+//     run` uses this to exit non-zero (issue #354).
 //
 // All log lines are prefixed with "[<repo>#<issue> <op>]" so output
 // from concurrent workers stays disentangleable.
-func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool) {
+func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool, failed bool) {
 	prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
 	fmt.Printf("%s → start\n", prefix)
 
@@ -993,7 +1032,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ lock failed (another process owns it): %v\n", prefix, err)
 		runLog.Warn("run/lock_failed", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", err.Error())
-		return false, false
+		return false, false, false
 	}
 	defer snapshot.ReleaseLock(j.repo, j.sub.Number)
 	runLog.Info("run/lock", "pid", os.Getpid(), "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
@@ -1008,7 +1047,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		if err := prepareCIRepair(j, time.Now().UTC()); err != nil {
 			fmt.Fprintf(os.Stderr, "%s → repair skipped: %v\n", prefix, err)
 			runLog.Warn("run/ci_repair_skip", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
-			return false, false
+			return false, false, false
 		}
 	}
 
@@ -1016,7 +1055,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		if err := prepareImplementation(j); err != nil {
 			fmt.Fprintf(os.Stderr, "%s → implementation skipped: %v\n", prefix, err)
 			runLog.Warn("run/implementation_skip", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
-			return false, false
+			return false, false, false
 		}
 	}
 
@@ -1029,7 +1068,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			freshSub.Labels = freshLabels
 			freshOp := effectiveOperator(j.op, &freshSub)
 			if freshOp == nil {
-				return false, false
+				return false, false, false
 			}
 			if ok, reason := operator.MatchesWithReason(&freshSub, freshOp); !ok {
 				fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
@@ -1037,7 +1076,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 					runLog.Info("run/skip_excluded",
 						"repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "by", by, "when", "post_poll")
 				}
-				return false, false
+				return false, false, false
 			}
 			j.op = freshOp
 		}
@@ -1064,7 +1103,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if stale, n := isStaleLeafJob(j.client, j.op, j.repo, j.sub.Number); stale {
 		fmt.Printf("%s → skip (became parent since poll: %d sub-issue(s))\n", prefix, n)
 		runLog.Info("run/skip_became_parent", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "subs", n)
-		return false, false
+		return false, false, false
 	}
 
 	// Persist per-run events.jsonl + meta.json under the dashboard
@@ -1123,7 +1162,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			runningMeta.Status = "skipped"
 			runningMeta.Error = commentErr.Error()
 			_ = snapshot.WriteRunMeta(runDir, runningMeta)
-			return false, false
+			return false, false, false
 		}
 	}
 
@@ -1148,7 +1187,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		runLog.Warn("run/end", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name,
 			"status", "failed", "stage", runningMeta.Stage, "err", overrideErr.Error(), "cost", "0.0000")
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, true
 	}
 	if hasOverride {
 		fmt.Fprintf(os.Stderr, "%s → base-branch override: %q (from %s)\n", prefix, overrideBranch, overrideSource)
@@ -1190,7 +1229,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		} else {
 			checkCircuitBreaker(j, prefix)
 		}
-		return false, false
+		return false, false, true
 	}
 	workdir := wtResult.Path
 	if wtResult.Resumed {
@@ -1243,7 +1282,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			runningMeta.Status = "skipped"
 			runningMeta.Error = err.Error()
 			_ = snapshot.WriteRunMeta(runDir, runningMeta)
-			return false, false
+			return false, false, false
 		}
 	}
 
@@ -1548,43 +1587,43 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	switch rm.Status {
 	case "success":
 		fmt.Printf("%s ✓ done\n", prefix)
-		return true, false
+		return true, false, false
 	case "rate-limited":
 		// Signal the caller to abort the queue; do NOT call checkCircuitBreaker.
-		return false, true
+		return false, true, true
 	case "cost-limit":
 		// Abort the queue exactly like a rate limit — a billing cap is
 		// account-level, so every remaining job in this pass would fail
 		// identically. Without this the whole queue re-fires and each issue
 		// burns a circuit-breaker slot on someone else's spend (issue #308).
 		fmt.Printf("%s ✗ cost limit reached (aborting pass; retries when the billing window resets)\n", prefix)
-		return false, true
+		return false, true, true
 	case "auth-error":
 		// Do NOT signal queue abort (unlike rate-limit, other issues may still
 		// succeed with the same session). Do NOT call checkCircuitBreaker —
 		// agent-failed would be misleading for a credential problem.
 		fmt.Printf("%s ✗ auth error (check session/API key)\n", prefix)
-		return false, false
+		return false, false, true
 	case "no-marker":
 		// Do NOT call checkCircuitBreaker: a missing marker line is a
 		// write-back defect, not an unprocessable issue (issue #323).
 		fmt.Printf("%s ✗ no outcome marker (not counted toward circuit breaker)\n", prefix)
-		return false, false
+		return false, false, true
 	case "disallowed-outcome":
 		fmt.Printf("%s ✗ disallowed outcome label %q (comment landed, no terminal label; circuit breaker counting)\n", prefix, outcome)
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, true
 	case "output-limit":
 		fmt.Printf("%s ✗ output token limit (raise max_output_tokens; circuit breaker counting)\n", prefix)
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, true
 	case "skipped-empty":
 		fmt.Printf("%s ✗ empty output (circuit breaker counting)\n", prefix)
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, true
 	default:
 		checkCircuitBreaker(j, prefix)
-		return false, false
+		return false, false, true
 	}
 }
 
