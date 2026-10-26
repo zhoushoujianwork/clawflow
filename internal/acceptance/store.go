@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 )
 
 const maxFileBytes = 4 << 20
@@ -284,20 +285,74 @@ func (s *Store) loadRecord(c Contract, name string) (Record, error) {
 // Start and completion order must agree strictly; ties or reversed completion
 // order are ambiguous and fail closed. No complete record returns os.ErrNotExist.
 func (s *Store) LatestRecord(c Contract) (Record, error) {
-	k, err := key(c)
+	complete, err := s.completeRecords(c)
 	if err != nil {
 		return Record{}, err
 	}
+	if len(complete) == 0 {
+		return Record{}, os.ErrNotExist
+	}
+	return complete[len(complete)-1], nil
+}
+
+// IsInfrastructure reports whether a completed record is an infrastructure
+// attempt rather than a reviewer verdict. Evidence is only populated after a
+// typed reviewer report was accepted, so a completed record without it ended in
+// a setup, provider, inspection, storage or cancellation error. A passing report
+// later rejected by the gate keeps its evidence and stays a verdict.
+func IsInfrastructure(r Record) bool { return r.Completed && len(r.Evidence) == 0 }
+
+// InfrastructureAttempts is a read-only summary of the completed infrastructure
+// attempts for exactly one contract.
+// Count is how many completed attempts ended without a reviewer verdict, LastAt
+// is the latest of their CompletedAt times, and LatestIsInfra reports whether
+// the newest completed record of any kind is one of them. Corruption and
+// ambiguous ordering fail closed with an error, exactly as in LatestRecord.
+type InfrastructureAttempts struct {
+	Count         int
+	LastAt        time.Time
+	LatestIsInfra bool
+}
+
+// InfrastructureAttempts scans the contract's records without writing.
+func (s *Store) InfrastructureAttempts(c Contract) (InfrastructureAttempts, error) {
+	var out InfrastructureAttempts
+	complete, err := s.completeRecords(c)
+	if err != nil {
+		return out, err
+	}
+	for _, r := range complete {
+		if IsInfrastructure(r) {
+			out.Count++
+			if r.CompletedAt.After(out.LastAt) {
+				out.LastAt = r.CompletedAt
+			}
+		}
+	}
+	if len(complete) > 0 {
+		out.LatestIsInfra = IsInfrastructure(complete[len(complete)-1])
+	}
+	return out, nil
+}
+
+// completeRecords loads every completed record for the exact contract, ordered
+// by start time. Start and completion order must agree strictly; ties or
+// reversed completion order are ambiguous and fail closed.
+func (s *Store) completeRecords(c Contract) ([]Record, error) {
+	k, err := key(c)
+	if err != nil {
+		return nil, err
+	}
 	dir, err := s.root.Open(".")
 	if err != nil {
-		return Record{}, err
+		return nil, err
 	}
 	defer dir.Close()
 	var complete []Record
 	for {
 		entries, readErr := dir.ReadDir(128)
 		if readErr != nil && readErr != io.EOF {
-			return Record{}, readErr
+			return nil, readErr
 		}
 		for _, entry := range entries {
 			name := entry.Name()
@@ -306,13 +361,13 @@ func (s *Store) LatestRecord(c Contract) (Record, error) {
 			}
 			r, err := s.loadRecord(c, name)
 			if err != nil {
-				return Record{}, fmt.Errorf("invalid acceptance reference %s: %w", name, err)
+				return nil, fmt.Errorf("invalid acceptance reference %s: %w", name, err)
 			}
 			if !r.Completed {
 				continue
 			}
 			if err := completeRecord(r); err != nil {
-				return Record{}, err
+				return nil, err
 			}
 			complete = append(complete, r)
 		}
@@ -320,16 +375,13 @@ func (s *Store) LatestRecord(c Contract) (Record, error) {
 			break
 		}
 	}
-	if len(complete) == 0 {
-		return Record{}, os.ErrNotExist
-	}
 	sort.Slice(complete, func(i, j int) bool { return complete[i].StartedAt.Before(complete[j].StartedAt) })
 	for i := 1; i < len(complete); i++ {
 		if !complete[i-1].StartedAt.Before(complete[i].StartedAt) || !complete[i-1].CompletedAt.Before(complete[i].CompletedAt) {
-			return Record{}, errors.New("ambiguous acceptance attempt ordering")
+			return nil, errors.New("ambiguous acceptance attempt ordering")
 		}
 	}
-	return complete[len(complete)-1], nil
+	return complete, nil
 }
 
 func completeRecord(r Record) error {

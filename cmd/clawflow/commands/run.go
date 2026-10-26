@@ -404,6 +404,11 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	//     the per-repo lock and run freely.
 	fired, failed := runJobsParallel(ctx, jobs, workers, timeout)
 
+	// Phase 2b (sequential): automatic acceptance harvest. Independent
+	// acceptance can take ~30 minutes, so it cannot live in the scan sweep
+	// (scanCtx is 5-15 min). Failures join the exit-status accounting below.
+	failed = append(failed, runHarvestPhase(ctx, cfg, onlyRepo, onlyIssue, timeout, watchdogDeadline)...)
+
 	// Phase 3 (sequential): drop pending entries that fired, then write
 	// the snapshots so the dashboard reflects the post-run state.
 	if len(fired) > 0 {

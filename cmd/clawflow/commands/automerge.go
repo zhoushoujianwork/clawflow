@@ -223,6 +223,61 @@ const sweepMaxMergesPerPass = 1
 // large open-PR backlog must not turn the sweep into an API storm.
 const sweepMaxCandidates = 10
 
+// prSkip describes why a PR was filtered out of auto-merge convergence. The
+// sweep and the acceptance harvest share it so both report the same reasons.
+type prSkip struct {
+	reason string
+	warn   bool
+	// fields are the log key/values that follow "repo" and "pr".
+	fields []any
+}
+
+// log writes the skip under event, keeping the field order the sweep has
+// always used: repo, pr, [issue], reason, [detail].
+func (s *prSkip) log(event, repo string, pr int) {
+	fields := append([]any{"repo", repo, "pr", pr}, s.fields...)
+	if s.warn {
+		runLog.Warn(event, fields...)
+		return
+	}
+	runLog.Info(event, fields...)
+}
+
+// autoMergeCandidate applies the PR filters shared by the sweep and the
+// acceptance harvest: not a draft, a closing keyword, mergeability clean and
+// the closed issue not locally locked. It returns the issue the PR closes,
+// whether the PR counted against the per-pass candidate cap (it passed the
+// keyword filter), and a non-nil skip when the PR is filtered out.
+//
+// Non-clean PRs are skipped silently (no comment): the same dirty PR is seen
+// every pass, so commenting would spam the issue forever. The reason still
+// lands in run.log (see #334) so patrol can tell a stuck candidate from
+// "nothing to do".
+func autoMergeCandidate(client vcs.Client, fullName string, pr vcs.PR) (issueNum int, candidate bool, skip *prSkip) {
+	if isDraftPR(pr.Title) {
+		return 0, false, &prSkip{reason: "draft", fields: []any{"reason", "draft"}}
+	}
+	// A PR with no closing keyword isn't ClawFlow's to merge: it may be
+	// a human's in-flight work. The `Closes #N` link is the signal that
+	// an operator opened it to resolve a tracked issue.
+	issueNum = extractClosesIssue(pr.Body)
+	if issueNum == 0 {
+		return 0, false, &prSkip{reason: "no_closing_keyword", fields: []any{"reason", "no_closing_keyword"}}
+	}
+	status, mErr := client.GetPRMergeability(fullName, pr.Number)
+	if mErr != nil {
+		fmt.Fprintf(os.Stderr, "[%s] ⚠ auto-merge sweep: mergeability of PR #%d: %v\n", fullName, pr.Number, mErr)
+		return issueNum, true, &prSkip{reason: "mergeability_error", warn: true, fields: []any{"issue", issueNum, "reason", "mergeability_error", "err", mErr.Error()}}
+	}
+	if status != vcs.MergeStatusClean {
+		return issueNum, true, &prSkip{reason: "not_clean", warn: true, fields: []any{"issue", issueNum, "reason", "not_clean", "status", string(status)}}
+	}
+	if snapshot.IsLocked(fullName, issueNum) {
+		return issueNum, true, &prSkip{reason: "locked", fields: []any{"issue", issueNum, "reason", "locked"}}
+	}
+	return issueNum, true, nil
+}
+
 // sweepAutoMergePRs converges open PRs on an auto_merge repo that no inline
 // auto-merge ever claimed. Before issue #299 auto-merge only fired in the
 // instant an `implement` run emitted `agent-implemented`, with the PR number
@@ -254,45 +309,14 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 		if candidates >= sweepMaxCandidates || merged >= sweepMaxMergesPerPass {
 			break
 		}
-		if isDraftPR(pr.Title) {
-			skipped++
-			skipReasons["draft"]++
-			runLog.Info("run/automerge_skip", "repo", fullName, "pr", pr.Number, "reason", "draft")
-			continue
+		issueNum, isCandidate, skip := autoMergeCandidate(client, fullName, pr)
+		if isCandidate {
+			candidates++
 		}
-		// A PR with no closing keyword isn't ClawFlow's to merge: it may be
-		// a human's in-flight work. The `Closes #N` link is the signal that
-		// an operator opened it to resolve a tracked issue.
-		issueNum := extractClosesIssue(pr.Body)
-		if issueNum == 0 {
+		if skip != nil {
 			skipped++
-			skipReasons["no_closing_keyword"]++
-			runLog.Info("run/automerge_skip", "repo", fullName, "pr", pr.Number, "reason", "no_closing_keyword")
-			continue
-		}
-		candidates++
-		// Silent skip on non-clean: the sweep sees the same dirty PR every
-		// pass, so commenting here would spam the issue forever. The reason
-		// still lands in run.log (see #334) so patrol can tell a stuck
-		// candidate from "nothing to do".
-		status, mErr := client.GetPRMergeability(fullName, pr.Number)
-		if mErr != nil {
-			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge sweep: mergeability of PR #%d: %v\n", prefix, pr.Number, mErr)
-			skipped++
-			skipReasons["mergeability_error"]++
-			runLog.Warn("run/automerge_skip", "repo", fullName, "pr", pr.Number, "issue", issueNum, "reason", "mergeability_error", "err", mErr.Error())
-			continue
-		}
-		if status != vcs.MergeStatusClean {
-			skipped++
-			skipReasons["not_clean"]++
-			runLog.Warn("run/automerge_skip", "repo", fullName, "pr", pr.Number, "issue", issueNum, "reason", "not_clean", "status", string(status))
-			continue
-		}
-		if snapshot.IsLocked(fullName, issueNum) {
-			skipped++
-			skipReasons["locked"]++
-			runLog.Info("run/automerge_skip", "repo", fullName, "pr", pr.Number, "issue", issueNum, "reason", "locked")
+			skipReasons[skip.reason]++
+			skip.log("run/automerge_skip", fullName, pr.Number)
 			continue
 		}
 		if attemptAutoMerge(autoMergeAttempt{
