@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 )
 
 // Lifecycle stages emitted via RunOptions.StageFunc as Run progresses. These
@@ -19,7 +21,7 @@ import (
 // frozen start-of-run snapshot (issue #199). Kept as exported consts so the
 // caller (cmd/clawflow/commands/run.go) and tests share one source of truth.
 const (
-	StageClaudeStarted  = "claude-started"
+	StageOffloadStarted = "offload-started"
 	StageParsingOutcome = "parsing-outcome"
 	StagePostingComment = "posting-comment"
 	StageApplyingLabel  = "applying-label"
@@ -95,10 +97,7 @@ const markerTailLines = 3
 
 // hasTrailingOutcome reports whether `body` carries a verdict marker in its
 // trailing lines, i.e. whether parseOutcome would extract a label from it.
-// Used by the multi-turn recovery in claude.go so the turn it falls back to is
-// one that actually ended with a verdict — not one that merely mentioned a
-// marker in passing (which, post-#326 anchoring, would then parse as no-marker
-// and throw away the real turn).
+// It shares the trailing-marker rules used by parseOutcome.
 func hasTrailingOutcome(body string) bool {
 	label, _ := parseOutcome(body)
 	return label != ""
@@ -106,8 +105,8 @@ func hasTrailingOutcome(body string) bool {
 
 // thinkingRE strips literal <thinking>…</thinking> blocks that some Claude
 // variants emit as plain text inside an assistant turn. This is distinct from
-// API-level thinking blocks (content[].type == "thinking"), which claude.go
-// already filters by content-block type. The (?s) flag makes . match newlines
+// structured observation evidence, which stays in the raw event log.
+// The (?s) flag makes . match newlines
 // so multi-paragraph reasoning blocks are fully removed. Non-greedy .*? means
 // multiple blocks in one response are each stripped independently rather than
 // one giant match swallowing content between the first <thinking> and the last
@@ -184,20 +183,16 @@ type VCS interface {
 // RunOptions configures a single operator invocation.
 type RunOptions struct {
 	Repo     string        // full_name, e.g. "owner/repo"
-	Workdir  string        // cwd for the claude subprocess
-	Timeout  time.Duration // claude subprocess timeout; 0 disables
+	Workdir  string        // cwd for the Offload execution
+	Timeout  time.Duration // execution timeout; 0 uses the shared default
 	Comments []string      // optional comment thread to include in the prompt
 
-	// Role selects which per-provider model slot RunClaude should read
-	// when spawning claude ("chat" / "eval" / "operator"). The failover
-	// loop resolves the actual model string per provider on each attempt,
-	// so different providers can have different per-role model IDs. An
-	// empty Role falls back to the operator slot (safest for unknown
-	// user-supplied skills).
+	// Role selects the configured model slot (chat/eval/operator/light).
+	// The shared client selects one model/auth provider and never replays execution.
 	Role string
 
-	// EventWriter, if non-nil, receives raw stream-json event lines from
-	// claude so the dashboard can replay runs post-mortem. Callers typically
+	// EventWriter, if non-nil, receives raw Offload NDJSON event evidence
+	// so the dashboard can replay runs post-mortem. Callers typically
 	// set it to a file writer pointing at `<run-dir>/events.jsonl`; tests
 	// leave it nil.
 	EventWriter io.Writer
@@ -213,8 +208,8 @@ type RunOptions struct {
 	// operator output (comments, verdicts) uses the configured language.
 	Language string
 
-	// RunFunc executes the claude subprocess. Leave nil to use the real
-	// RunClaude; tests inject a fake that returns canned output without
+	// RunFunc executes one Offload request. Leave nil to use the real
+	// RunOffload; tests inject a fake that returns canned output without
 	// spawning a process.
 	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, systemPrompt ...string) (string, error)
 
@@ -268,9 +263,20 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	}
 	runFunc := opts.RunFunc
 	if runFunc == nil {
-		runFunc = RunClaude
+		runFunc = RunOffload
+		if op.Name != "implement" && op.Name != "repair-ci" {
+			runFunc = func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, instructions ...string) (string, error) {
+				options := execution.Options{Workspace: workdir, Role: role, Timeout: timeout, Events: events}
+				options.MaxBudgetUSD, _ = ctx.Value(budgetKey{}).(float64)
+				if len(instructions) > 0 {
+					options.Instructions = instructions[0]
+				}
+				result, err := execution.Execute(ctx, prompt, options)
+				return result.Text, err
+			}
+		}
 	}
-	emitStage(opts.StageFunc, StageClaudeStarted)
+	emitStage(opts.StageFunc, StageOffloadStarted)
 	output, err := runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Role, systemPrompt)
 	if err != nil {
 		// Failure path: do NOT pollute the issue with a comment. The

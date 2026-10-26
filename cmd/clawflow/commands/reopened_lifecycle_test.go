@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -23,7 +24,7 @@ type reopenedLifecycleTransport func(*http.Request) (*http.Response, error)
 func (f reopenedLifecycleTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // This crosses the real scanner, provider subprocess and write-back boundary.
-// Only HTTP transport and the claude executable are fakes; Git uses a local
+// Only HTTP transport and the Offload executable are fakes; Git uses a local
 // bare remote, and every request is handled in memory without opening sockets.
 func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 	for _, race := range []bool{false, true} {
@@ -42,26 +43,22 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 			capture := t.TempDir()
 			promptPath := filepath.Join(capture, "prompt.txt")
 			cwdPath := filepath.Join(capture, "cwd.txt")
-			resultPath := filepath.Join(capture, "result.json")
-			result, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": "Follow-up implemented. PR: https://example.invalid/o/r/pull/11\n<!-- clawflow:outcome=agent-implemented -->"})
-			if err := os.WriteFile(resultPath, append(result, '\n'), 0600); err != nil {
+			executable, err := os.Executable()
+			if err != nil {
 				t.Fatal(err)
 			}
-			bin := t.TempDir()
-			script := `#!/bin/sh
-set -eu
-for argument do prompt="$argument"; done
-printf '%s' "$prompt" > "$REOPEN_TEST_PROMPT"
-pwd > "$REOPEN_TEST_CWD"
-/bin/cat "$REOPEN_TEST_RESULT"
-`
-			if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0700); err != nil {
+			command := filepath.Join(capture, "offload")
+			// The wrapper only selects this test binary's helper. All protocol
+			// parsing and response encoding happen in Go, including request IDs.
+			script := "#!/bin/sh\nexec '" + strings.ReplaceAll(executable, "'", "'\\''") + "' -test.run=^TestReopenedLifecycleOffloadHelper$ -- \"$@\"\n"
+			if err := os.WriteFile(command, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", command)
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "test-profile")
+			t.Setenv("CLAWFLOW_REOPEN_LIFECYCLE_OFFLOAD_HELPER", "1")
 			t.Setenv("REOPEN_TEST_PROMPT", promptPath)
 			t.Setenv("REOPEN_TEST_CWD", cwdPath)
-			t.Setenv("REOPEN_TEST_RESULT", resultPath)
 
 			implemented := true
 			openPR := false
@@ -231,4 +228,44 @@ pwd > "$REOPEN_TEST_CWD"
 			}
 		})
 	}
+}
+
+// TestReopenedLifecycleOffloadHelper is entered only by this fixture's Offload wrapper.
+// It never launches a native backend or contacts a provider.
+func TestReopenedLifecycleOffloadHelper(t *testing.T) {
+	if os.Getenv("CLAWFLOW_REOPEN_LIFECYCLE_OFFLOAD_HELPER") != "1" {
+		return
+	}
+	args := offloadtest.Args()
+	prompt, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := os.ReadFile(args["-instructions-file"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := struct{ Prompt, Workspace string }{Prompt: string(instructions) + "\n" + string(prompt), Workspace: args["-d"]}
+	if err := os.WriteFile(os.Getenv("REOPEN_TEST_PROMPT"), []byte(request.Prompt), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.Stat(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := os.Stat(request.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(actual, requested) {
+		t.Fatalf("Offload cwd=%q differs from requested workspace=%q", cwd, request.Workspace)
+	}
+	if err := os.WriteFile(os.Getenv("REOPEN_TEST_CWD"), []byte(cwd+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	offloadtest.Emit(args, "Follow-up implemented. PR: https://example.invalid/o/r/pull/11\n<!-- clawflow:outcome=agent-implemented -->", "", "")
 }

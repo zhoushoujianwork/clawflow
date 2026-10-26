@@ -3,13 +3,12 @@ package commands
 import (
 	"context"
 	"fmt"
+	"github.com/zhoushoujianwork/clawflow/internal/chat"
 	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/clawflow/internal/chat"
-	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -24,13 +23,10 @@ func NewChatCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "chat",
 		Short: "Interactive AI chat with repo/issue context",
-		Long: `Start an interactive Claude session with repository or issue context
-automatically injected. Each invocation creates a FRESH session and
-fetches the latest issue body / labels / comments — close the terminal
-window when you're done. Persistence is intentionally off: chat now
-lives in the user's native terminal (no clawflow-side destroy hook),
-and resuming would either strand stale issue data or have two claude
-processes fighting over the same transcript file.
+		Long: `Start a plain text Offload conversation with repository or issue context.
+Each invocation fetches current context and creates a fresh logical session.
+Enter one message per line; later turns resume that same session.
+Use /exit, EOF or Ctrl-C to leave. Native TUI and image paste are not supported.
 
 Issue-level chat supports two modes (--mode flag):
   issue  (default) — discussion and issue-tracker operations only.
@@ -63,10 +59,8 @@ Examples:
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "repository (owner/repo)")
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number for issue-level chat")
-	// Empty default means "use whatever the first enabled provider
-	// configured in its chat slot" — resolved below via
-	// config.ResolveModelForRole. An explicit --model on the CLI still wins.
-	cmd.Flags().StringVar(&model, "model", "", "claude model to use (default: first provider's chat_model, falls back to haiku)")
+	// An empty model lets the selected Offload profile choose.
+	cmd.Flags().StringVar(&model, "model", "", "explicit model override (default: Offload profile model)")
 	// Empty default means "use chat_default_mode from credentials.yaml" —
 	// resolved below via Credentials.EffectiveChatDefaultMode(). Only
 	// applies to issue-level chat (--issue N); repo-level chat is always
@@ -75,7 +69,7 @@ Examples:
 	return cmd
 }
 
-func runChat(_ context.Context, repo string, issueNum int, model string, modeFlag string) error {
+func runChat(ctx context.Context, repo string, issueNum int, model string, modeFlag string) error {
 	client, canonRepo, repoCfg, err := newVCSClientForRepo(repo)
 	if err != nil {
 		return err
@@ -90,7 +84,6 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 	//      no kill switch — so two clicks while the first window is
 	//      still open would pit two claude processes against the same
 	//      jsonl ("Session ID already in use" or worse).
-	sessionID := chat.NewSessionID(repo, issueNum)
 
 	// Working directory: prefer the repo's local clone so claude can
 	// read code in-place. When no local_path is configured we fall
@@ -103,15 +96,6 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 		workdir = os.TempDir()
 	}
 
-	// Resolve the model: explicit --model > first enabled provider's
-	// chat slot > built-in default. We resolve here rather than at
-	// flag-parse time so a provider edit takes effect on the next chat
-	// without rebuilding the binary.
-	if model == "" {
-		creds, _ := config.LoadCredentials()
-		model = config.ResolveModelForRole(creds, config.RoleChat)
-	}
-
 	// Resolve the issue chat mode: explicit --mode > credentials.yaml
 	// chat_default_mode > built-in default ("issue"). Resolved for both
 	// issue- and repo-level chat so the title can show the value — note
@@ -120,54 +104,6 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 	if modeFlag == "" {
 		creds, _ := config.LoadCredentials()
 		modeFlag = creds.EffectiveChatDefaultMode()
-	}
-
-	// Session display name — rendered by claude as the terminal window
-	// title via --name. Tag the scope + --mode value so the user can
-	// tell at a glance what this window is.
-	var name string
-	if issueNum > 0 {
-		name = fmt.Sprintf("clawflow: %s #%d [%s]", repo, issueNum, modeFlag)
-	} else {
-		name = fmt.Sprintf("clawflow: %s [repo · %s]", repo, modeFlag)
-	}
-
-	// Hard-block file mutations and notebook edits for REPO-level chat.
-	// Repo chat is strictly an analysis / planning assistant — code changes
-	// go through `clawflow run` (the implement operator) on a labeled issue.
-	//
-	// ISSUE-level chat behaviour depends on mode:
-	//   issue mode (default) — also disallows Edit/Write/NotebookEdit.
-	//     The AI is prompted to land conclusions in the issue tracker.
-	//   edit mode — allows full file editing for hot-fixes without going
-	//     through the full clawflow run pipeline.
-	//
-	// --dangerously-skip-permissions removes the per-Bash confirmation
-	// prompt for both modes.
-	args := []string{
-		"--model", model,
-		"--name", name,
-		"--dangerously-skip-permissions",
-	}
-	if issueNum == 0 || modeFlag != "edit" {
-		// Repo-level chat and issue-mode both block file edits.
-		args = append(args, "--disallowedTools", "Edit,Write,NotebookEdit")
-	}
-	// When the user has explicitly configured an API key in clawflow's
-	// settings (typically pointing at a corporate proxy via
-	// ANTHROPIC_BASE_URL), claude's default auth path picks the
-	// keychain/OAuth login over the env var and silently ignores both
-	// ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL — sending the OAuth
-	// token to the proxy which then 401s. --bare locks claude to
-	// "ANTHROPIC_API_KEY only" mode so the proxy actually sees the key
-	// the user configured. Trade-off: --bare also disables hooks, LSP,
-	// plugins, auto-memory, and CLAUDE.md auto-discovery — we add
-	// --add-dir for the workdir below to restore CLAUDE.md.
-	preCreds, _ := config.LoadCredentials()
-	apiKey, baseURL := config.ResolveClaudeCredentials(preCreds)
-	useBare := apiKey != ""
-	if useBare {
-		args = append(args, "--bare", "--add-dir", workdir)
 	}
 
 	// Always create a brand-new session, seeded with freshly fetched
@@ -196,53 +132,15 @@ func runChat(_ context.Context, repo string, issueNum int, model string, modeFla
 	if header := project.HeaderForRepo(repo); header != "" {
 		systemCtx = header + systemCtx
 	}
-	// claude CLI 2.x dropped --append-system-prompt-file; the prompt
-	// must be passed inline via --append-system-prompt. ARG_MAX is
-	// large enough for the 5–20KB context we build.
-	args = append(args,
-		"--session-id", sessionID,
-		"--append-system-prompt", systemCtx,
-	)
-
-	bin := claude.Resolve()
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = workdir
-	// LoadCredentials missing/unreadable falls through to empty
-	// strings, which EnvWithCredentials treats as "don't override"
-	// — same behavior as before for users with no custom claude
-	// config.
-	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
-	// Print a one-line provenance banner before claude takes over the
-	// terminal so the user can confirm which credentials this session
-	// will use. Same hint format the Settings page uses (last 4 chars).
-	// "(none — falling back to OAuth/keychain)" makes the inherit case
-	// obvious instead of silent.
-	keyHint := "(none — falling back to OAuth/keychain)"
-	if apiKey != "" {
-		if n := len(apiKey); n >= 4 {
-			keyHint = "…" + apiKey[n-4:]
-		} else {
-			keyHint = "(set, <4 chars)"
-		}
+	disallowed := []string{}
+	if issueNum == 0 || modeFlag != "edit" {
+		disallowed = []string{"Edit", "Write", "NotebookEdit"}
 	}
-	urlHint := baseURL
-	if urlHint == "" {
-		urlHint = "(default — api.anthropic.com)"
+	permission := "default"
+	if issueNum > 0 && modeFlag == "edit" {
+		permission = "bypassPermissions"
 	}
-	bareNote := ""
-	if useBare {
-		bareNote = " --bare (forced, API key takes priority over claude.ai login)"
-	}
-	modeNote := ""
-	if issueNum > 0 {
-		modeNote = fmt.Sprintf(" mode=%s", modeFlag)
-	}
-	fmt.Fprintf(os.Stderr, "[clawflow] chat → model=%s key=%s base_url=%s%s%s\n", model, keyHint, urlHint, bareNote, modeNote)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
+	return execution.Chat(ctx, os.Stdin, os.Stdout, execution.Options{Workspace: workdir, Model: model, Role: config.RoleChat, Instructions: systemCtx, PermissionMode: permission, DisallowedTools: disallowed})
 }
 
 func buildIssueChatContext(client vcs.Client, repo string, issueNum int, mode string, lang string) (string, error) {

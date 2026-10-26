@@ -2,16 +2,16 @@ package commands
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
-	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/projectgen"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -47,7 +47,7 @@ Storage: ~/.clawflow/projects/<name>/project.yaml + context.md`,
 // `clawflow project automation enable/disable/show <name>`.
 //
 // Enabling makes `clawflow run` wake this project's PM (a non-interactive
-// claude -p) at the end of each pass, throttled by --cooldown. The PM
+// offload) at the end of each pass, throttled by --cooldown. The PM
 // can only create new issues — it does not touch existing issue state.
 func newProjectAutomationCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -328,7 +328,7 @@ then writes the result to context.md.`,
 			return runProjectGenerate(args[0], model)
 		},
 	}
-	cmd.Flags().StringVar(&model, "model", "", "claude model (default: settings chat model)")
+	cmd.Flags().StringVar(&model, "model", "", "explicit model override (default: Offload profile model)")
 	return cmd
 }
 
@@ -338,7 +338,8 @@ func newProjectChatCmd() *cobra.Command {
 		Use:   "chat <name>",
 		Short: "Interactive chat to review/modify context.md",
 		Long: `Loads the current context.md as system context and launches an
-interactive Claude session. After the session ends, if Claude produced
+plain text Offload conversation. Each line is one turn; /exit or EOF leaves.
+After the session ends, if the assistant produced
 an updated context.md (in a fenced code block tagged "context.md"),
 you'll be shown a preview and asked whether to save it back.`,
 		Args: cobra.ExactArgs(1),
@@ -346,7 +347,7 @@ you'll be shown a preview and asked whether to save it back.`,
 			return runProjectChat(args[0], model)
 		},
 	}
-	cmd.Flags().StringVar(&model, "model", "", "claude model (default: settings chat model)")
+	cmd.Flags().StringVar(&model, "model", "", "explicit model override (default: Offload profile model)")
 	return cmd
 }
 
@@ -367,15 +368,11 @@ func newProjectDeleteCmd() *cobra.Command {
 
 // runProjectGenerate is a thin CLI wrapper around projectgen.Generate
 // — it adds stderr provenance lines and prints the generated content
-// to stdout. The actual prompt construction and `claude -p` invocation
+// to stdout. The actual prompt construction and `offload` invocation
 // live in internal/projectgen so the dashboard's HTTP handler can
 // reuse them.
 func runProjectGenerate(name, model string) error {
 	resolved := model
-	if resolved == "" {
-		creds, _ := config.LoadCredentials()
-		resolved = config.ResolveModelForRole(creds, config.RoleChat)
-	}
 	fmt.Fprintf(os.Stderr, "[clawflow] generating context.md for project %q (model=%s)...\n", name, resolved)
 
 	content, err := projectgen.Generate(name, model, "")
@@ -426,118 +423,29 @@ func runProjectChat(name, model string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	if model == "" {
-		creds, _ := config.LoadCredentials()
-		model = config.ResolveModelForRole(creds, config.RoleChat)
-	}
-
 	// Build the member-repo descriptor table — both for the system
 	// prompt (so Claude knows what's where) and for --add-dir below
 	// (so it can actually read those paths).
 	chatRepos := make([]chat.ProjectChatRepo, 0, len(p.Repos))
-	memberPaths := make([]string, 0, len(p.Repos))
 	for _, repoName := range p.Repos {
 		localPath := ""
 		if rc, ok := cfg.Repos[repoName]; ok {
 			localPath = rc.LocalPath
 		}
 		chatRepos = append(chatRepos, chat.ProjectChatRepo{Name: repoName, LocalPath: localPath})
-		if localPath != "" {
-			memberPaths = append(memberPaths, localPath)
-		}
 	}
 
 	systemCtx := chat.BuildProjectChatContext(name, chatRepos, originalCtx, originalTesting, cfg.Settings.Language)
 
-	sessionID := chat.NewSessionID("project/"+name, 0)
-	sessionName := fmt.Sprintf("clawflow: project/%s [project]", name)
-
-	// Workdir: the project's own metadata dir
-	// (~/.clawflow/projects/<name>/). Stable, neutral across member
-	// repos (no implicit primacy of repo[0]), and contains
-	// project.yaml + context.md so Claude can `cat` project metadata
-	// directly. Member repo source is reachable via --add-dir below.
+	sessionID, profile := "", ""
 	workdir := project.ProjectDir(name)
-
-	// claude CLI 2.x has no --append-system-prompt-file flag — the
-	// content must be passed inline. macOS/Linux ARG_MAX is well into
-	// the hundreds of KB, so a 10–30KB context fits comfortably.
-	//
-	// Tool permissions: project chat is the project-manager seat —
-	// the user wants full agency, including direct Edit/Write of
-	// code in member repos when they ask for it. Repo chat keeps
-	// its read-only stance because that surface is meant for analysis
-	// only; project chat is meant for orchestration.
-	//
-	// --dangerously-skip-permissions removes per-Bash confirmation
-	// prompts. The chat is local-only on the user's own machine,
-	// against repos they explicitly added to clawflow; auto-mode
-	// here is the whole point of project chat. User retains Esc /
-	// Ctrl-C to abort if claude does something unexpected.
-	args := []string{
-		"--model", model,
-		"--name", sessionName,
-		"--session-id", sessionID,
-		"--dangerously-skip-permissions",
-		"--append-system-prompt", systemCtx,
+	if err := execution.Chat(context.Background(), os.Stdin, os.Stdout, execution.Options{Workspace: workdir, Model: model, Role: config.RoleChat, Instructions: systemCtx, OnResult: func(result execution.Result) { sessionID = result.NativeSessionID; profile = result.Profile }}); err != nil {
+		return err
 	}
-
-	preCreds, _ := config.LoadCredentials()
-	apiKey, baseURL := config.ResolveClaudeCredentials(preCreds)
-	useBare := apiKey != ""
-	if useBare {
-		args = append(args, "--bare")
+	if sessionID == "" {
+		return nil
 	}
-	// Mount every member repo's local clone so Claude can read across
-	// the project. --add-dir is also appended for non-bare mode so the
-	// behavior is consistent regardless of auth path.
-	for _, path := range memberPaths {
-		args = append(args, "--add-dir", path)
-	}
-
-	bin := claude.Resolve()
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = workdir
-
-	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
-
-	keyHint := "(none — falling back to OAuth/keychain)"
-	if apiKey != "" {
-		if n := len(apiKey); n >= 4 {
-			keyHint = "…" + apiKey[n-4:]
-		} else {
-			keyHint = "(set, <4 chars)"
-		}
-	}
-	urlHint := baseURL
-	if urlHint == "" {
-		urlHint = "(default — api.anthropic.com)"
-	}
-	bareNote := ""
-	if useBare {
-		bareNote = " --bare (forced, API key takes priority over claude.ai login)"
-	}
-	fmt.Fprintf(os.Stderr, "[clawflow] project chat → %s (model=%s key=%s base_url=%s%s)\n", name, model, keyHint, urlHint, bareNote)
-	if len(memberPaths) > 0 {
-		fmt.Fprintf(os.Stderr, "[clawflow] mounted %d repo(s) via --add-dir; cwd = %s\n", len(memberPaths), workdir)
-	}
-
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		// The user pressing Ctrl-D / typing /exit is not an error;
-		// surface other failures so the post-chat extract still runs
-		// only when the session actually started.
-		fmt.Fprintf(os.Stderr, "[clawflow] chat exited: %v\n", err)
-	}
-
-	// Post-chat: resume the same session non-interactively to ask
-	// Claude for the final context.md (if anything was changed). This
-	// is the workaround for stream-json + interactive being mutually
-	// exclusive in claude CLI 2.x — split into two phases instead.
-	wbErr := resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx, originalTesting, useBare, apiKey, baseURL)
+	wbErr := resumeAndMaybeWriteBack(name, model, profile, sessionID, workdir, originalCtx, originalTesting)
 
 	// Refresh the dashboard snapshot regardless of whether we wrote
 	// back via the extract path — the AI may also have edited
@@ -550,7 +458,7 @@ func runProjectChat(name, model string) error {
 	return wbErr
 }
 
-// resumeAndMaybeWriteBack runs `claude -p --session-id <same>` to
+// resumeAndMaybeWriteBack runs `offload -r <actual-native-session>` to
 // extract the final context.md AND testing.md from the just-ended
 // chat. For each doc whose extracted content differs from the
 // original, the user is shown a preview and asked to confirm save.
@@ -560,7 +468,7 @@ func runProjectChat(name, model string) error {
 // Cost: one short follow-up turn covers both docs (~1–5s, a few
 // cents). Skipped silently for any doc the model omits — the prompt
 // invites the model to output zero, one, or both blocks.
-func resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx, originalTesting string, useBare bool, apiKey, baseURL string) error {
+func resumeAndMaybeWriteBack(name, model, profile, sessionID, workdir, originalCtx, originalTesting string) error {
 	fmt.Fprintln(os.Stderr, "\n[clawflow] checking for context.md / testing.md updates from this conversation…")
 
 	extractPrompt := `If the conversation produced or refined either of these documents, output the COMPLETE final version of each, inside its own fenced code block tagged with the doc name. Output zero, one, or both blocks — whatever changed.
@@ -577,29 +485,11 @@ If neither doc changed, reply with the literal token NO_UPDATES on a single line
 
 Do not include any other text, preamble, or explanation.`
 
-	args := []string{
-		"--model", model,
-		"--session-id", sessionID,
-		"-p",
-		"--output-format", "stream-json",
-		"--verbose", // stream-json with -p requires --verbose
-	}
-	if useBare {
-		args = append(args, "--bare")
-	}
-	args = append(args, extractPrompt)
-
-	cmd := exec.Command(claude.Resolve(), args...)
-	cmd.Dir = workdir
-	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
-	cmd.Stderr = os.Stderr
-
-	output, err := cmd.Output()
+	result, err := execution.Execute(context.Background(), extractPrompt, execution.Options{Workspace: workdir, Model: model, Role: config.RoleChat, Profile: profile, SessionKey: sessionID, Resume: true, ToolsDisabled: true})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[clawflow] could not extract updates (%v) — docs left as-is\n", err)
-		return nil
+		return fmt.Errorf("Offload extract updates: %w", err)
 	}
-	outStr := string(output)
+	outStr := result.Text
 
 	if err := offerSave(outStr, originalCtx, "context.md", chat.ExtractLastContextMD,
 		project.ContextPath(name), func(c string) error { return project.WriteContext(name, c) }); err != nil {

@@ -199,7 +199,7 @@ func TestRun_StageFunc_EmitsLifecycleStages(t *testing.T) {
 	}
 
 	want := []string{
-		StageClaudeStarted,
+		StageOffloadStarted,
 		StageParsingOutcome,
 		StagePostingComment,
 		StageApplyingLabel,

@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	clawsync "github.com/zhoushoujianwork/clawflow/internal/sync"
@@ -127,12 +127,17 @@ func inspectProject(name string) projectCheckResult {
 	} else {
 		r.add("config_registration", name, "passed", "Canonical config loaded without migration", "")
 	}
-	for _, tool := range []struct{ name, binary string }{{"git", "git"}, {"claude", claude.Resolve()}} {
+	for _, tool := range []struct{ name, binary string }{{"git", "git"}} {
 		if _, err := exec.LookPath(tool.binary); err != nil {
 			r.add("executable_"+tool.name, name, "blocked", tool.name+" executable unavailable", "Install the required executable")
 		} else {
 			r.add("executable_"+tool.name, name, "passed", tool.name+" executable available; execution unverified", "")
 		}
+	}
+	if err := execution.ValidateConfig(execution.WithEnvironment(cfg.Settings.Execution)); err != nil {
+		r.add("execution", name, "blocked", err.Error(), "Configure settings.execution or CLAWFLOW_OFFLOAD_* overrides")
+	} else {
+		r.add("execution", name, "passed", "Offload command/profile available; live execution unverified", "")
 	}
 	if paused, err := clawsync.IsPaused(); err != nil {
 		r.add("sync", name, "blocked", "Cannot inspect local sync pause state", "Inspect sync pause marker")

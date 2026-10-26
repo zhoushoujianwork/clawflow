@@ -2,11 +2,11 @@
 
 > **Label-driven automation that turns issues into PRs on GitHub and GitLab.**
 >
-> ClawFlow polls the repositories you configure, matches each open issue/PR against a set of **operators** (self-contained `SKILL.md` files), and runs the matching operator through `claude -p`. VCS labels and comments expose progress; local files retain run history, execution locks and bounded CI-repair attempts. There is no SaaS backend. Run it once, run it on cron, run it from your editor — it's the same binary either way.
+> ClawFlow polls the repositories you configure, matches each open issue/PR against a set of **operators** (self-contained `SKILL.md` files), and runs the matching operator through `agent-host execute`. VCS labels and comments expose progress; local files retain run history, execution locks and bounded CI-repair attempts. There is no SaaS backend. Run it once, run it on cron, run it from your editor — it's the same binary either way.
 
 ![ClawFlow dashboard](dashbroad.png)
 
-The local dashboard (`clawflow web`) gives you a filterable timeline of every operator run across every monitored repo — status, duration, PR links, and a full replay of the underlying `claude -p` event stream for any past run.
+The local dashboard (`clawflow web`) gives you a filterable timeline of every operator run across every monitored repo — status, duration, PR links, and a replay of the raw AGH event stream (usage is currently unknown) for any past run.
 
 ---
 
@@ -79,7 +79,7 @@ Supports macOS (Apple Silicon & Intel) and Linux (x86_64 & arm64). The installer
 - Initializes `~/.clawflow/config/` with a template config
 - Adds `~/.clawflow/bin` to your shell `PATH`
 
-You also need the [Claude Code CLI](https://claude.ai/code) on `PATH` — ClawFlow shells out to `claude -p` to run operators.
+You also need Agent-Host with the execution CLI and explicitly configured execution config, native command and native profile paths. See [AGH execution setup](docs/agh-execution-design.md). ACP currently supports Claude only; ClawFlow never launches a native backend directly.
 
 ---
 
@@ -172,7 +172,7 @@ Scans every enabled repo once, runs any matching operators, exits. Schedule it w
 
 ![ClawFlow architecture](docs/images/architecture.jpg)
 
-A single CLI binary scans enabled, machine-bound repositories and runs eligible work through `claude -p`:
+A single CLI binary scans enabled, machine-bound repositories and runs eligible work through `agent-host execute`:
 
 1. Route ordinary open leaf issues directly to `implement`; keep question/comment replies and parent tracking on their own paths.
 2. Acquire a local execution lock and prepare an isolated implementation worktree.
@@ -199,7 +199,7 @@ An **operator** is a single `SKILL.md` file — frontmatter plus a prompt — th
 
 - **Trigger**: which issues/PRs it runs on (target type + required labels + excluded labels)
 - **Outcome**: the result label emitted in stdout; `lock_label` is compatibility metadata, not a mutex
-- **Body**: the prompt that `claude -p` receives, with issue context injected
+- **Body**: the prompt that `agent-host execute` receives, with issue context injected
 
 Operators live in two places:
 
@@ -285,7 +285,7 @@ clawflow project automation enable my-project --cooldown 30
 
 Or flip the toggle in the dashboard's project detail page.
 
-When on, every `clawflow run` pass — after operators finish — wakes a per-project Pilot (a non-interactive `claude -p` invocation rooted at `~/.clawflow/projects/<name>/`). The Pilot triages the backlog at the **edges** of the operator pipeline: file new work, fix missing trigger labels, close stale/duplicate issues, comment to explain decisions. Implementation and delivery stay owned by the runner, operators and repo-level merge/CI controls.
+When on, every `clawflow run` pass — after operators finish — wakes a per-project Pilot (a non-interactive `agent-host execute` invocation rooted at `~/.clawflow/projects/<name>/`). The Pilot triages the backlog at the **edges** of the operator pipeline: file new work, fix missing trigger labels, close stale/duplicate issues, comment to explain decisions. Implementation and delivery stay owned by the runner, operators and repo-level merge/CI controls.
 
 #### Pilot's working files
 
@@ -293,7 +293,7 @@ When on, every `clawflow run` pass — after operators finish — wakes a per-pr
 
 | File | Owner | Role |
 |---|---|---|
-| `CLAUDE.md` | clawflow (auto-generated) | Member repo loader. Refreshed from `project.yaml` on every wake; auto-loaded by `claude -p` so the Pilot always knows which repos belong and where they live locally. Don't hand-edit — your changes get overwritten. |
+| `CLAUDE.md` | clawflow (auto-generated) | Member repo loader. Refreshed from `project.yaml` on every wake; auto-loaded by `agent-host execute` so the Pilot always knows which repos belong and where they live locally. Don't hand-edit — your changes get overwritten. |
 | `context.md` | **the Pilot itself** | The Pilot's evolving working memory. Read at wake start. The Pilot may rewrite it at wake end via a fenced ` ```context.md ``` ` block when something material was learned. Versioned by the project-level git repo. |
 | `deployment.md` | you | Optional: log-retrieval / health-check commands. When present, the Pilot inspects logs before triaging the backlog (production errors take priority over tracker work). |
 | `testing.md` | you | Optional: local-environment SOP. Used by the `implement` operator, not the Pilot. |
@@ -388,7 +388,7 @@ clawflow web --open          # serves http://127.0.0.1:8080 and opens your brows
 What it shows:
 
 - **Dashboard** — filterable timeline of recent operator runs across every monitored repo, with status, duration, and PR links
-- **Run detail** — replay of the full `claude -p` stream-json event log (tool calls, assistant messages, final result) for any past run
+- **Run detail** — replay of the raw AGH NDJSON event log (tool calls, assistant messages, final result) for any past run
 - **Repos** — read-only view of every repo in `config.yaml` with per-repo run history
 - **Operators** — active built-in and user operators with triggers, outcomes, and descriptions
 

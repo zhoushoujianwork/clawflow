@@ -68,8 +68,18 @@ type Repo struct {
 	UpdatedBy string `yaml:"updated_by,omitempty"`
 }
 
+// ExecutionSettings selects machine-local Offload profiles. Profiles own model authentication.
+type ExecutionSettings struct {
+	Command      string            `yaml:"command,omitempty" json:"command"`
+	Profile      string            `yaml:"profile,omitempty" json:"profile"`
+	RoleProfiles map[string]string `yaml:"role_profiles,omitempty" json:"role_profiles,omitempty"`
+	CodexSandbox string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
+}
+
 // Settings holds global ClawFlow settings.
 type Settings struct {
+	Execution ExecutionSettings `yaml:"execution,omitempty"`
+
 	PollInterval int `yaml:"poll_interval"`
 
 	AgentTimeout        int      `yaml:"agent_timeout"`
@@ -151,15 +161,9 @@ type Settings struct {
 	// Synced via Gist as a shared preference.
 	Language string `yaml:"language,omitempty"`
 
-	// PilotMaxBudgetUSD caps the dollar spend of a single Pilot wake via
-	// `claude -p --max-budget-usd`. Unlike the wall-clock --timeout (shared
-	// with every operator), this bounds cost directly: without it, a wake
-	// that wanders into a long tool-call loop is only stopped by the 60min
-	// deadline, which kills the subprocess outright and leaves PILOT-RESULT
-	// empty — the run is fully wasted. --max-budget-usd instead lets claude
-	// see its remaining budget each turn and wrap up with a PILOT-RESULT
-	// before hitting the ceiling, so most of the wake's work still lands.
-	// 0 or unset uses DefaultPilotMaxBudgetUSD.
+	// PilotMaxBudgetUSD preserves the requested per-wake dollar cap. Direct
+	// Offload currently rejects positive budgets before launching a provider.
+	// This constraint is never silently removed; zero retains the legacy default.
 	PilotMaxBudgetUSD float64 `yaml:"pilot_max_budget_usd,omitempty"`
 }
 
@@ -276,12 +280,7 @@ type ClaudeProvider struct {
 	EvalModel     string `yaml:"eval_model,omitempty"`     // used by evaluate-* operators
 	OperatorModel string `yaml:"operator_model,omitempty"` // used by every other operator
 	LightModel    string `yaml:"light_model,omitempty"`    // used by lightweight operators (reply-*, track-progress)
-	// MaxOutputTokens raises the CLAUDE_CODE_MAX_OUTPUT_TOKENS ceiling for
-	// this provider's subprocesses. Zero means "use the built-in default"
-	// (DefaultMaxOutputTokens). Operators that emit large diffs (implement)
-	// blow past claude's own 64000 default and fail; raising this fixes it
-	// (issue #286). Note: must not exceed the target model's real output
-	// ceiling, so it's configurable rather than hard-coded high.
+	// MaxOutputTokens is a retired compatibility field. Native token policy is owned by Offload.
 	MaxOutputTokens int `yaml:"max_output_tokens,omitempty"`
 	// Deprecated: Model is the legacy single-slot override. Non-empty on
 	// load triggers migration into the three role-specific fields above.
@@ -378,13 +377,12 @@ type Credentials struct {
 	ClaudeBaseURL string `yaml:"claude_base_url,omitempty"`
 
 	// ClaudeProviders is the ordered list of Claude API configurations.
-	// The first enabled provider is used; on failure, the runner failover
-	// to the next enabled one. Empty list + legacy fields triggers migration.
+	// Only the first enabled provider selects model/auth. Executions never fail over.
+	// Empty list + legacy fields triggers migration.
 	ClaudeProviders []ClaudeProvider `yaml:"claude_providers,omitempty"`
 
-	// FailoverPatterns are regex patterns (as strings) that trigger
-	// automatic failover to the next provider. User patterns are merged
-	// with (not replace) the defaults.
+	// FailoverPatterns is a retired compatibility field. Offload executions never replay.
+	// Existing values remain readable but are not execution policy.
 	FailoverPatterns []string `yaml:"failover_patterns,omitempty"`
 
 	// DefaultProviderSeeded marks whether clawflow has already seeded the
@@ -428,10 +426,7 @@ type Credentials struct {
 
 	// envChatModel / envEvalModel / envOperatorModel / envLightModel capture
 	// env-var overrides applied at LoadCredentials time. They take precedence
-	// over per-provider fields in ResolveModelForRole, but are NOT
-	// consulted by the per-provider failover loop (which reads
-	// ClaudeProvider.*Model directly). Not persisted — the `-` tag
-	// stops yaml.Marshal from emitting them.
+	// over per-provider fields in ResolveModelForRole. Not persisted.
 	envChatModel     string `yaml:"-"`
 	envEvalModel     string `yaml:"-"`
 	envOperatorModel string `yaml:"-"`
@@ -526,10 +521,8 @@ func (c *Credentials) EffectiveChatDefaultMode() string {
 //  2. First enabled provider's per-role override.
 //  3. Built-in DefaultModelForRole.
 //
-// Direct callers (chat, projectgen, pilot) that spawn claude without
-// going through the failover loop use this helper to pick which model
-// to request. The operator failover loop resolves per-provider inside
-// RunClaude so it can pick different models per attempt.
+// Retained for reading legacy settings only. Direct Offload execution does not use this resolver.
+// No execution is replayed against another provider.
 func ResolveModelForRole(c *Credentials, role string) string {
 	if c != nil {
 		if v := c.envRoleOverride(role); v != "" {
@@ -578,11 +571,7 @@ func ResolveClaudeCredentials(c *Credentials) (apiKey, baseURL string) {
 	return apiKey, baseURL
 }
 
-// envRoleOverride returns the env-var-sourced model override for role,
-// if any. The env vars are honored by ResolveModelForRole but NOT by
-// the per-provider failover loop in RunClaude — the loop consults
-// provider fields directly because each failover attempt may use a
-// different provider with a different model.
+// envRoleOverride returns the explicit per-role model override, if any.
 func (c *Credentials) envRoleOverride(role string) string {
 	if c == nil {
 		return ""
@@ -815,8 +804,8 @@ func (c *Credentials) EffectiveFailoverPatterns() []string {
 // CLAWFLOW_CLAUDE_BASE_URL (the CLAWFLOW_ prefix avoids conflict with
 // a user-set ANTHROPIC_API_KEY meant for their interactive shell).
 //
-// On load, if ClaudeProviders is empty but legacy single-provider fields are
-// set, they are automatically migrated into ClaudeProviders[0] and persisted.
+// Legacy Claude fields remain readable for compatibility but are never migrated
+// or persisted by loading. Direct execution uses Offload profiles.
 func LoadCredentials() (*Credentials, error) {
 	c := &Credentials{}
 	data, err := os.ReadFile(CredentialsPath())
@@ -837,30 +826,11 @@ func LoadCredentials() (*Credentials, error) {
 	// Env-var model overrides feed into ResolveModelForRole (via the
 	// unexported envChatModel/envEvalModel/envOperatorModel fields) so
 	// they take precedence over per-provider slots for direct-spawn
-	// callers. They don't override the per-provider failover loop,
-	// which reads ClaudeProvider.*Model directly — that's intentional,
-	// because a failover attempt against a different provider might
-	// need a different model ID than the env pin.
+	// callers. Direct Offload execution ignores these legacy model fields.
 	c.envChatModel = os.Getenv("CLAWFLOW_CLAUDE_CHAT_MODEL")
 	c.envEvalModel = os.Getenv("CLAWFLOW_CLAUDE_EVAL_MODEL")
 	c.envOperatorModel = os.Getenv("CLAWFLOW_CLAUDE_OPERATOR_MODEL")
 	c.envLightModel = os.Getenv("CLAWFLOW_CLAUDE_LIGHT_MODEL")
-
-	// Auto-migrate legacy single-provider fields to the providers list,
-	// seed the built-in OAuth fallback entry on first load, and push old
-	// global/per-provider model fields into the current per-role slots.
-	// All three are idempotent; a save failure is non-fatal because the
-	// operations will be retried on the next load.
-	mutated := MigrateLegacyProvider(c)
-	if SeedDefaultProvider(c) {
-		mutated = true
-	}
-	if MigrateProviderModels(c) {
-		mutated = true
-	}
-	if mutated {
-		_ = SaveCredentials(c)
-	}
 
 	return c, nil
 }

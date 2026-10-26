@@ -10,7 +10,7 @@ Humans set project direction and describe features. ClawFlow should carry eligib
 
 Eligible open leaf issues enter `implement` directly. Questions/comments retain their reply paths, and parents retain `track-progress` with the operational `progress-check` trigger. Local lockfiles, machine bindings, pause/cancel controls, terminal exclusions, bounded retries and historical records remain.
 
-Verified baseline: `refactor/autonomous-only` at `f9e1c8e` launches Claude directly in `internal/operator/claude.go`. The installed binary reports `74771e2-offload`; that Offload integration is on `feat/offload-execution`, not in this checkout. Reconcile and validate these source/executor versions before live self-hosting.
+Historical source baseline `f9e1c8e` launched Claude directly. Integration branch `feat/independent-acceptance` combines the existing `feat/offload-execution` work with the independently accepted CI fix. The installed binary still reports `74771e2-offload`; validate and record the selected source/executor versions before live self-hosting.
 
 ```bash
 clawflow repo set owner/repo --auto-merge on --ci-required on
@@ -26,7 +26,7 @@ The exact built-ins `classify`, `evaluate-bug`, `evaluate-feat` and `decompose` 
 
 Support tens to hundreds of projects, with a target of 10,000 concurrent workers. This is a design and validation target, not proven capacity. Actual concurrency depends on execution-provider capacity, GitHub Actions runners, API limits and project budgets.
 
-Evolve the existing Go application as a modular monolith, reusing project management, VCS and operator modules. Reconcile the existing Offload integration from its feature branch for reuse through an execution adapter. The durable, deterministic control plane owns tasks, transitions, evidence and external-effect authorization. GitHub Issues, labels and comments mirror coordination; the durable store is authoritative. Prompts and worker conversations cannot advance state themselves.
+Evolve the existing Go application as a modular monolith, reusing project management, VCS and operator modules and the integrated Offload execution adapter. The durable, deterministic control plane owns tasks, transitions, evidence and external-effect authorization. GitHub Issues, labels and comments mirror coordination; the durable store is authoritative. Prompts and worker conversations cannot advance state themselves.
 
 Start with one scheduler and SQLite as a reference implementation. Production scale requires a transactional distributed store such as PostgreSQL, leased and fenced workers, durable outbox/inbox delivery and fair project, provider and resource quotas. SQLite's single writer is not the proposed basis for 10,000 workers. Extract services only for measured bottlenecks or an independent security, failure-isolation or scaling need.
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 )
 
 func NewConfigCmd() *cobra.Command {
@@ -155,6 +156,13 @@ func newConfigShowCmd() *cobra.Command {
 			fmt.Printf("GitLab Token: %s\n", glTokenStatus)
 			fmt.Println()
 
+			execConfig := execution.WithEnvironment(cfg.Settings.Execution)
+			fmt.Printf("Execution:    Offload profile=%s\n", execConfig.Profile)
+			if err := execution.ValidateConfig(execConfig); err != nil {
+				fmt.Printf("Readiness:    %s\n", err)
+			} else {
+				fmt.Println("Readiness:    command available, profile configured; live execution unverified")
+			}
 			fmt.Printf("Settings:\n")
 			fmt.Printf("  poll_interval:        %d min\n", cfg.Settings.PollInterval)
 			fmt.Printf("  agent_timeout:        %d sec\n", cfg.Settings.AgentTimeout)
