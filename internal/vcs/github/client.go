@@ -660,6 +660,11 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 		return vcs.PR{}, fmt.Errorf("github get PR: HTTP %d: %s", status, data)
 	}
 	var raw struct {
+		MergeCommitSHA string `json:"merge_commit_sha"`
+		Base           struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"base"`
 		Number   int    `json:"number"`
 		Title    string `json:"title"`
 		Body     string `json:"body"`
@@ -683,7 +688,7 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 	if raw.MergedAt != "" {
 		s = "merged"
 	}
-	return vcs.PR{Number: raw.Number, Title: raw.Title, Body: raw.Body, State: s, HeadBranch: raw.Head.Ref, HeadSHA: raw.Head.SHA, HeadRepo: raw.Head.Repo.FullName, Draft: raw.Draft, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.HTMLURL}, nil
+	return vcs.PR{Number: raw.Number, Title: raw.Title, Body: raw.Body, State: s, HeadBranch: raw.Head.Ref, HeadSHA: raw.Head.SHA, HeadRepo: raw.Head.Repo.FullName, Draft: raw.Draft, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.HTMLURL, BaseBranch: raw.Base.Ref, BaseSHA: raw.Base.SHA, MergeCommitSHA: raw.MergeCommitSHA}, nil
 }
 
 func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
@@ -909,12 +914,42 @@ func (c *Client) ClosePR(repo string, prNumber int) error {
 // MergePRDetailed merges a PR and returns the resulting merge commit SHA.
 // GitHub's PUT /pulls/:n/merge returns { sha, merged, message } on 200.
 func (c *Client) MergePRDetailed(repo string, prNumber int) (string, error) {
+	return c.mergePR(repo, prNumber, "")
+}
+
+var _ vcs.ConditionalMerger = (*Client)(nil)
+
+// MergePRAtHead merges only the specified immutable head and validates the result.
+func (c *Client) MergePRAtHead(repo string, prNumber int, expectedHead string) (string, error) {
+	if !canonicalMergeSHA(expectedHead) {
+		return "", fmt.Errorf("github merge PR: invalid expected head SHA")
+	}
+	return c.mergePR(repo, prNumber, expectedHead)
+}
+
+func canonicalMergeSHA(sha string) bool {
+	if len(sha) != 40 && len(sha) != 64 {
+		return false
+	}
+	for _, ch := range sha {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) mergePR(repo string, prNumber int, expectedHead string) (string, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return "", err
 	}
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", owner, name, prNumber)
-	data, status, err := c.do("PUT", path, map[string]string{"merge_method": "merge"})
+	body := map[string]string{"merge_method": "merge"}
+	if expectedHead != "" {
+		body["sha"] = expectedHead
+	}
+	data, status, err := c.do("PUT", path, body)
 	if err != nil {
 		return "", err
 	}
@@ -927,6 +962,12 @@ func (c *Client) MergePRDetailed(repo string, prNumber int) (string, error) {
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return "", err
+	}
+	if !raw.Merged || strings.TrimSpace(raw.SHA) == "" {
+		return "", fmt.Errorf("github merge PR: response did not confirm a merge commit")
+	}
+	if expectedHead != "" && !canonicalMergeSHA(raw.SHA) {
+		return "", fmt.Errorf("github merge PR: invalid resulting merge SHA")
 	}
 	return raw.SHA, nil
 }
