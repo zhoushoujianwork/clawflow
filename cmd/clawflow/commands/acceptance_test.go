@@ -313,6 +313,53 @@ func TestAcceptanceDevelopmentFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAcceptanceDevelopmentLateNativeSessionBinding(t *testing.T) {
+	for _, mode := range []string{"production", "final-binding", "missing-final-session", "changed-session", "disappeared-session", "changed-backend", "missing-final-backend", "changed-caller", "failed-final"} {
+		t.Run(mode, func(t *testing.T) {
+			_, _ = acceptanceFixture(t)
+			writeAcceptanceDevelopment(t, "success", time.Now(), func(es []execution.Event) []execution.Event {
+				start, final := es[0], es[1]
+				start.Session = ""
+				progress := start
+				progress.Type, progress.Seq = "progress", 2
+				bound := progress
+				bound.Seq, bound.Session, bound.Backend, bound.Model = 3, "dev-session", "fixture", "fixture-model"
+				final.Seq, final.Backend, final.Model = 4, bound.Backend, bound.Model
+				switch mode {
+				case "final-binding":
+					bound.Session = ""
+				case "missing-final-session":
+					final.Session = ""
+				case "changed-session":
+					final.Session = "different-session"
+				case "disappeared-session":
+					disappeared := bound
+					disappeared.Seq, disappeared.Session = 4, ""
+					final.Seq = 5
+					return []execution.Event{start, progress, bound, disappeared, final}
+				case "changed-backend":
+					final.Backend = "other"
+				case "missing-final-backend":
+					final.Backend = ""
+				case "changed-caller":
+					final.CallerRunID = "other-caller"
+				case "failed-final":
+					final.Status, final.ExitCode = "error", 1
+				}
+				return []execution.Event{start, progress, bound, final}
+			})
+			identity, err := acceptanceDevelopment("o/r", 42, "Required behavior\n\nMeet the original goal")
+			valid := mode == "production" || mode == "final-binding"
+			if (err == nil) != valid {
+				t.Fatalf("mode=%s identity=%+v err=%v", mode, identity, err)
+			}
+			if valid && (identity.SessionID != "dev-session" || identity.RunID != "dev-run") {
+				t.Fatalf("wrong native identity: %+v", identity)
+			}
+		})
+	}
+}
+
 func TestAcceptanceStatusReadOnly(t *testing.T) {
 	f, _ := acceptanceFixture(t)
 	produceAcceptance(t, f)

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ import (
 )
 
 const acceptanceFileLimit = 32 << 20
+
+var acceptanceNativeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
 // These narrow boundaries allow isolated tests without network or live agents.
 var acceptanceClientFactory = newVCSClient
@@ -352,10 +355,11 @@ func acceptanceDevelopment(repo string, issue int, requirements string) (accepta
 	scanner := bufio.NewScanner(bytes.NewReader(b))
 	scanner.Buffer(make([]byte, 4096), execution.MaxEventBytes)
 	var start execution.Event
+	var session, backend, model string
 	seq, finalized := 0, false
 	for scanner.Scan() {
 		e, err := acceptanceEvent(scanner.Bytes())
-		if err != nil || e.Version != 1 || e.Seq != seq+1 || finalized || e.Session == "" || e.RunID == "" || e.CallerRunID == "" {
+		if err != nil || e.Version != 1 || e.Seq != seq+1 || finalized || !acceptanceNativeID.MatchString(e.RunID) || !acceptanceNativeID.MatchString(e.CallerRunID) {
 			return acceptance.Identity{}, errors.New("ambiguous native development events")
 		}
 		if seq == 0 {
@@ -363,21 +367,38 @@ func acceptanceDevelopment(repo string, issue int, requirements string) (accepta
 				return acceptance.Identity{}, errors.New("missing native development start")
 			}
 			start = e
-		} else if e.Type == "start" || e.Session != start.Session || e.RunID != start.RunID || e.CallerRunID != start.CallerRunID {
+		} else if e.Type == "start" || e.RunID != start.RunID || e.CallerRunID != start.CallerRunID {
 			return acceptance.Identity{}, errors.New("native development identity changed")
 		}
+		// Offload can emit start/progress before learning the native session.
+		// Once bound, provenance may neither switch nor lose that identity.
+		if (e.Session != "" && !acceptanceNativeID.MatchString(e.Session)) || (session != "" && e.Session != session) {
+			return acceptance.Identity{}, errors.New("native development session changed or disappeared")
+		}
+		if (backend != "" && e.Backend != "" && backend != e.Backend) || (model != "" && e.Model != "" && model != e.Model) {
+			return acceptance.Identity{}, errors.New("native development backend identity changed")
+		}
 		if e.Type == "final" {
-			if e.Status != "ok" || e.ExitCode != 0 || e.ErrorKind != "" {
+			if e.Session == "" || (backend != "" && e.Backend != backend) || (model != "" && e.Model != model) || e.Status != "ok" || e.ExitCode != 0 || e.ErrorKind != "" {
 				return acceptance.Identity{}, errors.New("native development execution unsuccessful")
 			}
 			finalized = true
+		}
+		if e.Session != "" {
+			session = e.Session
+		}
+		if e.Backend != "" {
+			backend = e.Backend
+		}
+		if e.Model != "" {
+			model = e.Model
 		}
 		seq++
 	}
 	if scanner.Err() != nil || !finalized || seq < 2 || !bytes.HasSuffix(b, []byte("\n")) {
 		return acceptance.Identity{}, errors.New("incomplete native development evidence")
 	}
-	return acceptance.Identity{SessionID: start.Session, RunID: start.RunID}, nil
+	return acceptance.Identity{SessionID: session, RunID: start.RunID}, nil
 }
 
 func acceptanceStorePath(repo string, pr int) string {
