@@ -427,6 +427,14 @@ type Options struct {
 }
 
 func Execute(ctx context.Context, prompt string, opts Options) (Result, error) {
+	return execute(ctx, prompt, opts, func(o Observation) {
+		if o.Delta != "" {
+			fmt.Fprint(os.Stderr, o.Delta)
+		}
+	})
+}
+
+func execute(ctx context.Context, prompt string, opts Options, observe func(Observation)) (Result, error) {
 	c, err := LoadConfig()
 	if err != nil {
 		return Result{}, err
@@ -480,11 +488,7 @@ func Execute(ctx context.Context, prompt string, opts Options) (Result, error) {
 	}
 	env = EnvWithCredentials(cleanEnv, apiKey, baseURL)
 	req := Request{Version: 1, RequestID: NewSessionKey(), SessionKey: opts.SessionKey, Resume: opts.Resume, Workspace: opts.Workspace, Model: model, Instructions: opts.Instructions, Prompt: prompt, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: opts.Timeout.Milliseconds(), MaxBudgetUSD: opts.MaxBudgetUSD}
-	return Run(ctx, c, req, env, opts.Events, func(o Observation) {
-		if o.Delta != "" {
-			fmt.Fprint(os.Stderr, o.Delta)
-		}
-	})
+	return Run(ctx, c, req, env, opts.Events, observe)
 }
 
 // Chat owns a plain terminal loop. Each successful turn resumes the same logical session.
@@ -536,9 +540,19 @@ func Chat(ctx context.Context, in io.Reader, out io.Writer, opts Options) error 
 		if strings.TrimSpace(prompt) == "" {
 			continue
 		}
-		r, err := Execute(ctx, prompt, opts)
-		if r.Text != "" {
-			fmt.Fprintln(out, r.Text)
+		var streamed strings.Builder
+		r, err := execute(ctx, prompt, opts, func(o Observation) {
+			// Run redacts observations before delivering them to this callback.
+			streamed.WriteString(o.Delta)
+			fmt.Fprint(out, o.Delta)
+		})
+		if strings.HasPrefix(r.Text, streamed.String()) {
+			fmt.Fprint(out, strings.TrimPrefix(r.Text, streamed.String()))
+		} else if r.Text != "" {
+			fmt.Fprint(out, "\n[Authoritative final answer]\n", r.Text)
+		}
+		if streamed.Len() > 0 || r.Text != "" {
+			fmt.Fprintln(out)
 		}
 		if err != nil {
 			return err

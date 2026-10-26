@@ -57,6 +57,28 @@ func TestAGHHelper(t *testing.T) {
 	enc := json.NewEncoder(os.Stdout)
 	seq := 0
 	emit := func(e Event) { seq++; e.Version = 1; e.RequestID = req.RequestID; e.Seq = seq; _ = enc.Encode(e) }
+	if mode == "chat-render" {
+		for _, delta := range strings.Split(os.Getenv("CLAWFLOW_TEST_DELTAS"), "|") {
+			if delta != "" {
+				emit(Event{Type: "observation", Observation: &Observation{Type: "text_delta", Delta: delta}})
+			}
+		}
+		status := os.Getenv("CLAWFLOW_TEST_STATUS")
+		if status == "missing" {
+			os.Exit(1)
+		}
+		r := Result{Status: status, Text: os.Getenv("CLAWFLOW_TEST_FINAL"), Model: req.Model, SessionKey: req.SessionKey, NativeSessionID: "native-distinct", Usage: json.RawMessage("null")}
+		code := 0
+		if status != "completed" {
+			r.ErrorKind = status
+			code = 1
+			if status == "canceled" {
+				code = 130
+			}
+		}
+		emit(Event{Type: "result", Result: &r})
+		os.Exit(code)
+	}
 	emit(Event{Type: "observation", Observation: &Observation{Type: "text_delta", Delta: "answer\n<!-- clawflow:outcome=done -->"}})
 	emit(Event{Type: "observation", Observation: &Observation{Type: "tool_start", Message: "Read"}})
 	r := Result{Status: "completed", Text: "", Model: req.Model, SessionKey: req.SessionKey, NativeSessionID: "native-distinct", Usage: json.RawMessage("null")}
@@ -293,6 +315,57 @@ func TestChatResume(t *testing.T) {
 	}
 	if dec.Decode(new(any)) != io.EOF {
 		t.Fatal("extra execution")
+	}
+}
+
+func TestChatRendersAnswerOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name, deltas, final, status, want string
+	}{
+		{"full", "Hello |world", "Hello world", "completed", "> Hello world\n> "},
+		{"suffix", "Hello ", "Hello world", "completed", "> Hello world\n> "},
+		{"no-stream", "", "Hello world", "completed", "> Hello world\n> "},
+		{"different", "Earlier answer", "Final answer", "completed", "> Earlier answer\n[Authoritative final answer]\nFinal answer\n> "},
+		{"failed-partial", "Partial |answer", "Partial answer", "failed", "> Partial answer\n"},
+		{"canceled-partial", "Partial |answer", "", "canceled", "> Partial answer\n"},
+		{"transport-partial", "Partial |answer", "", "missing", "> Partial answer\n"},
+		{"redacted", "Secret test-secret", "Secret test-secret", "completed", "> Secret [redacted]\n> "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, req, _ := fixture(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("CLAWFLOW_AGH_COMMAND", cfg.Command)
+			t.Setenv("CLAWFLOW_AGH_CONFIG", cfg.ConfigPath)
+			t.Setenv("CLAWFLOW_AGH_NATIVE", cfg.NativeCommand)
+			t.Setenv("CLAWFLOW_AGH_PROFILE", cfg.NativeProfile)
+			t.Setenv("CLAWFLOW_TEST_AGH", "1")
+			t.Setenv("CLAWFLOW_TEST_MODE", "chat-render")
+			t.Setenv("CLAWFLOW_TEST_DELTAS", tc.deltas)
+			t.Setenv("CLAWFLOW_TEST_FINAL", tc.final)
+			t.Setenv("CLAWFLOW_TEST_STATUS", tc.status)
+			t.Setenv("CLAWFLOW_TEST_SECRET", "test-secret")
+			stderr, err := os.Create(filepath.Join(req.Workspace, "stderr"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalStderr := os.Stderr
+			os.Stderr = stderr
+			t.Cleanup(func() {
+				os.Stderr = originalStderr
+				_ = stderr.Close()
+			})
+			var out bytes.Buffer
+			err = Chat(context.Background(), strings.NewReader("hello\n"), &out, Options{Workspace: req.Workspace})
+			if (err != nil) != (tc.status != "completed") {
+				t.Fatalf("status=%s error=%v", tc.status, err)
+			}
+			if out.String() != tc.want {
+				t.Fatalf("output=%q want=%q", out.String(), tc.want)
+			}
+			if st, err := stderr.Stat(); err != nil || st.Size() != 0 {
+				t.Fatalf("Chat also wrote to stderr: stat=%v error=%v", st, err)
+			}
+		})
 	}
 }
 

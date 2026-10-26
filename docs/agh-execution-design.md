@@ -25,3 +25,4 @@ Issue/worktree locks, CI repair bounds and VCS writeback remain owned by ClawFlo
 
 See [protocol and implementation details](agh-execution-design-detail.md).
 See the [acceptance record](agh-execution-validation-2026-10-26.md) for checks and rollout limits.
+The [Offload live acceptance](agh-offload-live-acceptance-2026-10-26.md) records a real read-only ACP run and the active-issue lock behavior.
