@@ -13,7 +13,7 @@ func NewRootCmd() *cobra.Command {
 		Use:   "clawflow",
 		Short: "Label-driven automation that turns issues into PRs on GitHub and GitLab",
 		Long: `ClawFlow matches each open issue/PR against a set of operators (self-contained
-SKILL.md files) and runs the matching operator through 'claude -p'. State lives
+SKILL.md files) and runs the matching operator through Offload. State lives
 entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 		Version: Version,
 	}
@@ -43,6 +43,7 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewProjectCmd())
 	root.AddCommand(NewPilotCmd())
 	root.AddCommand(NewRespawnCmd())
+	root.AddCommand(NewExecutionCmd())
 	// Helpers retained for operator use (invoked from SKILL.md bodies):
 	root.AddCommand(NewWorktreeCmd())
 	root.AddCommand(NewBranchCmd())
