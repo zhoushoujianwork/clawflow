@@ -691,45 +691,102 @@ func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
 	return c.PostIssueComment(repo, prNumber, body)
 }
 
+// GetCIStatus aggregates check runs for one captured PR revision. It does not
+// cover commit-status contexts, required check names, or workflow-run identity;
+// callers must not treat this observation as an atomic merge authorization.
 func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return vcs.CIStatusNone, err
 	}
-	// Get the PR head SHA first
 	pr, err := c.GetPR(repo, prNumber)
 	if err != nil {
 		return vcs.CIStatusNone, err
 	}
-	// Get check runs for the head branch
-	path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", owner, name, pr.HeadBranch)
-	data, status, err := c.do("GET", path, nil)
+	if strings.TrimSpace(pr.HeadSHA) == "" {
+		return vcs.CIStatusNone, fmt.Errorf("github get check runs: missing PR head SHA")
+	}
+	// Bound pagination even if the API reports an unexpectedly large count.
+	const pageSize, maxPages = 100, 100
+	total := -1
+	seen := make(map[int64]bool)
+	pending, failed := false, false
+	for page := 1; page <= maxPages; page++ {
+		path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=%d&filter=latest&page=%d", owner, name, url.PathEscape(pr.HeadSHA), pageSize, page)
+		data, status, err := c.do("GET", path, nil)
+		if err != nil {
+			return vcs.CIStatusNone, err
+		}
+		if status != 200 {
+			return vcs.CIStatusNone, fmt.Errorf("github get check runs: HTTP %d", status)
+		}
+		var raw struct {
+			TotalCount *int `json:"total_count"`
+			CheckRuns  []struct {
+				ID         int64   `json:"id"`
+				HeadSHA    string  `json:"head_sha"`
+				Status     string  `json:"status"`
+				Conclusion *string `json:"conclusion"`
+			} `json:"check_runs"`
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return vcs.CIStatusNone, err
+		}
+		if raw.TotalCount == nil || *raw.TotalCount < 0 || *raw.TotalCount > pageSize*maxPages || raw.CheckRuns == nil {
+			return vcs.CIStatusNone, fmt.Errorf("github get check runs: missing or invalid pagination data")
+		}
+		if total == -1 {
+			total = *raw.TotalCount
+		}
+		if total != *raw.TotalCount {
+			return vcs.CIStatusNone, fmt.Errorf("github get check runs: count changed during pagination")
+		}
+		expected := total - len(seen)
+		if expected > pageSize {
+			expected = pageSize
+		}
+		if len(raw.CheckRuns) != expected {
+			return vcs.CIStatusNone, fmt.Errorf("github get check runs: incomplete or inconsistent page %d", page)
+		}
+		for _, run := range raw.CheckRuns {
+			if run.ID <= 0 || seen[run.ID] || run.HeadSHA != pr.HeadSHA {
+				return vcs.CIStatusNone, fmt.Errorf("github get check runs: invalid identity or revision on page %d", page)
+			}
+			seen[run.ID] = true
+			switch run.Status {
+			case "completed":
+				if run.Conclusion == nil || *run.Conclusion == "" {
+					return vcs.CIStatusNone, fmt.Errorf("github get check runs: completed check missing conclusion")
+				}
+				failed = failed || *run.Conclusion != "success"
+			case "queued", "in_progress", "waiting", "requested", "pending":
+				if run.Conclusion != nil && *run.Conclusion != "" {
+					return vcs.CIStatusNone, fmt.Errorf("github get check runs: unfinished check has conclusion")
+				}
+				pending = true
+			default:
+				return vcs.CIStatusNone, fmt.Errorf("github get check runs: unknown status %q", run.Status)
+			}
+		}
+		if len(seen) == total {
+			break
+		}
+	}
+	if total == 0 {
+		return vcs.CIStatusNone, nil
+	}
+	if failed {
+		return vcs.CIStatusFailure, nil
+	}
+	if pending {
+		return vcs.CIStatusPending, nil
+	}
+	current, err := c.GetPR(repo, prNumber)
 	if err != nil {
 		return vcs.CIStatusNone, err
 	}
-	if status != 200 {
-		return vcs.CIStatusNone, fmt.Errorf("github get check runs: HTTP %d", status)
-	}
-	var raw struct {
-		TotalCount int `json:"total_count"`
-		CheckRuns  []struct {
-			Status     string `json:"status"`
-			Conclusion string `json:"conclusion"`
-		} `json:"check_runs"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return vcs.CIStatusNone, err
-	}
-	if raw.TotalCount == 0 {
-		return vcs.CIStatusNone, nil
-	}
-	for _, r := range raw.CheckRuns {
-		if r.Status != "completed" {
-			return vcs.CIStatusPending, nil
-		}
-		if r.Conclusion != "success" && r.Conclusion != "skipped" && r.Conclusion != "neutral" {
-			return vcs.CIStatusFailure, nil
-		}
+	if current.HeadSHA != pr.HeadSHA {
+		return vcs.CIStatusPending, nil
 	}
 	return vcs.CIStatusSuccess, nil
 }
