@@ -9,6 +9,19 @@ You are an external AI controlling the `clawflow` CLI. ClawFlow's operator
 runtime still requires Claude Code CLI (`claude -p`); installing this skill in
 Codex, Cursor or another tool does not replace that runtime.
 
+Autonomous repositories with `auto_merge` and `ci_required` can repair failed CI
+on existing managed GitHub PRs. Initial support requires a same-repository,
+non-draft `fix/issue-N` or `feat/issue-N` PR closing an open implemented leaf
+issue, verified head identity, a local clone, and no failed/skipped/running or
+tracking/question exclusion. GitLab and forks are explicitly unsupported.
+Repair reproduces failures using local headless tests; remote CI logs are not
+ingested. It updates the existing PR with a normal push, never opens another PR,
+and leaves CI checks intact. Each PR has at most three total reserved attempts
+with a five-minute cooldown, persisted under `~/.clawflow/data/ci-repair/`.
+A crash consumes its reserved attempt. Exhaustion is logged; semantic failure
+adds `agent-failed`. Failed repair work is retained for inspection. Do not clear
+the ledger to manufacture unlimited retries.
+
 Use only commands supported by the installed binary. Run help before unfamiliar
 flags. Report actual errors and partial effects; do not invent commands or
 silently retry actions that might already have changed state. Use `clawflow`
@@ -311,5 +324,5 @@ missing, pending, failed or unreadable CI blocks merging.
 Use `clawflow repo set <R> --workflow legacy` to retain the older label-driven
 classification/evaluation/approval pipeline. The `auto_approve` setting belongs
 to that legacy pipeline. Setting workflow alone does not enable auto-merge.
-This dispatch change does not add a durable event engine or an automatic CI
-repair controller; report blocked runs and unverified outcomes honestly.
+The bounded GitHub CI repair path above complements dispatch; it is not a
+general durable event engine. Report blocked runs and unverified outcomes honestly.

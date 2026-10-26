@@ -17,12 +17,12 @@ type IssueComment struct {
 
 // Issue represents a VCS issue/ticket.
 type Issue struct {
-	ID        int64    `json:"id,omitempty"` // platform internal ID (GitHub: id, GitLab: id); used for sub-issue API
-	Number    int      `json:"number"`
-	Title     string   `json:"title"`
-	Body      string   `json:"body"`
-	Labels    []string `json:"labels"`
-	State     string   `json:"state"`
+	ID     int64    `json:"id,omitempty"` // platform internal ID (GitHub: id, GitLab: id); used for sub-issue API
+	Number int      `json:"number"`
+	Title  string   `json:"title"`
+	Body   string   `json:"body"`
+	Labels []string `json:"labels"`
+	State  string   `json:"state"`
 	// URL is the web (HTML) URL of the issue. Populated by GetIssue
 	// (GitHub html_url / GitLab web_url); other list calls may leave it
 	// empty.
@@ -64,6 +64,9 @@ func (i Issue) HasLabel(name string) bool {
 
 // PR represents a pull/merge request.
 type PR struct {
+	HeadSHA    string `json:"head_sha,omitempty"`
+	HeadRepo   string `json:"head_repo,omitempty"`
+	Draft      bool   `json:"draft,omitempty"`
 	Number     int    `json:"number"`
 	Title      string `json:"title"`
 	HeadBranch string `json:"head_branch"`

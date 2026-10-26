@@ -719,8 +719,13 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 		State    string `json:"state"`
 		HTMLURL  string `json:"html_url"`
 		MergedAt string `json:"merged_at"`
+		Draft    bool   `json:"draft"`
 		Head     struct {
-			Ref string `json:"ref"`
+			Ref  string `json:"ref"`
+			SHA  string `json:"sha"`
+			Repo struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
 		} `json:"head"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -730,7 +735,7 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 	if raw.MergedAt != "" {
 		s = "merged"
 	}
-	return vcs.PR{Number: raw.Number, Title: raw.Title, Body: raw.Body, State: s, HeadBranch: raw.Head.Ref, MergedAt: raw.MergedAt, URL: raw.HTMLURL}, nil
+	return vcs.PR{Number: raw.Number, Title: raw.Title, Body: raw.Body, State: s, HeadBranch: raw.Head.Ref, HeadSHA: raw.Head.SHA, HeadRepo: raw.Head.Repo.FullName, Draft: raw.Draft, MergedAt: raw.MergedAt, URL: raw.HTMLURL}, nil
 }
 
 func (c *Client) PostPRComment(repo string, prNumber int, body string) error {

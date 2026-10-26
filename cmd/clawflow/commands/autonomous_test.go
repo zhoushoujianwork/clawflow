@@ -47,6 +47,9 @@ func TestAutonomousEligibility(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("matched=%t, want %t", got, tc.want)
 			}
+			if effective != nil && len(effective.Trigger.LabelsConsumed) != 0 {
+				t.Fatal("autonomous implementation consumes obsolete approval label")
+			}
 			if !reflect.DeepEqual(op.Trigger.LabelsRequired, []string{"ready-for-agent"}) {
 				t.Fatal("registry operator mutated")
 			}

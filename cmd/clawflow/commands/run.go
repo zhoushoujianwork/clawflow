@@ -509,6 +509,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 // runJob is one (issue, operator) pair that scanRepoOnce decided is
 // eligible to fire. The worker pool in runJobsParallel consumes these.
 type runJob struct {
+	repair   *ciRepairContext
 	op       *operator.Operator
 	sub      *operator.Subject
 	repo     string
@@ -588,7 +589,7 @@ func operatorPriority(name string) int {
 // effectiveOperator applies repository routing without changing shared registry data.
 // Autonomous implementation still respects custom triggers and terminal exclusions.
 func effectiveOperator(op *operator.Operator, sub *operator.Subject, repoCfg config.Repo) *operator.Operator {
-	if op == nil || config.ValidateWorkflow(repoCfg.Workflow) != nil {
+	if op == nil || op.Name == "repair-ci" || config.ValidateWorkflow(repoCfg.Workflow) != nil {
 		return nil
 	}
 	if repoCfg.EffectiveWorkflow() == config.WorkflowLegacy {
@@ -613,6 +614,7 @@ func effectiveOperator(op *operator.Operator, sub *operator.Subject, repoCfg con
 		}
 		copyOp.Trigger.LabelsRequired = withoutApproval(op.Trigger.LabelsRequired)
 		copyOp.Trigger.LabelsRequiredAny = withoutApproval(op.Trigger.LabelsRequiredAny)
+		copyOp.Trigger.LabelsConsumed = withoutApproval(op.Trigger.LabelsConsumed)
 		return &copyOp
 	default:
 		return op
@@ -837,6 +839,10 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		}
 	}
 
+	if executeHere {
+		jobs = append(jobs, scanCIRepairJobs(ctx, reg, client, fullName, repoCfg, onlyIssue, jobs)...)
+	}
+
 	// MVP: no PR-target operators yet. All built-in operators target
 	// issues. When a pr-target operator appears we'll add the same
 	// (subject × operator) loop over ListOpenPRs.
@@ -1023,25 +1029,39 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	runLog.Info("run/lock", "pid", os.Getpid(), "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
 	defer runLog.Info("run/unlock", "repo", j.repo, "issue", j.sub.Number)
 
+	if j.repair != nil {
+		if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
+			rc.SetRequestContext(ctx)
+		}
+		if err := prepareCIRepair(j, time.Now().UTC()); err != nil {
+			fmt.Fprintf(os.Stderr, "%s → repair skipped: %v\n", prefix, err)
+			runLog.Warn("run/ci_repair_skip", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
+			return false, false
+		}
+	}
+
 	// Re-fetch the issue's current labels to guard against the race where
 	// labels were added between the initial poll and now (e.g. user manually
 	// labelled the issue while classify was already queued).
-	if freshLabels, err := j.client.GetIssueLabels(j.repo, j.sub.Number); err == nil {
-		freshSub := *j.sub
-		freshSub.Labels = freshLabels
-		freshOp := effectiveOperator(j.op, &freshSub, j.repoCfg)
-		if freshOp == nil {
-			return false, false
-		}
-		if ok, reason := operator.MatchesWithReason(&freshSub, freshOp); !ok {
-			fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
-			if by, excluded := operator.ExcludedBy(&freshSub, freshOp); excluded {
-				runLog.Info("run/skip_excluded",
-					"repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "by", by, "when", "post_poll")
+	if j.repair == nil {
+		if freshLabels, err := j.client.GetIssueLabels(j.repo, j.sub.Number); err == nil {
+			freshSub := *j.sub
+			freshSub.Labels = freshLabels
+			freshOp := effectiveOperator(j.op, &freshSub, j.repoCfg)
+			if freshOp == nil {
+				return false, false
 			}
-			return false, false
+			if ok, reason := operator.MatchesWithReason(&freshSub, freshOp); !ok {
+				fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
+				if by, excluded := operator.ExcludedBy(&freshSub, freshOp); excluded {
+					runLog.Info("run/skip_excluded",
+						"repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "by", by, "when", "post_poll")
+				}
+				return false, false
+			}
+			j.op = freshOp
 		}
-		j.op = freshOp
+
 	}
 
 	// Sub-issue freshness recheck (issue #270). The scan captured SubTotal
@@ -1142,7 +1162,14 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		fmt.Fprintf(os.Stderr, "%s → base-branch override: %q (from %s)\n", prefix, overrideBranch, overrideSource)
 	}
 
-	wtResult, cleanup, err := resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch)
+	var wtResult worktreeResult
+	var cleanup func()
+	var err error
+	if j.repair != nil {
+		wtResult, cleanup, err = setupCIRepairWorkdir(ctx, j.repoCfg, j.repo, j.repair.PR)
+	} else {
+		wtResult, cleanup, err = resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch)
+	}
 	if err != nil {
 		// Failure path: do NOT post a comment to the issue. The full
 		// error is captured in events.jsonl and the run row on the
@@ -1163,7 +1190,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// the highest-volume pre-claude failure family in production.
 		runLog.Warn("run/end", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name,
 			"status", "failed", "stage", runningMeta.Stage, "err", err.Error(), "cost", "0.0000")
-		checkCircuitBreaker(j, prefix)
+		if j.repair != nil {
+			_ = j.client.AddLabel(j.repo, j.sub.Number, "agent-failed")
+			_ = j.client.PostIssueComment(j.repo, j.sub.Number, "CI repair setup failed: "+err.Error())
+		} else {
+			checkCircuitBreaker(j, prefix)
+		}
 		return false, false
 	}
 	workdir := wtResult.Path
@@ -1198,6 +1230,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	var resumeCtx string
 	if wtResult.Resumed {
 		resumeCtx = buildResumeContext(wtResult)
+	}
+	if j.repair != nil {
+		resumeCtx = j.repair.prompt(j.repoCfg.TestCommand)
 	}
 
 	// Rebind the VCS client's request context before execution + write-back.
@@ -1414,6 +1449,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// the circuit breaker so a stuck issue eventually gets agent-failed
 		// instead of looping forever (issue #143).
 		rm.Status = "skipped-empty"
+	case j.repair != nil && outcome == "agent-failed":
+		rm.Status = "failed"
+		rm.Error = "CI repair could not update existing PR"
 	case markerRecovered:
 		// Salvaged run: the body was a complete evaluation missing only its
 		// marker line, so the comment was posted and the label applied from
@@ -1452,7 +1490,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// sides of the resume decision agree: keep only if there's something
 	// to resume, otherwise treat it like the other no-partial-work statuses.
 	hasPartialWork := true
-	if rm.Status == "failed" {
+	if rm.Status == "failed" && j.repair == nil {
 		base := overrideBranch
 		if base == "" {
 			base = j.repoCfg.BaseBranch
@@ -1462,10 +1500,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 		hasPartialWork, _, _ = detectPartialWork(workdir, base)
 	}
-	if rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork) {
+	if (j.repair == nil || (rm.Status == "success" && outcome == "agent-implemented")) && (rm.Status == "success" || rm.Status == "marker-recovered" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork)) {
 		cleanup()
 	} else {
-		fmt.Fprintf(os.Stderr, "%s → preserving worktree for resume on next run: %s\n", prefix, workdir)
+		fmt.Fprintf(os.Stderr, "%s → preserving worktree evidence: %s\n", prefix, workdir)
 	}
 
 	// u != nil guard: ExtractUsage returns (nil, nil) when there is nothing to

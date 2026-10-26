@@ -1,0 +1,309 @@
+package commands
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+	clog "github.com/zhoushoujianwork/clawflow/internal/log"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+)
+
+func repairFixture() (vcs.PR, *vcs.Issue) {
+	return vcs.PR{Number: 11, Body: "Fixes #9", State: "open", HeadBranch: "fix/issue-9", HeadRepo: "o/r", HeadSHA: strings.Repeat("a", 40)}, &vcs.Issue{Number: 9, State: "open", Labels: []string{"agent-implemented"}}
+}
+
+func TestCIRepairCandidate(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*vcs.PR, *vcs.Issue)
+	}{
+		{"draft", func(p *vcs.PR, i *vcs.Issue) { p.Draft = true }},
+		{"closed", func(p *vcs.PR, i *vcs.Issue) { p.State = "closed" }},
+		{"fork", func(p *vcs.PR, i *vcs.Issue) { p.HeadRepo = "fork/r" }},
+		{"missing SHA", func(p *vcs.PR, i *vcs.Issue) { p.HeadSHA = "" }},
+		{"missing repo", func(p *vcs.PR, i *vcs.Issue) { p.HeadRepo = "" }},
+		{"unmanaged", func(p *vcs.PR, i *vcs.Issue) { p.HeadBranch = "human/work" }},
+		{"wrong issue", func(p *vcs.PR, i *vcs.Issue) { p.Body = "Fixes #10" }},
+		{"closed issue", func(p *vcs.PR, i *vcs.Issue) { i.State = "closed" }},
+		{"parent", func(p *vcs.PR, i *vcs.Issue) { i.SubIssuesTotal = 1 }},
+		{"not implemented", func(p *vcs.PR, i *vcs.Issue) { i.Labels = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, i := repairFixture()
+			tc.mutate(&p, i)
+			if ciRepairCandidate("o/r", p, i) == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+	for _, label := range []string{"agent-failed", "agent-skipped", "agent-running", "tracking", "question"} {
+		p, i := repairFixture()
+		i.Labels = append(i.Labels, label)
+		if ciRepairCandidate("o/r", p, i) == nil {
+			t.Fatalf("accepted %s", label)
+		}
+	}
+	for _, branch := range []string{"fix/issue-9", "feat/issue-9"} {
+		p, i := repairFixture()
+		p.HeadBranch = branch
+		if err := ciRepairCandidate("o/r", p, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type repairClient struct {
+	vcs.Client
+	pr        vcs.PR
+	issue     *vcs.Issue
+	status    vcs.CIStatus
+	ciErr     error
+	listCalls int
+}
+
+func (f *repairClient) ListOpenPRs(string) ([]vcs.PR, error) {
+	f.listCalls++
+	return []vcs.PR{f.pr}, nil
+}
+func (f *repairClient) GetPR(string, int) (vcs.PR, error)             { return f.pr, nil }
+func (f *repairClient) GetIssue(string, int) (*vcs.Issue, error)      { return f.issue, nil }
+func (f *repairClient) GetCIStatus(string, int) (vcs.CIStatus, error) { return f.status, f.ciErr }
+
+func repairRegistry(t *testing.T) *operator.Registry {
+	t.Helper()
+	reg := operator.NewRegistry()
+	if err := reg.LoadEmbedded(os.DirFS("../../../skills"), "."); err != nil {
+		t.Fatal(err)
+	}
+	return reg
+}
+
+func TestCIRepairDispatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	lg, err := clog.Open("run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := runLog
+	runLog = lg
+	t.Cleanup(func() { runLog = old; lg.Close() })
+	reg := repairRegistry(t)
+	cfg := config.Repo{AutoMerge: true, CIRequired: true, LocalPath: "unused"}
+	for _, tc := range []struct {
+		name   string
+		status vcs.CIStatus
+		err    error
+		want   int
+	}{
+		{"failed", vcs.CIStatusFailure, nil, 1}, {"success", vcs.CIStatusSuccess, nil, 0}, {"pending", vcs.CIStatusPending, nil, 0}, {"missing", vcs.CIStatusNone, nil, 0}, {"error", vcs.CIStatusFailure, errors.New("offline"), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, i := repairFixture()
+			f := &repairClient{pr: p, issue: i, status: tc.status, ciErr: tc.err}
+			jobs := scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, nil)
+			if len(jobs) != tc.want {
+				t.Fatalf("jobs=%d", len(jobs))
+			}
+		})
+	}
+	p, i := repairFixture()
+	f := &repairClient{pr: p, issue: i, status: vcs.CIStatusFailure}
+	if got := scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 10, nil); len(got) != 0 {
+		t.Fatal("scope escaped")
+	}
+	normal := []*runJob{{sub: &operator.Subject{Number: 9}}}
+	if got := scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, normal); len(got) != 0 {
+		t.Fatal("duplicate issue job")
+	}
+	for _, change := range []func(*config.Repo){func(c *config.Repo) { c.Workflow = "legacy" }, func(c *config.Repo) { c.AutoMerge = false }, func(c *config.Repo) { c.CIRequired = false }, func(c *config.Repo) { c.Platform = "gitlab" }, func(c *config.Repo) { c.BoundMachine = "not-this-host" }} {
+		other := cfg
+		change(&other)
+		before := f.listCalls
+		if len(scanCIRepairJobs(context.Background(), reg, f, "o/r", other, 0, nil)) != 0 || f.listCalls != before {
+			t.Fatal("disabled scope called VCS")
+		}
+	}
+	for _, original := range reg.All() {
+		if original.Name == "repair-ci" {
+			for _, workflow := range []string{"", "legacy"} {
+				if effectiveOperator(original, &operator.Subject{State: "open", Labels: []string{"agent-implemented"}}, config.Repo{Workflow: workflow}) != nil {
+					t.Fatal("normal matcher dispatched repair")
+				}
+			}
+		}
+	}
+	if err := snapshot.AcquireLock("o/r", 9, "test"); err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.ReleaseLock("o/r", 9)
+	if len(scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, nil)) != 0 {
+		t.Fatal("locked issue queued")
+	}
+}
+
+func TestCIRepairLedger(t *testing.T) {
+	root := t.TempDir()
+	p, _ := repairFixture()
+	now := time.Now().UTC()
+	if n, err := reserveCIRepair(root, "o/r", p, now); err != nil || n != 1 {
+		t.Fatalf("%d %v", n, err)
+	}
+	// No completion write: simulate a crash after reservation.
+	if _, err := reserveCIRepair(root, "o/r", p, now.Add(time.Minute)); err == nil {
+		t.Fatal("cooldown bypassed")
+	}
+	p.HeadSHA = strings.Repeat("b", 40)
+	for n := 2; n <= 3; n++ {
+		if got, err := reserveCIRepair(root, "o/r", p, now.Add(time.Duration(n)*5*time.Minute)); err != nil || got != n {
+			t.Fatalf("%d %v", got, err)
+		}
+	}
+	if _, err := reserveCIRepair(root, "o/r", p, now.Add(time.Hour)); err == nil {
+		t.Fatal("total limit reset by new SHA")
+	}
+}
+
+func TestCIRepairUnderLockRecheck(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	p, i := repairFixture()
+	f := &repairClient{pr: p, issue: i, status: vcs.CIStatusFailure}
+	j := &runJob{repo: "o/r", sub: &operator.Subject{Number: 9}, client: f, repair: &ciRepairContext{PR: p}}
+	if err := snapshot.AcquireLock("o/r", 9, "repair-ci"); err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.ReleaseLock("o/r", 9)
+	f.pr.HeadSHA = strings.Repeat("b", 40)
+	if err := prepareCIRepair(j, time.Now()); err == nil {
+		t.Fatal("stale head accepted")
+	}
+	f.pr = p
+	f.status = vcs.CIStatusPending
+	if err := prepareCIRepair(j, time.Now()); err == nil {
+		t.Fatal("pending accepted")
+	}
+	f.status = vcs.CIStatusFailure
+	if err := prepareCIRepair(j, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if j.repair.Attempt != 1 {
+		t.Fatal("stale checks consumed budget")
+	}
+}
+
+func TestCIRepairFrozenWorkdir(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "gitconfig"))
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	git(source, "init", "--quiet")
+	git(source, "config", "user.email", "test@example.com")
+	git(source, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(source, "code"), []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git(source, "add", "code")
+	git(source, "commit", "-qm", "fixture")
+	git(source, "branch", "fix/issue-9")
+	sha := git(source, "rev-parse", "HEAD")
+	git(source, "remote", "add", "origin", "https://github.com/o/r.git")
+	git(source, "config", "--global", "url."+source+".insteadOf", "https://github.com/o/r.git")
+	// get-url expands insteadOf, so use a separate clone with an SSH-shaped
+	// origin and a command-scoped rewrite only for subprocess network transport.
+	git(source, "remote", "set-url", "origin", "git@github.com:o/r.git")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "url."+source+".insteadOf")
+	t.Setenv("GIT_CONFIG_VALUE_0", "git@github.com:o/r.git")
+	p, _ := repairFixture()
+	p.HeadSHA = sha
+	cfg := config.Repo{LocalPath: source}
+	wt, cleanup, err := setupCIRepairWorkdir(context.Background(), cfg, "o/r", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if got := git(wt.Path, "rev-parse", "HEAD"); got != sha {
+		t.Fatalf("head %s", got)
+	}
+	if got := git(wt.Path, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+		t.Fatal("not detached")
+	}
+	p.HeadSHA = strings.Repeat("b", 40)
+	if _, _, err := setupCIRepairWorkdir(context.Background(), cfg, "o/r", p); err == nil {
+		t.Fatal("changed fetch accepted")
+	}
+	p.HeadSHA = sha
+	p.HeadBranch = "fix/issue-missing"
+	if _, _, err := setupCIRepairWorkdir(context.Background(), cfg, "o/r", p); err == nil {
+		t.Fatal("cached fallback accepted")
+	}
+}
+
+type repairWriteback struct {
+	vcs.Client
+	labels   []string
+	comments []string
+}
+
+func (f *repairWriteback) AddLabel(_ string, _ int, labels ...string) error {
+	f.labels = append(f.labels, labels...)
+	return nil
+}
+func (f *repairWriteback) PostIssueCommentIdempotent(_ string, _ int, body, _ string) error {
+	f.comments = append(f.comments, body)
+	return nil
+}
+
+func TestCIRepairExistingPROutcome(t *testing.T) {
+	data, err := os.ReadFile("../../../skills/repair-ci/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err := operator.Parse(data, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, i := repairFixture()
+	repair := ciRepairContext{PR: p, Attempt: 1}
+	for _, label := range []string{"agent-implemented", "agent-failed"} {
+		f := &repairWriteback{}
+		_, outcome, err := operator.Run(context.Background(), op, &operator.Subject{Number: i.Number, State: i.State, Labels: i.Labels}, f, operator.RunOptions{
+			Repo: "o/r", Workdir: t.TempDir(), ResumeContext: repair.prompt("go test ./..."),
+			RunFunc: func(_ context.Context, prompt, _ string, _ time.Duration, _ io.Writer, _ string, system ...string) (string, error) {
+				if !strings.Contains(prompt, p.HeadSHA) || !strings.Contains(prompt, "https://github.com/o/r/pull/11") {
+					t.Fatal("missing frozen PR context")
+				}
+				if len(system) == 0 || !strings.Contains(system[0], "Do not create a new PR") {
+					t.Fatal("missing same-PR contract")
+				}
+				return "Updated existing PR https://github.com/o/r/pull/11\n<!-- clawflow:outcome=" + label + " -->", nil
+			},
+		})
+		if err != nil || outcome != label || len(f.labels) != 1 || f.labels[0] != label || len(f.comments) != 1 {
+			t.Fatalf("writeback: %s %v %+v", outcome, err, f)
+		}
+		// All other VCS methods deliberately panic via the nil embedded Client:
+		// this proves writeback does not create another PR or reset approval labels.
+	}
+}
