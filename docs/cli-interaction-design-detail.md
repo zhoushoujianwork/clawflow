@@ -44,3 +44,9 @@ Contract tests should parse JSON for both ready and blocked results, assert stab
 Operator diagnostic regression cases should cover the built-in classify/evaluate-feat definitions, reordered equivalent label sets, and trigger differences in OR labels, exclusions and parent/leaf scope. Keep dispatch and matching behavior unchanged in a diagnostic-only fix.
 
 For live offload validation, record observed state and the command/build revision. A successful local readiness check does not establish remote authentication, test success, agent execution, PR creation or merge. Report each of those separately when exercised.
+
+## Autonomous repository controls
+
+`repo set <R> --workflow autonomous|legacy` selects dispatch. An omitted workflow defaults to autonomous. `repo show`, `config show --repo <R> --field workflow` and `project check` expose the effective mode. `repo set <R> --ci-required on|off` controls the existing required-CI gate. Select `--auto-merge on --ci-required on` for unattended delivery after successful checks; this does not require `--auto-approve on` or a per-issue ready label. Explicit legacy mode retains the earlier label-driven pipeline.
+
+Regression coverage includes omitted/explicit mode serialization and sync, invalid values, direct unlabeled/evaluated issue dispatch, custom constraints, terminal/parent/question exclusions, fresh-label rechecks and missing-CI rejection. These are changes to execution behavior, separate from the earlier diagnostic-only milestone.

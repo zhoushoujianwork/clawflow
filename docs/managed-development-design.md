@@ -1,6 +1,6 @@
 # Fully managed Git development
 
-Status: Proposed · Date: 2026-10-26
+Status: Proposed, with autonomous delivery policy updated · Date: 2026-10-26
 
 This document defines product scope and architectural choices. [Implementation notes](managed-development-design-detail.md) describe the proposed contracts and recovery rules. Names and configuration examples there are proposals, not supported commands or configuration today.
 
@@ -11,6 +11,8 @@ The [CLI interaction design](cli-interaction-design.md) defines the user and ext
 Turn ClawFlow into a service that takes an accepted Git issue through planning, implementation, testing, review, and merge, then verifies the result. Users configure how their projects work by installing and binding skills. ClawFlow continuously advances work within those configured permissions and resource limits.
 
 “Fully managed” means automatic progress and recovery for supported work, with an explicit blocked state when requirements, credentials, infrastructure, or policy prevent progress. It does not mean treating every agent response as success or retrying indefinitely.
+
+The default product direction is unattended development: humans specify project direction and requested features; AI implements, tests, repairs and delivers them. Classification, separate issue scoring, and manual approval labels are not mandatory workflow stages. The implementation agent performs any needed analysis and planning internally. Human confirmation is not a per-issue transition requirement.
 
 ## Current project assessment
 
@@ -39,8 +41,7 @@ The default built-in workflow is:
 
 ```mermaid
 flowchart LR
-    A[Intake] --> B[Plan and acceptance criteria]
-    B --> C[Implement in isolated workspace]
+    A[Eligible issue] --> C[Implement and plan internally in isolated workspace]
     C --> D[Required tests]
     D --> E[Review]
     E --> F[Merge eligibility]
@@ -97,6 +98,8 @@ Configuration changes use a separate configuration workflow: validate the new pr
 ## Autonomy and completion
 
 Offer project-level modes using the same workflow: plan only, develop through PR, or manage through merge. A project may authorize automatic merge once its required gates pass; repository protections and actual provider capabilities still apply. Release and production deployment are separate opt-in workflows.
+
+For the unattended mode, PR review and merge eligibility are automated checks, not requests for a human to approve each issue. Failed tests stay with the implementation/repair loop. Missing CI evidence must never count as a passing required check. Legacy evaluate/approve behavior is available only through an explicit legacy configuration; it is not the default path for eligible work.
 
 A development task is complete only when its requested changes have merged and required target-branch checks have passed, or when the selected mode's explicit endpoint has been reached. PR creation, a successful agent process, and an agent's written claim of completion are intermediate facts.
 

@@ -8,6 +8,8 @@ This extends the [managed development design](managed-development-design.md). Th
 
 The normal path is **inspect → configure → check → preview → execute → observe → recover**. An external AI should complete it using documented commands and structured results, without editing internal JSON/YAML state or scraping dashboard pages.
 
+These are capabilities, not mandatory human checkpoints. Under the unattended policy, project setup authorizes the delivery endpoint once; each eligible issue proceeds directly to implementation and test/repair. Preview remains an optional inspection tool, and execution plans can be produced and consumed internally. No separate evaluation score or manual approval label is required for each issue.
+
 Skills teach the workflow and project-specific choices. The CLI owns validation, persistence, execution identifiers and side effects. A skill must not claim a command exists before it is implemented.
 
 ## Interaction rules

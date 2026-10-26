@@ -92,6 +92,8 @@ func newRepoShowCmd() *cobra.Command {
 			}
 			fmt.Printf("repo:         %s\n", ownerRepo)
 			fmt.Printf("status:       %s\n", status)
+			fmt.Printf("workflow:     %s\n", r.EffectiveWorkflow())
+			fmt.Printf("ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
 			fmt.Printf("local_path:   %s\n", r.LocalPath)
 			if r.Description != "" {
@@ -324,6 +326,7 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 }
 
 func newRepoSetCmd() *cobra.Command {
+	var workflow, ciRequired string
 	var autoApprove string
 	var autoMerge string
 	var primaryProject string
@@ -366,6 +369,15 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			// Validate flags before mutating.
+			if err := config.ValidateWorkflow(workflow); err != nil {
+				return err
+			}
+			if cmd.Flags().Changed("workflow") && workflow == "" {
+				return fmt.Errorf("--workflow must be autonomous or legacy")
+			}
+			if cmd.Flags().Changed("ci-required") && ciRequired != "on" && ciRequired != "off" {
+				return fmt.Errorf("--ci-required must be on or off")
+			}
 			boundMachineSet := cmd.Flags().Changed("bound-machine")
 			if boundMachineSet && strings.ContainsFunc(boundMachine, func(r rune) bool {
 				return unicode.IsSpace(r) || unicode.IsControl(r) || r == '/' || r == '\\'
@@ -387,6 +399,12 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			config.TouchRepo(cfg, ownerRepo, func(r config.Repo) config.Repo {
+				if workflow != "" {
+					r.Workflow = workflow
+				}
+				if ciRequired != "" {
+					r.CIRequired = ciRequired == "on"
+				}
 				if autoApprove != "" {
 					switch autoApprove {
 					case "on", "true", "1":
@@ -419,6 +437,8 @@ func newRepoSetCmd() *cobra.Command {
 				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
 			}
 			fmt.Printf("repo %q updated\n", ownerRepo)
+			fmt.Printf("  workflow:     %s\n", r.EffectiveWorkflow())
+			fmt.Printf("  ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("  auto_approve: %v\n", r.AutoApprove)
 			fmt.Printf("  auto_merge:   %v\n", r.AutoMerge)
 			if boundMachineSet {
@@ -438,6 +458,8 @@ func newRepoSetCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&workflow, "workflow", "", "dispatch workflow: autonomous (default) or legacy")
+	cmd.Flags().StringVar(&ciRequired, "ci-required", "", "require successful CI before auto-merge: on or off")
 	cmd.Flags().StringVar(&autoApprove, "auto-approve", "", "enable/disable auto-approve: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")

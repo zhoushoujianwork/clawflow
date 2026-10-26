@@ -119,6 +119,8 @@ func newConfigShowCmd() *cobra.Command {
 					return fmt.Errorf("repo %q not found", repoFlag)
 				}
 				switch fieldFlag {
+				case "workflow":
+					fmt.Println(r.EffectiveWorkflow())
 				case "auto_approve":
 					fmt.Println(r.AutoApprove)
 				case "auto_merge":
@@ -178,7 +180,7 @@ func newConfigShowCmd() *cobra.Command {
 				if r.Enabled {
 					status = "enabled"
 				}
-				fmt.Printf("  %-40s [%s]\n", name, status)
+				fmt.Printf("  %-40s [%s] workflow=%s\n", name, status, r.EffectiveWorkflow())
 			}
 			return nil
 		},

@@ -22,6 +22,7 @@ func envOrFile(envKey, fileVal string) string {
 
 // Repo holds per-repository settings.
 type Repo struct {
+	Workflow          string            `yaml:"workflow,omitempty"`
 	Enabled           bool              `yaml:"enabled"`
 	Platform          string            `yaml:"platform,omitempty"` // "github" (default) or "gitlab"
 	BaseURL           string            `yaml:"base_url,omitempty"` // GitLab self-hosted instance URL
@@ -74,6 +75,38 @@ type Repo struct {
 	// UpdatedBy is the hostname of the machine that last wrote this entry.
 	// Informational only — the authoritative tiebreaker is UpdatedAt.
 	UpdatedBy string `yaml:"updated_by,omitempty"`
+}
+
+const (
+	WorkflowAutonomous = "autonomous"
+	WorkflowLegacy     = "legacy"
+)
+
+// EffectiveWorkflow defaults omitted workflow settings to autonomous dispatch.
+func (r Repo) EffectiveWorkflow() string {
+	if r.Workflow == "" {
+		return WorkflowAutonomous
+	}
+	return r.Workflow
+}
+
+// ValidateWorkflow rejects unknown modes instead of silently choosing a pipeline.
+func ValidateWorkflow(workflow string) error {
+	switch workflow {
+	case "", WorkflowAutonomous, WorkflowLegacy:
+		return nil
+	default:
+		return fmt.Errorf("workflow must be autonomous or legacy, got %q", workflow)
+	}
+}
+
+func (c *Config) validateWorkflows() error {
+	for name, r := range c.Repos {
+		if err := ValidateWorkflow(r.Workflow); err != nil {
+			return fmt.Errorf("repo %q: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // Settings holds global ClawFlow settings.
@@ -911,6 +944,9 @@ func LoadCredentials() (*Credentials, error) {
 
 // Save writes the config back to ~/.clawflow/config/config.yaml.
 func (c *Config) Save() error {
+	if err := c.validateWorkflows(); err != nil {
+		return err
+	}
 	if c.Repos == nil {
 		c.Repos = make(map[string]Repo)
 	}
@@ -966,6 +1002,9 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("cannot parse config: %w", err)
+	}
+	if err := cfg.validateWorkflows(); err != nil {
+		return nil, err
 	}
 	return &cfg, nil
 }

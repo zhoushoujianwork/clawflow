@@ -4,6 +4,12 @@ Status: Proposed · Date: 2026-10-26
 
 [Main design and scope](managed-development-design.md) is authoritative. These contracts illustrate the implementation direction and may be refined during development. No proposed schema or command here is implemented by this document.
 
+## Current autonomous dispatch policy
+
+Repository `workflow` defaults to `autonomous`; explicit `legacy` preserves the earlier classify/evaluate/approval pipeline. Autonomous dispatch sends eligible open leaf issues directly to implementation, where analysis, planning, headless tests and repair occur internally. It removes the built-in `ready-for-agent` prerequisite without discarding custom trigger constraints, terminal exclusions, machine binding or execution locks. The same routing applies during scanning and the fresh-label recheck. Questions retain their reply path, and parents retain tracking behavior.
+
+`repo set --workflow autonomous --auto-merge on --ci-required on` selects unattended delivery. Merge authorization remains separate from dispatch; required CI accepts only success, never missing/pending/failed/unreadable results. These changes use the existing runner and merge sweep; the durable workflow and automatic post-PR repair contracts below remain proposed.
+
 ## Existing code and migration map
 
 Source paths below refer to base commit `dff005a`; line numbers are inspection landmarks, not stable APIs.

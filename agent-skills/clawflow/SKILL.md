@@ -119,7 +119,8 @@ namespace match the requested repo; paths are stored as absolute paths.
 
 Use `repo list`/`repo show <R>` and `project list`/`project show <project>` first
 when entries may already exist. Do not delete/recreate them to bypass errors.
-Existing registration updates support `repo set --auto-approve`, `--auto-merge`,
+Existing registration updates support `repo set --workflow`, `--ci-required`,
+`--auto-approve`, `--auto-merge`,
 `--primary-project` and `--bound-machine`; base/local-path changes have no generic CLI setter.
 Report that limitation instead of inventing a flag.
 
@@ -285,3 +286,30 @@ Report exact commands, exit status, resulting enabled/automation/sync state,
 verification evidence and unresolved failures. A successful command launch is
 not a successful operator, CI job or deployment. Preserve partial-result and
 backup evidence and never claim tests or live operations that were not run.
+
+## Autonomous issue implementation
+
+The default repository workflow is `autonomous`, including configurations with no
+`workflow` field. Once project direction, repository binding and automation are
+authorized, configure the project endpoint explicitly:
+
+```bash
+clawflow repo set <R> --workflow autonomous --auto-merge on --ci-required on
+clawflow config show --repo <R> --field workflow
+clawflow repo enable <R>
+clawflow run --repo <R>
+```
+
+Ordinary open leaf issues go directly to implementation without classification,
+evaluation or a `ready-for-agent` label. Analysis, focused headless tests and
+repair happen inside implementation before commit and PR creation. Questions
+keep their reply path; tracking/parent issues are not direct implementation work.
+Terminal labels, machine binding, local locks and failure limits still apply.
+Auto-merge remains separately configured and required CI must report success;
+missing, pending, failed or unreadable CI blocks merging.
+
+Use `clawflow repo set <R> --workflow legacy` to retain the older label-driven
+classification/evaluation/approval pipeline. The `auto_approve` setting belongs
+to that legacy pipeline. Setting workflow alone does not enable auto-merge.
+This dispatch change does not add a durable event engine or an automatic CI
+repair controller; report blocked runs and unverified outcomes honestly.

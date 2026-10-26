@@ -585,6 +585,40 @@ func operatorPriority(name string) int {
 	}
 }
 
+// effectiveOperator applies repository routing without changing shared registry data.
+// Autonomous implementation still respects custom triggers and terminal exclusions.
+func effectiveOperator(op *operator.Operator, sub *operator.Subject, repoCfg config.Repo) *operator.Operator {
+	if op == nil || config.ValidateWorkflow(repoCfg.Workflow) != nil {
+		return nil
+	}
+	if repoCfg.EffectiveWorkflow() == config.WorkflowLegacy {
+		return op
+	}
+	switch op.Name {
+	case "classify", "evaluate-bug", "evaluate-feat", "decompose":
+		return nil
+	case "implement":
+		if sub.IsPR || sub.State != "open" || sub.SubTotal > 0 || sub.HasLabel("tracking") || sub.HasLabel("question") {
+			return nil
+		}
+		copyOp := *op
+		withoutApproval := func(labels []string) []string {
+			var result []string
+			for _, label := range labels {
+				if label != "ready-for-agent" {
+					result = append(result, label)
+				}
+			}
+			return result
+		}
+		copyOp.Trigger.LabelsRequired = withoutApproval(op.Trigger.LabelsRequired)
+		copyOp.Trigger.LabelsRequiredAny = withoutApproval(op.Trigger.LabelsRequiredAny)
+		return &copyOp
+	default:
+		return op
+	}
+}
+
 // subIssueLister is the narrow slice of vcs.Client that isStaleLeafJob needs.
 // Declaring it locally keeps the freshness recheck unit-testable with a tiny
 // fake instead of a full vcs.Client implementation.
@@ -723,6 +757,10 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		// post-run state.
 		var firstMatch *operator.Operator
 		for _, op := range reg.All() {
+			op = effectiveOperator(op, sub, repoCfg)
+			if op == nil {
+				continue
+			}
 			ok, reason := operator.MatchesWithReason(sub, op)
 			if !ok {
 				debugf("  ✗ %s: %s", op.Name, reason)
@@ -991,14 +1029,19 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if freshLabels, err := j.client.GetIssueLabels(j.repo, j.sub.Number); err == nil {
 		freshSub := *j.sub
 		freshSub.Labels = freshLabels
-		if ok, reason := operator.MatchesWithReason(&freshSub, j.op); !ok {
+		freshOp := effectiveOperator(j.op, &freshSub, j.repoCfg)
+		if freshOp == nil {
+			return false, false
+		}
+		if ok, reason := operator.MatchesWithReason(&freshSub, freshOp); !ok {
 			fmt.Printf("%s → skip (labels changed since poll: %s)\n", prefix, reason)
-			if by, excluded := operator.ExcludedBy(&freshSub, j.op); excluded {
+			if by, excluded := operator.ExcludedBy(&freshSub, freshOp); excluded {
 				runLog.Info("run/skip_excluded",
 					"repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "by", by, "when", "post_poll")
 			}
 			return false, false
 		}
+		j.op = freshOp
 	}
 
 	// Sub-issue freshness recheck (issue #270). The scan captured SubTotal

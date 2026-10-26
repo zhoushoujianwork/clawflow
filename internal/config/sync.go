@@ -26,6 +26,7 @@ const GistDescription = "clawflow-config"
 // every machine in the fleet would have to be re-bound by hand, which
 // defeats the purpose of the binding.
 type syncableRepo struct {
+	Workflow              string            `yaml:"workflow,omitempty"`
 	Enabled               bool              `yaml:"enabled"`
 	Platform              string            `yaml:"platform,omitempty"`
 	BaseURL               string            `yaml:"base_url,omitempty"`
@@ -51,6 +52,7 @@ type syncableRepo struct {
 // toSyncable converts a Repo to its syncable representation (strips local_path).
 func toSyncable(r Repo) syncableRepo {
 	return syncableRepo{
+		Workflow:              r.Workflow,
 		Enabled:               r.Enabled,
 		Platform:              r.Platform,
 		BaseURL:               r.BaseURL,
@@ -76,6 +78,7 @@ func toSyncable(r Repo) syncableRepo {
 // local_path (the only genuinely machine-local field).
 func fromSyncable(s syncableRepo, localPath string) Repo {
 	return Repo{
+		Workflow:              s.Workflow,
 		Enabled:               s.Enabled,
 		Platform:              s.Platform,
 		BaseURL:               s.BaseURL,
@@ -110,6 +113,9 @@ type gistPayload struct {
 // Any repo entry without an updated_at timestamp is stamped with the current
 // time before serialisation (one-shot migration for legacy configs).
 func MarshalForGist(cfg *Config) ([]byte, error) {
+	if err := cfg.validateWorkflows(); err != nil {
+		return nil, err
+	}
 	// Migrate any legacy entries in-place so the Gist always carries timestamps.
 	MigrateTimestamps(cfg)
 
@@ -135,12 +141,12 @@ type MergeResult struct {
 //
 //   - settings.*   → cloud wins (remote overwrites local)
 //   - repos list   → per-entry LWW using updated_at:
-//     • Gist newer  → replace local entry wholesale
-//     • local newer → keep local entry (will be pushed next time)
-//     • same ts, same content → no-op
-//     • same ts, different content → write config.conflict.yaml, return error
-//     • entry only on one side → union in (preserve)
-//     • local_path always comes from the local copy
+//   - Gist newer  → replace local entry wholesale
+//   - local newer → keep local entry (will be pushed next time)
+//   - same ts, same content → no-op
+//   - same ts, different content → write config.conflict.yaml, return error
+//   - entry only on one side → union in (preserve)
+//   - local_path always comes from the local copy
 //
 // Entries without updated_at (zero time) are treated as "oldest possible" so
 // any timestamped entry wins over them. This handles legacy configs gracefully.
@@ -159,6 +165,14 @@ func mergeConfigsInternal(local *Config, remoteYAML []byte, conflictFatal bool) 
 	var remote gistPayload
 	if err := yaml.Unmarshal(remoteYAML, &remote); err != nil {
 		return nil, fmt.Errorf("cannot parse remote config: %w", err)
+	}
+	if err := local.validateWorkflows(); err != nil {
+		return nil, err
+	}
+	for name, repo := range remote.Repos {
+		if err := ValidateWorkflow(repo.Workflow); err != nil {
+			return nil, fmt.Errorf("remote repo %q: %w", name, err)
+		}
 	}
 
 	merged := &Config{

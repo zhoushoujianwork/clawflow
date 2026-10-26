@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -161,7 +162,7 @@ func TestRunOneOperator_BecameParent_NoTerminalLabel(t *testing.T) {
 		labels: []string{"bug"},
 		subs:   []vcs.Issue{{Number: 43}, {Number: 44}},
 	}
-	job := &runJob{op: op, sub: sub, repo: "owner/repo", client: client}
+	job := &runJob{op: op, sub: sub, repo: "owner/repo", repoCfg: config.Repo{Workflow: config.WorkflowLegacy}, client: client}
 
 	didFire, hitRateLimit := runOneOperator(context.Background(), job, 5*time.Second)
 	if didFire || hitRateLimit {
