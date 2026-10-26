@@ -40,6 +40,7 @@ Run 'clawflow sync pull' to download and merge immediately.`,
 
 	cmd.AddCommand(newSyncPushCmd())
 	cmd.AddCommand(newSyncPullCmd())
+	cmd.AddCommand(newSyncLocalCmd("pause"), newSyncLocalCmd("resume"), newSyncLocalCmd("status"))
 	return cmd
 }
 
@@ -178,4 +179,25 @@ func confirmPrompt(prompt string) bool {
 		return answer == "y" || answer == "yes"
 	}
 	return false
+}
+
+func newSyncLocalCmd(action string) *cobra.Command {
+	return &cobra.Command{Use: action, Short: action + " local Gist synchronization (no network)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		var err error
+		switch action {
+		case "pause":
+			err = clawsync.Pause()
+		case "resume":
+			err = clawsync.Resume()
+		}
+		if err != nil {
+			return err
+		}
+		paused, err := clawsync.IsPaused()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "sync paused: %v\n", paused)
+		return nil
+	}}
 }

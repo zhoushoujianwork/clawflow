@@ -24,6 +24,9 @@ import (
 // Client returns a GitHub client and the stored Gist ID from credentials.
 // Returns an error when no token is configured.
 func Client() (*github.Client, string, error) {
+	if err := CheckNotPaused(); err != nil {
+		return nil, "", err
+	}
 	creds, err := config.LoadCredentials()
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot load credentials: %w", err)
