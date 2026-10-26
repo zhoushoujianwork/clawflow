@@ -17,7 +17,10 @@ The updated [product design](managed-development-design.md) describes supported 
 - Independent `go vet ./...`, build and diff checks passed.
 - Isolated CLI smoke passed: exactly five operators, supported help, retired flags rejected, legacy config notice, and save preserving disabled state, merge=false, CI=true and machine binding while omitting retired fields.
 - Lifecycle acceptance covers unlabeled dispatch, fake provider, comment/marker write-back and CI-gated merge. Successful CI merges; failed/missing CI does not. No paid provider or live PR was used for that test.
-- Installed-runtime validation is pending.
+- Installed runtime `906b60c` and external skills; backed up prior binaries, config and skills under `~/.clawflow/backups/runtime-before-906b60c/`.
+- Normalized live config through the CLI. Before/after comparison preserved all repository enablement, merge/CI, bindings, paths/platform/project fields and scheduler settings; retired fields are absent. Sync remains paused.
+- Restarted the background service without GUI interaction. HTTP root and API checks passed; settings/repos responses omit retired fields, and the live operator snapshot contains exactly the five supported operators.
+- Scoped live scan of already-closed issue #10 exited 0 and created no new issue run. This is a no-reexecution smoke check, not a claim of a newly implemented live feature.
 
 ## Supporting workers
 
@@ -33,3 +36,5 @@ Every worker used profile `codex-gpt-6.1-sol-medium-fast`, model `gpt-6.1-sol`. 
 Core implementation worker: status ok / worker exit 0, 104 calls, elapsed 1073.102 s, session `01a176a7-d51a-7333-8a47-dee4bce81bd9`, same profile/model and unavailable estimated cost. The surrounding shell exited 1 because a quoting error truncated the brief and attempted invalid trailing shell text. No successful extra action was reported. The remaining requirements were resubmitted with shell-safe quoting in the same session; worker edits were preserved. Its selected core tests/build passed, but socket-dependent tests and race acceptance still require the independent full check.
 
 Core completion follow-up: status ok / exit 0, 32 calls, 313.527 s, session `01a176a7-d51a-7333-8a47-dee4bce81bd9`, same profile/model and unavailable estimated cost. It completed override migration/diagnostics, optional category guidance and isolated lifecycle acceptance. No persisted Operators config map exists, so no additional map migration was added.
+
+Implementation commit: `906b60c`. The source remains on local branch `refactor/autonomous-only`; no source push or merge was performed. Runtime startup confirmed version `906b60c` at 05:52:57 UTC. The cleanup removed four built-ins, reducing the operator set from nine to five.
