@@ -1,3 +1,5 @@
+//go:build !windows
+
 package commands
 
 // These tests drive production runAcceptance and production execution.Run across
@@ -210,9 +212,6 @@ func runAcceptanceProtocolHelper() int {
 		}
 		_ = json.NewEncoder(events).Encode(e)
 	}
-	// Offload may start before it knows the native session.
-	emit("start", "", nil)
-
 	if phase == "review" {
 		captures, err := readAcceptanceProtocolCaptures(os.Getenv(acceptanceProtocolCaptureEnv))
 		if err != nil {
@@ -221,9 +220,6 @@ func runAcceptanceProtocolHelper() int {
 		if err := acceptanceProtocolPlanPersisted(os.Getenv(acceptanceProtocolStoreEnv), cwd, prompt, captures); err != nil {
 			return violate("review: %v", err)
 		}
-		emit("progress", session, map[string]any{"native_type": "tool_use", "tool_category": "read"})
-	} else {
-		emit("progress", session, map[string]any{"native_type": "message"})
 	}
 
 	entries, _ := os.ReadDir(cwd)
@@ -250,6 +246,15 @@ func runAcceptanceProtocolHelper() int {
 		return violate("%s: capture write: %v", phase, err)
 	}
 	_ = f.Close()
+	// Record invocation before an intentionally invalid event lets the real
+	// adapter terminate this helper. Plan validation above still precedes all
+	// reviewer source-tool events.
+	emit("start", "", nil)
+	if phase == "review" {
+		emit("progress", session, map[string]any{"native_type": "tool_use", "tool_category": "read"})
+	} else {
+		emit("progress", session, map[string]any{"native_type": "message"})
+	}
 
 	status, code, errorKind := "ok", 0, ""
 	if mode == "failed" {

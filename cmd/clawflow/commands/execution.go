@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 )
 
@@ -66,8 +68,35 @@ CLAWFLOW_OFFLOAD_PROFILE still wins, as it does during execution.`,
 	return cmd
 }
 
+// loadExecutionCheckConfig reads only the canonical config file, read-only.
+// Unlike execution.LoadConfig it never goes through config.Load, whose legacy
+// repos.yaml migration writes and renames files. Parser errors are not echoed.
+func loadExecutionCheckConfig() (execution.Config, error) {
+	var c execution.Config
+	path := config.ConfigPath()
+	_, statErr := os.Stat(path)
+	switch {
+	case statErr == nil:
+		var cfg config.Config
+		if err := readCheckYAML(path, &cfg); err != nil {
+			return c, errors.New("Offload settings unreadable: fix or recreate ~/.clawflow/config/config.yaml")
+		}
+		c = cfg.Settings.Execution
+	case os.IsNotExist(statErr):
+		if os.Getenv("CLAWFLOW_OFFLOAD_PROFILE") == "" {
+			if _, err := os.Stat(filepath.Join(filepath.Dir(path), "repos.yaml")); err == nil {
+				return c, errors.New("Only a legacy repos.yaml exists; this check does not migrate it. Create ~/.clawflow/config/config.yaml with settings.execution.profile or set CLAWFLOW_OFFLOAD_PROFILE")
+			}
+			return c, errors.New("Offload settings unavailable: configure settings.execution.profile or CLAWFLOW_OFFLOAD_PROFILE")
+		}
+	default:
+		return c, errors.New("Offload settings unreadable: ~/.clawflow/config/config.yaml is not accessible")
+	}
+	return execution.WithEnvironment(c), nil
+}
+
 func runExecutionCheck(cmd *cobra.Command, role string) execution.Report {
-	c, err := execution.LoadConfig()
+	c, err := loadExecutionCheckConfig()
 	if err != nil {
 		return execution.ConfigBlockedReport(err.Error())
 	}

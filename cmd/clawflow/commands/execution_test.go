@@ -161,3 +161,145 @@ func TestExecutionCheckTextReport(t *testing.T) {
 		}
 	}
 }
+
+type fileState struct {
+	data string
+	mode os.FileMode
+}
+
+func snapshotDir(t *testing.T, root string) map[string]fileState {
+	t.Helper()
+	state := map[string]fileState{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		fs := fileState{mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			fs.data = string(raw)
+		}
+		state[path] = fs
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func assertSnapshotEqual(t *testing.T, before, after map[string]fileState) {
+	t.Helper()
+	if len(before) != len(after) {
+		t.Fatalf("file set changed: before=%d after=%d", len(before), len(after))
+	}
+	for path, b := range before {
+		if a, ok := after[path]; !ok || a != b {
+			t.Fatalf("%s changed", path)
+		}
+	}
+}
+
+func clearOffloadEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"CLAWFLOW_OFFLOAD_COMMAND", "CLAWFLOW_OFFLOAD_PROFILE", "CLAWFLOW_OFFLOAD_CODEX_SANDBOX"} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
+	}
+}
+
+func TestExecutionCheckLegacyConfigIsNeverMigrated(t *testing.T) {
+	for _, withEnv := range []bool{false, true} {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		clearOffloadEnv(t)
+		cmdPath := fakeOffload(t, executionHelp(), "2")
+		cfgDir := filepath.Join(home, ".clawflow", "config")
+		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		legacy := "settings:\n  execution:\n    command: " + cmdPath + "\n    profile: legacy\nrepos: {}\n"
+		legacyPath := filepath.Join(cfgDir, "repos.yaml")
+		if err := os.WriteFile(legacyPath, []byte(legacy), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if withEnv {
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "env-profile")
+			t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", cmdPath)
+		}
+		before := snapshotDir(t, home)
+		out, errOut, err := runExecutionCheckCLI(t, "--json")
+		after := snapshotDir(t, home)
+		assertSnapshotEqual(t, before, after)
+		if _, statErr := os.Stat(filepath.Join(cfgDir, "config.yaml")); !os.IsNotExist(statErr) {
+			t.Fatal("canonical config was created")
+		}
+		if _, statErr := os.Stat(legacyPath + ".bak"); !os.IsNotExist(statErr) {
+			t.Fatal("legacy config was renamed")
+		}
+		var r execution.Report
+		if json.Unmarshal([]byte(out), &r) != nil || errOut != "" {
+			t.Fatalf("out=%q stderr=%q", out, errOut)
+		}
+		if withEnv {
+			if err != nil || r.Status != "ready" || r.Profile != "env-profile" {
+				t.Fatalf("env profile without canonical config must work: err=%v r=%+v", err, r)
+			}
+			continue
+		}
+		msg := r.Checks[0].Message
+		if err == nil || r.Status != "blocked" || !strings.Contains(msg, "legacy repos.yaml") || !strings.Contains(msg, "config.yaml") {
+			t.Fatalf("legacy-only must be actionable: err=%v r=%+v", err, r)
+		}
+	}
+}
+
+func TestExecutionCheckInvalidCanonicalBlocksWithoutMutationOrLeak(t *testing.T) {
+	for name, content := range map[string]string{
+		"malformed": "settings: [unterminated\n  secret-parser-detail: sk-LEAK\n",
+		"empty":     "",
+		"scalar":    "just a string\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			clearOffloadEnv(t)
+			// Env must not bypass an unreadable canonical file.
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "env-profile")
+			t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", fakeOffload(t, executionHelp(), "2"))
+			cfgDir := filepath.Join(home, ".clawflow", "config")
+			if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotDir(t, home)
+			out, errOut, err := runExecutionCheckCLI(t, "--json")
+			assertSnapshotEqual(t, before, snapshotDir(t, home))
+			var r execution.Report
+			if err == nil || json.Unmarshal([]byte(out), &r) != nil || r.Status != "blocked" || r.Checks[0].Status != "blocked" {
+				t.Fatalf("err=%v out=%q", err, out)
+			}
+			if r.Command != "" || strings.Contains(out+errOut+err.Error(), "LEAK") || strings.Contains(out, "yaml:") {
+				t.Fatalf("parser detail leaked: %q", out)
+			}
+		})
+	}
+}
+
+func TestExecutionCheckMissingEverythingIsBlockedWithoutWrites(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	clearOffloadEnv(t)
+	before := snapshotDir(t, home)
+	out, _, err := runExecutionCheckCLI(t, "--json")
+	var r execution.Report
+	if err == nil || json.Unmarshal([]byte(out), &r) != nil || r.Status != "blocked" {
+		t.Fatalf("err=%v out=%q", err, out)
+	}
+	assertSnapshotEqual(t, before, snapshotDir(t, home))
+}

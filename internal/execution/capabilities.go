@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // CapabilitySchemaVersion is the Report schema version.
@@ -309,9 +310,12 @@ func probeContextProblem(ctx context.Context) string {
 
 var (
 	usageLine = regexp.MustCompile(`(?i)^[ \t]*usage\b`)
-	// Checked on unindented lines only (flag descriptions are indented), so
-	// help prose cannot trigger it.
-	errorLine = regexp.MustCompile(`(?i)(flag provided but not defined|unknown (flag|option|shorthand)|unrecognized (flag|option|argument)|unsupported ?(flag|option)|invalid (flag|option)|unexpected argument|bad flag|no such (flag|option)|^(error|fatal|panic)\b)`)
+	// Exact diagnostic prefixes block at any indentation (matched after
+	// TrimSpace). Go's "flag: help requested" is not a diagnostic.
+	diagnosticLine = regexp.MustCompile(`(?i)^(unknown flag:|flag provided but not defined:|unsupported flag:|(error|fatal|fatal error|panic)\s*:|goroutine \d+ \[)`)
+	// Looser phrases are checked on unindented lines only, because flag
+	// descriptions are indented and may legitimately use such words.
+	errorLine = regexp.MustCompile(`(?i)^(unknown (flag|option|shorthand)|unrecognized (flag|option|argument)|unsupported ?(flag|option)|invalid (flag|option)|unexpected argument|bad flag|no such (flag|option))\b`)
 	// Go flag.PrintDefaults layout: "  -name [type]" followed by an indented
 	// "    \tdescription" line, or "  -x\tdescription" on one line.
 	flagDecl      = regexp.MustCompile(`^ {1,8}--?([A-Za-z][A-Za-z0-9-]*)(?: [A-Za-z][A-Za-z0-9_<>.\[\]-]*)?(?:\t(.*))?$`)
@@ -327,13 +331,34 @@ func helpLines(output []byte) []string {
 	return lines
 }
 
+// binaryOutput reports invalid UTF-8, NUL or control characters other than
+// tab, CR and LF.
+func binaryOutput(output []byte) bool {
+	if !utf8.Valid(output) {
+		return true
+	}
+	for _, r := range string(output) {
+		if r == '\t' || r == '\r' || r == '\n' {
+			continue
+		}
+		if r == 0 || unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateHelp(output []byte) string {
+	if binaryOutput(output) {
+		return "help output is not valid text"
+	}
 	usage := false
 	for _, l := range helpLines(output) {
 		if usageLine.MatchString(l) {
 			usage = true
 		}
-		if l != "" && l[0] != ' ' && l[0] != '\t' && errorLine.MatchString(l) {
+		trimmed := strings.TrimSpace(l)
+		if diagnosticLine.MatchString(trimmed) || (l != "" && l[0] != ' ' && l[0] != '\t' && errorLine.MatchString(trimmed)) {
 			return "help output reports an unsupported flag or error"
 		}
 	}

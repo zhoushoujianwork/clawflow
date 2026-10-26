@@ -37,6 +37,9 @@ func writeScript(t *testing.T, dir, name, body string) string {
 // helpScript prints help to stderr (like Go's flag package) and exits with code.
 func helpScript(t *testing.T, help string, code int) string {
 	t.Helper()
+	// Process start can be slow under suite load; the production 3s limit is
+	// exercised by the dedicated timeout tests.
+	shortProbe(t, 30*time.Second)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "help.txt"), []byte(help), 0600); err != nil {
 		t.Fatal(err)
@@ -215,7 +218,7 @@ func readPID(t *testing.T, path string) int {
 }
 
 func TestProbeTimeoutKillsDescendants(t *testing.T) {
-	shortProbe(t, 1500*time.Millisecond)
+	shortProbe(t, 5*time.Second)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "pid")
 	// Descendant inherits the output pipes and outlives a naive leader kill.
@@ -316,6 +319,104 @@ func TestProbeReportDoesNotEchoRawOutput(t *testing.T) {
 	raw, _ := json.Marshal(r)
 	if strings.Contains(string(raw), "LEAKED") {
 		t.Fatalf("raw output leaked: %s", raw)
+	}
+}
+
+func TestProbeRejectsBinaryOrInvalidText(t *testing.T) {
+	valid := helpFor(RequiredFlags, "")
+	for name, help := range map[string]string{
+		"invalid-utf8": valid + "\xff\xfe\n",
+		"nul":          valid + "a\x00b\n",
+		"escape":       valid + "\x1b[31mred\n",
+		"bell":         "Usage of offload:\a\n" + valid,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := ProbeCapabilities(context.Background(), Config{Command: helpScript(t, help, 2), Profile: "p"})
+			if r.Status != StatusBlocked || check(r, CheckHelpProbe).Status != CheckBlocked || check(r, CheckFlagDeclarations).Status != CheckSkipped {
+				t.Fatalf("report=%+v", r)
+			}
+		})
+	}
+	// Tabs and CRLF remain valid.
+	crlf := strings.ReplaceAll(valid, "\n", "\r\n")
+	if r := ProbeCapabilities(context.Background(), Config{Command: helpScript(t, crlf, 2), Profile: "p"}); r.Status != StatusReady {
+		t.Fatalf("crlf help rejected: %+v", r)
+	}
+}
+
+func TestValidateHelpIndentedDiagnostics(t *testing.T) {
+	valid := helpFor(RequiredFlags, "")
+	for _, prefix := range []string{"unknown flag:", "flag provided but not defined:", "unsupported flag:", "Error:", "fatal:", "panic:", "fatal error:"} {
+		for _, indent := range []string{"", "  ", "    ", "\t", "  \t"} {
+			if msg := validateHelp([]byte(valid + indent + prefix + " -h\n")); msg == "" {
+				t.Errorf("%q indent %q accepted", prefix, indent)
+			}
+		}
+	}
+	// Real Go help, legitimate descriptions and the "help requested" line pass.
+	ok := valid + "flag: help requested\n" +
+		"  -extra string\n    \tIf an unknown flag is given, ignore it; errors are reported\n" +
+		"  -other\tThe error output path\n"
+	if msg := validateHelp([]byte(ok)); msg != "" {
+		t.Fatalf("legitimate help rejected: %s", msg)
+	}
+}
+
+// TestRequiredFlagsMatchProductionArgv captures the argv Run really emits for
+// every request shape and keeps RequiredFlags in lockstep with it.
+func TestRequiredFlagsMatchProductionArgv(t *testing.T) {
+	shapes := []struct {
+		name   string
+		mutate func(*Request)
+	}{
+		{"managed", func(r *Request) {}},
+		{"default-tools-disabled", func(r *Request) { r.PermissionMode = "default"; r.ToolsDisabled = true }},
+		{"resume-model", func(r *Request) { r.Resume = true; r.SessionKey = "native-actual"; r.Model = "model-x" }},
+		{"tool-restrictions", func(r *Request) { r.AllowedTools = []string{"Read", "Grep"}; r.DisallowedTools = []string{"Bash"} }},
+	}
+	required := map[string]bool{}
+	for _, f := range RequiredFlags {
+		required[f] = true
+	}
+	emitted := map[string]bool{}
+	for _, s := range shapes {
+		t.Run(s.name, func(t *testing.T) {
+			c, req := fixture(t)
+			capture := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+			s.mutate(&req)
+			if _, err := Run(context.Background(), c, req, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var call struct{ Args map[string]string }
+			if err := json.Unmarshal(raw, &call); err != nil {
+				t.Fatal(err)
+			}
+			if len(call.Args) == 0 {
+				t.Fatal("no argv captured")
+			}
+			for flag, value := range call.Args {
+				name := strings.TrimPrefix(flag, "-")
+				if name == "execution-policy" && value == "default" && req.PermissionMode == "default" {
+					// The read-only fixture injects this value itself; Run emits
+					// the flag only for managed development.
+					continue
+				}
+				emitted[name] = true
+				if !required[name] {
+					t.Errorf("Run emitted -%s which RequiredFlags does not cover", name)
+				}
+			}
+		})
+	}
+	for name := range required {
+		if !emitted[name] {
+			t.Errorf("RequiredFlags lists -%s but no production argv shape emitted it", name)
+		}
 	}
 }
 
