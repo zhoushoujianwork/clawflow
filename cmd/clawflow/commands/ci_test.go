@@ -1,6 +1,111 @@
 package commands
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot/budget"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
+)
+
+func TestCIJobPlay(t *testing.T) {
+	for _, mode := range []string{"text", "json", "budget exhausted", "API error"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != "POST" || r.URL.EscapedPath() != "/api/v4/projects/group%2Fsub%2Frepo/jobs/42/play" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+				}
+				if mode == "API error" {
+					http.Error(w, "not playable", 400)
+					return
+				}
+				json.NewEncoder(w).Encode(gitlab.Job{ID: 42, Name: "deploy", Status: "pending", WebURL: "https://gl/job/42"})
+			}))
+			defer srv.Close()
+			writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{
+				"group/sub/repo": {Platform: "gitlab", BaseURL: srv.URL},
+			}})
+			path := filepath.Join(t.TempDir(), "budget.json")
+			if err := budget.Init(path, 1); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(budget.EnvPath, path)
+			if mode == "budget exhausted" {
+				if err := budget.Reserve("prior write"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := NewCICmd()
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			args := []string{"job", "play", "--repo", srv.URL + "/group/sub/repo", "--id", "42"}
+			if mode == "json" {
+				args[1] = "trigger"
+				args = append(args, "--json")
+			}
+			cmd.SetArgs(args)
+			err := cmd.Execute()
+			if mode == "budget exhausted" {
+				if err == nil || !strings.Contains(err.Error(), "budget exhausted") || calls != 0 {
+					t.Fatalf("expected budget rejection without request: calls=%d err=%v", calls, err)
+				}
+				return
+			}
+			if calls != 1 {
+				t.Fatalf("expected exactly one request, got %d", calls)
+			}
+			if mode == "API error" {
+				if err == nil || !strings.Contains(err.Error(), "not playable") {
+					t.Fatalf("expected GitLab error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "json" {
+				var job gitlab.Job
+				if err := json.Unmarshal(out.Bytes(), &job); err != nil || job.ID != 42 || job.Status != "pending" {
+					t.Fatalf("unexpected JSON: %s (%v)", out.String(), err)
+				}
+			} else if !strings.Contains(out.String(), "Triggered job #42 deploy [pending]") || !strings.Contains(out.String(), "https://gl/job/42") {
+				t.Fatalf("unexpected output: %s", out.String())
+			}
+			state, err := budget.Read(path)
+			if err != nil || state.Used != 1 {
+				t.Fatalf("write budget not consumed: %+v %v", state, err)
+			}
+		})
+	}
+}
+
+func TestCIJobPlayInvalidArgs(t *testing.T) {
+	for _, args := range [][]string{
+		{"job", "play"},
+		{"job", "play", "--repo", "group/repo"},
+		{"job", "play", "--id", "42"},
+		{"job", "play", "--repo", "group/repo", "--id", "0"},
+		{"job", "play", "--repo", "group/repo", "--id", "-1"},
+		{"job", "play", "--repo", "group/repo", "--id", "42", "extra"},
+	} {
+		cmd := NewCICmd()
+		cmd.SetArgs(args)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		if err := cmd.Execute(); err == nil {
+			t.Errorf("expected argument error for %v", args)
+		}
+	}
+}
 
 func TestStripANSI(t *testing.T) {
 	cases := []struct{ in, want string }{

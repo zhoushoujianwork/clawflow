@@ -31,9 +31,6 @@ func NewStatusCmd() *cobra.Command {
 			for repoName, repoCfg := range repos {
 				fmt.Printf("  %s\n", repoName)
 				flags := []string{}
-				if repoCfg.AutoApprove {
-					flags = append(flags, "auto_approve:on")
-				}
 				if repoCfg.AutoMerge {
 					flags = append(flags, "auto_merge:on")
 				}
@@ -53,10 +50,8 @@ func NewStatusCmd() *cobra.Command {
 					continue
 				}
 
-				// Tallies use the current operator label scheme. An issue can
-				// occupy multiple buckets (e.g. `bug` + `agent-evaluated`);
-				// the switch picks the most "advanced" state first.
-				var awaitingEval, readyToImplement, running, implemented, failed, skipped int
+				// Report current operational states; pending includes non-code issues.
+				var pending, running, implemented, failed, skipped int
 				for _, issue := range issues {
 					switch {
 					case issue.HasLabel("agent-running"):
@@ -67,15 +62,12 @@ func NewStatusCmd() *cobra.Command {
 						skipped++
 					case issue.HasLabel("agent-implemented"):
 						implemented++
-					case issue.HasLabel("ready-for-agent"):
-						readyToImplement++
-					case (issue.HasLabel("bug") || issue.HasLabel("feat")) && !issue.HasLabel("agent-evaluated"):
-						awaitingEval++
+					default:
+						pending++
 					}
 				}
 
-				fmt.Printf("    awaiting eval:     %d\n", awaitingEval)
-				fmt.Printf("    ready to implement: %d\n", readyToImplement)
+				fmt.Printf("    pending:           %d\n", pending)
 				fmt.Printf("    running:           %d\n", running)
 				fmt.Printf("    implemented:       %d\n", implemented)
 				fmt.Printf("    skipped:           %d\n", skipped)

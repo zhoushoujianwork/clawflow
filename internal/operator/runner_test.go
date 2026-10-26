@@ -491,7 +491,7 @@ func TestRun_QuotedMarkerInBody_NotTreatedAsVerdict(t *testing.T) {
 	sub := &Subject{Number: 326}
 	v := newFakeVCS()
 
-	// No Confidence/dimension lines, so salvageOutcome deliberately declines
+	// A quoted marker is documentation, not an outcome declaration.
 	// and the no-marker guard is what we observe.
 	body := "### Repro steps\n\n" +
 		"1. 让某个 issue 的 `evaluate-bug` 连续三次以 `no-marker` 收尾\n" +

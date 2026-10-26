@@ -188,8 +188,8 @@ function LandingPage() {
         <div className="mx-auto grid max-w-6xl gap-4 px-5 py-8 md:grid-cols-4">
           <Step n="1" title="Install once" body="The installer downloads the CLI and installs the AI skill." />
           <Step n="2" title="Add repositories" body="Point ClawFlow at GitHub, GitLab, or a local checkout." />
-          <Step n="3" title="Use labels" body="Labels decide which operator evaluates or implements an issue." />
-          <Step n="4" title="Review the PR" body="Check the generated branch, comments, and pull request in your VCS." />
+          <Step n="3" title="Use labels" body="Issues go directly to implementation, tests, and repair." />
+          <Step n="4" title="PR, CI, and merge" body="PR checks and CI repair lead to merge under repository settings." />
         </div>
       </section>
     </main>

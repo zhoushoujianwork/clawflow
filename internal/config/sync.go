@@ -26,24 +26,22 @@ const GistDescription = "clawflow-config"
 // every machine in the fleet would have to be re-bound by hand, which
 // defeats the purpose of the binding.
 type syncableRepo struct {
-	Enabled               bool              `yaml:"enabled"`
-	Platform              string            `yaml:"platform,omitempty"`
-	BaseURL               string            `yaml:"base_url,omitempty"`
-	BaseBranch            string            `yaml:"base_branch"`
-	Owner                 string            `yaml:"owner"`
-	Description           string            `yaml:"description"`
-	AddedAt               string            `yaml:"added_at"`
-	WebhookConfigured     bool              `yaml:"webhook_configured"`
-	Labels                map[string]string `yaml:"labels"`
-	TestCommand           string            `yaml:"test_command,omitempty"`
-	CIRequired            bool              `yaml:"ci_required,omitempty"`
-	CITimeout             int               `yaml:"ci_timeout,omitempty"`
-	AutoMerge             bool              `yaml:"auto_merge,omitempty"`
-	AutoApprove           bool              `yaml:"auto_approve,omitempty"`
-	AutoEvaluateAllIssues bool              `yaml:"auto_evaluate_all_issues,omitempty"`
-	BoundMachine          string            `yaml:"bound_machine,omitempty"`
-	UpdatedAt             time.Time         `yaml:"updated_at,omitempty"`
-	UpdatedBy             string            `yaml:"updated_by,omitempty"`
+	Enabled           bool              `yaml:"enabled"`
+	Platform          string            `yaml:"platform,omitempty"`
+	BaseURL           string            `yaml:"base_url,omitempty"`
+	BaseBranch        string            `yaml:"base_branch"`
+	Owner             string            `yaml:"owner"`
+	Description       string            `yaml:"description"`
+	AddedAt           string            `yaml:"added_at"`
+	WebhookConfigured bool              `yaml:"webhook_configured"`
+	Labels            map[string]string `yaml:"labels"`
+	TestCommand       string            `yaml:"test_command,omitempty"`
+	CIRequired        bool              `yaml:"ci_required,omitempty"`
+	CITimeout         int               `yaml:"ci_timeout,omitempty"`
+	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
+	BoundMachine      string            `yaml:"bound_machine,omitempty"`
+	UpdatedAt         time.Time         `yaml:"updated_at,omitempty"`
+	UpdatedBy         string            `yaml:"updated_by,omitempty"`
 	// local_path is intentionally absent — genuinely machine-local
 	// (paths differ across OSes and home dirs).
 }
@@ -51,24 +49,22 @@ type syncableRepo struct {
 // toSyncable converts a Repo to its syncable representation (strips local_path).
 func toSyncable(r Repo) syncableRepo {
 	return syncableRepo{
-		Enabled:               r.Enabled,
-		Platform:              r.Platform,
-		BaseURL:               r.BaseURL,
-		BaseBranch:            r.BaseBranch,
-		Owner:                 r.Owner,
-		Description:           r.Description,
-		AddedAt:               r.AddedAt,
-		WebhookConfigured:     r.WebhookConfigured,
-		Labels:                r.Labels,
-		TestCommand:           r.TestCommand,
-		CIRequired:            r.CIRequired,
-		CITimeout:             r.CITimeout,
-		AutoMerge:             r.AutoMerge,
-		AutoApprove:           r.AutoApprove,
-		AutoEvaluateAllIssues: r.AutoEvaluateAllIssues,
-		BoundMachine:          r.BoundMachine,
-		UpdatedAt:             r.UpdatedAt,
-		UpdatedBy:             r.UpdatedBy,
+		Enabled:           r.Enabled,
+		Platform:          r.Platform,
+		BaseURL:           r.BaseURL,
+		BaseBranch:        r.BaseBranch,
+		Owner:             r.Owner,
+		Description:       r.Description,
+		AddedAt:           r.AddedAt,
+		WebhookConfigured: r.WebhookConfigured,
+		Labels:            r.Labels,
+		TestCommand:       r.TestCommand,
+		CIRequired:        r.CIRequired,
+		CITimeout:         r.CITimeout,
+		AutoMerge:         r.AutoMerge,
+		BoundMachine:      r.BoundMachine,
+		UpdatedAt:         r.UpdatedAt,
+		UpdatedBy:         r.UpdatedBy,
 	}
 }
 
@@ -76,25 +72,23 @@ func toSyncable(r Repo) syncableRepo {
 // local_path (the only genuinely machine-local field).
 func fromSyncable(s syncableRepo, localPath string) Repo {
 	return Repo{
-		Enabled:               s.Enabled,
-		Platform:              s.Platform,
-		BaseURL:               s.BaseURL,
-		BaseBranch:            s.BaseBranch,
-		LocalPath:             localPath,
-		Owner:                 s.Owner,
-		Description:           s.Description,
-		AddedAt:               s.AddedAt,
-		WebhookConfigured:     s.WebhookConfigured,
-		Labels:                s.Labels,
-		TestCommand:           s.TestCommand,
-		CIRequired:            s.CIRequired,
-		CITimeout:             s.CITimeout,
-		AutoMerge:             s.AutoMerge,
-		AutoApprove:           s.AutoApprove,
-		AutoEvaluateAllIssues: s.AutoEvaluateAllIssues,
-		BoundMachine:          s.BoundMachine,
-		UpdatedAt:             s.UpdatedAt,
-		UpdatedBy:             s.UpdatedBy,
+		Enabled:           s.Enabled,
+		Platform:          s.Platform,
+		BaseURL:           s.BaseURL,
+		BaseBranch:        s.BaseBranch,
+		LocalPath:         localPath,
+		Owner:             s.Owner,
+		Description:       s.Description,
+		AddedAt:           s.AddedAt,
+		WebhookConfigured: s.WebhookConfigured,
+		Labels:            s.Labels,
+		TestCommand:       s.TestCommand,
+		CIRequired:        s.CIRequired,
+		CITimeout:         s.CITimeout,
+		AutoMerge:         s.AutoMerge,
+		BoundMachine:      s.BoundMachine,
+		UpdatedAt:         s.UpdatedAt,
+		UpdatedBy:         s.UpdatedBy,
 	}
 }
 
@@ -135,12 +129,12 @@ type MergeResult struct {
 //
 //   - settings.*   → cloud wins (remote overwrites local)
 //   - repos list   → per-entry LWW using updated_at:
-//     • Gist newer  → replace local entry wholesale
-//     • local newer → keep local entry (will be pushed next time)
-//     • same ts, same content → no-op
-//     • same ts, different content → write config.conflict.yaml, return error
-//     • entry only on one side → union in (preserve)
-//     • local_path always comes from the local copy
+//   - Gist newer  → replace local entry wholesale
+//   - local newer → keep local entry (will be pushed next time)
+//   - same ts, same content → no-op
+//   - same ts, different content → write config.conflict.yaml, return error
+//   - entry only on one side → union in (preserve)
+//   - local_path always comes from the local copy
 //
 // Entries without updated_at (zero time) are treated as "oldest possible" so
 // any timestamped entry wins over them. This handles legacy configs gracefully.

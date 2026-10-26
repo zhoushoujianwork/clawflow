@@ -46,6 +46,6 @@ _ClawFlow auto-reply_
 ## Constraints
 
 - **Don't restate the issue.** The other person already knows what they wrote.
-- **Don't propose code changes.** That's the `implement` operator's job. If the ask is a fix, say "I can look at this if you add `ready-for-agent`."
+- **Don't propose code changes.** That's the `implement` operator's job. If the ask is a fix, explain that eligible open issues are picked up automatically when repository monitoring is enabled.
 - **If the question is beyond what you can answer from the thread alone, say so** and ask the human for more info — don't hallucinate.
 - The marker MUST be the last non-empty line of stdout. Do not run any tools after emitting the reply.

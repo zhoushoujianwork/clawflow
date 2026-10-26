@@ -17,7 +17,6 @@ interface Repo {
   base_branch: string
   local_path?: string
   enabled: boolean
-  auto_approve: boolean
   auto_merge: boolean
   bound_machine?: string
   base_branch_valid?: boolean
@@ -236,7 +235,7 @@ function RepoList() {
   // POST /api/repo/config for a single field toggle. Optimistic UI:
   // we update local state on success only so a network hiccup doesn't
   // lie to the user.
-  const toggleField = useCallback(async (name: string, field: 'enabled' | 'auto_approve' | 'auto_merge') => {
+  const toggleField = useCallback(async (name: string, field: 'enabled' | 'auto_merge') => {
     const repo = repos.find(r => r.full_name === name)
     if (!repo) return
     const key = `${name}:${field}`
@@ -420,7 +419,6 @@ function RepoList() {
                 <th className="text-left px-4 py-2 font-semibold">Base</th>
                 <th className="text-left px-4 py-2 font-semibold">Sync</th>
                 <th className="text-left px-4 py-2 font-semibold">Enabled</th>
-                <th className="text-left px-4 py-2 font-semibold">Auto-approve</th>
                 <th className="text-left px-4 py-2 font-semibold">Auto-merge</th>
                 <th className="text-left px-4 py-2 font-semibold">Bound</th>
                 <th className="px-2 py-2 w-8"></th>
@@ -503,15 +501,6 @@ function RepoList() {
                       onLabel="enabled"
                       offLabel="disabled"
                       onClick={() => toggleField(r.full_name, 'enabled')}
-                    />
-                  </td>
-                  <td className="px-4 py-2">
-                    <TogglePill
-                      on={r.auto_approve}
-                      busy={busy.has(`${r.full_name}:auto_approve`)}
-                      onLabel="on"
-                      offLabel="off"
-                      onClick={() => toggleField(r.full_name, 'auto_approve')}
                     />
                   </td>
                   <td className="px-4 py-2">

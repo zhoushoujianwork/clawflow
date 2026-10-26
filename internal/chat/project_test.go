@@ -330,19 +330,19 @@ func TestBuildPilotContext_StandardPlays(t *testing.T) {
 	}
 
 	// Play 5 — dependency-unlock re-push
-	if !containsStr(prompt, "Dependency-unlock re-push") {
+	if !containsStr(prompt, "Dependency-unlock retry") {
 		t.Error("missing Play 5 (dependency-unlock re-push) header")
 	}
 	if !containsStr(prompt, "label remove") || !containsStr(prompt, "agent-skipped") {
 		t.Error("missing agent-skipped label-remove action in Play 5")
 	}
-	if !containsStr(prompt, "named dependency is closed/merged") {
+	if !containsStr(prompt, "every cited prerequisite is") {
 		t.Error("missing all-dependencies-merged gate in Play 5")
 	}
-	if !containsStr(prompt, "unresolved design") {
+	if !containsStr(prompt, "design or scope question remains") {
 		t.Error("missing unresolved-design-item guard in Play 5 (must not auto-re-push on open design questions)")
 	}
-	if !containsStr(prompt, "ping-pong") {
+	if !containsStr(prompt, "Never undo a human re-skip") {
 		t.Error("missing human ping-pong / re-skip guard in Play 5")
 	}
 	if !containsStr(prompt, "per wake") {
@@ -411,7 +411,6 @@ func TestBuildPilotContext_DeploymentUpdateProtocolAlwaysPresent(t *testing.T) {
 	}
 }
 
-
 func TestBuildProjectChatContext_AutomationModel(t *testing.T) {
 	repos := []ProjectChatRepo{{Name: "owner/repo-a", LocalPath: "/tmp/repo-a"}}
 	ctx := BuildProjectChatContext("my-proj", repos, "", "", "")
@@ -420,17 +419,17 @@ func TestBuildProjectChatContext_AutomationModel(t *testing.T) {
 	if !containsStr(ctx, "ClawFlow automation model") {
 		t.Error("missing automation model section header")
 	}
-	if !containsStr(ctx, "label-driven") {
-		t.Error("missing label-driven description")
+	if !containsStr(ctx, "autonomously") {
+		t.Error("missing autonomous description")
 	}
-	if !containsStr(ctx, "ready-for-agent") {
-		t.Error("missing ready-for-agent label in automation model")
+	if !containsStr(ctx, "No classification, evaluation or per-issue approval stage") {
+		t.Error("missing autonomous dispatch policy in automation model")
 	}
 	if !containsStr(ctx, "agent-running") {
 		t.Error("missing agent-running label in automation model")
 	}
-	if !containsStr(ctx, "agent-evaluated") {
-		t.Error("missing agent-evaluated label in automation model")
+	if !containsStr(ctx, "CI requirements") {
+		t.Error("missing CI policy in automation model")
 	}
 	if !containsStr(ctx, "agent-failed") {
 		t.Error("missing agent-failed label in automation model")
@@ -438,8 +437,8 @@ func TestBuildProjectChatContext_AutomationModel(t *testing.T) {
 	if !containsStr(ctx, "Execution lifecycle") {
 		t.Error("missing execution lifecycle section")
 	}
-	if !containsStr(ctx, "Standard pipeline") {
-		t.Error("missing standard pipeline section")
+	if !containsStr(ctx, "Trigger model") {
+		t.Error("missing trigger model section")
 	}
 	// Automation model must appear before the CLI cheatsheet
 	automationIdx := indexStr(ctx, "ClawFlow automation model")
@@ -460,8 +459,8 @@ func TestBuildPilotContext_AutomationModel(t *testing.T) {
 	if !containsStr(prompt, "ClawFlow automation model") {
 		t.Error("missing automation model section header in Pilot prompt")
 	}
-	if !containsStr(prompt, "ready-for-agent") {
-		t.Error("missing ready-for-agent label in Pilot automation model")
+	if !containsStr(prompt, "No classification, evaluation or per-issue approval stage") {
+		t.Error("missing autonomous dispatch policy in Pilot automation model")
 	}
 	if !containsStr(prompt, "agent-running") {
 		t.Error("missing agent-running label in Pilot automation model")
@@ -469,8 +468,8 @@ func TestBuildPilotContext_AutomationModel(t *testing.T) {
 	if !containsStr(prompt, "Diagnosing a stuck issue") {
 		t.Error("missing stuck-issue diagnosis guide in Pilot automation model")
 	}
-	if !containsStr(prompt, "Standard pipeline") {
-		t.Error("missing standard pipeline section in Pilot automation model")
+	if !containsStr(prompt, "Trigger model") {
+		t.Error("missing trigger model section in Pilot automation model")
 	}
 }
 
@@ -490,4 +489,14 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestBuildPilotContext_CategoryHygieneIsOptional(t *testing.T) {
+	prompt := BuildPilotContext("test-project", "", "", nil, nil, "")
+	if !containsStr(prompt, "Eligible unlabeled issues already enter implementation") {
+		t.Fatal("missing direct implementation guidance")
+	}
+	if containsStr(prompt, "operators won't pick them up otherwise") || containsStr(prompt, "Fix missing trigger labels") {
+		t.Fatal("obsolete category gate remains")
+	}
 }

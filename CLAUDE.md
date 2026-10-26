@@ -2,14 +2,23 @@
 
 ## 项目简介
 
-ClawFlow 是一个 label 驱动的自动化工具，连接 GitHub/GitLab issue/PR 与 AI 算子。它轮询配置的仓库，将 open issue/PR 与算子（`SKILL.md`）匹配，通过 `claude -p` 执行。所有状态通过 VCS label 和 comment 管理——无数据库、无 SaaS 后端。二进制独立运行：单次、cron 或编辑器内触发。
+ClawFlow connects GitHub/GitLab issues and PRs to autonomous implementation through `claude -p`. Humans set project direction and describe features. Eligible open leaf issues enter `implement` directly; analysis, planning, tests and repair happen within that attempt. Questions/comments retain their reply paths, and parents retain `track-progress` through the operational `progress-check` trigger.
 
-### 解决的核心场景
+The current runner uses VCS labels/comments for visible coordination, local files for history and locks (`~/.clawflow/locks/`), and bounded repair bookkeeping. `lock_label` and `agent-running` are not execution locks. Pause/cancel controls, machine bindings, terminal exclusions and retry bounds remain in force.
 
-| 场景 | 痛点 | ClawFlow 的解法 |
-|---|---|---|
-| **大需求拆解** | 一个复杂 feature issue 难以分配、难以追踪进度 | `decompose` 算子自动将 tracking issue 拆成 GitHub 原生 sub-issue，并在父 issue 留下 checklist；`track-progress` 算子定期检查所有子任务是否完成，完成后自动关闭父 issue |
-| **多机器配置同步** | 在公司机器配置好的仓库列表、设置，换到家里的机器就要重新配 | `clawflow sync push/pull` 将 `config.yaml`（排除 token 和本地路径）存入私有 GitHub Gist，新机器 `clawflow sync pull` 即可恢复全部配置；`clawflow login` 自动发现或创建 Gist |
+There is one autonomous lifecycle, without a workflow selector or built-in evaluation/approval stage. The exact names `classify`, `evaluate-bug`, `evaluate-feat` and `decompose` are retired and rejected as user overrides. Other custom operators and historical records are preserved. The eval model role is only for custom `evaluate-*` extensions.
+
+Old config input remains readable. Explicit legacy selection emits a migration notice and proceeds autonomously. Rewritten configs omit `workflow`, `auto_approve`, `auto_evaluate_all_issues` and `confidence_threshold`; supported enablement, bindings, merge/CI and other settings are preserved.
+
+```bash
+clawflow repo set owner/repo --auto-merge on --ci-required on
+clawflow repo enable owner/repo
+clawflow run --repo owner/repo
+```
+
+Required CI accepts success only. Failed-CI repair is limited to same-repository GitHub managed PRs, local reproduction, at most three attempts per PR and a five-minute cooldown. It updates the existing branch without force; it does not ingest CI logs or repair forks/GitLab MRs. Other GitLab capabilities remain supported.
+
+The [managed development design](docs/managed-development-design.md) proposes a durable task/effect engine beyond the implemented runner. Do not describe its proposed contracts as existing capabilities. Config sync remains available through `clawflow sync push/pull`, excluding tokens and local paths.
 
 ---
 
@@ -39,7 +48,7 @@ ClawFlow 是一个 label 驱动的自动化工具，连接 GitHub/GitLab issue/P
 
 ```bash
 # 构建二进制
-go build -o clawflow .
+go build -o clawflow ./cmd/clawflow
 
 # 本地运行（扫描配置中的仓库）
 ./clawflow run
@@ -158,16 +167,15 @@ ClawFlow 的核心设计:**一切可扩展单元都是算子 (operator)**。要�
 
 ```yaml
 ---
-name: evaluate-bug
+name: custom-check
 description: "一句话说明算子做什么、何时会被触发"
 operator:
   trigger:
     target: "issue"                                           # "issue" | "pr"
     applies_to: "leaf"                                        # "any"(默认) | "parent" | "leaf" —— 按子 issue 结构过滤
-    labels_required: ["bug"]                                  # 必须全部存在(AND)
-    labels_excluded: ["agent-evaluated", "agent-skipped", "agent-running"]  # 任一存在即跳过(OR NOT)
-  lock_label: "agent-running"                                 # 执行前加、完成/失败后删,并发锁
-  outcomes: ["agent-evaluated", "agent-skipped"]              # 算子可声明的结束态 label 白名单
+    labels_required: ["custom-check"]                                  # 必须全部存在(AND)
+    labels_excluded: ["custom-checked", "agent-skipped", "agent-failed"]  # 任一存在即跳过(OR NOT)
+  outcomes: ["custom-checked", "agent-skipped"]              # 算子可声明的结束态 label 白名单
 ---
 
 # (frontmatter 后是喂给 claude 的 prompt 正文)
@@ -180,15 +188,15 @@ operator:
 | `name` | 唯一标识,必须与目录名一致 |
 | `description` | 人读说明,也用于 `clawflow operators list` |
 | `operator.trigger.target` | 扫哪类对象。`issue` 或 `pr` |
-| `operator.trigger.applies_to` | 可选。按子 issue 结构硬约束触发:`parent`=必须有子 issue(协调类算子,如 track-progress);`leaf`=必须无子 issue(干活类算子,如 evaluate-*/decompose/implement);`any` 或空=不约束(向后兼容)。GitLab 无原生 sub-issue,所有 issue 恒为 leaf |
+| `operator.trigger.applies_to` | 可选。按子 issue 结构硬约束触发:`parent`=必须有子 issue(协调类算子,如 track-progress);`leaf`=必须无子 issue(干活类算子,如 implement 或自定义 leaf 算子);`any` 或空=不约束(向后兼容)。GitLab 无原生 sub-issue,所有 issue 恒为 leaf |
 | `operator.trigger.labels_required` | 必须**全部**存在才触发(AND) |
 | `operator.trigger.labels_excluded` | 有任意一个就跳过(OR NOT) |
-| `operator.lock_label` | 并发锁,执行前加、完成后删 |
+| `operator.lock_label` | 仅兼容旧 schema；runtime 忽略此字段，使用本地锁文件 |
 | `operator.outcomes` | 可选。允许通过 outcome marker 声明的结束 label 白名单。空/未填 = 接受任意 label(向后兼容) |
 
 ### Outcome marker 协议
 
-**算子(claude agent)只输出文本,所有 VCS 副作用由 runner 负责。** 算子**禁止**调用任何会写 VCS 状态的工具(`clawflow label / issue comment / pr ...`、`gh ...`)。算子要做的:
+**常规算子通过 stdout 输出正文与 outcome，由 runner 负责评论和标签写回。** `implement` 和 `repair-ci` 有各自明确的 Git/PR 操作例外。其他算子**禁止**调用任何会写 VCS 状态的工具(`clawflow label / issue comment / pr ...`、`gh ...`)。算子要做的:
 
 1. 把回应正文写到 stdout
 2. 在 stdout 末尾留一行结束 marker:`<!-- clawflow:outcome=<label> --> `
@@ -201,7 +209,7 @@ runner 拿到 stdout 后:
 4. `PostIssueComment(repo, issue, cleanedBody)`
 5. 校验 label 在 `outcomes` 白名单内（白名单为空则放行）
 6. `AddLabel(repo, issue, outcome)`
-7. 删除 `lock_label`
+7. 释放本地执行锁（不依赖 VCS label）
 
 这样算子作者只关心"分析什么 / 怎么组织文本",不需要管 VCS API、不会因 turn 顺序丢答案、也不会有重复 comment。
 
@@ -215,9 +223,9 @@ runner 拿到 stdout 后:
 ### 如何新增算子
 
 1. 在 `skills/<name>/SKILL.md` 创建目录和文件
-2. 写 frontmatter（name / description / trigger / lock_label）
+2. 写 frontmatter（name / description / trigger / outcomes）
 3. 正文写给 Claude 的指令（自然语言 prompt）
-4. `go build` 重新编译二进制（内置算子嵌入在 binary 里）
+4. `go build -o clawflow ./cmd/clawflow` 重新编译二进制（内置算子嵌入在 binary 里）
 5. 本地 `clawflow run` 在测试仓库上验证
 
 用户算子不需要 `go build` —— 直接放在 `~/.clawflow/skills/` 下,下次 `clawflow run` 自动加载。
@@ -253,7 +261,10 @@ GitHub Actions（`.github/workflows/release.yml`）会自动完成：
 
 #### Release Tag 描述规范
 
-Tag message 即 GitHub Release 的标题和正文，格式：
+Use an annotated tag message in the following format. The release workflow
+currently generates GitHub release notes automatically; it does not copy the
+tag message into the release body. After the workflow completes, explicitly
+set the release title/body and include migration or breaking-change notes.
 
 ```
 {一句话概括本版本核心变化}

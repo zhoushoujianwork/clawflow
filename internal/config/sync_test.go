@@ -118,12 +118,10 @@ repos:
 // TestMergeConfigs_SettingsCloudWins verifies that settings from the remote
 // overwrite local settings entirely.
 func TestMergeConfigs_SettingsCloudWins(t *testing.T) {
-	localThreshold := 7
 	local := &config.Config{
 		Settings: config.Settings{
-			PollInterval:        5,
-			ConfidenceThreshold: &localThreshold,
-			AgentTimeout:        120,
+			PollInterval: 5,
+			AgentTimeout: 120,
 		},
 		Repos: map[string]config.Repo{},
 	}
@@ -143,9 +141,6 @@ settings:
 
 	if merged.Settings.PollInterval != 10 {
 		t.Errorf("poll_interval: got %d, want 10", merged.Settings.PollInterval)
-	}
-	if merged.Settings.EffectiveConfidenceThreshold() != 8 {
-		t.Errorf("confidence_threshold: got %v, want 8", merged.Settings.EffectiveConfidenceThreshold())
 	}
 	if merged.Settings.AgentTimeout != 300 {
 		t.Errorf("agent_timeout: got %d, want 300", merged.Settings.AgentTimeout)

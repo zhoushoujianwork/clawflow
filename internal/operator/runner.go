@@ -37,7 +37,7 @@ var ErrNoOutcomeMarker = errors.New("operator produced no outcome marker")
 // outcome marker whose label is not in the operator's declared Outcomes
 // whitelist. Before issue #326 this only produced a stderr warning while the
 // run was still recorded as status="success" with the bogus label echoed into
-// run/end — so the one path that applies no label, triggers no salvage and
+// run/end — so the one path that applies no label, does not infer an outcome and
 // trips no circuit breaker was also the only one invisible to log patrol.
 // Recorded as its own status ("disallowed-outcome") and counted by the circuit
 // breaker, since the trigger labels stay put and the issue re-fires otherwise.
@@ -128,7 +128,7 @@ var thinkingRE = regexp.MustCompile(`(?s)<thinking>.*?</thinking>\s*`)
 //
 // Returns ("", body) when no trailing marker is found — preserves back-compat
 // for older skills that don't use the marker contract, and routes a body that
-// only *mentions* a marker into the no-marker/salvage path rather than labeling
+// only *mentions* a marker into the no-marker path rather than labeling
 // the issue with a fragment of prose.
 func parseOutcome(body string) (label, cleaned string) {
 	lines := strings.Split(body, "\n")
@@ -213,19 +213,6 @@ type RunOptions struct {
 	// operator output (comments, verdicts) uses the configured language.
 	Language string
 
-	// ConfidenceThreshold is the resolved Settings.EffectiveConfidenceThreshold
-	// (issue #336): the single score (0-10) evaluate-bug/evaluate-feat compare
-	// their Confidence average against, and the value the marker-less salvage
-	// path (salvage.go) uses for the same judgement.
-	//
-	// A pointer so nil (the zero RunOptions — every pre-#336 test and any
-	// caller that doesn't go through the config layer) preserves the
-	// historical hardcoded 7.0 default, while an explicit &0.0 (what the
-	// config layer sends after EffectiveConfidenceThreshold resolves a
-	// deliberate "confidence_threshold: 0") means "every valid score clears
-	// the bar" instead of being mistaken for "unset".
-	ConfidenceThreshold *float64
-
 	// RunFunc executes the claude subprocess. Leave nil to use the real
 	// RunClaude; tests inject a fake that returns canned output without
 	// spawning a process.
@@ -250,14 +237,6 @@ type RunOptions struct {
 	// retries are exhausted — a human (or future recovery logic) can read the
 	// file and re-post manually.
 	CommentSaveDir string
-
-	// MarkerRecovered, if non-nil, is invoked when the outcome label was
-	// salvaged from the body's Confidence score instead of read from an
-	// outcome marker (issue #307). The run still succeeds — the comment is
-	// posted and the label applied — but the caller records a distinct
-	// "marker-recovered" status so the degraded path stays visible on the
-	// dashboard and in the logs instead of hiding inside "success".
-	MarkerRecovered func(outcome string, confidence float64)
 }
 
 // emitStage safely invokes a (possibly nil) stage callback. Centralizing the
@@ -279,27 +258,10 @@ func emitStage(fn func(string), stage string) {
 // real 5-minute wait.
 var writeBackTimeout = 5 * time.Minute
 
-// defaultConfidenceThreshold mirrors config.DefaultConfidenceThreshold
-// (avoiding an import cycle: config already can't depend on operator). Used
-// when RunOptions.ConfidenceThreshold is nil — i.e. every caller that
-// predates issue #336 or doesn't route through the config layer.
-const defaultConfidenceThreshold = 7.0
-
-// resolveConfidenceThreshold applies the RunOptions contract documented on
-// ConfidenceThreshold: nil → default, explicit pointer (including &0.0) →
-// that value verbatim.
-func resolveConfidenceThreshold(t *float64) float64 {
-	if t == nil {
-		return defaultConfidenceThreshold
-	}
-	return *t
-}
-
 // Run executes one operator against one subject and returns the operator's
 // final stdout text, the outcome label (empty if none), or an error.
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
-	threshold := resolveConfidenceThreshold(opts.ConfidenceThreshold)
-	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language, threshold)
+	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language)
 	userMessage := BuildUserMessage(sub, opts.Repo, opts.Comments)
 	if opts.ResumeContext != "" {
 		userMessage += "\n---\n\n" + opts.ResumeContext
@@ -342,25 +304,6 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	// Without this, the issue stays unlabeled and re-fires on every subsequent
 	// pass until claude happens to produce a valid marker — potentially looping
 	// indefinitely (see issue #143).
-	//
-	// Exception: the model sometimes prints the operator's ENTIRE template —
-	// dimension scores, Confidence line, footer — and stops one line short of
-	// the marker. Discarding that is pure loss: the analysis is complete and
-	// already paid for, and the next pass pays for it a second time (issue
-	// #307). salvageOutcome recognises that shape by template skeleton and
-	// derives the label from the Confidence score, so the body still lands.
-	if outcome == "" {
-		if inferred, conf, ok := salvageOutcome(op, trimmed, threshold); ok {
-			outcome = inferred
-			body = prependSalvageNotice(trimmed, inferred, conf, threshold)
-			fmt.Fprintf(os.Stderr,
-				"  ⚠ operator %q stdout has no outcome marker but body matches the evaluation template — salvaging: Confidence %.1f/10 vs threshold %.1f → %q\n",
-				op.Name, conf, threshold, inferred)
-			if opts.MarkerRecovered != nil {
-				opts.MarkerRecovered(inferred, conf)
-			}
-		}
-	}
 	if outcome == "" {
 		fmt.Fprintf(os.Stderr,
 			"  ⚠ operator %q stdout has no outcome marker — operator may have self-posted via a tool call; recording as failure to prevent infinite retry loop\n",
@@ -428,7 +371,7 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 			// write-back. Previously a POST timeout (context deadline exceeded)
 			// returned here and the outcome-label write below never ran, so a
 			// PR that was already opened by `implement` never got its
-			// `agent-implemented` label — the issue stayed `ready-for-agent`
+			// `agent-implemented` label — the issue stayed eligible
 			// and the next scan re-triggered the operator, opening a duplicate
 			// PR and burning tokens again (issue #293). The comment body is
 			// already persisted to comment.md above and can be recovered, so

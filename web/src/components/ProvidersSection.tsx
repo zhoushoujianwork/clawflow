@@ -462,8 +462,8 @@ function ProviderModal({ initial, onSave, onClose }: ProviderModalProps) {
               to use the default shown above.
               <br />
               <span className="text-muted-foreground/50">
-                Eval = evaluate-* operators · Operator = implement + user skills ·
-                Light = classify / reply-comment / reply-question / track-progress ·
+                Eval = custom evaluate-* extensions · Operator = implement / repair-ci + user skills ·
+                Light = reply-comment / reply-question / track-progress ·
                 Chat = REPL &amp; project-gen
               </span>
             </p>

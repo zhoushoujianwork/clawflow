@@ -183,11 +183,10 @@ in chat memory. Two valid landing spots:
    If the conclusion changes scope, restate the new scope so
    `+"`"+`clawflow run`+"`"+` reads the latest intent.
 2. **Update labels** — add/remove labels to reflect the current state
-   (e.g. `+"`"+`ready-for-agent`+"`"+` when the issue is fully scoped and ready
-   for automated implementation).
+   (for example, descriptive bug or question labels).
 
 Do NOT propose to "go implement this now" from chat. Code changes go
-through `+"`"+`clawflow run`+"`"+` consuming a labeled issue; anything you'd write
+through `+"`"+`clawflow run`+"`"+` consuming an eligible issue; anything you'd write
 here as code would be discarded by that flow.
 
 ## Hard constraints
@@ -220,7 +219,6 @@ truth.`)
 	fmt.Fprintln(b)
 	fmt.Fprintln(b, prompts.LanguageRule(lang))
 }
-
 
 // BuildRepoContext assembles the system prompt for repo-level chat.
 // lang is the preferred output language from Settings.Language.
@@ -283,8 +281,8 @@ The deal between this chat and ClawFlow:
 - THIS CHAT analyzes, scopes, and drafts. The user's intent becomes
   issue-tracker side effects (create, label, comment, close).
 - `+"`"+`clawflow run`+"`"+` is what actually changes code: it picks up issues
-  with the `+"`"+`ready-for-agent`+"`"+` label and runs the implement operator
-  in an isolated worktree. That is the only path that opens PRs.
+  that are eligible for autonomous implementation and runs the implement
+  operator in an isolated worktree. That is the only path that opens PRs.
 
 ## Lock conclusions into issues, not into code
 
@@ -303,14 +301,12 @@ code from this REPL. Two valid landing spots:
    issue with title + body + labels. Do not pile unrelated fixes
    onto an existing thread.
 
-After the issue is in the right state, applying `+"`"+`ready-for-agent`+"`"+`
-hands it to `+"`"+`clawflow run`+"`"+`, which consumes the issue and produces
-the PR. If the conclusion is NOT yet ready for code (needs more
-discussion, blocked, design open), do NOT add `+"`"+`ready-for-agent`+"`"+` —
-just leave the comment / new issue and stop.
+Eligible open leaf issues are picked up automatically when repository monitoring
+is enabled. No per-issue approval label is required. Preserve existing skipped,
+failed, tracking and question states; do not clear them merely to start work.
 
 Do not propose to "go implement this now" from chat. The development
-flow only runs through `+"`"+`clawflow run`+"`"+` consuming a labeled issue;
+flow only runs through `+"`"+`clawflow run`+"`"+` consuming an eligible issue;
 anything you'd write here as code would be discarded by that flow.
 
 ## Hard constraints

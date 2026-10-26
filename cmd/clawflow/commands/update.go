@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -119,21 +120,8 @@ func downloadLatestBinary() error {
 // latestReleaseAsset finds the download URL for the current OS/arch binary
 // in the latest release.
 func latestReleaseAsset() (tag, url string, err error) {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
-	resp, err := http.Get(apiURL) //nolint:gosec
+	release, err := fetchLatestRelease(&http.Client{Timeout: 30 * time.Second})
 	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	var release struct {
-		TagName string `json:"tag_name"`
-		Assets  []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-		} `json:"assets"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return "", "", err
 	}
 
@@ -144,6 +132,52 @@ func latestReleaseAsset() (tag, url string, err error) {
 		}
 	}
 	return "", "", fmt.Errorf("no binary asset found in release %s (looked for %q)", release.TagName, want)
+}
+
+type githubRelease struct {
+	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+// fetchLatestRelease uses the same env-over-file credentials as other GitHub
+// commands. Authentication is limited to this API request; asset downloads
+// continue without a token because they can redirect to another host.
+func fetchLatestRelease(client *http.Client) (githubRelease, error) {
+	var release githubRelease
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return release, fmt.Errorf("load GitHub credentials: %w", err)
+	}
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return release, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if creds.GHToken != "" {
+		req.Header.Set("Authorization", "Bearer "+creds.GHToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return release, fmt.Errorf("fetch latest GitHub release: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			return release, fmt.Errorf("GitHub API rate limit exceeded (HTTP %d); configure a GitHub token with clawflow config set-token or GH_TOKEN, or retry after the quota resets", resp.StatusCode)
+		}
+		return release, fmt.Errorf("fetch latest GitHub release: HTTP %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return release, fmt.Errorf("decode latest GitHub release: %w", err)
+	}
+	if release.TagName == "" {
+		return release, fmt.Errorf("GitHub release response is missing tag_name")
+	}
+	return release, nil
 }
 
 func binaryAssetName() string {
@@ -303,18 +337,8 @@ func parseSemverTriple(s string) [3]int {
 // FetchLatestTag queries GitHub for the latest release tag. Returns empty
 // string on any error or timeout (5s).
 func FetchLatestTag() string {
-	client := &http.Client{Timeout: 5 * time.Second}
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
-	resp, err := client.Get(apiURL) //nolint:gosec
+	release, err := fetchLatestRelease(&http.Client{Timeout: 5 * time.Second})
 	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return ""
 	}
 	return release.TagName

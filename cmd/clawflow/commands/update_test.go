@@ -1,11 +1,123 @@
 package commands
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
+
+type releaseTestTransport func(*http.Request) (*http.Response, error)
+
+func (f releaseTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func seedReleaseCredentials(t *testing.T, contents, envToken string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GH_TOKEN", envToken)
+	if contents == "" {
+		return
+	}
+	path := config.CredentialsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFetchLatestReleaseCredentials(t *testing.T) {
+	for _, tc := range []struct{ name, stored, env, auth string }{
+		{"anonymous", "", "", ""},
+		{"stored token", "gh_token: stored-test-token\n", "", "Bearer stored-test-token"},
+		{"environment overrides file", "gh_token: stored-test-token\n", "env-test-token", "Bearer env-test-token"},
+		{"environment without file", "", "env-test-token", "Bearer env-test-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seedReleaseCredentials(t, tc.stored, tc.env)
+			client := &http.Client{Transport: releaseTestTransport(func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodGet || req.URL.String() != "https://api.github.com/repos/"+githubRepo+"/releases/latest" {
+					t.Fatalf("unexpected request: %s %s", req.Method, req.URL)
+				}
+				if req.Header.Get("Authorization") != tc.auth {
+					t.Error("unexpected authorization header")
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v0.73.0","assets":[]}`)), Header: http.Header{}}, nil
+			})}
+			release, err := fetchLatestRelease(client)
+			if err != nil || release.TagName != "v0.73.0" {
+				t.Fatalf("unexpected release: %+v, %v", release, err)
+			}
+		})
+	}
+}
+
+func TestFetchLatestReleaseErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, remaining, want string
+		status                      int
+	}{
+		{"rate limited", `{"message":"API rate limit exceeded; secret-test-token"}`, "0", "GitHub API rate limit exceeded (HTTP 403)", 403},
+		{"too many requests", `{"message":"secret-test-token"}`, "", "GitHub API rate limit exceeded (HTTP 429)", 429},
+		{"invalid token", `{"message":"secret-test-token"}`, "", "HTTP 401", 401},
+		{"forbidden", `{"message":"secret-test-token"}`, "", "HTTP 403", 403},
+		{"server error", `{"message":"secret-test-token"}`, "", "HTTP 500", 500},
+		{"invalid JSON", `not json`, "", "decode latest GitHub release", 200},
+		{"missing tag", `{}`, "", "missing tag_name", 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seedReleaseCredentials(t, "", "secret-test-token")
+			client := &http.Client{Transport: releaseTestTransport(func(req *http.Request) (*http.Response, error) {
+				header := http.Header{}
+				header.Set("X-RateLimit-Remaining", tc.remaining)
+				return &http.Response{StatusCode: tc.status, Header: header, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})}
+			_, err := fetchLatestRelease(client)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q, got %v", tc.want, err)
+			}
+			if strings.Contains(err.Error(), "secret-test-token") || strings.Contains(err.Error(), "no binary asset") {
+				t.Fatal("API error leaked response data or was misreported as a missing asset")
+			}
+		})
+	}
+}
+
+func TestReleaseLookupCallersUseToken(t *testing.T) {
+	seedReleaseCredentials(t, "gh_token: stored-test-token\n", "")
+	previous := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	calls := 0
+	http.DefaultTransport = releaseTestTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.Header.Get("Authorization") != "Bearer stored-test-token" {
+			t.Error("release lookup did not use configured token")
+		}
+		body, err := json.Marshal(map[string]any{"tag_name": "v0.73.0", "assets": []map[string]string{{"name": binaryAssetName(), "browser_download_url": "https://github.com/release/binary"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+	})
+	tag, url, err := latestReleaseAsset()
+	if err != nil || tag != "v0.73.0" || url != "https://github.com/release/binary" {
+		t.Fatalf("unexpected asset: %q %q %v", tag, url, err)
+	}
+	if got := FetchLatestTag(); got != "v0.73.0" {
+		t.Fatalf("background version check returned %q", got)
+	}
+	if calls != 2 {
+		t.Fatalf("expected two API requests, got %d", calls)
+	}
+}
 
 // IsNewerVersion is load-bearing for `clawflow update`'s "skip if already at
 // latest" short-circuit — one wrong case and users either re-download the

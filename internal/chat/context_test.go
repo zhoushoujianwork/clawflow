@@ -98,7 +98,7 @@ func assertSelfAwareness(t *testing.T, builder, prompt string) {
 	t.Helper()
 	for _, want := range []string{
 		"ClawFlow automation model", // AutomationModel header
-		"ready-for-agent",           // label vocabulary
+		"agent-implemented",         // lifecycle vocabulary
 		"clawflow CLI cheatsheet",   // CLICheatsheet header
 		"clawflow issue",            // at least one clawflow command
 		"clawflow feedback",         // self-feedback escape hatch

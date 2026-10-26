@@ -10,7 +10,6 @@ interface SettingsView {
   tokens: { gh_set: boolean; gh_hint?: string; gitlab_set: boolean; gitlab_hint?: string }
   global: {
     poll_interval: number
-    confidence_threshold: number
     agent_timeout: number
     max_concurrent_agents: number
     run_interval_minutes: number
@@ -267,7 +266,6 @@ function GlobalSection({
   view, onSaved,
 }: { view: SettingsView['global']; onSaved: () => void }) {
   const [pollInterval, setPollInterval] = useState(view.poll_interval)
-  const [confidence, setConfidence] = useState(view.confidence_threshold)
   const [timeout, setTimeoutVal] = useState(view.agent_timeout)
   const [maxConcurrent, setMaxConcurrent] = useState(view.max_concurrent_agents)
   const [runInterval, setRunInterval] = useState(view.run_interval_minutes)
@@ -284,7 +282,6 @@ function GlobalSection({
   // Resync if parent reloads.
   useEffect(() => {
     setPollInterval(view.poll_interval)
-    setConfidence(view.confidence_threshold)
     setTimeoutVal(view.agent_timeout)
     setMaxConcurrent(view.max_concurrent_agents)
     setRunInterval(view.run_interval_minutes)
@@ -299,7 +296,6 @@ function GlobalSection({
 
   const dirty =
     pollInterval !== view.poll_interval ||
-    confidence !== view.confidence_threshold ||
     timeout !== view.agent_timeout ||
     maxConcurrent !== view.max_concurrent_agents ||
     runInterval !== view.run_interval_minutes ||
@@ -318,7 +314,6 @@ function GlobalSection({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         poll_interval: pollInterval,
-        confidence_threshold: confidence,
         agent_timeout: timeout,
         max_concurrent_agents: maxConcurrent,
         run_interval_minutes: runInterval,
@@ -347,9 +342,6 @@ function GlobalSection({
       </Row>
       <Row label="Agent timeout (s)">
         <NumInput value={timeout} onChange={setTimeoutVal} min={60} />
-      </Row>
-      <Row label="Confidence threshold">
-        <NumInput value={confidence} onChange={setConfidence} min={0} max={100} />
       </Row>
       <Row label="Max concurrent agents">
         <NumInput value={maxConcurrent} onChange={setMaxConcurrent} min={1} max={32} />

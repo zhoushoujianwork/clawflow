@@ -1,9 +1,15 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -43,22 +49,18 @@ func newRepoListCmd() *cobra.Command {
 				fmt.Println("Add one with: clawflow repo add <owner/repo>")
 				return nil
 			}
-			fmt.Printf("%-40s %-10s %-12s %-10s %-10s %s\n", "REPO", "STATUS", "BASE", "AUTO_FIX", "AUTO_MERGE", "DESCRIPTION")
+			fmt.Printf("%-40s %-10s %-12s %-10s %s\n", "REPO", "STATUS", "BASE", "AUTO_MERGE", "DESCRIPTION")
 			fmt.Println(strings.Repeat("─", 100))
 			for name, r := range cfg.Repos {
 				status := "disabled"
 				if r.Enabled {
 					status = "enabled"
 				}
-				autoApprove := "off"
-				if r.AutoApprove {
-					autoApprove = "on"
-				}
 				autoMerge := "off"
 				if r.AutoMerge {
 					autoMerge = "on"
 				}
-				fmt.Printf("%-40s %-10s %-12s %-10s %-10s %s\n", name, status, r.BaseBranch, autoApprove, autoMerge, r.Description)
+				fmt.Printf("%-40s %-10s %-12s %-10s %s\n", name, status, r.BaseBranch, autoMerge, r.Description)
 			}
 			return nil
 		},
@@ -86,6 +88,7 @@ func newRepoShowCmd() *cobra.Command {
 			}
 			fmt.Printf("repo:         %s\n", ownerRepo)
 			fmt.Printf("status:       %s\n", status)
+			fmt.Printf("ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
 			fmt.Printf("local_path:   %s\n", r.LocalPath)
 			if r.Description != "" {
@@ -123,11 +126,12 @@ func newRepoShowCmd() *cobra.Command {
 }
 
 func newRepoAddCmd() *cobra.Command {
-	var baseBranch  string
-	var localPath   string
+	var baseBranch string
+	var localPath string
 	var description string
-	var platform    string
-	var baseURL     string
+	var platform string
+	var baseURL string
+	var disabled, skipLabelInit bool
 
 	cmd := &cobra.Command{
 		Use:     "add <owner/repo|URL>",
@@ -161,6 +165,12 @@ func newRepoAddCmd() *cobra.Command {
 				localPath = info.LocalPath
 			}
 
+			if localPath != "" {
+				localPath, err = validateRepoCheckout(localPath, info)
+				if err != nil {
+					return err
+				}
+			}
 			ownerRepo := info.OwnerRepo
 			parts := strings.SplitN(ownerRepo, "/", 2)
 
@@ -169,7 +179,7 @@ func newRepoAddCmd() *cobra.Command {
 			}
 
 			cfg.Repos[ownerRepo] = config.Repo{
-				Enabled:     true,
+				Enabled:     !disabled,
 				Platform:    info.Platform,
 				BaseURL:     info.BaseURL,
 				BaseBranch:  baseBranch,
@@ -177,13 +187,6 @@ func newRepoAddCmd() *cobra.Command {
 				Owner:       parts[0],
 				Description: description,
 				AddedAt:     time.Now().Format("2006-01-02"),
-				Labels: map[string]string{
-					"trigger":     "ready-for-agent",
-					"in_progress": "in-progress",
-					"bug":         "bug",
-					"enhancement": "enhancement",
-					"help_wanted": "help-wanted",
-				},
 			}
 
 			// Stamp the new entry with the current time so LWW sync
@@ -196,7 +199,11 @@ func newRepoAddCmd() *cobra.Command {
 			if err := snapshot.WriteRepos(cfg); err != nil {
 				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
 			}
-			fmt.Printf("repo %q added and enabled\n", ownerRepo)
+			if disabled {
+				fmt.Printf("repo %q added and disabled\n", ownerRepo)
+			} else {
+				fmt.Printf("repo %q added and enabled\n", ownerRepo)
+			}
 			fmt.Printf("  platform:    %s\n", info.Platform)
 			if info.BaseURL != "" {
 				fmt.Printf("  base url:    %s\n", info.BaseURL)
@@ -204,6 +211,9 @@ func newRepoAddCmd() *cobra.Command {
 			fmt.Printf("  base branch: %s\n", baseBranch)
 			if localPath != "" {
 				fmt.Printf("  local path:  %s\n", localPath)
+			}
+			if disabled || skipLabelInit {
+				return nil
 			}
 			fmt.Printf("Initializing ClawFlow labels in %s ...\n", ownerRepo)
 			repoCfg := cfg.Repos[ownerRepo]
@@ -217,11 +227,13 @@ func newRepoAddCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&baseBranch,  "base",        "main", "base branch for PRs")
-	cmd.Flags().StringVar(&localPath,   "local-path",  "",     "local clone path (for worktree)")
-	cmd.Flags().StringVar(&description, "description", "",     "short description")
-	cmd.Flags().StringVar(&platform,    "platform",    "",     "override platform: github or gitlab")
-	cmd.Flags().StringVar(&baseURL,     "base-url",    "",     "override instance URL for self-hosted GitLab")
+	cmd.Flags().BoolVar(&disabled, "disabled", false, "Register disabled; do not initialize remote labels")
+	cmd.Flags().BoolVar(&skipLabelInit, "skip-label-init", false, "Skip remote label initialization")
+	cmd.Flags().StringVar(&baseBranch, "base", "main", "base branch for PRs")
+	cmd.Flags().StringVar(&localPath, "local-path", "", "local clone path (for worktree)")
+	cmd.Flags().StringVar(&description, "description", "", "short description")
+	cmd.Flags().StringVar(&platform, "platform", "", "override platform: github or gitlab")
+	cmd.Flags().StringVar(&baseURL, "base-url", "", "override instance URL for self-hosted GitLab")
 	return cmd
 }
 
@@ -302,15 +314,16 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 }
 
 func newRepoSetCmd() *cobra.Command {
-	var autoApprove string
+	var ciRequired string
 	var autoMerge string
 	var primaryProject string
+	var boundMachine string
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
 		Short:   "Set configuration flags for a repository",
 		Args:    cobra.ExactArgs(1),
-		Example: "  clawflow repo set owner/repo --auto-approve on\n  clawflow repo set owner/repo --auto-merge on\n  clawflow repo set owner/repo --primary-project myproj",
+		Example: "  clawflow repo set owner/repo --auto-merge on\n  clawflow repo set owner/repo --primary-project myproj",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ownerRepo := args[0]
 			cfg, err := config.Load()
@@ -343,12 +356,14 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			// Validate flags before mutating.
-			if autoApprove != "" {
-				switch autoApprove {
-				case "on", "true", "1", "off", "false", "0":
-				default:
-					return fmt.Errorf("--auto-approve must be on or off")
-				}
+			if cmd.Flags().Changed("ci-required") && ciRequired != "on" && ciRequired != "off" {
+				return fmt.Errorf("--ci-required must be on or off")
+			}
+			boundMachineSet := cmd.Flags().Changed("bound-machine")
+			if boundMachineSet && strings.ContainsFunc(boundMachine, func(r rune) bool {
+				return unicode.IsSpace(r) || unicode.IsControl(r) || r == '/' || r == '\\'
+			}) {
+				return fmt.Errorf("--bound-machine must not contain whitespace, control characters, or slashes")
 			}
 			if autoMerge != "" {
 				switch autoMerge {
@@ -358,24 +373,17 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			config.TouchRepo(cfg, ownerRepo, func(r config.Repo) config.Repo {
-				if autoApprove != "" {
-					switch autoApprove {
-					case "on", "true", "1":
-						r.AutoApprove = true
-					case "off", "false", "0":
-						r.AutoApprove = false
-					}
+				if ciRequired != "" {
+					r.CIRequired = ciRequired == "on"
 				}
 				if autoMerge != "" {
-					switch autoMerge {
-					case "on", "true", "1":
-						r.AutoMerge = true
-					case "off", "false", "0":
-						r.AutoMerge = false
-					}
+					r.AutoMerge = autoMerge == "on" || autoMerge == "true" || autoMerge == "1"
 				}
 				if primaryProjectSet {
 					r.PrimaryProject = primaryProject
+				}
+				if boundMachineSet {
+					r.BoundMachine = boundMachine
 				}
 				return r
 			})
@@ -387,8 +395,15 @@ func newRepoSetCmd() *cobra.Command {
 				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
 			}
 			fmt.Printf("repo %q updated\n", ownerRepo)
-			fmt.Printf("  auto_approve: %v\n", r.AutoApprove)
+			fmt.Printf("  ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("  auto_merge:   %v\n", r.AutoMerge)
+			if boundMachineSet {
+				if r.BoundMachine == "" {
+					fmt.Printf("  bound_machine: (cleared)\n")
+				} else {
+					fmt.Printf("  bound_machine: %s\n", r.BoundMachine)
+				}
+			}
 			if primaryProjectSet {
 				if r.PrimaryProject == "" {
 					fmt.Printf("  primary_project: (cleared)\n")
@@ -399,9 +414,10 @@ func newRepoSetCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&autoApprove, "auto-approve", "", "enable/disable auto-approve: on or off")
+	cmd.Flags().StringVar(&ciRequired, "ci-required", "", "require successful CI before auto-merge: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
+	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
 	return cmd
 }
 
@@ -409,7 +425,10 @@ func newRepoSetCmd() *cobra.Command {
 func loadOrNewConfig() (*config.Config, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		// If file doesn't exist yet, start fresh
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		// Only a missing config initializes a new one.
 		cfg = &config.Config{
 			Repos: make(map[string]config.Repo),
 		}
@@ -419,7 +438,6 @@ func loadOrNewConfig() (*config.Config, error) {
 	}
 	return cfg, nil
 }
-
 
 func newRepoEnsureLocalCmd() *cobra.Command {
 	var repo string
@@ -448,4 +466,51 @@ func newRepoEnsureLocalCmd() *cobra.Command {
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/repo (required)")
 	_ = cmd.MarkFlagRequired("repo")
 	return cmd
+}
+
+// validateRepoCheckout checks the local origin without contacting the remote.
+func validateRepoCheckout(path string, target config.RepoInfo) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, path[2:])
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if out, err := exec.Command("git", "-C", abs, "rev-parse", "--is-inside-work-tree").Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		return "", fmt.Errorf("local path %q is not a Git checkout", abs)
+	}
+	out, err := exec.Command("git", "-C", abs, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return "", fmt.Errorf("local checkout has no origin")
+	}
+	remote := strings.TrimSpace(string(out))
+	if strings.HasPrefix(remote, "git@") {
+		parts := strings.SplitN(remote, ":", 2)
+		if len(parts) != 2 || !strings.Contains(parts[1], "/") {
+			return "", fmt.Errorf("invalid checkout origin")
+		}
+	}
+	origin, err := config.ParseRepoInput(remote, nil)
+	if err != nil {
+		return "", fmt.Errorf("cannot parse checkout origin")
+	}
+	host := func(info config.RepoInfo) string {
+		if info.Platform == "github" {
+			return "github.com"
+		}
+		u, _ := url.Parse(info.BaseURL)
+		if u == nil {
+			return ""
+		}
+		return strings.ToLower(u.Hostname())
+	}
+	if origin.Platform != target.Platform || host(origin) != host(target) || origin.OwnerRepo != target.OwnerRepo {
+		return "", fmt.Errorf("checkout origin does not match target provider, host and namespace")
+	}
+	return abs, nil
 }

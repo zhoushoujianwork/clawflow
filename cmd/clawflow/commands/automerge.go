@@ -121,7 +121,7 @@ func attemptAutoMerge(a autoMergeAttempt) bool {
 
 	if a.repoCfg.CIRequired {
 		switch status := a.checkCI(); status {
-		case vcs.CIStatusSuccess, vcs.CIStatusNone:
+		case vcs.CIStatusSuccess:
 			// proceed to merge
 		case vcs.CIStatusFailure:
 			fmt.Fprintf(os.Stderr, "%s ✗ CI failed, skipping auto-merge\n", a.prefix)

@@ -1,10 +1,12 @@
 package operator
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -19,6 +21,17 @@ type Registry struct {
 
 func NewRegistry() *Registry {
 	return &Registry{ops: make(map[string]*Operator)}
+}
+
+// IsRetiredBuiltin identifies names reserved by the removed approval pipeline.
+// User copies of these operators must not reactivate the retired stages.
+func IsRetiredBuiltin(name string) bool {
+	switch name {
+	case "classify", "evaluate-bug", "evaluate-feat", "decompose":
+		return true
+	default:
+		return false
+	}
 }
 
 // LoadEmbedded walks `sys` at `root` and parses every <name>/SKILL.md. Used
@@ -40,7 +53,9 @@ func (r *Registry) LoadEmbedded(sys fs.FS, root string) error {
 		if perr != nil {
 			return perr
 		}
-		r.ops[op.Name] = op
+		if !IsRetiredBuiltin(op.Name) {
+			r.ops[op.Name] = op
+		}
 		return nil
 	})
 }
@@ -60,6 +75,10 @@ func (r *Registry) LoadUserDir(dir string) error {
 		if !e.IsDir() {
 			continue
 		}
+		if IsRetiredBuiltin(e.Name()) {
+			warnRetiredUserOperator(e.Name(), filepath.Join(dir, e.Name()))
+			continue
+		}
 		skill := filepath.Join(dir, e.Name(), "SKILL.md")
 		data, err := os.ReadFile(skill)
 		if os.IsNotExist(err) {
@@ -68,13 +87,44 @@ func (r *Registry) LoadUserDir(dir string) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", skill, err)
 		}
+		if name := skillName(data, skill); IsRetiredBuiltin(name) {
+			warnRetiredUserOperator(name, skill)
+			continue
+		}
 		op, err := Parse(data, skill)
 		if err != nil {
 			return err
 		}
+		normalizeImplementTrigger(op)
 		r.ops[op.Name] = op // overrides embedded with same name
 	}
 	return nil
+}
+
+func warnRetiredUserOperator(name, source string) {
+	fmt.Fprintf(os.Stderr, "clawflow: ignored retired operator %q at %q; autonomous implementation replaces this stage\n", name, source)
+}
+
+func normalizeImplementTrigger(op *Operator) {
+	if op.Name != "implement" {
+		return
+	}
+	changed := false
+	removeApproval := func(labels []string) []string {
+		return slices.DeleteFunc(labels, func(label string) bool {
+			if label == "ready-for-agent" {
+				changed = true
+				return true
+			}
+			return false
+		})
+	}
+	op.Trigger.LabelsRequired = removeApproval(op.Trigger.LabelsRequired)
+	op.Trigger.LabelsRequiredAny = removeApproval(op.Trigger.LabelsRequiredAny)
+	op.Trigger.LabelsConsumed = removeApproval(op.Trigger.LabelsConsumed)
+	if changed {
+		fmt.Fprintf(os.Stderr, "clawflow: migrated implement operator at %q: removed obsolete ready-for-agent trigger; other constraints preserved\n", op.Source)
+	}
 }
 
 // All returns operators sorted by name for deterministic iteration.
@@ -97,7 +147,7 @@ func (r *Registry) Get(name string) (*Operator, bool) {
 type Severity int
 
 const (
-	SeverityError   Severity = iota
+	SeverityError Severity = iota
 	SeverityWarning
 )
 
@@ -138,20 +188,37 @@ func (r *Registry) Diagnose() []Diagnostic {
 	}
 
 	type triggerKey struct {
-		target string
-		labels string
+		target   string
+		applies  string
+		required string
+		any      string
+		excluded string
+	}
+	labelSet := func(labels []string) string {
+		set := make(map[string]bool)
+		for _, label := range labels {
+			set[label] = true
+		}
+		sorted := make([]string, 0, len(set))
+		for label := range set {
+			sorted = append(sorted, label)
+		}
+		sort.Strings(sorted)
+		data, _ := json.Marshal(sorted)
+		return string(data)
 	}
 	seen := make(map[triggerKey]string)
 	for _, op := range ops {
-		sorted := make([]string, len(op.Trigger.LabelsRequired))
-		copy(sorted, op.Trigger.LabelsRequired)
-		sort.Strings(sorted)
-		k := triggerKey{target: op.Trigger.Target, labels: strings.Join(sorted, ",")}
+		applies := op.Trigger.AppliesTo
+		if applies == "" {
+			applies = AppliesAny
+		}
+		k := triggerKey{op.Trigger.Target, applies, labelSet(op.Trigger.LabelsRequired), labelSet(op.Trigger.LabelsRequiredAny), labelSet(op.Trigger.LabelsExcluded)}
 		if first, ok := seen[k]; ok {
 			diags = append(diags, Diagnostic{
 				Operator: op.Name,
 				Severity: SeverityError,
-				Message:  fmt.Sprintf("overlapping trigger with %q (target=%s, labels_required=[%s])", first, k.target, k.labels),
+				Message:  fmt.Sprintf("duplicate trigger with %q (target=%s, applies_to=%s)", first, k.target, k.applies),
 			})
 		} else {
 			seen[k] = op.Name

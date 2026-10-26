@@ -1,85 +1,65 @@
 package prompts
 
-// AutomationModel returns the ClawFlow automation model section — a
-// concise conceptual reference that explains how ClawFlow's label-driven
-// pipeline works. Injected into every chat system prompt so the AI can
-// reason about why issues are stuck, what labels to suggest, and how to
-// draft issue bodies that operators can consume.
-//
-// This is the single source of truth for the automation model. Both
-// BuildProjectChatContext and BuildPilotContext call this function —
-// never copy-paste the content.
+// AutomationModel is shared by chat and Pilot so their lifecycle guidance agrees.
 func AutomationModel() string {
 	return `## ClawFlow automation model
 
-ClawFlow is a label-driven workflow engine. Understanding this model lets
-you explain why issues are stuck, suggest the right labels to unblock them,
-and draft issue bodies that operators can actually consume.
+ClawFlow implements eligible open issues autonomously when repository monitoring
+is enabled. No classification, evaluation or per-issue approval stage is required.
+Project direction and testing instructions supply the implementation context.
 
 ### Trigger model
 
-Each operator is defined by a SKILL.md file with a trigger:
+Operators are SKILL.md packages. Custom operators retain their target, required
+labels, excluded labels and parent/leaf constraints. User packages override
+built-ins by name, except retired pipeline names cannot reactivate old stages.
 
-    operator fires when:
-      target ∈ {issue, pr}
-      AND all labels_required are present
-      AND no labels_excluded are present
-
-An operator is idempotent: once its outcome label lands, the excluded-label
-guard prevents it from firing again on the same issue.
+The built-in implement operator accepts open leaf issues, including unlabeled
+ones. Parents, tracking issues and questions do not enter implementation.
+Existing implemented, skipped, failed and running states remain exclusions.
 
 ### Label vocabulary
 
-**Trigger labels** — added by humans or the classify operator to route work:
-
 | Label | Meaning |
 |---|---|
-| ` + "`bug`" + ` | Defect report — triggers ` + "`evaluate-bug`" + ` |
-| ` + "`feature`" + ` / ` + "`feat`" + ` | Feature request — triggers ` + "`evaluate-feat`" + ` |
-| ` + "`question`" + ` | User question — triggers ` + "`reply-question`" + ` |
-| ` + "`ready-for-agent`" + ` | Human approval to implement — triggers ` + "`implement`" + ` |
-| ` + "`tracking`" + ` | Epic/tracking issue — triggers ` + "`decompose`" + ` (with ` + "`ready-for-agent`" + `) |
-| ` + "`progress-check`" + ` | Request a sub-issue progress check — triggers ` + "`track-progress`" + ` |
-| ` + "`agent-mentioned`" + ` | Someone @-mentioned the agent — triggers ` + "`reply-comment`" + ` |
-
-**State labels** — set exclusively by operators, never by humans:
-
-| Label | Meaning |
-|---|---|
-| ` + "`agent-running`" + ` | Operator is mid-flight — issue is locked, treat as read-only |
-| ` + "`agent-evaluated`" + ` | Operator posted an evaluation; awaiting human ` + "`ready-for-agent`" + ` |
-| ` + "`agent-implemented`" + ` | PR opened by the implement operator |
-| ` + "`agent-decomposed`" + ` | Tracking issue broken into sub-issues |
-| ` + "`agent-replied`" + ` | Question or mention answered |
-| ` + "`agent-skipped`" + ` | Operator couldn't proceed (ambiguous, missing info) |
-| ` + "`agent-failed`" + ` | Operator exited with an error |
+| bug / feat | Descriptive issue categories; no approval gate |
+| question | Route to reply-question |
+| tracking | Parent coordination; excluded from direct implementation |
+| progress-check | Request track-progress for a parent issue |
+| agent-mentioned | Request reply-comment |
+| agent-running | Existing running-state signal; treat as read-only |
+| agent-implemented | Implementation opened a PR; delivery still requires merge |
+| agent-replied | Question or mention answered |
+| agent-skipped | Work needs information or a prerequisite; read the comment |
+| agent-failed | Work failed; inspect run history before retrying |
 
 ### Execution lifecycle
 
-1. ` + "`clawflow run`" + ` scans open issues/PRs for matching operators
-2. Runner adds ` + "`agent-running`" + ` lock label
-3. Issue context + operator prompt fed to ` + "`claude -p`" + `
-4. Operator stdout captured; ` + "`<!-- clawflow:outcome=<label> -->`" + ` marker parsed
-5. Cleaned output posted as a comment; outcome label applied; ` + "`agent-running`" + ` removed
+1. clawflow run scans enabled, machine-bound repositories for eligible work.
+2. The runner acquires a local cross-process issue lock and rechecks eligibility.
+3. Project context, issue context and the operator prompt are passed to claude -p.
+4. The operator analyzes, implements, tests and repairs, then opens a PR.
+5. The runner parses the final outcome marker, posts the cleaned comment and
+   applies the outcome label. Generic last-text recovery preserves assistant output.
+6. If auto_merge is enabled, the runner checks merge eligibility and configured
+   CI requirements. Failed managed GitHub PR checks can enter bounded repair when
+   both auto_merge and ci_required are enabled. Repair updates the existing PR.
 
-Operators communicate **only** through labels and comments — no direct
-coupling between operators, no shared state outside the issue tracker.
+Pause, cancellation, locks, retry limits, CI requirements, run history and project
+settings remain operational controls. Auto-merge is independent of monitoring;
+neither setting is enabled by removing retired configuration keys.
 
-### Standard pipeline
+### Diagnosing a stuck issue
 
-` + "```" + `
-new issue (no labels)
-  → classify        → adds bug / feature / question
-  → evaluate-bug    → adds agent-evaluated
-  → human adds ready-for-agent
-  → implement       → opens PR, adds agent-implemented
-` + "```" + `
+- Check repository enablement, machine binding, base branch and local clone.
+- Read agent-skipped comments for missing information or prerequisites. Do not
+  clear skipped or failed states merely to force implementation.
+- Read failure history and retry only after the underlying blocker clears.
+- Inspect locks and active runs before interfering with work in progress.
+- A PR being open is not proof of delivery: inspect CI, repair and merge status.
+- Parent progress counts merged delivery and deliberately closed work separately.
+  An open skipped issue or an unmerged PR is still pending.
 
-**Diagnosing a stuck issue:**
-- No trigger label (` + "`bug`" + `, ` + "`feature`" + `, etc.) → ` + "`classify`" + ` hasn't run or was skipped
-- Has ` + "`agent-evaluated`" + ` but no PR → waiting for human to add ` + "`ready-for-agent`" + `
-- Has ` + "`agent-skipped`" + ` → operator needs more info; read the comment to see what's missing
-- Has ` + "`agent-failed`" + ` → operator errored; remove the label once the blocker clears
-- Has ` + "`agent-running`" + ` for >10 min → likely a stale lock; ` + "`clawflow run`" + ` reconciles these
-- Has an excluded label → operator already ran; remove it to re-trigger`
+Preserve historical labels and comments. Removing retired stages does not rewrite
+the issue tracker or delete earlier runs.`
 }

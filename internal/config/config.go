@@ -36,14 +36,6 @@ type Repo struct {
 	CIRequired        bool              `yaml:"ci_required,omitempty"`
 	CITimeout         int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
-	AutoApprove       bool              `yaml:"auto_approve,omitempty"`
-	// AutoEvaluateAllIssues, when true, makes the discover loop fetch every
-	// open issue on the repo (not just those carrying the trigger label) and
-	// hand each one to local Claude scoring. Low-score runs get filtered by
-	// SaaS threshold rather than by the user's labelling discipline. Default
-	// false preserves the original "label is gatekeeper" behaviour. Pushed
-	// from SaaS via /sync/config (issue #28).
-	AutoEvaluateAllIssues bool `yaml:"auto_evaluate_all_issues,omitempty"`
 
 	// BoundMachine, when non-empty, restricts processing of this repo to the
 	// machine whose hostname matches this value. Repos with no BoundMachine
@@ -80,16 +72,6 @@ type Repo struct {
 type Settings struct {
 	PollInterval int `yaml:"poll_interval"`
 
-	// ConfidenceThreshold is the score (0-10) evaluate-bug/evaluate-feat and
-	// their marker-less salvage path (internal/operator/salvage.go) compare a
-	// run's Confidence average against to choose agent-evaluated vs
-	// agent-skipped. A pointer so the config can distinguish "never
-	// configured" (nil → default 7, matching every evaluate-* SKILL.md's
-	// historical hardcoded wording) from "explicitly set to 0" (issue #336:
-	// a user who deliberately sets 0 wants every valid numeric score to
-	// clear the bar). Read via EffectiveConfidenceThreshold, never directly —
-	// that resolver also clamps out-of-range values back to the default.
-	ConfidenceThreshold *int     `yaml:"confidence_threshold,omitempty"`
 	AgentTimeout        int      `yaml:"agent_timeout"`
 	MaxConcurrentAgents int      `yaml:"max_concurrent_agents"`
 	NotificationChannel string   `yaml:"notification_channel"`
@@ -223,32 +205,6 @@ func (s *Settings) ResolveCloneProtocol() string {
 	return "ssh"
 }
 
-// DefaultConfidenceThreshold is the score (0-10) evaluate-bug/evaluate-feat
-// compare their Confidence average against when Settings.ConfidenceThreshold
-// is unset. It mirrors the "Threshold = 7.0" wording both SKILL.md templates
-// have hardcoded since before this field existed (issue #336).
-const DefaultConfidenceThreshold = 7
-
-// EffectiveConfidenceThreshold resolves the configured threshold, applying
-// the issue #336 rules:
-//   - nil (never configured)          → DefaultConfidenceThreshold (7)
-//   - explicit 0                      → 0 (every valid score clears the bar;
-//     this does NOT bypass other gates like identity/lock/marker validity)
-//   - out of [0, 10] range             → DefaultConfidenceThreshold, since a
-//     negative or >10 value can never be compared meaningfully against a
-//     0-10 Confidence score
-//   - any other explicit value        → that value, unchanged
-func (s *Settings) EffectiveConfidenceThreshold() float64 {
-	if s == nil || s.ConfidenceThreshold == nil {
-		return DefaultConfidenceThreshold
-	}
-	v := *s.ConfidenceThreshold
-	if v < 0 || v > 10 {
-		return DefaultConfidenceThreshold
-	}
-	return float64(v)
-}
-
 // ResolveIDEScheme returns the URI scheme prefix for the configured IDE.
 // The returned string is the full prefix up to and including "://file/",
 // ready to be concatenated with an absolute local path.
@@ -319,7 +275,7 @@ type ClaudeProvider struct {
 	ChatModel     string `yaml:"chat_model,omitempty"`     // used by `clawflow chat` and project Pilot
 	EvalModel     string `yaml:"eval_model,omitempty"`     // used by evaluate-* operators
 	OperatorModel string `yaml:"operator_model,omitempty"` // used by every other operator
-	LightModel    string `yaml:"light_model,omitempty"`    // used by lightweight operators (classify, reply-*, track-progress)
+	LightModel    string `yaml:"light_model,omitempty"`    // used by lightweight operators (reply-*, track-progress)
 	// MaxOutputTokens raises the CLAUDE_CODE_MAX_OUTPUT_TOKENS ceiling for
 	// this provider's subprocesses. Zero means "use the built-in default"
 	// (DefaultMaxOutputTokens). Operators that emit large diffs (implement)
@@ -498,7 +454,7 @@ const (
 	RoleChat     = "chat"     // `clawflow chat` REPL + project-gen
 	RoleEval     = "eval"     // operators whose name starts with "evaluate-"
 	RoleOperator = "operator" // every other operator + project Pilot
-	RoleLight    = "light"    // lightweight operators: classify, reply-comment, reply-question, track-progress
+	RoleLight    = "light"    // lightweight operators: reply-comment, reply-question, track-progress
 )
 
 // Default model identifiers used when no provider is configured for a

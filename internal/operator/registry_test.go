@@ -1,8 +1,10 @@
 package operator
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -73,7 +75,7 @@ func TestRegistry_AllSortedByName(t *testing.T) {
 
 func TestRegistry_UserOverridesEmbedded(t *testing.T) {
 	sys := fstest.MapFS{
-		"skills/evaluate-bug/SKILL.md": {Data: []byte(makeSkill("evaluate-bug", "issue", "running", []string{"bug"}, nil))},
+		"skills/evaluate-custom/SKILL.md": {Data: []byte(makeSkill("evaluate-custom", "issue", "running", []string{"bug"}, nil))},
 	}
 	reg := NewRegistry()
 	if err := reg.LoadEmbedded(sys, "skills"); err != nil {
@@ -82,11 +84,11 @@ func TestRegistry_UserOverridesEmbedded(t *testing.T) {
 
 	// Create a user override with different trigger requirements.
 	userDir := t.TempDir()
-	opDir := filepath.Join(userDir, "evaluate-bug")
+	opDir := filepath.Join(userDir, "evaluate-custom")
 	if err := os.MkdirAll(opDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	userSkill := makeSkill("evaluate-bug", "issue", "running", []string{"bug", "urgent"}, nil)
+	userSkill := makeSkill("evaluate-custom", "issue", "running", []string{"bug", "urgent"}, nil)
 	if err := os.WriteFile(filepath.Join(opDir, "SKILL.md"), []byte(userSkill), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -95,9 +97,9 @@ func TestRegistry_UserOverridesEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, ok := reg.Get("evaluate-bug")
+	got, ok := reg.Get("evaluate-custom")
 	if !ok {
-		t.Fatal("evaluate-bug missing")
+		t.Fatal("evaluate-custom missing")
 	}
 	if len(got.Trigger.LabelsRequired) != 2 || got.Trigger.LabelsRequired[0] != "bug" || got.Trigger.LabelsRequired[1] != "urgent" {
 		t.Errorf("user version did not override embedded; required=%v", got.Trigger.LabelsRequired)
@@ -112,6 +114,162 @@ func TestRegistry_LoadUserDir_Missing(t *testing.T) {
 	err := reg.LoadUserDir(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err != nil {
 		t.Errorf("missing user dir should be a no-op, got: %v", err)
+	}
+}
+
+func TestRegistry_RetiredUserOperatorsIgnored(t *testing.T) {
+	userDir := t.TempDir()
+	for _, name := range []string{"classify", "evaluate-bug", "evaluate-feat", "decompose", "evaluate-custom"} {
+		dir := filepath.Join(userDir, name)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(makeSkill(name, "issue", "running", nil, nil)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg := NewRegistry()
+	if err := reg.LoadUserDir(userDir); err != nil {
+		t.Fatal(err)
+	}
+	ops := reg.All()
+	if len(ops) != 1 || ops[0].Name != "evaluate-custom" {
+		t.Fatalf("loaded operators: %+v", ops)
+	}
+}
+
+func captureUserLoad(t *testing.T, reg *Registry, dir string) string {
+	t.Helper()
+	log, err := os.CreateTemp(t.TempDir(), "operator-notices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr := os.Stderr
+	os.Stderr = log
+	defer func() { os.Stderr = stderr; log.Close() }()
+	if err := reg.LoadUserDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestRegistry_RetiredDiagnosticsAndAliases(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"classify":      "malformed content must not abort custom loads",
+		"evaluate-bug":  makeSkill("evaluate-custom", "issue", "", nil, nil),
+		"alias":         makeSkill("evaluate-feat", "invalid-old-target", "", nil, nil),
+		"another-alias": makeSkill("decompose", "issue", "", nil, nil),
+		"custom":        makeSkill("evaluate-custom", "issue", "", nil, nil),
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg := NewRegistry()
+	notices := captureUserLoad(t, reg, dir)
+	if ops := reg.All(); len(ops) != 1 || ops[0].Name != "evaluate-custom" {
+		t.Fatalf("loaded operators: %+v", ops)
+	}
+	for _, name := range []string{"classify", "evaluate-bug", "evaluate-feat", "decompose"} {
+		if !strings.Contains(notices, "ignored retired operator \""+name+"\"") {
+			t.Fatalf("missing diagnostic for %s: %s", name, notices)
+		}
+	}
+}
+
+func TestRegistry_LegacyImplementTriggerMigration(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		t.Run(map[bool]string{false: "copied", true: "custom-constraints"}[custom], func(t *testing.T) {
+			dir := t.TempDir()
+			content := "---\nname: implement\ndescription: custom implementation\noperator:\n  trigger:\n    target: issue\n    applies_to: leaf\n    labels_required: [ready-for-agent]\n    labels_required_any: [ready-for-agent]\n    labels_consumed: [ready-for-agent]\n    labels_excluded: [blocked]\n  outcomes: [custom-done]\n---\nKeep the user's implementation prompt.\n"
+			if custom {
+				content = strings.Replace(content, "labels_required: [ready-for-agent]", "labels_required: [ready-for-agent, custom]", 1)
+				content = strings.Replace(content, "labels_required_any: [ready-for-agent]", "labels_required_any: [ready-for-agent, one, two]", 1)
+				content = strings.Replace(content, "labels_consumed: [ready-for-agent]", "labels_consumed: [ready-for-agent, custom-flow]", 1)
+			}
+			path := filepath.Join(dir, "implement", "SKILL.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			original, err := Parse([]byte(content), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reg := NewRegistry()
+			if notice := captureUserLoad(t, reg, dir); !strings.Contains(notice, "removed obsolete ready-for-agent trigger") {
+				t.Fatalf("missing migration notice: %s", notice)
+			}
+			op, ok := reg.Get("implement")
+			if !ok {
+				t.Fatal("implement missing")
+			}
+			if !custom {
+				if !Matches(&Subject{State: "open"}, op) {
+					t.Fatal("copied implementation still requires approval")
+				}
+				if len(op.Trigger.LabelsConsumed) != 0 {
+					t.Fatal("obsolete consumed label retained")
+				}
+			} else {
+				if Matches(&Subject{State: "open"}, op) || Matches(&Subject{State: "open", Labels: []string{"custom"}}, op) {
+					t.Fatal("custom constraints lost")
+				}
+				if !Matches(&Subject{State: "open", Labels: []string{"custom", "one"}}, op) {
+					t.Fatal("custom eligible issue rejected")
+				}
+				if !reflect.DeepEqual(op.Trigger.LabelsConsumed, []string{"custom-flow"}) {
+					t.Fatalf("consumed labels: %v", op.Trigger.LabelsConsumed)
+				}
+			}
+			original.Trigger.LabelsRequired = op.Trigger.LabelsRequired
+			original.Trigger.LabelsRequiredAny = op.Trigger.LabelsRequiredAny
+			original.Trigger.LabelsConsumed = op.Trigger.LabelsConsumed
+			if !reflect.DeepEqual(original, op) {
+				t.Fatal("migration changed unrelated operator fields")
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(data, []byte(content)) {
+				t.Fatal("migration rewrote the user file")
+			}
+		})
+	}
+	// Approval-like labels remain a valid custom extension convention.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "evaluate-custom", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	content := makeSkill("evaluate-custom", "issue", "", []string{"ready-for-agent"}, nil)
+	content = strings.Replace(content, "labels_required: [ready-for-agent]", "labels_required: [ready-for-agent]\n    labels_required_any: [ready-for-agent, custom]\n    labels_consumed: [ready-for-agent, custom-flow]", 1)
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry()
+	if notice := captureUserLoad(t, reg, dir); notice != "" {
+		t.Fatalf("custom operator migrated: %s", notice)
+	}
+	op, _ := reg.Get("evaluate-custom")
+	want, err := Parse([]byte(content), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(op, want) {
+		t.Fatal("non-implement custom metadata changed")
+	}
+	if Matches(&Subject{State: "open"}, op) {
+		t.Fatal("custom approval trigger stripped")
 	}
 }
 
@@ -217,7 +375,7 @@ func TestDiagnose_NoOutcomes(t *testing.T) {
 	}
 }
 
-func TestDiagnose_OverlappingTriggers(t *testing.T) {
+func TestDiagnose_DuplicateTriggers(t *testing.T) {
 	sys := fstest.MapFS{
 		"skills/a/SKILL.md": {Data: []byte(makeSkillFull("a", "desc", "issue", "lock-a", []string{"bug", "urgent"}, nil, []string{"done"}))},
 		"skills/b/SKILL.md": {Data: []byte(makeSkillFull("b", "desc", "issue", "lock-b", []string{"urgent", "bug"}, nil, []string{"done"}))},
@@ -229,12 +387,12 @@ func TestDiagnose_OverlappingTriggers(t *testing.T) {
 	diags := reg.Diagnose()
 	found := false
 	for _, d := range diags {
-		if d.Severity == SeverityError && strings.Contains(d.Message, "overlapping trigger") {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "duplicate trigger") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected error about overlapping triggers; got %+v", diags)
+		t.Errorf("expected error about duplicate triggers; got %+v", diags)
 	}
 }
 
@@ -251,6 +409,68 @@ func TestDiagnose_DifferentTargetNoOverlap(t *testing.T) {
 	for _, d := range diags {
 		if d.Severity == SeverityError {
 			t.Errorf("same labels on different targets should not conflict; got %+v", d)
+		}
+	}
+}
+
+func TestDiagnose_TriggerConstraints(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		change    func(*Operator)
+		duplicate bool
+	}{
+		{"equivalent_sets", func(op *Operator) {
+			op.Trigger.LabelsRequired = []string{"b", "a", "a"}
+			op.Trigger.LabelsRequiredAny = []string{"y", "x", "x"}
+			op.Trigger.LabelsExcluded = []string{"n", "m", "m"}
+			op.Trigger.AppliesTo = ""
+		}, true},
+		{"different_any", func(op *Operator) { op.Trigger.LabelsRequiredAny = []string{"z"} }, false},
+		{"different_excluded", func(op *Operator) { op.Trigger.LabelsExcluded = []string{"z"} }, false},
+		{"different_applies", func(op *Operator) { op.Trigger.AppliesTo = AppliesLeaf }, false},
+		{"different_target", func(op *Operator) { op.Trigger.Target = "pr" }, false},
+		{"consumed_and_outcomes_ignored", func(op *Operator) {
+			op.Trigger.LabelsConsumed = []string{"a"}
+			op.Outcomes = []string{"other"}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &Operator{Name: "a", Description: "a", Outcomes: []string{"done"}, Trigger: Trigger{Target: "issue", AppliesTo: AppliesAny, LabelsRequired: []string{"a", "b"}, LabelsRequiredAny: []string{"x", "y"}, LabelsExcluded: []string{"m", "n"}}}
+			b := *a
+			b.Name = "b"
+			tc.change(&b)
+			r := NewRegistry()
+			r.ops[a.Name], r.ops[b.Name] = a, &b
+			found := false
+			for _, d := range r.Diagnose() {
+				if d.Severity == SeverityError {
+					found = true
+				}
+			}
+			if found != tc.duplicate {
+				t.Fatalf("duplicate=%t, diagnostics=%+v", tc.duplicate, r.Diagnose())
+			}
+		})
+	}
+}
+
+func TestDiagnose_BuiltinLifecycle(t *testing.T) {
+	r := NewRegistry()
+	for _, name := range []string{"implement", "repair-ci", "track-progress", "reply-question", "reply-comment"} {
+		path := filepath.Join("..", "..", "skills", name, "SKILL.md")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		op, err := Parse(data, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.ops[op.Name] = op
+	}
+	for _, d := range r.Diagnose() {
+		if d.Severity == SeverityError {
+			t.Fatalf("builtins conflict: %+v", d)
 		}
 	}
 }

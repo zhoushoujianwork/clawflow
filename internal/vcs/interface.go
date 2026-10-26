@@ -17,12 +17,12 @@ type IssueComment struct {
 
 // Issue represents a VCS issue/ticket.
 type Issue struct {
-	ID        int64    `json:"id,omitempty"` // platform internal ID (GitHub: id, GitLab: id); used for sub-issue API
-	Number    int      `json:"number"`
-	Title     string   `json:"title"`
-	Body      string   `json:"body"`
-	Labels    []string `json:"labels"`
-	State     string   `json:"state"`
+	ID     int64    `json:"id,omitempty"` // platform internal ID (GitHub: id, GitLab: id); used for sub-issue API
+	Number int      `json:"number"`
+	Title  string   `json:"title"`
+	Body   string   `json:"body"`
+	Labels []string `json:"labels"`
+	State  string   `json:"state"`
 	// URL is the web (HTML) URL of the issue. Populated by GetIssue
 	// (GitHub html_url / GitLab web_url); other list calls may leave it
 	// empty.
@@ -64,12 +64,16 @@ func (i Issue) HasLabel(name string) bool {
 
 // PR represents a pull/merge request.
 type PR struct {
+	HeadSHA    string `json:"head_sha,omitempty"`
+	HeadRepo   string `json:"head_repo,omitempty"`
+	Draft      bool   `json:"draft,omitempty"`
 	Number     int    `json:"number"`
 	Title      string `json:"title"`
 	HeadBranch string `json:"head_branch"`
 	Body       string `json:"body"`
 	State      string `json:"state"`
 	MergedAt   string `json:"merged_at,omitempty"`
+	ClosedAt   string `json:"closed_at,omitempty"`
 	URL        string `json:"url,omitempty"`
 	CreatedAt  string `json:"created_at,omitempty"`
 	UpdatedAt  string `json:"updated_at,omitempty"`
@@ -199,15 +203,13 @@ const (
 // are written back by operators to record progress.
 var ClawFlowLabels = []Label{
 	// Trigger labels
-	{"bug", "D73A4A", "Bug report — triggers evaluate-bug operator"},
-	{"feat", "0E8A16", "Feature request — triggers evaluate-feat operator (planned)"},
-	{"ready-for-agent", "00FF00", "Owner approved — triggers implement operator"},
+	{"bug", "D73A4A", "Bug report"},
+	{"feat", "0E8A16", "Feature request"},
 	{"agent-mentioned", "BFD4F2", "Issue mentioned @agent — triggers reply-comment operator"},
 	// State labels
 	{"agent-running", "FFA500", "An operator is running on this subject (concurrency lock)"},
-	{"agent-evaluated", "0075CA", "An evaluate-* operator has posted its assessment"},
-	{"agent-skipped", "BDBDBD", "Operator declined — confidence too low or info missing"},
+	{"agent-skipped", "BDBDBD", "Operator paused work — prerequisites or information missing"},
 	{"agent-implemented", "6E7681", "implement operator finished — PR opened"},
-	{"agent-failed", "FF0000", "An operator errored; see failure comment"},
+	{"agent-failed", "FF0000", "An operator failed; see run history"},
 	{"agent-replied", "E99695", "reply-comment operator has responded to a mention"},
 }

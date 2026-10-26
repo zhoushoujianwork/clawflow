@@ -2,6 +2,8 @@
 
 # ClawFlow
 
+> **Aviso de versión:** esta traducción describe el flujo anterior a v0.75.0 y todavía no está actualizada. Desde v0.75.0, los issues elegibles pasan directamente a implementación, sin etapas de evaluación ni aprobación humana. Los operadores `classify`, `evaluate-bug`, `evaluate-feat` y `decompose` se han retirado. Consulte el [README actualizado](readme.md) y la [guía de reapertura e historial](docs/reopened-issues.md) para el comportamiento vigente; las instrucciones antiguas de aprobación que aparecen abajo ya no se aplican.
+
 > **Automación basada en etiquetas que convierte issues en PRs en GitHub y GitLab.**
 >
 > ClawFlow consulta los repositorios que configuras, empareja cada issue/PR abierto con un conjunto de **operadores** (archivos `SKILL.md` autocontenidos) y ejecuta el operador coincidente mediante `claude -p`. El estado reside únicamente en las etiquetas y comentarios del VCS: no hay base de datos, ningún backend SaaS ni ningún servicio orquestador. Ejecútalo una vez, ajústalo a un cron, ejecútalo desde tu editor: es el mismo binario en cualquier caso.

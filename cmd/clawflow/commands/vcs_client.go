@@ -92,8 +92,8 @@ func newVCSClientForRepo(repoName string) (vcs.Client, string, config.Repo, erro
 // not a GitLab project. Resolution mirrors newVCSClientForRepo: configured repo
 // first, then a transient config inferred from a URL / owner/repo argument.
 //
-// These calls are reads, so — unlike newVCSClient — the client is never wrapped
-// in the Pilot budget decorator (which only gates writes).
+// The concrete client cannot use the platform-agnostic Pilot budget decorator.
+// Commands that write through this client must call budget.Reserve themselves.
 func newGitLabClientForRepo(repoName string) (*gitlab.Client, string, error) {
 	cfg, err := config.Load()
 	if err != nil {
