@@ -20,6 +20,8 @@ Old config input remains readable. Explicit legacy selection emits a migration n
 
 ## Existing code and migration map
 
+Verified baseline distinction: `refactor/autonomous-only` source at `f9e1c8e` launches Claude directly in `internal/operator/claude.go`. The installed binary reports `74771e2-offload`; the existing Offload integration commit `74771e252ca845213e9c33e3bcb4fe2a5e4a0f2e` belongs to `feat/offload-execution` and is not present in this checkout. Before live self-hosting, reconcile that integration with the autonomous-only source, verify adapter capabilities and execution semantics, build the reconciled source, and validate that the selected binary and executor match the recorded versions. An installed binary's behavior does not establish this checkout's capabilities.
+
 The source map below records the earlier review at base commit `dff005a`; it is historical inspection context, not the current supported control surface. Line numbers are landmarks, not stable APIs.
 
 | Existing location | Verified role | Proposed evolution |
@@ -36,7 +38,7 @@ The source map below records the earlier review at base commit `dff005a`; it is 
 | `internal/pilot/schedule.go` | Project-level scheduling | Retain backlog intake; hand eligible work to one execution authority |
 | `internal/config/config.go:35`, `cmd/clawflow/commands/lang.go:70` | `TestCommand` setting and language-detection use | Do not mistake this setting for an enforced test gate |
 
-Suggested new internal boundaries are `workflow` (graph and scheduler), `skill` (managed packages), `execution` (adapter contracts), `testing` (normalized evidence), and `store` (ledger/effect intents). These are implementation boundaries, not separately deployed services. Keep `internal/vcs` as the provider boundary and `internal/api`/`web` as views and controls over the same engine. Extract incrementally from the command orchestration instead of rewriting it wholesale.
+Suggested new internal boundaries are `workflow` (graph and scheduler), `skill` (managed packages), `execution` (adapter contracts), `testing` (normalized evidence), and `store` (ledger/effect intents). Start as a modular monolith, not separately deployed services. Reuse existing project management, VCS and operator modules; reconcile the Offload feature-branch integration for reuse behind a versioned execution adapter rather than assuming it exists here. This document does not assert an installed Offload API or invent commands. Keep `internal/vcs` as the provider boundary and `internal/api`/`web` as views and controls over the same engine. Extract incrementally for measured bottlenecks or independent security, failure-isolation or scaling needs.
 
 The source review found no general durable workflow graph or unfinished-write replay mechanism. Existing metadata reconciliation and partial worktree reuse should be preserved, but do not establish those stronger guarantees. Repository-wide runtime tests were not executed for this documentation task.
 
@@ -78,14 +80,16 @@ The resolved snapshot pins immutable digests even when a human-readable version 
 | Record | Key information |
 |---|---|
 | Project binding | Provider/repository identity, package pins, environment bindings, autonomy policy |
-| Task | Source issue/event, goal revision, acceptance criteria, dependencies, selected endpoint |
+| Task | Source issue/event, goal revision, acceptance-contract version/digest, dependencies, selected endpoint |
 | Workflow run | Task generation, compiled graph, configuration snapshot, aggregate status |
 | Step attempt | Step, attempt number, input digest, lease epoch, workspace, executor session, timestamps, result |
-| Evidence | Code/integration SHA, configuration digest, environment identity, check identity, status, artifacts |
+| Evidence | Contract digest, exact code/integration/base SHAs, policy/profile digests, environment identity, trusted check/workflow identity, run/job IDs and attempts, status, artifacts |
 | Effect intent | Desired external write, idempotency key, preconditions, external identity, reconciliation status |
 | Event | Provider delivery identity or synthetic deduplication key, source revision, timestamp, normalized payload |
 
-Use a transactional local store, preferably SQLite, for the first managed runtime. Persist transitions and pending effect intents in one transaction. Retain existing human-readable logs as views or artifacts rather than maintaining competing scheduling authorities. Local disk durability and backup remain deployment responsibilities; copying a database does not create a safe second scheduler.
+Use SQLite and one scheduler for the first reference runtime. Persist transitions and pending outbox effect intents in one transaction; deduplicate incoming observations in a durable inbox. The store is authoritative; GitHub Issues, labels/comments and human-readable logs are coordination mirrors or artifacts, never competing scheduling authorities. Local disk durability and backup remain deployment responsibilities; copying a database does not create a safe second scheduler.
+
+The target is tens to hundreds of projects and 10,000 concurrent workers, not demonstrated capacity. Production scale requires a transactional distributed store such as PostgreSQL with atomic lease claims, uniqueness constraints, fenced result/effect commits and restart-safe migrations. SQLite's single writer is not evidence of target capacity. Preserve store interfaces and transition semantics across backends, but benchmark contention and recovery independently. Multiple schedulers are enabled only after the distributed backend and ownership tests pass.
 
 Suggested step states: `pending`, `ready`, `running`, `waiting_external`, `succeeded`, `failed`, `blocked`, `cancelled`. An attempt is immutable after termination. A retry creates another attempt and preserves prior evidence. Run status is derived from required steps and the selected endpoint; it is not inferred from a label.
 
@@ -95,7 +99,9 @@ Normalize polling observations and, later, webhook deliveries into one inbox. Po
 
 Duplicate delivery maps to the existing task generation. A changed issue goal or source revision can request a new generation; it must not silently mutate a running attempt's input. Merge/close/cancel observations reconcile the task rather than creating conflicting work.
 
-The scheduler chooses ready steps subject to dependencies, project fairness, concurrency limits, and usage limits. A durable lease with heartbeat and fencing epoch prevents an expired worker from committing results. Labels such as `agent-running` can mirror activity but are not locks. The first release supports one active scheduler per store; worker processes must lose write capability when their attempt is fenced or cancelled.
+The deterministic scheduler chooses ready steps subject to satisfied dependencies and fair project, provider and resource quotas (worker slots, CPU/memory, API rate, CI runners and spend). Use bounded queues and per-project admission limits so one large backlog cannot starve other projects. Coordinate and implement the existing [dependency-gate backlog #337](https://github.com/zhoushoujianwork/clawflow/issues/337), verified OPEN and `agent-skipped`, rather than claiming reuse of an implemented gate. Persist dependency decisions against task generations and invalidate readiness when prerequisites change.
+
+A durable lease with heartbeat and monotonically increasing fencing epoch prevents an expired worker from committing results. Claim and renewal are conditional transactions; result and effect authorization require the current epoch. Labels such as `agent-running` can mirror activity but are not locks. The reference release supports one active scheduler per store; worker processes must lose write capability when their attempt is fenced or cancelled. External writes require the gateway because an expired process cannot be trusted to self-revoke credentials.
 
 Cancellation stops new dispatch, terminates the active execution where supported, revokes effect authorization, and then reconciles partial effects. Resume re-evaluates preconditions; it does not blindly rerun the last command.
 
@@ -103,7 +109,11 @@ Cancellation stops new dispatch, terminates the active execution where supported
 
 Allocate an isolated worktree/branch for each task, with bounded per-attempt modifications and a recorded base SHA. Worktrees isolate Git edits, not arbitrary executable code: projects that execute untrusted code need a container or equivalent restricted executor with scoped credentials and network access. Command adapters use structured executable/argument/environment inputs.
 
-An execution request contains the pinned skill, inputs, workspace, deadline, resource budget, capabilities, and artifact locations. Agent sessions can be attached to an attempt for diagnosis or continuation, but a resumed conversation cannot bypass the current lease or input revision.
+Development and acceptance run in separate ephemeral isolated worker pools and separate sessions. Development capabilities permit workspace edits and submission requests. Acceptance capabilities permit read-only access to the submitted source and execution in disposable test environments, plus evidence publication; they exclude source pushes, merge authorization and policy relaxation. Test-generated files stay in scratch/overlay storage and cannot mutate the submitted source. A repair returns to a development attempt and creates a new submission and acceptance attempt.
+
+Before reading implementation details or development conclusions, the acceptance session authors its own plan from the immutable acceptance contract and task requirements. Persist the plan digest, timestamp, input provenance and role/session identity before releasing the submitted implementation, development summaries or claimed test results to that session. Subsequent source inspection and comparisons may supplement evidence but cannot retroactively replace the independent plan. Repaired submissions require a new acceptance attempt with the same ordering constraint.
+
+An execution request contains task/generation/attempt IDs, role, session ID, lease epoch, pinned skill and acceptance-contract digest, exact code/integration/base SHAs, policy digest, inputs, workspace, deadline, resource budget, capabilities, and artifact locations. Separate role-scoped credentials enforce permissions outside prompts. Agent sessions can be attached for diagnosis or continuation, but a resumed conversation cannot bypass the lease or input revision, and a development session cannot be reused as independent acceptance.
 
 The structured result contains status, outputs, artifact references, evidence references, requested effects, and a failure category. A zero process exit code is necessary for some adapters but never sufficient to certify task completion. Invalid or absent output becomes a protocol failure.
 
@@ -123,6 +133,14 @@ Record partial effects even when the step ultimately fails. A stale agent result
 
 ## Test configuration workflow
 
+### Component adapters and onboarding
+
+External executors, Offload, CI providers and optional tools expose a capability/version adapter: identity and version discovery, compatibility range, supported operations and role capabilities, health probe, request/result schema, cancellation and reconciliation semantics. Verify the installed declarations or API before binding; unsupported versions or operations fail closed with evidence. Do not infer a usable API from a product name.
+
+Component onboarding is `discovered → verified → bound → active`, with `blocked`, `disabled` and `revoked` outcomes. Discovery is read-only; a newly found component remains disabled. Verification records probe evidence and adapter version/digest. Binding pins project, role, resource and secret references and approved capabilities. Activation records explicit operator authorization or an existing configured authorization policy. Unknown components are not invented, installed or automatically onboarded. Revocation blocks new dispatch and reconciles in-flight work. Management views expose state, pins, health, limits and failure reasons without disclosing secrets.
+
+### Project test profile
+
 Use a separate configuration run so incomplete onboarding cannot be treated as a ready development project:
 
 `discovered → proposed → preflight → validated → activated`, with explicit `blocked` and `rejected` outcomes.
@@ -139,7 +157,25 @@ A test package describes check identities, required/optional status, commands or
 
 Normalize results to `passed`, `failed`, `pending`, `cancelled`, `infra_error`, or `unknown`. Store skip counts and collected test counts; required checks with no usable evidence cannot become `passed` merely because a process exited zero. Explicit exemptions are policy records with reason and scope.
 
-Evidence key: repository + code or integration SHA + test-profile digest + relevant environment identity + check identity. CI evidence also records the provider run/job ID and attempt. Results from another SHA, cancelled runs, stale reports, or similarly named unrelated jobs cannot satisfy a gate. Dependency/environment changes can invalidate reuse even when the source SHA is unchanged.
+An immutable acceptance contract pins task goal/generation, required criteria and checks, source/integration test scope, environment requirements, role capabilities and authorized policy exceptions. Its version/digest and the policy digest are captured before submission. Neither development nor acceptance can authorize its own weaker contract. A separately authorized change produces a new generation and invalidates affected evidence.
+
+Evidence key: repository identity + task generation + contract digest + exact code SHA + integration/base SHA tuple + policy/profile digests + relevant environment identity + trusted check identity. Each record includes producer role/session, adapter version, timestamps, raw provider status/conclusion, normalized result, artifact digests and provenance. CI records additionally include workflow identity/path/digest, check suite/run IDs, workflow run ID and `run_attempt`, job IDs and their attempt association. Missing provenance is `unknown`, not success. Dependency/environment changes can invalidate reuse even when source is unchanged.
+
+### GitHub Actions and exact-revision aggregation
+
+GitHub Actions is a first-class asynchronous test executor. Reuse [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), currently triggered by PRs to `main`: its `Test` job builds the web bundle, runs `go test -v -race ./...`, then builds and smoke-checks the CLI including operator validation. Do not duplicate these as a newly invented test pipeline. Any later workflow trigger changes require a reviewed change; the current file is not assumed to support manual dispatch or target-branch verification.
+
+The adapter observes the workflow triggered by the submitted PR update or requests only a verified supported trigger. It persists dispatch intent, discovers and binds the resulting run, then transitions to `waiting_external` and releases the agent worker slot and session allocation. CI runner usage remains accounted separately. Webhooks plus bounded polling reconcile progress without keeping an agent alive. Restart reattaches to run IDs; ambiguous dispatch blocks instead of creating duplicate CI runs. Acceptance resumes in a separate role session when agent analysis is needed.
+
+Aggregation is a deterministic join, not a branch-name or display-name search:
+
+1. Read the current PR repository identity, head SHA and base SHA; select the pinned contract and trusted workflow identity/digest from authorized configuration. A changed workflow cannot establish its own trust merely by passing.
+2. Resolve the actual tested revision. A PR test merge commit may differ from its head SHA. Record `(repository, PR, head SHA, base SHA, test merge SHA)` with provider/Git provenance proving that candidate corresponds to that tuple. Never assume a workflow run's `head_sha` equals checkout/test merge SHA; retain explicit checkout/candidate evidence. If the tuple cannot be proven, block integration acceptance.
+3. Paginate check runs, required status contexts and workflow runs/jobs as applicable. Match exact revision, trusted app/workflow identity and required selectors, and retain all rerun attempts. Bind jobs to the selected run attempt; never combine convenient successes across attempts or SHAs. Reject ambiguous duplicate identities. A later non-success attempt supersedes earlier success under the declared rerun policy.
+4. Require every expected check/job and required test step/report to complete successfully. Missing, queued, pending, skipped, neutral, stale, cancelled, unreadable or timed-out evidence cannot pass; aggregate workflow success alone cannot conceal skipped required work. The profile must obtain step/report evidence if job success is insufficient.
+5. Re-read head/base and policy before committing eligibility. Changes invalidate affected evidence and require a new candidate. Gate evaluation is a pure function of the pinned contract and validated evidence, persisted atomically with its input digest.
+
+The GitHub [check runs API](https://docs.github.com/en/rest/checks/runs) supplies revision-specific checks and distinct conclusions. The [workflow runs API](https://docs.github.com/en/rest/actions/workflow-runs) supplies run/attempt observations and rerun operations. These are provider primitives, not a guarantee that names or a successful run prove this design's gate. Validate job/checkout provenance and adapter permissions during implementation; do not broaden credentials to work around missing evidence.
 
 Failure routing:
 
@@ -156,15 +192,17 @@ Log text is untrusted task data. Review and repair agents receive bounded, redac
 
 ## Review, merge, and completion
 
-Review is a separate attempt bound to the current diff and policy snapshot. It can request changes, provide evidence, or block. Required provider approvals remain authoritative and cannot be replaced with an agent-written approval comment.
+Review is an independent acceptance attempt bound to the immutable contract, current diff, exact code/integration/base SHAs and policy snapshot. It can request changes, provide evidence, or block; it cannot edit the submitted source or approve its own weaker policy. Required provider approvals remain authoritative and cannot be replaced with an agent-written approval comment.
 
-Merge eligibility requires current head/integration revision evidence, required review, successful required tests, resolved conflicts, permitted action, and satisfied provider protections. Use provider-supported conditional merge or an equivalent merge queue. Recheck the target base; if it changes, recompute the integration candidate and rerun required integration checks. If the provider cannot enforce the checked candidate, do not enable unattended merge on that capability path.
+Merge eligibility requires current head/integration revision evidence, required review, successful required tests, resolved conflicts, permitted action, and satisfied provider protections. Eligibility does not grant automatic merge authorization: require the existing explicit project/action policy separately. Use provider-supported conditional merge or an equivalent merge queue. Recheck the target base; if it changes, recompute the integration candidate and rerun required integration checks. If the provider cannot enforce the checked candidate, do not enable unattended merge on that capability path.
 
 After merging, record the actual resulting target SHA and run or observe target-branch checks. Squash/rebase may change the SHA; pre-merge evidence is not automatically target-branch evidence. A failing verification creates a recovery task and marks the original workflow accordingly. Revert is a distinct authorized effect, not an unconditional error handler.
 
 ## Migration and framework validation
 
 Replace runner internals incrementally under the single autonomous lifecycle. Map non-retired custom trigger/outcome definitions into a compatibility adapter and preserve their constraints and history. New packages require strict declared results; permissive old outcome labels must not bypass new gates. Keep one execution authority per issue.
+
+Rollout follows the [main design's linked backlog](managed-development-design.md#scope-and-implementation-order): (1) exact-SHA GitHub aggregation, independent evidence contract and existing CI reuse; (2) durable transitions, fencing/reconciliation and coordination/implementation of #337's dependency-gate backlog; (3) versioned component adapters and management; (4) distributed backend and capacity validation. Reconcile source/binary/Offload versions before live self-hosting. Version persisted schemas, adapter protocols and policy contracts; pin each run to a compatible engine version. Roll out bounded project cohorts with dispatch pause, backup and migration validation. Unsupported versions block rather than silently reinterpret records. This is versioned evolution, not an alternate legacy workflow selector.
 
 Migrate the autonomous implementation path end to end before extending package coverage. Keep historical records readable and reject retired override names. Rollback pauses dispatch and reconciles in-flight effects before restoring a compatible runner revision; it does not restore a selectable legacy pipeline. Do not delete the ledger or replay pending writes under another scheduler.
 
@@ -177,7 +215,24 @@ Framework acceptance checks should include:
 - CI infrastructure failure and code failure take different bounded paths.
 - Changed base, changed head, and changed test profile invalidate the appropriate evidence.
 - Existing required checks cannot be removed by a task's proposed test plan.
+- Acceptance cannot write submitted source, reuse the development session or authorize policy relaxation, even through tool calls or injected log instructions.
+- Acceptance plan provenance proves it was recorded before that session could read development conclusions; premature disclosure invalidates independence and requires a fresh acceptance session.
+- PR head/base/test-merge tuple mismatch, untrusted workflow digest, mixed attempts and skipped required steps block acceptance.
+- CI waiting consumes no agent worker slot; restart resumes known runs without duplicate dispatch.
+- Duplicate/out-of-order inbox events, lost write responses, outbox replay, lease expiry and scheduler partition preserve one authorized transition/effect.
+- Dependency changes prevent premature dispatch; fair quotas prevent a hot project/provider from starving others.
+- Unknown or incompatible components stay disabled; revocation and capability reduction stop unauthorized effects.
 - Both provider adapters return explicit unsupported-capability failures.
 - The full repair-and-merge scenario succeeds in a disposable repository without manual step advancement.
 
 Use unit tests for transition and policy evaluation, adapter contract tests for provider normalization, and crash-injection integration tests for the ledger/effect boundary. Real-provider smoke tests require designated test repositories and isolated credentials. Validate the product's own test suite separately from the user-project tests it orchestrates.
+
+## Scale validation and release limits
+
+Run successive 100, 1,000 and 10,000 concurrent-worker scenarios across 100 projects against the production distributed backend. Include balanced and hot-project workloads, mixed CPU/memory/provider quotas, long CI waits, bursty completions, dependency fan-out and recovery storms. Record active execution workers separately from queued tasks and waiting CI runs; 10,000 waiting records do not demonstrate 10,000 concurrent workers.
+
+Synthetic adapters measure control-plane scheduling, durable transitions and evidence/effect throughput without claiming real model or Actions capacity. Separately run authorized provider trials within actual account/rate/runner limits; report achieved concurrency, provider throttling and capacity shortfalls. Never extrapolate synthetic capacity into proven end-to-end throughput.
+
+At every tier measure dispatch latency p50/p95/p99, queue age and starvation by project, transaction/lease contention, heartbeat lag, fencing rejections, event/effect backlog, reconciliation time, CPU/memory/storage, provider errors/rate limits and cost. Inject scheduler/worker crashes, network partitions, database failover, duplicate delivery and stale credentials. Require zero stale-worker authorized writes, duplicate logical task generations or false acceptance; recovery must preserve budgets and provenance. Set latency/recovery SLOs and resource budgets before the run and publish results against them.
+
+Supported production limits increase only after repeatable results and recovery tests on a documented topology. No load measurements, provider capacity, elapsed benchmark time or cost figures are established by this documentation change. Distributed rollout remains a planned phase rather than indefinitely deferred or already supported capacity.

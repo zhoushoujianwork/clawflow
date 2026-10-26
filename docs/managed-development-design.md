@@ -10,6 +10,8 @@ Humans set project direction and describe features. ClawFlow should carry eligib
 
 Eligible open leaf issues enter `implement` directly. Questions/comments retain their reply paths, and parents retain `track-progress` with the operational `progress-check` trigger. Local lockfiles, machine bindings, pause/cancel controls, terminal exclusions, bounded retries and historical records remain.
 
+Verified baseline: `refactor/autonomous-only` at `f9e1c8e` launches Claude directly in `internal/operator/claude.go`. The installed binary reports `74771e2-offload`; that Offload integration is on `feat/offload-execution`, not in this checkout. Reconcile and validate these source/executor versions before live self-hosting.
+
 ```bash
 clawflow repo set owner/repo --auto-merge on --ci-required on
 clawflow repo enable owner/repo
@@ -22,31 +24,51 @@ The exact built-ins `classify`, `evaluate-bug`, `evaluate-feat` and `decompose` 
 
 ## Proposed durable engine
 
-Evolve the existing Go application, CLI, Web views, VCS adapters and execution backend. Add one durable authority for tasks, attempts, evidence and pending external effects. Keep labels and comments as visible coordination surfaces. Start with one scheduler and a local transactional store; distributed scheduling is deferred.
+Support tens to hundreds of projects, with a target of 10,000 concurrent workers. This is a design and validation target, not proven capacity. Actual concurrency depends on execution-provider capacity, GitHub Actions runners, API limits and project budgets.
+
+Evolve the existing Go application as a modular monolith, reusing project management, VCS and operator modules. Reconcile the existing Offload integration from its feature branch for reuse through an execution adapter. The durable, deterministic control plane owns tasks, transitions, evidence and external-effect authorization. GitHub Issues, labels and comments mirror coordination; the durable store is authoritative. Prompts and worker conversations cannot advance state themselves.
+
+Start with one scheduler and SQLite as a reference implementation. Production scale requires a transactional distributed store such as PostgreSQL, leased and fenced workers, durable outbox/inbox delivery and fair project, provider and resource quotas. SQLite's single writer is not the proposed basis for 10,000 workers. Extract services only for measured bottlenecks or an independent security, failure-isolation or scaling need.
 
 Versioned skill packages describe activities, tests, policy and bounded execution steps. Project bindings pin their resources. The engine validates results, owns transitions and enforces permissions; a prompt cannot waive checks. This does not introduce a repository workflow-mode selector or a second legacy pipeline.
 
 Users connect a repository and execution environment, provide project/test instructions, validate readiness, then enable automation. They observe progress and blocking reasons, pause/cancel or supply missing information. CLI task planning, durable status/retry commands and package binding contracts remain proposed where marked in the detailed design.
 
-The intended delivery path is:
+Development and acceptance use separate sessions, credentials and capabilities in ephemeral, isolated worker pools. Acceptance records its plan from the pinned contract and requirements before reading implementation details or development conclusions. It then inspects and tests the immutable submission but cannot modify its source or authorize its own policy relaxation. Evidence binds the contract, exact code SHA, integration/base SHAs and policy digest.
+
+The intended delivery path separates execution from authority:
 
 ```mermaid
-flowchart LR
-    A[Eligible issue] --> B[Implement and analyze internally]
-    B --> C[Required tests and review]
-    C -- Failure within budget --> B
-    C --> D[Merge eligibility]
-    D --> E[Merge]
-    E --> F[Verify target branch]
+flowchart TB
+    I[GitHub Issues coordination mirror] <--> C
+    subgraph CP[Deterministic control plane]
+        C[Scheduler and durable store] --> G[Evidence validation and policy gate]
+    end
+    C --> D[Isolated development pool / session]
+    D --> S[Immutable submission and contract]
+    S --> A[Independent acceptance pool / session]
+    C --> X[GitHub Actions test executor]
+    S --> X
+    A --> E[Revision-bound evidence]
+    X --> E
+    E --> G
+    G -- Repair within budget --> D
+    G --> M[Separately authorized merge / target verification]
 ```
 
-Tests and review evidence must match the current revision and configuration. Infrastructure failures use bounded backoff; missing evidence blocks completion. Provider protections remain authoritative. Production release/deployment remains separately configured work. Target-branch verification and general crash recovery are proposed guarantees, not established by PR creation or the current repair ledger.
+GitHub Actions is a first-class test executor. Reuse [the existing CI workflow](../.github/workflows/ci.yml): web build, Go race tests and CLI smoke checks. Waiting for CI persists the run identity and releases the worker slot. Results record run/job IDs and attempts plus trusted workflow identity/digest. Required evidence must be complete, current and successful; missing, skipped or stale results cannot pass. A PR test merge SHA is explicitly bound to its head/base tuple, never assumed identical to the submitted head SHA.
+
+Provider protections remain authoritative. Gate success creates merge eligibility only; it grants no automatic merge authorization. Existing explicit merge policy still applies, while production release/deployment remains separately configured work. Target-branch verification and general crash recovery are proposed guarantees, not established by PR creation or the current repair ledger.
+
+External components use versioned capability adapters. Onboarding moves through `discovered → verified → bound → active`; discovery is read-only and components remain disabled until authorized activation. Unknown components are reported as unsupported or awaiting verification, never invented or automatically onboarded.
 
 ## Scope and implementation order
 
-1. Establish durable task/attempt ownership, typed results and reconciliation of interrupted writes, preserving existing custom operators and history.
-2. Add pinned skill resources and validated test profiles with explicit environment requirements and normalized evidence.
-3. Prove one issue through test failure, bounded repair, successful checks, permitted merge and target-branch verification, including process restart.
-4. Add dependent tasks, fairness, richer Web/CLI views and provider parity after the vertical path is reliable.
+Delivery backlog: [parent #347](https://github.com/zhoushoujianwork/clawflow/issues/347).
 
-Defer arbitrary scripting, a marketplace, distributed scheduling and automatic production deployment. The [trigger expansion ADR](adr/0001-trigger-surface-expansion.md) remains a historical Proposed decision; this design does not change its status. Existing runtime/source observations and future contracts are separated in the [detailed design](managed-development-design-detail.md).
+1. Fix [exact-SHA CI aggregation #348](https://github.com/zhoushoujianwork/clawflow/issues/348), establish the [independent gate #349](https://github.com/zhoushoujianwork/clawflow/issues/349), and [reuse Actions #350](https://github.com/zhoushoujianwork/clawflow/issues/350).
+2. Add [durable workflow, fencing and reconciliation #351](https://github.com/zhoushoujianwork/clawflow/issues/351); coordinate and implement the existing [dependency-gate backlog #337](https://github.com/zhoushoujianwork/clawflow/issues/337), currently OPEN and `agent-skipped`, not an implemented gate. Prove failure, repair, permitted merge and target verification across restart.
+3. Add [component adapters and management #352](https://github.com/zhoushoujianwork/clawflow/issues/352), preserving project/VCS/operator modules and reconciling Offload reuse.
+4. Add the distributed backend and [scale validation #353](https://github.com/zhoushoujianwork/clawflow/issues/353) at 100, 1,000 and 10,000 workers across 100 projects. Distinguish synthetic control-plane capacity from real provider capacity; raise supported limits only from measured results.
+
+Roll out versioned contracts and store migrations incrementally, with one authority per task and bounded project cohorts; do not add an alternate legacy workflow selector. Defer arbitrary scripting, a marketplace and automatic production deployment. The [trigger expansion ADR](adr/0001-trigger-surface-expansion.md) remains a historical Proposed decision; this design does not change its status. Technical contracts, failure tests and scale acceptance are in the [detailed design](managed-development-design-detail.md).
