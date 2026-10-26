@@ -206,6 +206,9 @@ func (f ciErrorFake) GetCIStatus(string, int) (vcs.CIStatus, error) {
 }
 
 func TestRequiredCIOnlySuccessMerges(t *testing.T) {
+	// Merge policy is re-read from config at merge time; isolate it from the
+	// developer's real HOME so CI and local runs see the same unenrolled repo.
+	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{"o/r": {CIRequired: true}}})
 	for _, status := range []vcs.CIStatus{vcs.CIStatusSuccess, vcs.CIStatusNone, vcs.CIStatusFailure, vcs.CIStatusPending} {
 		t.Run(string(status), func(t *testing.T) {
 			fake := &sweepFake{ciStatus: status, openPRs: []vcs.PR{{Number: 1, HeadBranch: "fix/issue-1"}}}

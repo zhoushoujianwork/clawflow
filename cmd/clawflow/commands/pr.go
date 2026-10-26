@@ -259,11 +259,11 @@ func newPRMergeCmd() *cobra.Command {
 		Short:   "Merge a pull request via the VCS API",
 		Example: "  clawflow pr merge --repo owner/repo --pr 7\n  clawflow pr merge --repo owner/repo --pr 7 --no-delete-branch",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, repo, _, err := newVCSClientForRepo(repo)
+			client, repo, _, err := acceptanceMergeClient(repo)
 			if err != nil {
 				return err
 			}
-			if err := client.MergePR(repo, number); err != nil {
+			if err := explicitAcceptanceMerge(cmd.Context(), client, repo, number); err != nil {
 				return err
 			}
 			fmt.Printf("merged %s PR #%d\n", repo, number)

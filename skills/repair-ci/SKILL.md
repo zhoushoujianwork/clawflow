@@ -10,6 +10,9 @@ operator:
   outcomes: ["agent-implemented", "agent-failed"]
 ---
 
+ClawFlow runs this skill through direct Offload with explicit managed-development delivery. Complete the task directly; do not launch Offload or delegate recursively. Offload profiles own credentials and models.
+
+
 Repair the existing PR specified in the CI repair context. Your cwd is a fresh
 isolated repository detached at the exact expected PR head. Stay in this cwd.
 The runner has reserved one of at most three total repair attempts for this PR.

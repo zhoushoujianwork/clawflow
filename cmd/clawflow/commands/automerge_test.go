@@ -196,6 +196,10 @@ func (f *sweepFake) PostPRComment(repo string, prNumber int, body string) error 
 func (f *sweepFake) ClosePR(repo string, prNumber int) error { return vcs.ErrNotSupported }
 
 func TestSweepAutoMergePRs_DisabledCostsNoAPICalls(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	f := &sweepFake{openPRs: []vcs.PR{{Number: 1, Body: "Closes #2"}}}
 	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: false})
 	if f.listOpenPRCalls != 0 {
@@ -207,6 +211,10 @@ func TestSweepAutoMergePRs_DisabledCostsNoAPICalls(t *testing.T) {
 }
 
 func TestSweepAutoMergePRs_MergesCleanCandidate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	f := &sweepFake{openPRs: []vcs.PR{
 		{Number: 273, Title: "fix: thing", Body: "Closes #272", HeadBranch: "fix/issue-272"},
 	}}
@@ -223,6 +231,10 @@ func TestSweepAutoMergePRs_MergesCleanCandidate(t *testing.T) {
 }
 
 func TestSweepAutoMergePRs_DirtyIsSilentlySkipped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	f := &sweepFake{
 		openPRs:      []vcs.PR{{Number: 10, Body: "Closes #9"}},
 		mergeability: map[int]vcs.MergeStatus{10: vcs.MergeStatusConflict},
@@ -242,6 +254,9 @@ func TestSweepAutoMergePRs_DirtyIsSilentlySkipped(t *testing.T) {
 func withRunLog(t *testing.T) func() string {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	old := runLog
 	lg, err := clog.Open("run")
 	if err != nil {
@@ -262,6 +277,10 @@ func withRunLog(t *testing.T) func() string {
 }
 
 func TestSweepAutoMergePRs_NotCleanReasonInRunLog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	readLog := withRunLog(t)
 	f := &sweepFake{
 		openPRs:      []vcs.PR{{Number: 10, Body: "Closes #9"}},
@@ -278,6 +297,10 @@ func TestSweepAutoMergePRs_NotCleanReasonInRunLog(t *testing.T) {
 }
 
 func TestSweepAutoMergePRs_LockedReasonInRunLog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	readLog := withRunLog(t) // also sets HOME, so snapshot.AcquireLock lands in the same temp dir
 	f := &sweepFake{
 		openPRs: []vcs.PR{{Number: 10, Body: "Closes #9"}},
@@ -294,6 +317,10 @@ func TestSweepAutoMergePRs_LockedReasonInRunLog(t *testing.T) {
 }
 
 func TestSweepAutoMergePRs_SkipsPRsWithoutClosingKeyword(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	f := &sweepFake{openPRs: []vcs.PR{
 		{Number: 1, Title: "chore: human WIP", Body: "just some work"},
 		{Number: 2, Title: "WIP: not ready", Body: "Closes #3"},
@@ -308,6 +335,10 @@ func TestSweepAutoMergePRs_SkipsPRsWithoutClosingKeyword(t *testing.T) {
 }
 
 func TestSweepAutoMergePRs_CapsMergesPerPass(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	f := &sweepFake{openPRs: []vcs.PR{
 		{Number: 1, Body: "Closes #11", HeadBranch: "a"},
 		{Number: 2, Body: "Closes #12", HeadBranch: "b"},
@@ -320,6 +351,10 @@ func TestSweepAutoMergePRs_CapsMergesPerPass(t *testing.T) {
 }
 
 func TestSweepAutoMergePRs_FailureCommentIsDeduped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	f := &sweepFake{
 		openPRs:  []vcs.PR{{Number: 5, Body: "Closes #4"}},
 		mergeErr: errors.New("HTTP 403: Resource not accessible by integration"),
@@ -334,6 +369,10 @@ func TestSweepAutoMergePRs_FailureCommentIsDeduped(t *testing.T) {
 }
 
 func TestSweepAutoMergePRs_FailureCommentPostedOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	f := &sweepFake{
 		openPRs:  []vcs.PR{{Number: 5, Body: "Closes #4"}},
 		mergeErr: errors.New("HTTP 403: Resource not accessible by integration"),
@@ -348,6 +387,10 @@ func TestSweepAutoMergePRs_FailureCommentPostedOnce(t *testing.T) {
 // waitForCI's 30s sleep loop: a pending check must yield immediately and be
 // re-examined on the next pass.
 func TestSweepAutoMergePRs_PendingCIDoesNotBlock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
 	f := &sweepFake{
 		openPRs:  []vcs.PR{{Number: 8, Body: "Closes #7"}},
 		ciStatus: vcs.CIStatusPending,

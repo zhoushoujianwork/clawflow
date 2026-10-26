@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-ClawFlow connects GitHub/GitLab issues and PRs to autonomous implementation through `claude -p`. Humans set project direction and describe features. Eligible open leaf issues enter `implement` directly; analysis, planning, tests and repair happen within that attempt. Questions/comments retain their reply paths, and parents retain `track-progress` through the operational `progress-check` trigger.
+ClawFlow connects GitHub/GitLab issues and PRs to autonomous implementation through `offload`. Humans set project direction and describe features. Eligible open leaf issues enter `implement` directly; analysis, planning, tests and repair happen within that attempt. Questions/comments retain their reply paths, and parents retain `track-progress` through the operational `progress-check` trigger.
 
 The current runner uses VCS labels/comments for visible coordination, local files for history and locks (`~/.clawflow/locks/`), and bounded repair bookkeeping. `lock_label` and `agent-running` are not execution locks. Pause/cancel controls, machine bindings, terminal exclusions and retry bounds remain in force.
 
@@ -32,7 +32,7 @@ The [managed development design](docs/managed-development-design.md) proposes a 
 | 嵌入资源 | `embed.FS`（内置算子编译进二进制） |
 | Web 前端 | React + TypeScript (`web/` 目录) |
 | CI/CD | GitHub Actions (`.github/workflows/release.yml`) |
-| 运行时依赖 | Claude Code CLI (`claude -p`) 必须在 PATH 中 |
+| 运行时依赖 | Offload CLI + explicit machine-local profile |
 
 ---
 
@@ -42,7 +42,7 @@ The [managed development design](docs/managed-development-design.md) proposes a 
 
 - Go 1.21+（以 `go.mod` 为准）
 - Node.js（用于 `web/` 前端开发）
-- Claude Code CLI（`claude -p` 可用）
+- Offload CLI and explicit `settings.execution.profile`; see [Offload setup](docs/offload-execution-design.md)
 
 ### 构建与运行
 
@@ -148,7 +148,7 @@ ClawFlow 的核心设计:**一切可扩展单元都是算子 (operator)**。要�
 
 ### 什么是算子
 
-算子 = 一次有明确输入输出的 `claude -p` 调用,表现为一个 SKILL.md 文件:
+算子 = 一次有明确输入输出的 `offload` 调用,表现为一个 SKILL.md 文件:
 
 - **输入** = issue/PR 当前状态(label + body + comments)
 - **输出** = label 变更 + comment + 可选 PR
@@ -203,7 +203,7 @@ operator:
 
 runner 拿到 stdout 后:
 
-1. 自动 fallback 到最后一个有 text 的 assistant turn,所以即使模型最后一 turn 是 tool_use 也不会丢答案
+1. Use the authoritative Offload stdout `result` text. Progress events contain sanitized metadata only; never recover an outcome from progress.
 2. 解析 marker（出现多次取**最后一个**），拿到 outcome label
 3. 把 marker 行从 body 中剥掉
 4. `PostIssueComment(repo, issue, cleanedBody)`
@@ -308,7 +308,7 @@ clawflow update --from-source     # 从本地 repo 重新构建(开发用)
 
 ## 关联项目
 
-本仓库是单体项目，无外部 repo 依赖。曾计划的 SaaS 后端（`clawflow-saas`）已废弃。唯一运行时依赖是 Claude Code CLI。
+本仓库是单体项目，无外部 repo 依赖。曾计划的 SaaS 后端（`clawflow-saas`）已废弃。执行依赖为 Offload CLI and an explicitly configured profile. Offload owns credentials and native backend selection.
 
 ---
 

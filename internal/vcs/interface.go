@@ -64,19 +64,28 @@ func (i Issue) HasLabel(name string) bool {
 
 // PR represents a pull/merge request.
 type PR struct {
-	HeadSHA    string `json:"head_sha,omitempty"`
-	HeadRepo   string `json:"head_repo,omitempty"`
-	Draft      bool   `json:"draft,omitempty"`
-	Number     int    `json:"number"`
-	Title      string `json:"title"`
-	HeadBranch string `json:"head_branch"`
-	Body       string `json:"body"`
-	State      string `json:"state"`
-	MergedAt   string `json:"merged_at,omitempty"`
-	ClosedAt   string `json:"closed_at,omitempty"`
-	URL        string `json:"url,omitempty"`
-	CreatedAt  string `json:"created_at,omitempty"`
-	UpdatedAt  string `json:"updated_at,omitempty"`
+	BaseBranch     string `json:"base_branch,omitempty"`
+	BaseSHA        string `json:"base_sha,omitempty"`
+	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
+	HeadSHA        string `json:"head_sha,omitempty"`
+	HeadRepo       string `json:"head_repo,omitempty"`
+	Draft          bool   `json:"draft,omitempty"`
+	Number         int    `json:"number"`
+	Title          string `json:"title"`
+	HeadBranch     string `json:"head_branch"`
+	Body           string `json:"body"`
+	State          string `json:"state"`
+	MergedAt       string `json:"merged_at,omitempty"`
+	ClosedAt       string `json:"closed_at,omitempty"`
+	URL            string `json:"url,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+}
+
+// ConditionalMerger optionally supports merging only the accepted PR head.
+// Implementations return the resulting merge commit SHA only on confirmed success.
+type ConditionalMerger interface {
+	MergePRAtHead(repo string, prNumber int, expectedHead string) (string, error)
 }
 
 // IsMerged reports whether the PR was merged (not just closed).

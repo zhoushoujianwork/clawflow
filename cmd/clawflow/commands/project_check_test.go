@@ -50,8 +50,8 @@ func checkFixture(t *testing.T) (string, config.Config) {
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, "absent-gitconfig"))
 	t.Setenv("GIT_TERMINAL_PROMPT", "0")
 	bin := filepath.Join(home, "bin")
-	checkWrite(t, filepath.Join(bin, "claude"), "#!/bin/sh\nprintf invoked > \"$HOME/agent-invoked\"\nexit 99\n")
-	if err := os.Chmod(filepath.Join(bin, "claude"), 0700); err != nil {
+	checkWrite(t, filepath.Join(bin, "offload"), "#!/bin/sh\nprintf invoked > \"$HOME/agent-invoked\"\nexit 99\n")
+	if err := os.Chmod(filepath.Join(bin, "offload"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+filepath.Dir(git)+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -72,6 +72,7 @@ func checkFixture(t *testing.T) (string, config.Config) {
 	p := project.Project{Name: "demo", Repos: []string{"ns/repo"}, Automation: project.Automation{BoundMachine: host}}
 	checkYAML(t, filepath.Join(project.ProjectDir("demo"), "project.yaml"), p)
 	cfg := config.Config{Repos: map[string]config.Repo{"ns/repo": {Platform: "gitlab", BaseURL: "https://gitlab.example.invalid", LocalPath: checkout, BaseBranch: "main", PrimaryProject: "demo", BoundMachine: host}}}
+	cfg.Settings.Execution = config.ExecutionSettings{Command: "offload", Profile: "test-profile"}
 	checkYAML(t, config.ConfigPath(), cfg)
 	// Credentials are fixtures only: the command must neither parse nor change them.
 	checkWrite(t, filepath.Join(home, ".clawflow", "config", "credentials.yaml"), "secret: DO-NOT-EXPOSE\n")

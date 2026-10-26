@@ -73,7 +73,7 @@ func NewRunCmd() *cobra.Command {
 		Long: `Execute one pass of the operator loop:
   - for each enabled repo, list open issues
   - for each issue, match against registered operators
-  - on first match: run claude -p, post result as a comment, apply outcome label
+  - on first match: execute through Offload, post the result, apply the outcome label
 
 Concurrency is gated by an in-process per-issue mutex; up to
 settings.max_concurrent_agents (default 4) operators run in parallel
@@ -89,7 +89,7 @@ per-repo because it shares a local git clone. Pass --repo and/or
 	}
 	cmd.Flags().StringVar(&onlyRepo, "repo", "", "Restrict to a single repo (owner/repo); default: all enabled repos")
 	cmd.Flags().IntVar(&onlyIssue, "issue", 0, "Restrict to a single issue number (requires --repo)")
-	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator claude subprocess timeout")
+	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator Offload execution timeout")
 	return cmd
 }
 
@@ -1081,6 +1081,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Repo:        j.repo,
 		IssueNumber: j.sub.Number,
 		IssueTitle:  j.sub.Title,
+		IssueBody:   j.sub.Body,
 		IssueState:  j.sub.State,
 		StartedAt:   startedAt.UTC(),
 		Status:      "running",
@@ -1208,14 +1209,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		defer eventsFile.Close()
 	}
 
-	creds, _ := config.LoadCredentials()
 	role := roleForOperator(j.op.Name)
-	// Resolve a preview model string for logging only — the actual
-	// per-provider resolution happens inside RunClaude's failover loop.
-	previewModel := config.ResolveModelForRole(creds, role)
-	fmt.Fprintf(os.Stderr, "%s → claude (role %s, preview-model %s, timeout %s)\n", prefix, role, previewModel, timeout)
-	runLog.Info("run/claude_start", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "role", role, "model", previewModel, "timeout", timeout)
-	debugf("%s using role %q (preview-model %q)", prefix, role, previewModel)
+	fmt.Fprintf(os.Stderr, "%s → Offload (role %s, profile owns model, timeout %s)\n", prefix, role, timeout)
+	runLog.Info("run/offload_start", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "role", role, "timeout", timeout)
 	runStart := time.Now()
 
 	// Build resume context for the operator prompt when reusing a worktree.
@@ -1280,6 +1276,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			Repo:        j.repo,
 			IssueNumber: j.sub.Number,
 			IssueTitle:  j.sub.Title,
+			IssueBody:   j.sub.Body,
 			IssueState:  j.sub.State,
 			StartedAt:   startedAt.UTC(),
 			Status:      "finalizing",
@@ -1340,25 +1337,25 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			// Warn-level so patrol's grep -E "ERROR|WARN" catches the one
 			// condition that silently stalls every repo at once (issue #308).
 			runLog.Warn("run/cost_limit", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", runErr.Error())
-			fmt.Fprintf(os.Stderr, "%s ✗ claude cost limit reached — every provider is capped until its billing window resets (aborting this pass): %v\n", prefix, runErr)
+			fmt.Fprintf(os.Stderr, "%s ✗ Offload execution cost limit reached (aborting this pass): %v\n", prefix, runErr)
 		} else if isRateLimit {
-			fmt.Fprintf(os.Stderr, "%s ✗ claude rate limited (will retry next pass): %v\n", prefix, runErr)
+			fmt.Fprintf(os.Stderr, "%s ✗ Offload rate limited (will retry next pass): %v\n", prefix, runErr)
 		} else if isAuthError {
 			// Use Warn-level so patrol grep -E "ERROR|WARN" catches this.
 			runLog.Warn("run/auth_error", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", runErr.Error())
-			fmt.Fprintf(os.Stderr, "%s ✗ claude auth error 403 (check session/API key, NOT retrying): %v\n", prefix, runErr)
+			fmt.Fprintf(os.Stderr, "%s ✗ Offload authentication error (check execution profile, NOT retrying): %v\n", prefix, runErr)
 		} else if isNoMarker {
-			fmt.Fprintf(os.Stderr, "%s ✗ claude produced no outcome marker (write-back defect, NOT counted toward circuit breaker): %v\n", prefix, runErr)
+			fmt.Fprintf(os.Stderr, "%s ✗ Offload produced no outcome marker (write-back defect, NOT counted toward circuit breaker): %v\n", prefix, runErr)
 		} else if isDisallowedOutcome {
 			fmt.Fprintf(os.Stderr, "%s ✗ operator produced a disallowed outcome label — comment landed but no terminal label: %v\n", prefix, runErr)
 		} else if isOutputLimit {
 			runLog.Warn("run/output_limit", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", runErr.Error())
-			fmt.Fprintf(os.Stderr, "%s ✗ claude output token limit exceeded (raise max_output_tokens, NOT retrying): %v\n", prefix, runErr)
+			fmt.Fprintf(os.Stderr, "%s ✗ Offload output limit exceeded (check engine limits, NOT retrying): %v\n", prefix, runErr)
 		} else {
-			fmt.Fprintf(os.Stderr, "%s ✗ claude failed: %v\n", prefix, runErr)
+			fmt.Fprintf(os.Stderr, "%s ✗ Offload failed: %v\n", prefix, runErr)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "%s ✓ claude finished in %s\n", prefix, runDur)
+		fmt.Fprintf(os.Stderr, "%s ✓ Offload finished in %s\n", prefix, runDur)
 	}
 
 	endedAt := time.Now().UTC()
@@ -1367,6 +1364,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Repo:        j.repo,
 		IssueNumber: j.sub.Number,
 		IssueTitle:  j.sub.Title,
+		IssueBody:   j.sub.Body,
 		StartedAt:   startedAt.UTC(),
 		EndedAt:     &endedAt,
 		Summary:     output,
@@ -1544,7 +1542,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	// Apply successful lifecycle follow-up.
 	if rm.Status == "success" {
-		runPostAutomation(j, outcome, output, prefix)
+		runPostAutomation(ctx, j, outcome, output, prefix)
 	}
 
 	switch rm.Status {
@@ -1656,7 +1654,7 @@ func checkCircuitBreaker(j *runJob, prefix string) {
 }
 
 // runPostAutomation handles merge and parent-progress follow-up.
-func runPostAutomation(j *runJob, outcome, output, prefix string) {
+func runPostAutomation(ctx context.Context, j *runJob, outcome, output, prefix string) {
 	// Auto-merge: after implement produces agent-implemented, wait CI then
 	// merge. This is the low-latency path — the PR number comes straight
 	// from the run's stdout. sweepAutoMergePRs is the per-scan backstop for
@@ -1669,6 +1667,7 @@ func runPostAutomation(j *runJob, outcome, output, prefix string) {
 			return
 		}
 		attemptAutoMerge(autoMergeAttempt{
+			ctx:      ctx,
 			client:   j.client,
 			repo:     j.repo,
 			repoCfg:  j.repoCfg,

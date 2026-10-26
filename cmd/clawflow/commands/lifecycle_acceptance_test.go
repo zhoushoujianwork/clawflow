@@ -62,6 +62,9 @@ func TestAutonomousLifecycleAcceptance(t *testing.T) {
 	for _, status := range []vcs.CIStatus{vcs.CIStatusSuccess, vcs.CIStatusFailure, vcs.CIStatusNone} {
 		t.Run(string(status), func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
+			if err := (&config.Config{Repos: map[string]config.Repo{"o/r": {}}}).Save(); err != nil {
+				t.Fatal(err)
+			}
 			sub := &operator.Subject{Number: 7, State: "open", Title: "Implement this feature"}
 			var op *operator.Operator
 			for _, candidate := range reg.All() {
@@ -97,7 +100,7 @@ func TestAutonomousLifecycleAcceptance(t *testing.T) {
 			if !reflect.DeepEqual(fake.labels, []string{"agent-implemented"}) {
 				t.Fatalf("writeback labels: %v", fake.labels)
 			}
-			runPostAutomation(&runJob{repo: "o/r", sub: sub, op: op, client: fake, repoCfg: config.Repo{AutoMerge: true, CIRequired: true}}, outcome, output, "test")
+			runPostAutomation(context.Background(), &runJob{repo: "o/r", sub: sub, op: op, client: fake, repoCfg: config.Repo{AutoMerge: true, CIRequired: true}}, outcome, output, "test")
 			want := []string{"comment", "label:agent-implemented", "ci"}
 			if status == vcs.CIStatusSuccess {
 				want = append(want, "merge")
