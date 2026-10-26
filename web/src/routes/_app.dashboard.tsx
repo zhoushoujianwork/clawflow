@@ -35,7 +35,7 @@ interface Run {
   ended_at?: string
   status: 'success' | 'failed' | 'skipped' | 'running' | 'cancelled' | 'no-marker' | 'disallowed-outcome' | 'marker-recovered' | 'skipped-empty' | 'cost-limit'
   /** fine-grained lifecycle phase while status === 'running' (issue #199):
-   *  lock-acquired → claude-started → parsing-outcome → posting-comment → applying-label */
+   *  lock-acquired → agh-started → parsing-outcome → posting-comment → applying-label */
   stage?: string
   summary?: string
   pr_url?: string
@@ -109,7 +109,7 @@ const KNOWN_STAGES = ['implement', 'repair-ci', 'track-progress', 'reply-questio
  *  stepper on live rows. `key` matches RunMeta.Stage emitted by the runner. */
 const LIFECYCLE_STAGES: { key: string; label: string }[] = [
   { key: 'lock-acquired', label: 'lock' },
-  { key: 'claude-started', label: 'claude' },
+  { key: 'agh-started', label: 'AGH' },
   { key: 'parsing-outcome', label: 'parse' },
   { key: 'posting-comment', label: 'comment' },
   { key: 'applying-label', label: 'label' },
@@ -1213,9 +1213,10 @@ function IssueGroupRow({
  *  frozen "running" badge. Falls back to the first stage when `stage` is unset
  *  (older runs / pre-claude window). */
 function StageStepper({ stage }: { stage?: string }) {
-  const idx = stage ? LIFECYCLE_STAGES.findIndex(s => s.key === stage) : -1
+  const normalizedStage = stage === 'claude-started' ? 'agh-started' : stage
+  const idx = normalizedStage ? LIFECYCLE_STAGES.findIndex(s => s.key === normalizedStage) : -1
   const current = idx < 0 ? 0 : idx
-  const label = LIFECYCLE_STAGES[current]?.label ?? ''
+  const label = stage === 'claude-started' ? 'Claude' : LIFECYCLE_STAGES[current]?.label ?? ''
   return (
     <div
       className="hidden md:flex items-center gap-1 shrink-0"

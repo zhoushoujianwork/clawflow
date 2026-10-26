@@ -1,6 +1,6 @@
 //go:build !windows
 
-package operator
+package execution
 
 import (
 	"bufio"

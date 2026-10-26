@@ -6,8 +6,14 @@ description: "Control ClawFlow through its CLI: safe local reset, disabled GitHu
 # ClawFlow lifecycle control
 
 You are an external AI controlling the `clawflow` CLI. ClawFlow's operator
-runtime still requires Claude Code CLI (`claude -p`); installing this skill in
+runtime requires Agent-Host execute with explicit execution-config/native/native-profile paths (ACP currently Claude-only); installing this skill in
 Codex, Cursor or another tool does not replace that runtime.
+
+Set `settings.execution.command` (default `agent-host`) and the explicit absolute
+`config_path`, `native_command`, and `native_profile` paths. Isolated invocations
+can override these with `CLAWFLOW_AGH_COMMAND`, `CLAWFLOW_AGH_CONFIG`,
+`CLAWFLOW_AGH_NATIVE`, and `CLAWFLOW_AGH_PROFILE`. The runtime does not discover
+another Host home or fall back to a direct native CLI.
 
 Autonomous repositories with `auto_merge` and `ci_required` can repair failed CI
 on existing managed GitHub PRs. Initial support requires a same-repository,
@@ -173,7 +179,7 @@ clawflow project check <project> --json
 
 This command performs local reads only: project/repo and primary bindings,
 checkout origin and cached base commit, dirty state, context/testing document
-presence, Git/Claude executable availability, operator definitions, automation
+presence, Git/AGH execution readiness, operator definitions, automation
 controls and local sync pause state. It does not migrate config, fetch, probe
 providers, start agents, run tests or write snapshots. Missing cached base is
 blocked; a cached commit does not establish remote freshness. Disabled automation,
@@ -196,7 +202,7 @@ clawflow operators validate
 clawflow operators doctor
 ```
 
-Provider test invokes Claude for a connectivity probe; it can consume usage.
+Provider test invokes AGH for an explicit model/auth connectivity probe; it can consume usage.
 It uses the default chat model and is not a complete configured-model test.
 Provider management supports `add <name> [--base-url URL] [--model MODEL]
 [--api-key KEY] [--disabled]`, enable/disable/remove <name-or-index>, and

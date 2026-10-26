@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 )
 
@@ -25,8 +26,8 @@ func TestIsAuthError_Patterns(t *testing.T) {
 	}
 	for _, tc := range authPatterns {
 		t.Run(tc.name, func(t *testing.T) {
-			if !operator.IsAuthError(tc.err, tc.output) {
-				t.Errorf("IsAuthError(%v, %q) = false, want true", tc.err, tc.output)
+			if operator.IsAuthError(tc.err, tc.output) {
+				t.Errorf("IsAuthError(%v, %q) = true, want false", tc.err, tc.output)
 			}
 		})
 	}
@@ -58,11 +59,11 @@ func TestIsAuthError_NonAuthError(t *testing.T) {
 	}
 }
 
-// TestErrAuthError_WrappedByRunClaude verifies that the ErrAuthError sentinel
+// TestErrAuthError_WrappedByRunAgentHost verifies that the ErrAuthError sentinel
 // is wrapped (not replaced) so errors.Is works correctly in callers that need
 // to distinguish auth errors from other failures.
-func TestErrAuthError_WrappedByRunClaude(t *testing.T) {
-	// ErrAuthError is what RunClaude wraps when IsAuthError matches.
+func TestErrAuthError_WrappedByRunAgentHost(t *testing.T) {
+	// ErrAuthError is what RunAgentHost wraps when IsAuthError matches.
 	// Check that the sentinel itself is distinct from ErrRateLimit.
 	if errors.Is(operator.ErrAuthError, operator.ErrRateLimit) {
 		t.Error("ErrAuthError must not be the same as ErrRateLimit")
@@ -71,9 +72,15 @@ func TestErrAuthError_WrappedByRunClaude(t *testing.T) {
 		t.Error("ErrRateLimit must not be the same as ErrAuthError")
 	}
 
-	// Simulate the wrapped error RunClaude produces.
+	// Simulate the wrapped error RunAgentHost produces.
 	wrapped := errors.Join(operator.ErrAuthError, errors.New("claude: exit status 1"))
 	if !errors.Is(wrapped, operator.ErrAuthError) {
 		t.Error("errors.Is(wrapped, ErrAuthError) = false — callers rely on this for auth-error detection")
+	}
+}
+
+func TestAuthProtocolKind(t *testing.T) {
+	if !operator.IsAuthError(&execution.Error{Kind: "auth"}, "") {
+		t.Fatal("protocol auth kind lost")
 	}
 }

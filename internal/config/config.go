@@ -68,8 +68,19 @@ type Repo struct {
 	UpdatedBy string `yaml:"updated_by,omitempty"`
 }
 
+// ExecutionSettings identifies an explicitly configured Agent-Host execution runtime.
+// Paths are machine-local and must never contain credentials.
+type ExecutionSettings struct {
+	Command       string `yaml:"command,omitempty"`
+	ConfigPath    string `yaml:"config_path,omitempty"`
+	NativeCommand string `yaml:"native_command,omitempty"`
+	NativeProfile string `yaml:"native_profile,omitempty"`
+}
+
 // Settings holds global ClawFlow settings.
 type Settings struct {
+	Execution ExecutionSettings `yaml:"execution,omitempty"`
+
 	PollInterval int `yaml:"poll_interval"`
 
 	AgentTimeout        int      `yaml:"agent_timeout"`
@@ -276,12 +287,7 @@ type ClaudeProvider struct {
 	EvalModel     string `yaml:"eval_model,omitempty"`     // used by evaluate-* operators
 	OperatorModel string `yaml:"operator_model,omitempty"` // used by every other operator
 	LightModel    string `yaml:"light_model,omitempty"`    // used by lightweight operators (reply-*, track-progress)
-	// MaxOutputTokens raises the CLAUDE_CODE_MAX_OUTPUT_TOKENS ceiling for
-	// this provider's subprocesses. Zero means "use the built-in default"
-	// (DefaultMaxOutputTokens). Operators that emit large diffs (implement)
-	// blow past claude's own 64000 default and fail; raising this fixes it
-	// (issue #286). Note: must not exceed the target model's real output
-	// ceiling, so it's configurable rather than hard-coded high.
+	// MaxOutputTokens is a retired compatibility field. Native token policy is owned by AGH.
 	MaxOutputTokens int `yaml:"max_output_tokens,omitempty"`
 	// Deprecated: Model is the legacy single-slot override. Non-empty on
 	// load triggers migration into the three role-specific fields above.
@@ -378,13 +384,12 @@ type Credentials struct {
 	ClaudeBaseURL string `yaml:"claude_base_url,omitempty"`
 
 	// ClaudeProviders is the ordered list of Claude API configurations.
-	// The first enabled provider is used; on failure, the runner failover
-	// to the next enabled one. Empty list + legacy fields triggers migration.
+	// Only the first enabled provider selects model/auth. Executions never fail over.
+	// Empty list + legacy fields triggers migration.
 	ClaudeProviders []ClaudeProvider `yaml:"claude_providers,omitempty"`
 
-	// FailoverPatterns are regex patterns (as strings) that trigger
-	// automatic failover to the next provider. User patterns are merged
-	// with (not replace) the defaults.
+	// FailoverPatterns is a retired compatibility field. AGH executions never replay.
+	// Existing values remain readable but are not execution policy.
 	FailoverPatterns []string `yaml:"failover_patterns,omitempty"`
 
 	// DefaultProviderSeeded marks whether clawflow has already seeded the
@@ -428,10 +433,7 @@ type Credentials struct {
 
 	// envChatModel / envEvalModel / envOperatorModel / envLightModel capture
 	// env-var overrides applied at LoadCredentials time. They take precedence
-	// over per-provider fields in ResolveModelForRole, but are NOT
-	// consulted by the per-provider failover loop (which reads
-	// ClaudeProvider.*Model directly). Not persisted — the `-` tag
-	// stops yaml.Marshal from emitting them.
+	// over per-provider fields in ResolveModelForRole. Not persisted.
 	envChatModel     string `yaml:"-"`
 	envEvalModel     string `yaml:"-"`
 	envOperatorModel string `yaml:"-"`
@@ -526,10 +528,8 @@ func (c *Credentials) EffectiveChatDefaultMode() string {
 //  2. First enabled provider's per-role override.
 //  3. Built-in DefaultModelForRole.
 //
-// Direct callers (chat, projectgen, pilot) that spawn claude without
-// going through the failover loop use this helper to pick which model
-// to request. The operator failover loop resolves per-provider inside
-// RunClaude so it can pick different models per attempt.
+// All execution surfaces use this caller policy and pass a single selected model to AGH.
+// No execution is replayed against another provider.
 func ResolveModelForRole(c *Credentials, role string) string {
 	if c != nil {
 		if v := c.envRoleOverride(role); v != "" {
@@ -578,11 +578,7 @@ func ResolveClaudeCredentials(c *Credentials) (apiKey, baseURL string) {
 	return apiKey, baseURL
 }
 
-// envRoleOverride returns the env-var-sourced model override for role,
-// if any. The env vars are honored by ResolveModelForRole but NOT by
-// the per-provider failover loop in RunClaude — the loop consults
-// provider fields directly because each failover attempt may use a
-// different provider with a different model.
+// envRoleOverride returns the explicit per-role model override, if any.
 func (c *Credentials) envRoleOverride(role string) string {
 	if c == nil {
 		return ""
@@ -837,10 +833,7 @@ func LoadCredentials() (*Credentials, error) {
 	// Env-var model overrides feed into ResolveModelForRole (via the
 	// unexported envChatModel/envEvalModel/envOperatorModel fields) so
 	// they take precedence over per-provider slots for direct-spawn
-	// callers. They don't override the per-provider failover loop,
-	// which reads ClaudeProvider.*Model directly — that's intentional,
-	// because a failover attempt against a different provider might
-	// need a different model ID than the env pin.
+	// callers. AGH receives one selected model; no provider replay occurs.
 	c.envChatModel = os.Getenv("CLAWFLOW_CLAUDE_CHAT_MODEL")
 	c.envEvalModel = os.Getenv("CLAWFLOW_CLAUDE_EVAL_MODEL")
 	c.envOperatorModel = os.Getenv("CLAWFLOW_CLAUDE_OPERATOR_MODEL")

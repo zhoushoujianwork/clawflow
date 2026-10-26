@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	githubpkg "github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
@@ -34,9 +33,7 @@ https://github.com/zhoushoujianwork/clawflow.
 Claude asks a few questions to turn your description into a clear title +
 body, then files the issue using your locally-stored GitHub token. After each
 submission Claude asks if you have more feedback — you can file multiple issues
-in a single session without restarting. If your terminal supports pasting
-images (VS Code integrated terminal, iTerm2, Claude Code's native terminal),
-Claude will see the screenshot and describe it in the issue body.`,
+in a single session without restarting. This plain text terminal loop accepts one message per line; use /exit or EOF to leave.`,
 		Example: "  clawflow feedback",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runFeedback(cmd.Context())
@@ -46,7 +43,7 @@ Claude will see the screenshot and describe it in the issue body.`,
 	return cmd
 }
 
-func runFeedback(_ context.Context) error {
+func runFeedback(ctx context.Context) error {
 	creds, _ := config.LoadCredentials()
 	if creds == nil || creds.GHToken == "" {
 		return fmt.Errorf("no GitHub token configured — run `clawflow config set-token <ghp_...>` first")
@@ -55,58 +52,7 @@ func runFeedback(_ context.Context) error {
 	model := config.ResolveModelForRole(creds, config.RoleChat)
 	systemPrompt := buildFeedbackSystemPrompt()
 
-	args := []string{
-		"--model", model,
-		"--name", "clawflow: feedback",
-		"--dangerously-skip-permissions",
-		// Tight allowlist: Bash for `clawflow feedback submit` and
-		// `clawflow --version`; Read so the user can point Claude at a
-		// local log file. No Edit/Write/NotebookEdit — nothing about
-		// filing feedback should touch the user's files.
-		"--disallowedTools", "Edit,Write,NotebookEdit",
-	}
-
-	apiKey, baseURL := config.ResolveClaudeCredentials(creds)
-	useBare := apiKey != ""
-	if useBare {
-		// Same rationale as chat.go: when the user has configured an
-		// API key (often against a corporate proxy), lock claude to
-		// ANTHROPIC_API_KEY-only mode so the proxy sees the real key.
-		// --bare disables auto-memory / plugins / hooks, which is fine
-		// for this one-shot feedback chat.
-		args = append(args, "--bare")
-	}
-
-	args = append(args, "--append-system-prompt", systemPrompt)
-
-	bin := claude.Resolve()
-	cmd := exec.Command(bin, args...)
-	// No workdir matters for a feedback chat — claude doesn't read
-	// project files. Use tempdir so claude doesn't accidentally pick up
-	// CLAUDE.md from whatever cwd clawflow was launched from.
-	cmd.Dir = os.TempDir()
-
-	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
-
-	keyHint := "(none — falling back to OAuth/keychain)"
-	if apiKey != "" {
-		if n := len(apiKey); n >= 4 {
-			keyHint = "…" + apiKey[n-4:]
-		} else {
-			keyHint = "(set, <4 chars)"
-		}
-	}
-	urlHint := baseURL
-	if urlHint == "" {
-		urlHint = "(default — api.anthropic.com)"
-	}
-	fmt.Fprintf(os.Stderr, "[clawflow] feedback → model=%s key=%s base_url=%s target=%s\n",
-		model, keyHint, urlHint, feedbackTargetRepo)
-
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return execution.Chat(ctx, os.Stdin, os.Stdout, execution.Options{Workspace: os.TempDir(), Model: model, Role: config.RoleChat, Instructions: systemPrompt, PermissionMode: "bypassPermissions", DisallowedTools: []string{"Edit", "Write", "NotebookEdit"}})
 }
 
 func buildFeedbackSystemPrompt() string {

@@ -730,7 +730,7 @@ export function ProvidersSection() {
           <p className="text-xs text-muted-foreground mt-0.5">
             Ordered list of Claude API configurations. The runner tries providers top-to-bottom,
             failing over on rate limits, auth errors, and network failures.
-            Drag to reorder — index 0 has highest priority.
+            Drag to reorder — the first enabled provider selects model/auth. Executions are never replayed against another provider.
           </p>
         </div>
         <button
@@ -761,7 +761,7 @@ export function ProvidersSection() {
 
       {!loading && providers.length === 0 && !loadErr && (
         <p className="text-xs text-muted-foreground py-2">
-          No providers configured. Add one to enable multi-provider failover.
+          No providers configured. AGH uses its native profile for authentication.
         </p>
       )}
 

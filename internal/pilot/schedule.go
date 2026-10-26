@@ -307,8 +307,8 @@ func WakeOne(ctx context.Context, projectName string, timeout time.Duration) err
 }
 
 // wake builds the digest for one project, constructs the Pilot prompt,
-// and invokes claude -p. The Pilot's stdout is streamed to the user's
-// stderr by operator.RunClaude; we additionally echo the parsed
+// and invokes Agent-Host. The Pilot's stdout is streamed to the user's
+// stderr by operator.RunAgentHost; we additionally echo the parsed
 // PILOT-RESULT line so the run summary reads cleanly.
 //
 // Each wake is persisted to ~/.clawflow/data/pilot-runs/<project>/<ts>/
@@ -391,16 +391,15 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		defer os.Unsetenv(budget.EnvPath)
 	}
 
-	output, err := operator.RunClaude(ctx, prompt, workdir, timeout, eventsFile, model)
+	output, err := operator.RunAgentHost(ctx, prompt, workdir, timeout, eventsFile, model)
 	if eventsFile != nil {
 		_ = eventsFile.Close()
 	}
 
 	// A billing cap (402) is the one failure where whatever the wake already
 	// produced is still trustworthy: it interrupts the work that comes NEXT,
-	// it doesn't corrupt the fenced blocks already written. But RunClaude's
-	// provider-exhaustion path returns "" for output, so the only surviving
-	// copy of the partial transcript is the events.jsonl we just teed. Read it
+	// it doesn't corrupt the fenced blocks already written. The
+	// raw AGH evidence also retains streamed partial text. Read it
 	// back so a wake that got as far as writing PILOT-RESULT / duties /
 	// context.md keeps them instead of being recorded as a blank failure
 	// (issue #320).
@@ -417,9 +416,8 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 
 	// Hitting our own --max-budget-usd ceiling always needs the full
 	// transcript, not just the empty-output check the cost-limit branch uses
-	// above: `output` here is whatever runClaudeWithProvider returned, which
-	// on this path is only the LAST assistant turn's text (RunClaude's normal
-	// non-exhaustion return value), not the full session. A wake that wrote
+	// above: the result text can contain only the final assistant response,
+	// while the raw AGH observations retain the full streamed text. A wake that wrote
 	// its context.md block several turns before the final PILOT-RESULT turn
 	// would otherwise lose that block even though output is non-empty. Always
 	// re-read the full transcript from events.jsonl and prefer it — it is a
@@ -613,7 +611,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 //     account-level condition — the wake dies in ~4 seconds at $0 and would do
 //     so for any project — so it gets its own status, exactly as run.go
 //     records for operator runs (#308). Checked FIRST, and via the sentinel
-//     before the text patterns, because RunClaude's provider-exhaustion path
+//     before the text patterns, because RunAgentHost's provider-exhaustion path
 //     returns an empty output, leaving errors.Is as the only reliable signal.
 //   - "budget-capped": the wake hit its own --max-budget-usd ceiling
 //     (Settings.PilotMaxBudgetUSD). Unlike cost-limit this is expected,
@@ -644,7 +642,7 @@ func classifyWakeStatus(err error, output string) string {
 // extractContextMD pulls the last fenced ```context.md block out of a wake's
 // output, accepting both shapes the value can take:
 //
-//   - plain assistant text — what operator.RunClaude returns, and what the
+//   - plain assistant text — what operator.RunAgentHost returns, and what the
 //     cost-limit salvage above reconstructs from events.jsonl
 //   - raw stream-json — the shape chat.ExtractLastContextMD expects
 //

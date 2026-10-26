@@ -120,7 +120,7 @@ func HandleProjectUpdateDoc(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), updateDocTimeout)
 	defer cancel()
 
-	output, err := operator.RunClaude(ctx, prompt, workdir, updateDocTimeout, nil, model)
+	output, err := operator.RunAgentHost(ctx, prompt, workdir, updateDocTimeout, nil, model)
 	if err != nil {
 		writeJSON(w, 502, map[string]string{"error": "run claude: " + err.Error()})
 		return

@@ -5,21 +5,21 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
+
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 )
 
 // newConfigProviderCmd returns the `clawflow config provider` command group.
 func newConfigProviderCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "provider",
-		Short: "Manage Claude API providers (multi-provider failover)",
+		Short: "Manage model/auth providers for AGH (no automatic failover)",
 		Long: `Manage the ordered list of Claude API providers used by the operator runner.
 Providers are tried in priority order (index 0 first); when one fails with a
 transient error (rate limit, auth failure, network error, 5xx), the runner
@@ -259,24 +259,10 @@ func newProviderTestCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			probeArgs := []string{"-p"}
-			// Only force --bare when an explicit API key is set. Empty key
-			// means OAuth/keychain, and --bare would skip that lookup.
-			if p.APIKey != "" {
-				probeArgs = append(probeArgs, "--bare")
-			}
-			probeArgs = append(probeArgs,
-				"--model", config.DefaultChatModel,
-				"--output-format", "text",
-				"say PONG",
-			)
-			c := exec.CommandContext(ctx, claude.Resolve(), probeArgs...)
-			c.Env = claude.EnvWithCredentials(os.Environ(), p.APIKey, p.BaseURL)
+			result, probeErr := execution.Execute(ctx, "say PONG", execution.Options{Model: p.EffectiveChatModel(), Role: config.RoleChat, Provider: &p, ToolsDisabled: true, Timeout: 30 * time.Second})
 			var stdout, stderr bytes.Buffer
-			c.Stdout = &stdout
-			c.Stderr = &stderr
-
-			if err := c.Run(); err != nil {
+			stdout.WriteString(result.Text)
+			if err := probeErr; err != nil {
 				detail := strings.TrimSpace(stderr.String())
 				if detail == "" {
 					detail = strings.TrimSpace(stdout.String())

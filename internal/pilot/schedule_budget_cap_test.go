@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -108,22 +107,5 @@ func TestWakeSucceedsOnBudgetCap(t *testing.T) {
 // is reached. One assistant turn precedes the cap so the wake has a
 // PILOT-RESULT line and a finished context.md block to recover.
 func stubBudgetCappedClaude(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shell stub is POSIX-only")
-	}
-	bin := t.TempDir()
-	script := `#!/bin/sh
-cat <<'STDOUT_EOF'
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Patrol done.\n\n` +
-		"```context.md" + `\n# Overview\n\nUpdated before the budget cap.\n` + "```" + `\n"}]}}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"PILOT-RESULT: 1 action — filed #42\n"}]}}
-{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":5,"total_cost_usd":8.0,"errors":["Reached maximum budget ($8.00)"]}
-STDOUT_EOF
-exit 1
-`
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write claude stub: %v", err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stubAGHFailure(t, "budget_exceeded", "Patrol done.\n\n```context.md\n# Overview\n\nUpdated before the budget cap.\n```\nPILOT-RESULT: 1 action — filed #42\n")
 }

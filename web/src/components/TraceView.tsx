@@ -39,7 +39,14 @@ export interface ContentBlock {
 export interface RawEvent {
   type: string
   subtype?: string
-  result?: string
+  version?: number
+  observation?: {
+    type: string
+    message?: string
+    delta?: string
+    tool?: { id?: string; name?: string; stage?: string; input?: unknown; output?: unknown; is_error?: boolean }
+  }
+  result?: string | { status: string; text: string; error_kind?: string; error?: string; usage: null }
   session_id?: string
   message?: {
     role?: string
@@ -96,6 +103,30 @@ function buildSteps(events: RawEvent[]): TraceStep[] {
   const pendingTools = new Map<string, ToolStep>()
 
   for (const ev of events) {
+    if (ev.version === 1) {
+      if (ev.type === 'observation' && ev.observation) {
+        const o = ev.observation
+        if (o.delta) {
+          const last = steps[steps.length - 1]
+          if (last?.kind === 'reply') last.text += o.delta
+          else steps.push({ kind: 'reply', text: o.delta })
+        }
+        if (o.tool) {
+          const tool = o.tool
+          const prior = tool.id ? pendingTools.get(tool.id) : undefined
+          if (prior && tool.stage !== 'call') {
+            prior.result = { body: resultBody(tool.output), isError: !!tool.is_error }
+          } else {
+            const step: ToolStep = { kind: 'tool', name: tool.name || o.type, input: tool.input }
+            steps.push(step)
+            if (tool.id) pendingTools.set(tool.id, step)
+          }
+        } else if (o.message && !o.delta) steps.push({ kind: 'reply', text: `[AGH ${o.type}] ${o.message}` })
+      } else if (ev.type === 'result' && ev.result && typeof ev.result === 'object') {
+        steps.push({ kind: 'final', isError: ev.result.status !== 'completed', subtype: `AGH ${ev.result.status} · usage unknown`, text: ev.result.text || ev.result.error })
+      }
+      continue
+    }
     if (ev.type === 'assistant' && ev.message?.content) {
       for (const c of ev.message.content) {
         if (c.type === 'thinking' && c.thinking?.trim()) {
@@ -127,7 +158,7 @@ function buildSteps(events: RawEvent[]): TraceStep[] {
         subtype: ev.subtype,
         durationMs: ev.duration_ms,
         costUsd: ev.total_cost_usd,
-        text: ev.result,
+        text: typeof ev.result === 'string' ? ev.result : undefined,
       })
     }
   }

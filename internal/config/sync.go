@@ -111,6 +111,7 @@ func MarshalForGist(cfg *Config) ([]byte, error) {
 		Repos:    make(map[string]syncableRepo, len(cfg.Repos)),
 		Settings: cfg.Settings,
 	}
+	payload.Settings.Execution = ExecutionSettings{} // execution runtime paths are machine-local
 	for k, v := range cfg.Repos {
 		payload.Repos[k] = toSyncable(v)
 	}
@@ -160,6 +161,8 @@ func mergeConfigsInternal(local *Config, remoteYAML []byte, conflictFatal bool) 
 		Settings: remote.Settings,
 		Repos:    make(map[string]Repo, len(local.Repos)),
 	}
+
+	merged.Settings.Execution = local.Settings.Execution // never import remote execution paths
 
 	// Start with all local repos (preserves local_path and local-only repos).
 	for k, v := range local.Repos {

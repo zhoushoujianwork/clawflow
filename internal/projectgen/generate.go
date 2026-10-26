@@ -1,24 +1,25 @@
 // Package projectgen builds the prompt for a project's context.md and
-// invokes `claude -p` to produce it. Shared between the CLI's
+// invokes `agent-host execute` to produce it. Shared between the CLI's
 // `clawflow project generate` subcommand and the dashboard's
 // /api/project/generate-context endpoint so both paths produce
 // byte-identical output.
 package projectgen
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 )
 
 // Generate scans the project's member repos, builds a prompt, runs
-// `claude -p`, writes the result to context.md, and returns the
+// `agent-host execute`, writes the result to context.md, and returns the
 // content that was written. `model` may be empty to use the default
 // chat model from credentials.
 //
@@ -52,26 +53,15 @@ func Generate(name, model, instructions string) (string, error) {
 		model = config.ResolveModelForRole(creds, config.RoleChat)
 	}
 
-	bin := claude.Resolve()
-	args := []string{
-		"--model", model,
-		"--print",
-		"-p", prompt,
-	}
-	cmd := exec.Command(bin, args...)
-	creds, _ := config.LoadCredentials()
-	apiKey, baseURL := config.ResolveClaudeCredentials(creds)
-	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
-	cmd.Stderr = os.Stderr
-
-	output, err := cmd.Output()
+	result, err := execution.Execute(context.Background(), prompt, execution.Options{Model: model, Role: config.RoleChat, Timeout: time.Hour, ToolsDisabled: true})
 	if err != nil {
-		return "", fmt.Errorf("claude generate failed: %w", err)
+		return "", fmt.Errorf("AGH generate failed: %w", err)
 	}
+	output := result.Text
 
-	content := sanitizeOutput(string(output))
+	content := sanitizeOutput(output)
 	if content == "" {
-		return "", fmt.Errorf("claude returned empty output")
+		return "", fmt.Errorf("AGH returned empty output")
 	}
 
 	if err := project.WriteContext(name, content); err != nil {
@@ -81,7 +71,7 @@ func Generate(name, model, instructions string) (string, error) {
 }
 
 // GenerateDeployment scans the project's member repos for CI workflow files
-// and existing context.md, builds a prompt, runs `claude -p`, writes the
+// and existing context.md, builds a prompt, runs `agent-host execute`, writes the
 // result to deployment.md, and returns the content that was written.
 // `model` may be empty to use the default chat model from credentials.
 func GenerateDeployment(name, model string) (string, error) {
@@ -108,26 +98,15 @@ func GenerateDeployment(name, model string) (string, error) {
 		model = config.ResolveModelForRole(creds, config.RoleChat)
 	}
 
-	bin := claude.Resolve()
-	args := []string{
-		"--model", model,
-		"--print",
-		"-p", prompt,
-	}
-	cmd := exec.Command(bin, args...)
-	creds, _ := config.LoadCredentials()
-	apiKey, baseURL := config.ResolveClaudeCredentials(creds)
-	cmd.Env = claude.EnvWithCredentials(os.Environ(), apiKey, baseURL)
-	cmd.Stderr = os.Stderr
-
-	output, err := cmd.Output()
+	result, err := execution.Execute(context.Background(), prompt, execution.Options{Model: model, Role: config.RoleChat, Timeout: time.Hour, ToolsDisabled: true})
 	if err != nil {
-		return "", fmt.Errorf("claude generate failed: %w", err)
+		return "", fmt.Errorf("AGH generate failed: %w", err)
 	}
+	output := result.Text
 
-	content := sanitizeOutput(string(output))
+	content := sanitizeOutput(output)
 	if content == "" {
-		return "", fmt.Errorf("claude returned empty output")
+		return "", fmt.Errorf("AGH returned empty output")
 	}
 
 	if err := project.WriteDeployment(name, content); err != nil {

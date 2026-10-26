@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -23,7 +24,7 @@ type reopenedLifecycleTransport func(*http.Request) (*http.Response, error)
 func (f reopenedLifecycleTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // This crosses the real scanner, provider subprocess and write-back boundary.
-// Only HTTP transport and the claude executable are fakes; Git uses a local
+// Only HTTP transport and the AGH executable are fakes; Git uses a local
 // bare remote, and every request is handled in memory without opening sockets.
 func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 	for _, race := range []bool{false, true} {
@@ -42,26 +43,28 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 			capture := t.TempDir()
 			promptPath := filepath.Join(capture, "prompt.txt")
 			cwdPath := filepath.Join(capture, "cwd.txt")
-			resultPath := filepath.Join(capture, "result.json")
-			result, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": "Follow-up implemented. PR: https://example.invalid/o/r/pull/11\n<!-- clawflow:outcome=agent-implemented -->"})
-			if err := os.WriteFile(resultPath, append(result, '\n'), 0600); err != nil {
+			executable, err := os.Executable()
+			if err != nil {
 				t.Fatal(err)
 			}
-			bin := t.TempDir()
-			script := `#!/bin/sh
-set -eu
-for argument do prompt="$argument"; done
-printf '%s' "$prompt" > "$REOPEN_TEST_PROMPT"
-pwd > "$REOPEN_TEST_CWD"
-/bin/cat "$REOPEN_TEST_RESULT"
-`
-			if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0700); err != nil {
+			command := filepath.Join(capture, "agent-host")
+			// The wrapper only selects this test binary's helper. All protocol
+			// parsing and response encoding happen in Go, including request IDs.
+			script := "#!/bin/sh\nexec '" + strings.ReplaceAll(executable, "'", "'\\''") + "' -test.run=^TestReopenedLifecycleAGHHelper$ -- \"$@\"\n"
+			if err := os.WriteFile(command, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			executionConfig := filepath.Join(capture, "execution.yaml")
+			if err := os.WriteFile(executionConfig, []byte("fixture: reopened-lifecycle\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CLAWFLOW_AGH_COMMAND", command)
+			t.Setenv("CLAWFLOW_AGH_CONFIG", executionConfig)
+			t.Setenv("CLAWFLOW_AGH_NATIVE", executable)
+			t.Setenv("CLAWFLOW_AGH_PROFILE", capture)
+			t.Setenv("CLAWFLOW_REOPEN_LIFECYCLE_AGH_HELPER", "1")
 			t.Setenv("REOPEN_TEST_PROMPT", promptPath)
 			t.Setenv("REOPEN_TEST_CWD", cwdPath)
-			t.Setenv("REOPEN_TEST_RESULT", resultPath)
 
 			implemented := true
 			openPR := false
@@ -231,4 +234,60 @@ pwd > "$REOPEN_TEST_CWD"
 			}
 		})
 	}
+}
+
+// TestReopenedLifecycleAGHHelper is entered only by this fixture's AGH wrapper.
+// It never launches a native backend or contacts a provider.
+func TestReopenedLifecycleAGHHelper(t *testing.T) {
+	if os.Getenv("CLAWFLOW_REOPEN_LIFECYCLE_AGH_HELPER") != "1" {
+		return
+	}
+	var request execution.Request
+	decoder := json.NewDecoder(os.Stdin)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		t.Fatalf("unexpected trailing request content: %v", err)
+	}
+	if request.Version != 1 || request.RequestID == "" || request.SessionKey == "" || !filepath.IsAbs(request.Workspace) {
+		t.Fatal("invalid AGH request identity or workspace")
+	}
+	if err := os.WriteFile(os.Getenv("REOPEN_TEST_PROMPT"), []byte(request.Prompt), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.Stat(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := os.Stat(request.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(actual, requested) {
+		t.Fatalf("AGH cwd=%q differs from requested workspace=%q", cwd, request.Workspace)
+	}
+	if err := os.WriteFile(os.Getenv("REOPEN_TEST_CWD"), []byte(cwd+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	event := execution.Event{Version: 1, RequestID: request.RequestID, Seq: 1, Type: "result", Result: &execution.Result{
+		Status:          "completed",
+		Text:            "Follow-up implemented. PR: https://example.invalid/o/r/pull/11\n<!-- clawflow:outcome=agent-implemented -->",
+		Model:           request.Model,
+		SessionKey:      request.SessionKey,
+		NativeSessionID: "reopened-lifecycle-native-session",
+		ErrorKind:       "",
+		Error:           "",
+		Usage:           json.RawMessage("null"),
+	}}
+	if err := json.NewEncoder(os.Stdout).Encode(event); err != nil {
+		t.Fatal(err)
+	}
+	// Suppress the Go test runner's PASS line on the machine-protocol stream.
+	os.Exit(0)
 }

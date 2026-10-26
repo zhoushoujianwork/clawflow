@@ -288,7 +288,7 @@ type RunMeta struct {
 	// Stage is the fine-grained lifecycle phase WITHIN the coarse Status.
 	// While Status=="running" it advances through the operator lifecycle so
 	// the dashboard can show intermediate progress instead of a frozen
-	// start-of-run snapshot: "lock-acquired" → "claude-started" →
+	// start-of-run snapshot: "lock-acquired" → "agh-started" →
 	// "parsing-outcome" → "posting-comment" → "applying-label". It is purely
 	// advisory (the reconciler and circuit breaker key off Status, not Stage)
 	// and omitted from the wire when empty for back-compat with older runs.
@@ -408,7 +408,7 @@ func ExtractUsage(eventsPath string) (*Usage, error) {
 	defer f.Close()
 
 	sc := bufio.NewScanner(f)
-	// Match parseClaudeStream's 4MB cap so a long final result line is not
+	// Match the execution client's 4MB cap so a long final result line is not
 	// silently truncated and missed.
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
@@ -422,6 +422,15 @@ func ExtractUsage(eventsPath string) (*Usage, error) {
 	for sc.Scan() {
 		line := sc.Bytes()
 		text := string(line)
+		var envelope struct {
+			Version int `json:"version"`
+			RequestID string `json:"request_id"`
+		}
+		// AGH usage is explicitly unknown, including partial observations.
+		if json.Unmarshal(line, &envelope) == nil && envelope.Version == 1 && envelope.RequestID != "" {
+			continue
+		}
+
 		// Cheap pre-check before unmarshal — most lines are neither result
 		// nor assistant events.
 		switch {

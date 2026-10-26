@@ -7,13 +7,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"os/exec"
+
 	"strings"
 	"time"
 
-	"github.com/zhoushoujianwork/clawflow/internal/claude"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 )
 
 // providerView is the safe representation of a ClaudeProvider for the API.
@@ -334,41 +333,16 @@ func HandleTestProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	p := creds.ClaudeProviders[idx]
 
-	keyHint := "(empty)"
-	if n := len(p.APIKey); n >= 4 {
-		keyHint = "…" + p.APIKey[n-4:]
-	}
-	urlForLog := p.BaseURL
-	if urlForLog == "" {
-		urlForLog = "(default — api.anthropic.com)"
-	}
-	log.Printf("test-provider[%d]: start name=%q base_url=%s key_hint=%s", idx, p.Name, urlForLog, keyHint)
+	log.Printf("test-provider[%d]: starting explicit AGH model/auth probe", idx)
 	startedAt := time.Now()
 
 	ctx, cancel := context.WithTimeout(r.Context(), testClaudeTimeout)
 	defer cancel()
 
-	probeArgs := []string{"-p"}
-	// Only force --bare when an explicit API key is configured. Empty key
-	// means the entry is the built-in OAuth fallback (seeded default) or a
-	// user-defined keychain-based entry — in both cases --bare would skip
-	// the claude CLI's keychain lookup and falsely fail the probe.
-	if p.APIKey != "" {
-		probeArgs = append(probeArgs, "--bare")
-	}
-	probeArgs = append(probeArgs,
-		"--model", p.EffectiveChatModel(),
-		"--output-format", "text",
-		"say PONG",
-	)
-	cmd := exec.CommandContext(ctx, claude.Resolve(), probeArgs...)
-	cmd.Env = claude.EnvWithCredentials(os.Environ(), p.APIKey, p.BaseURL)
-
+	result, probeErr := execution.Execute(ctx, "say PONG", execution.Options{Model: p.EffectiveChatModel(), Role: config.RoleChat, Provider: &p, ToolsDisabled: true, Timeout: 30 * time.Second})
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
+	stdout.WriteString(result.Text)
+	if err := probeErr; err != nil {
 		stderrMsg := truncateMsg(stderr.String(), 800)
 		stdoutMsg := truncateMsg(stdout.String(), 800)
 		detail := stderrMsg
