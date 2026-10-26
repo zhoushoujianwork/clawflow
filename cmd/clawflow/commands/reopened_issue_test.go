@@ -151,8 +151,8 @@ func TestReopenLockPreventsHistoryAndWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer snapshot.ReleaseLock(j.repo, j.sub.Number)
-	if fired, _ := runOneOperator(context.Background(), j, time.Second); fired {
-		t.Fatal("fired while locked")
+	if fired, _, failed := runOneOperator(context.Background(), j, time.Second); fired || failed {
+		t.Fatal("fired or failed while locked")
 	}
 	if f.issueCalls != 0 || len(f.removed) > 0 {
 		t.Fatal("locked issue was inspected or mutated")

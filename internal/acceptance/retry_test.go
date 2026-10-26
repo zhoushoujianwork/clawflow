@@ -287,3 +287,93 @@ func TestNativeProvenanceValidation(t *testing.T) {
 		t.Fatalf("unavailable model rejected: %v", err)
 	}
 }
+
+// infraRecord mimics what the runner's deferred block saves when an attempt ends
+// in an error before any typed reviewer report: Blocked, completed, no evidence.
+func infraRecord(base Record, attempt string, offset time.Duration) Record {
+	r := laterRecord(base, attempt, offset)
+	r.Verdict = Blocked
+	r.Evidence = nil
+	r.Report = "provider unavailable"
+	return r
+}
+
+func TestInfrastructureAttempts(t *testing.T) {
+	s := openTestStore(t)
+	c := contract()
+	got, err := s.InfrastructureAttempts(c)
+	if err != nil || got.Count != 0 || got.LatestIsInfra || !got.LastAt.IsZero() {
+		t.Fatalf("empty store: %+v %v", got, err)
+	}
+	first := passing()
+	if IsInfrastructure(first) {
+		t.Fatal("passing record classified as infrastructure")
+	}
+	failed := laterRecord(first, "failed", 10*time.Second)
+	failed.Verdict = Failed
+	// A passing report rejected by the post-review gate keeps its evidence.
+	gated := laterRecord(first, "gated", 20*time.Second)
+	gated.Verdict = Blocked
+	gated.Report = "gate rejected"
+	infra1 := infraRecord(first, "infra1", 30*time.Second)
+	infra2 := infraRecord(first, "infra2", 40*time.Second)
+	incomplete := infraRecord(first, "incomplete", 50*time.Second)
+	incomplete.Completed = false
+	other := infraRecord(first, "other", 60*time.Second)
+	other.Contract.Generation++
+	other.ContractDigest, _ = other.Contract.Digest()
+	other.Plan.ContractDigest = other.ContractDigest
+	for _, r := range []Record{first, failed, gated, infra1, infra2, incomplete, other} {
+		if err := s.SaveRecord(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if IsInfrastructure(failed) || IsInfrastructure(gated) || !IsInfrastructure(infra1) {
+		t.Fatal("verdicts and infrastructure attempts misclassified")
+	}
+	got, err = s.InfrastructureAttempts(c)
+	if err != nil || got.Count != 2 || !got.LatestIsInfra || !got.LastAt.Equal(infra2.CompletedAt) {
+		t.Fatalf("summary: %+v %v", got, err)
+	}
+
+	// A newer reviewer verdict supersedes older infrastructure attempts.
+	s = openTestStore(t)
+	verdict := laterRecord(first, "verdict", 60*time.Second)
+	verdict.Verdict = Failed
+	for _, r := range []Record{infra1, infra2, verdict} {
+		if err := s.SaveRecord(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err = s.InfrastructureAttempts(c)
+	if err != nil || got.Count != 2 || got.LatestIsInfra {
+		t.Fatalf("verdict after infra: %+v %v", got, err)
+	}
+}
+
+func TestInfrastructureAttemptsFailsClosedOnCorruptionAndAmbiguity(t *testing.T) {
+	for _, mode := range []string{"corrupt", "start tie"} {
+		t.Run(mode, func(t *testing.T) {
+			s := openTestStore(t)
+			first := infraRecord(passing(), "first", 0)
+			second := infraRecord(first, "second", 10*time.Second)
+			if mode == "start tie" {
+				second.StartedAt = first.StartedAt
+			}
+			for _, r := range []Record{first, second} {
+				if err := s.SaveRecord(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "corrupt" {
+				name, _ := recordName(first.Contract, first.AttemptID)
+				if err := os.WriteFile(filepath.Join(s.path, name, "data.json"), []byte("corrupt"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.InfrastructureAttempts(first.Contract); err == nil {
+				t.Fatal("accepted corrupt or ambiguous references")
+			}
+		})
+	}
+}

@@ -20,6 +20,14 @@ Private local storage under the ClawFlow data directory retains per-attempt plan
 
 Head conditional merge does not atomically pin the target base. Integration candidates, merge queues and post-merge verification require subsequent work. Read-only execution uses the configured backend's permission enforcement; it is not a new container or project credential-isolation layer. Same-host file ownership remains a trust boundary until the durable authority/effect gateway work is complete.
 
+## Automatic harvest
+
+`runHarvestPhase` (`cmd/clawflow/commands/harvest.go`) runs between the operator phase and the snapshot/PM phases, outside the scan budget. Repos run sequentially with the scan's bound-machine rules. Selection reuses the sweep's candidate filter, then requires one successful CI read when CI is required and `errAcceptanceMissing` from `currentAcceptance`. That sentinel covers only an absent store or absent completed record; any existing record, unreadable evidence or contract error (such as missing development provenance) launches nothing and logs `run/harvest_skip`.
+
+Each run gets `min(timeout, time to watchdog - 2m)` and is skipped under 5 minutes. A completed record is a reviewer verdict only if it has evidence, which the runner sets after a typed reviewer report. A passing report later rejected by the gate keeps its evidence and stays a verdict. A completed record without evidence is an infrastructure attempt (setup, provider, inspection, storage or cancellation error); the runner saves it as blocked, and `Store.InfrastructureAttempts` counts these per exact contract with the same corruption and ordering checks as `LatestRecord`. The merge gate is unchanged: such a record never passes.
+
+Harvest retries when the newest record is an infrastructure attempt, fewer than 3 exist for the contract, and the latest finished at least 15 minutes ago (`infra_cooldown` otherwise). Reviewer verdicts are never retried. After 3 attempts it logs `infra_exhausted` and posts one comment with `<!-- clawflow:acceptance-infra=<12 hex of contract digest> -->`, pointing to `clawflow acceptance run`, which has no cap. Exhaustion is not a new run failure. A new head or changed requirements is a new contract and starts over. Non-pass comments use `<!-- clawflow:acceptance=<12 hex of contract digest> -->`.
+
 ## Validation
 
 Core tests cover stale contracts, self-acceptance, cancellation, phase ordering, exact JSON schemas, per-attempt retries, latest-failure selection, corruption and local storage constraints. Command fixtures cover requirements provenance, isolated checkout, policy enrollment, missing/stale evidence, local exclusion, manual merge, automatic merge/sweep and conditional retries. Provider fixtures cover expected-head requests, changed-head conflicts and unconfirmed/malformed merge responses.

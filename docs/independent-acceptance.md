@@ -14,7 +14,17 @@ clawflow acceptance run --repo owner/repo --pr 123 --timeout 30m
 clawflow acceptance status --repo owner/repo --pr 123 --json
 ```
 
-Enrollment preserves monitoring and automatic-merge settings. Acceptance runs explicitly; the scheduler reports missing evidence without launching a reviewer on each scan.
+Enrollment preserves monitoring and automatic-merge settings. The scan sweep never launches a reviewer; it only reports missing evidence. `clawflow acceptance run` stays available for explicit runs.
+
+## Automatic harvest
+
+`clawflow run` has an acceptance phase after the operator phase. It needs `auto_merge` on and `acceptance_required` on, and it skips single-issue runs (`--issue`).
+
+- Per repo and pass, at most one acceptance runs, for the first open PR that passes the sweep's filters, has successful required CI and has no evidence for its current contract.
+- A passing result goes straight to the conditional merge path with the accepted head SHA.
+- A failed or blocked verdict posts one comment on the issue with the status and reviewer summary. Later passes find the recorded verdict and stay silent.
+- Setup or provider errors post nothing, are logged, and make `clawflow run` exit non-zero. They are retried after 15 minutes, up to 3 attempts per head. After that one comment points to `clawflow acceptance run`.
+- There is no repair loop yet. A non-pass PR waits for a new head or a human.
 
 The PR must be open, non-draft, from the same repository, and reference an open issue with a closing keyword. A successful managed development run must have captured that issue's requirements and trustworthy native execution events. Historical runs missing the requirements snapshot need a new managed development run. The configured acceptance profile must support the existing Offload execution protocol.
 

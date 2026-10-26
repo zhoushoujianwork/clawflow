@@ -491,6 +491,21 @@ func explicitAcceptanceMerge(ctx context.Context, client vcs.Client, repo string
 	return conditionalAcceptedMerge(ctx, client, repo, pr, accepted)
 }
 
+// errAcceptanceMissing marks the absence of acceptance evidence for the current
+// contract (no private store, or no completed record). It is distinct from
+// unreadable or corrupt evidence and from contract-construction failures, none
+// of which may trigger a new acceptance run.
+var errAcceptanceMissing = errors.New("acceptance evidence missing")
+
+// missingAcceptanceError keeps the historical message text while matching
+// errAcceptanceMissing through errors.Is.
+type missingAcceptanceError string
+
+func (e missingAcceptanceError) Error() string        { return string(e) }
+func (e missingAcceptanceError) Is(target error) bool { return target == errAcceptanceMissing }
+
+func missingAcceptance(msg string) error { return missingAcceptanceError(msg) }
+
 func currentAcceptance(ctx context.Context, client vcs.Client, repo string, pr int) (acceptance.Contract, acceptance.Record, error) {
 	c, _, _, _, err := acceptanceContract(ctx, client, repo, pr)
 	if err != nil {
@@ -501,7 +516,7 @@ func currentAcceptance(ctx context.Context, client vcs.Client, repo string, pr i
 	// non-private roots first; existing stores are opened without changing files.
 	st, err := os.Lstat(path)
 	if err != nil || !st.IsDir() || st.Mode().Perm()&0077 != 0 {
-		return c, acceptance.Record{}, errors.New("no private acceptance evidence store")
+		return c, acceptance.Record{}, missingAcceptance("no private acceptance evidence store")
 	}
 	store, err := acceptance.OpenStore(path)
 	if err != nil {
@@ -510,6 +525,9 @@ func currentAcceptance(ctx context.Context, client vcs.Client, repo string, pr i
 	defer store.Close()
 	r, err := store.LatestRecord(c)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return c, r, missingAcceptance("no current completed acceptance evidence")
+		}
 		return c, r, errors.New("no current completed acceptance evidence")
 	}
 	return c, r, acceptance.Evaluate(c, r)
@@ -590,7 +608,22 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 	}
 	r, err := (acceptance.Runner{Store: store, Execute: execute, Inspect: inspect}).Run(ctx, c, scratch, workspace)
 	if err == nil {
-		err = acceptance.Evaluate(c, r)
+		// Run returns nil only after the reviewer report was parsed and the
+		// record was saved, so a failed/blocked verdict reaching here is a
+		// recorded judgement, not an infrastructure error.
+		if err = acceptance.Evaluate(c, r); err != nil && (r.Verdict == acceptance.Failed || r.Verdict == acceptance.Blocked) {
+			err = recordedNonpassError{err}
+		}
 	}
 	return r, err
 }
+
+// errAcceptanceNonpass marks a recorded reviewer verdict of failed or blocked,
+// as opposed to a setup, provider or storage error while producing a verdict.
+var errAcceptanceNonpass = errors.New("acceptance recorded a nonpassing verdict")
+
+// recordedNonpassError keeps the Evaluate message and matches errAcceptanceNonpass.
+type recordedNonpassError struct{ error }
+
+func (e recordedNonpassError) Is(target error) bool { return target == errAcceptanceNonpass }
+func (e recordedNonpassError) Unwrap() error        { return e.error }

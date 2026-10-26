@@ -158,8 +158,8 @@ func TestAutonomousFreshRecheck(t *testing.T) {
 			fake := &autonomousRecheckFake{labels: tc.labels}
 			sub := &operator.Subject{Number: 42, State: "open"}
 			op := effectiveOperator(implementationForTest(t), sub)
-			fired, limited := runOneOperator(context.Background(), &runJob{op: op, sub: sub, repo: "o/r", client: fake}, time.Second)
-			if fired || limited {
+			fired, limited, failed := runOneOperator(context.Background(), &runJob{op: op, sub: sub, repo: "o/r", client: fake}, time.Second)
+			if fired || limited || failed {
 				t.Fatal("structural skip should not fire")
 			}
 			if (fake.structuralChecks > 0) != tc.reachesStructure {

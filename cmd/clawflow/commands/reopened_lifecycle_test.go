@@ -174,7 +174,7 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 			if race {
 				openPR = true
 			}
-			fired, limited := runOneOperator(context.Background(), job, 20*time.Second)
+			fired, limited, _ := runOneOperator(context.Background(), job, 20*time.Second)
 			if limited {
 				t.Fatal("unexpected rate limit")
 			}

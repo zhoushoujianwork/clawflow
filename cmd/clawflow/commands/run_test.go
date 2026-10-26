@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -468,5 +470,132 @@ func TestRunGitWithRetry_ExhaustsRetries(t *testing.T) {
 	// Error message should mention the retry count.
 	if !strings.Contains(err.Error(), "retried") {
 		t.Errorf("error should mention retry count, got: %v", err)
+	}
+}
+
+// stubRunOneOperator swaps the per-job executor for the duration of a test and
+// returns a counter of how many jobs were actually dispatched.
+func stubRunOneOperator(t *testing.T, fn func(j *runJob) (bool, bool, bool)) *int32 {
+	t.Helper()
+	var calls int32
+	old := runOneOperatorFn
+	runOneOperatorFn = func(_ context.Context, j *runJob, _ time.Duration) (bool, bool, bool) {
+		atomic.AddInt32(&calls, 1)
+		return fn(j)
+	}
+	t.Cleanup(func() { runOneOperatorFn = old })
+	return &calls
+}
+
+func testJob(repo string, issue int, op string) *runJob {
+	return &runJob{
+		op:   &operator.Operator{Name: op},
+		sub:  &operator.Subject{Number: issue},
+		repo: repo,
+	}
+}
+
+// TestRunJobsParallel_AggregatesFailures verifies that failed jobs are
+// reported separately from fired ones and that a job can be neither (skip).
+func TestRunJobsParallel_AggregatesFailures(t *testing.T) {
+	stubRunOneOperator(t, func(j *runJob) (bool, bool, bool) {
+		switch j.sub.Number {
+		case 1:
+			return true, false, false // success
+		case 2:
+			return false, false, true // terminal failure
+		default:
+			return false, false, false // non-terminal skip
+		}
+	})
+	jobs := []*runJob{testJob("o/r", 1, "implement"), testJob("o/r", 2, "implement"), testJob("o/r", 3, "implement")}
+
+	fired, failed := runJobsParallel(context.Background(), jobs, 3, time.Second)
+
+	if len(fired) != 1 || fired[0].IssueNumber != 1 {
+		t.Errorf("fired = %v, want only issue 1", fired)
+	}
+	if len(failed) != 1 || failed[0] != (firedKey{Repo: "o/r", IssueNumber: 2, Operator: "implement"}) {
+		t.Errorf("failed = %v, want only o/r#2 implement", failed)
+	}
+}
+
+// TestRunJobsParallel_ProviderLimitSkipsNotFailed verifies that only the job
+// that hit the account-level limit counts as failed; jobs skipped afterwards
+// by the circuit breaker are neither fired nor failed.
+func TestRunJobsParallel_ProviderLimitSkipsNotFailed(t *testing.T) {
+	withRunLog(t) // the skip path writes to runLog
+	calls := stubRunOneOperator(t, func(j *runJob) (bool, bool, bool) {
+		return false, true, true // rate-limited / cost-limit
+	})
+	jobs := []*runJob{testJob("o/r", 1, "implement"), testJob("o/r", 2, "implement"), testJob("o/r", 3, "implement")}
+
+	// One worker keeps dispatch order deterministic.
+	fired, failed := runJobsParallel(context.Background(), jobs, 1, time.Second)
+
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Errorf("dispatched %d jobs, want 1 (rest skipped by circuit breaker)", got)
+	}
+	if len(fired) != 0 {
+		t.Errorf("fired = %v, want none", fired)
+	}
+	if len(failed) != 1 || failed[0].IssueNumber != 1 {
+		t.Errorf("failed = %v, want only the job that hit the limit (issue 1)", failed)
+	}
+}
+
+func TestRunJobsParallel_NoJobs(t *testing.T) {
+	fired, failed := runJobsParallel(context.Background(), nil, 4, time.Second)
+	if fired != nil || failed != nil {
+		t.Errorf("got (%v, %v), want (nil, nil)", fired, failed)
+	}
+}
+
+// TestFailedRunsError pins the error message shape returned by runOnce (and
+// therefore the RunE exit path) for a failed pass.
+func TestFailedRunsError(t *testing.T) {
+	if err := failedRunsError(nil); err != nil {
+		t.Fatalf("no failures must yield nil, got %v", err)
+	}
+	err := failedRunsError([]firedKey{
+		{Repo: "o/r", IssueNumber: 10, Operator: "implement"},
+		{Repo: "a/b", IssueNumber: 7, Operator: "track-progress"},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	want := "2 operator run(s) failed: a/b#7 track-progress, o/r#10 implement"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// commentsFake serves just enough of vcs.Client for runOneOperator to reach
+// the base-branch marker check; any other method panics via the nil embed.
+type commentsFake struct {
+	vcs.Client
+	labels []string
+}
+
+func (f *commentsFake) GetIssueLabels(string, int) ([]string, error) { return f.labels, nil }
+func (f *commentsFake) ListIssueCommentsDetail(string, int) ([]vcs.IssueComment, error) {
+	return nil, nil
+}
+
+// TestRunOneOperator_InvalidBaseBranchMarkerFails exercises a real terminal
+// failure path (no Offload needed): an invalid ClawFlow-Base-Branch marker
+// records status=failed and must report failed=true without firing.
+func TestRunOneOperator_InvalidBaseBranchMarkerFails(t *testing.T) {
+	withRunLog(t)
+	op := &operator.Operator{
+		Name:    "inspect",
+		Trigger: operator.Trigger{Target: "issue", LabelsRequired: []string{"bug"}},
+	}
+	sub := &operator.Subject{Number: 5, Labels: []string{"bug"}, State: "open", Body: "ClawFlow-Base-Branch: ../evil"}
+	job := &runJob{op: op, sub: sub, repo: "o/r", client: &commentsFake{labels: []string{"bug"}}}
+
+	didFire, limited, failed := runOneOperator(context.Background(), job, time.Second)
+	if didFire || limited || !failed {
+		t.Errorf("runOneOperator() = (%v, %v, %v), want (false, false, true)", didFire, limited, failed)
 	}
 }
