@@ -11,8 +11,7 @@ import (
 // BuildSystemPrompt returns the stable, cacheable portion of the operator
 // prompt: the project header (context.md / testing.md) plus the SKILL.md
 // body. This content is identical across every issue the same operator
-// processes, so passing it via `--system-prompt` lets Anthropic's prompt
-// cache hit on subsequent runs of the same operator.
+// processes. It is sent through Offload's private instructions file.
 //
 // lang is the preferred output language from Settings.Language ("zh", "en",
 // or "" for the historical auto-detect behaviour). A non-empty value appends
@@ -35,7 +34,7 @@ func BuildSystemPrompt(op *Operator, repo string, lang string) string {
 
 // BuildUserMessage returns the per-issue dynamic context: repo, issue
 // number, title, body, labels, and recent comments. This varies on every
-// invocation and is passed as the positional user message to `claude -p`.
+// invocation and is sent to Offload on stdin.
 //
 // comments is optional; pass nil to skip the "Recent Comments" section.
 func BuildUserMessage(sub *Subject, repo string, comments []string) string {

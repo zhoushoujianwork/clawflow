@@ -528,7 +528,7 @@ func TestReconcileStaleRuns_RecentRunning_Untouched(t *testing.T) {
 }
 
 // A run whose meta.json says "running" but has no events.jsonl AT ALL is
-// reconciled once it's older than DefaultQuietWindow — RunAgentHost opens the events
+// reconciled once it's older than DefaultQuietWindow — RunOffload opens the events
 // file before launching claude, so a missing file past that window means
 // the runner died before getting that far. Without this aggressive sweep
 // the dashboard would carry a frozen "running" row for the full staleAfter

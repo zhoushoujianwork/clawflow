@@ -39,6 +39,11 @@ export interface ContentBlock {
 export interface RawEvent {
   type: string
   subtype?: string
+  schema_version?: number
+  status?: string
+  native_type?: string
+  tool_category?: string
+  error_kind?: string
   version?: number
   observation?: {
     type: string
@@ -103,6 +108,11 @@ function buildSteps(events: RawEvent[]): TraceStep[] {
   const pendingTools = new Map<string, ToolStep>()
 
   for (const ev of events) {
+    if (ev.schema_version === 1) {
+      if (ev.type === 'progress') steps.push({ kind: 'reply', text: `[Offload ${ev.tool_category || ev.native_type || 'progress'}]` })
+      else if (ev.type === 'final') steps.push({ kind: 'final', isError: ev.status !== 'ok', subtype: `Offload ${ev.status || 'unknown'}`, text: ev.error_kind || 'Final answer is recorded in the run result.' })
+      continue
+    }
     if (ev.version === 1) {
       if (ev.type === 'observation' && ev.observation) {
         const o = ev.observation

@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-// activeCmds tracks every Agent-Host subprocess currently running under this
+// activeCmds tracks every Offload subprocess currently running under this
 // process, across both the operator runner and Pilot wakes (schedule.go
-// calls RunAgentHost too — they share this package). It exists so the `clawflow
+// calls RunOffload too — they share this package). It exists so the `clawflow
 // run` self-watchdog (cmd/clawflow/commands/run.go) can terminate whatever is
 // still in flight before it force-exits.
 //
-// Without this, os.Exit(1) leaves any spawned Agent-Host process (and its whole
+// Without this, os.Exit(1) leaves any spawned Offload process (and its whole
 // process group — see setProcessGroup) running as an orphan: it keeps
 // writing to the VCS and burning tokens with no meta.json ever reaching a
 // terminal status, since the parent that would have written it is gone
@@ -22,7 +22,7 @@ var (
 	activeCmds   = map[*exec.Cmd]struct{}{}
 )
 
-// registerActiveCmd records a started Agent-Host subprocess. Must be called only
+// registerActiveCmd records a started Offload subprocess. Must be called only
 // after cmd.Start() succeeds — Process is nil before that, and
 // terminateProcessGroup is a no-op on a nil Process anyway, but registering
 // pre-Start would create a window where TerminateAllActiveCmds reads Pid 0.
@@ -40,15 +40,14 @@ func unregisterActiveCmd(cmd *exec.Cmd) {
 	activeCmdsMu.Unlock()
 }
 
-// DefaultTerminateGrace allows ACP's cancellation receipt and watchdog cleanup
-// (up to seven seconds) to complete before ClawFlow kills the owned group.
+// DefaultTerminateGrace lets Offload flush terminal evidence before escalation.
 const DefaultTerminateGrace = 8 * time.Second
 
 // Shared by ordinary cancellation and the run watchdog; tests can shorten it
 // when they specifically exercise forced process-group termination.
 var terminateGrace = DefaultTerminateGrace
 
-// TerminateAllActiveCmds signals every Agent-Host subprocess (and its process
+// TerminateAllActiveCmds signals every Offload subprocess (and its process
 // group) currently tracked, and blocks until each has been SIGTERM'd and
 // (after a short grace) SIGKILL'd. Called by the run-level self-watchdog
 // immediately before os.Exit — it must block synchronously rather than

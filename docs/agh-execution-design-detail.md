@@ -1,5 +1,7 @@
 # AGH execution details
 
+> Historical record: this describes the retired AGH execution route. Current execution uses [direct Offload](offload-execution-design.md); recorded past events and results below are unchanged.
+
 [User-facing setup and scope](agh-execution-design.md) governs the migration.
 
 ## Process and wire contract

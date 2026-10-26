@@ -4,7 +4,10 @@ package execution
 
 import (
 	"bufio"
+	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -67,4 +70,35 @@ func TestTerminateProcessGroupKillsGrandchild(t *testing.T) {
 	// Best-effort cleanup if the test is about to fail.
 	_ = syscall.Kill(grandPID, syscall.SIGKILL)
 	t.Fatalf("grandchild %d still alive after terminateProcessGroup", grandPID)
+}
+
+func TestOffloadTerminalCleansRemainingGroup(t *testing.T) {
+	c, req := fixture(t)
+	orig := terminateGrace
+	terminateGrace = 100 * time.Millisecond
+	defer func() { terminateGrace = orig }()
+	pidPath := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("OFFLOAD_TEST_CHILD_PID", pidPath)
+	t.Setenv("OFFLOAD_TEST_MODE", "descendant")
+	_, err := Run(context.Background(), c, req, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	t.Fatal("native descendant survived successful terminal result")
 }

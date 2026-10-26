@@ -10,7 +10,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
-	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -104,10 +104,6 @@ func HandleProjectUpdateDoc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	model := req.Model
-	if model == "" {
-		creds, _ := config.LoadCredentials()
-		model = config.ResolveModelForRole(creds, config.RoleOperator)
-	}
 
 	var lang string
 	if cfg, cfgErr := config.Load(); cfgErr == nil {
@@ -120,7 +116,8 @@ func HandleProjectUpdateDoc(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), updateDocTimeout)
 	defer cancel()
 
-	output, err := operator.RunAgentHost(ctx, prompt, workdir, updateDocTimeout, nil, model)
+	result, err := execution.Execute(ctx, prompt, execution.Options{Workspace: workdir, Timeout: updateDocTimeout, Model: model, Role: config.RoleOperator, ToolsDisabled: true})
+	output := result.Text
 	if err != nil {
 		writeJSON(w, 502, map[string]string{"error": "run claude: " + err.Error()})
 		return

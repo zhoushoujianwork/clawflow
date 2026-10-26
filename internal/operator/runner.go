@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 )
 
 // Lifecycle stages emitted via RunOptions.StageFunc as Run progresses. These
@@ -19,10 +21,10 @@ import (
 // frozen start-of-run snapshot (issue #199). Kept as exported consts so the
 // caller (cmd/clawflow/commands/run.go) and tests share one source of truth.
 const (
-	StageAgentHostStarted = "agh-started"
-	StageParsingOutcome   = "parsing-outcome"
-	StagePostingComment   = "posting-comment"
-	StageApplyingLabel    = "applying-label"
+	StageOffloadStarted = "offload-started"
+	StageParsingOutcome = "parsing-outcome"
+	StagePostingComment = "posting-comment"
+	StageApplyingLabel  = "applying-label"
 )
 
 // ErrNoOutcomeMarker is returned by Run when claude produced non-empty output
@@ -181,7 +183,7 @@ type VCS interface {
 // RunOptions configures a single operator invocation.
 type RunOptions struct {
 	Repo     string        // full_name, e.g. "owner/repo"
-	Workdir  string        // cwd for the AGH execution
+	Workdir  string        // cwd for the Offload execution
 	Timeout  time.Duration // execution timeout; 0 uses the shared default
 	Comments []string      // optional comment thread to include in the prompt
 
@@ -189,7 +191,7 @@ type RunOptions struct {
 	// The shared client selects one model/auth provider and never replays execution.
 	Role string
 
-	// EventWriter, if non-nil, receives raw AGH NDJSON event evidence
+	// EventWriter, if non-nil, receives raw Offload NDJSON event evidence
 	// so the dashboard can replay runs post-mortem. Callers typically
 	// set it to a file writer pointing at `<run-dir>/events.jsonl`; tests
 	// leave it nil.
@@ -206,8 +208,8 @@ type RunOptions struct {
 	// operator output (comments, verdicts) uses the configured language.
 	Language string
 
-	// RunFunc executes one AGH request. Leave nil to use the real
-	// RunAgentHost; tests inject a fake that returns canned output without
+	// RunFunc executes one Offload request. Leave nil to use the real
+	// RunOffload; tests inject a fake that returns canned output without
 	// spawning a process.
 	RunFunc func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, systemPrompt ...string) (string, error)
 
@@ -261,9 +263,20 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	}
 	runFunc := opts.RunFunc
 	if runFunc == nil {
-		runFunc = RunAgentHost
+		runFunc = RunOffload
+		if op.Name != "implement" && op.Name != "repair-ci" {
+			runFunc = func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, instructions ...string) (string, error) {
+				options := execution.Options{Workspace: workdir, Role: role, Timeout: timeout, Events: events}
+				options.MaxBudgetUSD, _ = ctx.Value(budgetKey{}).(float64)
+				if len(instructions) > 0 {
+					options.Instructions = instructions[0]
+				}
+				result, err := execution.Execute(ctx, prompt, options)
+				return result.Text, err
+			}
+		}
 	}
-	emitStage(opts.StageFunc, StageAgentHostStarted)
+	emitStage(opts.StageFunc, StageOffloadStarted)
 	output, err := runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Role, systemPrompt)
 	if err != nil {
 		// Failure path: do NOT pollute the issue with a comment. The

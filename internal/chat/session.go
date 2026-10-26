@@ -35,6 +35,6 @@ func NewSessionID(repo string, issue int) string {
 		h[0:4], h[4:6], h[6:8], h[8:10], h[10:16])
 }
 
-// DeleteSessions deliberately leaves AGH-owned native transcripts alone.
+// DeleteSessions deliberately leaves Offload-owned native transcripts alone.
 // New chats always use fresh logical keys; no Host delete protocol is exposed.
 func DeleteSessions(sessionID string) (int, error) { return 0, nil }

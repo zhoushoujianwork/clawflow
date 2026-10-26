@@ -29,7 +29,7 @@ import {
 // Long claude -p run (typically 30s–2min). The job runs server-side
 // so the user is free to navigate away — re-opening the page resumes
 // the spinner via /api/project/generate-context/status polling.
-const GENERATE_HINT = 'Calling Agent-Host — usually 30s to 2min. Runs in the background, you can close this tab.'
+const GENERATE_HINT = 'Calling Offload — usually 30s to 2min. Runs in the background, you can close this tab.'
 
 interface Project {
   name: string

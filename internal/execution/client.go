@@ -1,5 +1,4 @@
-// Package execution is ClawFlow's execution-only Agent-Host protocol client.
-// It neither discovers Host homes nor launches a native AI backend itself.
+// Package execution implements the direct Offload CLI boundary.
 package execution
 
 import (
@@ -7,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,40 +25,36 @@ import (
 )
 
 const MaxRequestBytes = 4 << 20
+const MaxInstructionsBytes = 256 << 10
 const MaxEventBytes = 4 << 20
 const MaxOutputBytes = 32 << 20
 
-// Config uses only explicitly supplied machine-local runtime paths.
 type Config = config.ExecutionSettings
 
 func LoadConfig() (Config, error) {
 	var c Config
-	// Fully explicit environment settings work without a ClawFlow config file.
-	if os.Getenv("CLAWFLOW_AGH_CONFIG") == "" || os.Getenv("CLAWFLOW_AGH_NATIVE") == "" || os.Getenv("CLAWFLOW_AGH_PROFILE") == "" {
-		cfg, err := config.Load()
-		if err != nil {
-			return Config{}, errors.New("AGH settings unavailable: configure settings.execution or all CLAWFLOW_AGH_CONFIG/NATIVE/PROFILE paths")
-		}
+	cfg, err := config.Load()
+	if err == nil {
 		c = cfg.Settings.Execution
+	} else if os.Getenv("CLAWFLOW_OFFLOAD_PROFILE") == "" {
+		return c, errors.New("Offload settings unavailable: configure settings.execution.profile or CLAWFLOW_OFFLOAD_PROFILE")
 	}
 	return WithEnvironment(c), nil
 }
 
-// WithEnvironment applies only the four explicit execution overrides without reading files.
 func WithEnvironment(c Config) Config {
 	for _, v := range []struct {
 		key string
 		dst *string
 	}{
-		{"CLAWFLOW_AGH_COMMAND", &c.Command}, {"CLAWFLOW_AGH_CONFIG", &c.ConfigPath},
-		{"CLAWFLOW_AGH_NATIVE", &c.NativeCommand}, {"CLAWFLOW_AGH_PROFILE", &c.NativeProfile},
+		{"CLAWFLOW_OFFLOAD_COMMAND", &c.Command}, {"CLAWFLOW_OFFLOAD_PROFILE", &c.Profile}, {"CLAWFLOW_OFFLOAD_CODEX_SANDBOX", &c.CodexSandbox},
 	} {
 		if s, ok := os.LookupEnv(v.key); ok {
 			*v.dst = s
 		}
 	}
 	if c.Command == "" {
-		c.Command = "agent-host"
+		c.Command = "offload"
 	}
 	return c
 }
@@ -66,31 +62,27 @@ func WithEnvironment(c Config) Config {
 func ValidateConfig(c Config) error {
 	command := c.Command
 	if command == "" {
-		command = "agent-host"
+		command = "offload"
 	}
 	if _, err := exec.LookPath(command); err != nil {
-		return errors.New("AGH unavailable: install agent-host or set settings.execution.command / CLAWFLOW_AGH_COMMAND")
+		return errors.New("Offload unavailable: install offload or set settings.execution.command / CLAWFLOW_OFFLOAD_COMMAND")
 	}
-	for _, p := range []struct {
-		name, path      string
-		dir, executable bool
-	}{
-		{"config_path / CLAWFLOW_AGH_CONFIG", c.ConfigPath, false, false},
-		{"native_command / CLAWFLOW_AGH_NATIVE", c.NativeCommand, false, true},
-		{"native_profile / CLAWFLOW_AGH_PROFILE", c.NativeProfile, true, false},
-	} {
-		if !filepath.IsAbs(p.path) || strings.ContainsAny(p.path, "\x00\r\n") {
-			return fmt.Errorf("AGH readiness: settings.execution.%s must be an explicit absolute path", p.name)
+	if !validProfile(c.Profile) {
+		return errors.New("Offload readiness: configure an explicit settings.execution.profile / CLAWFLOW_OFFLOAD_PROFILE")
+	}
+	for _, profile := range c.RoleProfiles {
+		if !validProfile(profile) {
+			return errors.New("Offload readiness: invalid role profile")
 		}
-		st, err := os.Stat(p.path)
-		if err != nil || st.IsDir() != p.dir || (!p.dir && !st.Mode().IsRegular()) {
-			return fmt.Errorf("AGH readiness: settings.execution.%s is unavailable or has the wrong type", p.name)
-		}
-		if p.executable && st.Mode().Perm()&0111 == 0 {
-			return errors.New("AGH readiness: native_command must be executable")
-		}
+	}
+	if c.CodexSandbox != "" && c.CodexSandbox != "workspace-write" && c.CodexSandbox != "danger-full-access" {
+		return errors.New("Offload readiness: codex_sandbox must be workspace-write or danger-full-access")
 	}
 	return nil
+}
+
+func validProfile(profile string) bool {
+	return strings.TrimSpace(profile) != "" && !strings.ContainsAny(profile, "\x00\r\n")
 }
 
 func Ready() error {
@@ -101,22 +93,16 @@ func Ready() error {
 	return ValidateConfig(c)
 }
 
-// Request contains no auth fields. Credentials travel only in the child environment.
+// Request is an internal admission record, not a payload sent to a provider.
 type Request struct {
-	Version         int      `json:"version"`
-	RequestID       string   `json:"request_id"`
-	SessionKey      string   `json:"session_key"`
-	Resume          bool     `json:"resume"`
-	Workspace       string   `json:"workspace"`
-	Model           string   `json:"model"`
-	Instructions    string   `json:"instructions"`
-	Prompt          string   `json:"prompt"`
-	PermissionMode  string   `json:"permission_mode"`
-	ToolsDisabled   bool     `json:"tools_disabled"`
-	AllowedTools    []string `json:"allowed_tools"`
-	DisallowedTools []string `json:"disallowed_tools"`
-	TimeoutMS       int64    `json:"timeout_ms"`
-	MaxBudgetUSD    float64  `json:"max_budget_usd,omitempty"`
+	Version                                                int
+	RequestID, SessionKey                                  string
+	Resume                                                 bool
+	Workspace, Model, Instructions, Prompt, PermissionMode string
+	ToolsDisabled                                          bool
+	AllowedTools, DisallowedTools                          []string
+	TimeoutMS                                              int64
+	MaxBudgetUSD                                           float64
 }
 
 type Observation struct {
@@ -128,29 +114,45 @@ type Observation struct {
 	Raw             json.RawMessage `json:"raw,omitempty"`
 	Tool            json.RawMessage `json:"tool,omitempty"`
 }
+
 type Result struct {
 	Status          string          `json:"status"`
-	Text            string          `json:"text"`
+	Text            string          `json:"result"`
 	Model           string          `json:"model"`
-	SessionKey      string          `json:"session_key"`
-	NativeSessionID string          `json:"native_session_id"`
+	SessionKey      string          `json:"-"`
+	NativeSessionID string          `json:"session"`
+	Profile         string          `json:"profile"`
+	Backend         string          `json:"backend"`
+	RunID           string          `json:"run_id"`
+	CallerRunID     string          `json:"caller_run_id"`
+	ExecutionPolicy string          `json:"execution_policy"`
+	ExitCode        int             `json:"exit_code"`
 	ErrorKind       string          `json:"error_kind"`
 	Error           string          `json:"error"`
 	Usage           json.RawMessage `json:"usage"`
 }
+
+// Event contains sanitized metadata only; final answer text comes from stdout.
 type Event struct {
-	Version     int          `json:"version"`
-	RequestID   string       `json:"request_id"`
-	Seq         int          `json:"seq"`
-	Type        string       `json:"type"`
-	Observation *Observation `json:"observation,omitempty"`
-	Result      *Result      `json:"result,omitempty"`
+	Version      int    `json:"schema_version"`
+	Type         string `json:"type"`
+	RunID        string `json:"run_id"`
+	CallerRunID  string `json:"caller_run_id"`
+	Seq          int    `json:"seq"`
+	Timestamp    string `json:"timestamp"`
+	Session      string `json:"session"`
+	Backend      string `json:"backend"`
+	Model        string `json:"model"`
+	NativeType   string `json:"native_type,omitempty"`
+	ToolCategory string `json:"tool_category,omitempty"`
+	Status       string `json:"status,omitempty"`
+	ExitCode     int    `json:"exit_code"`
+	ErrorKind    string `json:"error_kind,omitempty"`
 }
 
-// Error exposes stable protocol classifications; arbitrary native prose never drives retries.
 type Error struct{ Kind string }
 
-func (e *Error) Error() string           { return "AGH execution: " + e.Kind }
+func (e *Error) Error() string           { return "Offload execution: " + e.Kind }
 func IsKind(err error, kind string) bool { var e *Error; return errors.As(err, &e) && e.Kind == kind }
 
 func NewSessionKey() string {
@@ -161,43 +163,94 @@ func NewSessionKey() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
-var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
 func validateRequest(r Request) error {
-	if r.Version != 1 || !idPattern.MatchString(r.RequestID) || !uuidPattern.MatchString(r.SessionKey) {
-		return errors.New("AGH request: invalid version, request_id or session_key")
+	if r.Version != 1 || !idPattern.MatchString(r.RequestID) || (r.Resume && !idPattern.MatchString(r.SessionKey)) {
+		return errors.New("Offload request: invalid caller identity or resume session")
 	}
 	if !filepath.IsAbs(r.Workspace) || strings.ContainsAny(r.Workspace, "\x00\r\n") {
-		return errors.New("AGH request: workspace must be absolute")
+		return errors.New("Offload request: workspace must be absolute")
 	}
 	st, err := os.Stat(r.Workspace)
 	if err != nil || !st.IsDir() {
-		return errors.New("AGH request: workspace directory unavailable")
+		return errors.New("Offload request: workspace directory unavailable")
 	}
 	if r.TimeoutMS <= 0 || r.TimeoutMS > 86400000 {
-		return errors.New("AGH request: timeout_ms must be 1..86400000")
+		return errors.New("Offload request: timeout must be 1ms..24h")
 	}
 	if r.PermissionMode != "default" && r.PermissionMode != "bypassPermissions" {
-		return errors.New("AGH request: unsupported permission_mode")
+		return errors.New("Offload request: unsupported permission_mode")
 	}
 	if math.IsNaN(r.MaxBudgetUSD) || math.IsInf(r.MaxBudgetUSD, 0) || r.MaxBudgetUSD < 0 {
-		return errors.New("AGH request: invalid max_budget_usd")
+		return errors.New("Offload request: invalid max_budget_usd")
 	}
-	// The current execution contract's ACP path explicitly rejects budgets before native launch.
-	// Forward valid budgets unchanged: AGH owns capability admission and must fail unsupported_budget.
+	if r.MaxBudgetUSD > 0 {
+		return &Error{Kind: "unsupported_budget"}
+	}
 	if r.ToolsDisabled && len(r.AllowedTools) > 0 {
-		return errors.New("AGH request: tools_disabled conflicts with allowed_tools")
+		return errors.New("Offload request: tools_disabled conflicts with allowed_tools")
 	}
 	for _, t := range append(append([]string{}, r.AllowedTools...), r.DisallowedTools...) {
-		if strings.TrimSpace(t) == "" || strings.ContainsAny(t, "\x00\r\n") {
-			return errors.New("AGH request: invalid tool restriction")
+		if strings.TrimSpace(t) == "" || strings.ContainsAny(t, ",\x00\r\n") {
+			return errors.New("Offload request: invalid tool restriction")
 		}
+	}
+	if len(r.Instructions) > MaxInstructionsBytes || len(r.Prompt)+len(r.Instructions) > MaxRequestBytes {
+		return &Error{Kind: "request_limit"}
 	}
 	return nil
 }
 
-// Run starts exactly one AGH child. Parse/transport failures never cause replay.
+// acquireOwnership holds advisory locks in a separate namespace from issue locks.
+// Lock files remain in place; closing the descriptors or process death releases ownership.
+func acquireOwnership(workspace, profile, session string, resume bool) (func(), error) {
+	canonical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return nil, err
+	}
+	workspace = canonical
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(home, ".clawflow", "execution-locks")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	keys := []string{"workspace:" + workspace}
+	if resume {
+		keys = append(keys, "session:"+profile+":"+session)
+	}
+	var files []*os.File
+	release := func() {
+		for _, f := range files {
+			_ = f.Close()
+		}
+	}
+	for _, key := range keys {
+		hash := sha256.Sum256([]byte(key))
+		path := filepath.Join(dir, fmt.Sprintf("%x.lock", hash))
+		f, err := acquireOwnershipFile(path)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		files = append(files, f)
+		if err := f.Truncate(0); err != nil {
+			release()
+			return nil, &Error{Kind: "ownership_write"}
+		}
+		if _, err := fmt.Fprintf(f, "pid=%d\n", os.Getpid()); err != nil {
+			release()
+			return nil, &Error{Kind: "ownership_write"}
+		}
+	}
+
+	return release, nil
+}
+
+// Run starts exactly one Offload process. Uncertain failures never replay work.
 func Run(ctx context.Context, c Config, req Request, env []string, events io.Writer, observe func(Observation)) (Result, error) {
 	var result Result
 	if err := validateRequest(req); err != nil {
@@ -206,75 +259,157 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if err := ValidateConfig(c); err != nil {
 		return result, err
 	}
-	if req.AllowedTools == nil {
-		req.AllowedTools = []string{}
-	}
-	if req.DisallowedTools == nil {
-		req.DisallowedTools = []string{}
-	}
-	payload, err := json.Marshal(req)
-	if err != nil || len(payload) > MaxRequestBytes {
-		return result, errors.New("AGH request exceeds 4 MiB or cannot be encoded")
-	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
-	defer cancel()
+	canonical, err := filepath.EvalSymlinks(req.Workspace)
+	if err != nil {
+		return result, err
+	}
+	req.Workspace = canonical
+	release, err := acquireOwnership(req.Workspace, c.Profile, req.SessionKey, req.Resume)
+	if err != nil {
+		return result, err
+	}
+	defer release()
+	dir, err := os.MkdirTemp("", "clawflow-offload-*")
+	if err != nil {
+		return result, err
+	}
+	defer os.RemoveAll(dir)
+	instructions := filepath.Join(dir, "instructions.md")
+	if err := os.WriteFile(instructions, []byte(req.Instructions), 0600); err != nil {
+		return result, err
+	}
+	eventPath := filepath.Join(dir, "events.ndjson") // Offload creates exclusively with mode 0600.
+	args := []string{"-json", "-no-salvage", "-p", c.Profile, "-d", req.Workspace, "-t", (time.Duration(req.TimeoutMS) * time.Millisecond).String(), "-caller-run-id", req.RequestID, "-events-file", eventPath, "-instructions-file", instructions}
+	if req.Resume {
+		args = append(args, "-r", req.SessionKey)
+	}
+	if req.Model != "" {
+		args = append(args, "-m", req.Model)
+	}
+	if req.PermissionMode == "bypassPermissions" {
+		args = append(args, "-w", "-execution-policy", "managed-development")
+		if c.CodexSandbox != "" {
+			args = append(args, "-codex-sandbox", c.CodexSandbox)
+		}
+	}
+	if req.ToolsDisabled {
+		args = append(args, "-tools-disabled")
+	}
+	if len(req.AllowedTools) > 0 {
+		args = append(args, "-allowed-tools", strings.Join(req.AllowedTools, ","))
+	}
+	if len(req.DisallowedTools) > 0 {
+		args = append(args, "-disallowed-tools", strings.Join(req.DisallowedTools, ","))
+	}
 	command := c.Command
 	if command == "" {
-		command = "agent-host"
+		command = "offload"
 	}
-	cmd := exec.Command(command, "execute", "--execution-config", c.ConfigPath, "--native", c.NativeCommand, "--native-profile", c.NativeProfile)
-	cmd.Dir = req.Workspace
 	if env == nil {
 		env = os.Environ()
 	}
-	cmd.Env = env
-	if redactEvidence(payload, env) != string(payload) || redact(c.Command, env) != c.Command || redact(c.ConfigPath, env) != c.ConfigPath || redact(c.NativeCommand, env) != c.NativeCommand || redact(c.NativeProfile, env) != c.NativeProfile {
-		return result, errors.New("AGH request contains an environment secret; remove credentials from prompt/instructions")
+	if redact(req.Prompt, env) != req.Prompt || redact(req.Instructions, env) != req.Instructions || redact(strings.Join(args, " "), env) != strings.Join(args, " ") {
+		return result, errors.New("Offload request contains an environment secret")
 	}
-	cmd.Stdin = bytes.NewReader(payload)
-	// Native stderr can include secrets. Never relay or persist it.
-	cmd.Stderr = io.Discard
-	setProcessGroup(cmd)
-	stdout, err := cmd.StdoutPipe()
+	resolved, err := exec.LookPath(command)
 	if err != nil {
-		return result, errors.New("AGH stdout unavailable")
+		return result, errors.New("Offload executable unavailable")
 	}
-	if err = cmd.Start(); err != nil {
-		return result, errors.New("AGH start failed; check command and execution settings")
+	command, err = filepath.Abs(resolved)
+	if err != nil {
+		return result, errors.New("Offload executable path unavailable")
+	}
+	cmd := exec.Command(command, args...)
+	cmd.Dir = req.Workspace
+	cmd.Env = env
+	// File descriptors avoid os/exec copy goroutines whose pipes can be held
+	// open by native descendants after Offload has already returned a result.
+	taskInput, err := os.OpenFile(filepath.Join(dir, "task.txt"), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return result, err
+	}
+	defer taskInput.Close()
+	if _, err := io.WriteString(taskInput, req.Prompt); err != nil {
+		return result, err
+	}
+	if _, err := taskInput.Seek(0, io.SeekStart); err != nil {
+		return result, err
+	}
+	cmd.Stdin = taskInput
+	nullOutput, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		return result, err
+	}
+	defer nullOutput.Close()
+	cmd.Stderr = nullOutput
+	stdout, err := os.OpenFile(filepath.Join(dir, "stdout.json"), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return result, err
+	}
+	defer stdout.Close()
+	cmd.Stdout = stdout
+	setProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		return result, &Error{Kind: "launch"}
 	}
 	registerActiveCmd(cmd)
 	defer unregisterActiveCmd(cmd)
-	done := make(chan struct{})
-	guardDone := make(chan struct{})
-	go func() {
-		defer close(guardDone)
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	var waitErr error
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	exceeded := false
+	tail := newEventTail(eventPath, req, events, env, observe)
+	defer tail.close()
+	var eventErr error
+	waiting := true
+	for waiting {
 		select {
-		case <-ctx.Done():
+		case waitErr = <-done:
 			terminateProcessGroupSync(cmd, terminateGrace)
-			_ = stdout.Close()
-		case <-done:
+			waiting = false
+		case <-runCtx.Done():
+			terminateProcessGroupSync(cmd, terminateGrace)
+			waitErr = <-done
+			waiting = false
+		case <-ticker.C:
+			if eventErr == nil {
+				eventErr = tail.poll()
+				if eventErr != nil {
+					cancel()
+				}
+			}
+			if st, err := stdout.Stat(); err != nil {
+				eventErr = &Error{Kind: "events_io"}
+				cancel()
+			} else if st.Size() > MaxOutputBytes {
+				exceeded = true
+				cancel()
+			}
+
 		}
-	}()
-	result, parseErr := parseStream(stdout, req, events, env, observe)
-	externalErr := ctx.Err()
-	if parseErr != nil {
-		cancel()
 	}
-	waitErr := cmd.Wait()
-	close(done)
-	<-guardDone
-	if externalErr != nil {
-		return result, externalErr
+
+	// Drain only newly completed records, even on timeout or invalid stdout.
+	if eventErr == nil {
+		eventErr = tail.poll()
 	}
-	if parseErr != nil {
-		return result, parseErr
+	if eventErr != nil {
+		return result, eventErr
 	}
-	if ctx.Err() != nil {
-		return result, ctx.Err()
+	if exceeded {
+		return result, &Error{Kind: "protocol_output_limit"}
 	}
+	if runCtx.Err() != nil {
+		return result, runCtx.Err()
+	}
+
 	code := 0
 	if waitErr != nil {
 		var ee *exec.ExitError
@@ -283,25 +418,46 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		}
 		code = ee.ExitCode()
 	}
-	expected := 0
-	switch result.Status {
-	case "completed":
-		expected = 0
-	case "failed":
-		expected = 1
-	case "canceled":
-		expected = 130
-		if result.ErrorKind == "timeout" {
-			expected = 124
+	if st, err := stdout.Stat(); err != nil || st.Size() > MaxOutputBytes {
+		exceeded = true
+	}
+	if exceeded {
+		return result, &Error{Kind: "protocol_output_limit"}
+	}
+	if _, err := stdout.Seek(0, io.SeekStart); err != nil {
+		return result, &Error{Kind: "transport"}
+	}
+	output, err := io.ReadAll(io.LimitReader(stdout, MaxOutputBytes+1))
+	if err != nil {
+		return result, &Error{Kind: "transport"}
+	}
+	raw := bytes.TrimSpace(output)
+	if !validJSON(raw) || json.Unmarshal(raw, &result) != nil || !hasFields(raw, "status", "exit_code", "profile", "run_id", "caller_run_id", "execution_policy") {
+		if runCtx.Err() != nil {
+			return result, runCtx.Err()
 		}
+		return Result{}, &Error{Kind: "protocol_invalid_result"}
 	}
-	if result.Status == "failed" && code == 2 {
-		expected = 2
+	result.Text = redact(result.Text, env)
+	result.Error = redact(result.Error, env)
+	result.SessionKey = result.NativeSessionID
+	eventErr = tail.finish(result)
+	if runCtx.Err() != nil {
+		return result, runCtx.Err()
 	}
-	if code != expected {
-		return result, &Error{Kind: "protocol_exit_mismatch"}
+	if eventErr != nil {
+		return result, eventErr
 	}
-	if result.Status != "completed" {
+	if !idPattern.MatchString(result.RunID) || result.CallerRunID != req.RequestID || result.Profile != c.Profile || (result.Status == "ok" && !idPattern.MatchString(result.NativeSessionID)) || (result.NativeSessionID != "" && !idPattern.MatchString(result.NativeSessionID)) || (req.Resume && result.NativeSessionID != "" && result.NativeSessionID != req.SessionKey) || result.ExitCode != code || (result.Status != "ok" && result.Status != "error" && result.Status != "timeout") || (result.Status == "ok" && (code != 0 || result.ErrorKind != "" || result.Error != "")) || (result.Status != "ok" && code == 0) {
+		return result, &Error{Kind: "protocol_invalid_result"}
+	}
+	if req.PermissionMode == "bypassPermissions" && result.ExecutionPolicy != "managed-development" {
+		return result, &Error{Kind: "protocol_policy_mismatch"}
+	}
+	if req.PermissionMode == "default" && result.ExecutionPolicy != "default" {
+		return result, &Error{Kind: "protocol_policy_mismatch"}
+	}
+	if result.Status != "ok" {
 		return result, &Error{Kind: safeKind(result.ErrorKind)}
 	}
 	return result, nil
@@ -309,136 +465,50 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 
 func safeKind(s string) string {
 	switch s {
-	case "rate_limit", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "timeout", "canceled", "execution":
+	case "rate_limit", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "timeout", "canceled", "execution", "launch", "events_io":
 		return s
 	}
 	return "execution"
 }
 
-func redact(s string, env []string) string {
-	for _, kv := range env {
-		k, v, ok := strings.Cut(kv, "=")
-		k = strings.ToUpper(k)
-		if ok && v != "" && (strings.HasSuffix(k, "_TOKEN") || strings.HasSuffix(k, "_KEY") || strings.HasSuffix(k, "_SECRET") || strings.HasSuffix(k, "_PASSWORD")) {
-			s = strings.ReplaceAll(s, v, "[redacted]")
-		}
-	}
-	return s
-}
-
-func parseStream(r io.Reader, req Request, events io.Writer, env []string, observe func(Observation)) (result Result, parseErr error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), MaxEventBytes)
-	seq, total := 0, 0
-	final := false
-	observedNative := ""
-	var partial strings.Builder
-	defer func() {
-		if result.Text == "" {
-			result.Text = partial.String()
-		}
-		result.Text = redact(result.Text, env)
-		result.Error = redact(result.Error, env)
-	}()
-	for sc.Scan() {
-		line := sc.Bytes()
-		total += len(line) + 1
-		if total > MaxOutputBytes {
-			return result, &Error{Kind: "protocol_output_limit"}
-		}
-		// Persist actual AGH evidence, redacted at the boundary, without fabricating native envelopes.
-		if events != nil {
-			if _, err := io.WriteString(events, redactEvidence(line, env)+"\n"); err != nil {
-				return result, &Error{Kind: "evidence_write"}
-			}
-		}
-		var e Event
-		if !validJSON(line) || json.Unmarshal(line, &e) != nil || e.Version != 1 || e.RequestID != req.RequestID || e.Seq != seq+1 || final {
-			return result, &Error{Kind: "protocol_invalid_event"}
-		}
-		var envelope map[string]json.RawMessage
-		_ = json.Unmarshal(line, &envelope)
-		if _, ok := envelope["result"]; e.Type == "observation" && ok {
-			return result, &Error{Kind: "protocol_invalid_observation"}
-		}
-		if _, ok := envelope["observation"]; e.Type == "result" && ok {
-			return result, &Error{Kind: "protocol_invalid_result"}
-		}
-		seq++
-		switch e.Type {
-		case "observation":
-			if e.Observation == nil || e.Result != nil || e.Observation.Type == "" {
-				return result, &Error{Kind: "protocol_invalid_observation"}
-			}
-			o := *e.Observation
-			if o.NativeSessionID != "" {
-				if observedNative != "" && observedNative != o.NativeSessionID {
-					return result, &Error{Kind: "protocol_native_session_mismatch"}
-				}
-				observedNative = o.NativeSessionID
-			}
-			partial.WriteString(o.Delta)
-			if observe != nil {
-				o.Message = redact(o.Message, env)
-				o.Delta = redact(o.Delta, env)
-				observe(o)
-			}
-		case "result":
-			if e.Result == nil || e.Observation != nil {
-				return result, &Error{Kind: "protocol_invalid_result"}
-			}
-			result = *e.Result
-			var fields struct {
-				Result map[string]json.RawMessage `json:"result"`
-			}
-			_ = json.Unmarshal(line, &fields)
-			for _, key := range []string{"status", "text", "model", "session_key", "native_session_id", "error_kind", "error", "usage"} {
-				v, ok := fields.Result[key]
-				if !ok || (key != "usage" && bytes.Equal(v, []byte("null"))) {
-					return result, &Error{Kind: "protocol_invalid_result"}
-				}
-			}
-			if (observedNative != "" && result.NativeSessionID != observedNative) || result.SessionKey != req.SessionKey || (result.Status != "completed" && result.Status != "failed" && result.Status != "canceled") || len(result.Usage) == 0 || string(result.Usage) != "null" || (result.Status == "completed" && (result.ErrorKind != "" || result.Error != "")) {
-				return result, &Error{Kind: "protocol_invalid_result"}
-			}
-			final = true
-		default:
-			return result, &Error{Kind: "protocol_unknown_event"}
-		}
-	}
-	if sc.Err() != nil {
-		return result, &Error{Kind: "protocol_read"}
-	}
-	if !final {
-		return result, &Error{Kind: "protocol_missing_result"}
-	}
-	return result, nil
-}
-
-// Options is shared by one-shot execution and the terminal conversation loop.
+// PermissionMode preserves the old API spelling: default maps to read-only;
+// bypassPermissions explicitly opts into Offload managed development delivery.
 type Options struct {
-	Workspace, Model, Role, Instructions, SessionKey, PermissionMode string
-	Resume, ToolsDisabled                                            bool
-	AllowedTools, DisallowedTools                                    []string
-	Timeout                                                          time.Duration
-	MaxBudgetUSD                                                     float64
-	Events                                                           io.Writer
-	Provider                                                         *config.ClaudeProvider // explicit probe/auth choice; never a fallback chain
+	Workspace, Model, Role, Profile, Instructions, SessionKey, PermissionMode string
+	Resume, ToolsDisabled                                                     bool
+	AllowedTools, DisallowedTools                                             []string
+	Timeout                                                                   time.Duration
+	MaxBudgetUSD                                                              float64
+	Events                                                                    io.Writer
+	Provider                                                                  *config.ClaudeProvider // Retired: rejected instead of overriding profile authentication.
+	OnSession                                                                 func(string)
+	OnResult                                                                  func(Result)
 }
 
 func Execute(ctx context.Context, prompt string, opts Options) (Result, error) {
-	return execute(ctx, prompt, opts, func(o Observation) {
-		if o.Delta != "" {
-			fmt.Fprint(os.Stderr, o.Delta)
-		}
-	})
+	return execute(ctx, prompt, opts, nil)
 }
-
 func execute(ctx context.Context, prompt string, opts Options, observe func(Observation)) (Result, error) {
+	if opts.Provider != nil {
+		return Result{}, errors.New("ClawFlow provider overrides are retired; configure an Offload profile with offload config")
+	}
+	if opts.MaxBudgetUSD > 0 {
+		return Result{}, &Error{Kind: "unsupported_budget"}
+	}
 	c, err := LoadConfig()
 	if err != nil {
 		return Result{}, err
 	}
+	if profile := c.RoleProfiles[opts.Role]; profile != "" {
+		c.Profile = profile
+	}
+	// An explicit environment profile overrides role selection too.
+	if profile, ok := os.LookupEnv("CLAWFLOW_OFFLOAD_PROFILE"); ok {
+		c.Profile = profile
+	}
+	if opts.Profile != "" {
+		c.Profile = opts.Profile
+	} // Pin returned profile on resume.
 	if opts.Workspace == "" {
 		opts.Workspace, err = os.Getwd()
 		if err != nil {
@@ -447,59 +517,63 @@ func execute(ctx context.Context, prompt string, opts Options, observe func(Obse
 	}
 	opts.Workspace, err = filepath.Abs(opts.Workspace)
 	if err != nil {
-		return Result{}, errors.New("AGH workspace unavailable")
+		return Result{}, err
+	}
+	// Supply repository instructions explicitly instead of depending on a native
+	// backend's automatic instruction discovery.
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		path := filepath.Join(opts.Workspace, name)
+		f, openErr := os.Open(path)
+		if os.IsNotExist(openErr) {
+			continue
+		}
+		if openErr != nil {
+			return Result{}, errors.New("Offload repository instructions unavailable")
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, MaxInstructionsBytes+1))
+		closeErr := f.Close()
+		if readErr != nil || closeErr != nil {
+			return Result{}, errors.New("Offload repository instructions unreadable")
+		}
+		if len(data) > MaxInstructionsBytes {
+			return Result{}, &Error{Kind: "request_limit"}
+		}
+		opts.Instructions += "\n\nRepository instructions (" + name + "):\n" + string(data)
+		if len(opts.Instructions) > MaxInstructionsBytes {
+			return Result{}, &Error{Kind: "request_limit"}
+		}
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = time.Hour
 	}
-	if opts.SessionKey == "" {
-		opts.SessionKey = NewSessionKey()
-	}
 	if opts.PermissionMode == "" {
 		opts.PermissionMode = "default"
 	}
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return Result{}, errors.New("execution credentials unavailable; check credentials.yaml")
-	}
-	model := opts.Model
-	if model == "" {
-		model = config.ResolveModelForRole(creds, opts.Role)
-	}
-	env := os.Environ()
-	apiKey, baseURL := "", ""
-	if opts.Provider != nil {
-		apiKey, baseURL = opts.Provider.APIKey, opts.Provider.BaseURL
-	} else {
-		policy := *creds
-		if len(policy.ClaudeProviders) > 0 {
-			policy.ClaudeAPIKey = ""
-			policy.ClaudeBaseURL = ""
-		}
-		apiKey, baseURL = config.ResolveClaudeCredentials(&policy)
-	}
-	// No explicit ClawFlow provider means AGH's native profile owns native auth.
-	cleanEnv := make([]string, 0, len(env))
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") || strings.HasPrefix(kv, "ANTHROPIC_AUTH_TOKEN=") || strings.HasPrefix(kv, "ANTHROPIC_BASE_URL=") {
-			continue
-		}
-		cleanEnv = append(cleanEnv, kv)
-	}
-	env = EnvWithCredentials(cleanEnv, apiKey, baseURL)
-	req := Request{Version: 1, RequestID: NewSessionKey(), SessionKey: opts.SessionKey, Resume: opts.Resume, Workspace: opts.Workspace, Model: model, Instructions: opts.Instructions, Prompt: prompt, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: opts.Timeout.Milliseconds(), MaxBudgetUSD: opts.MaxBudgetUSD}
-	return Run(ctx, c, req, env, opts.Events, observe)
+	req := Request{Version: 1, RequestID: NewSessionKey(), SessionKey: opts.SessionKey, Resume: opts.Resume, Workspace: opts.Workspace, Model: opts.Model, Instructions: opts.Instructions, Prompt: prompt, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: opts.Timeout.Milliseconds(), MaxBudgetUSD: opts.MaxBudgetUSD}
+	// Credentials and models come only from Offload profiles or explicit model input.
+	return Run(ctx, c, req, os.Environ(), opts.Events, observe)
 }
 
-// Chat owns a plain terminal loop. Each successful turn resumes the same logical session.
 func Chat(ctx context.Context, in io.Reader, out io.Writer, opts Options) error {
+	var err error
+	if opts.Workspace == "" {
+		opts.Workspace, err = os.Getwd()
+		if err != nil {
+			return err
+		}
+	}
+	opts.Workspace, err = filepath.Abs(opts.Workspace)
+	if err != nil {
+		return err
+	}
+	opts.Workspace, err = filepath.EvalSymlinks(opts.Workspace)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := Ready(); err != nil {
 		return err
-	}
-	if opts.SessionKey == "" {
-		opts.SessionKey = NewSessionKey()
 	}
 	type inputLine struct {
 		text string
@@ -533,32 +607,40 @@ func Chat(ctx context.Context, in io.Reader, out io.Writer, opts Options) error 
 		if line.eof {
 			return line.err
 		}
-		prompt := line.text
-		if prompt == "/exit" || prompt == "/quit" {
+		if line.text == "/exit" || line.text == "/quit" {
 			return nil
 		}
-		if strings.TrimSpace(prompt) == "" {
+		if strings.TrimSpace(line.text) == "" {
 			continue
 		}
-		var streamed strings.Builder
-		r, err := execute(ctx, prompt, opts, func(o Observation) {
-			// Run redacts observations before delivering them to this callback.
-			streamed.WriteString(o.Delta)
-			fmt.Fprint(out, o.Delta)
-		})
-		if strings.HasPrefix(r.Text, streamed.String()) {
-			fmt.Fprint(out, strings.TrimPrefix(r.Text, streamed.String()))
-		} else if r.Text != "" {
-			fmt.Fprint(out, "\n[Authoritative final answer]\n", r.Text)
-		}
-		if streamed.Len() > 0 || r.Text != "" {
-			fmt.Fprintln(out)
+		r, err := execute(ctx, line.text, opts, nil)
+		if r.Text != "" {
+			fmt.Fprintln(out, r.Text)
 		}
 		if err != nil {
 			return err
 		}
+		opts.SessionKey = r.NativeSessionID
+		opts.Profile = r.Profile
 		opts.Resume = true
+		if opts.OnResult != nil {
+			opts.OnResult(r)
+		}
+		if opts.OnSession != nil {
+			opts.OnSession(r.NativeSessionID)
+		}
 	}
+}
+
+func redact(s string, env []string) string {
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		k = strings.ToUpper(k)
+		if ok && v != "" && (strings.HasSuffix(k, "_TOKEN") || strings.HasSuffix(k, "_KEY") || strings.HasSuffix(k, "_SECRET") || strings.HasSuffix(k, "_PASSWORD")) {
+			s = strings.ReplaceAll(s, v, "[redacted]")
+		}
+	}
+	return s
 }
 
 func validJSON(raw []byte) bool {
@@ -641,4 +723,18 @@ func redactEvidence(line []byte, env []string) string {
 		}
 	}
 	return string(line)
+}
+
+func hasFields(raw []byte, keys ...string) bool {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	for _, k := range keys {
+		v, ok := obj[k]
+		if !ok || bytes.Equal(v, []byte("null")) {
+			return false
+		}
+	}
+	return true
 }

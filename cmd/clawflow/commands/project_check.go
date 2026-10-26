@@ -135,9 +135,9 @@ func inspectProject(name string) projectCheckResult {
 		}
 	}
 	if err := execution.ValidateConfig(execution.WithEnvironment(cfg.Settings.Execution)); err != nil {
-		r.add("execution", name, "blocked", err.Error(), "Configure settings.execution or CLAWFLOW_AGH_* overrides")
+		r.add("execution", name, "blocked", err.Error(), "Configure settings.execution or CLAWFLOW_OFFLOAD_* overrides")
 	} else {
-		r.add("execution", name, "passed", "AGH execution paths available; live execution unverified", "")
+		r.add("execution", name, "passed", "Offload command/profile available; live execution unverified", "")
 	}
 	if paused, err := clawsync.IsPaused(); err != nil {
 		r.add("sync", name, "blocked", "Cannot inspect local sync pause state", "Inspect sync pause marker")

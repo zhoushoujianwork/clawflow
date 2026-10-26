@@ -1,19 +1,29 @@
 ---
 name: clawflow
-description: "Control ClawFlow through its CLI: safe local reset, disabled GitHub/GitLab onboarding, project binding, provider/operator checks, authorized runs, status, issues, PRs and CI."
+description: "Control ClawFlow through its CLI: safe local reset, disabled GitHub/GitLab onboarding, project binding, execution/operator checks, authorized runs, status, issues, PRs and CI."
 ---
 
 # ClawFlow lifecycle control
 
-You are an external AI controlling the `clawflow` CLI. ClawFlow's operator
-runtime requires Agent-Host execute with explicit execution-config/native/native-profile paths (ACP currently Claude-only); installing this skill in
-Codex, Cursor or another tool does not replace that runtime.
+You are an external AI controlling the `clawflow` CLI. ClawFlow executes tasks
+directly through Offload. Installing this skill in Codex, Cursor or another tool
+does not replace the configured Offload runtime.
 
-Set `settings.execution.command` (default `agent-host`) and the explicit absolute
-`config_path`, `native_command`, and `native_profile` paths. Isolated invocations
-can override these with `CLAWFLOW_AGH_COMMAND`, `CLAWFLOW_AGH_CONFIG`,
-`CLAWFLOW_AGH_NATIVE`, and `CLAWFLOW_AGH_PROFILE`. The runtime does not discover
-another Host home or fall back to a direct native CLI.
+Set `settings.execution.command` (default `offload`) and an explicit `profile`.
+Profiles own credentials and default models; configure them with `offload config`.
+Optional `role_profiles` selects profiles by chat/eval/operator/light role.
+Optional `codex_sandbox` accepts `workspace-write` or `danger-full-access`; the
+latter is an explicit trusted delivery choice. Machine-local overrides are
+`CLAWFLOW_OFFLOAD_COMMAND`, `CLAWFLOW_OFFLOAD_PROFILE`, and
+`CLAWFLOW_OFFLOAD_CODEX_SANDBOX`. These settings are excluded from config sync.
+There is no AGH/ACP dependency, credential migration, provider fallback or replay.
+
+Implement, CI repair, Pilot and explicit issue-edit chat opt into managed
+development delivery. Auxiliary/read-only and tools-disabled calls retain their
+narrower permissions. Positive dollar budgets fail before launch with
+`unsupported_budget`; unsupported tool restrictions fail with `unsupported_tools`.
+Progress events contain metadata only. The final stdout record supplies the
+answer; chat resumes the actual native session returned by Offload.
 
 Autonomous repositories with `auto_merge` and `ci_required` can repair failed CI
 on existing managed GitHub PRs. Initial support requires a same-repository,
@@ -179,7 +189,7 @@ clawflow project check <project> --json
 
 This command performs local reads only: project/repo and primary bindings,
 checkout origin and cached base commit, dirty state, context/testing document
-presence, Git/AGH execution readiness, operator definitions, automation
+presence, Git/Offload execution readiness, operator definitions, automation
 controls and local sync pause state. It does not migrate config, fetch, probe
 providers, start agents, run tests or write snapshots. Missing cached base is
 blocked; a cached commit does not establish remote freshness. Disabled automation,
@@ -195,18 +205,16 @@ only: `remote_auth`, `remote_freshness`, `provider_execution`, `project_tests` a
 configuration are not inspected. Check command help when using an older binary.
 
 ```bash
-clawflow config provider list
-clawflow config provider test <name-or-index>
+clawflow config show
 clawflow operators list
 clawflow operators validate
 clawflow operators doctor
 ```
 
-Provider test invokes AGH for an explicit model/auth connectivity probe; it can consume usage.
-It uses the default chat model and is not a complete configured-model test.
-Provider management supports `add <name> [--base-url URL] [--model MODEL]
-[--api-key KEY] [--disabled]`, enable/disable/remove <name-or-index>, and
-`move <name-or-index> --to <index>`. Keep keys out of transcripts.
+The settings UI and `config show` report the selected Offload profile and local
+readiness without a live provider probe. Retired `config provider` operations and
+provider mutation/test/reveal API endpoints return actionable errors directing
+you to Offload profiles. They do not mutate or print legacy Claude credentials.
 Operator validate/doctor check loaded embedded and user operators; they do not
 run an issue or prove tests pass.
 

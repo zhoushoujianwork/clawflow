@@ -1,5 +1,7 @@
 # Offload live AGH acceptance — 2026-10-26
 
+> Historical record: this describes the retired AGH execution route. Current execution uses [direct Offload](offload-execution-design.md); recorded past events and results below are unchanged.
+
 ## Result
 
 The new ClawFlow execution client successfully ran a real read-only Offload conversation through the built AGH CLI and Claude ACP bridge. The run completed in **27.246 seconds**, exited 0, and returned the requested `LIVE_AGH_OFFLOAD_OK` marker. The observed model was `claude-sonnet-5`.

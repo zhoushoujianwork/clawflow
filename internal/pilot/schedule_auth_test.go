@@ -59,11 +59,11 @@ func TestIsAuthError_NonAuthError(t *testing.T) {
 	}
 }
 
-// TestErrAuthError_WrappedByRunAgentHost verifies that the ErrAuthError sentinel
+// TestErrAuthError_WrappedByRunOffload verifies that the ErrAuthError sentinel
 // is wrapped (not replaced) so errors.Is works correctly in callers that need
 // to distinguish auth errors from other failures.
-func TestErrAuthError_WrappedByRunAgentHost(t *testing.T) {
-	// ErrAuthError is what RunAgentHost wraps when IsAuthError matches.
+func TestErrAuthError_WrappedByRunOffload(t *testing.T) {
+	// ErrAuthError is what RunOffload wraps when IsAuthError matches.
 	// Check that the sentinel itself is distinct from ErrRateLimit.
 	if errors.Is(operator.ErrAuthError, operator.ErrRateLimit) {
 		t.Error("ErrAuthError must not be the same as ErrRateLimit")
@@ -72,7 +72,7 @@ func TestErrAuthError_WrappedByRunAgentHost(t *testing.T) {
 		t.Error("ErrRateLimit must not be the same as ErrAuthError")
 	}
 
-	// Simulate the wrapped error RunAgentHost produces.
+	// Simulate the wrapped error RunOffload produces.
 	wrapped := errors.Join(operator.ErrAuthError, errors.New("claude: exit status 1"))
 	if !errors.Is(wrapped, operator.ErrAuthError) {
 		t.Error("errors.Is(wrapped, ErrAuthError) = false — callers rely on this for auth-error detection")

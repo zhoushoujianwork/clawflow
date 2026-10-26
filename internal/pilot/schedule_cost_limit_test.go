@@ -22,7 +22,7 @@ import (
 // perfectly good credentials) and, through the pre-wake MarkWoken stamp, burned
 // a full cooldown per 4-second failure.
 func TestClassifyWakeStatus_CostLimit(t *testing.T) {
-	// The sentinel path is what production actually hits: RunAgentHost's
+	// The sentinel path is what production actually hits: RunOffload's
 	// provider-exhaustion branch returns ("" , ErrCostLimit-wrapped), so the
 	// 402 text is nowhere in output.
 	sentinel := fmt.Errorf("%w: all 1 provider(s) failed", operator.ErrCostLimit)
@@ -162,7 +162,7 @@ func TestSetLastWokenAtPreservesSkipReason(t *testing.T) {
 
 // TestCostLimitSalvageFromEvents covers the "keep the work already paid for"
 // half of issue #320. Two capped wakes cost $17.52 (41 and 65 turns) and were
-// recorded with an empty Result / Duties / Summary, because RunAgentHost's
+// recorded with an empty Result / Duties / Summary, because RunOffload's
 // exhaustion path returns "" and the doc write-back was gated on err == nil.
 // The teed events.jsonl is the only surviving copy of the partial transcript,
 // so the recovery has to read it back and re-run the extractors against plain
@@ -203,7 +203,7 @@ func TestCostLimitSalvageFromEvents(t *testing.T) {
 }
 
 // TestExtractContextMDBothShapes pins extractContextMD accepting both the
-// plain-text form (operator.RunAgentHost's return value / salvaged transcript) and
+// plain-text form (operator.RunOffload's return value / salvaged transcript) and
 // the raw stream-json form, since the two paths reach the same write-back.
 func TestExtractContextMDBothShapes(t *testing.T) {
 	plain := "prose\n\n```context.md\n# From plain text\n```\n"
@@ -222,82 +222,34 @@ func TestExtractContextMDBothShapes(t *testing.T) {
 	}
 }
 
-// TestScheduleAbortsOnCostLimit is the end-to-end guard for the cascade half of
-// issue #320: on 2026-09-11 a single account cap took three projects down in
-// six seconds (09:18:16 / :24 / :30), each burning its own full cooldown. With
-// the fix Schedule stops after the first capped wake, and no project involved
-// has its cooldown consumed.
-//
-// Drives the real Schedule against a stubbed `claude` that always answers 402,
-// which is also what makes this a runtime check and not just a unit assertion.
-func TestScheduleAbortsOnCostLimit(t *testing.T) {
+// The default Pilot dollar cap is unsupported by direct Offload. Admission must
+// fail before any provider process instead of silently dropping the cap.
+func TestScheduleRejectsUnsupportedBudgetBeforeLaunch(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	stub402Claude(t)
-
-	if err := os.MkdirAll(filepath.Join(home, ".clawflow", "config"), 0o755); err != nil {
-		t.Fatalf("mkdir config: %v", err)
+	stubOffloadFailure(t, "cost_limit", "PILOT-RESULT: should never launch")
+	capture := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+	dir := filepath.Join(home, ".clawflow", "config")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".clawflow", "config", "repos.yaml"), []byte("repos: {}\n"), 0o644); err != nil {
-		t.Fatalf("write repos.yaml: %v", err)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("settings:\n  language: en\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".clawflow", "config", "config.yaml"), []byte("settings:\n  language: en\n"), 0o644); err != nil {
-		t.Fatalf("write config.yaml: %v", err)
+	if _, err := project.Create("budget-rejected"); err != nil {
+		t.Fatal(err)
 	}
-
-	names := []string{"abort-a", "abort-b", "abort-c"}
-	for _, n := range names {
-		if _, err := project.Create(n); err != nil {
-			t.Fatalf("create %s: %v", n, err)
-		}
-		if err := project.SetAutomation(n, true, 60); err != nil {
-			t.Fatalf("enable automation %s: %v", n, err)
-		}
+	if err := project.SetAutomation("budget-rejected", true, 60); err != nil {
+		t.Fatal(err)
 	}
-
 	woken, err := Schedule(context.Background(), 30*time.Second, time.Time{})
-	if err != nil {
-		t.Fatalf("Schedule returned error: %v", err)
+	if err != nil || woken != 0 {
+		t.Fatalf("woken=%d err=%v", woken, err)
 	}
-	if woken != 0 {
-		t.Errorf("woken = %d, want 0 — every wake was capped, none did any work", woken)
+	if _, err := os.Stat(capture); !os.IsNotExist(err) {
+		t.Fatal("unsupported cap launched Offload")
 	}
-
-	// Exactly one wake should have been attempted; the abort must stop the
-	// fan-out before the other two projects are touched.
-	attempted := 0
-	for _, n := range names {
-		if entries, rerr := os.ReadDir(filepath.Join(home, ".clawflow", "data", "pilot-runs", n)); rerr == nil {
-			attempted += len(entries)
-		}
-	}
-	if attempted != 1 {
-		t.Errorf("%d wake(s) attempted, want 1 — a cap is account-level, the pass must abort after the first", attempted)
-	}
-
-	// No project may have its cooldown consumed: the one that hit the cap gets
-	// rolled back, the other two were never stamped.
-	for _, n := range names {
-		p, gerr := project.Get(n)
-		if gerr != nil {
-			t.Fatalf("get %s: %v", n, gerr)
-		}
-		if p.Automation.LastWokenAt != "" {
-			t.Errorf("%s: LastWokenAt = %q, want empty — a capped pass must not burn any cooldown",
-				n, p.Automation.LastWokenAt)
-		}
-		if rem := p.CooldownRemaining(time.Now()); rem > 0 {
-			t.Errorf("%s: CooldownRemaining = %s, want 0 — must be eligible again on the next tick", n, rem)
-		}
-	}
-}
-
-// stub402Claude puts a fake `claude` at the front of PATH that answers every
-// invocation with a 402 billing cap, mirroring the proxy's Chinese phrasing
-// from the incident. Two assistant turns precede the refusal so the salvage
-// path has a finished context.md block and a PILOT-RESULT line to recover.
-func stub402Claude(t *testing.T) {
-	stubAGHFailure(t, "cost_limit", "Patrol done.\n\n```context.md\n# Overview\n\nSalvaged.\n```\nPILOT-RESULT: 1 action — filed #42\n")
 }
 
 // TestScheduleSkipsWhenBudgetInsufficient is the regression guard for issue
@@ -359,7 +311,7 @@ func TestScheduleSkipsWhenBudgetInsufficient(t *testing.T) {
 func TestScheduleProceedsWhenBudgetSufficient(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	stub402Claude(t) // fast, deterministic subprocess; outcome doesn't matter here
+	stubOffloadFailure(t, "cost_limit", "PILOT-RESULT: refused") // fast, deterministic subprocess; outcome doesn't matter here
 
 	if err := os.MkdirAll(filepath.Join(home, ".clawflow", "config"), 0o755); err != nil {
 		t.Fatalf("mkdir config: %v", err)

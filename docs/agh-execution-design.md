@@ -1,5 +1,7 @@
 # AGH execution
 
+> Historical record: this describes the retired AGH execution route. Current execution uses [direct Offload](offload-execution-design.md); recorded past events and results below are unchanged.
+
 ClawFlow now sends every AI request through `agent-host execute`. Operators, Pilot, document generation, provider probes and terminal conversations use one structured client. There is no direct native execution backend, automatic provider replay or fallback.
 
 Configure one dedicated Agent-Host execution runtime before running AI work:

@@ -47,7 +47,7 @@ Storage: ~/.clawflow/projects/<name>/project.yaml + context.md`,
 // `clawflow project automation enable/disable/show <name>`.
 //
 // Enabling makes `clawflow run` wake this project's PM (a non-interactive
-// agent-host execute) at the end of each pass, throttled by --cooldown. The PM
+// offload) at the end of each pass, throttled by --cooldown. The PM
 // can only create new issues — it does not touch existing issue state.
 func newProjectAutomationCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -328,7 +328,7 @@ then writes the result to context.md.`,
 			return runProjectGenerate(args[0], model)
 		},
 	}
-	cmd.Flags().StringVar(&model, "model", "", "model (default: configured chat model)")
+	cmd.Flags().StringVar(&model, "model", "", "explicit model override (default: Offload profile model)")
 	return cmd
 }
 
@@ -338,7 +338,7 @@ func newProjectChatCmd() *cobra.Command {
 		Use:   "chat <name>",
 		Short: "Interactive chat to review/modify context.md",
 		Long: `Loads the current context.md as system context and launches an
-plain text AGH conversation. Each line is one turn; /exit or EOF leaves.
+plain text Offload conversation. Each line is one turn; /exit or EOF leaves.
 After the session ends, if the assistant produced
 an updated context.md (in a fenced code block tagged "context.md"),
 you'll be shown a preview and asked whether to save it back.`,
@@ -347,7 +347,7 @@ you'll be shown a preview and asked whether to save it back.`,
 			return runProjectChat(args[0], model)
 		},
 	}
-	cmd.Flags().StringVar(&model, "model", "", "model (default: configured chat model)")
+	cmd.Flags().StringVar(&model, "model", "", "explicit model override (default: Offload profile model)")
 	return cmd
 }
 
@@ -368,15 +368,11 @@ func newProjectDeleteCmd() *cobra.Command {
 
 // runProjectGenerate is a thin CLI wrapper around projectgen.Generate
 // — it adds stderr provenance lines and prints the generated content
-// to stdout. The actual prompt construction and `agent-host execute` invocation
+// to stdout. The actual prompt construction and `offload` invocation
 // live in internal/projectgen so the dashboard's HTTP handler can
 // reuse them.
 func runProjectGenerate(name, model string) error {
 	resolved := model
-	if resolved == "" {
-		creds, _ := config.LoadCredentials()
-		resolved = config.ResolveModelForRole(creds, config.RoleChat)
-	}
 	fmt.Fprintf(os.Stderr, "[clawflow] generating context.md for project %q (model=%s)...\n", name, resolved)
 
 	content, err := projectgen.Generate(name, model, "")
@@ -427,11 +423,6 @@ func runProjectChat(name, model string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	if model == "" {
-		creds, _ := config.LoadCredentials()
-		model = config.ResolveModelForRole(creds, config.RoleChat)
-	}
-
 	// Build the member-repo descriptor table — both for the system
 	// prompt (so Claude knows what's where) and for --add-dir below
 	// (so it can actually read those paths).
@@ -446,12 +437,15 @@ func runProjectChat(name, model string) error {
 
 	systemCtx := chat.BuildProjectChatContext(name, chatRepos, originalCtx, originalTesting, cfg.Settings.Language)
 
-	sessionID := chat.NewSessionID("project/"+name, 0)
+	sessionID, profile := "", ""
 	workdir := project.ProjectDir(name)
-	if err := execution.Chat(context.Background(), os.Stdin, os.Stdout, execution.Options{Workspace: workdir, Model: model, Role: config.RoleChat, SessionKey: sessionID, Instructions: systemCtx, PermissionMode: "bypassPermissions"}); err != nil {
+	if err := execution.Chat(context.Background(), os.Stdin, os.Stdout, execution.Options{Workspace: workdir, Model: model, Role: config.RoleChat, Instructions: systemCtx, OnResult: func(result execution.Result) { sessionID = result.NativeSessionID; profile = result.Profile }}); err != nil {
 		return err
 	}
-	wbErr := resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx, originalTesting, false, "", "")
+	if sessionID == "" {
+		return nil
+	}
+	wbErr := resumeAndMaybeWriteBack(name, model, profile, sessionID, workdir, originalCtx, originalTesting)
 
 	// Refresh the dashboard snapshot regardless of whether we wrote
 	// back via the extract path — the AI may also have edited
@@ -464,7 +458,7 @@ func runProjectChat(name, model string) error {
 	return wbErr
 }
 
-// resumeAndMaybeWriteBack runs `agent-host execute --session-id <same>` to
+// resumeAndMaybeWriteBack runs `offload -r <actual-native-session>` to
 // extract the final context.md AND testing.md from the just-ended
 // chat. For each doc whose extracted content differs from the
 // original, the user is shown a preview and asked to confirm save.
@@ -474,7 +468,7 @@ func runProjectChat(name, model string) error {
 // Cost: one short follow-up turn covers both docs (~1–5s, a few
 // cents). Skipped silently for any doc the model omits — the prompt
 // invites the model to output zero, one, or both blocks.
-func resumeAndMaybeWriteBack(name, model, sessionID, workdir, originalCtx, originalTesting string, useBare bool, apiKey, baseURL string) error {
+func resumeAndMaybeWriteBack(name, model, profile, sessionID, workdir, originalCtx, originalTesting string) error {
 	fmt.Fprintln(os.Stderr, "\n[clawflow] checking for context.md / testing.md updates from this conversation…")
 
 	extractPrompt := `If the conversation produced or refined either of these documents, output the COMPLETE final version of each, inside its own fenced code block tagged with the doc name. Output zero, one, or both blocks — whatever changed.
@@ -491,9 +485,9 @@ If neither doc changed, reply with the literal token NO_UPDATES on a single line
 
 Do not include any other text, preamble, or explanation.`
 
-	result, err := execution.Execute(context.Background(), extractPrompt, execution.Options{Workspace: workdir, Model: model, Role: config.RoleChat, SessionKey: sessionID, Resume: true, ToolsDisabled: true})
+	result, err := execution.Execute(context.Background(), extractPrompt, execution.Options{Workspace: workdir, Model: model, Role: config.RoleChat, Profile: profile, SessionKey: sessionID, Resume: true, ToolsDisabled: true})
 	if err != nil {
-		return fmt.Errorf("AGH extract updates: %w", err)
+		return fmt.Errorf("Offload extract updates: %w", err)
 	}
 	outStr := result.Text
 

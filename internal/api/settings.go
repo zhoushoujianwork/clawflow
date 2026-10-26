@@ -142,7 +142,8 @@ func HandleRevealSecret(w http.ResponseWriter, r *http.Request) {
 	var v string
 	switch req.Which {
 	case "claude_api_key":
-		v = creds.ClaudeAPIKey
+		writeJSON(w, http.StatusGone, map[string]string{"error": "Claude provider credentials are retired; use offload config"})
+		return
 	case "gh_token":
 		v = creds.GHToken
 	case "gitlab_token":

@@ -1,5 +1,7 @@
 # AGH execution acceptance — 2026-10-26
 
+> Historical record: this describes the retired AGH execution route. Current execution uses [direct Offload](offload-execution-design.md); recorded past events and results below are unchanged.
+
 The implementation uses the CLI boundary described in the [main design](agh-execution-design.md). ClawFlow owns issues, worktrees, PRs, CI and acceptance; AGH executes one ACP turn. No direct Claude execution fallback remains in ClawFlow. This does not remove AGH's separately configured print backend for its other consumers.
 
 ## Source and rollout scope

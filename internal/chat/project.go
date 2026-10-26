@@ -218,7 +218,7 @@ func ExtractLastContextMD(output string) string {
 // found.
 //
 // Use this when the input is already a plain assistant-text string —
-// e.g. the value returned by operator.RunAgentHost, which internally
+// e.g. the value returned by operator.RunOffload, which internally
 // parses claude's stream-json and hands back just the final text. The
 // stream-json-aware variants (ExtractLastContextMD / ExtractLastTestingMD)
 // are for callers that captured raw stream-json themselves (the CLI
@@ -261,7 +261,7 @@ func ExtractLastTestingMD(output string) string {
 // returns it as plain text.
 //
 // Exported for callers that need to recover a partial transcript AFTER the
-// claude invocation failed: operator.RunAgentHost drops its accumulated output
+// claude invocation failed: operator.RunOffload drops its accumulated output
 // on the provider-exhaustion path, so the only surviving copy of whatever the
 // model already wrote is the teed events.jsonl. Pilot uses this to salvage a
 // wake that a billing cap (402) cut short (issue #320).

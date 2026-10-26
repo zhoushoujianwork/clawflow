@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// setProcessGroup puts the Agent-Host subprocess in its own process group so the
-// whole subtree (Agent-Host plus any Bash tool grandchildren it forks, e.g.
+// setProcessGroup puts the Offload subprocess in its own process group so the
+// whole subtree (Offload plus any Bash tool grandchildren it forks, e.g.
 // `git fetch` / `clawflow issue list`) can be signalled at once via a
 // negative PID. Without this, exec.CommandContext's deadline kill only
 // reaches the direct child; orphaned grandchildren keep the stdout pipe open
@@ -21,8 +21,8 @@ func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
-// terminateProcessGroup signals the Agent-Host process group: SIGTERM first so
-// Agent-Host can flush its stream-json (keeping the run's events.jsonl useful for
+// terminateProcessGroup signals the Offload process group: SIGTERM first so
+// Offload can flush its stream-json (keeping the run's events.jsonl useful for
 // diagnosis), then SIGKILL after a short grace for anything that ignored it.
 // Safe to call once Start has succeeded; a no-op otherwise. Mirrors the
 // killGroup pattern already used in internal/pty/server.go. The SIGKILL
@@ -37,7 +37,7 @@ func terminateProcessGroup(cmd *exec.Cmd) {
 	if pid <= 0 {
 		return
 	}
-	// Negative PID targets the whole group (setProcessGroup made Agent-Host the
+	// Negative PID targets the whole group (setProcessGroup made Offload the
 	// group leader, so its PID equals the PGID).
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		// Group signal not permitted (Setpgid didn't take?) — fall back to
@@ -70,7 +70,13 @@ func terminateProcessGroupSync(cmd *exec.Cmd, grace time.Duration) {
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 	}
-	time.Sleep(grace)
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
 		_ = cmd.Process.Kill()
 	}

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
-	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -24,7 +24,7 @@ type reopenedLifecycleTransport func(*http.Request) (*http.Response, error)
 func (f reopenedLifecycleTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // This crosses the real scanner, provider subprocess and write-back boundary.
-// Only HTTP transport and the AGH executable are fakes; Git uses a local
+// Only HTTP transport and the Offload executable are fakes; Git uses a local
 // bare remote, and every request is handled in memory without opening sockets.
 func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 	for _, race := range []bool{false, true} {
@@ -47,22 +47,16 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			command := filepath.Join(capture, "agent-host")
+			command := filepath.Join(capture, "offload")
 			// The wrapper only selects this test binary's helper. All protocol
 			// parsing and response encoding happen in Go, including request IDs.
-			script := "#!/bin/sh\nexec '" + strings.ReplaceAll(executable, "'", "'\\''") + "' -test.run=^TestReopenedLifecycleAGHHelper$ -- \"$@\"\n"
+			script := "#!/bin/sh\nexec '" + strings.ReplaceAll(executable, "'", "'\\''") + "' -test.run=^TestReopenedLifecycleOffloadHelper$ -- \"$@\"\n"
 			if err := os.WriteFile(command, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
-			executionConfig := filepath.Join(capture, "execution.yaml")
-			if err := os.WriteFile(executionConfig, []byte("fixture: reopened-lifecycle\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("CLAWFLOW_AGH_COMMAND", command)
-			t.Setenv("CLAWFLOW_AGH_CONFIG", executionConfig)
-			t.Setenv("CLAWFLOW_AGH_NATIVE", executable)
-			t.Setenv("CLAWFLOW_AGH_PROFILE", capture)
-			t.Setenv("CLAWFLOW_REOPEN_LIFECYCLE_AGH_HELPER", "1")
+			t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", command)
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "test-profile")
+			t.Setenv("CLAWFLOW_REOPEN_LIFECYCLE_OFFLOAD_HELPER", "1")
 			t.Setenv("REOPEN_TEST_PROMPT", promptPath)
 			t.Setenv("REOPEN_TEST_CWD", cwdPath)
 
@@ -236,24 +230,22 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 	}
 }
 
-// TestReopenedLifecycleAGHHelper is entered only by this fixture's AGH wrapper.
+// TestReopenedLifecycleOffloadHelper is entered only by this fixture's Offload wrapper.
 // It never launches a native backend or contacts a provider.
-func TestReopenedLifecycleAGHHelper(t *testing.T) {
-	if os.Getenv("CLAWFLOW_REOPEN_LIFECYCLE_AGH_HELPER") != "1" {
+func TestReopenedLifecycleOffloadHelper(t *testing.T) {
+	if os.Getenv("CLAWFLOW_REOPEN_LIFECYCLE_OFFLOAD_HELPER") != "1" {
 		return
 	}
-	var request execution.Request
-	decoder := json.NewDecoder(os.Stdin)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	args := offloadtest.Args()
+	prompt, err := io.ReadAll(os.Stdin)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		t.Fatalf("unexpected trailing request content: %v", err)
+	instructions, err := os.ReadFile(args["-instructions-file"])
+	if err != nil {
+		t.Fatal(err)
 	}
-	if request.Version != 1 || request.RequestID == "" || request.SessionKey == "" || !filepath.IsAbs(request.Workspace) {
-		t.Fatal("invalid AGH request identity or workspace")
-	}
+	request := struct{ Prompt, Workspace string }{Prompt: string(instructions) + "\n" + string(prompt), Workspace: args["-d"]}
 	if err := os.WriteFile(os.Getenv("REOPEN_TEST_PROMPT"), []byte(request.Prompt), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -270,24 +262,10 @@ func TestReopenedLifecycleAGHHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !os.SameFile(actual, requested) {
-		t.Fatalf("AGH cwd=%q differs from requested workspace=%q", cwd, request.Workspace)
+		t.Fatalf("Offload cwd=%q differs from requested workspace=%q", cwd, request.Workspace)
 	}
 	if err := os.WriteFile(os.Getenv("REOPEN_TEST_CWD"), []byte(cwd+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	event := execution.Event{Version: 1, RequestID: request.RequestID, Seq: 1, Type: "result", Result: &execution.Result{
-		Status:          "completed",
-		Text:            "Follow-up implemented. PR: https://example.invalid/o/r/pull/11\n<!-- clawflow:outcome=agent-implemented -->",
-		Model:           request.Model,
-		SessionKey:      request.SessionKey,
-		NativeSessionID: "reopened-lifecycle-native-session",
-		ErrorKind:       "",
-		Error:           "",
-		Usage:           json.RawMessage("null"),
-	}}
-	if err := json.NewEncoder(os.Stdout).Encode(event); err != nil {
-		t.Fatal(err)
-	}
-	// Suppress the Go test runner's PASS line on the machine-protocol stream.
-	os.Exit(0)
+	offloadtest.Emit(args, "Follow-up implemented. PR: https://example.invalid/o/r/pull/11\n<!-- clawflow:outcome=agent-implemented -->", "", "")
 }

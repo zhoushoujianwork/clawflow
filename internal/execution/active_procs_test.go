@@ -69,7 +69,7 @@ func TestTerminateAllActiveCmdsNoOpWhenEmpty(t *testing.T) {
 
 // TestRegisterUnregisterActiveCmd pins the bookkeeping contract:
 // register makes a cmd visible to TerminateAllActiveCmds, unregister removes
-// it (the normal path once RunAgentHost's own cmd.Wait has completed).
+// it (the normal path once RunOffload's own cmd.Wait has completed).
 func TestRegisterUnregisterActiveCmd(t *testing.T) {
 	cmd := exec.Command("true")
 	registerActiveCmd(cmd)

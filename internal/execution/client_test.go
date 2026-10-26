@@ -5,483 +5,256 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 )
 
-func TestAGHHelper(t *testing.T) {
-	if os.Getenv("CLAWFLOW_TEST_AGH") != "1" {
+func TestOffloadHelper(t *testing.T) {
+	if os.Getenv("CLAWFLOW_OFFLOAD_TEST_HELPER") != "1" {
 		return
 	}
-	var req Request
-	if json.NewDecoder(os.Stdin).Decode(&req) != nil {
+	args := offloadtest.Args()
+	if args["-w"] != "" {
+		offloadtest.Helper(t)
+		return
+	}
+	// The shared historical fixture emits an empty read-only policy. Match the
+	// delivered CLI's explicit default while capturing the actual argument set.
+	prompt, _ := io.ReadAll(os.Stdin)
+	instructions, err := os.ReadFile(args["-instructions-file"])
+	if err != nil {
 		os.Exit(2)
 	}
-	if path := os.Getenv("CLAWFLOW_TEST_RECORD"); path != "" {
-		f, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-		wd, _ := os.Getwd()
-		_ = json.NewEncoder(f).Encode(map[string]any{"request": req, "cwd": wd, "args": os.Args, "api_key": os.Getenv("ANTHROPIC_API_KEY")})
+	if capture := os.Getenv("OFFLOAD_TEST_CAPTURE"); capture != "" {
+		f, err := os.OpenFile(capture, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
+		if err != nil {
+			os.Exit(2)
+		}
+		cwd, _ := os.Getwd()
+		_ = json.NewEncoder(f).Encode(map[string]any{"args": args, "prompt": string(prompt), "instructions": string(instructions), "cwd": cwd})
 		_ = f.Close()
 	}
-	mode := os.Getenv("CLAWFLOW_TEST_MODE")
-	if mode == "delayed-cleanup" {
-		signals := make(chan os.Signal, 1)
-		signal.Notify(signals, syscall.SIGTERM)
-		if err := os.WriteFile(os.Getenv("CLAWFLOW_TEST_READY"), []byte("ready"), 0600); err != nil {
-			os.Exit(1)
-		}
-		<-signals
-		time.Sleep(3 * time.Second)
-		if err := os.WriteFile(os.Getenv("CLAWFLOW_TEST_CLEANUP"), []byte("cleaned"), 0600); err != nil {
-			os.Exit(1)
-		}
-		_ = json.NewEncoder(os.Stdout).Encode(Event{Version: 1, RequestID: req.RequestID, Seq: 1, Type: "result", Result: &Result{Status: "canceled", Text: "cleanup complete", Model: req.Model, SessionKey: req.SessionKey, NativeSessionID: "native-distinct", ErrorKind: "canceled", Error: "execution canceled", Usage: json.RawMessage("null")}})
-		os.Exit(130)
+	args["-execution-policy"] = "default"
+	text := os.Getenv("OFFLOAD_TEST_TEXT")
+	if text == "" {
+		text = "Final answer\n<!-- clawflow:outcome=done -->"
 	}
-	if mode == "hang" {
-		signal.Ignore(syscall.SIGTERM)
-		c := exec.Command("sleep", "60")
-		c.Stdout = os.Stdout
-		c.Stderr = os.Stderr
-		_ = c.Start()
-		select {}
-	}
-	enc := json.NewEncoder(os.Stdout)
-	seq := 0
-	emit := func(e Event) { seq++; e.Version = 1; e.RequestID = req.RequestID; e.Seq = seq; _ = enc.Encode(e) }
-	if mode == "chat-render" {
-		for _, delta := range strings.Split(os.Getenv("CLAWFLOW_TEST_DELTAS"), "|") {
-			if delta != "" {
-				emit(Event{Type: "observation", Observation: &Observation{Type: "text_delta", Delta: delta}})
-			}
-		}
-		status := os.Getenv("CLAWFLOW_TEST_STATUS")
-		if status == "missing" {
-			os.Exit(1)
-		}
-		r := Result{Status: status, Text: os.Getenv("CLAWFLOW_TEST_FINAL"), Model: req.Model, SessionKey: req.SessionKey, NativeSessionID: "native-distinct", Usage: json.RawMessage("null")}
-		code := 0
-		if status != "completed" {
-			r.ErrorKind = status
-			code = 1
-			if status == "canceled" {
-				code = 130
-			}
-		}
-		emit(Event{Type: "result", Result: &r})
-		os.Exit(code)
-	}
-	emit(Event{Type: "observation", Observation: &Observation{Type: "text_delta", Delta: "answer\n<!-- clawflow:outcome=done -->"}})
-	emit(Event{Type: "observation", Observation: &Observation{Type: "tool_start", Message: "Read"}})
-	r := Result{Status: "completed", Text: "", Model: req.Model, SessionKey: req.SessionKey, NativeSessionID: "native-distinct", Usage: json.RawMessage("null")}
-	code := 0
-	switch mode {
-	case "failed":
-		r.Status = "failed"
-		r.ErrorKind = "auth"
-		code = 1
-	case "budget":
-		if req.MaxBudgetUSD > 0 {
-			r.Status = "failed"
-			r.ErrorKind = "unsupported_budget"
-			code = 1
-		}
-	case "wrong-session":
-		r.SessionKey = NewSessionKey()
-	case "exit-mismatch":
-		code = 1
-	case "missing":
-		os.Exit(0)
-	}
-	emit(Event{Type: "result", Result: &r})
-	if mode == "duplicate" {
-		emit(Event{Type: "result", Result: &r})
-	}
-	os.Exit(code)
+	offloadtest.Emit(args, text, os.Getenv("OFFLOAD_TEST_ERROR"), os.Getenv("OFFLOAD_TEST_MODE"))
 }
-
-func fixture(t *testing.T) (Config, Request, []string) {
+func fixture(t *testing.T) (Config, Request) {
 	t.Helper()
-	dir := t.TempDir()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := filepath.Join(dir, "agent-host")
-	script := "#!/bin/sh\nexec '" + strings.ReplaceAll(exe, "'", "'\\''") + "' -test.run=^TestAGHHelper$ -- \"$@\"\n"
-	if err = os.WriteFile(command, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	cfgPath := filepath.Join(dir, "execution.yaml")
-	if err = os.WriteFile(cfgPath, []byte("test: true\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	cfg := Config{Command: command, ConfigPath: cfgPath, NativeCommand: exe, NativeProfile: dir}
-	req := Request{Version: 1, RequestID: NewSessionKey(), SessionKey: NewSessionKey(), Workspace: dir, Prompt: "hello", PermissionMode: "bypassPermissions", TimeoutMS: 10000}
-	return cfg, req, append(os.Environ(), "CLAWFLOW_TEST_AGH=1")
+	command := offloadtest.Setup(t)
+	t.Setenv("HOME", t.TempDir())
+	return Config{Command: command, Profile: "test-profile", CodexSandbox: "workspace-write"}, Request{Version: 1, RequestID: NewSessionKey(), Workspace: t.TempDir(), Prompt: "task", Instructions: "private context", PermissionMode: "bypassPermissions", TimeoutMS: 3000}
 }
-
-func TestRunContract(t *testing.T) {
-	cfg, req, env := fixture(t)
-	req.Prompt = strings.Repeat("long input\n", 4000)
-	req.Model = "role-model"
-	req.Instructions = "instructions"
-	req.DisallowedTools = []string{"Edit", "Write", "NotebookEdit"}
-	req.MaxBudgetUSD = 1.23
-	record := filepath.Join(req.Workspace, "record.jsonl")
-	env = append(env, "CLAWFLOW_TEST_RECORD="+record, "ANTHROPIC_API_KEY=test-secret")
+func TestDirectOffloadContract(t *testing.T) {
+	c, req := fixture(t)
+	capture := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
 	var evidence bytes.Buffer
-	result, err := Run(context.Background(), cfg, req, env, &evidence, nil)
+	result, err := Run(context.Background(), c, req, nil, &evidence, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Text, "outcome=done") || result.NativeSessionID == req.SessionKey {
-		t.Fatalf("result: %+v", result)
+	if result.NativeSessionID != "native-actual" || !strings.Contains(result.Text, "outcome=done") {
+		t.Fatalf("result=%+v", result)
 	}
-	var got struct {
-		Request Request  `json:"request"`
-		Cwd     string   `json:"cwd"`
-		Args    []string `json:"args"`
-		APIKey  string   `json:"api_key"`
-	}
-	raw, _ := os.ReadFile(record)
-	if err = json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+	raw, err := os.ReadFile(capture)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Request.Prompt != req.Prompt || got.Request.MaxBudgetUSD != 1.23 || got.Request.PermissionMode != "bypassPermissions" || got.Request.Instructions != "instructions" || len(got.Request.DisallowedTools) != 3 || got.Cwd != req.Workspace || got.APIKey != "test-secret" {
-		t.Fatalf("request transport changed: %+v", got)
+	var call struct {
+		Args                      map[string]string
+		Prompt, Instructions, Cwd string
 	}
-	if strings.Contains(strings.Join(got.Args, " "), "test-secret") || strings.Contains(evidence.String(), "test-secret") {
-		t.Fatal("secret leaked")
+	if err := json.Unmarshal(raw, &call); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(evidence.String(), `"type":"observation"`) || strings.Contains(evidence.String(), `"type":"assistant"`) {
-		t.Fatal("evidence was fabricated")
+	for k, want := range map[string]string{"-json": "true", "-no-salvage": "true", "-p": "test-profile", "-execution-policy": "managed-development", "-w": "true", "-codex-sandbox": "workspace-write", "-caller-run-id": req.RequestID} {
+		if call.Args[k] != want {
+			t.Errorf("%s=%q want %q", k, call.Args[k], want)
+		}
+	}
+	if call.Args["-r"] != "" || call.Args["-m"] != "" || call.Prompt != req.Prompt || call.Instructions != req.Instructions {
+		t.Fatalf("call=%+v", call)
+	}
+	if strings.Contains(evidence.String(), "Final answer") || !strings.Contains(evidence.String(), `"type":"final"`) {
+		t.Fatalf("evidence=%s", evidence.String())
+	}
+	for _, key := range []string{"-events-file", "-instructions-file"} {
+		if _, err := os.Stat(call.Args[key]); !os.IsNotExist(err) {
+			t.Errorf("private input left behind: %v", err)
+		}
 	}
 }
-
-func TestRunFailuresNeverReplay(t *testing.T) {
-	for _, mode := range []string{"failed", "wrong-session", "exit-mismatch", "missing", "duplicate", "budget"} {
+func TestOffloadProtocolFailuresNeverReplay(t *testing.T) {
+	for _, mode := range []string{"mismatch", "wrong-profile", "changed-session", "sequence", "missing-final", "duplicate-final", "truncated", "exit-mismatch", "missing-field", "truncated-events", "oversized-events", "oversized-stdout", "duplicate-stdout"} {
 		t.Run(mode, func(t *testing.T) {
-			cfg, req, env := fixture(t)
-			record := filepath.Join(req.Workspace, "record")
-			env = append(env, "CLAWFLOW_TEST_MODE="+mode, "CLAWFLOW_TEST_RECORD="+record)
-			if mode == "budget" {
-				req.MaxBudgetUSD = 2
-			}
-			_, err := Run(context.Background(), cfg, req, env, nil, nil)
+			c, req := fixture(t)
+			req.Resume = true
+			req.SessionKey = "native-actual"
+			t.Setenv("OFFLOAD_TEST_MODE", mode)
+			capture := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+			_, err := Run(context.Background(), c, req, nil, nil, nil)
 			if err == nil {
-				t.Fatal("invalid success")
+				t.Fatal("accepted invalid contract")
 			}
-			if mode == "budget" && !IsKind(err, "unsupported_budget") {
-				t.Fatal(err)
-			}
-			raw, _ := os.ReadFile(record)
-			if bytes.Count(raw, []byte("\n")) != 1 {
-				t.Fatal("execution replayed")
+			calls, _ := os.ReadFile(capture)
+			if bytes.Count(calls, []byte("\n")) != 1 {
+				t.Fatalf("replayed: %s", calls)
 			}
 		})
 	}
 }
-
-func TestProtocolValidation(t *testing.T) {
-	_, req, _ := fixture(t)
-	good := func() string {
-		raw, _ := json.Marshal(Event{Version: 1, RequestID: req.RequestID, Seq: 1, Type: "result", Result: &Result{Status: "completed", SessionKey: req.SessionKey, Usage: json.RawMessage("null")}})
-		return string(raw) + "\n"
+func TestOffloadBudgetAndOwnershipFailBeforeLaunch(t *testing.T) {
+	c, req := fixture(t)
+	capture := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+	req.MaxBudgetUSD = 1
+	_, err := Run(context.Background(), c, req, nil, nil, nil)
+	if !IsKind(err, "unsupported_budget") {
+		t.Fatal(err)
 	}
-	cases := map[string]string{
-		"valid": good(), "missing": "", "malformed": "not json\n", "duplicate": good() + good(),
-		"version":        strings.Replace(good(), `"version":1`, `"version":2`, 1),
-		"request":        strings.Replace(good(), req.RequestID, "wrong", 1),
-		"sequence":       strings.Replace(good(), `"seq":1`, `"seq":2`, 1),
-		"session":        strings.Replace(good(), req.SessionKey, "wrong", 1),
-		"status":         strings.Replace(good(), `"completed"`, `"unknown"`, 1),
-		"usage":          strings.Replace(good(), `"usage":null`, `"usage":{}`, 1),
-		"missing-usage":  strings.Replace(good(), `,"usage":null`, "", 1),
-		"duplicate-key":  strings.Replace(good(), `"version":1`, `"version":1,"version":1`, 1),
-		"null-text":      strings.Replace(good(), `"text":""`, `"text":null`, 1),
-		"oversized-line": strings.Repeat("x", MaxEventBytes+1),
+	if _, err := os.Stat(capture); !os.IsNotExist(err) {
+		t.Fatal("budget launched child")
 	}
-	for name, data := range cases {
-		t.Run(name, func(t *testing.T) {
-			_, err := parseStream(strings.NewReader(data), req, nil, nil, nil)
-			if (err == nil) != (name == "valid") {
-				t.Fatalf("error=%v", err)
-			}
-		})
+	req.MaxBudgetUSD = 0
+	release, err := acquireOwnership(req.Workspace, c.Profile, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	_, err = Run(context.Background(), c, req, nil, nil, nil)
+	if !IsKind(err, "session_busy") {
+		t.Fatal(err)
 	}
 }
-
-func TestPreflight(t *testing.T) {
-	cfg, req, env := fixture(t)
-	cfg.NativeProfile = "relative"
-	if _, err := Run(context.Background(), cfg, req, env, nil, nil); err == nil {
-		t.Fatal("relative profile accepted")
-	}
-	cfg, req, env = fixture(t)
-	req.Prompt = strings.Repeat("x", MaxRequestBytes)
-	if _, err := Run(context.Background(), cfg, req, env, nil, nil); err == nil {
-		t.Fatal("oversized request accepted")
-	}
-	cfg, req, env = fixture(t)
-	req.ToolsDisabled = true
-	req.AllowedTools = []string{"Read"}
-	if _, err := Run(context.Background(), cfg, req, env, nil, nil); err == nil {
-		t.Fatal("conflicting tools accepted")
-	}
-	cfg, req, env = fixture(t)
-	req.TimeoutMS = 86400001
-	if _, err := Run(context.Background(), cfg, req, env, nil, nil); err == nil {
-		t.Fatal("timeout accepted")
-	}
-}
-
-func TestTimeoutAndCancellation(t *testing.T) {
-	for _, deadline := range []bool{false, true} {
-		t.Run(fmt.Sprint(deadline), func(t *testing.T) {
-			cfg, req, env := fixture(t)
-			env = append(env, "CLAWFLOW_TEST_MODE=hang")
+func TestOffloadTimeoutAndCancel(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "timeout", true: "cancel"}[cancelled], func(t *testing.T) {
+			c, req := fixture(t)
+			req.TimeoutMS = 80
+			t.Setenv("OFFLOAD_TEST_MODE", "sleep")
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			if deadline {
-				req.TimeoutMS = 100
-			} else {
-				time.AfterFunc(100*time.Millisecond, cancel)
+			if cancelled {
+				time.AfterFunc(40*time.Millisecond, cancel)
 			}
 			start := time.Now()
-			_, err := Run(ctx, cfg, req, env, nil, nil)
-			want := context.Canceled
-			if deadline {
-				want = context.DeadlineExceeded
+			_, err := Run(ctx, c, req, nil, nil, nil)
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
 			}
-			if !errors.Is(err, want) {
-				t.Fatalf("error=%v want %v", err, want)
+			if time.Since(start) > 5*time.Second {
+				t.Fatal("cancellation unbounded")
 			}
-			if time.Since(start) > DefaultTerminateGrace+3*time.Second {
-				t.Fatal("owned subprocess tree held stdout open")
-			}
-		})
-	}
-}
-
-func TestRedactionAndPartialFailure(t *testing.T) {
-	_, req, _ := fixture(t)
-	line, _ := json.Marshal(Event{Version: 1, RequestID: req.RequestID, Seq: 1, Type: "observation", Observation: &Observation{Type: "text_delta", Delta: "secret-value partial"}})
-	var ev bytes.Buffer
-	r, err := parseStream(bytes.NewReader(append(line, '\n')), req, &ev, []string{"ANTHROPIC_API_KEY=secret-value"}, nil)
-	if err == nil || r.Text != "[redacted] partial" || strings.Contains(ev.String(), "secret-value") {
-		t.Fatalf("partial/redaction: %q %v", r.Text, err)
-	}
-}
-
-func TestChatResume(t *testing.T) {
-	cfg, req, _ := fixture(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CLAWFLOW_AGH_COMMAND", cfg.Command)
-	t.Setenv("CLAWFLOW_AGH_CONFIG", cfg.ConfigPath)
-	t.Setenv("CLAWFLOW_AGH_NATIVE", cfg.NativeCommand)
-	t.Setenv("CLAWFLOW_AGH_PROFILE", cfg.NativeProfile)
-	t.Setenv("CLAWFLOW_TEST_AGH", "1")
-	record := filepath.Join(req.Workspace, "record")
-	t.Setenv("CLAWFLOW_TEST_RECORD", record)
-	var out bytes.Buffer
-	if err := Chat(context.Background(), strings.NewReader("first\nsecond\n"), &out, Options{Workspace: req.Workspace, Model: "chat-model", SessionKey: req.SessionKey}); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Open(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	dec := json.NewDecoder(f)
-	for i := 0; i < 2; i++ {
-		var v struct {
-			Request Request `json:"request"`
-		}
-		if err = dec.Decode(&v); err != nil {
-			t.Fatal(err)
-		}
-		if v.Request.SessionKey != req.SessionKey || v.Request.Resume != (i > 0) || v.Request.Model != "chat-model" {
-			t.Fatalf("turn %d: %+v", i, v.Request)
-		}
-	}
-	if dec.Decode(new(any)) != io.EOF {
-		t.Fatal("extra execution")
-	}
-}
-
-func TestChatRendersAnswerOnce(t *testing.T) {
-	for _, tc := range []struct {
-		name, deltas, final, status, want string
-	}{
-		{"full", "Hello |world", "Hello world", "completed", "> Hello world\n> "},
-		{"suffix", "Hello ", "Hello world", "completed", "> Hello world\n> "},
-		{"no-stream", "", "Hello world", "completed", "> Hello world\n> "},
-		{"different", "Earlier answer", "Final answer", "completed", "> Earlier answer\n[Authoritative final answer]\nFinal answer\n> "},
-		{"failed-partial", "Partial |answer", "Partial answer", "failed", "> Partial answer\n"},
-		{"canceled-partial", "Partial |answer", "", "canceled", "> Partial answer\n"},
-		{"transport-partial", "Partial |answer", "", "missing", "> Partial answer\n"},
-		{"redacted", "Secret test-secret", "Secret test-secret", "completed", "> Secret [redacted]\n> "},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, req, _ := fixture(t)
-			t.Setenv("HOME", t.TempDir())
-			t.Setenv("CLAWFLOW_AGH_COMMAND", cfg.Command)
-			t.Setenv("CLAWFLOW_AGH_CONFIG", cfg.ConfigPath)
-			t.Setenv("CLAWFLOW_AGH_NATIVE", cfg.NativeCommand)
-			t.Setenv("CLAWFLOW_AGH_PROFILE", cfg.NativeProfile)
-			t.Setenv("CLAWFLOW_TEST_AGH", "1")
-			t.Setenv("CLAWFLOW_TEST_MODE", "chat-render")
-			t.Setenv("CLAWFLOW_TEST_DELTAS", tc.deltas)
-			t.Setenv("CLAWFLOW_TEST_FINAL", tc.final)
-			t.Setenv("CLAWFLOW_TEST_STATUS", tc.status)
-			t.Setenv("CLAWFLOW_TEST_SECRET", "test-secret")
-			stderr, err := os.Create(filepath.Join(req.Workspace, "stderr"))
+			release, err := acquireOwnership(req.Workspace, c.Profile, "", false)
 			if err != nil {
 				t.Fatal(err)
 			}
-			originalStderr := os.Stderr
-			os.Stderr = stderr
-			t.Cleanup(func() {
-				os.Stderr = originalStderr
-				_ = stderr.Close()
-			})
-			var out bytes.Buffer
-			err = Chat(context.Background(), strings.NewReader("hello\n"), &out, Options{Workspace: req.Workspace})
-			if (err != nil) != (tc.status != "completed") {
-				t.Fatalf("status=%s error=%v", tc.status, err)
-			}
-			if out.String() != tc.want {
-				t.Fatalf("output=%q want=%q", out.String(), tc.want)
-			}
-			if st, err := stderr.Stat(); err != nil || st.Size() != 0 {
-				t.Fatalf("Chat also wrote to stderr: stat=%v error=%v", st, err)
-			}
+			release()
 		})
 	}
 }
-
-func TestExecuteRoleAndAuthSelection(t *testing.T) {
-	cfg, req, _ := fixture(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".clawflow", "config")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	credentials := "claude_providers:\n  - name: selected\n    enabled: true\n    api_key: selected-secret\n    operator_model: role-specific\n  - name: unused\n    enabled: true\n    api_key: unused-secret\n    operator_model: unused-model\n"
-	if err := os.WriteFile(filepath.Join(dir, "credentials.yaml"), []byte(credentials), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CLAWFLOW_AGH_COMMAND", cfg.Command)
-	t.Setenv("CLAWFLOW_AGH_CONFIG", cfg.ConfigPath)
-	t.Setenv("CLAWFLOW_AGH_NATIVE", cfg.NativeCommand)
-	t.Setenv("CLAWFLOW_AGH_PROFILE", cfg.NativeProfile)
-	t.Setenv("CLAWFLOW_TEST_AGH", "1")
-	t.Setenv("CLAWFLOW_CLAUDE_API_KEY", "")
-	t.Setenv("CLAWFLOW_CLAUDE_OPERATOR_MODEL", "")
-	record := filepath.Join(req.Workspace, "record")
-	t.Setenv("CLAWFLOW_TEST_RECORD", record)
-	_, err := Execute(context.Background(), "hello", Options{Workspace: req.Workspace, Role: "operator"})
+func TestOffloadChatResumesActualSessionOnce(t *testing.T) {
+	_, req := fixture(t)
+	capture := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+	var out bytes.Buffer
+	native := ""
+	err := Chat(context.Background(), strings.NewReader("first\nsecond\n/exit\n"), &out, Options{Workspace: req.Workspace, OnSession: func(id string) { native = id; t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "changed-profile") }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := os.ReadFile(record)
-	var got struct {
-		Request Request `json:"request"`
-		APIKey  string  `json:"api_key"`
+	if strings.Count(out.String(), "Final answer") != 2 || native != "native-actual" {
+		t.Fatalf("out=%s session=%s", out.String(), native)
 	}
-	if err = json.Unmarshal(bytes.TrimSpace(raw), &got); err != nil {
+	raw, _ := os.ReadFile(capture)
+	lines := bytes.Split(bytes.TrimSpace(raw), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatal(string(raw))
+	}
+	for i, line := range lines {
+		var call struct{ Args map[string]string }
+		_ = json.Unmarshal(line, &call)
+		if i == 0 && call.Args["-r"] != "" || i == 1 && call.Args["-r"] != "native-actual" {
+			t.Fatal(string(line))
+		}
+		if call.Args["-p"] != "test-profile" {
+			t.Fatal("chat changed profile during resume")
+		}
+		if call.Args["-w"] != "" || call.Args["-execution-policy"] != "" {
+			t.Fatal("read-only broadened")
+		}
+	}
+}
+func TestOffloadRolesRestrictionsRedactionAndErrors(t *testing.T) {
+	_, req := fixture(t)
+	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "")
+	cfg := []byte("settings:\n  execution:\n    command: " + os.Getenv("CLAWFLOW_OFFLOAD_COMMAND") + "\n    profile: base\n    role_profiles:\n      chat: chat-profile\n")
+	path := filepath.Join(os.Getenv("HOME"), ".clawflow", "config", "config.yaml")
+	_ = os.MkdirAll(filepath.Dir(path), 0700)
+	_ = os.WriteFile(path, cfg, 0600)
+	_ = os.Unsetenv("CLAWFLOW_OFFLOAD_PROFILE")
+	capture := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+	t.Setenv("TEST_API_KEY", "sensitive-value")
+	t.Setenv("OFFLOAD_TEST_TEXT", "answer sensitive-value")
+	t.Setenv("OFFLOAD_TEST_ERROR", "unsupported_tools")
+	result, err := Execute(context.Background(), "task", Options{Workspace: req.Workspace, Role: "chat", ToolsDisabled: true, DisallowedTools: []string{"Edit", "Write"}})
+	if !IsKind(err, "unsupported_tools") || strings.Contains(result.Text, "sensitive-value") {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	raw, _ := os.ReadFile(capture)
+	var call struct{ Args map[string]string }
+	_ = json.Unmarshal(raw, &call)
+	if call.Args["-p"] != "chat-profile" || call.Args["-tools-disabled"] != "true" || call.Args["-disallowed-tools"] != "Edit,Write" || call.Args["-m"] != "" {
+		t.Fatal(string(raw))
+	}
+}
+func TestOffloadConfigurationRequired(t *testing.T) {
+	c, _ := fixture(t)
+	c.Profile = ""
+	if ValidateConfig(c) == nil {
+		t.Fatal("implicit profile")
+	}
+	c.Profile = "test"
+	c.CodexSandbox = "unrestricted"
+	if ValidateConfig(c) == nil {
+		t.Fatal("invalid sandbox")
+	}
+}
+func TestDuplicateJSONKeysRejected(t *testing.T) {
+	if validJSON([]byte(`{"x":1,"x":2}`)) {
+		t.Fatal("duplicate accepted")
+	}
+}
+
+func TestOffloadExplicitModelToolsAndInstructions(t *testing.T) {
+	_, req := fixture(t)
+	capture := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+	if err := os.WriteFile(filepath.Join(req.Workspace, "AGENTS.md"), []byte("Project-specific rule"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got.Request.Model != "role-specific" || got.APIKey != "selected-secret" || bytes.Count(raw, []byte("\n")) != 1 {
-		t.Fatal("provider policy changed or replayed")
+	_, err := Execute(context.Background(), "task", Options{Workspace: req.Workspace, Role: "operator", Model: "explicit-model", Instructions: strings.Repeat("instruction ", 1800), AllowedTools: []string{"Read", "Grep"}})
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestRequestCannotContainSecret(t *testing.T) {
-	cfg, req, env := fixture(t)
-	req.Instructions = "credential secret-token-value"
-	_, err := Run(context.Background(), cfg, req, append(env, "API_TOKEN=secret-token-value"), nil, nil)
-	if err == nil {
-		t.Fatal("secret request accepted")
+	raw, _ := os.ReadFile(capture)
+	var call struct {
+		Args         map[string]string
+		Instructions string
 	}
-}
-
-func TestChatIdleCancellation(t *testing.T) {
-	cfg, req, _ := fixture(t)
-	t.Setenv("CLAWFLOW_AGH_COMMAND", cfg.Command)
-	t.Setenv("CLAWFLOW_AGH_CONFIG", cfg.ConfigPath)
-	t.Setenv("CLAWFLOW_AGH_NATIVE", cfg.NativeCommand)
-	t.Setenv("CLAWFLOW_AGH_PROFILE", cfg.NativeProfile)
-	in, w := io.Pipe()
-	defer in.Close()
-	defer w.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := Chat(ctx, in, io.Discard, Options{Workspace: req.Workspace}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("idle cancellation: %v", err)
-	}
-}
-
-func TestDelayedGracefulCancellation(t *testing.T) {
-	if terminateGrace < 8*time.Second {
-		t.Fatal("ACP cancellation grace is too short")
-	}
-	cfg, req, env := fixture(t)
-	req.TimeoutMS = 20000
-	ready := filepath.Join(req.Workspace, "ready")
-	cleanup := filepath.Join(req.Workspace, "cleanup")
-	env = append(env, "CLAWFLOW_TEST_MODE=delayed-cleanup", "CLAWFLOW_TEST_READY="+ready, "CLAWFLOW_TEST_CLEANUP="+cleanup)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	type outcome struct {
-		result Result
-		err    error
-	}
-	done := make(chan outcome, 1)
-	go func() { r, err := Run(ctx, cfg, req, env, nil, nil); done <- outcome{r, err} }()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("fake AGH did not install its signal handler")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	cancel()
-	select {
-	case got := <-done:
-		if _, err := os.Stat(cleanup); err != nil {
-			t.Fatal("AGH was killed before delayed native cleanup completed")
-		}
-		if !errors.Is(got.err, context.Canceled) || got.result.Status != "canceled" || got.result.Text != "cleanup complete" {
-			t.Fatalf("canceled final result became success or was lost: %+v %v", got.result, got.err)
-		}
-	case <-time.After(DefaultTerminateGrace + 5*time.Second):
-		t.Fatal("cancellation did not finish")
-	}
-}
-
-func TestExplicitFinalTextWinsOverEarlierOutcome(t *testing.T) {
-	_, req, _ := fixture(t)
-	var stream bytes.Buffer
-	enc := json.NewEncoder(&stream)
-	_ = enc.Encode(Event{Version: 1, RequestID: req.RequestID, Seq: 1, Type: "observation", Observation: &Observation{Type: "text_delta", Delta: "Earlier answer\n<!-- clawflow:outcome=done -->"}})
-	_ = enc.Encode(Event{Version: 1, RequestID: req.RequestID, Seq: 2, Type: "observation", Observation: &Observation{Type: "tool_start", Message: "Read"}})
-	_ = enc.Encode(Event{Version: 1, RequestID: req.RequestID, Seq: 3, Type: "result", Result: &Result{Status: "completed", Text: "Final answer without an outcome marker", Model: req.Model, SessionKey: req.SessionKey, NativeSessionID: "native-distinct", Usage: json.RawMessage("null")}})
-	got, err := parseStream(&stream, req, nil, nil, nil)
-	if err != nil || got.Text != "Final answer without an outcome marker" {
-		t.Fatalf("explicit final answer overwritten: %q %v", got.Text, err)
+	_ = json.Unmarshal(raw, &call)
+	if call.Args["-m"] != "explicit-model" || call.Args["-allowed-tools"] != "Read,Grep" || !strings.Contains(call.Instructions, "Project-specific rule") || len(call.Instructions) < 16000 {
+		t.Fatal("explicit execution input lost")
 	}
 }

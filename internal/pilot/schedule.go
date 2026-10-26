@@ -307,8 +307,7 @@ func WakeOne(ctx context.Context, projectName string, timeout time.Duration) err
 }
 
 // wake builds the digest for one project, constructs the Pilot prompt,
-// and invokes Agent-Host. The Pilot's stdout is streamed to the user's
-// stderr by operator.RunAgentHost; we additionally echo the parsed
+// and invokes Offload. We echo the authoritative parsed
 // PILOT-RESULT line so the run summary reads cleanly.
 //
 // Each wake is persisted to ~/.clawflow/data/pilot-runs/<project>/<ts>/
@@ -353,7 +352,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		Status:    "running",
 	}
 	_ = snapshot.WritePilotRunMeta(runDir, meta)
-	lg.Info("pilot/start", "project", p.Name, "model", config.ResolveModelForRole(creds, config.RoleOperator), "timeout", timeout)
+	lg.Info("pilot/start", "project", p.Name, "role", config.RoleOperator, "timeout", timeout)
 
 	// Refresh CLAUDE.md from current project.yaml + cfg.Repos before
 	// every wake. `claude -p` will auto-load it from the workdir, giving
@@ -369,7 +368,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	recent := pilotRecentSummaries(p.Name, 3)
 
 	prompt := chat.BuildPilotContext(p.Name, contextMD, deploymentMD, recent, digests, cfg.Settings.Language)
-	model := config.ResolveModelForRole(creds, config.RoleOperator)
+	role := config.RoleOperator
 	workdir := project.ProjectDir(p.Name)
 
 	eventsFile, _ := os.Create(filepath.Join(runDir, "events.jsonl"))
@@ -391,47 +390,15 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		defer os.Unsetenv(budget.EnvPath)
 	}
 
-	output, err := operator.RunAgentHost(ctx, prompt, workdir, timeout, eventsFile, model)
+	output, err := operator.RunOffload(ctx, prompt, workdir, timeout, eventsFile, role)
 	if eventsFile != nil {
 		_ = eventsFile.Close()
 	}
 
-	// A billing cap (402) is the one failure where whatever the wake already
-	// produced is still trustworthy: it interrupts the work that comes NEXT,
-	// it doesn't corrupt the fenced blocks already written. The
-	// raw AGH evidence also retains streamed partial text. Read it
-	// back so a wake that got as far as writing PILOT-RESULT / duties /
-	// context.md keeps them instead of being recorded as a blank failure
-	// (issue #320).
+	// Offload progress is sanitized metadata, never a recoverable transcript.
+	// Only the authoritative stdout result can supply partial work.
 	costLimited := err != nil && (errors.Is(err, operator.ErrCostLimit) || operator.IsCostLimitError(err, output))
-	if costLimited && strings.TrimSpace(output) == "" {
-		if raw, rerr := os.ReadFile(filepath.Join(runDir, "events.jsonl")); rerr == nil {
-			if salvaged := strings.TrimSpace(chat.CollectAssistantText(string(raw))); salvaged != "" {
-				output = salvaged
-				fmt.Fprintf(os.Stderr, "[pilot] %s: cost limit hit — salvaged %d bytes of partial output from events.jsonl\n", p.Name, len(salvaged))
-				lg.Info("pilot/salvage", "project", p.Name, "reason", "cost-limit", "bytes", len(salvaged))
-			}
-		}
-	}
-
-	// Hitting our own --max-budget-usd ceiling always needs the full
-	// transcript, not just the empty-output check the cost-limit branch uses
-	// above: the result text can contain only the final assistant response,
-	// while the raw AGH observations retain the full streamed text. A wake that wrote
-	// its context.md block several turns before the final PILOT-RESULT turn
-	// would otherwise lose that block even though output is non-empty. Always
-	// re-read the full transcript from events.jsonl and prefer it — it is a
-	// strict superset of the single final turn.
 	budgetExceeded := err != nil && errors.Is(err, operator.ErrBudgetExceeded)
-	if budgetExceeded {
-		if raw, rerr := os.ReadFile(filepath.Join(runDir, "events.jsonl")); rerr == nil {
-			if salvaged := strings.TrimSpace(chat.CollectAssistantText(string(raw))); salvaged != "" {
-				output = salvaged
-				fmt.Fprintf(os.Stderr, "[pilot] %s: budget cap hit — salvaged %d bytes of full transcript from events.jsonl\n", p.Name, len(salvaged))
-				lg.Info("pilot/salvage", "project", p.Name, "reason", "budget-capped", "bytes", len(salvaged))
-			}
-		}
-	}
 
 	if budgetPath != "" {
 		if s, rerr := budget.Read(budgetPath); rerr == nil {
@@ -611,7 +578,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 //     account-level condition — the wake dies in ~4 seconds at $0 and would do
 //     so for any project — so it gets its own status, exactly as run.go
 //     records for operator runs (#308). Checked FIRST, and via the sentinel
-//     before the text patterns, because RunAgentHost's provider-exhaustion path
+//     before the text patterns, because RunOffload's provider-exhaustion path
 //     returns an empty output, leaving errors.Is as the only reliable signal.
 //   - "budget-capped": the wake hit its own --max-budget-usd ceiling
 //     (Settings.PilotMaxBudgetUSD). Unlike cost-limit this is expected,
@@ -642,7 +609,7 @@ func classifyWakeStatus(err error, output string) string {
 // extractContextMD pulls the last fenced ```context.md block out of a wake's
 // output, accepting both shapes the value can take:
 //
-//   - plain assistant text — what operator.RunAgentHost returns, and what the
+//   - plain assistant text — what operator.RunOffload returns, and what the
 //     cost-limit salvage above reconstructs from events.jsonl
 //   - raw stream-json — the shape chat.ExtractLastContextMD expects
 //

@@ -3,10 +3,10 @@ package commands
 import (
 	"context"
 	"fmt"
+	"github.com/zhoushoujianwork/clawflow/internal/chat"
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/clawflow/internal/chat"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
@@ -23,7 +23,7 @@ func NewChatCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "chat",
 		Short: "Interactive AI chat with repo/issue context",
-		Long: `Start a plain text AGH conversation with repository or issue context.
+		Long: `Start a plain text Offload conversation with repository or issue context.
 Each invocation fetches current context and creates a fresh logical session.
 Enter one message per line; later turns resume that same session.
 Use /exit, EOF or Ctrl-C to leave. Native TUI and image paste are not supported.
@@ -59,10 +59,8 @@ Examples:
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "repository (owner/repo)")
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number for issue-level chat")
-	// Empty default means "use whatever the first enabled provider
-	// configured in its chat slot" — resolved below via
-	// config.ResolveModelForRole. An explicit --model on the CLI still wins.
-	cmd.Flags().StringVar(&model, "model", "", "model to request from AGH (default: configured chat model)")
+	// An empty model lets the selected Offload profile choose.
+	cmd.Flags().StringVar(&model, "model", "", "explicit model override (default: Offload profile model)")
 	// Empty default means "use chat_default_mode from credentials.yaml" —
 	// resolved below via Credentials.EffectiveChatDefaultMode(). Only
 	// applies to issue-level chat (--issue N); repo-level chat is always
@@ -86,7 +84,6 @@ func runChat(ctx context.Context, repo string, issueNum int, model string, modeF
 	//      no kill switch — so two clicks while the first window is
 	//      still open would pit two claude processes against the same
 	//      jsonl ("Session ID already in use" or worse).
-	sessionID := chat.NewSessionID(repo, issueNum)
 
 	// Working directory: prefer the repo's local clone so claude can
 	// read code in-place. When no local_path is configured we fall
@@ -97,15 +94,6 @@ func runChat(ctx context.Context, repo string, issueNum int, model string, modeF
 	workdir := repoCfg.LocalPath
 	if workdir == "" {
 		workdir = os.TempDir()
-	}
-
-	// Resolve the model: explicit --model > first enabled provider's
-	// chat slot > built-in default. We resolve here rather than at
-	// flag-parse time so a provider edit takes effect on the next chat
-	// without rebuilding the binary.
-	if model == "" {
-		creds, _ := config.LoadCredentials()
-		model = config.ResolveModelForRole(creds, config.RoleChat)
 	}
 
 	// Resolve the issue chat mode: explicit --mode > credentials.yaml
@@ -148,7 +136,11 @@ func runChat(ctx context.Context, repo string, issueNum int, model string, modeF
 	if issueNum == 0 || modeFlag != "edit" {
 		disallowed = []string{"Edit", "Write", "NotebookEdit"}
 	}
-	return execution.Chat(ctx, os.Stdin, os.Stdout, execution.Options{Workspace: workdir, Model: model, Role: config.RoleChat, SessionKey: sessionID, Instructions: systemCtx, PermissionMode: "bypassPermissions", DisallowedTools: disallowed})
+	permission := "default"
+	if issueNum > 0 && modeFlag == "edit" {
+		permission = "bypassPermissions"
+	}
+	return execution.Chat(ctx, os.Stdin, os.Stdout, execution.Options{Workspace: workdir, Model: model, Role: config.RoleChat, Instructions: systemCtx, PermissionMode: permission, DisallowedTools: disallowed})
 }
 
 func buildIssueChatContext(client vcs.Client, repo string, issueNum int, mode string, lang string) (string, error) {

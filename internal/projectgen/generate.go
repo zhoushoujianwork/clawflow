@@ -1,5 +1,5 @@
 // Package projectgen builds the prompt for a project's context.md and
-// invokes `agent-host execute` to produce it. Shared between the CLI's
+// invokes `offload` to produce it. Shared between the CLI's
 // `clawflow project generate` subcommand and the dashboard's
 // /api/project/generate-context endpoint so both paths produce
 // byte-identical output.
@@ -19,9 +19,9 @@ import (
 )
 
 // Generate scans the project's member repos, builds a prompt, runs
-// `agent-host execute`, writes the result to context.md, and returns the
+// `offload`, writes the result to context.md, and returns the
 // content that was written. `model` may be empty to use the default
-// chat model from credentials.
+// model from the selected Offload profile.
 //
 // `instructions` is optional steering from the user (e.g. "focus on
 // API surface", "use bullet points"). When non-empty, the existing
@@ -48,20 +48,15 @@ func Generate(name, model, instructions string) (string, error) {
 		return "", fmt.Errorf("no repos with local_path configured — set local_path in config for at least one member repo")
 	}
 
-	if model == "" {
-		creds, _ := config.LoadCredentials()
-		model = config.ResolveModelForRole(creds, config.RoleChat)
-	}
-
 	result, err := execution.Execute(context.Background(), prompt, execution.Options{Model: model, Role: config.RoleChat, Timeout: time.Hour, ToolsDisabled: true})
 	if err != nil {
-		return "", fmt.Errorf("AGH generate failed: %w", err)
+		return "", fmt.Errorf("Offload generate failed: %w", err)
 	}
 	output := result.Text
 
 	content := sanitizeOutput(output)
 	if content == "" {
-		return "", fmt.Errorf("AGH returned empty output")
+		return "", fmt.Errorf("Offload returned empty output")
 	}
 
 	if err := project.WriteContext(name, content); err != nil {
@@ -71,9 +66,9 @@ func Generate(name, model, instructions string) (string, error) {
 }
 
 // GenerateDeployment scans the project's member repos for CI workflow files
-// and existing context.md, builds a prompt, runs `agent-host execute`, writes the
+// and existing context.md, builds a prompt, runs `offload`, writes the
 // result to deployment.md, and returns the content that was written.
-// `model` may be empty to use the default chat model from credentials.
+// `model` may be empty to use the default model from the selected Offload profile.
 func GenerateDeployment(name, model string) (string, error) {
 	p, err := project.Get(name)
 	if err != nil {
@@ -93,20 +88,15 @@ func GenerateDeployment(name, model string) (string, error) {
 		return "", fmt.Errorf("no repos with local_path configured — set local_path in config for at least one member repo")
 	}
 
-	if model == "" {
-		creds, _ := config.LoadCredentials()
-		model = config.ResolveModelForRole(creds, config.RoleChat)
-	}
-
 	result, err := execution.Execute(context.Background(), prompt, execution.Options{Model: model, Role: config.RoleChat, Timeout: time.Hour, ToolsDisabled: true})
 	if err != nil {
-		return "", fmt.Errorf("AGH generate failed: %w", err)
+		return "", fmt.Errorf("Offload generate failed: %w", err)
 	}
 	output := result.Text
 
 	content := sanitizeOutput(output)
 	if content == "" {
-		return "", fmt.Errorf("AGH returned empty output")
+		return "", fmt.Errorf("Offload returned empty output")
 	}
 
 	if err := project.WriteDeployment(name, content); err != nil {

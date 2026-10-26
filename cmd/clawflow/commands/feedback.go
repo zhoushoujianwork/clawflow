@@ -49,10 +49,10 @@ func runFeedback(ctx context.Context) error {
 		return fmt.Errorf("no GitHub token configured — run `clawflow config set-token <ghp_...>` first")
 	}
 
-	model := config.ResolveModelForRole(creds, config.RoleChat)
+	model := ""
 	systemPrompt := buildFeedbackSystemPrompt()
 
-	return execution.Chat(ctx, os.Stdin, os.Stdout, execution.Options{Workspace: os.TempDir(), Model: model, Role: config.RoleChat, Instructions: systemPrompt, PermissionMode: "bypassPermissions", DisallowedTools: []string{"Edit", "Write", "NotebookEdit"}})
+	return execution.Chat(ctx, os.Stdin, os.Stdout, execution.Options{Workspace: os.TempDir(), Model: model, Role: config.RoleChat, Instructions: systemPrompt, PermissionMode: "default", DisallowedTools: []string{"Edit", "Write", "NotebookEdit"}})
 }
 
 func buildFeedbackSystemPrompt() string {

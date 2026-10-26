@@ -68,13 +68,12 @@ type Repo struct {
 	UpdatedBy string `yaml:"updated_by,omitempty"`
 }
 
-// ExecutionSettings identifies an explicitly configured Agent-Host execution runtime.
-// Paths are machine-local and must never contain credentials.
+// ExecutionSettings selects machine-local Offload profiles. Profiles own model authentication.
 type ExecutionSettings struct {
-	Command       string `yaml:"command,omitempty"`
-	ConfigPath    string `yaml:"config_path,omitempty"`
-	NativeCommand string `yaml:"native_command,omitempty"`
-	NativeProfile string `yaml:"native_profile,omitempty"`
+	Command      string            `yaml:"command,omitempty" json:"command"`
+	Profile      string            `yaml:"profile,omitempty" json:"profile"`
+	RoleProfiles map[string]string `yaml:"role_profiles,omitempty" json:"role_profiles,omitempty"`
+	CodexSandbox string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
 }
 
 // Settings holds global ClawFlow settings.
@@ -162,15 +161,9 @@ type Settings struct {
 	// Synced via Gist as a shared preference.
 	Language string `yaml:"language,omitempty"`
 
-	// PilotMaxBudgetUSD caps the dollar spend of a single Pilot wake via
-	// `claude -p --max-budget-usd`. Unlike the wall-clock --timeout (shared
-	// with every operator), this bounds cost directly: without it, a wake
-	// that wanders into a long tool-call loop is only stopped by the 60min
-	// deadline, which kills the subprocess outright and leaves PILOT-RESULT
-	// empty — the run is fully wasted. --max-budget-usd instead lets claude
-	// see its remaining budget each turn and wrap up with a PILOT-RESULT
-	// before hitting the ceiling, so most of the wake's work still lands.
-	// 0 or unset uses DefaultPilotMaxBudgetUSD.
+	// PilotMaxBudgetUSD preserves the requested per-wake dollar cap. Direct
+	// Offload currently rejects positive budgets before launching a provider.
+	// This constraint is never silently removed; zero retains the legacy default.
 	PilotMaxBudgetUSD float64 `yaml:"pilot_max_budget_usd,omitempty"`
 }
 
@@ -287,7 +280,7 @@ type ClaudeProvider struct {
 	EvalModel     string `yaml:"eval_model,omitempty"`     // used by evaluate-* operators
 	OperatorModel string `yaml:"operator_model,omitempty"` // used by every other operator
 	LightModel    string `yaml:"light_model,omitempty"`    // used by lightweight operators (reply-*, track-progress)
-	// MaxOutputTokens is a retired compatibility field. Native token policy is owned by AGH.
+	// MaxOutputTokens is a retired compatibility field. Native token policy is owned by Offload.
 	MaxOutputTokens int `yaml:"max_output_tokens,omitempty"`
 	// Deprecated: Model is the legacy single-slot override. Non-empty on
 	// load triggers migration into the three role-specific fields above.
@@ -388,7 +381,7 @@ type Credentials struct {
 	// Empty list + legacy fields triggers migration.
 	ClaudeProviders []ClaudeProvider `yaml:"claude_providers,omitempty"`
 
-	// FailoverPatterns is a retired compatibility field. AGH executions never replay.
+	// FailoverPatterns is a retired compatibility field. Offload executions never replay.
 	// Existing values remain readable but are not execution policy.
 	FailoverPatterns []string `yaml:"failover_patterns,omitempty"`
 
@@ -528,7 +521,7 @@ func (c *Credentials) EffectiveChatDefaultMode() string {
 //  2. First enabled provider's per-role override.
 //  3. Built-in DefaultModelForRole.
 //
-// All execution surfaces use this caller policy and pass a single selected model to AGH.
+// Retained for reading legacy settings only. Direct Offload execution does not use this resolver.
 // No execution is replayed against another provider.
 func ResolveModelForRole(c *Credentials, role string) string {
 	if c != nil {
@@ -811,8 +804,8 @@ func (c *Credentials) EffectiveFailoverPatterns() []string {
 // CLAWFLOW_CLAUDE_BASE_URL (the CLAWFLOW_ prefix avoids conflict with
 // a user-set ANTHROPIC_API_KEY meant for their interactive shell).
 //
-// On load, if ClaudeProviders is empty but legacy single-provider fields are
-// set, they are automatically migrated into ClaudeProviders[0] and persisted.
+// Legacy Claude fields remain readable for compatibility but are never migrated
+// or persisted by loading. Direct execution uses Offload profiles.
 func LoadCredentials() (*Credentials, error) {
 	c := &Credentials{}
 	data, err := os.ReadFile(CredentialsPath())
@@ -833,27 +826,11 @@ func LoadCredentials() (*Credentials, error) {
 	// Env-var model overrides feed into ResolveModelForRole (via the
 	// unexported envChatModel/envEvalModel/envOperatorModel fields) so
 	// they take precedence over per-provider slots for direct-spawn
-	// callers. AGH receives one selected model; no provider replay occurs.
+	// callers. Direct Offload execution ignores these legacy model fields.
 	c.envChatModel = os.Getenv("CLAWFLOW_CLAUDE_CHAT_MODEL")
 	c.envEvalModel = os.Getenv("CLAWFLOW_CLAUDE_EVAL_MODEL")
 	c.envOperatorModel = os.Getenv("CLAWFLOW_CLAUDE_OPERATOR_MODEL")
 	c.envLightModel = os.Getenv("CLAWFLOW_CLAUDE_LIGHT_MODEL")
-
-	// Auto-migrate legacy single-provider fields to the providers list,
-	// seed the built-in OAuth fallback entry on first load, and push old
-	// global/per-provider model fields into the current per-role slots.
-	// All three are idempotent; a save failure is non-fatal because the
-	// operations will be retried on the next load.
-	mutated := MigrateLegacyProvider(c)
-	if SeedDefaultProvider(c) {
-		mutated = true
-	}
-	if MigrateProviderModels(c) {
-		mutated = true
-	}
-	if mutated {
-		_ = SaveCredentials(c)
-	}
 
 	return c, nil
 }
