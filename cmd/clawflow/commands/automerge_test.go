@@ -201,7 +201,7 @@ func TestSweepAutoMergePRs_DisabledCostsNoAPICalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := &sweepFake{openPRs: []vcs.PR{{Number: 1, Body: "Closes #2"}}}
-	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: false})
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: false}, 0)
 	if f.listOpenPRCalls != 0 {
 		t.Errorf("expected 0 ListOpenPRs calls when auto_merge is off, got %d", f.listOpenPRCalls)
 	}
@@ -218,7 +218,7 @@ func TestSweepAutoMergePRs_MergesCleanCandidate(t *testing.T) {
 	f := &sweepFake{openPRs: []vcs.PR{
 		{Number: 273, Title: "fix: thing", Body: "Closes #272", HeadBranch: "fix/issue-272"},
 	}}
-	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true, BaseBranch: "main"})
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true, BaseBranch: "main"}, 0)
 	if len(f.merged) != 1 || f.merged[0] != 273 {
 		t.Fatalf("expected PR 273 merged, got %v", f.merged)
 	}
@@ -239,7 +239,7 @@ func TestSweepAutoMergePRs_DirtyIsSilentlySkipped(t *testing.T) {
 		openPRs:      []vcs.PR{{Number: 10, Body: "Closes #9"}},
 		mergeability: map[int]vcs.MergeStatus{10: vcs.MergeStatusConflict},
 	}
-	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true})
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
 	if len(f.merged) != 0 {
 		t.Errorf("expected no merge for dirty PR, got %v", f.merged)
 	}
@@ -286,7 +286,7 @@ func TestSweepAutoMergePRs_NotCleanReasonInRunLog(t *testing.T) {
 		openPRs:      []vcs.PR{{Number: 10, Body: "Closes #9"}},
 		mergeability: map[int]vcs.MergeStatus{10: vcs.MergeStatusConflict},
 	}
-	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true})
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
 	log := readLog()
 	if !strings.Contains(log, "run/automerge_skip") || !strings.Contains(log, "reason=not_clean") || !strings.Contains(log, "status=conflict") {
 		t.Errorf("expected a run/automerge_skip line with reason=not_clean status=conflict, got:\n%s", log)
@@ -309,7 +309,7 @@ func TestSweepAutoMergePRs_LockedReasonInRunLog(t *testing.T) {
 		t.Fatalf("AcquireLock: %v", err)
 	}
 	t.Cleanup(func() { snapshot.ReleaseLock("o/r", 9) })
-	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true})
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
 	log := readLog()
 	if !strings.Contains(log, "run/automerge_skip") || !strings.Contains(log, "reason=locked") {
 		t.Errorf("expected a run/automerge_skip line with reason=locked, got:\n%s", log)
@@ -325,7 +325,7 @@ func TestSweepAutoMergePRs_SkipsPRsWithoutClosingKeyword(t *testing.T) {
 		{Number: 1, Title: "chore: human WIP", Body: "just some work"},
 		{Number: 2, Title: "WIP: not ready", Body: "Closes #3"},
 	}}
-	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true})
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
 	if f.mergeabilityCall != 0 {
 		t.Errorf("expected no mergeability calls for non-candidates, got %d", f.mergeabilityCall)
 	}
@@ -344,7 +344,7 @@ func TestSweepAutoMergePRs_CapsMergesPerPass(t *testing.T) {
 		{Number: 2, Body: "Closes #12", HeadBranch: "b"},
 		{Number: 3, Body: "Closes #13", HeadBranch: "c"},
 	}}
-	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true})
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
 	if len(f.merged) != sweepMaxMergesPerPass {
 		t.Errorf("expected at most %d merge(s) per pass, got %v", sweepMaxMergesPerPass, f.merged)
 	}
@@ -362,7 +362,7 @@ func TestSweepAutoMergePRs_FailureCommentIsDeduped(t *testing.T) {
 			"🤖 Auto-merge failed for PR #5: HTTP 403: Resource not accessible by integration",
 		},
 	}
-	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true})
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
 	if len(f.comments) != 0 {
 		t.Errorf("expected the duplicate failure comment to be suppressed, got %v", f.comments)
 	}
@@ -377,7 +377,7 @@ func TestSweepAutoMergePRs_FailureCommentPostedOnce(t *testing.T) {
 		openPRs:  []vcs.PR{{Number: 5, Body: "Closes #4"}},
 		mergeErr: errors.New("HTTP 403: Resource not accessible by integration"),
 	}
-	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true})
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
 	if len(f.comments) != 1 || !strings.Contains(f.comments[0], "Auto-merge failed for PR #5") {
 		t.Fatalf("expected one failure comment carrying the Play 4 marker, got %v", f.comments)
 	}
@@ -398,7 +398,7 @@ func TestSweepAutoMergePRs_PendingCIDoesNotBlock(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		sweepAutoMergePRs(context.Background(), f, "o/r",
-			config.Repo{AutoMerge: true, CIRequired: true, CITimeout: 600})
+			config.Repo{AutoMerge: true, CIRequired: true, CITimeout: 600}, 0)
 		close(done)
 	}()
 	select {

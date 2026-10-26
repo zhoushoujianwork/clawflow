@@ -231,7 +231,7 @@ func TestAcceptanceGateInlineAndSweepUseConditionalMerge(t *testing.T) {
 			f, rc := acceptanceFixture(t)
 			produceAcceptance(t, f)
 			if mode == "sweep" {
-				sweepAutoMergePRs(context.Background(), f, "o/r", rc)
+				sweepAutoMergePRs(context.Background(), f, "o/r", rc, 0)
 			} else {
 				runPostAutomation(context.Background(), &runJob{repo: "o/r", repoCfg: rc, client: f, op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 42}}, "agent-implemented", "https://github.com/o/r/pull/11", "test")
 			}
