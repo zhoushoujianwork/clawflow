@@ -253,7 +253,7 @@ scheduler and auto-sync; it is not a read-only status command.
 
 ```bash
 clawflow status
-clawflow issue view --repo <R> --issue <N>
+clawflow issue view <N> --repo <R> --json
 clawflow pr list --repo <R> --state open
 clawflow repo disable <R>
 clawflow project automation disable <project>
@@ -276,8 +276,9 @@ clawflow pr list/create/view/comment/merge --repo <R>
 clawflow label add/remove --repo <R> --issue <N> --label <L>
 ```
 
-Read subcommand help for required write fields. Search related historical
-issues before creating duplicates. `repo remove <R>` only unregisters the repo;
+Read subcommand help for required write fields. `issue view` takes a positional issue number;
+`issue comment-list` instead uses `--issue <N>` and supports `--json`.
+Search related historical issues before creating duplicates. `repo remove <R>` only unregisters the repo;
 `project delete <project>` deletes its metadata; neither is a history reset.
 
 Report exact commands, exit status, resulting enabled/automation/sync state,
