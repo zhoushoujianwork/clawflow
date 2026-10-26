@@ -247,6 +247,7 @@ type RunMeta struct {
 	Repo        string    `json:"repo"`
 	IssueNumber int       `json:"issue_number"`
 	IssueTitle  string    `json:"issue_title,omitempty"`
+	IssueBody   string    `json:"issue_body"`
 	IssueState  string    `json:"issue_state,omitempty"` // "open" | "closed"
 	StartedAt   time.Time `json:"started_at"`
 	// EndedAt is a pointer so a nil value omits the JSON key for a still-
@@ -254,7 +255,7 @@ type RunMeta struct {
 	// time.Time (`omitempty` only skips nil/0/""/empty), so the wire format
 	// would carry "0001-01-01T00:00:00Z" and the dashboard's duration math
 	// would render it as a giant negative offset.
-	EndedAt     *time.Time `json:"ended_at,omitempty"`
+	EndedAt *time.Time `json:"ended_at,omitempty"`
 	// Status is one of "running", "finalizing", "success", "failed", "skipped",
 	// "cancelled", "no-marker", "disallowed-outcome", "marker-recovered",
 	// "skipped-empty".
@@ -284,7 +285,7 @@ type RunMeta struct {
 	// circuit breaker's failure list below, but it is kept separate because the
 	// recovery window is the provider's next billing period rather than the
 	// next few minutes (issue #308).
-	Status  string `json:"status"`
+	Status string `json:"status"`
 	// Stage is the fine-grained lifecycle phase WITHIN the coarse Status.
 	// While Status=="running" it advances through the operator lifecycle so
 	// the dashboard can show intermediate progress instead of a frozen
@@ -305,14 +306,14 @@ type RunMeta struct {
 // "result" event. All fields are summable across runs so callers can build
 // aggregates without re-parsing events.jsonl.
 type Usage struct {
-	DurationMs               int64                  `json:"duration_ms"`
-	NumTurns                 int                    `json:"num_turns"`
-	TotalCostUSD             float64                `json:"total_cost_usd"`
-	InputTokens              int64                  `json:"input_tokens"`
-	OutputTokens             int64                  `json:"output_tokens"`
-	CacheReadInputTokens     int64                  `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int64                  `json:"cache_creation_input_tokens"`
-	ModelUsage               map[string]ModelUsage  `json:"model_usage,omitempty"`
+	DurationMs               int64                 `json:"duration_ms"`
+	NumTurns                 int                   `json:"num_turns"`
+	TotalCostUSD             float64               `json:"total_cost_usd"`
+	InputTokens              int64                 `json:"input_tokens"`
+	OutputTokens             int64                 `json:"output_tokens"`
+	CacheReadInputTokens     int64                 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64                 `json:"cache_creation_input_tokens"`
+	ModelUsage               map[string]ModelUsage `json:"model_usage,omitempty"`
 	// Estimated marks a Usage that was summed from per-message `assistant`
 	// events instead of read off the terminal "result" event. Runs killed
 	// mid-flight (deadline, SIGKILL, OOM) never emit a result event, and
@@ -423,7 +424,7 @@ func ExtractUsage(eventsPath string) (*Usage, error) {
 		line := sc.Bytes()
 		text := string(line)
 		var envelope struct {
-			Version int `json:"version"`
+			Version   int    `json:"version"`
 			RequestID string `json:"request_id"`
 		}
 		// AGH usage is explicitly unknown, including partial observations.
@@ -572,7 +573,7 @@ type PeriodSummary struct {
 	ByOperator  map[string]UsageAggregate `json:"by_operator"`
 	ByRepo      map[string]UsageAggregate `json:"by_repo"`
 	ByModel     map[string]ModelAggregate `json:"by_model"`
-	DailyTrend  []DailyPoint             `json:"daily_trend"`
+	DailyTrend  []DailyPoint              `json:"daily_trend"`
 }
 
 // DailyPoint is one day's aggregated usage within a billing period.
@@ -931,8 +932,8 @@ func MigrateFailedToCancelled() int {
 		return 0
 	}
 	cancelMarkers := []string{
-		"cancelled by user",            // /api/run/cancel after kill
-		"cleared by cancel",            // /api/run/cancel after dead-PID branch
+		"cancelled by user", // /api/run/cancel after kill
+		"cleared by cancel", // /api/run/cancel after dead-PID branch
 	}
 	var migrated int
 	_ = filepath.WalkDir(runsRoot, func(path string, d os.DirEntry, err error) error {
@@ -2028,11 +2029,11 @@ type PilotIssueDigest struct {
 // to one of Pilot's standing responsibilities — see internal/chat
 // pilot prompt for the contract Pilot agrees to honour.
 type PilotDuties struct {
-	PRTriage        PilotDuty        `json:"pr_triage"`
-	Monitoring      PilotDuty        `json:"monitoring"`
-	DocSync         PilotDuty        `json:"doc_sync"`
-	IssueDigest     PilotIssueDigest `json:"issue_digest"`
-	BacklogHygiene  PilotDuty        `json:"backlog_hygiene"`
+	PRTriage       PilotDuty        `json:"pr_triage"`
+	Monitoring     PilotDuty        `json:"monitoring"`
+	DocSync        PilotDuty        `json:"doc_sync"`
+	IssueDigest    PilotIssueDigest `json:"issue_digest"`
+	BacklogHygiene PilotDuty        `json:"backlog_hygiene"`
 }
 
 // PilotRunDir returns the directory for a single Pilot run.
@@ -2190,7 +2191,7 @@ func collectPilotRunEntries(root string) []PilotRunIndexEntry {
 		relDir := strings.TrimPrefix(filepath.Dir(path), DataDir())
 		out = append(out, PilotRunIndexEntry{
 			PilotRunMeta: m,
-			Path:      "./data" + filepath.ToSlash(relDir) + "/",
+			Path:         "./data" + filepath.ToSlash(relDir) + "/",
 		})
 		return nil
 	})

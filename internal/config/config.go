@@ -22,20 +22,21 @@ func envOrFile(envKey, fileVal string) string {
 
 // Repo holds per-repository settings.
 type Repo struct {
-	Enabled           bool              `yaml:"enabled"`
-	Platform          string            `yaml:"platform,omitempty"` // "github" (default) or "gitlab"
-	BaseURL           string            `yaml:"base_url,omitempty"` // GitLab self-hosted instance URL
-	BaseBranch        string            `yaml:"base_branch"`
-	LocalPath         string            `yaml:"local_path"`
-	Owner             string            `yaml:"owner"`
-	Description       string            `yaml:"description"`
-	AddedAt           string            `yaml:"added_at"`
-	WebhookConfigured bool              `yaml:"webhook_configured"`
-	Labels            map[string]string `yaml:"labels"`
-	TestCommand       string            `yaml:"test_command,omitempty"`
-	CIRequired        bool              `yaml:"ci_required,omitempty"`
-	CITimeout         int               `yaml:"ci_timeout,omitempty"`
-	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
+	Enabled            bool              `yaml:"enabled"`
+	Platform           string            `yaml:"platform,omitempty"` // "github" (default) or "gitlab"
+	BaseURL            string            `yaml:"base_url,omitempty"` // GitLab self-hosted instance URL
+	BaseBranch         string            `yaml:"base_branch"`
+	LocalPath          string            `yaml:"local_path"`
+	Owner              string            `yaml:"owner"`
+	Description        string            `yaml:"description"`
+	AddedAt            string            `yaml:"added_at"`
+	WebhookConfigured  bool              `yaml:"webhook_configured"`
+	Labels             map[string]string `yaml:"labels"`
+	TestCommand        string            `yaml:"test_command,omitempty"`
+	CIRequired         bool              `yaml:"ci_required,omitempty"`
+	CITimeout          int               `yaml:"ci_timeout,omitempty"`
+	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
+	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
 
 	// BoundMachine, when non-empty, restricts processing of this repo to the
 	// machine whose hostname matches this value. Repos with no BoundMachine

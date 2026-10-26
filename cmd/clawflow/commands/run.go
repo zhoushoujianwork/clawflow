@@ -1081,6 +1081,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Repo:        j.repo,
 		IssueNumber: j.sub.Number,
 		IssueTitle:  j.sub.Title,
+		IssueBody:   j.sub.Body,
 		IssueState:  j.sub.State,
 		StartedAt:   startedAt.UTC(),
 		Status:      "running",
@@ -1275,6 +1276,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			Repo:        j.repo,
 			IssueNumber: j.sub.Number,
 			IssueTitle:  j.sub.Title,
+			IssueBody:   j.sub.Body,
 			IssueState:  j.sub.State,
 			StartedAt:   startedAt.UTC(),
 			Status:      "finalizing",
@@ -1362,6 +1364,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Repo:        j.repo,
 		IssueNumber: j.sub.Number,
 		IssueTitle:  j.sub.Title,
+		IssueBody:   j.sub.Body,
 		StartedAt:   startedAt.UTC(),
 		EndedAt:     &endedAt,
 		Summary:     output,
@@ -1539,7 +1542,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	// Apply successful lifecycle follow-up.
 	if rm.Status == "success" {
-		runPostAutomation(j, outcome, output, prefix)
+		runPostAutomation(ctx, j, outcome, output, prefix)
 	}
 
 	switch rm.Status {
@@ -1651,7 +1654,7 @@ func checkCircuitBreaker(j *runJob, prefix string) {
 }
 
 // runPostAutomation handles merge and parent-progress follow-up.
-func runPostAutomation(j *runJob, outcome, output, prefix string) {
+func runPostAutomation(ctx context.Context, j *runJob, outcome, output, prefix string) {
 	// Auto-merge: after implement produces agent-implemented, wait CI then
 	// merge. This is the low-latency path — the PR number comes straight
 	// from the run's stdout. sweepAutoMergePRs is the per-scan backstop for
@@ -1664,6 +1667,7 @@ func runPostAutomation(j *runJob, outcome, output, prefix string) {
 			return
 		}
 		attemptAutoMerge(autoMergeAttempt{
+			ctx:      ctx,
 			client:   j.client,
 			repo:     j.repo,
 			repoCfg:  j.repoCfg,

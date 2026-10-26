@@ -48,6 +48,7 @@ func isDraftPR(title string) bool {
 // (right after implement produced agent-implemented) and the per-scan sweep
 // (sweepAutoMergePRs), so the two can't drift apart. See issue #299.
 type autoMergeAttempt struct {
+	ctx     context.Context
 	client  vcs.Client
 	repo    string
 	repoCfg config.Repo
@@ -118,6 +119,32 @@ func (a autoMergeAttempt) checkCI() vcs.CIStatus {
 // cleanup. Returns true only when the merge landed.
 func attemptAutoMerge(a autoMergeAttempt) bool {
 	fmt.Fprintf(os.Stderr, "%s → auto-merge: PR #%d\n", a.prefix, a.prNum)
+	if a.ctx == nil {
+		a.ctx = context.Background()
+	}
+	if a.ctx.Err() != nil {
+		return false
+	}
+	required, err := acceptanceEnrollment(a.repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s merge blocked: %v\n", a.prefix, err)
+		return false
+	}
+	required = required || a.repoCfg.AcceptanceRequired
+	merge := func() error { return a.client.MergePR(a.repo, a.prNum) }
+	if required {
+		unlock, err := acceptanceLock(a.repo, a.prNum)
+		if err != nil {
+			return false
+		}
+		defer unlock()
+		accepted, _, err := currentAcceptance(a.ctx, a.client, a.repo, a.prNum)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s acceptance blocked: %v; run clawflow acceptance run --repo %s --pr %d\n", a.prefix, err, a.repo, a.prNum)
+			return false
+		}
+		merge = func() error { return conditionalAcceptedMerge(a.ctx, a.client, a.repo, a.prNum, accepted) }
+	}
 
 	if a.repoCfg.CIRequired {
 		switch status := a.checkCI(); status {
@@ -155,7 +182,7 @@ func attemptAutoMerge(a autoMergeAttempt) bool {
 	}
 
 	if err := mergeWithRetry(a.prefix,
-		func() error { return a.client.MergePR(a.repo, a.prNum) },
+		merge,
 		func() (vcs.MergeStatus, error) { return a.client.GetPRMergeability(a.repo, a.prNum) },
 		time.Sleep,
 	); err != nil {
@@ -269,6 +296,7 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 			continue
 		}
 		if attemptAutoMerge(autoMergeAttempt{
+			ctx:      ctx,
 			client:   client,
 			repo:     fullName,
 			repoCfg:  repoCfg,

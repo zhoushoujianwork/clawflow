@@ -89,6 +89,7 @@ func newRepoShowCmd() *cobra.Command {
 			fmt.Printf("repo:         %s\n", ownerRepo)
 			fmt.Printf("status:       %s\n", status)
 			fmt.Printf("ci_required:  %v\n", r.CIRequired)
+			fmt.Printf("acceptance_required: %v\n", r.AcceptanceRequired)
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
 			fmt.Printf("local_path:   %s\n", r.LocalPath)
 			if r.Description != "" {
@@ -314,6 +315,7 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 }
 
 func newRepoSetCmd() *cobra.Command {
+	var acceptanceRequired string
 	var ciRequired string
 	var autoMerge string
 	var primaryProject string
@@ -356,6 +358,9 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			// Validate flags before mutating.
+			if cmd.Flags().Changed("acceptance-required") && acceptanceRequired != "on" && acceptanceRequired != "off" {
+				return fmt.Errorf("--acceptance-required must be on or off")
+			}
 			if cmd.Flags().Changed("ci-required") && ciRequired != "on" && ciRequired != "off" {
 				return fmt.Errorf("--ci-required must be on or off")
 			}
@@ -373,6 +378,9 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			config.TouchRepo(cfg, ownerRepo, func(r config.Repo) config.Repo {
+				if cmd.Flags().Changed("acceptance-required") {
+					r.AcceptanceRequired = acceptanceRequired == "on"
+				}
 				if ciRequired != "" {
 					r.CIRequired = ciRequired == "on"
 				}
@@ -397,6 +405,7 @@ func newRepoSetCmd() *cobra.Command {
 			fmt.Printf("repo %q updated\n", ownerRepo)
 			fmt.Printf("  ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("  auto_merge:   %v\n", r.AutoMerge)
+			fmt.Printf("  acceptance_required: %v\n", r.AcceptanceRequired)
 			if boundMachineSet {
 				if r.BoundMachine == "" {
 					fmt.Printf("  bound_machine: (cleared)\n")
@@ -415,6 +424,7 @@ func newRepoSetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&ciRequired, "ci-required", "", "require successful CI before auto-merge: on or off")
+	cmd.Flags().StringVar(&acceptanceRequired, "acceptance-required", "", "require current independent acceptance before auto-merge: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
