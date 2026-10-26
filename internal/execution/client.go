@@ -458,14 +458,24 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, &Error{Kind: "protocol_policy_mismatch"}
 	}
 	if result.Status != "ok" {
-		return result, &Error{Kind: safeKind(result.ErrorKind)}
+		kind := safeKind(result.ErrorKind)
+		if kind == "execution" && capacityMessage.MatchString(result.Error) {
+			// Fallback until Offload exposes error_kind=capacity: only the fixed
+			// kind is retained, never the raw provider message.
+			kind = "capacity"
+		}
+		return result, &Error{Kind: kind}
 	}
 	return result, nil
 }
 
+// capacityMessage matches provider capacity/overload refusals reported under
+// the generic "execution" kind by Offload versions without a capacity kind.
+var capacityMessage = regexp.MustCompile(`(?i)\bat capacity\b|\boverloaded\b|\bcapacity (?:exceeded|limit)\b`)
+
 func safeKind(s string) string {
 	switch s {
-	case "rate_limit", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "timeout", "canceled", "execution", "launch", "events_io":
+	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "timeout", "canceled", "execution", "launch", "events_io":
 		return s
 	}
 	return "execution"

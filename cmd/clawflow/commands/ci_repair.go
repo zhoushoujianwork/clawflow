@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -163,47 +166,71 @@ func prepareCIRepair(j *runJob, now time.Time) error {
 	return nil
 }
 
+// Limits for the CI repair ledger. Only attempts that reached real repair work
+// consume the repair budget; infrastructure outcomes (see classifyRepairInfra)
+// are released and counted against a separate bounded budget with backoff.
+const (
+	ciRepairMaxAttempts = 3
+	ciRepairMaxInfra    = 5
+	ciRepairCooldown    = 5 * time.Minute
+	ciRepairMaxBackoff  = time.Hour
+)
+
 type ciRepairAttempt struct {
 	Head    string    `json:"head"`
 	Attempt int       `json:"attempt"`
 	At      time.Time `json:"at"`
+	// Released is the infrastructure kind that made this reservation
+	// non-consuming. Empty means the attempt counts against the repair budget.
+	Released string `json:"released,omitempty"`
 }
 type ciRepairLedger struct {
 	Attempts []ciRepairAttempt `json:"attempts"`
+	// NotBefore is the infrastructure backoff deadline for the next reservation.
+	NotBefore time.Time `json:"not_before,omitempty"`
 }
 
-func reserveCIRepair(root, repo string, pr vcs.PR, now time.Time) (int, error) {
-	key := sha256.Sum256([]byte(strings.ToLower(repo)))
-	dir := filepath.Join(root, "ci-repair", hex.EncodeToString(key[:]))
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return 0, err
-	}
-	path := filepath.Join(dir, fmt.Sprintf("pr-%d.json", pr.Number))
-	var ledger ciRepairLedger
-	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return 0, err
-	}
-	if err == nil {
-		if err := json.Unmarshal(data, &ledger); err != nil {
-			return 0, fmt.Errorf("invalid repair ledger: %w", err)
+// counts returns (consumed repair attempts, released infrastructure outcomes).
+func (l ciRepairLedger) counts() (consumed, infra int) {
+	for _, a := range l.Attempts {
+		if a.Released == "" {
+			consumed++
+		} else {
+			infra++
 		}
 	}
-	n := len(ledger.Attempts)
-	if n >= 3 {
-		return 0, fmt.Errorf("CI repair exhausted: 3 total attempts")
+	return
+}
+
+func ciRepairLedgerPath(root, repo string, pr int) (dir, path string) {
+	key := sha256.Sum256([]byte(strings.ToLower(repo)))
+	dir = filepath.Join(root, "ci-repair", hex.EncodeToString(key[:]))
+	return dir, filepath.Join(dir, fmt.Sprintf("pr-%d.json", pr))
+}
+
+func loadCIRepairLedger(path string) (ciRepairLedger, error) {
+	var ledger ciRepairLedger
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return ledger, nil
 	}
-	if n > 0 && now.Sub(ledger.Attempts[n-1].At) < 5*time.Minute {
-		return 0, fmt.Errorf("CI repair cooldown: 5 minutes")
-	}
-	ledger.Attempts = append(ledger.Attempts, ciRepairAttempt{pr.HeadSHA, n + 1, now})
-	data, err = json.Marshal(ledger)
 	if err != nil {
-		return 0, err
+		return ledger, err
+	}
+	if err := json.Unmarshal(data, &ledger); err != nil {
+		return ledger, fmt.Errorf("invalid repair ledger: %w", err)
+	}
+	return ledger, nil
+}
+
+func saveCIRepairLedger(dir, path string, ledger ciRepairLedger) error {
+	data, err := json.Marshal(ledger)
+	if err != nil {
+		return err
 	}
 	f, err := os.CreateTemp(dir, ".reserve-")
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer os.Remove(f.Name())
 	if _, err = f.Write(data); err == nil {
@@ -211,24 +238,134 @@ func reserveCIRepair(root, repo string, pr vcs.PR, now time.Time) (int, error) {
 	}
 	closeErr := f.Close()
 	if err != nil {
-		return 0, err
+		return err
 	}
 	if closeErr != nil {
-		return 0, closeErr
+		return closeErr
 	}
 	if err := os.Rename(f.Name(), path); err != nil {
-		return 0, err
+		return err
 	}
 	// Persist the directory entry before allowing provider startup.
 	d, err := os.Open(dir)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer d.Close()
-	if err := d.Sync(); err != nil {
+	return d.Sync()
+}
+
+func reserveCIRepair(root, repo string, pr vcs.PR, now time.Time) (int, error) {
+	dir, path := ciRepairLedgerPath(root, repo, pr.Number)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return 0, err
 	}
-	return n + 1, nil
+	ledger, err := loadCIRepairLedger(path)
+	if err != nil {
+		return 0, err
+	}
+	consumed, infra := ledger.counts()
+	if consumed >= ciRepairMaxAttempts {
+		return 0, fmt.Errorf("CI repair exhausted: %d total attempts", ciRepairMaxAttempts)
+	}
+	if infra >= ciRepairMaxInfra {
+		last := ledger.Attempts[len(ledger.Attempts)-1]
+		return 0, fmt.Errorf("CI repair blocked: infrastructure budget exhausted (%d outcomes, last: %s)", infra, last.Released)
+	}
+	if n := len(ledger.Attempts); n > 0 && now.Sub(ledger.Attempts[n-1].At) < ciRepairCooldown {
+		return 0, fmt.Errorf("CI repair cooldown: 5 minutes")
+	}
+	if now.Before(ledger.NotBefore) {
+		return 0, fmt.Errorf("CI repair infrastructure backoff until %s", ledger.NotBefore.Format(time.RFC3339))
+	}
+	attempt := consumed + 1
+	ledger.Attempts = append(ledger.Attempts, ciRepairAttempt{Head: pr.HeadSHA, Attempt: attempt, At: now})
+	if err := saveCIRepairLedger(dir, path, ledger); err != nil {
+		return 0, err
+	}
+	return attempt, nil
+}
+
+// releaseCIRepair marks the open reservation for `attempt` as non-consuming
+// after an infrastructure outcome and applies exponential backoff. The release
+// still counts toward the bounded infrastructure budget.
+func releaseCIRepair(root, repo string, pr vcs.PR, attempt int, kind string, now time.Time) error {
+	dir, path := ciRepairLedgerPath(root, repo, pr.Number)
+	ledger, err := loadCIRepairLedger(path)
+	if err != nil {
+		return err
+	}
+	idx := -1
+	for i := len(ledger.Attempts) - 1; i >= 0; i-- {
+		a := ledger.Attempts[i]
+		if a.Released == "" && a.Attempt == attempt && a.Head == pr.HeadSHA {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("no open repair reservation for attempt %d", attempt)
+	}
+	ledger.Attempts[idx].Released = kind
+	_, infra := ledger.counts()
+	backoff := ciRepairCooldown << uint(infra)
+	if backoff > ciRepairMaxBackoff || backoff <= 0 {
+		backoff = ciRepairMaxBackoff
+	}
+	ledger.NotBefore = now.Add(backoff)
+	return saveCIRepairLedger(dir, path, ledger)
+}
+
+// classifyRepairInfra reports whether a failed repair run was an infrastructure
+// outcome (provider rate limit/capacity, launch failure, transport or timeout)
+// that happened before any tool activity, so no repair work was evaluated.
+// Classification uses Offload's structured error kinds, never free text. If tool
+// activity cannot be ruled out the run is treated as real repair work.
+func classifyRepairInfra(err error, eventsPath string) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	kind := ""
+	switch {
+	case errors.Is(err, operator.ErrCapacity) || execution.IsKind(err, "capacity"):
+		kind = "capacity"
+	case errors.Is(err, operator.ErrRateLimit) || execution.IsKind(err, "rate_limit"):
+		kind = "rate_limit"
+	case execution.IsKind(err, "launch"):
+		kind = "launch"
+	case execution.IsKind(err, "transport"):
+		kind = "transport"
+	case execution.IsKind(err, "timeout") || errors.Is(err, context.DeadlineExceeded):
+		kind = "timeout"
+	default:
+		return "", false
+	}
+	if active, aerr := repairToolActivity(eventsPath); aerr != nil || active {
+		return "", false
+	}
+	return kind, true
+}
+
+// repairToolActivity reports whether the sanitized event stream contains any
+// event carrying a tool category.
+func repairToolActivity(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true, err
+	}
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var e execution.Event
+		if json.Unmarshal(line, &e) != nil {
+			return true, fmt.Errorf("unreadable event")
+		}
+		if e.ToolCategory != "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *ciRepairContext) prompt(testCommand string) string {

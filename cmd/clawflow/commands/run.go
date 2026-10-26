@@ -1462,6 +1462,23 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// produced no greppable failure signal (issue #326).
 	isDisallowedOutcome := runErr != nil && errors.Is(runErr, operator.ErrDisallowedOutcome)
 
+	// CI repair infrastructure outcomes (provider capacity/rate limit, launch,
+	// transport, timeout before any tool activity) release the reserved attempt
+	// so only real repair work consumes the three-attempt budget (issue #356).
+	repairInfra := false
+	if j.repair != nil && runErr != nil {
+		if kind, ok := classifyRepairInfra(runErr, filepath.Join(runDir, "events.jsonl")); ok {
+			if rerr := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, kind, time.Now().UTC()); rerr != nil {
+				fmt.Fprintf(os.Stderr, "%s ⚠ repair attempt release failed (attempt stays consumed): %v\n", prefix, rerr)
+				runLog.Warn("run/ci_repair_release_failed", "repo", j.repo, "issue", j.sub.Number, "err", rerr.Error())
+			} else {
+				repairInfra = true
+				fmt.Fprintf(os.Stderr, "%s → CI repair infrastructure outcome (%s): attempt %d not consumed, backoff applied\n", prefix, kind, j.repair.Attempt)
+				runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "kind", kind)
+			}
+		}
+	}
+
 	if runErr != nil {
 		if isCostLimit {
 			// Warn-level so patrol's grep -E "ERROR|WARN" catches the one
@@ -1604,7 +1621,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 		hasPartialWork, _, _ = detectPartialWork(workdir, base)
 	}
-	if (j.repair == nil || (rm.Status == "success" && outcome == "agent-implemented")) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork)) {
+	if repairInfra || ((j.repair == nil || (rm.Status == "success" && outcome == "agent-implemented")) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork))) {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree evidence: %s\n", prefix, workdir)
@@ -1673,6 +1690,14 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// Apply successful lifecycle follow-up.
 	if rm.Status == "success" {
 		runPostAutomation(ctx, j, outcome, output, prefix)
+	}
+
+	// Released infrastructure outcomes are bounded by the repair ledger's own
+	// infrastructure budget, so they must not also trip the circuit breaker
+	// (which would label the issue agent-failed and block further repair).
+	if repairInfra && rm.Status == "failed" {
+		fmt.Printf("%s ✗ CI repair infrastructure failure (not counted toward circuit breaker)\n", prefix)
+		return false, false, true
 	}
 
 	switch rm.Status {

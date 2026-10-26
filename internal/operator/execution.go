@@ -10,6 +10,10 @@ import (
 )
 
 var ErrRateLimit = errors.New("execution rate limit")
+
+// ErrCapacity marks provider capacity/overload refusals. It is joined with
+// ErrRateLimit so it is handled as a provider-limit class.
+var ErrCapacity = errors.New("execution provider capacity")
 var ErrAuthError = errors.New("execution auth error")
 var ErrOutputLimit = errors.New("execution output limit")
 var ErrCostLimit = errors.New("execution cost limit")
@@ -25,7 +29,7 @@ func WithMaxBudgetUSD(ctx context.Context, usd float64) context.Context {
 	return context.WithValue(ctx, budgetKey{}, usd)
 }
 func IsRateLimitError(err error, _ string) bool {
-	return errors.Is(err, ErrRateLimit) || execution.IsKind(err, "rate_limit")
+	return errors.Is(err, ErrRateLimit) || execution.IsKind(err, "rate_limit") || execution.IsKind(err, "capacity")
 }
 func IsAuthError(err error, _ string) bool {
 	return errors.Is(err, ErrAuthError) || execution.IsKind(err, "auth")
@@ -45,6 +49,9 @@ func RunOffload(ctx context.Context, prompt, workdir string, timeout time.Durati
 	}
 	opts.MaxBudgetUSD, _ = ctx.Value(budgetKey{}).(float64)
 	result, err := execution.Execute(ctx, prompt, opts)
+	if execution.IsKind(err, "capacity") {
+		return result.Text, errors.Join(ErrRateLimit, ErrCapacity, err)
+	}
 	for kind, sentinel := range map[string]error{"rate_limit": ErrRateLimit, "auth": ErrAuthError, "output_limit": ErrOutputLimit, "cost_limit": ErrCostLimit, "budget_exceeded": ErrBudgetExceeded} {
 		if execution.IsKind(err, kind) {
 			return result.Text, errors.Join(sentinel, err)

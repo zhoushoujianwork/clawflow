@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -303,5 +304,122 @@ func TestCIRepairExistingPROutcome(t *testing.T) {
 		}
 		// All other VCS methods deliberately panic via the nil embedded Client:
 		// this proves writeback does not create another PR or reset approval labels.
+	}
+}
+
+func TestCIRepairInfraReleaseKeepsBudgetAndBacksOff(t *testing.T) {
+	root := t.TempDir()
+	p, _ := repairFixture()
+	now := time.Now().UTC()
+	n, err := reserveCIRepair(root, "o/r", p, now)
+	if err != nil || n != 1 {
+		t.Fatalf("%d %v", n, err)
+	}
+	if err := releaseCIRepair(root, "o/r", p, n, "capacity", now); err != nil {
+		t.Fatal(err)
+	}
+	// Backoff (10 minutes after the first release) blocks an early retry.
+	if _, err := reserveCIRepair(root, "o/r", p, now.Add(6*time.Minute)); err == nil || !strings.Contains(err.Error(), "backoff") {
+		t.Fatalf("backoff not applied: %v", err)
+	}
+	// After backoff the released attempt did not consume repair budget.
+	if n, err := reserveCIRepair(root, "o/r", p, now.Add(11*time.Minute)); err != nil || n != 1 {
+		t.Fatalf("released attempt consumed budget: %d %v", n, err)
+	}
+	// A real repair failure (no release) consumes the attempt.
+	if n, err := reserveCIRepair(root, "o/r", p, now.Add(17*time.Minute)); err != nil || n != 2 {
+		t.Fatalf("%d %v", n, err)
+	}
+}
+
+func TestCIRepairRealFailuresStillExhaust(t *testing.T) {
+	root := t.TempDir()
+	p, _ := repairFixture()
+	now := time.Now().UTC()
+	for i := 1; i <= 3; i++ {
+		if n, err := reserveCIRepair(root, "o/r", p, now.Add(time.Duration(i)*10*time.Minute)); err != nil || n != i {
+			t.Fatalf("%d %v", n, err)
+		}
+	}
+	if _, err := reserveCIRepair(root, "o/r", p, now.Add(time.Hour*2)); err == nil || !strings.Contains(err.Error(), "exhausted") {
+		t.Fatalf("expected exhaustion: %v", err)
+	}
+}
+
+func TestCIRepairInfraBudgetExhaustionBlocks(t *testing.T) {
+	root := t.TempDir()
+	p, _ := repairFixture()
+	now := time.Now().UTC()
+	for i := 0; i < ciRepairMaxInfra; i++ {
+		now = now.Add(2 * time.Hour)
+		n, err := reserveCIRepair(root, "o/r", p, now)
+		if err != nil || n != 1 {
+			t.Fatalf("round %d: %d %v", i, n, err)
+		}
+		if err := releaseCIRepair(root, "o/r", p, n, "capacity", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := reserveCIRepair(root, "o/r", p, now.Add(24*time.Hour))
+	if err == nil || !strings.Contains(err.Error(), "infrastructure budget exhausted") || !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("expected blocked with reason: %v", err)
+	}
+}
+
+func TestCIRepairReleaseRequiresOpenReservation(t *testing.T) {
+	root := t.TempDir()
+	p, _ := repairFixture()
+	now := time.Now().UTC()
+	if err := releaseCIRepair(root, "o/r", p, 1, "capacity", now); err == nil {
+		t.Fatal("released without reservation")
+	}
+	n, _ := reserveCIRepair(root, "o/r", p, now)
+	if err := releaseCIRepair(root, "o/r", p, n, "capacity", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := releaseCIRepair(root, "o/r", p, n, "capacity", now); err == nil {
+		t.Fatal("double release accepted")
+	}
+}
+
+func TestClassifyRepairInfra(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	quiet := write("quiet.jsonl", `{"type":"start"}`+"\n"+`{"type":"final","status":"error"}`+"\n")
+	tools := write("tools.jsonl", `{"type":"start"}`+"\n"+`{"type":"progress","tool_category":"edit"}`+"\n")
+	bad := write("bad.jsonl", "not json\n")
+	missing := filepath.Join(dir, "missing.jsonl")
+
+	for _, tc := range []struct {
+		name   string
+		err    error
+		events string
+		kind   string
+		infra  bool
+	}{
+		{"capacity", &execution.Error{Kind: "capacity"}, quiet, "capacity", true},
+		{"capacity sentinel", errors.Join(operator.ErrRateLimit, operator.ErrCapacity), quiet, "capacity", true},
+		{"rate limit", &execution.Error{Kind: "rate_limit"}, quiet, "rate_limit", true},
+		{"launch with empty events", &execution.Error{Kind: "launch"}, write("empty.jsonl", ""), "launch", true},
+		{"launch with missing events", &execution.Error{Kind: "launch"}, missing, "", false},
+		{"transport", &execution.Error{Kind: "transport"}, quiet, "transport", true},
+		{"timeout", &execution.Error{Kind: "timeout"}, quiet, "timeout", true},
+		{"capacity after tool activity", &execution.Error{Kind: "capacity"}, tools, "", false},
+		{"unreadable events", &execution.Error{Kind: "capacity"}, bad, "", false},
+		{"generic execution failure", &execution.Error{Kind: "execution"}, quiet, "", false},
+		{"nil", nil, quiet, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, ok := classifyRepairInfra(tc.err, tc.events)
+			if kind != tc.kind || ok != tc.infra {
+				t.Fatalf("got %q %v", kind, ok)
+			}
+		})
 	}
 }
