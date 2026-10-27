@@ -1,12 +1,10 @@
 package snapshot
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 )
 
 func TestAcquireReleaseLock(t *testing.T) {
@@ -148,56 +146,63 @@ func TestReleaseLock_NoOp(t *testing.T) {
 	ReleaseLock("no/repo", 999)
 }
 
-// TestAcquireLock_ConcurrentExclusion verifies that concurrent callers cannot
-// hold the lock simultaneously. Run with -race to catch the data race present
-// in the os.WriteFile path; the test should pass cleanly once AcquireLock uses
-// O_CREATE|O_EXCL (issue #68).
+// TestAcquireLock_ConcurrentExclusion holds the winner until every contender
+// has attempted acquisition, so any second success violates mutual exclusion.
 func TestAcquireLock_ConcurrentExclusion(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	testConcurrentLock(t, func() string { return LockPath("owner/repo", 99) },
+		func() error { return AcquireLock("owner/repo", 99, "implement") },
+		func() { ReleaseLock("owner/repo", 99) })
+}
 
-	const goroutines = 20
-	repo := "owner/repo"
-	issue := 99
-
-	var (
-		mu      sync.Mutex
-		winners []int
-		wg      sync.WaitGroup
-	)
-	start := make(chan struct{})
-
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			<-start // all goroutines race from the same starting line
-			if err := AcquireLock(repo, issue, fmt.Sprintf("op-%d", id)); err == nil {
-				mu.Lock()
-				winners = append(winners, id)
-				mu.Unlock()
-				// Hold briefly to give other goroutines a chance to try.
-				time.Sleep(5 * time.Millisecond)
-				ReleaseLock(repo, issue)
+func testConcurrentLock(t *testing.T, path func() string, acquire func() error, release func()) {
+	t.Helper()
+	for _, initial := range []string{"missing", "stale", "corrupt"} {
+		t.Run(initial, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			if initial != "missing" {
+				if err := os.MkdirAll(filepath.Dir(path()), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				data := "not json"
+				if initial == "stale" {
+					data = `{"pid":2999999}`
+					if processAlive(2999999) {
+						t.Skip("test PID is alive")
+					}
+				}
+				if err := os.WriteFile(path(), []byte(data), 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
-		}(i)
+			const contenders = 20
+			start := make(chan struct{})
+			results := make(chan bool, contenders)
+			var attempted sync.WaitGroup
+			attempted.Add(contenders)
+			for i := 0; i < contenders; i++ {
+				go func() {
+					<-start
+					ok := acquire() == nil
+					results <- ok
+					attempted.Done()
+				}()
+			}
+			close(start)
+			attempted.Wait()
+			winners := 0
+			for i := 0; i < contenders; i++ {
+				if <-results {
+					winners++
+				}
+			}
+			release()
+			if winners != 1 {
+				t.Fatalf("%d contenders acquired the lock while held, want 1", winners)
+			}
+			if err := acquire(); err != nil {
+				t.Fatalf("acquire after release: %v", err)
+			}
+			release()
+		})
 	}
-
-	close(start)
-	wg.Wait()
-
-	// Every goroutine that acquired the lock should have done so exclusively.
-	// With O_EXCL semantics, at most one goroutine wins per acquire window.
-	// We can't assert exactly 1 winner (release + re-acquire is valid), but
-	// we can assert no two goroutines held the lock simultaneously by
-	// checking the lock file was never double-written (the O_EXCL path
-	// returns an error on the second writer, so winners > 1 only if the
-	// race is present).
-	//
-	// A simpler invariant: run the whole thing and assert no panic / data race.
-	// Enable with: go test -race ./internal/snapshot/...
-	if len(winners) == 0 {
-		t.Error("expected at least one goroutine to acquire the lock")
-	}
-	t.Logf("%d/%d goroutines acquired the lock (sequential windows)", len(winners), goroutines)
 }
