@@ -213,6 +213,9 @@ func harvestRun(ctx context.Context, client vcs.Client, setCtx func(context.Cont
 	attempt := autoMergeAttempt{ctx: ctx, client: client, repo: fullName, repoCfg: repoCfg, prNum: pr.Number, issueNum: issueNum, prefix: prefix, ciPoll: true, quiet: true}
 	switch {
 	case err == nil:
+		if len(record.Findings) > 0 {
+			attempt.notify(harvestNonpassComment(record), harvestMarker(record))
+		}
 		merged := attemptAutoMerge(attempt)
 		runLog.Info("run/harvest_end", "repo", fullName, "pr", pr.Number, "issue", issueNum, "verdict", string(record.Verdict), "planner_isolation", record.Plan.PlannerIsolation, "status", "accepted", "merged", merged, "duration", elapsed)
 	case errors.Is(err, errAcceptanceNonpass):
@@ -311,13 +314,18 @@ func harvestMarker(r acceptance.Record) string {
 	return "<!-- clawflow:acceptance=" + d + " -->"
 }
 
-// harvestNonpassComment renders the one comment posted for a failed or blocked
-// verdict. The reviewer summary is model output, so it is bounded and stripped
+// harvestNonpassComment renders nonpassing verdicts and passing advisories. The reviewer summary is model output, so it is bounded and stripped
 // of HTML comment delimiters to keep it from forging markers.
 func harvestNonpassComment(r acceptance.Record) string {
 	summary := strings.NewReplacer("<!--", "", "-->", "").Replace(strings.TrimSpace(r.Report))
 	if runes := []rune(summary); len(runes) > harvestSummaryLimit {
 		summary = string(runes[:harvestSummaryLimit]) + "…"
+	}
+	for i, f := range r.Findings {
+		if i >= acceptanceFindingEvidenceLimit {
+			break
+		}
+		summary += "\n\n" + sanitizeReviewerText(f.Kind+": "+f.Summary+" "+f.Requirement+" "+f.Defect+" "+f.Evidence, acceptanceFindingEntryLimit)
 	}
 	next := ""
 	if r.Verdict == acceptance.Blocked {

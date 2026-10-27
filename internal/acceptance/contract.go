@@ -155,6 +155,46 @@ func (s Source) matches(c Contract) bool {
 	return s.Clean && s.HeadSHA == c.HeadSHA && s.BaseSHA == c.BaseSHA && s.IntegrationSHA == c.IntegrationSHA
 }
 
+// Finding separates actionable requirement/defect evidence from review advice.
+// Requirement names a contract requirement; Defect names a correctness/safety
+// violation in changed code. Advisory items cannot make acceptance fail.
+type Finding struct {
+	Kind        string `json:"kind"`
+	Summary     string `json:"summary"`
+	Requirement string `json:"requirement,omitempty"`
+	Defect      string `json:"defect,omitempty"`
+	Evidence    string `json:"evidence,omitempty"`
+}
+
+func (f Finding) Failing() bool {
+	return f.Kind == "requirement" || f.Kind == "defect"
+}
+
+func validateFindings(findings []Finding) (bool, error) {
+	failing := false
+	for _, f := range findings {
+		if !nonempty(f.Summary) {
+			return false, errors.New("finding requires summary")
+		}
+		switch f.Kind {
+		case "advisory":
+		case "requirement":
+			if !nonempty(f.Requirement, f.Evidence) {
+				return false, errors.New("requirement finding requires requirement and concrete evidence")
+			}
+			failing = true
+		case "defect":
+			if !nonempty(f.Defect, f.Evidence) {
+				return false, errors.New("defect finding requires defect and concrete evidence")
+			}
+			failing = true
+		default:
+			return false, errors.New("unknown finding kind")
+		}
+	}
+	return failing, nil
+}
+
 type Record struct {
 	Version         int       `json:"version"`
 	Contract        Contract  `json:"contract"`
@@ -165,6 +205,7 @@ type Record struct {
 	Reviewer        Native    `json:"reviewer"`
 	Verdict         Verdict   `json:"verdict"`
 	Report          string    `json:"report"`
+	Findings        []Finding `json:"findings,omitempty"`
 	Evidence        []string  `json:"evidence"`
 	Before          Source    `json:"before"`
 	After           Source    `json:"after"`
@@ -203,6 +244,9 @@ func Evaluate(expected Contract, r Record) error {
 	}
 	if !r.Completed || r.Cancelled || r.Verdict != Passed || r.Role != "acceptance" || !nonempty(r.AttemptID, r.Report) || len(r.Evidence) == 0 {
 		return errors.New("acceptance attempt is incomplete or nonpassing")
+	}
+	if failing, err := validateFindings(r.Findings); err != nil || failing {
+		return errors.New("passing record contains invalid or failing findings")
 	}
 	for _, e := range r.Evidence {
 		if !nonempty(e) {
