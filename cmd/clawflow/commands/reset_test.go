@@ -267,3 +267,42 @@ func TestResetPreviewKeepsStaleLocksAndEmptyHome(t *testing.T) {
 		t.Fatalf("%+v %v", r, err)
 	}
 }
+
+func TestResetRefusesWhilePerRepoRunLockHeld(t *testing.T) {
+	root := resetTestHome(t)
+	resetTestWrite(t, filepath.Join(root, "config", "config.yaml"), "repos:\n  ns/r: {}\n")
+	// The parent process is a live PID other than ours.
+	resetTestWrite(t, snapshot.RepoRunLockPath("ns/r"), fmt.Sprintf(`{"pid":%d,"repo":"ns/r"}`, os.Getppid()))
+	_, _, err := planReset()
+	if err == nil || !strings.Contains(err.Error(), "stop active clawflow run") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "backups")); !os.IsNotExist(err) {
+		t.Fatal("refused reset mutated backup state")
+	}
+	// A dead owner does not block, and the preview leaves its lock alone.
+	resetTestWrite(t, snapshot.RepoRunLockPath("ns/r"), `{"pid":2147483647,"repo":"ns/r"}`)
+	if _, _, err := planReset(); err != nil {
+		t.Fatalf("stale repo lock blocked reset: %v", err)
+	}
+}
+
+func TestApplyResetRefusesWhilePerRepoRunLockHeld(t *testing.T) {
+	root := resetTestHome(t)
+	resetTestWrite(t, filepath.Join(root, "config", "config.yaml"), "repos:\n  ns/r: {}\n")
+	resetTestWrite(t, filepath.Join(root, "data", "sentinel"), "history")
+	r, cfg, err := planReset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetTestWrite(t, snapshot.RepoRunLockPath("ns/r"), fmt.Sprintf(`{"pid":%d,"repo":"ns/r"}`, os.Getppid()))
+	if err := applyReset(&r, cfg); err == nil || !strings.Contains(err.Error(), "stop active clawflow run") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(snapshot.RunLockPath()); !os.IsNotExist(err) {
+		t.Fatal("legacy lock not released after refusal")
+	}
+	if _, err := os.Stat(filepath.Join(root, "data", "sentinel")); err != nil {
+		t.Fatal("data moved despite refusal")
+	}
+}

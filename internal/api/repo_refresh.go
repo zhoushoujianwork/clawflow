@@ -3,8 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -95,35 +93,13 @@ func HandleRepoRefreshIssues(w http.ResponseWriter, r *http.Request) {
 		fresh = append(fresh, entry)
 	}
 
-	// Read existing issues.json so we keep entries from OTHER repos
-	// untouched. Missing or unreadable file is treated as empty —
-	// WriteIssues will create it.
-	existing := readIssuesSnapshot()
-	merged := make([]snapshot.IssueEntry, 0, len(existing)+len(fresh))
-	for _, e := range existing {
-		if e.Repo == req.Repo {
-			continue
-		}
-		merged = append(merged, e)
-	}
-	merged = append(merged, fresh...)
-
-	if err := snapshot.WriteIssues(merged); err != nil {
+	// Replace only this repo's entries; other repos' entries stay as on disk.
+	// The read-modify-write happens under the snapshot lock so a concurrent
+	// `clawflow run` pass for another repo cannot lose this update.
+	if err := snapshot.ReplaceRepoIssues(req.Repo, fresh); err != nil {
 		writeErr(w, err)
 		return
 	}
 
 	writeJSON(w, 200, repoRefreshIssuesResponse{Status: "ok", Count: len(fresh)})
-}
-
-func readIssuesSnapshot() []snapshot.IssueEntry {
-	data, err := os.ReadFile(filepath.Join(snapshot.DataDir(), "issues.json"))
-	if err != nil {
-		return nil
-	}
-	var entries []snapshot.IssueEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil
-	}
-	return entries
 }

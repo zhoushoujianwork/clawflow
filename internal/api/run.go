@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,12 +19,22 @@ import (
 )
 
 var (
-	runMu     sync.Mutex
-	runActive bool
+	// runMu guards activeRuns. Keys are repo names of in-flight repo-scoped
+	// `clawflow run --repo R` passes; unscopedKey marks an unscoped pass.
+	runMu      sync.Mutex
+	activeRuns = map[string]bool{}
 
 	schedMu       sync.Mutex
 	schedNextFire time.Time // zero when no scheduler is running or interval=0
 )
+
+// unscopedKey is the activeRuns key of a pass over all repos. No repo name is
+// empty, so it cannot collide.
+const unscopedKey = ""
+
+// defaultMaxScheduledRuns caps concurrent scheduler passes when
+// settings.max_concurrent_agents is unset.
+const defaultMaxScheduledRuns = 4
 
 type runRequest struct {
 	Repo  string `json:"repo,omitempty"`
@@ -36,9 +47,12 @@ type runResponse struct {
 	// Scheduler fields — populated by HandleRunStatus so the dashboard
 	// can render the auto-run banner ("every 5m · next in 2:14") in one
 	// fetch alongside the running/idle indicator.
-	IntervalMinutes int   `json:"interval_minutes,omitempty"`
-	Paused          bool  `json:"paused,omitempty"`
-	NextFireUnixMs  int64 `json:"next_fire_unix_ms,omitempty"`
+	IntervalMinutes int  `json:"interval_minutes,omitempty"`
+	Paused          bool `json:"paused,omitempty"`
+	// ActiveRepos lists repos with an in-flight repo-scoped pass (sorted).
+	// Empty while idle or when only an unscoped pass is running.
+	ActiveRepos    []string `json:"active_repos,omitempty"`
+	NextFireUnixMs int64    `json:"next_fire_unix_ms,omitempty"`
 }
 
 // SetSchedulerNextFire is called by the web command's periodic-run
@@ -49,23 +63,96 @@ func SetSchedulerNextFire(t time.Time) {
 	schedMu.Unlock()
 }
 
-// TriggerRun spawns `clawflow run` as a background subprocess if no
-// run is currently in flight. Returns true if it actually started,
-// false if a run was already running. Empty repo/issue arguments mean
-// "all enabled repos / all issues" — same semantics as the CLI flags.
+// canStartRunLocked reports whether a pass for repo may start given the
+// in-flight passes. An unscoped pass (repo == "") needs every pass idle; a
+// repo-scoped pass needs no unscoped pass and no pass for the same repo.
+func canStartRunLocked(active map[string]bool, repo string) bool {
+	if repo == unscopedKey {
+		return len(active) == 0
+	}
+	return !active[unscopedKey] && !active[repo]
+}
+
+// TriggerRun spawns `clawflow run` as a background subprocess if the gate
+// allows it. Returns true if it actually started, false otherwise. An empty
+// repo means an unscoped pass over all enabled repos, which only starts when
+// no pass at all is active; a non-empty repo gates on that repo only, so
+// passes for different repos run concurrently (each holds its own run lock).
+// issue narrows the pass further, same as the CLI flag.
 //
-// Both the manual Run button (HandleRun) and the periodic ticker in
-// `clawflow web` go through this helper so they share the runActive
-// gate and can never overlap.
+// The manual Run button (HandleRun) and the periodic scheduler
+// (TriggerScheduledRuns) share this gate so they can never overlap on a repo.
 func TriggerRun(repo string, issue int) bool {
 	runMu.Lock()
-	if runActive {
+	if !canStartRunLocked(activeRuns, repo) {
 		runMu.Unlock()
 		return false
 	}
-	runActive = true
+	activeRuns[repo] = true
 	runMu.Unlock()
+	spawnRun(repo, issue)
+	return true
+}
 
+// PlanScheduledRuns is the scheduler's pure decision: which repos to start a
+// pass for now. A repo qualifies when it is enabled, belongs on this machine
+// (bound_machine / require_binding), is in only (when only is non-nil) and has
+// no active pass. At most max(settings.max_concurrent_agents, default 4)
+// passes may be active, so the result is capped at the remaining slots. An
+// active unscoped pass blocks everything. Result order is alphabetical.
+func PlanScheduledRuns(cfg *config.Config, hostname string, active map[string]bool, only map[string]bool) []string {
+	if active[unscopedKey] {
+		return nil
+	}
+	limit := cfg.Settings.MaxConcurrentAgents
+	if limit <= 0 {
+		limit = defaultMaxScheduledRuns
+	}
+	slots := limit - len(active)
+	var names []string
+	for name, repo := range cfg.EnabledRepos() {
+		if only != nil && !only[name] {
+			continue
+		}
+		if active[name] || !cfg.Settings.RunsOnHost(repo, hostname) {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if slots < 0 {
+		slots = 0
+	}
+	if len(names) > slots {
+		names = names[:slots]
+	}
+	return names
+}
+
+// TriggerScheduledRuns starts `clawflow run --repo R` for every repo
+// PlanScheduledRuns selects and returns the repos started plus the repos that
+// currently have an active pass. The plan and the reservations happen under
+// one lock, so a concurrent manual trigger cannot slip between them.
+func TriggerScheduledRuns(cfg *config.Config, hostname string, only map[string]bool) (started []string, active map[string]bool) {
+	runMu.Lock()
+	chosen := PlanScheduledRuns(cfg, hostname, activeRuns, only)
+	for _, repo := range chosen {
+		activeRuns[repo] = true
+	}
+	active = make(map[string]bool, len(activeRuns))
+	for k := range activeRuns {
+		active[k] = true
+	}
+	runMu.Unlock()
+	for _, repo := range chosen {
+		spawnRun(repo, 0)
+	}
+	return chosen, active
+}
+
+// spawnRun launches the subprocess for a pass already reserved in activeRuns
+// and clears the reservation when it exits.
+func spawnRun(repo string, issue int) {
 	self, err := os.Executable()
 	if err != nil {
 		self = os.Args[0]
@@ -82,7 +169,7 @@ func TriggerRun(repo string, issue int) bool {
 	// Watchdog: bound the entire subprocess lifetime. A `clawflow run`
 	// that wedges on a hung downstream call (e.g. a git fetch blocked on
 	// a credential prompt, or a network read that never returns) would
-	// otherwise pin runActive=true forever — and because the periodic
+	// otherwise pin its active-run slot forever — and because the periodic
 	// scheduler in `clawflow web` only fires the next run once this one
 	// exits, a single hung run permanently stalls auto-run. See issue
 	// #216, where a run sat idle for 8h+ after reconcile and froze the
@@ -121,7 +208,7 @@ func TriggerRun(repo string, issue int) bool {
 		defer func() {
 			cancel()
 			runMu.Lock()
-			runActive = false
+			delete(activeRuns, repo)
 			runMu.Unlock()
 		}()
 		_ = cmd.Run()
@@ -131,7 +218,6 @@ func TriggerRun(repo string, issue int) bool {
 				watchdog)
 		}
 	}()
-	return true
 }
 
 // runWatchdogTimeout returns how long TriggerRun lets a `clawflow run`
@@ -162,7 +248,7 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 	if !TriggerRun(req.Repo, req.Issue) {
-		writeJSON(w, 409, runResponse{Status: "busy", Message: "a run is already in progress"})
+		writeJSON(w, 409, runResponse{Status: "busy", Message: "a run is already in progress for this scope"})
 		return
 	}
 	writeJSON(w, 200, runResponse{Status: "started"})
@@ -183,15 +269,22 @@ func HandleRunStatus(w http.ResponseWriter, r *http.Request) {
 // shared by HandleRunStatus and the pipeline board's runtime header.
 func currentRunStatus() runResponse {
 	runMu.Lock()
-	active := runActive
+	var repos []string
+	for k := range activeRuns {
+		if k != unscopedKey {
+			repos = append(repos, k)
+		}
+	}
+	active := len(activeRuns) > 0
 	runMu.Unlock()
+	sort.Strings(repos)
 
 	status := "idle"
 	if active {
 		status = "running"
 	}
 
-	resp := runResponse{Status: status}
+	resp := runResponse{Status: status, ActiveRepos: repos}
 	if cfg, err := config.Load(); err == nil {
 		resp.IntervalMinutes = cfg.Settings.RunIntervalMinutes
 		resp.Paused = cfg.Settings.RunPaused
