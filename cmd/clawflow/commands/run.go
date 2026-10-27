@@ -1922,7 +1922,7 @@ func runPostAutomation(ctx context.Context, j *runJob, outcome, output, prefix s
 			fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge: could not extract PR number from output (sweep will retry next pass)\n", prefix)
 			return
 		}
-		attemptAutoMerge(autoMergeAttempt{
+		if result := attemptAutoMergeResult(autoMergeAttempt{
 			ctx:      ctx,
 			client:   j.client,
 			repo:     j.repo,
@@ -1932,7 +1932,9 @@ func runPostAutomation(ctx context.Context, j *runJob, outcome, output, prefix s
 			prefix:   prefix,
 			ciPoll:   true,
 			quiet:    true,
-		})
+		}); !result.Merged {
+			result.log("run/automerge_skip", j.repo, prNum, j.sub.Number)
+		}
 	}
 
 	// Tracking issue: sub-issues still pending — re-add progress-check so
