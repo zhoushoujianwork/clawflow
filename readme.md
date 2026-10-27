@@ -239,6 +239,24 @@ clawflow issue list-sub --repo owner/repo --issue 10 --json
 
 GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return an error on GitLab repos. Existing checklist-based tracking remains available where supported; native sub-issue commands remain GitHub-only.
 
+### Work queue (`queue_issue`)
+
+By default every eligible open leaf issue is dispatched to `implement`. To control which issues run and in what order, point a GitHub repository at one parent issue:
+
+```bash
+clawflow repo set owner/repo --queue-issue 42   # 0 clears it
+clawflow repo show owner/repo                   # prints queue_issue
+```
+
+The queue items are the **direct** open sub-issues of #42, in the order GitHub returns them (reorder them in the GitHub UI). Each scan:
+
+- dispatches `implement` only for the head item (the first open sub-issue), and only one item at a time. An item is in flight while it holds a local lock, or while it carries `agent-implemented` and an open PR closes it. Nothing else starts until it finishes.
+- blocks when the head is excluded (`agent-failed`, `agent-skipped`, ...) or is itself a parent. Nothing is dispatched until you reorder or remove it. It does not skip ahead.
+- never dispatches `implement` for issues outside the queue, whatever their labels.
+- fails closed: if the sub-issue list cannot be read, nothing is dispatched for that repository and a WARN is logged.
+
+Decisions are logged to `run.log` as `run/queue_pick`, `run/queue_wait` and `run/queue_blocked` with the queue issue, item and reason. Other operators, CI repair, harvest and auto-merge ignore the queue, and targeted runs (`clawflow run --repo R --issue N`) bypass it. `--queue-issue` is rejected on GitLab repositories.
+
 ---
 
 ## Configuration migration

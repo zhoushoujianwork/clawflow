@@ -90,6 +90,11 @@ func newRepoShowCmd() *cobra.Command {
 			fmt.Printf("status:       %s\n", status)
 			fmt.Printf("ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("acceptance_required: %v\n", r.AcceptanceRequired)
+			if r.QueueIssue > 0 {
+				fmt.Printf("queue_issue:  #%d\n", r.QueueIssue)
+			} else {
+				fmt.Printf("queue_issue:  (none)\n")
+			}
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
 			fmt.Printf("local_path:   %s\n", r.LocalPath)
 			if r.Description != "" {
@@ -320,12 +325,13 @@ func newRepoSetCmd() *cobra.Command {
 	var autoMerge string
 	var primaryProject string
 	var boundMachine string
+	var queueIssue int
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
 		Short:   "Set configuration flags for a repository",
 		Args:    cobra.ExactArgs(1),
-		Example: "  clawflow repo set owner/repo --auto-merge on\n  clawflow repo set owner/repo --primary-project myproj",
+		Example: "  clawflow repo set owner/repo --auto-merge on\n  clawflow repo set owner/repo --primary-project myproj\n  clawflow repo set owner/repo --queue-issue 42",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ownerRepo := args[0]
 			cfg, err := config.Load()
@@ -364,6 +370,12 @@ func newRepoSetCmd() *cobra.Command {
 			if cmd.Flags().Changed("ci-required") && ciRequired != "on" && ciRequired != "off" {
 				return fmt.Errorf("--ci-required must be on or off")
 			}
+			queueIssueSet := cmd.Flags().Changed("queue-issue")
+			if queueIssueSet {
+				if err := validateQueueIssue(cfg.Repos[ownerRepo], queueIssue); err != nil {
+					return err
+				}
+			}
 			boundMachineSet := cmd.Flags().Changed("bound-machine")
 			if boundMachineSet && strings.ContainsFunc(boundMachine, func(r rune) bool {
 				return unicode.IsSpace(r) || unicode.IsControl(r) || r == '/' || r == '\\'
@@ -393,6 +405,9 @@ func newRepoSetCmd() *cobra.Command {
 				if boundMachineSet {
 					r.BoundMachine = boundMachine
 				}
+				if queueIssueSet {
+					r.QueueIssue = queueIssue
+				}
 				return r
 			})
 			r := cfg.Repos[ownerRepo]
@@ -413,6 +428,13 @@ func newRepoSetCmd() *cobra.Command {
 					fmt.Printf("  bound_machine: %s\n", r.BoundMachine)
 				}
 			}
+			if queueIssueSet {
+				if r.QueueIssue == 0 {
+					fmt.Printf("  queue_issue: (cleared)\n")
+				} else {
+					fmt.Printf("  queue_issue: #%d\n", r.QueueIssue)
+				}
+			}
 			if primaryProjectSet {
 				if r.PrimaryProject == "" {
 					fmt.Printf("  primary_project: (cleared)\n")
@@ -427,8 +449,21 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&acceptanceRequired, "acceptance-required", "", "require current independent acceptance before auto-merge: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
+	cmd.Flags().IntVar(&queueIssue, "queue-issue", 0, "parent issue whose open sub-issues form an ordered implement queue, GitHub only (0 clears it)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
 	return cmd
+}
+
+// validateQueueIssue rejects values the queue cannot honor: negative numbers
+// and platforms without native sub-issues. 0 (clear) is always valid.
+func validateQueueIssue(r config.Repo, n int) error {
+	if n < 0 {
+		return fmt.Errorf("--queue-issue must be a positive issue number, or 0 to clear")
+	}
+	if n > 0 && r.Platform == "gitlab" {
+		return fmt.Errorf("--queue-issue is not supported on GitLab repositories (no native sub-issues)")
+	}
+	return nil
 }
 
 // loadOrNewConfig loads existing config or creates an empty one.

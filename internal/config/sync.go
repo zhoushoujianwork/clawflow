@@ -40,6 +40,7 @@ type syncableRepo struct {
 	CITimeout         int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
 	BoundMachine      string            `yaml:"bound_machine,omitempty"`
+	QueueIssue        int               `yaml:"queue_issue,omitempty"`
 	UpdatedAt         time.Time         `yaml:"updated_at,omitempty"`
 	UpdatedBy         string            `yaml:"updated_by,omitempty"`
 	// local_path is intentionally absent — genuinely machine-local
@@ -63,6 +64,7 @@ func toSyncable(r Repo) syncableRepo {
 		CITimeout:         r.CITimeout,
 		AutoMerge:         r.AutoMerge,
 		BoundMachine:      r.BoundMachine,
+		QueueIssue:        r.QueueIssue,
 		UpdatedAt:         r.UpdatedAt,
 		UpdatedBy:         r.UpdatedBy,
 	}
@@ -87,6 +89,7 @@ func fromSyncable(s syncableRepo, localPath string) Repo {
 		CITimeout:         s.CITimeout,
 		AutoMerge:         s.AutoMerge,
 		BoundMachine:      s.BoundMachine,
+		QueueIssue:        s.QueueIssue,
 		UpdatedAt:         s.UpdatedAt,
 		UpdatedBy:         s.UpdatedBy,
 	}

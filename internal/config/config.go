@@ -37,6 +37,11 @@ type Repo struct {
 	CITimeout          int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
+	// QueueIssue, when > 0, names a parent issue whose direct open sub-issues
+	// form an ordered work queue: the runner dispatches implement only for the
+	// first eligible item, one at a time. 0 = no queue (every eligible leaf
+	// issue is dispatched). GitHub only.
+	QueueIssue int `yaml:"queue_issue,omitempty" json:"queue_issue,omitempty"`
 
 	// BoundMachine, when non-empty, restricts processing of this repo to the
 	// machine whose hostname matches this value. Repos with no BoundMachine
