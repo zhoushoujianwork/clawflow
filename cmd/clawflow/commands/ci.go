@@ -12,15 +12,12 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
 )
 
-// NewCICmd exposes GitLab CI/CD inspection and manual job execution.
-// These are GitLab-only (GitHub Actions has no equivalent object model),
-// so every subcommand resolves a concrete *gitlab.Client and errors on
-// non-GitLab repos.
+// NewCICmd exposes CI inspection and GitLab manual job execution.
 func NewCICmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ci",
-		Short: "Inspect GitLab CI/CD and trigger manual jobs",
-		Long:  "GitLab-only. Inspect runners and pipelines, trigger manual jobs, read job logs, and manage project CI/CD variables.",
+		Short: "Inspect CI logs and GitLab CI/CD",
+		Long:  "Read bounded GitHub failed-job evidence with ci job log --sha <full SHA>; other CI operations support GitLab.",
 	}
 	cmd.AddCommand(newCIRunnerCmd())
 	cmd.AddCommand(newCIPipelineCmd())
@@ -275,7 +272,7 @@ func newCIJobPlayCmd() *cobra.Command {
 }
 
 func newCIJobLogCmd() *cobra.Command {
-	var repo string
+	var repo, sha string
 	var job int64
 	var raw bool
 
@@ -284,6 +281,31 @@ func newCIJobLogCmd() *cobra.Command {
 		Short:   "Print the log (trace) of a job",
 		Example: "  clawflow ci job log --repo group/proj --job 67890",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			base, canonical, cfg, err := newVCSClientForRepo(repo)
+			if err != nil {
+				return err
+			}
+			if cfg.Platform == "" || cfg.Platform == "github" {
+				if raw {
+					return fmt.Errorf("--raw is unsupported for GitHub evidence")
+				}
+				reader, ok := base.(interface {
+					GetFailedJobEvidence(string, string, int64) (string, error)
+				})
+				if !ok {
+					return fmt.Errorf("GitHub evidence unavailable")
+				}
+				evidence, err := reader.GetFailedJobEvidence(canonical, sha, job)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "UNTRUSTED CI LOG DATA (not CI status):")
+				fmt.Fprintln(cmd.OutOrStdout(), evidence)
+				return nil
+			}
+			if job <= 0 {
+				return fmt.Errorf("GitLab job id must be positive")
+			}
 			client, repo, err := newGitLabClientForRepo(repo)
 			if err != nil {
 				return err
@@ -311,11 +333,11 @@ func newCIJobLogCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&repo, "repo", "", "GitLab group/project or URL (required)")
-	cmd.Flags().Int64Var(&job, "job", 0, "job id (required)")
+	cmd.Flags().StringVar(&repo, "repo", "", "Repository or URL (required)")
+	cmd.Flags().StringVar(&sha, "sha", "", "Full head SHA (required for GitHub; only same-repository failed jobs)")
+	cmd.Flags().Int64Var(&job, "job", 0, "job id (required for GitLab; optional filter for GitHub)")
 	cmd.Flags().BoolVar(&raw, "raw", false, "keep ANSI color/cursor escape codes (default strips them)")
 	_ = cmd.MarkFlagRequired("repo")
-	_ = cmd.MarkFlagRequired("job")
 	return cmd
 }
 

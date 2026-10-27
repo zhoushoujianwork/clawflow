@@ -155,3 +155,17 @@ func TestTruncate(t *testing.T) {
 		t.Errorf("truncate = %q", got)
 	}
 }
+
+func TestGitHubCIJobLogRequiresSHAAndRejectsRaw(t *testing.T) {
+	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{"o/r": {Platform: "github"}}})
+	for _, extra := range [][]string{nil, {"--sha", "main"}, {"--sha", strings.Repeat("a", 40), "--raw"}} {
+		cmd := NewCICmd()
+		cmd.SetArgs(append([]string{"job", "log", "--repo", "o/r"}, extra...))
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		if err := cmd.Execute(); err == nil {
+			t.Fatal("unsafe query accepted")
+		}
+	}
+}
