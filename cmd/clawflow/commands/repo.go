@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -96,6 +97,7 @@ func newRepoShowCmd() *cobra.Command {
 			} else {
 				fmt.Printf("queue_issue:  (none)\n")
 			}
+			fmt.Printf("queue_scope:  %s\n", firstNonEmpty(r.QueueScope, "(default)"))
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
 			fmt.Printf("local_path:   %s\n", r.LocalPath)
 			if r.Description != "" {
@@ -328,6 +330,7 @@ func newRepoSetCmd() *cobra.Command {
 	var primaryProject string
 	var boundMachine string
 	var queueIssue, maxInFlight int
+	var queueScope string
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
@@ -385,6 +388,10 @@ func newRepoSetCmd() *cobra.Command {
 			if maxInFlightSet && maxInFlight < 1 {
 				return fmt.Errorf("--max-in-flight must be >= 1")
 			}
+			queueScopeSet := cmd.Flags().Changed("queue-scope")
+			if queueScopeSet && queueScope != "" && !queue.ValidScope(queueScope) {
+				return fmt.Errorf("--queue-scope must be all, labeled or ranked (empty clears it)")
+			}
 			boundMachineSet := cmd.Flags().Changed("bound-machine")
 			if boundMachineSet && strings.ContainsFunc(boundMachine, func(r rune) bool {
 				return unicode.IsSpace(r) || unicode.IsControl(r) || r == '/' || r == '\\'
@@ -423,6 +430,9 @@ func newRepoSetCmd() *cobra.Command {
 				if maxInFlightSet {
 					r.MaxInFlight = maxInFlight
 				}
+				if queueScopeSet {
+					r.QueueScope = queueScope
+				}
 				return r
 			})
 			r := cfg.Repos[ownerRepo]
@@ -454,6 +464,9 @@ func newRepoSetCmd() *cobra.Command {
 			if maxInFlightSet {
 				fmt.Printf("  max_in_flight: %d\n", r.MaxInFlight)
 			}
+			if queueScopeSet {
+				fmt.Printf("  queue_scope: %s\n", firstNonEmpty(r.QueueScope, "(default)"))
+			}
 			if primaryProjectSet {
 				if r.PrimaryProject == "" {
 					fmt.Printf("  primary_project: (cleared)\n")
@@ -470,6 +483,7 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&selfUpgrade, "self-upgrade", "", "rebuild and replace the installed binary after a confirmed merge into this repo (only for the repo containing clawflow's source): on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
 	cmd.Flags().IntVar(&queueIssue, "queue-issue", 0, "DEPRECATED: parent issue whose open sub-issues are imported once into the unified queue rank (0 clears it)")
+	cmd.Flags().StringVar(&queueScope, "queue-scope", "", "which open issues the unified queue may pick up: all, labeled (label clawflow) or ranked (in the rank file or labeled clawflow); empty clears it")
 	cmd.Flags().IntVar(&maxInFlight, "max-in-flight", 0, "max issues of this repo running or awaiting review at once in the unified queue (>=1, default 2)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
 	return cmd

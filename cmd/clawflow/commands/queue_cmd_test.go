@@ -144,3 +144,94 @@ func TestQueueImportOrderAppendsAndSkipsDuplicates(t *testing.T) {
 		t.Fatal("unsupported platform must error for the explicit command")
 	}
 }
+
+func TestQueueAddAndRemoveCommands(t *testing.T) {
+	queueCmdSetup(t)
+	steps := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"add", "o/r#1"}, "o/r#1"},
+		{[]string{"add", "g/sub/p#2"}, "o/r#1,g/sub/p#2"},
+		{[]string{"add", "o/r#3", "--top"}, "o/r#3,o/r#1,g/sub/p#2"},
+		{[]string{"add", "o/r#4", "--after", "o/r#1"}, "o/r#3,o/r#1,o/r#4,g/sub/p#2"},
+		{[]string{"add", "o/r#5", "--before", "o/r#1"}, "o/r#3,o/r#5,o/r#1,o/r#4,g/sub/p#2"},
+		{[]string{"remove", "o/r#5"}, "o/r#3,o/r#1,o/r#4,g/sub/p#2"},
+	}
+	for _, s := range steps {
+		if _, err := runQueueCmd(t, s.args...); err != nil {
+			t.Fatalf("%v: %v", s.args, err)
+		}
+		if got := rankStrings(t); got != s.want {
+			t.Fatalf("%v: rank = %s, want %s", s.args, got, s.want)
+		}
+	}
+	// Adding an already ranked key repositions it without duplicating.
+	if _, err := runQueueCmd(t, "add", "o/r#4"); err != nil || rankStrings(t) != "o/r#3,o/r#1,g/sub/p#2,o/r#4" {
+		t.Fatalf("re-add: %s %v", rankStrings(t), err)
+	}
+	for _, bad := range [][]string{
+		{"add", "x/unknown#1"},
+		{"add", "nonsense"},
+		{"add", "o/r#9", "--top", "--before", "o/r#1"},
+		{"remove", "o/r#99"},
+		{"remove", "bad"},
+	} {
+		before := rankStrings(t)
+		if _, err := runQueueCmd(t, bad...); err == nil {
+			t.Errorf("%v should fail", bad)
+		}
+		if rankStrings(t) != before {
+			t.Errorf("%v must not change the rank", bad)
+		}
+	}
+}
+
+func TestQueueListShowsScopeAndHidesOutOfScope(t *testing.T) {
+	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{
+		"o/r": {Platform: "github", Enabled: true, QueueScope: "ranked"},
+		"o/l": {Platform: "github", Enabled: true, QueueScope: "labeled"},
+		"o/a": {Platform: "github", Enabled: true},
+	}})
+	entries := []queue.EntryRecord{
+		{Number: 1, Priority: "P2", Rank: -1, State: "eligible", Created: "2026-01-01T00:00:00Z"},
+		{Number: 2, Priority: "P2", Rank: -1, State: "eligible", Created: "2026-01-02T00:00:00Z", Labeled: true},
+		{Number: 3, Priority: "P2", Rank: -1, State: "in_flight", Created: "2026-01-03T00:00:00Z"},
+	}
+	for _, repo := range []string{"o/r", "o/l", "o/a"} {
+		if err := queue.SaveState(queue.RepoState{Repo: repo, Entries: entries}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := runQueueCmd(t, "add", "o/r#1"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runQueueCmd(t, "list", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []queue.ListEntry
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Key] = r.Scope
+	}
+	want := map[string]string{
+		"o/r#1": "ranked", "o/r#2": "ranked", "o/r#3": "ranked", // ranked or labeled or in flight
+		"o/l#2": "labeled", "o/l#3": "labeled", // unlabeled #1 hidden
+		"o/a#1": "all", "o/a#2": "all", "o/a#3": "all",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s scope = %q, want %q (rows %v)", k, got[k], v, got)
+		}
+	}
+	if tbl, _ := runQueueCmd(t, "list"); !strings.Contains(tbl, "SCOPE") {
+		t.Fatalf("table lacks scope column:\n%s", tbl)
+	}
+}

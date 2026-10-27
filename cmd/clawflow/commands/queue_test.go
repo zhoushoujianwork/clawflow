@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -403,6 +405,8 @@ func (f *fakeQueueLister) ListSubIssues(string, int) ([]vcs.Issue, error) {
 	return f.subs, f.err
 }
 
+func noScopeWrite() error { return nil }
+
 func TestMigrateQueueIssueImportsOnceInOrder(t *testing.T) {
 	logs := withRunLog(t)
 	if err := queue.SaveState(queue.RepoState{Repo: "o/r"}); err != nil {
@@ -415,7 +419,7 @@ func TestMigrateQueueIssueImportsOnceInOrder(t *testing.T) {
 	}
 	lister := &fakeQueueLister{subs: []vcs.Issue{{Number: 9, State: "open"}, {Number: 7, State: "open"}, {Number: 8, State: "closed"}, {Number: 5, State: "open"}}}
 	st, _ := queue.LoadState("o/r")
-	if !migrateQueueIssue(lister, "o/r", 100, &st) {
+	if !migrateQueueIssue(lister, "o/r", 100, false, noScopeWrite, &st) {
 		t.Fatal("migration should succeed")
 	}
 	order, _ := queue.LoadRank()
@@ -431,7 +435,7 @@ func TestMigrateQueueIssueImportsOnceInOrder(t *testing.T) {
 		t.Fatalf("state = %+v", st)
 	}
 	// Second pass: no import, no second notice.
-	if !migrateQueueIssue(lister, "o/r", 100, &st) || lister.calls != 1 {
+	if !migrateQueueIssue(lister, "o/r", 100, false, noScopeWrite, &st) || lister.calls != 1 {
 		t.Fatalf("import must happen once, calls=%d", lister.calls)
 	}
 	out := logs()
@@ -439,7 +443,7 @@ func TestMigrateQueueIssueImportsOnceInOrder(t *testing.T) {
 		t.Fatalf("log:\n%s", out)
 	}
 	// No queue_issue: nothing to do.
-	if !migrateQueueIssue(lister, "o/r", 0, &queue.RepoState{}) || lister.calls != 1 {
+	if !migrateQueueIssue(lister, "o/r", 0, false, noScopeWrite, &queue.RepoState{}) || lister.calls != 1 {
 		t.Fatal("repos without queue_issue are untouched")
 	}
 }
@@ -448,11 +452,11 @@ func TestMigrateQueueIssueTransientFailureRetries(t *testing.T) {
 	withRunLog(t)
 	lister := &fakeQueueLister{err: errors.New("HTTP 502")}
 	st := queue.RepoState{Repo: "o/r"}
-	if migrateQueueIssue(lister, "o/r", 100, &st) || st.Imported {
+	if migrateQueueIssue(lister, "o/r", 100, false, noScopeWrite, &st) || st.Imported {
 		t.Fatal("transient failure must not mark the import done")
 	}
 	lister.err = vcs.ErrNotSupported
-	if !migrateQueueIssue(lister, "o/r", 100, &st) || !st.Imported {
+	if !migrateQueueIssue(lister, "o/r", 100, false, noScopeWrite, &st) || !st.Imported {
 		t.Fatal("unsupported platform has nothing to preserve")
 	}
 }
@@ -474,5 +478,173 @@ func TestRunOnceQueueIssueIgnoredAfterImport(t *testing.T) {
 	}
 	if out := logs(); !strings.Contains(out, "queue/import") || !strings.Contains(out, "queue/deprecated") {
 		t.Fatalf("missing import log:\n%s", out)
+	}
+}
+
+func TestMigrateQueueIssueSetsRankedScopeOrFailsClosed(t *testing.T) {
+	logs := withRunLog(t)
+	lister := &fakeQueueLister{subs: []vcs.Issue{{Number: 1, State: "open"}}}
+	writes := 0
+	st := queue.RepoState{Repo: "o/r"}
+	failing := func() error { writes++; return errors.New("disk full") }
+	if migrateQueueIssue(lister, "o/r", 100, false, failing, &st) {
+		t.Fatal("a failed scope write must hold back implement")
+	}
+	if !st.Imported || st.DeprecationShown {
+		t.Fatalf("import is kept, notice waits for success: %+v", st)
+	}
+	ok := func() error { writes++; return nil }
+	if !migrateQueueIssue(lister, "o/r", 100, false, ok, &st) || writes != 2 || lister.calls != 1 {
+		t.Fatalf("retry: writes=%d calls=%d", writes, lister.calls)
+	}
+	// An explicit queue_scope is never overwritten.
+	writes = 0
+	if !migrateQueueIssue(lister, "o/r", 100, true, failing, &queue.RepoState{Repo: "o/r", Imported: true}) || writes != 0 {
+		t.Fatal("explicit scope must not be touched")
+	}
+	if !strings.Contains(logs(), "queue/scope") {
+		t.Fatal("scope change must be logged")
+	}
+}
+
+func TestPlanRepoQueueRankedScopeAndEnroll(t *testing.T) {
+	logs := withRunLog(t)
+	in := plannerInput("o/r",
+		plannerIssue(1, "2026-01-01T00:00:00Z"),             // unlisted
+		plannerIssue(2, "2026-01-02T00:00:00Z"),             // listed
+		plannerIssue(3, "2026-01-03T00:00:00Z", "clawflow"), // enrolled on sight
+	)
+	in.Scope = queue.ScopeRanked
+	in.MaxInFlight = 5
+	in.Rank = []queue.Key{{Repo: "o/r", Number: 2}}
+	p := planRepoQueue(in)
+	if got := pickedNumbers(p); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("picked = %v, want [2 3]", got)
+	}
+	if len(p.Enroll) != 1 || p.Enroll[0].Number != 3 {
+		t.Fatalf("enroll = %v", p.Enroll)
+	}
+	for _, e := range p.Result.Entries {
+		if e.Key.Number == 1 {
+			t.Fatal("unlisted issue must not be a candidate")
+		}
+	}
+	if kept := applyUnifiedQueue("o/r", nil, p); kept != nil && len(kept) != 0 {
+		t.Fatal("no jobs expected")
+	}
+	if order, _ := queue.LoadRank(); len(order) != 1 || order[0].Number != 3 {
+		t.Fatalf("rank = %v (rank file starts empty in this test)", order)
+	}
+	if !strings.Contains(logs(), "queue/enroll") {
+		t.Fatal("missing queue/enroll")
+	}
+	// Labeled scope ignores the rank.
+	in.Scope = queue.ScopeLabeled
+	if got := pickedNumbers(planRepoQueue(in)); len(got) != 1 || got[0] != 3 {
+		t.Fatalf("labeled picked = %v", got)
+	}
+}
+
+func TestEffectiveScopeFailsClosedForMigratedRepos(t *testing.T) {
+	cases := []struct {
+		repo, def string
+		had       bool
+		want      string
+		fell      bool
+	}{
+		{"", "", false, "all", false},
+		{"", "labeled", false, "labeled", false},
+		{"ranked", "labeled", false, "ranked", false},
+		{"bogus", "", true, "ranked", true},
+		{"bogus", "", false, "all", true},
+		{"", "bogus", true, "ranked", true},
+	}
+	for _, c := range cases {
+		got, fell := queue.EffectiveScope(c.repo, c.def, c.had)
+		if got != c.want || fell != c.fell {
+			t.Errorf("%+v = %s,%v", c, got, fell)
+		}
+	}
+}
+
+func TestRepoSetQueueScope(t *testing.T) {
+	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{"o/gh": {Platform: "github"}}})
+	run := func(args ...string) error {
+		cmd := newRepoSetCmd()
+		cmd.SetArgs(args)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		return cmd.Execute()
+	}
+	if err := run("o/gh", "--queue-scope", "weird"); err == nil {
+		t.Fatal("unknown scope must be rejected")
+	}
+	if err := run("o/gh", "--queue-scope", "ranked"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := config.Load(); cfg.Repos["o/gh"].QueueScope != "ranked" {
+		t.Fatalf("scope = %q", cfg.Repos["o/gh"].QueueScope)
+	}
+	if err := run("o/gh", "--queue-scope", ""); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := config.Load(); cfg.Repos["o/gh"].QueueScope != "" {
+		t.Fatal("empty must clear")
+	}
+}
+
+// End to end: a migrated repo becomes ranked; unlisted work is not dispatched,
+// listed work is, and a clawflow-labeled issue is enrolled and dispatched.
+func TestRunOnceMigratedRepoIsRanked(t *testing.T) {
+	logs := withRunLog(t)
+	queueConfig(t, 100)
+	queueVCS(t,
+		[]map[string]any{queueParent(100, 1), targetedIssue(9), targetedIssue(5), targetedIssue(4), targetedIssue(3, "clawflow")},
+		map[int][]int{100: {9}}, nil, nil)
+	got := runQueueOnce(t, 0)
+	if len(got) != 2 || got[0] != 3 || got[1] != 9 {
+		t.Fatalf("dispatched = %v, want [3 9] (5 and 4 are unlisted)", got)
+	}
+	cfg, _ := config.Load()
+	if cfg.Repos["o/r"].QueueScope != "ranked" {
+		t.Fatalf("queue_scope = %q, want ranked", cfg.Repos["o/r"].QueueScope)
+	}
+	order, _ := queue.LoadRank()
+	var keys []string
+	for _, k := range order {
+		keys = append(keys, k.String())
+	}
+	if strings.Join(keys, ",") != "o/r#9,o/r#3" {
+		t.Fatalf("rank = %v", keys)
+	}
+	if out := logs(); !strings.Contains(out, "queue/enroll") || !strings.Contains(out, "queue/scope") {
+		t.Fatalf("missing logs:\n%s", out)
+	}
+}
+
+func TestRunOnceMigrationHoldsBackWhenScopeWriteFails(t *testing.T) {
+	withRunLog(t)
+	queueConfig(t, 100)
+	queueVCS(t,
+		[]map[string]any{queueParent(100, 1), targetedIssue(9), targetedIssue(5)},
+		map[int][]int{100: {9}}, nil, nil)
+	// Read-only config file: loading works, saving the scope fails.
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".clawflow", "config", "config.yaml")
+	if err := os.Chmod(cfgPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfgPath, 0o644) })
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	if got := runQueueOnce(t, 0); len(got) != 0 {
+		t.Fatalf("dispatched = %v, want none while the scope write fails", got)
+	}
+	// Writable again: the next pass retries, sets ranked and dispatches the listed item.
+	if err := os.Chmod(cfgPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runQueueOnce(t, 0); len(got) != 1 || got[0] != 9 {
+		t.Fatalf("retry dispatched = %v, want [9]", got)
 	}
 }

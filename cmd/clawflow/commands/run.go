@@ -1098,7 +1098,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 		if stateErr != nil {
 			runLog.Warn("queue/state_unreadable", "repo", fullName, "err", stateErr.Error())
 		}
-		migrated := migrateQueueIssue(client, fullName, repoCfg.QueueIssue, &state)
+		migrated := migrateQueueIssue(client, fullName, repoCfg.QueueIssue, repoCfg.QueueScope != "",
+			func() error { return persistRepoQueueScope(fullName, queue.ScopeRanked) }, &state)
+		if migrated && repoCfg.QueueIssue > 0 && repoCfg.QueueScope == "" {
+			repoCfg.QueueScope = queue.ScopeRanked // just persisted
+		}
 		rank, rankErr := queue.LoadRank()
 		if rankErr != nil {
 			runLog.Warn("queue/rank_unreadable", "repo", fullName, "err", rankErr.Error())

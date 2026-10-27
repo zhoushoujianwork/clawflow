@@ -25,6 +25,7 @@ type EntryRecord struct {
 	State    string `json:"state"`
 	Reason   string `json:"reason,omitempty"`
 	Created  string `json:"created_at,omitempty"`
+	Labeled  bool   `json:"labeled,omitempty"` // carries the "clawflow" scope label
 }
 
 // RepoState is the small per-repo file under data/queue-state/. Only the pass
@@ -37,6 +38,8 @@ type RepoState struct {
 	Parked           []int             `json:"parked,omitempty"`
 	Warned           map[string]bool   `json:"warned,omitempty"` // "<number>|<warning>" already reported
 	Imported         bool              `json:"imported,omitempty"`
+	ScopeSet         bool              `json:"scope_set,omitempty"` // migration persisted queue_scope
+	Scope            string            `json:"scope,omitempty"`     // effective scope at the last pass
 	DeprecationShown bool              `json:"deprecation_shown,omitempty"`
 	Entries          []EntryRecord     `json:"entries,omitempty"`
 }

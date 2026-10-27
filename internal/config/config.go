@@ -57,6 +57,13 @@ type Repo struct {
 	// 0 = default 2. Negative values are rejected by Validate.
 	MaxInFlight int `yaml:"max_in_flight,omitempty" json:"max_in_flight,omitempty"`
 
+	// QueueScope selects which open issues of this repo are queue
+	// candidates: "all", "labeled" (label clawflow) or "ranked" (listed in
+	// the rank file, or labeled clawflow and enrolled on sight). Empty falls
+	// back to settings.queue.scope, then "all". Migrating a repo's
+	// queue_issue sets "ranked" so unlisted work is never picked up.
+	QueueScope string `yaml:"queue_scope,omitempty" json:"queue_scope,omitempty"`
+
 	// BoundMachine, when non-empty, restricts processing of this repo to the
 	// machine whose hostname matches this value. Repos with no BoundMachine
 	// (or whose BoundMachine matches the current hostname) are processed
@@ -98,8 +105,9 @@ type ExecutionSettings struct {
 
 // QueueSettings tunes the unified work queue.
 type QueueSettings struct {
-	// Scope selects the candidates: "all" (default) or "labeled" (only
-	// issues carrying the label "clawflow").
+	// Scope is the default candidate scope for repos without queue_scope:
+	// "all" (default), "labeled" (only issues carrying the label
+	// "clawflow") or "ranked" (only issues in the rank file or labeled).
 	Scope string `yaml:"scope,omitempty"`
 	// ParkAfter is how long an in-flight item may stay blocked before it
 	// stops counting toward max_in_flight (Go duration, default 45m).

@@ -18,7 +18,7 @@ func NewQueueCmd() *cobra.Command {
 		Use:   "queue",
 		Short: "Show and reorder the unified work queue across all repositories",
 	}
-	cmd.AddCommand(newQueueListCmd(), newQueueMoveCmd(), newQueueImportCmd())
+	cmd.AddCommand(newQueueListCmd(), newQueueMoveCmd(), newQueueAddCmd(), newQueueRemoveCmd(), newQueueImportCmd())
 	return cmd
 }
 
@@ -47,7 +47,19 @@ func queueListRows(repo string) ([]queue.ListEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return queue.BuildList(queue.ListStates(), order, repo), nil
+	var cfg *config.Config
+	if c, cErr := config.Load(); cErr == nil {
+		cfg = c
+	}
+	scopeOf := func(st queue.RepoState) string {
+		if cfg == nil {
+			return st.Scope
+		}
+		rc := cfg.Repos[st.Repo]
+		s, _ := queue.EffectiveScope(rc.QueueScope, cfg.Settings.Queue.Scope, rc.QueueIssue > 0 || st.Imported)
+		return s
+	}
+	return queue.BuildList(queue.ListStates(), order, repo, scopeOf), nil
 }
 
 func writeQueueList(w io.Writer, rows []queue.ListEntry, asJSON bool) error {
@@ -64,9 +76,9 @@ func writeQueueList(w io.Writer, rows []queue.ListEntry, asJSON bool) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "#\tKEY\tTIER\tRANK\tSTATE\tTITLE")
+	fmt.Fprintln(tw, "#\tKEY\tTIER\tRANK\tSCOPE\tSTATE\tTITLE")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", r.Position, r.Key, r.Tier, queue.RankLabel(r.Rank), r.State, r.Title)
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Position, r.Key, r.Tier, queue.RankLabel(r.Rank), r.Scope, r.State, r.Title)
 	}
 	return tw.Flush()
 }
@@ -167,4 +179,72 @@ func newQueueImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&repo, "repo", "", "repository of the queue issue")
 	cmd.Flags().IntVar(&from, "from-issue", 0, "queue issue number whose sub-issues are imported")
 	return cmd
+}
+
+func newQueueAddCmd() *cobra.Command {
+	var top bool
+	var before, after string
+	cmd := &cobra.Command{
+		Use:   "add <key> [--top | --before <key> | --after <key>]",
+		Short: "Enroll an issue in the manual rank (appended at the bottom by default)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			p := queue.Placement{Top: top, Bottom: !top && before == "" && after == ""}
+			if before != "" {
+				k, err := queue.ParseKey(before)
+				if err != nil {
+					return err
+				}
+				p.Before = &k
+			}
+			if after != "" {
+				k, err := queue.ParseKey(after)
+				if err != nil {
+					return err
+				}
+				p.After = &k
+			}
+			order, err := moveQueueItem(cfg, args[0], p)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "added %s; %d item(s) ranked\n", args[0], len(order))
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&top, "top", false, "add at the top instead of the bottom")
+	cmd.Flags().StringVar(&before, "before", "", "place directly before this key")
+	cmd.Flags().StringVar(&after, "after", "", "place directly after this key")
+	return cmd
+}
+
+func newQueueRemoveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <key>",
+		Short: "Remove an issue from the manual rank (a repo with scope ranked then stops picking it up)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			k, err := queue.ParseKey(args[0])
+			if err != nil {
+				return err
+			}
+			removed := false
+			if _, err := queue.UpdateRank(func(order []queue.Key) ([]queue.Key, error) {
+				next := queue.Remove(order, k)
+				removed = len(next) != len(order)
+				return next, nil
+			}, nil); err != nil {
+				return err
+			}
+			if !removed {
+				return fmt.Errorf("%s is not in the rank", k)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "removed %s\n", k)
+			return nil
+		},
+	}
 }
