@@ -1,12 +1,9 @@
 package snapshot
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
-	"time"
 )
 
 func TestAcquireRunLock_BasicAcquireRelease(t *testing.T) {
@@ -116,41 +113,7 @@ func TestReleaseRunLock_NoOp(t *testing.T) {
 	ReleaseRunLock()
 }
 
-// TestAcquireRunLock_ConcurrentExclusion verifies that concurrent callers
-// cannot hold the run lock simultaneously. Run with -race to catch data races.
 func TestAcquireRunLock_ConcurrentExclusion(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-
-	const goroutines = 20
-	var (
-		mu      sync.Mutex
-		winners []int
-		wg      sync.WaitGroup
-	)
-	start := make(chan struct{})
-
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			<-start // all goroutines race from the same starting line
-			if err := AcquireRunLock(fmt.Sprintf("v1.0.%d", id)); err == nil {
-				mu.Lock()
-				winners = append(winners, id)
-				mu.Unlock()
-				// Hold briefly to give other goroutines a chance to try.
-				time.Sleep(5 * time.Millisecond)
-				ReleaseRunLock()
-			}
-		}(i)
-	}
-
-	close(start)
-	wg.Wait()
-
-	if len(winners) == 0 {
-		t.Error("expected at least one goroutine to acquire the run lock")
-	}
-	t.Logf("%d/%d goroutines acquired the run lock (sequential windows)", len(winners), goroutines)
+	testConcurrentLock(t, RunLockPath,
+		func() error { return AcquireRunLock("v1.0.0") }, ReleaseRunLock)
 }

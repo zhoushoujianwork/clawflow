@@ -182,9 +182,15 @@ func selfUpgradeLockPath() string {
 	return filepath.Join(snapshot.LockDir(), "self-upgrade.lock")
 }
 
+// selfUpgradeLockMu serializes create/write/reclaim within this process.
+// O_EXCL alone exposes an empty file before its owner PID has been written.
+var selfUpgradeLockMu sync.Mutex
+
 // acquireSelfUpgradeLock takes an O_EXCL lockfile holding the owner PID.
 // A lock whose owner is dead is reclaimed.
 func acquireSelfUpgradeLock() (func(), bool, error) {
+	selfUpgradeLockMu.Lock()
+	defer selfUpgradeLockMu.Unlock()
 	path := selfUpgradeLockPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, false, err
@@ -198,7 +204,11 @@ func acquireSelfUpgradeLock() (func(), bool, error) {
 				_ = os.Remove(path)
 				return nil, false, errors.Join(werr, cerr)
 			}
-			return func() { _ = os.Remove(path) }, true, nil
+			return func() {
+				selfUpgradeLockMu.Lock()
+				defer selfUpgradeLockMu.Unlock()
+				_ = os.Remove(path)
+			}, true, nil
 		}
 		if !os.IsExist(err) {
 			return nil, false, err
