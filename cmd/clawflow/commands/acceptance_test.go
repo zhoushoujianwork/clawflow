@@ -213,7 +213,7 @@ func TestAcceptanceGateRejectsMissingAndStaleEvidence(t *testing.T) {
 					r, err := baseRun(ctx, c, req, env, w, observe)
 					if !req.ToolsDisabled {
 						if mode == "failed" {
-							r.Text = `{"status":"failed","summary":"Tests fail","evidence":["failure"]}`
+							r.Text = `{"status":"failed","summary":"Tests fail","evidence":["failure"],"findings":[{"kind":"requirement","summary":"missing behavior","requirement":"required behavior","evidence":"TestBehavior fails"}]}`
 						} else {
 							r.NativeSessionID = "dev-session"
 						}
@@ -867,6 +867,9 @@ func TestAcceptanceCodexFallbackAndHarvestEvidence(t *testing.T) {
 				}
 				result, err := base(ctx, c, req, env, w, observe)
 				result.Text = strings.Replace(result.Text, `"passed"`, `"`+verdict+`"`, 1)
+				if verdict == "failed" {
+					result.Text = strings.Replace(result.Text, `"summary":`, `"findings":[{"kind":"requirement","summary":"missing behavior","requirement":"Required behavior","evidence":"TestBehavior fails"}],"summary":`, 1)
+				}
 				return result, err
 			}
 			if failed := harvest(t, "", 0); len(failed) != 0 || calls != 3 || *attempts != 1 {

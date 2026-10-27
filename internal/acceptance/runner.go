@@ -236,9 +236,10 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		return record, errors.New("review requires a fresh native session and run")
 	}
 	var output struct {
-		Status   Verdict  `json:"status"`
-		Summary  string   `json:"summary"`
-		Evidence []string `json:"evidence"`
+		Status   Verdict   `json:"status"`
+		Findings []Finding `json:"findings"`
+		Summary  string    `json:"summary"`
+		Evidence []string  `json:"evidence"`
 	}
 	if len(reviewed.Text) > maxFileBytes {
 		return record, errors.New("acceptance report exceeds size limit")
@@ -254,6 +255,21 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 			return record, errors.New("acceptance report contains empty evidence")
 		}
 	}
+	failing, findingErr := validateFindings(output.Findings)
+	if findingErr != nil {
+		return record, findingErr
+	}
+	if output.Status == Failed && len(output.Findings) == 0 {
+		return record, errors.New("failed verdict requires requirement or defect findings")
+	}
+	if output.Status != Blocked {
+		if failing {
+			output.Status = Failed
+		} else {
+			output.Status = Passed
+		}
+	}
+	record.Findings = output.Findings
 	record.Verdict = output.Status
 	record.Report = output.Summary
 	record.Evidence = output.Evidence
@@ -267,10 +283,10 @@ func (runner Runner) reviewPrompt() string {
 	if nonempty(runner.TestCommand) {
 		test = "the configured test command `" + strings.TrimSpace(runner.TestCommand) + "`"
 	}
-	return "Review the source against the pinned contract and independently saved plan below. The review checkout is a disposable detached copy of the PR head; you may build and run tests in it, but do not change tracked source, commit, or switch HEAD, and you have no remote or credentials. " +
+	return "Review the source against the pinned contract below. The independently saved plan is a review aid, not a requirement source. The review checkout is a disposable detached copy of the PR head; you may build and run tests in it, but do not change tracked source, commit, or switch HEAD, and you have no remote or credentials. " +
 		"You must run " + test + " and also tests targeted at the requirements. " +
 		"Use blocked only when requirements cannot be evaluated, such as missing or contradictory requirements or unavailable source. If the configured test command, targeted tests, and source review produced the required evidence, inability to create additional isolation or tooling beyond that command is a limitation, not grounds for blocked. Return passed or failed based on the requirements and record those limitations in evidence. " +
-		"Return exactly one JSON object with only status (passed, failed, or blocked), summary (nonempty string), and evidence (nonempty array of nonempty strings). " +
+		"A failed verdict requires at least one finding tied to a requirement in the contract issue body or a concrete correctness/safety defect in changed code, even outside the plan. Uncovered plan items without a requirement violation or demonstrated defect are advisory only and never cause failed on their own. Each failing finding must name the violated requirement or defect and concrete evidence. Return passed when only advisory findings remain and evidence suffices. Return exactly one JSON object with only status (passed, failed, or blocked), summary (nonempty string), evidence (nonempty array of nonempty strings), and findings (array, empty if none). Each finding has kind (requirement, defect, or advisory), summary (nonempty string), requirement (contract requirement text for kind requirement), defect (correctness/safety violation for kind defect), and evidence (concrete evidence required for either failing kind). " +
 		"Record every command you executed as one evidence entry of the form `" + EvidenceCommandPrefix + " <exact command> => <result>`; a passed verdict whose evidence lists no executed command is rejected. " +
 		"Return raw JSON only, without Markdown code fences. Do not supply actor or execution identities.\n\n"
 }

@@ -245,10 +245,12 @@ func runAcceptanceProtocolHelper() int {
 		capture.Token = text
 	} else {
 		verdict := "passed"
+		findings := "[]"
 		if mode == "verdict-failed" {
 			verdict = "failed"
+			findings = `[{"kind":"requirement","summary":"missing behavior","requirement":"Required behavior","evidence":"TestBehavior fails"}]`
 		}
-		text = `{"status":"` + verdict + `","summary":"Independent protocol review complete","evidence":["` + acceptanceProtocolReviewerMark + `","command: go test ./... => ok"]}`
+		text = `{"status":"` + verdict + `","summary":"Independent protocol review complete","evidence":["` + acceptanceProtocolReviewerMark + `","command: go test ./... => ok"],"findings":` + findings + `}`
 	}
 	f, err := os.OpenFile(os.Getenv(acceptanceProtocolCaptureEnv), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {

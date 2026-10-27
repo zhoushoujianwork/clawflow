@@ -39,7 +39,7 @@ func setReviewerVerdict(verdict string) {
 		if !req.ToolsDisabled && verdict == "passed" {
 			r.Text = `{"status":"passed","summary":"Independent checks complete","evidence":["Source fulfills the plan","command: go test ./... => ok"]}`
 		} else if !req.ToolsDisabled {
-			r.Text = `{"status":"` + verdict + `","summary":"Missing <!-- x --> retry token=abcd1234efgh5678ijkl behavior","evidence":["command: go test ./... => FAIL TestRetry","no test covers it"]}`
+			r.Text = `{"status":"` + verdict + `","summary":"Missing <!-- x --> retry token=abcd1234efgh5678ijkl behavior","evidence":["command: go test ./... => FAIL TestRetry","no test covers it"],"findings":[{"kind":"requirement","summary":"Missing retry behavior","requirement":"retry","evidence":"command: go test ./... => FAIL TestRetry"}]}`
 		}
 		return r, err
 	}
@@ -81,7 +81,7 @@ func TestAcceptanceRepairFailedVerdictDispatchesOneJobWithUntrustedFindings(t *t
 	}
 	jobs[0].repair.Attempt = 1
 	p := jobs[0].repair.prompt("go test ./...")
-	for _, want := range []string{"BEGIN UNTRUSTED REVIEWER FINDINGS", "END UNTRUSTED REVIEWER FINDINGS", "UNTRUSTED DATA", "only source of truth", "FAIL TestRetry", "no test covers it", f.pr.HeadSHA, "https://github.com/o/r/pull/11", "Do not create a new PR", "go test ./..."} {
+	for _, want := range []string{"BEGIN UNTRUSTED REVIEWER FINDINGS", "END UNTRUSTED REVIEWER FINDINGS", "UNTRUSTED DATA", "only source of truth", "FAIL TestRetry", "Missing retry behavior", f.pr.HeadSHA, "https://github.com/o/r/pull/11", "Do not create a new PR", "go test ./..."} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("prompt lacks %q:\n%s", want, p)
 		}
@@ -406,7 +406,7 @@ func TestSanitizeReviewerText(t *testing.T) {
 	}
 	r := acceptance.Record{AttemptID: "a", Verdict: acceptance.Failed, Report: "r"}
 	for i := 0; i < 50; i++ {
-		r.Evidence = append(r.Evidence, strings.Repeat("e", 2000))
+		r.Findings = append(r.Findings, acceptance.Finding{Kind: "requirement", Requirement: "retry", Summary: "missing retry", Evidence: strings.Repeat("e", 2000)})
 	}
 	f := findingsFromRecord(r)
 	if len(f.Evidence) != acceptanceFindingEvidenceLimit || len([]rune(f.Evidence[0])) > acceptanceFindingEntryLimit+1 {
@@ -780,4 +780,25 @@ func TestNoChangeRepairRunRecordsSuccess(t *testing.T) {
 func (f *setupRepairFake) PostIssueCommentIdempotent(_ string, _ int, body, _ string) error {
 	f.comments = append(f.comments, body)
 	return nil
+}
+
+func TestRepairExcludesAdvisoryFindings(t *testing.T) {
+	r := acceptance.Record{
+		Verdict: acceptance.Failed, Report: "ADVISORY_ONLY general summary",
+		Evidence: []string{"ADVISORY_ONLY general evidence"},
+		Findings: []acceptance.Finding{
+			{Kind: "advisory", Summary: "ADVISORY_ONLY missing plan tests"},
+			{Kind: "requirement", Summary: "retry absent", Requirement: "retry transient errors", Evidence: "TestRetry fails"},
+			{Kind: "defect", Summary: "race", Defect: "concurrent writes", Evidence: "race detector handler.go:42"},
+		},
+	}
+	f := findingsFromRecord(r)
+	data, _ := json.Marshal(f)
+	if strings.Contains(string(data), "ADVISORY_ONLY") || len(f.Evidence) != 2 || !strings.Contains(f.Summary, "concurrent writes") || !strings.Contains(f.Summary, "retry transient errors") {
+		t.Fatalf("incorrect repair targets: %s", data)
+	}
+	r.Report = strings.Repeat("x", harvestSummaryLimit+100)
+	if !strings.Contains(harvestNonpassComment(r), "ADVISORY_ONLY missing plan tests") {
+		t.Fatal("advisory not rendered")
+	}
 }

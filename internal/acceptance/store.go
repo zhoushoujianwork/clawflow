@@ -390,6 +390,16 @@ func (s *Store) completeRecords(c Contract) ([]Record, error) {
 }
 
 func completeRecord(r Record) error {
+	if len(r.Findings) > 0 {
+		failing, err := validateFindings(r.Findings)
+		if err != nil {
+			return err
+		}
+		if r.Verdict == Failed && !failing {
+			return errors.New("failed record contains only advisory findings")
+		}
+	}
+
 	if r.StartedAt.IsZero() || r.CompletedAt.IsZero() || r.CompletedAt.Before(r.StartedAt) || !nonempty(r.Report) ||
 		(r.Verdict != Passed && r.Verdict != Failed && r.Verdict != Blocked) {
 		return errors.New("incoherent complete acceptance record")

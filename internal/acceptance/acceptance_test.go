@@ -566,7 +566,7 @@ func TestRunnerNonpassingVerdicts(t *testing.T) {
 			r.Execute = func(ctx context.Context, p string, o execution.Options) (execution.Result, error) {
 				result, err := base(ctx, p, o)
 				if !o.ToolsDisabled {
-					b, _ := json.Marshal(map[string]any{"status": status, "summary": "not accepted", "evidence": []string{"reason"}})
+					b, _ := json.Marshal(map[string]any{"status": status, "summary": "not accepted", "evidence": []string{"reason"}, "findings": []Finding{{Kind: "requirement", Summary: "missing behavior", Requirement: "required behavior", Evidence: "test failed"}}})
 					result.Text = string(b)
 				}
 				return result, err
@@ -680,5 +680,63 @@ func TestReviewerBlockedPolicy(t *testing.T) {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("review prompt missing %q", required)
 		}
+	}
+}
+
+func TestReviewerFindingPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   Verdict
+		findings []Finding
+		want     Verdict
+		invalid  bool
+	}{
+		{"plan-only", Failed, []Finding{{Kind: "advisory", Summary: "plan requests multibyte boundary tests"}}, Passed, false},
+		{"requirement", Failed, []Finding{{Kind: "requirement", Summary: "retry absent", Requirement: "retry on transient failure", Evidence: "TestRetry fails: got one attempt"}}, Failed, false},
+		{"unplanned-defect", Passed, []Finding{{Kind: "defect", Summary: "race outside plan", Defect: "concurrent map writes in changed handler", Evidence: "race detector points to handler.go:42"}}, Failed, false},
+		{"no-findings", Failed, nil, Blocked, true},
+		{"no-requirement", Failed, []Finding{{Kind: "requirement", Summary: "more tests", Evidence: "plan gap"}}, Blocked, true},
+		{"no-defect-evidence", Failed, []Finding{{Kind: "defect", Summary: "possible race", Defect: "race"}}, Blocked, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, scratch, workspace := setupRunner(t)
+			base := r.Execute
+			r.Execute = func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
+				result, err := base(ctx, prompt, opts)
+				if !opts.ToolsDisabled {
+					for _, rule := range []string{"review aid, not a requirement source", "advisory only", "Each failing finding", "limitation, not grounds for blocked"} {
+						if !strings.Contains(prompt, rule) {
+							t.Fatalf("missing prompt rule %q", rule)
+						}
+					}
+					data, _ := json.Marshal(map[string]any{"status": tc.status, "summary": "reviewed", "evidence": []string{testCommandEvidence}, "findings": tc.findings})
+					result.Text = string(data)
+				}
+				return result, err
+			}
+			rec, err := r.Run(context.Background(), contract(), scratch, workspace)
+			if (err != nil) != tc.invalid || rec.Verdict != tc.want {
+				t.Fatalf("verdict=%s err=%v", rec.Verdict, err)
+			}
+			if !tc.invalid {
+				stored, err := r.Store.LoadRecord(contract(), rec.AttemptID)
+				if err != nil || len(stored.Findings) != len(tc.findings) {
+					t.Fatalf("findings not persisted: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestStoredFindingsCannotBypassVerdict(t *testing.T) {
+	r := passing()
+	r.Findings = []Finding{{Kind: "defect", Summary: "race", Defect: "concurrent writes", Evidence: "race detector"}}
+	if Evaluate(r.Contract, r) == nil {
+		t.Fatal("passing verdict with defect accepted")
+	}
+	r.Verdict = Failed
+	r.Findings = []Finding{{Kind: "advisory", Summary: "optional plan test"}}
+	if completeRecord(r) == nil {
+		t.Fatal("advisory-only failure accepted")
 	}
 }

@@ -197,7 +197,7 @@ func TestHarvestNonpassCommentsOncePerContract(t *testing.T) {
 			acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
 				r, err := baseRun(ctx, c, req, env, w, observe)
 				if !req.ToolsDisabled {
-					r.Text = `{"status":"` + status + `","summary":"Missing <!-- x --> behavior","evidence":["no test covers it"]}`
+					r.Text = `{"status":"` + status + `","summary":"Missing <!-- x --> behavior","evidence":["TestBehavior fails"],"findings":[{"kind":"requirement","summary":"missing behavior","requirement":"required behavior","evidence":"TestBehavior fails"}]}`
 				}
 				return r, err
 			}
@@ -364,7 +364,7 @@ func TestHarvestNeverRetriesReviewerVerdict(t *testing.T) {
 	acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
 		r, err := baseRun(ctx, c, req, env, w, observe)
 		if !req.ToolsDisabled {
-			r.Text = `{"status":"failed","summary":"Wrong","evidence":["proof"]}`
+			r.Text = `{"status":"failed","summary":"Wrong","evidence":["proof"],"findings":[{"kind":"defect","summary":"broken behavior","defect":"incorrect return value","evidence":"TestBehavior fails"}]}`
 		}
 		return r, err
 	}
@@ -430,5 +430,26 @@ func TestCurrentAcceptanceMissingSentinel(t *testing.T) {
 	writeAcceptanceDevelopment(t, "running", time.Now(), nil)
 	if _, _, err = currentAcceptance(context.Background(), f, "o/r", 11); err == nil || errors.Is(err, errAcceptanceMissing) {
 		t.Fatalf("provenance error classified as missing: %v", err)
+	}
+}
+
+func TestHarvestPostsPassingAdvisories(t *testing.T) {
+	f, _, _ := harvestFixture(t)
+	baseRun := acceptanceNativeRun
+	acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+		r, err := baseRun(ctx, c, req, env, w, observe)
+		if !req.ToolsDisabled {
+			r.Text = `{"status":"failed","summary":"requirements met; plan gap only","evidence":["command: go test ./... => ok"],"findings":[{"kind":"advisory","summary":"optional multibyte boundary test"}]}`
+		}
+		return r, err
+	}
+	if failed := harvest(t, "", 0); len(failed) != 0 {
+		t.Fatalf("harvest failed: %v", failed)
+	}
+	if len(f.comments) != 1 || !strings.Contains(f.comments[0], "advisory: optional multibyte boundary test") || !strings.Contains(f.comments[0], "passed") {
+		t.Fatalf("comments=%v", f.comments)
+	}
+	if len(f.expected) != 1 {
+		t.Fatal("advisory prevented merge gate")
 	}
 }
