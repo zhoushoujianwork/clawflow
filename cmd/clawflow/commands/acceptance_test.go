@@ -876,3 +876,24 @@ func TestAcceptanceCodexFallbackAndHarvestEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestAcceptanceWritebackFailurePreservesContract(t *testing.T) {
+	for _, status := range []string{"success", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			f, _ := acceptanceFixture(t)
+			dir := writeAcceptanceDevelopment(t, status, time.Now().Add(-30*time.Second), nil)
+			path := filepath.Join(dir, "meta.json")
+			data, _ := os.ReadFile(path)
+			var meta snapshot.RunMeta
+			json.Unmarshal(data, &meta)
+			meta.WritebackError = "add outcome label: network unavailable"
+			if err := snapshot.WriteRunMeta(dir, meta); err != nil {
+				t.Fatal(err)
+			}
+			_, _, _, _, err := acceptanceContract(context.Background(), f, "o/r", 11)
+			if (err == nil) != (status == "success") {
+				t.Fatalf("status=%s contract error=%v", status, err)
+			}
+		})
+	}
+}

@@ -5,6 +5,7 @@ package gitlab
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,7 +58,7 @@ func projectID(repo string) string {
 	return url.PathEscape(repo)
 }
 
-func (c *Client) do(method, path string, body url.Values) ([]byte, int, error) {
+func (c *Client) doOnce(method, path string, body url.Values) ([]byte, int, error) {
 	var r io.Reader
 	if body != nil {
 		r = strings.NewReader(body.Encode())
@@ -76,10 +77,13 @@ func (c *Client) do(method, path string, body url.Values) ([]byte, int, error) {
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
+	if err == nil {
+		err = retry.ResponseError(resp.StatusCode, resp.Header, data)
+	}
 	return data, resp.StatusCode, err
 }
 
-func (c *Client) doJSON(method, path string, body any) ([]byte, int, error) {
+func (c *Client) doJSONOnce(method, path string, body any) ([]byte, int, error) {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -102,6 +106,9 @@ func (c *Client) doJSON(method, path string, body any) ([]byte, int, error) {
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
+	if err == nil && method != "POST" {
+		err = retry.ResponseError(resp.StatusCode, resp.Header, data)
+	}
 	return data, resp.StatusCode, err
 }
 
@@ -261,15 +268,7 @@ func (c *Client) ListIssueComments(repo string, issueNumber int) ([]string, erro
 
 func (c *Client) PostIssueComment(repo string, issueNumber int, body string) error {
 	path := fmt.Sprintf("/projects/%s/issues/%d/notes", projectID(repo), issueNumber)
-	form := url.Values{"body": {body}}
-	_, status, err := c.do("POST", path, form)
-	if err != nil {
-		return err
-	}
-	if status != 201 {
-		return fmt.Errorf("gitlab post comment: HTTP %d", status)
-	}
-	return nil
+	return c.postComment(path, body, "", false)
 }
 
 func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.IssueComment, error) {
@@ -460,7 +459,7 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 	return prs, nil
 }
 
-func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
+func (c *Client) createPROnce(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
 	path := fmt.Sprintf("/projects/%s/merge_requests", projectID(repo))
 	form := url.Values{
 		"title":         {opts.Title},
@@ -473,7 +472,7 @@ func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
 		return vcs.PR{}, err
 	}
 	if status != 201 {
-		return vcs.PR{}, fmt.Errorf("gitlab create MR: HTTP %d: %s", status, data)
+		return vcs.PR{}, retry.Permanent(fmt.Errorf("gitlab create MR: HTTP %d: %s", status, data))
 	}
 	var raw struct {
 		IID          int    `json:"iid"`
@@ -502,14 +501,17 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 		return vcs.PR{}, fmt.Errorf("gitlab get MR: HTTP %d: %s", status, data)
 	}
 	var raw struct {
-		IID          int    `json:"iid"`
-		Title        string `json:"title"`
-		Description  string `json:"description"`
-		State        string `json:"state"`
-		WebURL       string `json:"web_url"`
-		ClosedAt     string `json:"closed_at"`
-		MergedAt     string `json:"merged_at"`
-		SourceBranch string `json:"source_branch"`
+		IID             int    `json:"iid"`
+		Title           string `json:"title"`
+		Description     string `json:"description"`
+		State           string `json:"state"`
+		WebURL          string `json:"web_url"`
+		ClosedAt        string `json:"closed_at"`
+		MergedAt        string `json:"merged_at"`
+		SourceBranch    string `json:"source_branch"`
+		TargetBranch    string `json:"target_branch"`
+		SourceProjectID int    `json:"source_project_id"`
+		TargetProjectID int    `json:"target_project_id"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.PR{}, err
@@ -518,20 +520,16 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 	if s == "opened" {
 		s = "open"
 	}
-	return vcs.PR{Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.WebURL}, nil
+	headRepo := ""
+	if raw.SourceProjectID > 0 && raw.SourceProjectID == raw.TargetProjectID {
+		headRepo = repo
+	}
+	return vcs.PR{HeadRepo: headRepo, Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, BaseBranch: raw.TargetBranch, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.WebURL}, nil
 }
 
 func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
 	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), prNumber)
-	form := url.Values{"body": {body}}
-	_, status, err := c.do("POST", path, form)
-	if err != nil {
-		return err
-	}
-	if status != 201 {
-		return fmt.Errorf("gitlab post MR comment: HTTP %d", status)
-	}
-	return nil
+	return c.postComment(path, body, "", false)
 }
 
 func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
@@ -874,47 +872,107 @@ func (c *Client) UploadAttachment(repo string, filePath string) (string, error) 
 // method returns nil without posting again, making retries safe. Falls back
 // to a plain PostIssueComment when runID is empty (issue #278).
 func (c *Client) PostIssueCommentIdempotent(repo string, issueNumber int, body, runID string) error {
+	path := fmt.Sprintf("/projects/%s/issues/%d/notes", projectID(repo), issueNumber)
+	return c.postComment(path, body, runID, runID != "")
+}
+
+func (c *Client) postComment(path, body, runID string, checkFirst bool) error {
 	if runID == "" {
-		return c.PostIssueComment(repo, issueNumber, body)
+		runID = fmt.Sprintf("write-%x", randomCommentID())
 	}
 	marker := "<!-- clawflow:run-id=" + runID + " -->"
 	fullBody := body + "\n\n" + marker
-
-	// Pre-check: avoid posting if comment already exists.
-	existing, listErr := c.ListIssueComments(repo, issueNumber)
-	if listErr == nil {
-		for _, cm := range existing {
-			if strings.Contains(cm, marker) {
-				return nil
-			}
-		}
-	}
-
-	path := fmt.Sprintf("/projects/%s/issues/%d/notes", projectID(repo), issueNumber)
+	ctx, cancel := context.WithTimeout(c.reqContext(), 60*time.Second)
+	defer cancel()
+	bounded := *c
+	bounded.ctx = ctx
+	c = &bounded
 	attempt := 0
-	return retry.Do(c.reqContext(), retry.DefaultConfig, func() error {
-		if attempt > 0 {
-			comments, err := c.ListIssueComments(repo, issueNumber)
-			if err == nil {
-				for _, cm := range comments {
-					if strings.Contains(cm, marker) {
-						return nil // delivered on prior attempt
-					}
+	return retry.Do(ctx, retry.DefaultConfig, func() error {
+		attempt++
+		if checkFirst || attempt > 1 {
+			data, err := c.allPages(path + "?per_page=100")
+			if err != nil {
+				return retry.RequestError(err)
+			}
+			var comments []struct {
+				Body string `json:"body"`
+			}
+			if err := json.Unmarshal(data, &comments); err != nil {
+				return retry.Permanent(err)
+			}
+			for _, comment := range comments {
+				if strings.Contains(comment.Body, marker) {
+					return nil
 				}
 			}
 		}
-		attempt++
-		form := url.Values{"body": {fullBody}}
-		_, status, doErr := c.do("POST", path, form)
-		if doErr != nil {
-			return doErr
+		_, status, err := c.doOnce("POST", path, url.Values{"body": {fullBody}})
+		if err != nil {
+			return err
 		}
 		if status != 201 {
-			if status == 429 || (status >= 500 && status != 501) {
-				return fmt.Errorf("gitlab post comment: HTTP %d (transient)", status)
-			}
-			return fmt.Errorf("gitlab post comment: HTTP %d", status)
+			return retry.Permanent(fmt.Errorf("post comment: HTTP %d", status))
 		}
 		return nil
 	})
 }
+
+func (c *Client) do(method, path string, body url.Values) ([]byte, int, error) {
+	return c.request(method, func(bounded *Client) ([]byte, int, error) { return bounded.doOnce(method, path, body) })
+}
+func (c *Client) doJSON(method, path string, body any) ([]byte, int, error) {
+	return c.request(method, func(bounded *Client) ([]byte, int, error) { return bounded.doJSONOnce(method, path, body) })
+}
+func (c *Client) request(method string, fn func(*Client) ([]byte, int, error)) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(c.reqContext(), 60*time.Second)
+	defer cancel()
+	bounded := *c
+	bounded.ctx = ctx
+	if method == "POST" {
+		return fn(&bounded)
+	}
+	var data []byte
+	var status int
+	err := retry.Do(ctx, retry.DefaultConfig, func() error { var err error; data, status, err = fn(&bounded); return err })
+	return data, status, err
+}
+
+// CreatePR reconciles an ambiguous response before retrying a non-idempotent POST.
+func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
+	ctx, cancel := context.WithTimeout(c.reqContext(), 60*time.Second)
+	defer cancel()
+	bounded := *c
+	bounded.ctx = ctx
+	c = &bounded
+	var result vcs.PR
+	attempt := 0
+	err := retry.Do(ctx, retry.DefaultConfig, func() error {
+		attempt++
+		if attempt > 1 {
+			prs, err := c.ListOpenPRs(repo)
+			if err != nil {
+				return retry.RequestError(err)
+			}
+			for _, pr := range prs {
+				if pr.HeadBranch != opts.Head {
+					continue
+				}
+				current, err := c.GetPR(repo, pr.Number)
+				if err != nil {
+					return retry.RequestError(err)
+				}
+				if current.HeadRepo == repo && current.BaseBranch == opts.Base {
+					result = current
+					return nil
+				}
+			}
+		}
+		var err error
+		result, err = c.createPROnce(repo, opts)
+		return err
+	})
+	return result, err
+}
+
+func randomCommentID() []byte { id := make([]byte, 16); _, _ = rand.Read(id); return id }

@@ -16,6 +16,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
@@ -27,13 +28,14 @@ func (f reopenedLifecycleTransport) RoundTrip(r *http.Request) (*http.Response, 
 // Only HTTP transport and the Offload executable are fakes; Git uses a local
 // bare remote, and every request is handled in memory without opening sockets.
 func TestReopenedLifecycleScanToCompletion(t *testing.T) {
-	for _, race := range []bool{false, true} {
-		name := "complete and consume"
-		if race {
-			name = "open PR appears after scan"
-		}
+	for _, name := range []string{"complete and consume", "open PR appears after scan", "label outage"} {
+		race := name == "open PR appears after scan"
+		outage := name == "label outage"
 		t.Run(name, func(t *testing.T) {
 			withRunLog(t)
+			oldRetry := retry.DefaultConfig
+			retry.DefaultConfig = retry.Config{MaxAttempts: 4, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
+			t.Cleanup(func() { retry.DefaultConfig = oldRetry })
 			for _, key := range []string{"GH_TOKEN", "GITLAB_TOKEN", "CLAWFLOW_CLAUDE_API_KEY", "ANTHROPIC_API_KEY"} {
 				t.Setenv(key, "integration-test-only")
 			}
@@ -95,7 +97,7 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 				case "GET /repos/o/r/issues/9/events":
 					body = events
 				case "GET /repos/o/r/issues/9/comments":
-					body = []map[string]any{{"id": 42, "body": followup, "created_at": "2026-01-04T00:00:00Z", "user": map[string]string{"login": "alice"}}}
+					body = []map[string]any{{"id": 42, "body": followup, "created_at": "2026-01-04T00:00:00Z", "user": map[string]string{"login": "alice"}}, {"id": 99, "body": posted, "user": map[string]string{"login": "bot"}}}
 				case "GET /repos/o/r/pulls":
 					if r.URL.Query().Get("state") == "open" {
 						if openPR {
@@ -128,6 +130,9 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 					status = 201
 					body = map[string]int{"id": 99}
 				case "POST /repos/o/r/issues/9/labels":
+					if outage {
+						return nil, fmt.Errorf("temporary network outage")
+					}
 					var request struct {
 						Labels []string `json:"labels"`
 					}
@@ -174,7 +179,7 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 			if race {
 				openPR = true
 			}
-			fired, limited, _ := runOneOperator(context.Background(), job, 20*time.Second)
+			fired, limited, failed := runOneOperator(context.Background(), job, 20*time.Second)
 			if limited {
 				t.Fatal("unexpected rate limit")
 			}
@@ -186,6 +191,42 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 					t.Fatal("provider invoked despite post-scan open PR")
 				}
 				return
+			}
+			if name == "label outage" {
+				if failed || !fired || implemented {
+					t.Fatalf("failed=%v fired=%v implemented=%v", failed, fired, implemented)
+				}
+				paths, _ := filepath.Glob(filepath.Join(snapshot.DataDir(), "runs", "o__r", "issue-9", "*", "meta.json"))
+				if len(paths) != 1 {
+					t.Fatalf("metas=%v", paths)
+				}
+				data, _ := os.ReadFile(paths[0])
+				var meta snapshot.RunMeta
+				json.Unmarshal(data, &meta)
+				if meta.Status != "success" || meta.WritebackError == "" {
+					t.Fatalf("meta=%+v", meta)
+				}
+				if _, err := acceptanceDevelopment("o/r", 9, "Fix reopened follow-up\n\nCurrent issue body for reopened work"); err != nil {
+					t.Fatalf("writeback failure blocked provenance: %v", err)
+				}
+				// A further failed pass must not dispatch another paid execution.
+				pending, jobs, err = scanRepoOnce(context.Background(), reg, "o/r", cfg, true, 9, &issues)
+				if err != nil || len(jobs) != 0 {
+					t.Fatalf("pending writeback redispatched: %v %v", jobs, err)
+				}
+				outage = false
+				pending, jobs, err = scanRepoOnce(context.Background(), reg, "o/r", cfg, true, 9, &issues)
+				if err != nil || len(jobs) != 0 || !implemented {
+					t.Fatalf("replay failed: %v %v", jobs, err)
+				}
+				data, _ = os.ReadFile(paths[0])
+				json.Unmarshal(data, &meta)
+				// Decode into a fresh value because omitted JSON fields do not clear existing values.
+				var recovered snapshot.RunMeta
+				json.Unmarshal(data, &recovered)
+				if recovered.Status != "success" || recovered.WritebackError != "" {
+					t.Fatalf("recovered=%+v", recovered)
+				}
 			}
 			if !fired || !implemented {
 				t.Fatalf("fired=%v implemented=%v", fired, implemented)

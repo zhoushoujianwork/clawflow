@@ -269,6 +269,7 @@ func (runner Runner) reviewPrompt() string {
 	}
 	return "Review the source against the pinned contract and independently saved plan below. The review checkout is a disposable detached copy of the PR head; you may build and run tests in it, but do not change tracked source, commit, or switch HEAD, and you have no remote or credentials. " +
 		"You must run " + test + " and also tests targeted at the requirements. " +
+		"Use blocked only when requirements cannot be evaluated, such as missing or contradictory requirements or unavailable source. If the configured test command, targeted tests, and source review produced the required evidence, inability to create additional isolation or tooling beyond that command is a limitation, not grounds for blocked. Return passed or failed based on the requirements and record those limitations in evidence. " +
 		"Return exactly one JSON object with only status (passed, failed, or blocked), summary (nonempty string), and evidence (nonempty array of nonempty strings). " +
 		"Record every command you executed as one evidence entry of the form `" + EvidenceCommandPrefix + " <exact command> => <result>`; a passed verdict whose evidence lists no executed command is rejected. " +
 		"Return raw JSON only, without Markdown code fences. Do not supply actor or execution identities.\n\n"

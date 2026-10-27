@@ -4,6 +4,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -82,6 +83,9 @@ func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
+	if err == nil {
+		err = retry.ResponseError(resp.StatusCode, resp.Header, data)
+	}
 	return data, resp.StatusCode, err
 }
 
@@ -98,8 +102,13 @@ func isRetryableStatus(status int) bool {
 // retry semantics on POST must handle idempotency themselves (see
 // PostIssueCommentIdempotent).
 func (c *Client) do(method, path string, body any) ([]byte, int, error) {
-	// Only retry idempotent methods automatically.
-	if method == "POST" {
+	// Retry idempotent methods and additive label POSTs automatically.
+	ctx, cancel := context.WithTimeout(c.reqContext(), 60*time.Second)
+	defer cancel()
+	bounded := *c
+	bounded.ctx = ctx
+	c = &bounded
+	if method == "POST" && !strings.HasSuffix(path, "/labels") {
 		return c.doOnce(method, path, body)
 	}
 	cfg := retry.DefaultConfig
@@ -139,52 +148,51 @@ func runIDMarker(runID string) string {
 // posting again. When runID is empty the method falls back to a plain POST
 // without dedup.
 func (c *Client) PostIssueCommentIdempotent(repo string, issueNumber int, body, runID string) error {
-	if runID == "" {
-		return c.PostIssueComment(repo, issueNumber, body)
-	}
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return err
 	}
-	marker := "<!-- clawflow:run-id=" + runID + " -->"
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, name, issueNumber)
-	fullBody := body + runIDMarker(runID)
+	return c.postComment(path, body, runID, runID != "")
+}
 
-	// Check for an existing comment with this run-id before the first attempt.
-	existing, listErr := c.ListIssueComments(repo, issueNumber)
-	if listErr == nil {
-		for _, cm := range existing {
-			if strings.Contains(cm, marker) {
-				return nil // already delivered
-			}
-		}
+func (c *Client) postComment(path, body, runID string, checkFirst bool) error {
+	if runID == "" {
+		runID = fmt.Sprintf("write-%x", randomCommentID())
 	}
-
-	cfg := retry.DefaultConfig
+	marker := "<!-- clawflow:run-id=" + runID + " -->"
+	fullBody := body + "\n\n" + marker
+	ctx, cancel := context.WithTimeout(c.reqContext(), 60*time.Second)
+	defer cancel()
+	bounded := *c
+	bounded.ctx = ctx
+	c = &bounded
 	attempt := 0
-	return retry.Do(c.reqContext(), cfg, func() error {
-		// On retries (not the first attempt), re-check for the marker in case
-		// the previous attempt succeeded but the HTTP response was lost.
-		if attempt > 0 {
-			comments, listErr := c.ListIssueComments(repo, issueNumber)
-			if listErr == nil {
-				for _, cm := range comments {
-					if strings.Contains(cm, marker) {
-						return nil // already delivered on a prior attempt
-					}
+	return retry.Do(ctx, retry.DefaultConfig, func() error {
+		attempt++
+		if checkFirst || attempt > 1 {
+			data, err := c.allPages(path + "?per_page=100")
+			if err != nil {
+				return retry.RequestError(err)
+			}
+			var comments []struct {
+				Body string `json:"body"`
+			}
+			if err := json.Unmarshal(data, &comments); err != nil {
+				return retry.Permanent(err)
+			}
+			for _, comment := range comments {
+				if strings.Contains(comment.Body, marker) {
+					return nil
 				}
 			}
 		}
-		attempt++
-		_, status, doErr := c.doOnce("POST", path, map[string]string{"body": fullBody})
-		if doErr != nil {
-			return doErr
+		_, status, err := c.doOnce("POST", path, map[string]string{"body": fullBody})
+		if err != nil {
+			return err
 		}
 		if status != 201 {
-			if isRetryableStatus(status) {
-				return fmt.Errorf("github post comment: HTTP %d (transient)", status)
-			}
-			return fmt.Errorf("github post comment: HTTP %d", status)
+			return retry.Permanent(fmt.Errorf("post comment: HTTP %d", status))
 		}
 		return nil
 	})
@@ -304,7 +312,7 @@ func (c *Client) RemoveLabel(repo string, issueNumber int, labels ...string) err
 		if err != nil {
 			return err
 		}
-		if status != 200 && status != 204 {
+		if status != 200 && status != 204 && status != 404 {
 			return fmt.Errorf("github remove label %q: HTTP %d", label, status)
 		}
 	}
@@ -329,14 +337,7 @@ func (c *Client) PostIssueComment(repo string, issueNumber int, body string) err
 		return err
 	}
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, name, issueNumber)
-	_, status, err := c.do("POST", path, map[string]string{"body": body})
-	if err != nil {
-		return err
-	}
-	if status != 201 {
-		return fmt.Errorf("github post comment: HTTP %d", status)
-	}
-	return nil
+	return c.postComment(path, body, "", false)
 }
 
 func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.IssueComment, error) {
@@ -672,7 +673,7 @@ func (c *Client) ListRecentPRs(repo, state string, limit int) ([]vcs.PR, error) 
 	return prs, nil
 }
 
-func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
+func (c *Client) createPROnce(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return vcs.PR{}, err
@@ -688,7 +689,7 @@ func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
 		return vcs.PR{}, err
 	}
 	if status != 201 {
-		return vcs.PR{}, fmt.Errorf("github create PR: HTTP %d: %s", status, data)
+		return vcs.PR{}, retry.Permanent(fmt.Errorf("github create PR: HTTP %d: %s", status, data))
 	}
 	var raw struct {
 		Number  int    `json:"number"`
@@ -1299,3 +1300,51 @@ func splitRepo(repo string) (owner, name string, err error) {
 	}
 	return parts[0], parts[1], nil
 }
+
+// CreatePR reconciles an ambiguous response before retrying a non-idempotent POST.
+func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
+	ctx, cancel := context.WithTimeout(c.reqContext(), 60*time.Second)
+	defer cancel()
+	bounded := *c
+	bounded.ctx = ctx
+	c = &bounded
+	headBranch := opts.Head
+	headOwner, branch, qualified := strings.Cut(opts.Head, ":")
+	if qualified {
+		headBranch = branch
+	}
+	var result vcs.PR
+	attempt := 0
+	err := retry.Do(ctx, retry.DefaultConfig, func() error {
+		attempt++
+		if attempt > 1 {
+			prs, err := c.ListOpenPRs(repo)
+			if err != nil {
+				return retry.RequestError(err)
+			}
+			for _, pr := range prs {
+				if pr.HeadBranch != headBranch {
+					continue
+				}
+				current, err := c.GetPR(repo, pr.Number)
+				if err != nil {
+					return retry.RequestError(err)
+				}
+				sameSource := current.HeadRepo == repo
+				if qualified {
+					sameSource = strings.HasPrefix(current.HeadRepo, headOwner+"/")
+				}
+				if sameSource && current.BaseBranch == opts.Base {
+					result = current
+					return nil
+				}
+			}
+		}
+		var err error
+		result, err = c.createPROnce(repo, opts)
+		return err
+	})
+	return result, err
+}
+
+func randomCommentID() []byte { id := make([]byte, 16); _, _ = rand.Read(id); return id }

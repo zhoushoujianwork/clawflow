@@ -3,6 +3,7 @@ package retry_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -82,5 +83,33 @@ func TestDo_ZeroMaxAttempts(t *testing.T) {
 	})
 	if calls != 1 {
 		t.Fatalf("zero MaxAttempts should act as 1, got %d calls", calls)
+	}
+}
+
+func TestPermanentAndRetryAfterBudget(t *testing.T) {
+	calls := 0
+	err := retry.Do(context.Background(), retry.Config{MaxAttempts: 4}, func() error { calls++; return retry.Permanent(errors.New("validation")) })
+	if err == nil || calls != 1 {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+	calls = 0
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err = retry.Do(ctx, retry.Config{MaxAttempts: 4}, func() error { calls++; return &retry.HTTPError{Status: 429, After: time.Minute} })
+	if err == nil || calls != 1 {
+		t.Fatalf("Retry-After must not be shortened: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestResponseRetryAfter(t *testing.T) {
+	for _, value := range []string{"7", time.Now().Add(7 * time.Second).UTC().Format(http.TimeFormat)} {
+		err := retry.ResponseError(429, http.Header{"Retry-After": []string{value}}, nil)
+		var response *retry.HTTPError
+		if !errors.As(err, &response) || response.After < 5*time.Second || response.After > 8*time.Second {
+			t.Fatalf("Retry-After %q: %+v", value, response)
+		}
+	}
+	if retry.ResponseError(422, nil, nil) != nil || retry.ResponseError(403, nil, []byte("permission denied")) != nil {
+		t.Fatal("validation or permission errors must not be transient")
 	}
 }

@@ -2,11 +2,13 @@ package gitlab_test
 
 import (
 	"encoding/json"
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
@@ -159,7 +161,7 @@ func TestPostIssueComment(t *testing.T) {
 	if err := client.PostIssueComment("ns/group/repo", 3, "hello from clawflow"); err != nil {
 		t.Fatal(err)
 	}
-	if gotBody != "hello from clawflow" {
+	if !strings.HasPrefix(gotBody, "hello from clawflow\n\n<!-- clawflow:run-id=write-") {
 		t.Errorf("unexpected comment body: %q", gotBody)
 	}
 }
@@ -347,5 +349,32 @@ func TestUploadAttachmentServerError(t *testing.T) {
 	}
 	if _, err := client.UploadAttachment("ns/group/repo", imgPath); err == nil {
 		t.Fatal("expected error on HTTP 413, got nil")
+	}
+}
+
+func TestCreateMRLostResponseIgnoresForeignSource(t *testing.T) {
+	old := retry.DefaultConfig
+	retry.DefaultConfig = retry.Config{MaxAttempts: 4, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
+	t.Cleanup(func() { retry.DefaultConfig = old })
+	posts := 0
+	c := newTestClient(t, map[string]http.HandlerFunc{
+		"POST " + projectPath + "/merge_requests": func(w http.ResponseWriter, r *http.Request) {
+			posts++
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			conn.Close()
+		},
+		"GET " + projectPath + "/merge_requests": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 200, []map[string]any{{"iid": 3, "source_branch": "fix"}, {"iid": 2, "source_branch": "fix"}})
+		},
+		"GET " + projectPath + "/merge_requests/3": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 200, map[string]any{"iid": 3, "source_branch": "fix", "target_branch": "main", "source_project_id": 99, "target_project_id": 1})
+		},
+		"GET " + projectPath + "/merge_requests/2": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 200, map[string]any{"iid": 2, "source_branch": "fix", "target_branch": "main", "source_project_id": 1, "target_project_id": 1})
+		},
+	})
+	pr, err := c.CreatePR("ns/group/repo", vcs.PRCreateOpts{Head: "fix", Base: "main"})
+	if err != nil || pr.Number != 2 || posts != 1 {
+		t.Fatalf("pr=%+v posts=%d err=%v", pr, posts, err)
 	}
 }
