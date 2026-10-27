@@ -327,7 +327,7 @@ func newRepoSetCmd() *cobra.Command {
 	var selfUpgrade string
 	var primaryProject string
 	var boundMachine string
-	var queueIssue int
+	var queueIssue, maxInFlight int
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
@@ -381,6 +381,10 @@ func newRepoSetCmd() *cobra.Command {
 					return err
 				}
 			}
+			maxInFlightSet := cmd.Flags().Changed("max-in-flight")
+			if maxInFlightSet && maxInFlight < 1 {
+				return fmt.Errorf("--max-in-flight must be >= 1")
+			}
 			boundMachineSet := cmd.Flags().Changed("bound-machine")
 			if boundMachineSet && strings.ContainsFunc(boundMachine, func(r rune) bool {
 				return unicode.IsSpace(r) || unicode.IsControl(r) || r == '/' || r == '\\'
@@ -416,6 +420,9 @@ func newRepoSetCmd() *cobra.Command {
 				if queueIssueSet {
 					r.QueueIssue = queueIssue
 				}
+				if maxInFlightSet {
+					r.MaxInFlight = maxInFlight
+				}
 				return r
 			})
 			r := cfg.Repos[ownerRepo]
@@ -444,6 +451,9 @@ func newRepoSetCmd() *cobra.Command {
 					fmt.Printf("  queue_issue: #%d\n", r.QueueIssue)
 				}
 			}
+			if maxInFlightSet {
+				fmt.Printf("  max_in_flight: %d\n", r.MaxInFlight)
+			}
 			if primaryProjectSet {
 				if r.PrimaryProject == "" {
 					fmt.Printf("  primary_project: (cleared)\n")
@@ -459,7 +469,8 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&selfUpgrade, "self-upgrade", "", "rebuild and replace the installed binary after a confirmed merge into this repo (only for the repo containing clawflow's source): on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
-	cmd.Flags().IntVar(&queueIssue, "queue-issue", 0, "parent issue whose open sub-issues form an ordered implement queue, GitHub only (0 clears it)")
+	cmd.Flags().IntVar(&queueIssue, "queue-issue", 0, "DEPRECATED: parent issue whose open sub-issues are imported once into the unified queue rank (0 clears it)")
+	cmd.Flags().IntVar(&maxInFlight, "max-in-flight", 0, "max issues of this repo running or awaiting review at once in the unified queue (>=1, default 2)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
 	return cmd
 }
