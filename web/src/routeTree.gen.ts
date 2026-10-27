@@ -14,6 +14,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AppUsageRouteImport } from './routes/_app.usage'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppProjectsRouteImport } from './routes/_app.projects'
+import { Route as AppPipelineRouteImport } from './routes/_app.pipeline'
 import { Route as AppOperatorsRouteImport } from './routes/_app.operators'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppReposIndexRouteImport } from './routes/_app.repos.index'
@@ -46,6 +47,11 @@ const AppSettingsRoute = AppSettingsRouteImport.update({
 const AppProjectsRoute = AppProjectsRouteImport.update({
   id: '/projects',
   path: '/projects',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppPipelineRoute = AppPipelineRouteImport.update({
+  id: '/pipeline',
+  path: '/pipeline',
   getParentRoute: () => AppRoute,
 } as any)
 const AppOperatorsRoute = AppOperatorsRouteImport.update({
@@ -99,6 +105,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dashboard': typeof AppDashboardRoute
   '/operators': typeof AppOperatorsRoute
+  '/pipeline': typeof AppPipelineRoute
   '/projects': typeof AppProjectsRouteWithChildren
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
@@ -114,6 +121,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/dashboard': typeof AppDashboardRoute
   '/operators': typeof AppOperatorsRoute
+  '/pipeline': typeof AppPipelineRoute
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
   '/projects/$name': typeof AppProjectsNameRoute
@@ -130,6 +138,7 @@ export interface FileRoutesById {
   '/_app': typeof AppRouteWithChildren
   '/_app/dashboard': typeof AppDashboardRoute
   '/_app/operators': typeof AppOperatorsRoute
+  '/_app/pipeline': typeof AppPipelineRoute
   '/_app/projects': typeof AppProjectsRouteWithChildren
   '/_app/settings': typeof AppSettingsRoute
   '/_app/usage': typeof AppUsageRoute
@@ -147,6 +156,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/operators'
+    | '/pipeline'
     | '/projects'
     | '/settings'
     | '/usage'
@@ -162,6 +172,7 @@ export interface FileRouteTypes {
     | '/'
     | '/dashboard'
     | '/operators'
+    | '/pipeline'
     | '/settings'
     | '/usage'
     | '/projects/$name'
@@ -177,6 +188,7 @@ export interface FileRouteTypes {
     | '/_app'
     | '/_app/dashboard'
     | '/_app/operators'
+    | '/_app/pipeline'
     | '/_app/projects'
     | '/_app/settings'
     | '/_app/usage'
@@ -229,6 +241,13 @@ declare module '@tanstack/react-router' {
       path: '/projects'
       fullPath: '/projects'
       preLoaderRoute: typeof AppProjectsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/pipeline': {
+      id: '/_app/pipeline'
+      path: '/pipeline'
+      fullPath: '/pipeline'
+      preLoaderRoute: typeof AppPipelineRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/operators': {
@@ -316,6 +335,7 @@ const AppProjectsRouteWithChildren = AppProjectsRoute._addFileChildren(
 interface AppRouteChildren {
   AppDashboardRoute: typeof AppDashboardRoute
   AppOperatorsRoute: typeof AppOperatorsRoute
+  AppPipelineRoute: typeof AppPipelineRoute
   AppProjectsRoute: typeof AppProjectsRouteWithChildren
   AppSettingsRoute: typeof AppSettingsRoute
   AppUsageRoute: typeof AppUsageRoute
@@ -328,6 +348,7 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppDashboardRoute: AppDashboardRoute,
   AppOperatorsRoute: AppOperatorsRoute,
+  AppPipelineRoute: AppPipelineRoute,
   AppProjectsRoute: AppProjectsRouteWithChildren,
   AppSettingsRoute: AppSettingsRoute,
   AppUsageRoute: AppUsageRoute,

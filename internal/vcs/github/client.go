@@ -613,6 +613,65 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 	return prs, nil
 }
 
+// ListRecentPRs returns one page (at most limit, capped at 100) of pull
+// requests in state "open" or "closed", most recently updated first. Unlike
+// ListPRs it never walks the whole history, and it keeps the head and merge
+// commit SHAs the list response already carries. Merged PRs get State "merged".
+func (c *Client) ListRecentPRs(repo, state string, limit int) ([]vcs.PR, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	if state != "open" && state != "closed" {
+		return nil, fmt.Errorf("github list recent PRs: unsupported state %q", state)
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls?state=%s&sort=updated&direction=desc&per_page=%d", owner, name, state, limit)
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("github list recent PRs: HTTP %d", status)
+	}
+	var raw []struct {
+		Number         int    `json:"number"`
+		Title          string `json:"title"`
+		Body           string `json:"body"`
+		State          string `json:"state"`
+		HTMLURL        string `json:"html_url"`
+		ClosedAt       string `json:"closed_at"`
+		MergedAt       string `json:"merged_at"`
+		CreatedAt      string `json:"created_at"`
+		UpdatedAt      string `json:"updated_at"`
+		Draft          bool   `json:"draft"`
+		MergeCommitSHA string `json:"merge_commit_sha"`
+		Head           struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	prs := make([]vcs.PR, 0, len(raw))
+	for _, r := range raw {
+		s := r.State
+		if r.MergedAt != "" {
+			s = "merged"
+		}
+		prs = append(prs, vcs.PR{Number: r.Number, Title: r.Title, Body: r.Body, State: s, Draft: r.Draft,
+			HeadBranch: r.Head.Ref, HeadSHA: r.Head.SHA, BaseBranch: r.Base.Ref, MergeCommitSHA: r.MergeCommitSHA,
+			MergedAt: r.MergedAt, ClosedAt: r.ClosedAt, URL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+	}
+	return prs, nil
+}
+
 func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {

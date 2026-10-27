@@ -1853,6 +1853,21 @@ func WriteRunsIndex(limit int) ([]RunIndexEntry, error) {
 	return entries, nil
 }
 
+// ReadRunsIndex returns the entries of data/runs.json without touching disk
+// state. A missing or unreadable index yields nil: it is a cache of recent
+// runs, not an authority.
+func ReadRunsIndex() []RunIndexEntry {
+	data, err := os.ReadFile(filepath.Join(DataDir(), "runs.json"))
+	if err != nil {
+		return nil
+	}
+	var entries []RunIndexEntry
+	if json.Unmarshal(data, &entries) != nil {
+		return nil
+	}
+	return entries
+}
+
 // collectRunEntries walks data/runs/* and reads every meta.json it finds.
 // Malformed files are skipped silently — we'd rather render an incomplete
 // list than fail the entire index write.

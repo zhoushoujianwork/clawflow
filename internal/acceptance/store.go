@@ -335,6 +335,11 @@ func (s *Store) InfrastructureAttempts(c Contract) (InfrastructureAttempts, erro
 	return out, nil
 }
 
+// CompleteRecords returns every completed record for exactly c, oldest first,
+// with the same fail-closed corruption and ordering checks as LatestRecord. It
+// is read-only and intended for status displays.
+func (s *Store) CompleteRecords(c Contract) ([]Record, error) { return s.completeRecords(c) }
+
 // completeRecords loads every completed record for the exact contract, ordered
 // by start time. Start and completion order must agree strictly; ties or
 // reversed completion order are ambiguous and fail closed.

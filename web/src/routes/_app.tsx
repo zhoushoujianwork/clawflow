@@ -129,6 +129,14 @@ function AppLayout() {
                 Operators
               </Link>
               <Link
+                to="/pipeline"
+                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
+                style={{ color: 'hsl(var(--text-low))' }}
+                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
+              >
+                Pipeline
+              </Link>
+              <Link
                 to="/usage"
                 className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
                 style={{ color: 'hsl(var(--text-low))' }}

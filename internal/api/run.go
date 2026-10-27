@@ -176,6 +176,12 @@ func HandleRunStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	writeJSON(w, 200, currentRunStatus())
+}
+
+// currentRunStatus snapshots the in-flight flag and scheduler settings. It is
+// shared by HandleRunStatus and the pipeline board's runtime header.
+func currentRunStatus() runResponse {
 	runMu.Lock()
 	active := runActive
 	runMu.Unlock()
@@ -196,7 +202,7 @@ func HandleRunStatus(w http.ResponseWriter, r *http.Request) {
 	if !next.IsZero() {
 		resp.NextFireUnixMs = next.UnixMilli()
 	}
-	writeJSON(w, 200, resp)
+	return resp
 }
 
 // cancelRequest identifies which in-flight run the dashboard wants to stop.
