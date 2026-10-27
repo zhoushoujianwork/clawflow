@@ -20,6 +20,8 @@ type Runner struct {
 	Store   *Store
 	Execute ExecuteFunc
 	Inspect InspectFunc
+	// Prepare creates the review checkout only after the plan is durably saved.
+	Prepare func(context.Context) (string, error)
 	// TestCommand is the repository's configured test command; the reviewer is
 	// told to run it. Empty means the reviewer discovers the standard command.
 	TestCommand string
@@ -50,8 +52,9 @@ func directory(path string) (string, error) {
 	return p, nil
 }
 
-// Run executes exactly one fresh planning call and one fresh review call. The
-// caller supplies an immutable review workspace and authoritative inspection;
+// Run executes fresh planning (with at most one isolation fallback) and review calls. The
+// caller supplies a deferred workspace preparer (or an existing workspace) and
+// authoritative inspection;
 // this core never fetches Git state, falls back to another provider, or resumes.
 func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace string) (record Record, err error) {
 	d, err := c.Digest()
@@ -96,15 +99,20 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if err != nil {
 		return record, err
 	}
-	workspace, err = directory(workspace)
-	if err != nil {
-		return record, err
+	if containsPath(scratch, runner.Store.path) || containsPath(runner.Store.path, scratch) {
+		return record, errors.New("acceptance scratch and store must be separate directories")
 	}
-	paths := []string{scratch, workspace, runner.Store.path}
-	for i, a := range paths {
-		for _, b := range paths[i+1:] {
-			if containsPath(a, b) || containsPath(b, a) {
-				return record, errors.New("acceptance scratch, source and store must be separate directories")
+	if runner.Prepare == nil {
+		workspace, err = directory(workspace)
+		if err != nil {
+			return record, err
+		}
+		paths := []string{scratch, workspace, runner.Store.path}
+		for i, a := range paths {
+			for _, b := range paths[i+1:] {
+				if containsPath(a, b) || containsPath(b, a) {
+					return record, errors.New("acceptance scratch, source and store must be separate directories")
+				}
 			}
 		}
 	}
@@ -119,11 +127,25 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if execute == nil {
 		execute = execution.Execute
 	}
-	plan := Plan{Version: Version, ContractDigest: d, AttemptID: record.AttemptID, StartedAt: time.Now().UTC()}
+	plan := Plan{PlannerIsolation: ToolsDisabled, Version: Version, ContractDigest: d, AttemptID: record.AttemptID, StartedAt: time.Now().UTC()}
 	// Only requirements are sent in phase one: no source locations, Git inputs,
 	// developer output, contract identity, or development session identifiers.
 	planned, err := execute(ctx, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not inspect source or use tools.\n\n"+c.Requirements,
 		execution.Options{Workspace: scratch, Role: "acceptance", PermissionMode: "default", ToolsDisabled: true})
+	record.Plan.PlannerIsolation = ToolsDisabled
+	if err != nil && execution.IsKind(err, "unsupported_tools") && planned.ErrorKind == "unsupported_tools" {
+		if err = ctx.Err(); err != nil {
+			return record, err
+		}
+		entries, readErr := os.ReadDir(scratch)
+		if readErr != nil || len(entries) != 0 {
+			return record, errors.New("planner scratch must remain empty before isolation fallback")
+		}
+		plan.PlannerIsolation = IsolatedReadonly
+		record.Plan.PlannerIsolation = IsolatedReadonly
+		planned, err = execute(ctx, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not read files outside your working directory or any repository. Do not inspect source.\n\n"+c.Requirements,
+			execution.Options{Workspace: scratch, Role: "acceptance", PermissionMode: "default"})
+	}
 	if err != nil {
 		return record, err
 	}
@@ -146,6 +168,27 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		return record, err
 	}
 	record.Plan = plan
+	if runner.Prepare != nil {
+		if err = ctx.Err(); err != nil {
+			return record, err
+		}
+		workspace, err = runner.Prepare(ctx)
+		if err != nil {
+			return record, err
+		}
+		workspace, err = directory(workspace)
+		if err != nil {
+			return record, err
+		}
+		paths := []string{scratch, workspace, runner.Store.path}
+		for i, a := range paths {
+			for _, b := range paths[i+1:] {
+				if containsPath(a, b) || containsPath(b, a) {
+					return record, errors.New("acceptance scratch, source and store must be separate directories")
+				}
+			}
+		}
+	}
 	record.Before, err = runner.Inspect(ctx, workspace)
 	if err != nil {
 		return record, err

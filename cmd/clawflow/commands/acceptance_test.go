@@ -386,7 +386,7 @@ func TestAcceptanceStatusReadOnly(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"status":"passed"`) || !reflect.DeepEqual(before, acceptanceTree(t, snapshot.DataDir())) {
+	if !strings.Contains(output.String(), `"planner_isolation":"tools-disabled"`) || !strings.Contains(output.String(), `"status":"passed"`) || !reflect.DeepEqual(before, acceptanceTree(t, snapshot.DataDir())) {
 		t.Fatal("status changed evidence or omitted result")
 	}
 }
@@ -475,8 +475,11 @@ func TestAcceptanceRunBlocksChangedInputsAndDirtySource(t *testing.T) {
 			if err == nil || r.Verdict == acceptance.Passed {
 				t.Fatalf("accepted %s: %+v", mode, r)
 			}
-			if (mode == "fetched-head" || mode == "no-provenance") && calls != 0 {
-				t.Fatal("agent launched without immutable source/provenance")
+			if mode == "no-provenance" && calls != 0 {
+				t.Fatal("agent launched without provenance")
+			}
+			if mode == "fetched-head" && (calls != 1 || r.Plan.Text == "" || !r.ReviewStartedAt.IsZero()) {
+				t.Fatal("changed fetched head must block review after durable planning")
 			}
 		})
 	}
@@ -787,5 +790,89 @@ func TestAcceptanceReviewerEnvStripsTokens(t *testing.T) {
 		if !strings.Contains(out, good) {
 			t.Fatalf("%s dropped: %s", good, out)
 		}
+	}
+}
+
+func TestAcceptanceCheckoutAfterPersistedPlan(t *testing.T) {
+	f, _ := acceptanceFixture(t)
+	git, nativeRun := acceptanceGit, acceptanceNativeRun
+	planned, initialized := false, false
+	acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+		if req.ToolsDisabled {
+			if initialized {
+				t.Fatal("checkout initialized before planning")
+			}
+			planned = true
+		} else if !initialized {
+			t.Fatal("review without checkout")
+		}
+		return nativeRun(ctx, c, req, env, w, observe)
+	}
+	acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+		if args[0] == "init" {
+			if !planned {
+				t.Fatal("checkout initialized before planning")
+			}
+			entries, err := os.ReadDir(acceptanceStorePath("o/r", 11))
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, entry := range entries {
+				if strings.HasSuffix(entry.Name(), ".plan") {
+					b, err := os.ReadFile(filepath.Join(acceptanceStorePath("o/r", 11), entry.Name(), "data.json"))
+					if err != nil || !bytes.Contains(b, []byte(`"planner_isolation":"tools-disabled"`)) {
+						t.Fatal("missing durable isolation evidence")
+					}
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("checkout initialized before plan saved")
+			}
+			initialized = true
+		}
+		return git(ctx, dir, args...)
+	}
+	r, err := runAcceptance(context.Background(), f, "o/r", 11)
+	if err != nil || !initialized || r.Plan.PlannerIsolation != acceptance.ToolsDisabled {
+		t.Fatalf("checkout ordering: %+v %v", r, err)
+	}
+}
+
+func TestAcceptanceCodexFallbackAndHarvestEvidence(t *testing.T) {
+	for _, verdict := range []string{"passed", "failed"} {
+		t.Run(verdict, func(t *testing.T) {
+			_, readLog, attempts := harvestFixture(t)
+			base := acceptanceNativeRun
+			calls := 0
+			acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+				calls++
+				if calls == 1 {
+					if !req.ToolsDisabled {
+						t.Fatal("initial planner must disable tools")
+					}
+					return execution.Result{Status: "error", ErrorKind: "unsupported_tools"}, &execution.Error{Kind: "unsupported_tools"}
+				}
+				if calls == 2 {
+					entries, err := os.ReadDir(req.Workspace)
+					if err != nil || len(entries) != 0 || req.PermissionMode != "default" || req.ToolsDisabled || len(req.AllowedTools) != 0 || len(req.DisallowedTools) != 0 {
+						t.Fatalf("invalid fallback request: %+v", req)
+					}
+					// Reuse the fixture's planner response after checking the actual request.
+					req.ToolsDisabled = true
+					return base(ctx, c, req, env, w, observe)
+				}
+				result, err := base(ctx, c, req, env, w, observe)
+				result.Text = strings.Replace(result.Text, `"passed"`, `"`+verdict+`"`, 1)
+				return result, err
+			}
+			if failed := harvest(t, "", 0); len(failed) != 0 || calls != 3 || *attempts != 1 {
+				t.Fatalf("fallback attempts=%d calls=%d failures=%v", *attempts, calls, failed)
+			}
+			if !strings.Contains(readLog(), "planner_isolation=isolated-readonly") {
+				t.Fatalf("missing isolation in harvest log: %s", readLog())
+			}
+		})
 	}
 }

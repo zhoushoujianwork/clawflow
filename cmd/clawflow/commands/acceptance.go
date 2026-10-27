@@ -83,7 +83,7 @@ func newAcceptanceCmd() *cobra.Command {
 				if run {
 					record, err := runAcceptance(ctx, client, repo, pr)
 					if record.AttemptID != "" {
-						fmt.Fprintf(cmd.OutOrStdout(), "Acceptance PR #%d: %s (attempt %s)\n", pr, record.Verdict, record.AttemptID)
+						fmt.Fprintf(cmd.OutOrStdout(), "Acceptance PR #%d: %s (attempt %s, planner_isolation=%s)\n", pr, record.Verdict, record.AttemptID, record.Plan.PlannerIsolation)
 					}
 					return err
 				}
@@ -94,15 +94,16 @@ func newAcceptanceCmd() *cobra.Command {
 				}
 				if asJSON {
 					if e := json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
-						Status  string `json:"status"`
-						Reason  string `json:"reason,omitempty"`
-						Head    string `json:"head_sha,omitempty"`
-						Attempt string `json:"attempt_id,omitempty"`
-					}{status, reason, c.HeadSHA, record.AttemptID}); e != nil {
+						PlannerIsolation string `json:"planner_isolation,omitempty"`
+						Status           string `json:"status"`
+						Reason           string `json:"reason,omitempty"`
+						Head             string `json:"head_sha,omitempty"`
+						Attempt          string `json:"attempt_id,omitempty"`
+					}{record.Plan.PlannerIsolation, status, reason, c.HeadSHA, record.AttemptID}); e != nil {
 						return e
 					}
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "Acceptance PR #%d: %s\n", pr, status)
+					fmt.Fprintf(cmd.OutOrStdout(), "Acceptance PR #%d: %s (planner_isolation=%s)\n", pr, status, record.Plan.PlannerIsolation)
 					if reason != "" {
 						fmt.Fprintln(cmd.OutOrStdout(), reason)
 					}
@@ -584,28 +585,36 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		return acceptance.Record{}, err
 	}
 	defer os.RemoveAll(scratch)
-	workspace, err := os.MkdirTemp("", "clawflow-acceptance-review-")
-	if err != nil {
-		return acceptance.Record{}, err
-	}
-	defer os.RemoveAll(workspace)
-	// An independent detached Git workspace avoids mutating the user's checkout
-	// or sharing FETCH_HEAD with implement/repair. Only these temp dirs are removed.
-	for _, args := range [][]string{{"init", "--quiet"}, {"remote", "add", "origin", origin}, {"check-ref-format", "refs/heads/" + pr.HeadBranch}, {"fetch", "--no-tags", "origin", "refs/heads/" + pr.HeadBranch}} {
-		if _, err := acceptanceGit(ctx, workspace, args...); err != nil {
-			return acceptance.Record{}, err
+	var workspace string
+	defer func() {
+		if workspace != "" {
+			os.RemoveAll(workspace)
 		}
-	}
-	fetched, err := acceptanceGit(ctx, workspace, "rev-parse", "FETCH_HEAD")
-	if err != nil || fetched != c.HeadSHA {
-		return acceptance.Record{}, errors.New("acceptance fetched PR head changed")
-	}
-	if _, err := acceptanceGit(ctx, workspace, "checkout", "--detach", c.HeadSHA); err != nil {
-		return acceptance.Record{}, err
-	}
-	// The reviewer may run arbitrary commands here, so leave it nothing to push to.
-	if err := acceptanceRemoveRemotes(ctx, workspace); err != nil {
-		return acceptance.Record{}, err
+	}()
+	prepare := func(ctx context.Context) (string, error) {
+		workspace, err = os.MkdirTemp("", "clawflow-acceptance-review-")
+		if err != nil {
+			return "", err
+		}
+		// An independent detached Git workspace avoids mutating the user's checkout
+		// or sharing FETCH_HEAD with implement/repair. Only these temp dirs are removed.
+		for _, args := range [][]string{{"init", "--quiet"}, {"remote", "add", "origin", origin}, {"check-ref-format", "refs/heads/" + pr.HeadBranch}, {"fetch", "--no-tags", "origin", "refs/heads/" + pr.HeadBranch}} {
+			if _, err := acceptanceGit(ctx, workspace, args...); err != nil {
+				return "", err
+			}
+		}
+		fetched, err := acceptanceGit(ctx, workspace, "rev-parse", "FETCH_HEAD")
+		if err != nil || fetched != c.HeadSHA {
+			return "", errors.New("acceptance fetched PR head changed")
+		}
+		if _, err := acceptanceGit(ctx, workspace, "checkout", "--detach", c.HeadSHA); err != nil {
+			return "", err
+		}
+		// The reviewer may run arbitrary commands here, so leave it nothing to push to.
+		if err := acceptanceRemoveRemotes(ctx, workspace); err != nil {
+			return "", err
+		}
+		return workspace, nil
 	}
 	store, err := acceptance.OpenStore(acceptanceStorePath(repo, prNumber))
 	if err != nil {
@@ -644,7 +653,7 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		}
 		return acceptanceNativeRun(ctx, ec, execution.Request{Version: 1, RequestID: execution.NewSessionKey(), Workspace: opts.Workspace, Prompt: prompt, Instructions: opts.Instructions, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: max(1, timeout.Milliseconds())}, acceptanceReviewerEnv(os.Environ()), opts.Events, nil)
 	}
-	r, err := (acceptance.Runner{Store: store, Execute: execute, Inspect: inspect, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
+	r, err := (acceptance.Runner{Store: store, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
 	if err == nil {
 		// Run returns nil only after the reviewer report was parsed and the
 		// record was saved, so a failed/blocked verdict reaching here is a
