@@ -192,6 +192,12 @@ func resetIdle(ownRunLock bool) error {
 			}
 		}
 	}
+	// Any pass (legacy global lock or a per-repo run lock) held by a live
+	// process other than this one blocks the reset. The walk below would also
+	// refuse, but this names the cause.
+	if held, holder := snapshot.AnyRunLockHeldExcept(os.Getpid()); held {
+		return fmt.Errorf("stop active clawflow run (pid %d, repo %q) before reset", holder.PID, holder.Repo)
+	}
 	return filepath.WalkDir(snapshot.LockDir(), func(path string, d fs.DirEntry, err error) error {
 		if os.IsNotExist(err) {
 			return nil
