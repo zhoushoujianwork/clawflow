@@ -11,6 +11,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -68,6 +69,7 @@ type sweepFake struct {
 	// mergeability keyed by PR number; missing entries default to clean.
 	mergeability map[int]vcs.MergeStatus
 	ciStatus     vcs.CIStatus
+	ciCalls      int
 
 	listOpenPRCalls  int
 	mergeabilityCall int
@@ -123,6 +125,7 @@ func (f *sweepFake) ListIssueComments(repo string, issueNumber int) ([]string, e
 }
 
 func (f *sweepFake) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
+	f.ciCalls++
 	if f.ciStatus == "" {
 		return vcs.CIStatusNone, nil
 	}
@@ -411,5 +414,21 @@ func TestSweepAutoMergePRs_PendingCIDoesNotBlock(t *testing.T) {
 	}
 	if len(f.comments) != 0 {
 		t.Errorf("pending CI must stay silent in sweep mode, got %v", f.comments)
+	}
+}
+
+// TestInlineAutoMergeNeverWaitsForCI pins the non-blocking inline path: a
+// pending check is read once and left for the next pass, without sleeping
+// while the run lock is held.
+func TestInlineAutoMergeNeverWaitsForCI(t *testing.T) {
+	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{"o/r": {AutoMerge: true, CIRequired: true, CITimeout: 600}}})
+	fake := &sweepFake{ciStatus: vcs.CIStatusPending}
+	start := time.Now()
+	runPostAutomation(context.Background(), &runJob{repo: "o/r", client: fake, repoCfg: config.Repo{AutoMerge: true, CIRequired: true, CITimeout: 600}, op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7}}, "agent-implemented", "https://github.com/o/r/pull/9", "test")
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("inline auto-merge blocked for %s", elapsed)
+	}
+	if fake.ciCalls != 1 || len(fake.merged) != 0 || len(fake.comments) != 0 {
+		t.Fatalf("ciCalls=%d merged=%v comments=%v", fake.ciCalls, fake.merged, fake.comments)
 	}
 }

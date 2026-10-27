@@ -142,6 +142,56 @@ func resolveRunRepos(cfg *config.Config, onlyRepo string, onlyIssue int) (repos 
 	return nil, "", fmt.Errorf("repo %q not found or not enabled", onlyRepo)
 }
 
+// Lock-wait tuning for targeted runs; variables so tests can shorten them.
+var (
+	acquireRunLock   = snapshot.AcquireRunLock
+	targetedLockWait = 30 * time.Minute
+	runLockPoll      = 5 * time.Second
+)
+
+// acquireRunLockForPass takes the global run lock. An unscoped pass that
+// loses the race reports skip=true (exit 0, the next tick retries). A
+// targeted run (--repo + --issue) is an explicit request to process one
+// issue, so exiting 0 would look like the work was done: it waits up to
+// targetedLockWait for the active pass and returns an error on timeout.
+func acquireRunLockForPass(ctx context.Context, lg *clog.Logger, targeted bool) (skip bool, err error) {
+	lockErr := acquireRunLock(Version)
+	if lockErr == nil {
+		return false, nil
+	}
+	if targeted {
+		fmt.Fprintf(os.Stderr, "⚠ %v — waiting up to %s for it to finish\n", lockErr, targetedLockWait)
+		lg.Info("run/lock_wait", "pid", os.Getpid(), "reason", lockErr.Error(), "max_wait", targetedLockWait.String())
+		deadline := time.Now().Add(targetedLockWait)
+		for lockErr != nil && time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(runLockPoll):
+			}
+			lockErr = acquireRunLock(Version)
+		}
+		if lockErr == nil {
+			return false, nil
+		}
+		lg.Warn("run/lock_timeout", "pid", os.Getpid(), "reason", lockErr.Error(), "waited", targetedLockWait.String())
+		return false, fmt.Errorf("another clawflow run is still active after waiting %s: %w", targetedLockWait, lockErr)
+	}
+	if holder, readErr := snapshot.ReadRunLock(); readErr == nil {
+		lg.Info("run/skip",
+			"pid", os.Getpid(),
+			"holder_pid", holder.PID,
+			"holder_started", holder.StartedAt.Format(time.RFC3339),
+		)
+		fmt.Fprintf(os.Stderr, "⚠ clawflow run already active (pid=%d, started=%s) — skipping\n",
+			holder.PID, holder.StartedAt.Format(time.RFC3339))
+	} else {
+		lg.Info("run/skip", "pid", os.Getpid(), "reason", lockErr.Error())
+		fmt.Fprintf(os.Stderr, "⚠ %v — skipping\n", lockErr)
+	}
+	return true, nil
+}
+
 func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.Duration) error {
 	// Global collection for all issues from all repos
 	var globalIssues []snapshot.IssueEntry
@@ -163,22 +213,13 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 
 	// Single-instance lock: prevent concurrent clawflow run invocations
 	// (e.g. cron firing while a previous run is still active). On
-	// contention, log run/skip and exit cleanly so cron doesn't treat
-	// the skip as a failure. Stale locks from crashed processes are
-	// reclaimed automatically via PID-liveness check.
-	if err := snapshot.AcquireRunLock(Version); err != nil {
-		if holder, readErr := snapshot.ReadRunLock(); readErr == nil {
-			lg.Info("run/skip",
-				"pid", os.Getpid(),
-				"holder_pid", holder.PID,
-				"holder_started", holder.StartedAt.Format(time.RFC3339),
-			)
-			fmt.Fprintf(os.Stderr, "⚠ clawflow run already active (pid=%d, started=%s) — skipping\n",
-				holder.PID, holder.StartedAt.Format(time.RFC3339))
-		} else {
-			lg.Info("run/skip", "pid", os.Getpid(), "reason", err.Error())
-			fmt.Fprintf(os.Stderr, "⚠ %v — skipping\n", err)
-		}
+	// contention an unscoped pass logs run/skip and exits cleanly so
+	// schedulers don't treat the skip as a failure; a targeted run waits
+	// for the active pass (see acquireRunLockForPass). Stale locks from
+	// crashed processes are reclaimed automatically via PID-liveness check.
+	if skip, err := acquireRunLockForPass(ctx, lg, onlyRepo != "" && onlyIssue != 0); err != nil {
+		return err
+	} else if skip {
 		return nil
 	}
 	// Release the run lock on normal exit. For unhandled signals (SIGINT/
@@ -1859,11 +1900,13 @@ func checkCircuitBreaker(j *runJob, prefix string) {
 
 // runPostAutomation handles merge and parent-progress follow-up.
 func runPostAutomation(ctx context.Context, j *runJob, outcome, output, prefix string) {
-	// Auto-merge: after implement produces agent-implemented, wait CI then
-	// merge. This is the low-latency path — the PR number comes straight
-	// from the run's stdout. sweepAutoMergePRs is the per-scan backstop for
-	// every PR this path misses (issue #299); both share attemptAutoMerge so
-	// the two can't drift.
+	// Auto-merge: after implement produces agent-implemented, take one CI
+	// reading and merge if it is already green. Never wait here: this runs
+	// while the global run lock and a worker slot are held, so blocking up to
+	// ci_timeout stalled every other repository. A fresh PR's checks are
+	// normally still pending; the per-scan sweep (sweepAutoMergePRs, #299) and
+	// the harvest phase converge it on the next pass. Both paths share
+	// attemptAutoMerge so they can't drift.
 	if outcome == "agent-implemented" && j.repoCfg.AutoMerge {
 		prNum := extractPRNumber(output)
 		if prNum == 0 {
@@ -1878,6 +1921,8 @@ func runPostAutomation(ctx context.Context, j *runJob, outcome, output, prefix s
 			prNum:    prNum,
 			issueNum: j.sub.Number,
 			prefix:   prefix,
+			ciPoll:   true,
+			quiet:    true,
 		})
 	}
 
