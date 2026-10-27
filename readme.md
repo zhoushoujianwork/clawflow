@@ -403,7 +403,15 @@ Every `clawflow run` writes JSON snapshots and per-run event logs to `~/.clawflo
 
 ```bash
 clawflow web --open          # serves http://127.0.0.1:8080 and opens your browser
+
+# macOS：登录后启动，由 launchd 监督运行
+clawflow web service install --host 127.0.0.1 --port 8090
+clawflow web service status
+clawflow web restart         # LaunchAgent 实例通过 kickstart 重启，并等待端口就绪
+clawflow web service uninstall
 ```
+
+服务日志写入 `~/.clawflow/logs/web.launchd.log`。重复安装相同配置不会重启服务；更改 host/port 后重新安装会重新加载服务。自升级沿用 `web restart`，保留 launchd 监督；非 LaunchAgent 实例仍使用原有的自行重启方式。
 
 What it shows:
 
