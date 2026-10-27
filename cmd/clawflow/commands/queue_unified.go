@@ -246,9 +246,9 @@ func applyUnifiedQueue(repo string, jobs []*runJob, plan repoQueuePlan) []*runJo
 		for _, k := range plan.Result.Newly.Unparked {
 			runLog.Info("queue/unpark", "repo", repo, "issue", k.Number)
 		}
-		if err := queue.SaveState(plan.State); err != nil {
-			runLog.Warn("queue/state_write", "repo", repo, "err", err.Error())
-		}
+	}
+	if err := queue.SaveState(plan.State); err != nil {
+		runLog.Warn("queue/state_write", "repo", repo, "err", err.Error())
 	}
 	kept := make([]*runJob, 0, len(jobs))
 	for _, j := range jobs {

@@ -1094,13 +1094,14 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	// explicit authorization and bypass it.
 	if executeHere && onlyIssue == 0 {
 		now := qrt.now()
-		rank, rankErr := queue.LoadRank()
-		if rankErr != nil {
-			runLog.Warn("queue/rank_unreadable", "repo", fullName, "err", rankErr.Error())
-		}
 		state, stateErr := queue.LoadState(fullName)
 		if stateErr != nil {
 			runLog.Warn("queue/state_unreadable", "repo", fullName, "err", stateErr.Error())
+		}
+		migrated := migrateQueueIssue(client, fullName, repoCfg.QueueIssue, &state)
+		rank, rankErr := queue.LoadRank()
+		if rankErr != nil {
+			runLog.Warn("queue/rank_unreadable", "repo", fullName, "err", rankErr.Error())
 		}
 		maxInFlight, parkAfter, scope := queueRepoParams(repoCfg, qrt.Settings)
 		implementJobs := map[int]bool{}
@@ -1123,6 +1124,9 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			Scope: scope, MaxInFlight: maxInFlight, ParkAfter: parkAfter,
 			Rank: rank, DepOpen: qrt.DepOpen, State: state, Now: now,
 		})
+		if !migrated {
+			plan.Err = "queue_issue_import_pending"
+		}
 		jobs = applyUnifiedQueue(fullName, jobs, plan)
 		pruneRepoRank(fullName, issues)
 	}

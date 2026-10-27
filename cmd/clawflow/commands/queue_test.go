@@ -391,3 +391,88 @@ func TestQueueRepoParamsDefaults(t *testing.T) {
 		t.Fatalf("bad park_after must fall back, got %s", p)
 	}
 }
+
+type fakeQueueLister struct {
+	subs  []vcs.Issue
+	err   error
+	calls int
+}
+
+func (f *fakeQueueLister) ListSubIssues(string, int) ([]vcs.Issue, error) {
+	f.calls++
+	return f.subs, f.err
+}
+
+func TestMigrateQueueIssueImportsOnceInOrder(t *testing.T) {
+	logs := withRunLog(t)
+	if err := queue.SaveState(queue.RepoState{Repo: "o/r"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.UpdateRank(func([]queue.Key) ([]queue.Key, error) {
+		return []queue.Key{{Repo: "o/other", Number: 4}, {Repo: "o/r", Number: 7}}, nil
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	lister := &fakeQueueLister{subs: []vcs.Issue{{Number: 9, State: "open"}, {Number: 7, State: "open"}, {Number: 8, State: "closed"}, {Number: 5, State: "open"}}}
+	st, _ := queue.LoadState("o/r")
+	if !migrateQueueIssue(lister, "o/r", 100, &st) {
+		t.Fatal("migration should succeed")
+	}
+	order, _ := queue.LoadRank()
+	want := []string{"o/other#4", "o/r#7", "o/r#9", "o/r#5"}
+	var got []string
+	for _, k := range order {
+		got = append(got, k.String())
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("rank = %v, want %v", got, want)
+	}
+	if !st.Imported || !st.DeprecationShown {
+		t.Fatalf("state = %+v", st)
+	}
+	// Second pass: no import, no second notice.
+	if !migrateQueueIssue(lister, "o/r", 100, &st) || lister.calls != 1 {
+		t.Fatalf("import must happen once, calls=%d", lister.calls)
+	}
+	out := logs()
+	if strings.Count(out, "queue/import") != 1 || strings.Count(out, "queue/deprecated") != 1 {
+		t.Fatalf("log:\n%s", out)
+	}
+	// No queue_issue: nothing to do.
+	if !migrateQueueIssue(lister, "o/r", 0, &queue.RepoState{}) || lister.calls != 1 {
+		t.Fatal("repos without queue_issue are untouched")
+	}
+}
+
+func TestMigrateQueueIssueTransientFailureRetries(t *testing.T) {
+	withRunLog(t)
+	lister := &fakeQueueLister{err: errors.New("HTTP 502")}
+	st := queue.RepoState{Repo: "o/r"}
+	if migrateQueueIssue(lister, "o/r", 100, &st) || st.Imported {
+		t.Fatal("transient failure must not mark the import done")
+	}
+	lister.err = vcs.ErrNotSupported
+	if !migrateQueueIssue(lister, "o/r", 100, &st) || !st.Imported {
+		t.Fatal("unsupported platform has nothing to preserve")
+	}
+}
+
+func TestRunOnceQueueIssueIgnoredAfterImport(t *testing.T) {
+	logs := withRunLog(t)
+	queueConfig(t, 100)
+	queueVCS(t,
+		[]map[string]any{queueParent(100, 2), targetedIssue(9), targetedIssue(7), targetedIssue(5)},
+		map[int][]int{100: {9, 7}}, nil, nil)
+	got := runQueueOnce(t, 0)
+	// Ranked 9,7 first; max_in_flight 2 -> only those two run, 5 waits.
+	if len(got) != 2 || got[0] != 7 || got[1] != 9 {
+		t.Fatalf("dispatched = %v, want [7 9]", got)
+	}
+	order, _ := queue.LoadRank()
+	if len(order) != 2 || order[0].Number != 9 || order[1].Number != 7 {
+		t.Fatalf("rank = %v", order)
+	}
+	if out := logs(); !strings.Contains(out, "queue/import") || !strings.Contains(out, "queue/deprecated") {
+		t.Fatalf("missing import log:\n%s", out)
+	}
+}
