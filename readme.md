@@ -241,23 +241,25 @@ clawflow issue list-sub --repo owner/repo --issue 10 --json
 
 GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return an error on GitLab repos. Existing checklist-based tracking remains available where supported; native sub-issue commands remain GitHub-only.
 
-### Work queue (`queue_issue`)
+### Work queue (one queue for all repositories)
 
-By default every eligible open leaf issue is dispatched to `implement`. To control which issues run and in what order, point a GitHub repository at one parent issue:
+All enabled repositories, GitHub and GitLab, share one ClawFlow-native queue. Candidates are the open leaf issues `implement` would accept; with `settings.queue.scope: labeled` only issues labeled `clawflow` qualify (default `all`).
+
+Order is `(priority, rank, created_at, key)`:
+
+- Priority is the label `P0`..`P3` (exact, case-sensitive; the highest wins; none = `P2`). Look-alikes such as `p1` or `priority:1` are ignored and reported once in `queue/format_warning`.
+- Rank is the manual order in `~/.clawflow/data/queue.json` within a tier. Change it with `clawflow queue move owner/repo#12 --top | --bottom | --before K | --after K`.
+- Dependencies: one body line `Depends on: #12, owner/repo#34` (max 10). Items wait while a dependency is open; a cycle blocks all its members (`dependency_cycle`).
 
 ```bash
-clawflow repo set owner/repo --queue-issue 42   # 0 clears it
-clawflow repo show owner/repo                   # prints queue_issue
+clawflow queue list [--repo R] [--json]   # global order: key, tier, rank, state
+clawflow queue move owner/repo#12 --top
+clawflow repo set owner/repo --max-in-flight 3   # per repo, default 2
 ```
 
-The queue items are the **direct** open sub-issues of #42, in the order GitHub returns them (reorder them in the GitHub UI). Each scan:
+Each pass walks the order for its repositories and dispatches while the repo's `max_in_flight` and the global `settings.max_concurrent_agents` allow. An item is in flight while it holds a local lock, or carries `agent-implemented` with an open PR that references it. Blocked items (`agent-failed`, red CI without repair, no acceptance verdict, open dependency) are skipped with a recorded reason and never stall the queue. An in-flight item blocked longer than `settings.queue.park_after` (default `45m`) is parked and stops counting toward `max_in_flight` (at most 2 per repo). Logs: `queue/pick`, `queue/skip`, `queue/park`, `queue/unpark`, `queue/format_warning`, `queue/import`. Targeted runs (`clawflow run --repo R --issue N`) bypass the queue.
 
-- dispatches `implement` only for the head item (the first open sub-issue), and only one item at a time. An item is in flight while it holds a local lock, or while it carries `agent-implemented` and an open PR closes it. Nothing else starts until it finishes.
-- blocks when the head is excluded (`agent-failed`, `agent-skipped`, ...) or is itself a parent. Nothing is dispatched until you reorder or remove it. It does not skip ahead.
-- never dispatches `implement` for issues outside the queue, whatever their labels.
-- fails closed: if the sub-issue list cannot be read, nothing is dispatched for that repository and a WARN is logged.
-
-Decisions are logged to `run.log` as `run/queue_pick`, `run/queue_wait` and `run/queue_blocked` with the queue issue, item and reason. Other operators, CI repair, harvest and auto-merge ignore the queue, and targeted runs (`clawflow run --repo R --issue N`) bypass it. `--queue-issue` is rejected on GitLab repositories.
+`queue_issue` is deprecated. On the first pass its open sub-issues are imported into the rank (`clawflow queue import --repo R --from-issue N` does the same by hand) and the field is then ignored. The old queue issue is left untouched.
 
 ---
 
