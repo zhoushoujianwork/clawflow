@@ -105,3 +105,7 @@ func WithConfigSyncLock(wait time.Duration, fn func()) bool {
 	fn()
 	return true
 }
+
+// WithSnapshotLock runs fn under the cross-process snapshot lock for callers
+// outside this package (e.g. the queue rank file). fn must not take the lock.
+func WithSnapshotLock(fn func() error) error { return withSnapshotLock(fn) }
