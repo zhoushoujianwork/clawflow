@@ -95,6 +95,10 @@ func loadInstallRecord() (*installRecord, error) {
 func downloadLatestBinary() error { return downloadReleaseBinary(false, false) }
 
 func downloadReleaseBinary(explicitRelease, allowDowngrade bool) error {
+	return newSelfUpgrader().downloadReleaseBinary(explicitRelease, allowDowngrade)
+}
+
+func (u *selfUpgrader) downloadReleaseBinary(explicitRelease, allowDowngrade bool) error {
 	if buildChannel() == "source" && !explicitRelease {
 		return fmt.Errorf("source build requires --release to switch channels")
 	}
@@ -105,20 +109,6 @@ func downloadReleaseBinary(explicitRelease, allowDowngrade bool) error {
 
 	if err := checkReleaseReplacement(Version, tag, buildChannel(), explicitRelease, allowDowngrade); err != nil {
 		return err
-	}
-	if buildChannel() == "source" && !allowDowngrade {
-		repo, err := sourceRepository()
-		if err != nil {
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := newSelfUpgrader().verifyReleaseAncestry(ctx, repo.LocalPath, tag); err != nil {
-			return err
-		}
-	}
-	if Version == tag {
-		return nil
 	}
 
 	fmt.Printf("  [dl] downloading %s (%s)...\n", tag, assetURL)
@@ -132,7 +122,56 @@ func downloadReleaseBinary(explicitRelease, allowDowngrade bool) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
-	return atomicReplace(binaryPath(), resp.Body)
+	// Finish downloading before locking, then revalidate the actual destination.
+	// Both release and source replacements hold this same lock through installation.
+	staged, err := os.CreateTemp("", "clawflow-release-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(staged.Name())
+	defer staged.Close()
+	if _, err := io.Copy(staged, resp.Body); err != nil {
+		return err
+	}
+	if _, err := staged.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	release, ok, err := u.Lock()
+	if err != nil {
+		return fmt.Errorf("acquire upgrade lock: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("another upgrade is in progress")
+	}
+	defer release()
+	dest, err := u.Executable()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	version, commit, channel, err := u.readInstalledIdentity(ctx, dest)
+	if err != nil {
+		return fmt.Errorf("read installed version: %w", err)
+	}
+	if err := checkReleaseReplacement(version, tag, channel, explicitRelease, allowDowngrade); err != nil {
+		return err
+	}
+	if channel == "source" && !allowDowngrade {
+		repo, err := sourceRepository()
+		if err != nil {
+			return err
+		}
+		current := *u
+		current.Version, current.Commit = version, commitForVersion(version, commit)
+		if err := current.verifyReleaseAncestry(ctx, repo.LocalPath, tag); err != nil {
+			return err
+		}
+	}
+	if version == tag && channel == "release" {
+		return nil
+	}
+	return atomicReplace(dest, staged)
 }
 
 // latestReleaseAsset finds the download URL for the current OS/arch binary

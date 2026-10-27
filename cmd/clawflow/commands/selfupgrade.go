@@ -252,6 +252,28 @@ func copyExecutable(src, dst string, mode os.FileMode) error {
 	return os.Chmod(dst, mode)
 }
 
+// readInstalledIdentity reads the destination while the caller holds the upgrade lock.
+func (u *selfUpgrader) readInstalledIdentity(ctx context.Context, dest string) (version, commit, channel string, err error) {
+	installed, err := u.Run(ctx, filepath.Dir(dest), dest, "version")
+	if err != nil {
+		return "", "", "", err
+	}
+	versionLine, metadata, _ := strings.Cut(strings.TrimSpace(string(installed)), "\n")
+	version = strings.TrimSpace(versionLine)
+	for _, field := range strings.Fields(metadata) {
+		if value, ok := strings.CutPrefix(field, "commit="); ok {
+			if value != "" && !fullSHARE.MatchString(value) {
+				return "", "", "", fmt.Errorf("installed commit metadata is invalid")
+			}
+			commit = value
+		}
+		if value, ok := strings.CutPrefix(field, "channel="); ok {
+			channel = value
+		}
+	}
+	return version, commit, channelForVersion(version, channel), nil
+}
+
 // Upgrade verifies ancestry and builds one source upgrade.
 // It reports its result instead of returning errors.
 func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out selfUpgradeOutcome) {
@@ -287,21 +309,9 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 	if err != nil {
 		return fail("locate running executable: %v", err)
 	}
-	installed, err := u.Run(ctx, filepath.Dir(dest), dest, "version")
+	installedVersion, commit, _, err := u.readInstalledIdentity(ctx, dest)
 	if err != nil {
 		return fail("read installed version: %v", err)
-	}
-	versionLine, metadata, _ := strings.Cut(strings.TrimSpace(string(installed)), "\n")
-	installedVersion := strings.TrimSpace(versionLine)
-	commit := ""
-	for _, field := range strings.Fields(metadata) {
-		if value, ok := strings.CutPrefix(field, "commit="); ok {
-			if value != "" && !fullSHARE.MatchString(value) {
-				return fail("installed commit metadata is invalid")
-			}
-			commit = value
-			break
-		}
 	}
 	// Keep status checks on the running process unchanged; only this locked
 	// replacement attempt uses the freshly read destination identity.

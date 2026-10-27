@@ -92,10 +92,14 @@ func IsNewerVersion(current, latest string) bool {
 }
 
 func buildChannel() string {
-	if BuildChannel == "release" || BuildChannel == "source" {
-		return BuildChannel
+	return channelForVersion(Version, BuildChannel)
+}
+
+func channelForVersion(version, channel string) string {
+	if channel == "release" || channel == "source" {
+		return channel
 	}
-	if _, ok := parseVersion(Version); ok && !strings.Contains(Version, "-g") {
+	if _, ok := parseVersion(version); ok && !strings.Contains(version, "-g") {
 		return "release"
 	}
 	return "source"

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -216,5 +217,114 @@ func TestPermissionDeniedErr(t *testing.T) {
 	}
 	if !strings.Contains(msg, "sudo clawflow update") {
 		t.Errorf("error message missing sudo hint: %q", msg)
+	}
+}
+
+func TestDelayedReleaseCannotDowngradeInstalledBinary(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, channel, wantError string
+		explicit, allow, busy             bool
+	}{
+		{name: "newer release", version: "v3.0.0", channel: "release", wantError: "refusing downgrade"},
+		{name: "source switch requires authorization", version: "v1.0.0", channel: "source", wantError: "--release"},
+		{name: "downgrade permission does not authorize channel switch", version: "v3.0.0", channel: "source", allow: true, wantError: "--release"},
+		{name: "source ancestry uses installed commit", version: "v1.0.0", channel: "source", explicit: true, wantError: "refusing release downgrade"},
+		{name: "unknown version", version: "unknown", channel: "release", wantError: "refusing downgrade"},
+		{name: "shared lock busy", version: "v1.0.0", channel: "release", busy: true, wantError: "another upgrade"},
+		{name: "upgrade", version: "v1.0.0", channel: "release"},
+		{name: "explicit downgrade", version: "v3.0.0", channel: "release", allow: true},
+		{name: "explicit source downgrade", version: "v3.0.0", channel: "source", explicit: true, allow: true},
+		{name: "already installed", version: "v2.0.0", channel: "release"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seedReleaseCredentials(t, "", "")
+			oldVersion, oldChannel, oldTransport := Version, BuildChannel, http.DefaultTransport
+			Version, BuildChannel = "v1.0.0", "release"
+			t.Cleanup(func() { Version, BuildChannel, http.DefaultTransport = oldVersion, oldChannel, oldTransport })
+			dest := filepath.Join(t.TempDir(), "clawflow")
+			commit := ""
+			if tc.name == "source ancestry uses installed commit" {
+				repo := t.TempDir()
+				git := func(args ...string) string {
+					t.Helper()
+					out, err := runSelfUpgradeCmd(context.Background(), repo, "git", args...)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return strings.TrimSpace(string(out))
+				}
+				git("init", "-b", "main")
+				git("config", "user.name", "Test")
+				git("config", "user.email", "test@example.com")
+				git("commit", "--allow-empty", "-m", "release")
+				git("tag", "v2.0.0")
+				git("commit", "--allow-empty", "-m", "newer source")
+				commit = git("rev-parse", "HEAD")
+				git("remote", "add", "origin", repo)
+				path := filepath.Join(filepath.Dir(config.CredentialsPath()), "install.yaml")
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("repo_dir: "+repo+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			installed := "#!/bin/sh\nprintf '%s\\n' '" + tc.version + "' 'channel=" + tc.channel + " commit=" + commit + " branch='\n"
+			http.DefaultTransport = releaseTestTransport(func(req *http.Request) (*http.Response, error) {
+				body := `{"tag_name":"v2.0.0","assets":[{"name":"clawflow","browser_download_url":"https://example.test/binary"}]}`
+				if req.URL.Host == "example.test" {
+					// Another updater finished while this stale process downloaded.
+					if err := os.WriteFile(dest, []byte(installed), 0755); err != nil {
+						t.Fatal(err)
+					}
+					body = "downloaded release"
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+			})
+			if tc.busy {
+				release, ok, err := acquireSelfUpgradeLock()
+				if err != nil || !ok {
+					t.Fatalf("acquire competing lock: %v", err)
+				}
+				defer release()
+			}
+			u := newSelfUpgrader()
+			u.Executable = func() (string, error) { return dest, nil }
+			u.Run = func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+				// The installed identity must be read under the shared source lock.
+				release, ok, err := acquireSelfUpgradeLock()
+				if ok {
+					release()
+					t.Fatal("installed identity read without shared lock")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				return runSelfUpgradeCmd(ctx, dir, name, args...)
+			}
+			err := u.downloadReleaseBinary(tc.explicit, tc.allow)
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("expected %q, got %v", tc.wantError, err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			want := "downloaded release"
+			if tc.wantError != "" || tc.version == "v2.0.0" {
+				want = installed
+			}
+			got, readErr := os.ReadFile(dest)
+			if readErr != nil || string(got) != want {
+				t.Fatalf("destination: error=%v content=%q want=%q", readErr, got, want)
+			}
+			if !tc.busy {
+				release, ok, err := acquireSelfUpgradeLock()
+				if err != nil || !ok {
+					t.Fatalf("upgrade lock leaked: %v", err)
+				}
+				release()
+			}
+		})
 	}
 }
