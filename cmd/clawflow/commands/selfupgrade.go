@@ -23,9 +23,9 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
-// Self-upgrade (issue #369). After a `clawflow run` pass that confirmed a merge
-// into the base branch of a repository with self_upgrade enabled, the final
-// step of the pass rebuilds the binary from the fetched base and replaces the
+// Self-upgrade checks opted-in source branches after every run pass, including
+// advances merged outside ClawFlow. The final step builds a verified descendant
+// of the installed commit from the fetched branch and replaces the
 // running executable. The user's checkout is never built in, switched or
 // modified: the build happens in a temporary detached worktree. Every step
 // before the replacement leaves the installed binary untouched, and a failure
@@ -33,7 +33,6 @@ import (
 
 const (
 	selfUpgradeTimeout = 30 * time.Minute
-	versionLDFlagsPkg  = "github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version"
 )
 
 var fullSHARE = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -92,6 +91,7 @@ func (l *mergeLedger) names() []string {
 type selfUpgrader struct {
 	// Version is the running binary's version string.
 	Version string
+	Commit  string
 	// Executable returns the resolved path of the running executable.
 	Executable func() (string, error)
 	// Run executes name with args in dir and returns stdout. Errors carry a
@@ -115,6 +115,7 @@ type selfUpgrader struct {
 func newSelfUpgrader() *selfUpgrader {
 	return &selfUpgrader{
 		Version: Version,
+		Commit:  installedCommit(),
 		Executable: func() (string, error) {
 			exe, err := os.Executable()
 			if err != nil {
@@ -251,8 +252,8 @@ func copyExecutable(src, dst string, mode os.FileMode) error {
 	return os.Chmod(dst, mode)
 }
 
-// Upgrade runs one upgrade for a repository whose base branch just received a
-// merge. It never panics and reports its result instead of returning errors.
+// Upgrade verifies ancestry and builds one source upgrade.
+// It reports its result instead of returning errors.
 func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out selfUpgradeOutcome) {
 	out = selfUpgradeOutcome{From: u.Version, Result: selfUpgradeFailed}
 	fail := func(format string, a ...any) selfUpgradeOutcome {
@@ -299,6 +300,22 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 		return skip("installed version already equals target")
 	}
 
+	distance, err := u.sourceDistance(ctx, localPath, sha)
+	if err != nil {
+		return fail("%v", err)
+	}
+	if distance == 0 {
+		return skip("installed commit already equals target")
+	}
+	described, err := u.Run(ctx, localPath, "git", "describe", "--tags", "--always", sha)
+	if err != nil {
+		return fail("describe target: %v", err)
+	}
+	version := strings.TrimSpace(string(described))
+	if version == "" {
+		return fail("empty target version")
+	}
+
 	dest, err := u.Executable()
 	if err != nil {
 		return fail("locate running executable: %v", err)
@@ -341,13 +358,13 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 		return fail("web build: %v", err)
 	}
 	candidate := filepath.Join(tmp, "clawflow-candidate")
-	ldflags := fmt.Sprintf("-s -w -X %s=%s", versionLDFlagsPkg, short)
+	ldflags := sourceBuildFlags(version, sha, base)
 	if _, err := u.Run(ctx, wt, "go", "build", "-ldflags", ldflags, "-o", candidate, "./cmd/clawflow"); err != nil {
 		return fail("go build: %v", err)
 	}
 
 	// 3. Verify the candidate before it gets anywhere near the install path.
-	if err := u.verifyVersion(ctx, candidate, short); err != nil {
+	if err := u.verifyVersion(ctx, candidate, version); err != nil {
 		return fail("candidate: %v", err)
 	}
 	checkOut, checkErr := u.Run(ctx, tmp, candidate, "execution", "check", "--json")
@@ -383,7 +400,7 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 		}
 		return fail("%v; rolled back to previous binary", cause)
 	}
-	if err := u.verifyVersion(ctx, dest, short); err != nil {
+	if err := u.verifyVersion(ctx, dest, version); err != nil {
 		return rollback(fmt.Errorf("installed binary: %w", err))
 	}
 
@@ -427,8 +444,8 @@ func (u *selfUpgrader) stageCopy(src, dst string, mode os.FileMode) error {
 }
 
 // runSelfUpgradePhase is the final step of a pass. It upgrades at most once,
-// for the first repository (by name) with self_upgrade enabled and a merge
-// confirmed in this pass, and returns failure keys for the exit status.
+// for an opted-in repository with a verified branch advance. Legacy release
+// installs retain the confirmed-merge trigger. Failures contribute to exit status.
 func runSelfUpgradePhase(ctx context.Context, cfg *config.Config, u *selfUpgrader) []firedKey {
 	if cfg == nil || u == nil {
 		return nil
@@ -436,12 +453,35 @@ func runSelfUpgradePhase(ctx context.Context, cfg *config.Config, u *selfUpgrade
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for _, repo := range confirmedMerges.names() {
+	names := confirmedMerges.names()
+	if buildChannel() == "source" {
+		for name, repo := range cfg.Repos {
+			if repo.SelfUpgrade && !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+		slices.Sort(names)
+	}
+	for _, repo := range names {
 		repoCfg, ok := cfg.Repos[repo]
 		if !ok || !repoCfg.SelfUpgrade {
 			continue
 		}
-		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), selfUpgradeTimeout)
+		if ctx.Err() != nil {
+			return nil
+		}
+		uctx, cancel := context.WithTimeout(ctx, selfUpgradeTimeout)
+		if buildChannel() == "source" {
+			repoCfg.BaseBranch = trackedBranch()
+			_, behind, err := u.SourceStatus(uctx, repoCfg)
+			if err != nil || behind == 0 {
+				cancel()
+				if err != nil {
+					runLog.Warn("run/self_upgrade", "repo", repo, "reason", err.Error())
+				}
+				continue
+			}
+		}
 		res := u.Upgrade(uctx, repoCfg)
 		cancel()
 

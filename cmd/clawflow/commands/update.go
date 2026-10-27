@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,8 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -29,41 +28,47 @@ type installRecord struct {
 }
 
 func NewUpdateCmd() *cobra.Command {
-	var fromSource bool
+	var fromSource, release, allowDowngrade bool
 
 	cmd := &cobra.Command{
 		Use:   "update",
-		Short: "Update the clawflow binary to the latest release",
-		Long: `Fetches the latest release from GitHub and replaces the currently
+		Short: "Update clawflow within its installed channel",
+		Long: `Updates the tracked source branch or latest release and replaces the currently
 running clawflow binary in place — wherever it lives (/usr/local/bin,
 ~/.local/bin, ~/.clawflow/bin, ...) — so the updated binary stays on your
 PATH and no stale second copy is left behind. Built-in operators ship inside
 the binary, so there is nothing else to sync. User operators in
 ~/.clawflow/skills/ are untouched.
 
-Use --from-source to rebuild from a local repo clone instead (dev flow).`,
+Source builds track their stamped branch (default main) using a verified temporary worktree.
+Use --from-source to switch to source, --release to switch to releases.
+Older or unknown releases also require --allow-downgrade.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			record, _ := loadInstallRecord() // missing record is fine for curl-installed users
-
-			if fromSource {
-				if record == nil || record.RepoDir == "" {
-					return fmt.Errorf("--from-source requires an install record with repo_dir; install via ./install.sh first")
-				}
-				return rebuildFromSource(record.RepoDir)
+			if fromSource && release {
+				return fmt.Errorf("--from-source and --release are mutually exclusive")
 			}
-
-			if err := downloadLatestBinary(); err != nil {
-				if record != nil && record.RepoDir != "" {
-					fmt.Printf("  [warn] download failed (%v), trying source rebuild...\n", err)
-					return rebuildFromSource(record.RepoDir)
+			if fromSource || (buildChannel() == "source" && !release) {
+				repo, err := sourceRepository()
+				if err != nil {
+					return err
 				}
-				return fmt.Errorf("binary download failed: %w", err)
+				ctx, cancel := context.WithTimeout(cmd.Context(), selfUpgradeTimeout)
+				defer cancel()
+				u := newSelfUpgrader()
+				result := u.Upgrade(ctx, repo)
+				if result.Result == selfUpgradeFailed {
+					return fmt.Errorf("source upgrade: %s", result.Reason)
+				}
+				fmt.Println(result.Result + ": " + result.Reason)
+				return nil
 			}
-			return nil
+			return downloadReleaseBinary(release, allowDowngrade)
 		},
 	}
 
 	cmd.Flags().BoolVar(&fromSource, "from-source", false, "Rebuild binary from local source instead of downloading")
+	cmd.Flags().BoolVar(&release, "release", false, "Explicitly switch to release assets")
+	cmd.Flags().BoolVar(&allowDowngrade, "allow-downgrade", false, "Allow an older or unverified release (source also requires --release)")
 	return cmd
 }
 
@@ -87,19 +92,32 @@ func loadInstallRecord() (*installRecord, error) {
 }
 
 // downloadLatestBinary fetches the latest release binary from GitHub.
-func downloadLatestBinary() error {
+func downloadLatestBinary() error { return downloadReleaseBinary(false, false) }
+
+func downloadReleaseBinary(explicitRelease, allowDowngrade bool) error {
+	if buildChannel() == "source" && !explicitRelease {
+		return fmt.Errorf("source build requires --release to switch channels")
+	}
 	tag, assetURL, err := latestReleaseAsset()
 	if err != nil {
 		return err
 	}
 
-	// Short-circuit when the installed binary is already at (or ahead of) the
-	// published release. A dev build (Version == "dev") parses to 0.0.0 and
-	// therefore never matches — `clawflow update` on a dev build always
-	// downloads, which is the intended way to swap a local build for the
-	// released one.
-	if !IsNewerVersion(Version, tag) {
-		fmt.Printf("  [ok] already at %s — nothing to do\n", Version)
+	if err := checkReleaseReplacement(Version, tag, buildChannel(), explicitRelease, allowDowngrade); err != nil {
+		return err
+	}
+	if buildChannel() == "source" && !allowDowngrade {
+		repo, err := sourceRepository()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := newSelfUpgrader().verifyReleaseAncestry(ctx, repo.LocalPath, tag); err != nil {
+			return err
+		}
+	}
+	if Version == tag {
 		return nil
 	}
 
@@ -192,18 +210,12 @@ func rebuildFromSource(repoDir string) error {
 	repoDir = expandHomeStr(repoDir)
 	fmt.Printf("  [build] rebuilding from %s...\n", repoDir)
 
-	version := "dev"
-	if tagOut, err := exec.Command("git", "-C", repoDir, "describe", "--tags", "--abbrev=0").Output(); err == nil {
-		version = strings.TrimSpace(string(tagOut))
+	ctx, cancel := context.WithTimeout(context.Background(), selfUpgradeTimeout)
+	defer cancel()
+	result := newSelfUpgrader().Upgrade(ctx, config.Repo{LocalPath: repoDir, BaseBranch: trackedBranch()})
+	if result.Result == selfUpgradeFailed {
+		return fmt.Errorf("source upgrade: %s", result.Reason)
 	}
-	ldflags := fmt.Sprintf("-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=%s", version)
-	c := exec.Command("go", "build", "-ldflags", ldflags, "-o", binaryPath(), "./cmd/clawflow/")
-	c.Dir = repoDir
-	out, err := c.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("go build: %w\n%s", err, out)
-	}
-	fmt.Printf("  [ok] binary rebuilt → %s\n", binaryPath())
 	return nil
 }
 
@@ -302,36 +314,6 @@ func codesignIfDarwin(path string) error {
 		return fmt.Errorf("codesign: %w\n%s", err, out)
 	}
 	return nil
-}
-
-// IsNewerVersion reports whether `latest` is strictly newer than `current`,
-// comparing major.minor.patch triples only. Leading "v" is optional; any
-// pre-release or git-describe suffix (e.g. "-5-g1234abc", "-rc1") is stripped
-// before comparison, so a dev build ahead of the tag is treated as equal
-// to that tag rather than older. An unparseable input counts as zero — we'd
-// rather stay silent than nag the user with bogus "new version" hints.
-func IsNewerVersion(current, latest string) bool {
-	c := parseSemverTriple(current)
-	l := parseSemverTriple(latest)
-	for i := range 3 {
-		if l[i] != c[i] {
-			return l[i] > c[i]
-		}
-	}
-	return false
-}
-
-func parseSemverTriple(s string) [3]int {
-	s = strings.TrimPrefix(s, "v")
-	if dash := strings.Index(s, "-"); dash >= 0 {
-		s = s[:dash]
-	}
-	parts := strings.SplitN(s, ".", 3)
-	var out [3]int
-	for i := 0; i < 3 && i < len(parts); i++ {
-		out[i], _ = strconv.Atoi(parts[i])
-	}
-	return out
 }
 
 // FetchLatestTag queries GitHub for the latest release tag. Returns empty

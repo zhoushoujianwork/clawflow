@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"os/exec"
@@ -10,7 +11,9 @@ import (
 
 // VersionInfo is set by the web command at startup.
 var VersionInfo struct {
+	Update  func(context.Context) ([]byte, error)
 	Current string
+	Status  func() VersionStatus
 	Fetch   func() string              // FetchLatestTag
 	IsNewer func(cur, lat string) bool // IsNewerVersion
 	// Respawn, when non-nil, is invoked after a successful `/api/update`
@@ -21,7 +24,12 @@ var VersionInfo struct {
 	Respawn func()
 }
 
-type versionResponse struct {
+type VersionStatus struct {
+	Channel         string `json:"channel"`
+	Branch          string `json:"branch"`
+	Behind          int    `json:"behind"`
+	CanUpgrade      bool   `json:"can_upgrade"`
+	Warning         string `json:"warning,omitempty"`
 	Current         string `json:"current"`
 	Latest          string `json:"latest"`
 	UpdateAvailable bool   `json:"update_available"`
@@ -33,6 +41,10 @@ func HandleVersion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if VersionInfo.Status != nil {
+		writeJSON(w, 200, VersionInfo.Status())
+		return
+	}
 	latest := ""
 	if VersionInfo.Fetch != nil {
 		latest = VersionInfo.Fetch()
@@ -41,7 +53,8 @@ func HandleVersion(w http.ResponseWriter, r *http.Request) {
 	if latest != "" && VersionInfo.IsNewer != nil {
 		avail = VersionInfo.IsNewer(VersionInfo.Current, latest)
 	}
-	writeJSON(w, 200, versionResponse{
+	writeJSON(w, 200, VersionStatus{
+		Channel: "release", CanUpgrade: avail,
 		Current:         VersionInfo.Current,
 		Latest:          latest,
 		UpdateAvailable: avail,
@@ -60,6 +73,10 @@ func HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if VersionInfo.Status != nil && !VersionInfo.Status().CanUpgrade {
+		writeJSON(w, 409, map[string]string{"status": "blocked", "message": "no verified upgrade available"})
+		return
+	}
 	updateMu.Lock()
 	if updateActive {
 		updateMu.Unlock()
@@ -76,13 +93,21 @@ func HandleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	cmd := exec.Command(self, "update")
 	cmd.Env = os.Environ()
-	output, err := cmd.CombinedOutput()
+	var output []byte
+	if VersionInfo.Update != nil {
+		output, err = VersionInfo.Update(r.Context())
+	} else {
+		output, err = cmd.CombinedOutput()
+	}
 
 	updateMu.Lock()
 	updateActive = false
 	updateMu.Unlock()
 
 	if err != nil {
+		if len(output) == 0 {
+			output = []byte(err.Error())
+		}
 		writeJSON(w, 500, map[string]string{
 			"status":  "failed",
 			"message": string(output),

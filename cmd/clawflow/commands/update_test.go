@@ -144,14 +144,13 @@ func TestIsNewerVersion(t *testing.T) {
 		{"ahead patch", "v0.38.1", "v0.38.0", false},
 		{"ahead major", "v1.0.0", "v0.99.0", false},
 
-		// Dev/prerelease builds — git-describe format strips dash suffix
-		// so they compare by the base tag.
+		// Describe builds retain their distance from the base tag.
 		{"git describe same tag", "v0.38.1-5-gabc123", "v0.38.1", false},
 		{"git describe older tag", "v0.37.0-5-gabc123", "v0.38.0", true},
 
-		// Dev build (unparseable) → parses to 0.0.0, so any real tag is newer
-		{"dev build", "dev", "v0.38.1", true},
-		{"empty current", "", "v0.38.1", true},
+		// Unknown builds fail closed.
+		{"dev build", "dev", "v0.38.1", false},
+		{"empty current", "", "v0.38.1", false},
 
 		// Both unparseable → equal → not newer
 		{"both dev", "dev", "dev", false},

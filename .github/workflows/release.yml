@@ -99,8 +99,9 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          VERSION=${GITHUB_REF_NAME}
-          go build -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=${VERSION}" \
+          VERSION=$(git describe --tags --always)
+          COMMIT=$(git rev-parse HEAD)
+          go build -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=${VERSION} -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildCommit=${COMMIT} -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildChannel=release -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.SourceBranch=main" \
             -o clawflow_${{ matrix.suffix }} ./cmd/clawflow/
 
       - name: Upload artifact

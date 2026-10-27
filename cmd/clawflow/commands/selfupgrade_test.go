@@ -47,6 +47,7 @@ func newUpgradeHarness(t *testing.T) *upgradeHarness {
 	}
 	u := newSelfUpgrader()
 	u.Version = "oldver"
+	u.Commit = strings.Repeat("a", 40)
 	u.Executable = func() (string, error) { return h.dest, nil }
 	u.WebRunning = func() bool { return h.web }
 	u.StartDetached = func(name string, args ...string) error {
@@ -79,6 +80,12 @@ func (h *upgradeHarness) run(_ context.Context, dir, name string, args ...string
 		return nil, errors.New("boom")
 	}
 	switch {
+	case name == "git" && args[0] == "describe":
+		return []byte(testFullSHA[:7]), nil
+	case name == "git" && args[0] == "ls-remote":
+		return []byte(testFullSHA + "\trefs/heads/main"), nil
+	case name == "git" && args[0] == "rev-list":
+		return []byte("1"), nil
 	case name == "git" && args[0] == "rev-parse":
 		return []byte(testFullSHA + "\n"), nil
 	case name == "git" && args[0] == "worktree" && args[1] == "add":
@@ -188,7 +195,7 @@ func TestSelfUpgradeBuildsAtFetchedSHAInTempWorktree(t *testing.T) {
 	}
 	// Only git commands that never modify the checkout run in local_path.
 	for _, c := range h.calls {
-		if strings.HasPrefix(c, "git checkout") || strings.HasPrefix(c, "git reset") || strings.HasPrefix(c, "git pull") || strings.HasPrefix(c, "git merge") {
+		if strings.HasPrefix(c, "git checkout") || strings.HasPrefix(c, "git reset") || strings.HasPrefix(c, "git pull") || strings.HasPrefix(c, "git merge ") {
 			t.Errorf("modifies user's checkout: %s", c)
 		}
 	}
@@ -447,7 +454,7 @@ func phaseUpgrader(t *testing.T, _ *upgradeHarness) {
 	t.Cleanup(func() { runLog = prevLog; lg.Close() })
 }
 
-func TestSelfUpgradePhaseNoMergeNoUpgrade(t *testing.T) {
+func TestSelfUpgradePhaseBranchAdvanceWithoutMerge(t *testing.T) {
 	h := newUpgradeHarness(t)
 	phaseUpgrader(t, h)
 	confirmedMerges.reset()
@@ -455,8 +462,8 @@ func TestSelfUpgradePhaseNoMergeNoUpgrade(t *testing.T) {
 	if failed := runSelfUpgradePhase(context.Background(), cfg, h.u); len(failed) != 0 {
 		t.Fatalf("failed = %v", failed)
 	}
-	if len(h.calls) != 0 {
-		t.Fatalf("upgrade ran without a confirmed merge: %v", h.calls)
+	if h.installed() != "NEW" {
+		t.Fatalf("branch advance did not upgrade: %v", h.calls)
 	}
 }
 

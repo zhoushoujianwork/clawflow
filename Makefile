@@ -1,8 +1,11 @@
 BIN_DIR := $(HOME)/.clawflow/bin
 BINARY  := $(BIN_DIR)/clawflow
 SRC     := ./cmd/clawflow/
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS := -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$(VERSION)"
+VERSION := $(shell git describe --tags --always 2>/dev/null || echo "dev")
+COMMIT := $(shell git rev-parse HEAD)
+BRANCH := $(shell git symbolic-ref --short -q HEAD || echo main)
+CHANNEL := source
+LDFLAGS = -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$(VERSION) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildCommit=$(COMMIT) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildChannel=$(CHANNEL) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.SourceBranch=$(BRANCH)"
 
 .PHONY: install build release clean test fmt vet tidy dev web
 
@@ -31,6 +34,7 @@ build: web
 dev: tidy install
 
 # 构建所有平台发版二进制（含前端）
+release: CHANNEL = release
 release: web
 	GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o clawflow_darwin_arm64  $(SRC)
 	GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o clawflow_darwin_amd64  $(SRC)
