@@ -37,6 +37,11 @@ type Repo struct {
 	CITimeout          int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
+	// SelfUpgrade, when true, makes a `clawflow run` pass that confirmed a
+	// merge into this repository's base branch rebuild and replace the
+	// installed binary from the fetched base (see selfupgrade.go). Intended
+	// only for the repository that contains this binary's source.
+	SelfUpgrade bool `yaml:"self_upgrade,omitempty" json:"self_upgrade,omitempty"`
 	// QueueIssue, when > 0, names a parent issue whose direct open sub-issues
 	// form an ordered work queue: the runner dispatches implement only for the
 	// first eligible item, one at a time. 0 = no queue (every eligible leaf

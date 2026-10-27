@@ -90,6 +90,7 @@ func newRepoShowCmd() *cobra.Command {
 			fmt.Printf("status:       %s\n", status)
 			fmt.Printf("ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("acceptance_required: %v\n", r.AcceptanceRequired)
+			fmt.Printf("self_upgrade: %v\n", r.SelfUpgrade)
 			if r.QueueIssue > 0 {
 				fmt.Printf("queue_issue:  #%d\n", r.QueueIssue)
 			} else {
@@ -323,6 +324,7 @@ func newRepoSetCmd() *cobra.Command {
 	var acceptanceRequired string
 	var ciRequired string
 	var autoMerge string
+	var selfUpgrade string
 	var primaryProject string
 	var boundMachine string
 	var queueIssue int
@@ -370,6 +372,9 @@ func newRepoSetCmd() *cobra.Command {
 			if cmd.Flags().Changed("ci-required") && ciRequired != "on" && ciRequired != "off" {
 				return fmt.Errorf("--ci-required must be on or off")
 			}
+			if cmd.Flags().Changed("self-upgrade") && selfUpgrade != "on" && selfUpgrade != "off" {
+				return fmt.Errorf("--self-upgrade must be on or off")
+			}
 			queueIssueSet := cmd.Flags().Changed("queue-issue")
 			if queueIssueSet {
 				if err := validateQueueIssue(cfg.Repos[ownerRepo], queueIssue); err != nil {
@@ -399,6 +404,9 @@ func newRepoSetCmd() *cobra.Command {
 				if autoMerge != "" {
 					r.AutoMerge = autoMerge == "on" || autoMerge == "true" || autoMerge == "1"
 				}
+				if cmd.Flags().Changed("self-upgrade") {
+					r.SelfUpgrade = selfUpgrade == "on"
+				}
 				if primaryProjectSet {
 					r.PrimaryProject = primaryProject
 				}
@@ -421,6 +429,7 @@ func newRepoSetCmd() *cobra.Command {
 			fmt.Printf("  ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("  auto_merge:   %v\n", r.AutoMerge)
 			fmt.Printf("  acceptance_required: %v\n", r.AcceptanceRequired)
+			fmt.Printf("  self_upgrade: %v\n", r.SelfUpgrade)
 			if boundMachineSet {
 				if r.BoundMachine == "" {
 					fmt.Printf("  bound_machine: (cleared)\n")
@@ -448,6 +457,7 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ciRequired, "ci-required", "", "require successful CI before auto-merge: on or off")
 	cmd.Flags().StringVar(&acceptanceRequired, "acceptance-required", "", "require current independent acceptance before auto-merge: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
+	cmd.Flags().StringVar(&selfUpgrade, "self-upgrade", "", "rebuild and replace the installed binary after a confirmed merge into this repo (only for the repo containing clawflow's source): on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
 	cmd.Flags().IntVar(&queueIssue, "queue-issue", 0, "parent issue whose open sub-issues form an ordered implement queue, GitHub only (0 clears it)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
