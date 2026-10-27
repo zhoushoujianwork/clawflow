@@ -760,6 +760,9 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
+	// implementState records, per scanned issue, why implement would not be
+	// dispatched ("" = eligible). Only consulted by the work queue.
+	implementState := map[int]string{}
 	capturedAt := time.Now().UTC()
 	targetMatch := "" // operator matched for the --issue target, if any
 	for _, iss := range issues {
@@ -787,14 +790,20 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 			}
 		}
 		var firstMatch *operator.Operator
+		implementState[sub.Number] = "implement_operator_unavailable"
 		for _, op := range reg.All() {
+			isImplement := op.Name == "implement"
 			op = effectiveOperator(op, sub)
 			if op == nil {
+				if isImplement {
+					implementState[sub.Number] = "not_eligible_leaf_issue"
+				}
 				continue
 			}
 			matchSub := sub
 			if op.Name == "implement" {
 				if reopenErr != nil {
+					implementState[sub.Number] = "reopen_check_failed: " + reopenErr.Error()
 					continue
 				}
 				if reopened != nil {
@@ -803,6 +812,9 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 			}
 			ok, reason := operator.MatchesWithReason(matchSub, op)
 			if !ok {
+				if op.Name == "implement" {
+					implementState[sub.Number] = reason
+				}
 				debugf("  ✗ %s: %s", op.Name, reason)
 				// An exclusion-only miss is the one skip reason a human can
 				// trigger by hand and get zero feedback on: the trigger labels
@@ -823,8 +835,14 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 			// deterministic failures early"); both must agree, otherwise
 			// matched-but-unrunnable operators stay queued indefinitely.
 			if deterministicSkip(op, repoCfg) {
+				if op.Name == "implement" {
+					implementState[sub.Number] = deterministicSkipReason(op, repoCfg)
+				}
 				debugf("  ⊘ %s matches but config makes it unrunnable, skipping pending", op.Name)
 				continue
+			}
+			if op.Name == "implement" {
+				implementState[sub.Number] = ""
 			}
 			debugf("  ✓ %s matches", op.Name)
 			pending = append(pending, snapshot.PendingEntry{
@@ -876,6 +894,37 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 			}
 			jobs = append(jobs, &runJob{op: firstMatch, sub: sub, repo: fullName, repoCfg: repoCfg, client: client, reopen: selectedReopen})
 		}
+	}
+
+	// Work queue: when the repo sets queue_issue, only the head of the queue
+	// issue's open sub-issues may start implement. Targeted runs are explicit
+	// authorization and bypass it.
+	if executeHere && onlyIssue == 0 && repoCfg.QueueIssue > 0 {
+		items, itemsErr := readQueueItems(client, fullName, repoCfg.QueueIssue)
+		jobs = applyImplementQueue(fullName, repoCfg.QueueIssue, jobs, queueInput{
+			Items:   items,
+			Locked:  func(n int) bool { return snapshot.IsLocked(fullName, n) },
+			OpenPRs: func() ([]vcs.PR, error) { return client.ListOpenPRs(fullName) },
+			Eligible: func(n int) (bool, string) {
+				reason, scanned := implementState[n]
+				if !scanned {
+					return false, "not_in_open_issue_scan"
+				}
+				if reason != "" {
+					return false, reason
+				}
+				// The list API may not report the sub-issue count; confirm the
+				// head is a leaf directly and fail closed if that cannot be read.
+				subs, err := client.ListSubIssues(fullName, n)
+				if err != nil {
+					return false, "leaf_check_failed: " + err.Error()
+				}
+				if len(subs) > 0 {
+					return false, "not_a_leaf"
+				}
+				return true, ""
+			},
+		}, itemsErr)
 	}
 
 	if executeHere {
