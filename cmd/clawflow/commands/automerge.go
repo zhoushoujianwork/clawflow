@@ -58,13 +58,13 @@ type autoMergeAttempt struct {
 	issueNum int
 	prefix   string
 	// ciPoll, when true, checks CI exactly once instead of blocking up to
-	// repoCfg.CITimeout. The sweep sets it: it runs every pass, so a
+	// repoCfg.CITimeout. Runner callers set it: they run every pass, so a
 	// still-pending check is simply re-examined next time rather than
-	// eating the scan budget in 30s sleeps.
+	// holding the run lock in 30s sleeps.
 	ciPoll bool
-	// quiet suppresses the "not mergeable" / "CI pending" comments. The
-	// sweep runs every pass, so commenting on a still-dirty PR each time
-	// would spam the issue; the inline path comments once and is done.
+	// quiet suppresses the "not mergeable" / "CI pending" comments. Runner
+	// callers see the same PR every pass, so commenting each time would spam
+	// the issue; CI failures are handled by repair-ci.
 	quiet bool
 }
 
@@ -93,11 +93,10 @@ func (a autoMergeAttempt) notify(body, marker string) {
 	}
 }
 
-// checkCI resolves the PR's CI state. The inline path blocks up to the
-// repo's ci_timeout (a fresh PR's checks have not started yet, and waiting
-// is what makes same-run auto-merge work). The sweep sets ciPoll and takes a
-// single reading: it will look again next pass, so blocking here would just
-// spend scan budget on sleeps.
+// checkCI resolves the PR's CI state. Without ciPoll it blocks up to the
+// repo's ci_timeout. Every runner caller (inline, sweep, harvest) sets ciPoll
+// and takes a single reading: the next pass looks again, so blocking would
+// hold the global run lock on sleeps.
 func (a autoMergeAttempt) checkCI() vcs.CIStatus {
 	if a.ciPoll {
 		status, err := a.client.GetCIStatus(a.repo, a.prNum)

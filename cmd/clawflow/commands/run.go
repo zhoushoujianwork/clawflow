@@ -1859,11 +1859,13 @@ func checkCircuitBreaker(j *runJob, prefix string) {
 
 // runPostAutomation handles merge and parent-progress follow-up.
 func runPostAutomation(ctx context.Context, j *runJob, outcome, output, prefix string) {
-	// Auto-merge: after implement produces agent-implemented, wait CI then
-	// merge. This is the low-latency path — the PR number comes straight
-	// from the run's stdout. sweepAutoMergePRs is the per-scan backstop for
-	// every PR this path misses (issue #299); both share attemptAutoMerge so
-	// the two can't drift.
+	// Auto-merge: after implement produces agent-implemented, take one CI
+	// reading and merge if it is already green. Never wait here: this runs
+	// while the global run lock and a worker slot are held, so blocking up to
+	// ci_timeout stalled every other repository. A fresh PR's checks are
+	// normally still pending; the per-scan sweep (sweepAutoMergePRs, #299) and
+	// the harvest phase converge it on the next pass. Both paths share
+	// attemptAutoMerge so they can't drift.
 	if outcome == "agent-implemented" && j.repoCfg.AutoMerge {
 		prNum := extractPRNumber(output)
 		if prNum == 0 {
@@ -1878,6 +1880,8 @@ func runPostAutomation(ctx context.Context, j *runJob, outcome, output, prefix s
 			prNum:    prNum,
 			issueNum: j.sub.Number,
 			prefix:   prefix,
+			ciPoll:   true,
+			quiet:    true,
 		})
 	}
 

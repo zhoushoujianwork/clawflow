@@ -102,10 +102,10 @@ func TestAutonomousLifecycleAcceptance(t *testing.T) {
 			}
 			runPostAutomation(context.Background(), &runJob{repo: "o/r", sub: sub, op: op, client: fake, repoCfg: config.Repo{AutoMerge: true, CIRequired: true}}, outcome, output, "test")
 			want := []string{"comment", "label:agent-implemented", "ci"}
+			// The inline path takes one CI reading and stays quiet when it
+			// cannot merge; the next pass's sweep/harvest converges the PR.
 			if status == vcs.CIStatusSuccess {
 				want = append(want, "merge")
-			} else {
-				want = append(want, "comment")
 			}
 			if !reflect.DeepEqual(fake.events, want) {
 				t.Fatalf("lifecycle events=%v want=%v", fake.events, want)
