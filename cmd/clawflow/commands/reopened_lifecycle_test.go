@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -206,7 +207,7 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 				if meta.Status != "success" || meta.WritebackError == "" {
 					t.Fatalf("meta=%+v", meta)
 				}
-				if _, err := acceptanceDevelopment("o/r", 9, "Fix reopened follow-up\n\nCurrent issue body for reopened work"); err != nil {
+				if _, err := acceptanceDevelopment("o/r", 9, meta.HeadSHA); err != nil {
 					t.Fatalf("writeback failure blocked provenance: %v", err)
 				}
 				// A further failed pass must not dispatch another paid execution.
@@ -307,6 +308,12 @@ func TestReopenedLifecycleOffloadHelper(t *testing.T) {
 	}
 	if err := os.WriteFile(os.Getenv("REOPEN_TEST_CWD"), []byte(cwd+"\n"), 0600); err != nil {
 		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"checkout", "-b", "fix/reopened-test"}, {"push", "origin", "HEAD:refs/heads/fix/reopened-test"}} {
+		cmd := exec.Command("git", append([]string{"-C", cwd}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git: %s %v", out, err)
+		}
 	}
 	offloadtest.Emit(args, "Follow-up implemented. PR: https://example.invalid/o/r/pull/11\n<!-- clawflow:outcome=agent-implemented -->", "", "")
 }

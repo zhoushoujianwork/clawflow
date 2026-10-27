@@ -516,3 +516,47 @@ func exactFields(typ reflect.Type) map[string]reflect.Type {
 	}
 	return fields
 }
+
+// DevelopmentAtHead recovers historical development bindings for runs written
+// before head_sha was recorded in run metadata. Only validated local records
+// for this exact task and head are evidence; verdict and requirements may differ.
+func (s *Store) DevelopmentAtHead(repo string, pr int, task, head string) (map[Identity]bool, error) {
+	dir, err := s.root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(10001)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if len(entries) > 10000 {
+		return nil, errors.New("too many acceptance records")
+	}
+	identities := map[Identity]bool{}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".record") {
+			continue
+		}
+		var record Record
+		if err := s.read(entry.Name(), &record); err != nil {
+			return nil, err
+		}
+		c := record.Contract
+		if c.Repository != repo || c.PRNumber != pr || c.TaskID != task || c.HeadSHA != head {
+			continue
+		}
+		record, err = s.loadRecord(c, entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		if !record.Completed {
+			continue
+		}
+		if err := completeRecord(record); err != nil {
+			return nil, err
+		}
+		identities[c.Development] = true
+	}
+	return identities, nil
+}

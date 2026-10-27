@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
+	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -369,6 +371,8 @@ func TestAcceptanceRepairNewHeadGetsFreshAcceptance(t *testing.T) {
 	// The repair pushed a new commit: a new head is a new contract, so the old
 	// failed verdict neither triggers another repair nor blocks acceptance.
 	f.pr.HeadSHA = strings.Repeat("e", 40)
+	dir := writeAcceptanceDevelopment(t, "success", time.Now(), nil)
+	updateDevelopmentHead(t, dir, f.pr.HeadSHA)
 	f.openPRs = []vcs.PR{f.pr}
 	if jobs := scanRepair(t, reg, f, cfg, 0); len(jobs) != 0 || len(f.comments) != 0 {
 		t.Fatalf("old verdict applied to new head: jobs=%v comments=%v", jobs, f.comments)
@@ -511,14 +515,14 @@ func TestAcceptanceRepairSetupFailurePreservesProvenance(t *testing.T) {
 					}
 				}
 				jobs := scanRepair(t, reg, f, cfg, 0)
-				want := 0
-				if mode == "missing-events" || mode == "empty-events" {
-					want = 1
+				want := 1
+				if mode == "running" {
+					want = 0
 				}
 				if len(jobs) != want {
 					t.Fatalf("jobs=%d want=%d log=%s", len(jobs), want, readLog())
 				}
-				if want == 1 && (!strings.Contains(readLog(), "development_setup_failure") || !strings.Contains(readLog(), filepath.Base(dir))) {
+				if (mode == "missing-events" || mode == "empty-events") && (!strings.Contains(readLog(), "development_setup_failure") || !strings.Contains(readLog(), filepath.Base(dir))) {
 					t.Fatalf("missing ignored-run diagnostic: %s", readLog())
 				}
 			})
@@ -571,7 +575,209 @@ func TestAcceptanceRepairWorkdirFailureReleasesAttempt(t *testing.T) {
 	if err != nil || n != 1 {
 		t.Fatalf("attempt=%d err=%v", n, err)
 	}
-	if _, err := acceptanceDevelopment("o/r", 42, f.issue.Title+"\n\n"+f.issue.Body); err != nil {
+	if _, err := acceptanceDevelopment("o/r", 42, f.pr.HeadSHA); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func updateDevelopmentHead(t *testing.T, dir, head string) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m snapshot.RunMeta
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	m.HeadSHA = head
+	if err := snapshot.WriteRunMeta(dir, m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDevelopmentProvenanceFollowsHead(t *testing.T) {
+	for _, mode := range []string{"failed", "blocked", "timeout", "moved", "external", "legacy"} {
+		t.Run(mode, func(t *testing.T) {
+			f, _, _, _ := repairAcceptanceFixture(t, "failed")
+			recordVerdict(t, f)
+			if mode == "legacy" {
+				parent := filepath.Dir(snapshot.RunDir("o/r", 42, time.Now()))
+				entries, _ := os.ReadDir(parent)
+				for _, e := range entries {
+					updateDevelopmentHead(t, filepath.Join(parent, e.Name()), "")
+				}
+			}
+			if mode != "external" {
+				writeAcceptanceDevelopment(t, "failed", time.Now(), nil)
+			}
+			if mode == "moved" || mode == "external" {
+				f.pr.HeadSHA = strings.Repeat("f", 40)
+			}
+			_, err := acceptanceDevelopment("o/r", 42, f.pr.HeadSHA, f.pr.Number)
+			if (err == nil) != (mode != "moved" && mode != "external") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestRequirementsChangeDispatchesAcceptanceAfterFailedRepair(t *testing.T) {
+	f, _, reg, cfg := repairAcceptanceFixture(t, "failed")
+	recordVerdict(t, f)
+	writeAcceptanceDevelopment(t, "failed", time.Now(), nil)
+	f.issue.Body += "\nUpdated requirements supersede the disputed finding."
+	if jobs := scanRepair(t, reg, f, cfg, 0); len(jobs) != 0 {
+		t.Fatal("stale failed verdict dispatched repair")
+	}
+	setReviewerVerdict("passed")
+	calls := 0
+	runAcceptanceFn = func(ctx context.Context, c vcs.Client, repo string, pr int) (acceptance.Record, error) {
+		calls++
+		return runAcceptance(ctx, c, repo, pr)
+	}
+	if failures := harvest(t, "", 0); len(failures) != 0 || calls != 1 {
+		t.Fatalf("failures=%v calls=%d", failures, calls)
+	}
+}
+
+func TestNoChangeRepairValidationAndBudget(t *testing.T) {
+	for _, mode := range []string{"valid", "dirty", "changed", "unpublished", "no-reason", "ci"} {
+		t.Run(mode, func(t *testing.T) {
+			f, _, _, _ := repairAcceptanceFixture(t, "failed")
+			attempt, err := reserveRepair(snapshot.DataDir(), "o/r", f.pr, repairReasonAcceptance, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			j := &runJob{repo: "o/r", repair: &ciRepairContext{PR: f.pr, Attempt: attempt, Acceptance: &acceptanceFindings{}}}
+			if mode == "ci" {
+				j.repair.Acceptance = nil
+			}
+			acceptanceGit = func(_ context.Context, _ string, args ...string) (string, error) {
+				switch args[0] {
+				case "rev-parse":
+					if mode == "changed" {
+						return strings.Repeat("f", 40), nil
+					}
+					return f.pr.HeadSHA, nil
+				case "ls-remote":
+					if mode == "unpublished" {
+						return "", errors.New("offline")
+					}
+					return f.pr.HeadSHA + "\trefs/heads/" + f.pr.HeadBranch, nil
+				case "status":
+					if mode == "dirty" {
+						return " M source.go", nil
+					}
+					return "", nil
+				}
+				return "", errors.New("unexpected git call")
+			}
+			reason := "No change required: reviewer finding conflicts with current body. go test ./... passed."
+			if mode == "no-reason" {
+				reason = ""
+			}
+			head, err := validateRepairOutcome(context.Background(), "unused", j, "no-change", reason)
+			if (err == nil) != (mode == "valid") {
+				t.Fatalf("head=%s err=%v", head, err)
+			}
+			_, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", f.pr.Number)
+			ledger, err := loadCIRepairLedger(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			consumed, infra := ledger.counts()
+			want := 1
+			if mode == "valid" {
+				want = 0
+			}
+			if consumed != want || infra != 0 {
+				t.Fatalf("consumed=%d infra=%d", consumed, infra)
+			}
+		})
+	}
+}
+
+func TestOffloadHelper(t *testing.T) { offloadtest.Helper(t) }
+
+func TestNoChangeRepairRunRecordsSuccess(t *testing.T) {
+	f, _, reg, cfg := repairAcceptanceFixture(t, "failed")
+	source := newIssue329Repo(t)
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", source}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	remote := git("config", "--get", "remote.origin.url")
+	git("push", "origin", "HEAD:refs/heads/"+f.pr.HeadBranch)
+	git("remote", "set-url", "origin", "https://github.com/o/r.git")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "url."+remote+".insteadOf")
+	t.Setenv("GIT_CONFIG_VALUE_0", "https://github.com/o/r.git")
+	f.pr.HeadSHA = git("rev-parse", "HEAD")
+	f.openPRs = []vcs.PR{f.pr}
+	parent := filepath.Dir(snapshot.RunDir("o/r", 42, time.Now()))
+	entries, _ := os.ReadDir(parent)
+	for _, e := range entries {
+		updateDevelopmentHead(t, filepath.Join(parent, e.Name()), f.pr.HeadSHA)
+	}
+	offloadtest.Setup(t)
+	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "acceptance-profile")
+	t.Setenv("OFFLOAD_TEST_TEXT", "No change required: findings conflict with the issue body. Tests passed.\n<!-- clawflow:outcome=no-change -->")
+	recordVerdict(t, f)
+	jobs := scanRepair(t, reg, f, cfg, 0)
+	if len(jobs) != 1 {
+		t.Fatalf("jobs=%v", jobs)
+	}
+	client := &setupRepairFake{acceptanceFake: f}
+	jobs[0].client, jobs[0].repoCfg.LocalPath = client, source
+	oldGit := acceptanceGit
+	acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+		if args[0] == "ls-remote" {
+			return f.pr.HeadSHA + "\trefs/heads/" + f.pr.HeadBranch, nil
+		}
+		return oldGit(ctx, dir, args...)
+	}
+	fired, limited, failed := runOneOperator(context.Background(), jobs[0], time.Minute)
+	if !fired || limited || failed {
+		t.Fatalf("fired=%v limited=%v failed=%v", fired, limited, failed)
+	}
+	entries, _ = os.ReadDir(parent)
+	found := false
+	for _, e := range entries {
+		b, _ := os.ReadFile(filepath.Join(parent, e.Name(), "meta.json"))
+		var m snapshot.RunMeta
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.Operator != "repair-ci" {
+			continue
+		}
+		found = true
+		if m.Status != "success" || m.Outcome != "no-change" || m.OutcomeReason == "" || m.HeadSHA != f.pr.HeadSHA {
+			t.Fatalf("meta=%+v", m)
+		}
+	}
+	if !found || len(client.labels) != 0 || len(f.comments) != 1 || !strings.Contains(f.comments[0], "conflict") {
+		t.Fatalf("found=%v labels=%v comments=%v", found, client.labels, f.comments)
+	}
+	_, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", f.pr.Number)
+	ledger, err := loadCIRepairLedger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumed, infra := ledger.counts(); consumed != 0 || infra != 0 {
+		t.Fatalf("consumed=%d infra=%d", consumed, infra)
+	}
+	if _, err := acceptanceDevelopment("o/r", 42, f.pr.HeadSHA, f.pr.Number); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *setupRepairFake) PostIssueCommentIdempotent(_ string, _ int, body, _ string) error {
+	f.comments = append(f.comments, body)
+	return nil
 }
