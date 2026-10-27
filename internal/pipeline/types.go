@@ -29,6 +29,22 @@ type Snapshot struct {
 	GeneratedAt string      `json:"generated_at"`
 	Repos       []RepoBoard `json:"repos"`
 	Events      []Event     `json:"events"`
+	// GlobalQueue is the single cross-repository work queue in dispatch
+	// order (priority tier, manual rank, age). Additive: the per-repo
+	// Queue fields keep their shape.
+	GlobalQueue []GlobalQueueEntry `json:"global_queue"`
+}
+
+// GlobalQueueEntry is one issue of the unified queue.
+type GlobalQueueEntry struct {
+	Position int    `json:"position"`
+	Key      string `json:"key"` // owner/repo#N
+	Repo     string `json:"repo"`
+	Number   int    `json:"number"`
+	Title    string `json:"title,omitempty"`
+	Tier     string `json:"tier"`           // P0..P3
+	Rank     int    `json:"rank,omitempty"` // 1-based manual rank, 0 = unranked
+	State    string `json:"state"`          // in_flight | eligible | blocked:<r> | parked:<r> | waiting:dependency
 }
 
 // Board is the full /api/pipeline response.

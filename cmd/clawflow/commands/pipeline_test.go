@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -316,5 +318,31 @@ func TestPipelineSummaryBoundsAndStripsMarkers(t *testing.T) {
 	}
 	if pipelineSessionID("bad id\nwith newline") != "" || pipelineSessionID("sess-123") != "sess-123" {
 		t.Fatal("session id validation")
+	}
+}
+
+func TestBuildPipelineGlobalQueue(t *testing.T) {
+	f := newPipelineFake()
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, AutoMerge: true}, "g/sub/p": {Enabled: true}})
+	d.globalQueue = func() []queue.ListEntry {
+		return []queue.ListEntry{
+			{Key: "g/sub/p#4", Repo: "g/sub/p", Number: 4, Title: "gitlab item", Tier: "P0", Rank: 1, State: "eligible"},
+			{Key: "o/r#2", Repo: "o/r", Number: 2, Tier: "P2", State: "parked:ci_failed"},
+			{Key: "gone/repo#1", Repo: "gone/repo", Number: 1, Tier: "P2", State: "eligible"},
+		}
+	}
+	snap := buildPipeline(context.Background(), d)
+	if len(snap.GlobalQueue) != 2 || snap.GlobalQueue[0].Key != "g/sub/p#4" || snap.GlobalQueue[1].Position != 2 || snap.GlobalQueue[1].State != "parked:ci_failed" {
+		t.Fatalf("global queue = %+v", snap.GlobalQueue)
+	}
+	raw, _ := json.Marshal(snap)
+	for _, want := range []string{`"global_queue":[`, `"repos":[`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("JSON missing %s: %s", want, raw)
+		}
+	}
+	d.globalQueue = nil
+	if snap = buildPipeline(context.Background(), d); snap.GlobalQueue == nil || len(snap.GlobalQueue) != 0 {
+		t.Fatalf("empty queue must serialize as [], got %#v", snap.GlobalQueue)
 	}
 }

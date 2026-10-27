@@ -15,6 +15,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -49,6 +50,8 @@ type pipelineDeps struct {
 	runs      func() []snapshot.RunIndexEntry
 	events    func() ([]pipeline.Event, error)
 	locked    func(repo string, issue int) bool
+	// globalQueue returns the unified queue in dispatch order; nil = none.
+	globalQueue func() []queue.ListEntry
 	// acceptance returns nil when the repo has no acceptance evidence to show.
 	acceptance func(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) *pipeline.AcceptanceInfo
 }
@@ -68,6 +71,13 @@ func defaultPipelineDeps() (pipelineDeps, error) {
 		},
 		locked:     snapshot.IsLocked,
 		acceptance: pipelineAcceptance,
+		globalQueue: func() []queue.ListEntry {
+			rows, err := queueListRows("")
+			if err != nil {
+				runLogWarn("queue rank unreadable", err)
+			}
+			return rows
+		},
 	}, nil
 }
 
@@ -109,6 +119,18 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 		snap.Repos = append(snap.Repos, buildRepoBoard(ctx, d, name, d.cfg.Repos[name], runs, events, now))
 	}
 	snap.Events = pipeline.Relevant(events, tracked)
+	snap.GlobalQueue = []pipeline.GlobalQueueEntry{}
+	if d.globalQueue != nil {
+		for _, r := range d.globalQueue() {
+			if _, ok := d.cfg.Repos[r.Repo]; !ok {
+				continue
+			}
+			snap.GlobalQueue = append(snap.GlobalQueue, pipeline.GlobalQueueEntry{
+				Position: len(snap.GlobalQueue) + 1, Key: r.Key, Repo: r.Repo, Number: r.Number,
+				Title: pipelineClip(r.Title, 200), Tier: r.Tier, Rank: r.Rank, State: r.State,
+			})
+		}
+	}
 	return snap
 }
 
