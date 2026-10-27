@@ -452,7 +452,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// (and future invocations that hit a busy port) know who owns
 			// the dashboard. Best-effort — a write failure shouldn't block
 			// serving, it just degrades the restart UX.
-			if err := writeWebPid(webPidInfo{PID: os.Getpid(), Host: host, Port: port, StartedAt: time.Now()}); err != nil {
+			if err := writeWebPid(webPidInfo{PID: os.Getpid(), Host: host, Port: port, StartedAt: time.Now(), ServiceName: os.Getenv("XPC_SERVICE_NAME")}); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠ write pid file: %v\n", err)
 			}
 			defer removeWebPid()
@@ -486,7 +486,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 	cmd.Flags().IntVar(&port, "port", 8090, "TCP port to bind")
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host/IP to bind — 127.0.0.1 by default so the dashboard stays off the LAN")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the dashboard in your default browser")
-	cmd.AddCommand(newWebRestartCmd())
+	cmd.AddCommand(newWebRestartCmd(), newWebServiceCmd())
 	return cmd
 }
 
@@ -584,10 +584,11 @@ func openBrowser(url string) {
 // in-use port read it to figure out whether the process holding the port
 // is our own — in which case replacing it is safe.
 type webPidInfo struct {
-	PID       int       `json:"pid"`
-	Host      string    `json:"host"`
-	Port      int       `json:"port"`
-	StartedAt time.Time `json:"started_at"`
+	ServiceName string    `json:"service_name,omitempty"`
+	PID         int       `json:"pid"`
+	Host        string    `json:"host"`
+	Port        int       `json:"port"`
+	StartedAt   time.Time `json:"started_at"`
 }
 
 // webPidPath is the single source of truth for the pid file location.
@@ -675,9 +676,10 @@ func newWebRestartCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "restart",
 		Short: "Stop the running clawflow web instance and start a new one",
-		Long: `Finds the current clawflow web process via its pid file, sends SIGTERM,
-waits for the port to free, and re-execs 'clawflow web' with the same host
-and port. If no pid file exists or the recorded process is gone, just starts
+		Long: `Finds the current clawflow web process via its pid file. LaunchAgent instances
+restart through launchctl kickstart and wait for readiness. For other instances,
+send SIGTERM, wait for the port to free, and re-exec 'clawflow web' with the same
+host and port. If no pid file exists or the recorded process is gone, just starts
 a fresh web instance.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			info, ok := readWebPid()
@@ -694,30 +696,10 @@ a fresh web instance.`,
 				return fmt.Errorf("pid %d in pid file is not a clawflow process; refusing to signal it\n  remove %s manually if you're sure it's stale", info.PID, webPidPath())
 			}
 
-			fmt.Fprintf(os.Stderr, "stopping clawflow web (pid %d) on %s:%d...\n", info.PID, info.Host, info.Port)
-			if err := syscall.Kill(info.PID, syscall.SIGTERM); err != nil {
-				return fmt.Errorf("send SIGTERM to pid %d: %w", info.PID, err)
-			}
-
-			addr := fmt.Sprintf("%s:%d", info.Host, info.Port)
-			deadline := time.Now().Add(time.Duration(waitSeconds) * time.Second)
-			for time.Now().Before(deadline) {
-				if !pidAlive(info.PID) {
-					ln, err := net.Listen("tcp", addr)
-					if err == nil {
-						_ = ln.Close()
-						break
-					}
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			if pidAlive(info.PID) {
-				return fmt.Errorf("pid %d still alive after %ds; not starting a replacement\n  check with `ps -p %d` and escalate manually", info.PID, waitSeconds, info.PID)
-			}
-			return execSelfWeb(info.Host, info.Port)
+			return restartWeb(info, time.Duration(waitSeconds)*time.Second, defaultWebRestartOps())
 		},
 	}
-	cmd.Flags().IntVar(&waitSeconds, "wait", 10, "seconds to wait for the old instance to release the port before giving up")
+	cmd.Flags().IntVar(&waitSeconds, "wait", 10, "seconds to wait for port release or LaunchAgent readiness before giving up")
 	return cmd
 }
 
