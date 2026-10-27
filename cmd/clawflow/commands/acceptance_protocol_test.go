@@ -174,8 +174,16 @@ func runAcceptanceProtocolHelper() int {
 	if args["-tools-disabled"] == "true" {
 		phase, mode = "plan", os.Getenv(acceptanceProtocolPlanModeEnv)
 	}
-	// Both phases must be read-only, fresh sessions with the pinned profile.
-	for _, forbidden := range []string{"-w", "-r", "-execution-policy", "-codex-sandbox", "-m"} {
+	// Both phases are fresh sessions with the pinned profile. The planner is
+	// read-only; only the reviewer may use the command-capable policy.
+	forbiddenFlags := []string{"-w", "-r", "-execution-policy", "-codex-sandbox", "-m"}
+	if phase == "review" {
+		forbiddenFlags = []string{"-r", "-codex-sandbox", "-m"}
+		if _, ok := args["-w"]; !ok || args["-execution-policy"] != "managed-development" {
+			return violate("review: command-capable policy flags missing: %v", argv)
+		}
+	}
+	for _, forbidden := range forbiddenFlags {
 		if _, ok := args[forbidden]; ok {
 			return violate("%s: forbidden flag %s", phase, forbidden)
 		}
@@ -228,6 +236,10 @@ func runAcceptanceProtocolHelper() int {
 		names = append(names, e.Name())
 	}
 	text := "Independent acceptance plan token " + caller
+	policy := "default"
+	if phase == "review" {
+		policy = "managed-development"
+	}
 	capture := acceptanceProtocolCapture{Phase: phase, Argv: argv, Args: args, Cwd: cwd, Prompt: prompt, Entries: names}
 	if phase == "plan" {
 		capture.Token = text
@@ -236,7 +248,7 @@ func runAcceptanceProtocolHelper() int {
 		if mode == "verdict-failed" {
 			verdict = "failed"
 		}
-		text = `{"status":"` + verdict + `","summary":"Independent protocol review complete","evidence":["` + acceptanceProtocolReviewerMark + `"]}`
+		text = `{"status":"` + verdict + `","summary":"Independent protocol review complete","evidence":["` + acceptanceProtocolReviewerMark + `","command: go test ./... => ok"]}`
 	}
 	f, err := os.OpenFile(os.Getenv(acceptanceProtocolCaptureEnv), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
@@ -275,14 +287,14 @@ func runAcceptanceProtocolHelper() int {
 		emit("final", session, extra)
 	}
 
-	resultCaller, resultSession, policy := caller, session, "default"
+	resultCaller, resultSession := caller, session
 	switch mode {
 	case "wrong-caller-result":
 		resultCaller = "wrong-" + caller
 	case "result-session-mutation":
 		resultSession = session + "-mutated"
 	case "wrong-policy":
-		policy = "managed-development"
+		policy = "default"
 	}
 	result := map[string]any{"run_id": runID, "caller_run_id": resultCaller, "session": resultSession, "profile": args["-p"], "backend": "fixture", "model": "fixture-model", "status": status, "exit_code": code, "result": text, "error_kind": errorKind, "error": "", "usage": nil, "execution_policy": policy}
 	_ = json.NewEncoder(os.Stdout).Encode(result)
@@ -372,7 +384,7 @@ func (e *acceptanceProtocolEnv) assertNoWrites(t *testing.T) {
 	if len(e.f.merged) != 0 || len(e.f.deletedBranches) != 0 || len(e.f.comments) != 0 || len(e.f.expected) != 0 {
 		t.Fatalf("unexpected VCS writes: merged=%v deleted=%v comments=%v conditional=%v", e.f.merged, e.f.deletedBranches, e.f.comments, e.f.expected)
 	}
-	allowed := []string{"config", "init", "remote", "check-ref-format", "fetch", "rev-parse", "checkout", "status"}
+	allowed := []string{"config", "init", "remote", "check-ref-format", "fetch", "rev-parse", "checkout", "status", "rev-list"}
 	for _, args := range *e.git {
 		if !slices.Contains(allowed, args[0]) {
 			t.Fatalf("unexpected git operation %v", args)
@@ -430,9 +442,19 @@ func TestAcceptanceProtocolPlannerReviewerThroughExecutionRun(t *testing.T) {
 				t.Fatalf("%s argv lacks %s: %v", c.Phase, flag, c.Argv)
 			}
 		}
-		for _, flag := range []string{"-w", "-r", "-execution-policy", "-codex-sandbox", "-m"} {
+		forbidden := []string{"-w", "-r", "-execution-policy", "-codex-sandbox", "-m"}
+		if c.Phase == "review" {
+			// Only the reviewer runs commands, and only in its disposable checkout.
+			forbidden = []string{"-r", "-codex-sandbox", "-m"}
+			for _, flag := range []string{"-w", "-execution-policy"} {
+				if !hasAcceptanceProtocolFlag(c.Argv, flag) {
+					t.Fatalf("reviewer argv lacks %s: %v", flag, c.Argv)
+				}
+			}
+		}
+		for _, flag := range forbidden {
 			if hasAcceptanceProtocolFlag(c.Argv, flag) {
-				t.Fatalf("%s argv must be read-only and fresh, found %s: %v", c.Phase, flag, c.Argv)
+				t.Fatalf("%s argv has forbidden flag %s: %v", c.Phase, flag, c.Argv)
 			}
 		}
 		if c.Args["-p"] != acceptanceProtocolProfile {
@@ -486,8 +508,11 @@ func TestAcceptanceProtocolPlannerReviewerThroughExecutionRun(t *testing.T) {
 	if !strings.HasPrefix(r.Plan.Planner.SessionID, "plan-native-") || !strings.HasPrefix(r.Reviewer.SessionID, "review-native-") || r.Plan.Planner.SessionID == r.Reviewer.SessionID || r.Plan.Planner.RunID == r.Reviewer.RunID {
 		t.Fatalf("native identities: planner=%+v reviewer=%+v", r.Plan.Planner, r.Reviewer)
 	}
+	if r.Plan.Planner.Policy != acceptance.PlannerPolicy || r.Reviewer.Policy != acceptance.ReviewerPolicy {
+		t.Fatalf("policies: planner=%q reviewer=%q", r.Plan.Planner.Policy, r.Reviewer.Policy)
+	}
 	for _, n := range []acceptance.Native{r.Plan.Planner, r.Reviewer} {
-		if n.Policy != "default" || n.Profile != acceptanceProtocolProfile || n.Backend != "fixture" || n.Status != "ok" || n.ExitCode != 0 {
+		if n.Profile != acceptanceProtocolProfile || n.Backend != "fixture" || n.Status != "ok" || n.ExitCode != 0 {
 			t.Fatalf("native identity: %+v", n)
 		}
 	}

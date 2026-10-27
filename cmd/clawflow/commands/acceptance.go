@@ -533,6 +533,38 @@ func currentAcceptance(ctx context.Context, client vcs.Client, repo string, pr i
 	return c, r, acceptance.Evaluate(c, r)
 }
 
+// acceptanceRemoveRemotes deletes every configured remote of the review checkout.
+func acceptanceRemoveRemotes(ctx context.Context, dir string) error {
+	out, err := acceptanceGit(ctx, dir, "remote")
+	if err != nil {
+		return err
+	}
+	for _, name := range strings.Fields(out) {
+		if _, err := acceptanceGit(ctx, dir, "remote", "remove", name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// acceptanceReviewerEnv returns env without VCS or ClawFlow token variables.
+func acceptanceReviewerEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		upper := strings.ToUpper(name)
+		switch upper {
+		case "GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN":
+			continue
+		}
+		if strings.HasPrefix(upper, "CLAWFLOW_") && strings.Contains(upper, "TOKEN") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Record, error) {
 	unlock, err := acceptanceLock(repo, prNumber)
 	if err != nil {
@@ -571,6 +603,10 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 	if _, err := acceptanceGit(ctx, workspace, "checkout", "--detach", c.HeadSHA); err != nil {
 		return acceptance.Record{}, err
 	}
+	// The reviewer may run arbitrary commands here, so leave it nothing to push to.
+	if err := acceptanceRemoveRemotes(ctx, workspace); err != nil {
+		return acceptance.Record{}, err
+	}
 	store, err := acceptance.OpenStore(acceptanceStorePath(repo, prNumber))
 	if err != nil {
 		return acceptance.Record{}, errors.New("cannot open private acceptance store")
@@ -590,11 +626,13 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		if err != nil {
 			return acceptance.Source{}, err
 		}
-		status, err := acceptanceGit(ctx, workspace, "status", "--porcelain=v1", "--untracked-files=all")
+		// Build and test artifacts (untracked or modified files) are allowed. The
+		// proof is that HEAD is the contract head and no other commit exists.
+		extra, err := acceptanceGit(ctx, workspace, "rev-list", "-n", "1", "--all", "--not", c.HeadSHA)
 		if err != nil {
 			return acceptance.Source{}, err
 		}
-		return acceptance.Source{HeadSHA: head, BaseSHA: current.BaseSHA, Clean: status == ""}, nil
+		return acceptance.Source{HeadSHA: head, BaseSHA: current.BaseSHA, Clean: head == c.HeadSHA && extra == ""}, nil
 	}
 	execute := func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
 		timeout := 30 * time.Minute
@@ -604,9 +642,9 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		if timeout <= 0 {
 			return execution.Result{}, context.DeadlineExceeded
 		}
-		return acceptanceNativeRun(ctx, ec, execution.Request{Version: 1, RequestID: execution.NewSessionKey(), Workspace: opts.Workspace, Prompt: prompt, Instructions: opts.Instructions, PermissionMode: "default", ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: max(1, timeout.Milliseconds())}, os.Environ(), opts.Events, nil)
+		return acceptanceNativeRun(ctx, ec, execution.Request{Version: 1, RequestID: execution.NewSessionKey(), Workspace: opts.Workspace, Prompt: prompt, Instructions: opts.Instructions, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: max(1, timeout.Milliseconds())}, acceptanceReviewerEnv(os.Environ()), opts.Events, nil)
 	}
-	r, err := (acceptance.Runner{Store: store, Execute: execute, Inspect: inspect}).Run(ctx, c, scratch, workspace)
+	r, err := (acceptance.Runner{Store: store, Execute: execute, Inspect: inspect, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
 	if err == nil {
 		// Run returns nil only after the reviewer report was parsed and the
 		// record was saved, so a failed/blocked verdict reaching here is a

@@ -20,6 +20,9 @@ type Runner struct {
 	Store   *Store
 	Execute ExecuteFunc
 	Inspect InspectFunc
+	// TestCommand is the repository's configured test command; the reviewer is
+	// told to run it. Empty means the reviewer discovers the standard command.
+	TestCommand string
 }
 
 func randomID() string { return execution.NewSessionKey() }
@@ -170,8 +173,8 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		Plan           string `json:"plan"`
 		PlanDigest     string `json:"plan_digest"`
 	}{d, c.TaskID, c.Generation, c.Repository, c.PRNumber, c.HeadSHA, c.BaseSHA, c.IntegrationSHA, c.PolicyDigest, c.Requirements, plan.Text, plan.Digest})
-	reviewed, reviewErr := execute(ctx, "Review the immutable source against the pinned contract and independently saved plan below. Use read-only tools; never change source. Return exactly one JSON object with only status (passed, failed, or blocked), summary (nonempty string), and evidence (nonempty array of nonempty strings). Return raw JSON only, without Markdown code fences. Do not supply actor or execution identities.\n\n"+string(input),
-		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "default"})
+	reviewed, reviewErr := execute(ctx, runner.reviewPrompt()+string(input),
+		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "bypassPermissions"})
 	record.Reviewer = native(reviewed)
 	// Inspect even after execution failure/cancellation; use the caller's context
 	// and fail closed if inspection itself cannot complete.
@@ -183,7 +186,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if !record.After.matches(c) {
 		return record, errors.New("acceptance source changed during review")
 	}
-	if err = record.Reviewer.validate(c.Development); err != nil {
+	if err = record.Reviewer.validate(c.Development, ReviewerPolicy); err != nil {
 		return record, err
 	}
 	if record.Reviewer.SessionID == plan.Planner.SessionID || record.Reviewer.RunID == plan.Planner.RunID {
@@ -212,6 +215,20 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	record.Report = output.Summary
 	record.Evidence = output.Evidence
 	return record, nil
+}
+
+// reviewPrompt instructs the reviewer. The judged object is the PR head on the
+// provider; the local checkout is disposable, so building and testing is allowed.
+func (runner Runner) reviewPrompt() string {
+	test := "the repository's standard test command"
+	if nonempty(runner.TestCommand) {
+		test = "the configured test command `" + strings.TrimSpace(runner.TestCommand) + "`"
+	}
+	return "Review the source against the pinned contract and independently saved plan below. The review checkout is a disposable detached copy of the PR head; you may build and run tests in it, but do not change tracked source, commit, or switch HEAD, and you have no remote or credentials. " +
+		"You must run " + test + " and also tests targeted at the requirements. " +
+		"Return exactly one JSON object with only status (passed, failed, or blocked), summary (nonempty string), and evidence (nonempty array of nonempty strings). " +
+		"Record every command you executed as one evidence entry of the form `" + EvidenceCommandPrefix + " <exact command> => <result>`; a passed verdict whose evidence lists no executed command is rejected. " +
+		"Return raw JSON only, without Markdown code fences. Do not supply actor or execution identities.\n\n"
 }
 
 // unfenceReport removes one Markdown code fence that encloses the whole

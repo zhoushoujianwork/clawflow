@@ -93,9 +93,18 @@ func native(r execution.Result) Native {
 	return Native{Identity: Identity{r.NativeSessionID, r.RunID}, Status: r.Status, ExitCode: r.ExitCode, Policy: r.ExecutionPolicy, Profile: r.Profile, Backend: r.Backend, Model: r.Model, ErrorKind: r.ErrorKind, Error: r.Error}
 }
 
-func (n Native) validate(dev Identity) error {
-	if !nonempty(n.SessionID, n.RunID, n.Profile, n.Backend) || n.Status != "ok" || n.ExitCode != 0 || n.Policy != "default" || n.ErrorKind != "" || n.Error != "" {
-		return errors.New("acceptance requires successful default-policy native execution")
+// Execution policies required of each acceptance role. The planner is
+// tools-disabled and read-only. The reviewer runs commands in a disposable
+// checkout, so it needs the same command-capable policy implement uses.
+const (
+	PlannerPolicy  = "default"
+	ReviewerPolicy = "managed-development"
+)
+
+// validate requires successful native execution under exactly the given policy.
+func (n Native) validate(dev Identity, policy string) error {
+	if !nonempty(n.SessionID, n.RunID, n.Profile, n.Backend) || n.Status != "ok" || n.ExitCode != 0 || n.Policy != policy || n.ErrorKind != "" || n.Error != "" {
+		return fmt.Errorf("acceptance requires successful %s-policy native execution", policy)
 	}
 	if n.SessionID == dev.SessionID || n.RunID == dev.RunID {
 		return errors.New("development actor cannot accept its own work")
@@ -123,9 +132,12 @@ func (p Plan) validate(c Contract) error {
 		p.StartedAt.IsZero() || p.CompletedAt.Before(p.StartedAt) {
 		return errors.New("invalid or stale acceptance plan")
 	}
-	return p.Planner.validate(c.Development)
+	return p.Planner.validate(c.Development, PlannerPolicy)
 }
 
+// Source is the immutability proof of a review checkout. Clean means the local
+// HEAD equals the contract head and no commit beyond it exists; untracked or
+// modified build and test artifacts are allowed in the disposable checkout.
 type Source struct {
 	HeadSHA        string `json:"head_sha"`
 	BaseSHA        string `json:"base_sha"`
@@ -157,6 +169,21 @@ type Record struct {
 	CompletedAt     time.Time `json:"completed_at"`
 }
 
+// EvidenceCommandPrefix marks an evidence entry that records an executed command
+// and its result, for example "command: go test ./... => ok".
+const EvidenceCommandPrefix = "command:"
+
+// hasExecutedCommand reports whether any entry records a command with content.
+func hasExecutedCommand(evidence []string) bool {
+	for _, e := range evidence {
+		t := strings.TrimSpace(e)
+		if len(t) > len(EvidenceCommandPrefix) && strings.EqualFold(t[:len(EvidenceCommandPrefix)], EvidenceCommandPrefix) && nonempty(t[len(EvidenceCommandPrefix):]) {
+			return true
+		}
+	}
+	return false
+}
+
 // Evaluate returns nil only for a complete passing record for exactly expected.
 // Callers must obtain expected from their current authoritative inputs.
 func Evaluate(expected Contract, r Record) error {
@@ -176,13 +203,16 @@ func Evaluate(expected Contract, r Record) error {
 			return errors.New("missing acceptance evidence")
 		}
 	}
+	if !hasExecutedCommand(r.Evidence) {
+		return errors.New("acceptance evidence lists no executed command")
+	}
 	if err := r.Plan.validate(expected); err != nil {
 		return err
 	}
 	if r.Plan.AttemptID != r.AttemptID {
 		return errors.New("acceptance plan belongs to another attempt")
 	}
-	if err := r.Reviewer.validate(expected.Development); err != nil {
+	if err := r.Reviewer.validate(expected.Development, ReviewerPolicy); err != nil {
 		return err
 	}
 	if r.Reviewer.SessionID == r.Plan.Planner.SessionID || r.Reviewer.RunID == r.Plan.Planner.RunID {
