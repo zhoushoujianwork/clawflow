@@ -238,7 +238,7 @@ func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prN
 	if len(requirements) > execution.MaxRequestBytes/2 {
 		return c, rc, ec, pr, errors.New("acceptance requirements exceed size limit")
 	}
-	dev, err := acceptanceDevelopment(repo, issueNum, requirements)
+	dev, err := acceptanceDevelopment(repo, issueNum, pr.HeadSHA, pr.Number)
 	if err != nil {
 		return c, rc, ec, pr, err
 	}
@@ -310,12 +310,24 @@ func acceptanceEvent(raw []byte) (execution.Event, error) {
 }
 
 // Only ClawFlow's completed local run metadata and sanitized native event
-// sequence supply developer identity. Never fall back past newer executed work.
-func acceptanceDevelopment(repo string, issue int, requirements string) (acceptance.Identity, error) {
+// sequence supply developer identity for the current published head.
+func acceptanceDevelopment(repo string, issue int, head string, prNumbers ...int) (acceptance.Identity, error) {
 	parent := filepath.Dir(snapshot.RunDir(repo, issue, time.Now()))
 	entries, err := os.ReadDir(parent)
 	if err != nil || len(entries) > 10000 {
 		return acceptance.Identity{}, errors.New("trusted development provenance unavailable")
+	}
+	legacy := map[acceptance.Identity]bool{}
+	if len(prNumbers) == 1 && acceptanceStoreExists(repo, prNumbers[0]) {
+		store, err := acceptance.OpenStore(acceptanceStorePath(repo, prNumbers[0]))
+		if err != nil {
+			return acceptance.Identity{}, err
+		}
+		defer store.Close()
+		legacy, err = store.DevelopmentAtHead(repo, prNumbers[0], repo+":issue:"+strconv.Itoa(issue), head)
+		if err != nil {
+			return acceptance.Identity{}, err
+		}
 	}
 	var latest snapshot.RunMeta
 	var latestDir string
@@ -339,6 +351,18 @@ func acceptanceDevelopment(repo string, issue int, requirements string) (accepta
 				"reason", "development_setup_failure", "ignored_run", entry.Name(), "stage", m.Stage)
 			continue
 		}
+		if m.Status == "running" || m.Status == "finalizing" {
+			return acceptance.Identity{}, errors.New("development is still running")
+		}
+		if m.Status == "success" && m.HeadSHA == "" && len(legacy) != 0 {
+			identity, err := developmentIdentity(filepath.Join(parent, entry.Name()))
+			if err == nil && legacy[identity] {
+				m.HeadSHA = head
+			}
+		}
+		if m.Status != "success" || m.HeadSHA != head || !acceptanceSHA(head) {
+			continue
+		}
 		if latestDir != "" && m.StartedAt.Equal(latest.StartedAt) {
 			return acceptance.Identity{}, errors.New("ambiguous development run provenance")
 		}
@@ -349,12 +373,11 @@ func acceptanceDevelopment(repo string, issue int, requirements string) (accepta
 	if latestDir == "" || latest.Status != "success" || latest.EndedAt == nil || latest.EndedAt.Before(latest.StartedAt) {
 		return acceptance.Identity{}, errors.New("latest development run is absent, incomplete or unsuccessful")
 	}
-	metaBytes, err := acceptanceRead(filepath.Join(latestDir, "meta.json"), 1<<20)
-	var fields map[string]json.RawMessage
-	if err != nil || json.Unmarshal(metaBytes, &fields) != nil || fields["issue_body"] == nil || latest.IssueTitle+"\n\n"+latest.IssueBody != requirements {
-		return acceptance.Identity{}, errors.New("development requirements snapshot missing or changed; a new managed development run is required")
-	}
-	b, err := acceptanceRead(filepath.Join(latestDir, "events.jsonl"), acceptanceFileLimit)
+	return developmentIdentity(latestDir)
+}
+
+func developmentIdentity(dir string) (acceptance.Identity, error) {
+	b, err := acceptanceRead(filepath.Join(dir, "events.jsonl"), acceptanceFileLimit)
 	if err != nil {
 		return acceptance.Identity{}, err
 	}
@@ -696,3 +719,8 @@ type recordedNonpassError struct{ error }
 
 func (e recordedNonpassError) Is(target error) bool { return target == errAcceptanceNonpass }
 func (e recordedNonpassError) Unwrap() error        { return e.error }
+
+func acceptanceStoreExists(repo string, pr int) bool {
+	_, err := os.Lstat(acceptanceStorePath(repo, pr))
+	return !errors.Is(err, os.ErrNotExist)
+}

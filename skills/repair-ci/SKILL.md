@@ -7,7 +7,7 @@ operator:
     applies_to: "leaf"
     labels_required: ["agent-implemented"]
     labels_excluded: ["agent-failed", "agent-skipped", "agent-running", "tracking", "question"]
-  outcomes: ["agent-implemented", "agent-failed"]
+  outcomes: ["agent-implemented", "agent-failed", "no-change"]
 ---
 
 ClawFlow runs this skill through direct Offload with explicit managed-development delivery. Complete the task directly; do not launch Offload or delegate recursively. Offload profiles own credentials and models.
@@ -57,3 +57,13 @@ commands/results, and any limitations. After a successful tested push, finish
 with exactly `<!-- clawflow:outcome=agent-implemented -->` so the runner waits
 for CI and reuses auto-merge. Otherwise finish with exactly
 `<!-- clawflow:outcome=agent-failed -->`. Never claim success without the push.
+
+For acceptance repair only, if all findings are unnecessary under the current issue
+body or cannot be reproduced, and the relevant headless tests pass, leave the
+working tree clean and make no commit or push. Explain why no change is required,
+report the passing commands, and explicitly describe any conflict between the
+review findings and the issue body for the supervisor to resolve by editing the
+body. Finish with `<!-- clawflow:outcome=no-change -->`. The runner verifies the
+unchanged published head and posts this decision on the issue. Test failures,
+blocked checks, incomplete investigation, and uncertain defects must still emit
+agent-failed; they are not no-change results.

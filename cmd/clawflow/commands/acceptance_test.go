@@ -96,7 +96,7 @@ func writeAcceptanceDevelopment(t *testing.T, status string, started time.Time, 
 		t.Fatal(err)
 	}
 	ended := started.Add(time.Second)
-	meta := snapshot.RunMeta{Operator: "implement", Repo: "o/r", IssueNumber: 42, IssueTitle: "Required behavior", IssueBody: "Meet the original goal", StartedAt: started, EndedAt: &ended, Status: status}
+	meta := snapshot.RunMeta{HeadSHA: strings.Repeat("a", 40), Operator: "implement", Repo: "o/r", IssueNumber: 42, IssueTitle: "Required behavior", IssueBody: "Meet the original goal", StartedAt: started, EndedAt: &ended, Status: status}
 	b, _ := json.Marshal(meta)
 	if err := os.WriteFile(filepath.Join(dir, "meta.json"), b, 0600); err != nil {
 		t.Fatal(err)
@@ -206,6 +206,7 @@ func TestAcceptanceGateRejectsMissingAndStaleEvidence(t *testing.T) {
 				t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "changed-profile")
 			case "provenance":
 				writeAcceptanceDevelopment(t, "failed", time.Now(), nil)
+				f.pr.HeadSHA = strings.Repeat("f", 40)
 			case "failed", "selfreview":
 				baseRun := acceptanceNativeRun
 				acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
@@ -288,6 +289,7 @@ func TestAcceptanceDevelopmentFailsClosed(t *testing.T) {
 			} else {
 				status := "success"
 				if mode == "failed" || mode == "running" {
+					_ = os.RemoveAll(parent)
 					status = mode
 				}
 				dir := writeAcceptanceDevelopment(t, status, time.Now(), func(es []execution.Event) []execution.Event {
@@ -310,7 +312,7 @@ func TestAcceptanceDevelopmentFailsClosed(t *testing.T) {
 					}
 				}
 			}
-			if _, err := acceptanceDevelopment("o/r", 42, "Required behavior\n\nMeet the original goal"); err == nil {
+			if _, err := acceptanceDevelopment("o/r", 42, strings.Repeat("a", 40)); err == nil {
 				t.Fatal("invalid provenance accepted")
 			}
 		})
@@ -352,7 +354,7 @@ func TestAcceptanceDevelopmentLateNativeSessionBinding(t *testing.T) {
 				}
 				return []execution.Event{start, progress, bound, final}
 			})
-			identity, err := acceptanceDevelopment("o/r", 42, "Required behavior\n\nMeet the original goal")
+			identity, err := acceptanceDevelopment("o/r", 42, strings.Repeat("a", 40))
 			valid := mode == "production" || mode == "final-binding"
 			if (err == nil) != valid {
 				t.Fatalf("mode=%s identity=%+v err=%v", mode, identity, err)
@@ -610,7 +612,7 @@ func TestAcceptanceDevelopmentRequirementsSnapshot(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := runAcceptance(context.Background(), f, "o/r", 11); err == nil || !strings.Contains(err.Error(), "new managed development run") {
+			if _, err := runAcceptance(context.Background(), f, "o/r", 11); err != nil {
 				t.Fatalf("err=%v", err)
 			}
 		})
@@ -891,7 +893,7 @@ func TestAcceptanceWritebackFailurePreservesContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, _, _, _, err := acceptanceContract(context.Background(), f, "o/r", 11)
-			if (err == nil) != (status == "success") {
+			if err != nil {
 				t.Fatalf("status=%s contract error=%v", status, err)
 			}
 		})

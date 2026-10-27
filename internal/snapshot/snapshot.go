@@ -243,13 +243,16 @@ type Meta struct {
 
 // RunMeta describes one operator run. events.jsonl lives alongside it.
 type RunMeta struct {
-	Operator    string    `json:"operator"`
-	Repo        string    `json:"repo"`
-	IssueNumber int       `json:"issue_number"`
-	IssueTitle  string    `json:"issue_title,omitempty"`
-	IssueBody   string    `json:"issue_body"`
-	IssueState  string    `json:"issue_state,omitempty"` // "open" | "closed"
-	StartedAt   time.Time `json:"started_at"`
+	HeadSHA       string    `json:"head_sha,omitempty"`
+	Outcome       string    `json:"outcome,omitempty"`
+	OutcomeReason string    `json:"outcome_reason,omitempty"`
+	Operator      string    `json:"operator"`
+	Repo          string    `json:"repo"`
+	IssueNumber   int       `json:"issue_number"`
+	IssueTitle    string    `json:"issue_title,omitempty"`
+	IssueBody     string    `json:"issue_body"`
+	IssueState    string    `json:"issue_state,omitempty"` // "open" | "closed"
+	StartedAt     time.Time `json:"started_at"`
 	// EndedAt is a pointer so a nil value omits the JSON key for a still-
 	// running run. With a value type, Go's `omitempty` does NOT skip a zero
 	// time.Time (`omitempty` only skips nil/0/""/empty), so the wire format

@@ -243,7 +243,7 @@ func (l ciRepairLedger) counts() (consumed, infra int) {
 	for _, a := range l.Attempts {
 		if a.Released == "" {
 			consumed++
-		} else {
+		} else if a.Released != "no-change" {
 			infra++
 		}
 	}
@@ -369,8 +369,8 @@ func reserveRepair(root, repo string, pr vcs.PR, reason string, now time.Time) (
 }
 
 // releaseCIRepair marks the open reservation for `attempt` as non-consuming
-// after an infrastructure outcome and applies exponential backoff. The release
-// still counts toward the bounded infrastructure budget.
+// after an infrastructure or confirmed no-change outcome and applies backoff.
+// Only infrastructure releases count toward the bounded infrastructure budget.
 func releaseCIRepair(root, repo string, pr vcs.PR, attempt int, kind string, now time.Time) error {
 	dir, path := ciRepairLedgerPath(root, repo, pr.Number)
 	ledger, err := loadCIRepairLedger(path)
@@ -511,4 +511,49 @@ func setupCIRepairWorkdir(ctx context.Context, cfg config.Repo, repo string, pr 
 		return fail(err)
 	}
 	return worktreeResult{Path: dir}, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// confirmedDevelopmentHead binds local execution to the published branch. Never
+// infer ownership from a PR head observed without matching the agent checkout.
+func confirmedDevelopmentHead(ctx context.Context, workdir string, j *runJob) (string, error) {
+	head, err := acceptanceGit(ctx, workdir, "rev-parse", "HEAD")
+	if err != nil || !acceptanceSHA(head) {
+		return "", fmt.Errorf("development head unavailable")
+	}
+	branch := ""
+	if j.repair != nil {
+		branch = j.repair.PR.HeadBranch
+	} else {
+		branch, err = acceptanceGit(ctx, workdir, "symbolic-ref", "--short", "HEAD")
+		if err != nil || branch == "" {
+			return "", fmt.Errorf("development branch unavailable")
+		}
+	}
+	remote, err := acceptanceGit(ctx, workdir, "ls-remote", "--exit-code", "origin", "refs/heads/"+branch)
+	fields := strings.Fields(remote)
+	if err != nil || len(fields) != 2 || fields[0] != head || fields[1] != "refs/heads/"+branch {
+		return "", fmt.Errorf("development head is not published")
+	}
+	return head, nil
+}
+
+func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outcome, body string) (string, error) {
+	if outcome != "no-change" {
+		return "", nil
+	}
+	if j.repair == nil || j.repair.Acceptance == nil || strings.TrimSpace(body) == "" {
+		return "", fmt.Errorf("no-change requires acceptance repair and a reason")
+	}
+	head, err := confirmedDevelopmentHead(ctx, workdir, j)
+	if err != nil || head != j.repair.PR.HeadSHA {
+		return "", fmt.Errorf("no-change repair did not confirm unchanged published head")
+	}
+	clean, err := acceptanceGit(ctx, workdir, "status", "--porcelain")
+	if err != nil || clean != "" {
+		return "", fmt.Errorf("no-change repair left local changes")
+	}
+	if err := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, "no-change", time.Now().UTC()); err != nil {
+		return "", err
+	}
+	return head, nil
 }

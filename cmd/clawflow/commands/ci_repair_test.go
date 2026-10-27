@@ -285,7 +285,7 @@ func TestCIRepairExistingPROutcome(t *testing.T) {
 	}
 	p, i := repairFixture()
 	repair := ciRepairContext{PR: p, Attempt: 1}
-	for _, label := range []string{"agent-implemented", "agent-failed"} {
+	for _, label := range []string{"agent-implemented", "agent-failed", "no-change"} {
 		f := &repairWriteback{}
 		_, outcome, err := operator.Run(context.Background(), op, &operator.Subject{Number: i.Number, State: i.State, Labels: i.Labels}, f, operator.RunOptions{
 			Repo: "o/r", Workdir: t.TempDir(), ResumeContext: repair.prompt("go test ./..."),
@@ -299,7 +299,11 @@ func TestCIRepairExistingPROutcome(t *testing.T) {
 				return "Updated existing PR https://github.com/o/r/pull/11\n<!-- clawflow:outcome=" + label + " -->", nil
 			},
 		})
-		if err != nil || outcome != label || len(f.labels) != 1 || f.labels[0] != label || len(f.comments) != 1 {
+		wantLabels := 1
+		if label == "no-change" {
+			wantLabels = 0
+		}
+		if err != nil || outcome != label || len(f.labels) != wantLabels || (wantLabels == 1 && f.labels[0] != label) || len(f.comments) != 1 {
 			t.Fatalf("writeback: %s %v %+v", outcome, err, f)
 		}
 		// All other VCS methods deliberately panic via the nil embedded Client:

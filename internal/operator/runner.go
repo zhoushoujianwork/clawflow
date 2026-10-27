@@ -188,6 +188,9 @@ type VCS interface {
 
 // RunOptions configures a single operator invocation.
 type RunOptions struct {
+	// ValidateOutcome checks runner-owned repair invariants before write-back.
+	ValidateOutcome func(outcome, body string) error
+
 	Repo     string        // full_name, e.g. "owner/repo"
 	Workdir  string        // cwd for the Offload execution
 	Timeout  time.Duration // execution timeout; 0 uses the shared default
@@ -324,6 +327,12 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		return trimmed, "", ErrNoOutcomeMarker
 	}
 
+	if opts.ValidateOutcome != nil && outcomeAllowed(op, outcome) {
+		if err := opts.ValidateOutcome(outcome, body); err != nil {
+			return body, outcome, err
+		}
+	}
+
 	if outcomeAllowed(op, outcome) && opts.CommentSaveDir != "" {
 		if err := saveWriteBack(op, sub, opts, body, outcome); err != nil {
 			return body, outcome, &WriteBackError{err}
@@ -416,6 +425,8 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 				"  ⚠ operator %q produced disallowed outcome %q (allowed: %v); skipping label add\n",
 				op.Name, outcome, op.Outcomes)
 			disallowed = fmt.Errorf("%w: %q not in %v (operator %q)", ErrDisallowedOutcome, outcome, op.Outcomes, op.Name)
+		} else if op.Name == "repair-ci" && outcome == "no-change" {
+			// A confirmed no-op posts its reason but has no terminal label.
 		} else if err := v.AddLabel(opts.Repo, sub.Number, outcome); err != nil {
 			writeErrors = append(writeErrors, fmt.Errorf("add outcome label %q: %w", outcome, err))
 		} else {

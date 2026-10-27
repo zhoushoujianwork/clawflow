@@ -1491,7 +1491,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 	}
 
+	confirmedHead := ""
 	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
+		ValidateOutcome: func(outcome, body string) error {
+			var err error
+			confirmedHead, err = validateRepairOutcome(ctx, workdir, j, outcome, body)
+			return err
+		},
 		Repo:           j.repo,
 		RunID:          strings.ReplaceAll(j.repo, "/", "__") + "-" + strconv.Itoa(j.sub.Number) + "-" + filepath.Base(runDir),
 		CommentSaveDir: runDir,
@@ -1521,8 +1527,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// the reconciler will see "finalizing" (not "running") and know that
 	// VCS side-effects already completed — it will promote to "success"
 	// without re-queuing the issue for a duplicate run.
-	if runErr == nil && output != "" {
+	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
+		if confirmedHead == "" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
+			confirmedHead, _ = confirmedDevelopmentHead(ctx, workdir, j)
+		}
 		finalizingMeta := snapshot.RunMeta{
+			HeadSHA:     confirmedHead,
+			Outcome:     outcome,
 			Operator:    j.op.Name,
 			Repo:        j.repo,
 			IssueNumber: j.sub.Number,
@@ -1533,6 +1544,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			Status:      "finalizing",
 			Stage:       "finalizing",
 			Summary:     output,
+		}
+		if outcome == "no-change" {
+			finalizingMeta.OutcomeReason = output
 		}
 		if writebackErr != nil {
 			finalizingMeta.WritebackError = writebackErr.Error()
@@ -1710,6 +1724,17 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rm.Status = "success"
 	}
 
+	if rm.Status == "success" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
+		if confirmedHead == "" {
+			confirmedHead, _ = confirmedDevelopmentHead(ctx, workdir, j)
+		}
+		rm.HeadSHA = confirmedHead
+	}
+	rm.Outcome = outcome
+	if outcome == "no-change" {
+		rm.OutcomeReason = output
+	}
+
 	if writebackErr != nil {
 		rm.WritebackError = writebackErr.Error()
 	}
@@ -1748,7 +1773,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 		hasPartialWork, _, _ = detectPartialWork(workdir, base)
 	}
-	if repairInfra || ((j.repair == nil || (rm.Status == "success" && outcome == "agent-implemented")) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork))) {
+	if repairInfra || ((j.repair == nil || (rm.Status == "success" && (outcome == "agent-implemented" || outcome == "no-change"))) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork))) {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree evidence: %s\n", prefix, workdir)
@@ -1799,7 +1824,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// issue #326. Emitted alongside rather than replacing `outcome` so existing
 	// greps over run.log keep working.
 	appliedLabel := outcome
-	if isDisallowedOutcome || writebackErr != nil {
+	if isDisallowedOutcome || writebackErr != nil || outcome == "no-change" {
 		appliedLabel = ""
 	}
 	logFn("run/end",

@@ -97,7 +97,7 @@ func TestHarvestNoDispatch(t *testing.T) {
 	}{
 		{name: "evidence present", reason: "evidence_present", setup: func(t *testing.T, f *acceptanceFake) { produceAcceptance(t, f) }},
 		{name: "contract construction fails", reason: "evidence_not_missing", setup: func(t *testing.T, f *acceptanceFake) {
-			writeAcceptanceDevelopment(t, "failed", time.Now(), nil)
+			writeAcceptanceDevelopment(t, "running", time.Now(), nil)
 		}},
 		{name: "only issue", setup: func(*testing.T, *acceptanceFake) {}, issue: 42},
 		{name: "other repo", setup: func(*testing.T, *acceptanceFake) {}, only: "o/other"},
@@ -427,7 +427,7 @@ func TestCurrentAcceptanceMissingSentinel(t *testing.T) {
 		t.Fatalf("no record: %v", err)
 	}
 	// Contract-construction failures are not "missing".
-	writeAcceptanceDevelopment(t, "failed", time.Now(), nil)
+	writeAcceptanceDevelopment(t, "running", time.Now(), nil)
 	if _, _, err = currentAcceptance(context.Background(), f, "o/r", 11); err == nil || errors.Is(err, errAcceptanceMissing) {
 		t.Fatalf("provenance error classified as missing: %v", err)
 	}
