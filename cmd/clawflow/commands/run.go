@@ -687,13 +687,13 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// whole is reported successful as long as the operator phase
 	// completed.
 	//
-	// Gated on --repo / --issue narrowing: ad-hoc single-issue runs
-	// shouldn't wake every project's PM. Only the unscoped pass
-	// (the one a cron / hook normally invokes) triggers PMs.
-	//
-	// Unscoped passes can now overlap, so pilot.Schedule is guarded by a
-	// try-lock: a pass that loses the race leaves the wake to the holder.
-	if onlyRepo == "" && onlyIssue == 0 {
+	// Ad-hoc single-issue runs (--issue) shouldn't wake every project's PM.
+	// Every other pass may: the web scheduler now runs one repo-scoped pass
+	// per repository, so gating on onlyRepo would stop scheduled Pilot wakes.
+	// Passes overlap, so pilot.Schedule is guarded by a try-lock; a pass that
+	// loses the race leaves the wake to the holder, and pilot.Schedule's own
+	// per-project interval prevents repeated wakes across passes.
+	if onlyIssue == 0 {
 		if snapshot.TryAcquirePilotScheduleLock() {
 			if n, err := pilot.Schedule(ctx, timeout, watchdogDeadline); err != nil {
 				fmt.Fprintf(os.Stderr, "[pilot] schedule: %v\n", err)
