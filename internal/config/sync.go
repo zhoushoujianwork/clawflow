@@ -39,6 +39,7 @@ type syncableRepo struct {
 	CIRequired        bool              `yaml:"ci_required,omitempty"`
 	CITimeout         int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
+	SelfUpgrade       bool              `yaml:"self_upgrade,omitempty"`
 	BoundMachine      string            `yaml:"bound_machine,omitempty"`
 	QueueIssue        int               `yaml:"queue_issue,omitempty"`
 	UpdatedAt         time.Time         `yaml:"updated_at,omitempty"`
@@ -63,6 +64,7 @@ func toSyncable(r Repo) syncableRepo {
 		CIRequired:        r.CIRequired,
 		CITimeout:         r.CITimeout,
 		AutoMerge:         r.AutoMerge,
+		SelfUpgrade:       r.SelfUpgrade,
 		BoundMachine:      r.BoundMachine,
 		QueueIssue:        r.QueueIssue,
 		UpdatedAt:         r.UpdatedAt,
@@ -88,6 +90,7 @@ func fromSyncable(s syncableRepo, localPath string) Repo {
 		CIRequired:        s.CIRequired,
 		CITimeout:         s.CITimeout,
 		AutoMerge:         s.AutoMerge,
+		SelfUpgrade:       s.SelfUpgrade,
 		BoundMachine:      s.BoundMachine,
 		QueueIssue:        s.QueueIssue,
 		UpdatedAt:         s.UpdatedAt,

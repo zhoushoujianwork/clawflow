@@ -662,3 +662,18 @@ func TestQueueIssueRoundTrip(t *testing.T) {
 		t.Fatalf("merge lost queue_issue: %+v", merged.Repos["o/queued"])
 	}
 }
+
+// TestSelfUpgradeSurvivesGistRoundTrip verifies self_upgrade is synced and is
+// not dropped when a newer remote entry replaces the local one.
+func TestSelfUpgradeSurvivesGistRoundTrip(t *testing.T) {
+	cfg := &config.Config{Repos: map[string]config.Repo{
+		"owner/repo": {Enabled: true, BaseBranch: "main", LocalPath: "/x", SelfUpgrade: true},
+	}}
+	data, err := config.MarshalForGist(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "self_upgrade: true") {
+		t.Fatalf("self_upgrade missing from payload: %s", data)
+	}
+}

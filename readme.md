@@ -187,6 +187,8 @@ clawflow repo enable owner/repo
 clawflow run --repo owner/repo
 ```
 
+Self-upgrade (optional, off by default) is meant only for the repository that contains ClawFlow's own source: `clawflow repo set owner/repo --self-upgrade on`. After a `clawflow run` pass that confirmed a merge into that repository's base branch (acceptance harvest, inline or sweep auto-merge), the last step of the pass fetches `origin/<base>` in `local_path`, builds the web bundle and the binary in a temporary detached worktree (your checkout is never touched), checks that the candidate reports the new short SHA and that `execution check --json` is `ready`, then atomically replaces the running executable and keeps the old one as `<path>.prev`. A running local `clawflow web` is restarted in a detached session. Any failure leaves the installed binary unchanged (or restores `.prev`), logs a WARN `run/self_upgrade` line and makes the run exit non-zero. It is skipped when the installed version already equals the target or another upgrade holds the local lock. Requires `git`, `pnpm` and `go` on the machine.
+
 Failed CI repair is limited to supported same-repository GitHub managed PRs. It reproduces failures locally, updates the existing branch without force, reserves at most three attempts per PR and waits five minutes between attempts. It does not ingest CI logs or repair forks or GitLab MRs. Other GitLab issue, MR and CI commands remain available.
 
 This is the current runner, with local history and repair bookkeeping. The [managed development design](docs/managed-development-design.md) proposes a broader durable task/effect engine; that engine is not implemented by these controls.

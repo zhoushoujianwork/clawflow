@@ -200,8 +200,12 @@ func attemptAutoMerge(a autoMergeAttempt) bool {
 
 	// Clean up the remote head branch. Non-fatal: the merge already landed
 	// and a stale branch is housekeeping, not a failure.
-	if pr, err := a.client.GetPR(a.repo, a.prNum); err != nil {
-		fmt.Fprintf(os.Stderr, "%s ⚠ branch cleanup: lookup PR failed: %v\n", a.prefix, err)
+	pr, prErr := a.client.GetPR(a.repo, a.prNum)
+	if a.repoCfg.SelfUpgrade && (prErr != nil || pr.BaseBranch == "" || pr.BaseBranch == baseBranchOrMain(a.repoCfg)) {
+		confirmedMerges.note(a.repo) // merge into the base branch confirmed (issue #369)
+	}
+	if prErr != nil {
+		fmt.Fprintf(os.Stderr, "%s ⚠ branch cleanup: lookup PR failed: %v\n", a.prefix, prErr)
 	} else if head := pr.HeadBranch; head != "" && head != a.repoCfg.BaseBranch {
 		if err := a.client.DeleteBranch(a.repo, head); err != nil {
 			fmt.Fprintf(os.Stderr, "%s ⚠ branch cleanup: delete %s failed: %v\n", a.prefix, head, err)
@@ -351,4 +355,12 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 	if merged > 0 {
 		fmt.Fprintf(os.Stderr, "%s ✓ auto-merge sweep: merged %d PR(s)\n", prefix, merged)
 	}
+}
+
+// baseBranchOrMain returns the repo's configured base branch, defaulting to main.
+func baseBranchOrMain(r config.Repo) string {
+	if r.BaseBranch == "" {
+		return "main"
+	}
+	return r.BaseBranch
 }

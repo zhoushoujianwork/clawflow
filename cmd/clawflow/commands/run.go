@@ -195,6 +195,7 @@ func acquireRunLockForPass(ctx context.Context, lg *clog.Logger, targeted bool) 
 func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.Duration) error {
 	// Global collection for all issues from all repos
 	var globalIssues []snapshot.IssueEntry
+	confirmedMerges.reset()
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -585,6 +586,10 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if api.AutoPush() {
 		fmt.Fprintf(os.Stderr, "✓ auto-pushed config to Gist\n")
 	}
+
+	// Final step (issue #369): when this pass confirmed a merge into a
+	// self_upgrade repository's base, rebuild and replace the installed binary.
+	failed = append(failed, runSelfUpgradePhase(ctx, cfg, newSelfUpgrader())...)
 
 	// Exit non-zero when any dispatched operator job ended in a terminal
 	// non-success state (issue #354). Reported last so Phases 3/4 and
