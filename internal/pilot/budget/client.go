@@ -123,3 +123,13 @@ func (b *budgetClient) DeleteBranch(repo, branch string) error {
 	}
 	return b.Client.DeleteBranch(repo, branch)
 }
+
+// GetFailedJobEvidence forwards optional read-only GitHub evidence queries.
+func (c *budgetClient) GetFailedJobEvidence(repo, sha string, job int64) (string, error) {
+	if reader, ok := c.Client.(interface {
+		GetFailedJobEvidence(string, string, int64) (string, error)
+	}); ok {
+		return reader.GetFailedJobEvidence(repo, sha, job)
+	}
+	return "no evidence (unsupported provider)", nil
+}
