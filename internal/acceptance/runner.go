@@ -170,7 +170,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		Plan           string `json:"plan"`
 		PlanDigest     string `json:"plan_digest"`
 	}{d, c.TaskID, c.Generation, c.Repository, c.PRNumber, c.HeadSHA, c.BaseSHA, c.IntegrationSHA, c.PolicyDigest, c.Requirements, plan.Text, plan.Digest})
-	reviewed, reviewErr := execute(ctx, "Review the immutable source against the pinned contract and independently saved plan below. Use read-only tools; never change source. Return exactly one JSON object with only status (passed, failed, or blocked), summary (nonempty string), and evidence (nonempty array of nonempty strings). Do not supply actor or execution identities.\n\n"+string(input),
+	reviewed, reviewErr := execute(ctx, "Review the immutable source against the pinned contract and independently saved plan below. Use read-only tools; never change source. Return exactly one JSON object with only status (passed, failed, or blocked), summary (nonempty string), and evidence (nonempty array of nonempty strings). Return raw JSON only, without Markdown code fences. Do not supply actor or execution identities.\n\n"+string(input),
 		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "default"})
 	record.Reviewer = native(reviewed)
 	// Inspect even after execution failure/cancellation; use the caller's context
@@ -197,7 +197,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if len(reviewed.Text) > maxFileBytes {
 		return record, errors.New("acceptance report exceeds size limit")
 	}
-	if err = decodeStrict([]byte(reviewed.Text), &output); err != nil {
+	if err = decodeStrict([]byte(unfenceReport(reviewed.Text)), &output); err != nil {
 		return record, fmt.Errorf("invalid acceptance report: %w", err)
 	}
 	if (output.Status != Passed && output.Status != Failed && output.Status != Blocked) || !nonempty(output.Summary) || len(output.Evidence) == 0 {
@@ -212,4 +212,20 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	record.Report = output.Summary
 	record.Evidence = output.Evidence
 	return record, nil
+}
+
+// unfenceReport removes one Markdown code fence that encloses the whole
+// trimmed report (models often wrap JSON in ```json). Any other shape is
+// returned unchanged so strict decoding still rejects surrounding prose,
+// multiple blocks and trailing data.
+func unfenceReport(text string) string {
+	t := strings.TrimSpace(text)
+	if !strings.HasPrefix(t, "```") || !strings.HasSuffix(t, "```") || len(t) < 6 {
+		return text
+	}
+	open, body, ok := strings.Cut(t[3:len(t)-3], "\n")
+	if !ok || (strings.TrimSpace(open) != "" && !strings.EqualFold(strings.TrimSpace(open), "json")) || strings.Contains(body, "```") {
+		return text
+	}
+	return body
 }
