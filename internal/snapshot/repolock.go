@@ -82,15 +82,34 @@ func ReadRepoRunLock(repo string) (*RunLockInfo, error) {
 	return readRunLockFile(RepoRunLockPath(repo))
 }
 
+// RepoRunLockHolder returns the live process that blocks a run on repo: the
+// legacy global lock holder first, then the repo's own lock holder. Nil when
+// nobody live holds either.
+func RepoRunLockHolder(repo string) *RunLockInfo {
+	if legacy, ok := liveLegacyRunLock(); ok {
+		return legacy
+	}
+	if info, err := ReadRepoRunLock(repo); err == nil && processAlive(info.PID) {
+		return info
+	}
+	return nil
+}
+
 // AnyRunLockHeld reports whether the legacy global lock or any per-repository
 // run lock is held by a live process, returning one holder.
 func AnyRunLockHeld() (bool, *RunLockInfo) {
-	if legacy, ok := liveLegacyRunLock(); ok {
+	return AnyRunLockHeldExcept(-1)
+}
+
+// AnyRunLockHeldExcept is AnyRunLockHeld ignoring locks owned by pid, so a
+// process can check for other passes while holding locks of its own.
+func AnyRunLockHeldExcept(pid int) (bool, *RunLockInfo) {
+	if legacy, ok := liveLegacyRunLock(); ok && legacy.PID != pid {
 		return true, legacy
 	}
 	matches, _ := filepath.Glob(filepath.Join(LockDir(), runLockPrefix+"*.lock"))
 	for _, path := range matches {
-		if info, err := readRunLockFile(path); err == nil && processAlive(info.PID) {
+		if info, err := readRunLockFile(path); err == nil && info.PID != pid && processAlive(info.PID) {
 			return true, info
 		}
 	}

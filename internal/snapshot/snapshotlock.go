@@ -33,9 +33,14 @@ func SnapshotLockPath() string {
 // 30s. Locks of dead owners are reclaimed. Callers inside this package should
 // use withSnapshotLock, which also serializes goroutines of this process.
 func AcquireSnapshotLock() error {
-	deadline := time.Now().Add(snapshotLockWait)
+	return acquireWaiting(SnapshotLockPath(), snapshotLockWait)
+}
+
+// acquireWaiting polls acquirePIDLock until it succeeds or wait elapses.
+func acquireWaiting(path string, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
 	for {
-		holder, err := acquirePIDLock(SnapshotLockPath(), RunLockInfo{PID: os.Getpid(), StartedAt: time.Now().UTC()})
+		holder, err := acquirePIDLock(path, RunLockInfo{PID: os.Getpid(), StartedAt: time.Now().UTC()})
 		if err == nil {
 			return nil
 		}
@@ -43,7 +48,7 @@ func AcquireSnapshotLock() error {
 			return err // not contention (e.g. unwritable lock dir)
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("snapshot lock still held by pid %d after %s", holder.PID, snapshotLockWait)
+			return fmt.Errorf("%s still held by pid %d after %s", filepath.Base(path), holder.PID, wait)
 		}
 		time.Sleep(snapshotLockPoll)
 	}
@@ -81,4 +86,22 @@ func TryAcquirePilotScheduleLock() bool {
 // ReleasePilotScheduleLock releases the pilot scheduling lock if held by this process.
 func ReleasePilotScheduleLock() {
 	releasePIDLock(PilotScheduleLockPath())
+}
+
+// ConfigSyncLockPath guards config auto-pull / auto-push. Passes are repo
+// scoped and run concurrently; config.yaml is rewritten non-atomically by
+// ApplyGistConfig, so concurrent syncs must be serialized.
+func ConfigSyncLockPath() string {
+	return filepath.Join(LockDir(), "config-sync.lock")
+}
+
+// WithConfigSyncLock runs fn under the config sync lock, waiting up to wait.
+// Returns false without running fn when the lock cannot be taken.
+func WithConfigSyncLock(wait time.Duration, fn func()) bool {
+	if err := acquireWaiting(ConfigSyncLockPath(), wait); err != nil {
+		return false
+	}
+	defer releasePIDLock(ConfigSyncLockPath())
+	fn()
+	return true
 }
