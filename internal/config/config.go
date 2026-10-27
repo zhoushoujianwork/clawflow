@@ -914,6 +914,20 @@ func ConfigPath() string {
 }
 
 // EnabledRepos returns only the repos with enabled: true.
+// RunsOnHost reports whether a repo is processed by the machine named
+// hostname: bound_machine must match when set, and require_binding rejects
+// unbound repos. An empty hostname (unresolvable) conservatively accepts all.
+// Shared by `clawflow run` and the web auto-run scheduler.
+func (s Settings) RunsOnHost(r Repo, hostname string) bool {
+	if r.BoundMachine != "" && hostname != "" && r.BoundMachine != hostname {
+		return false
+	}
+	if s.RequireBinding && r.BoundMachine == "" && hostname != "" {
+		return false
+	}
+	return true
+}
+
 func (c *Config) EnabledRepos() map[string]Repo {
 	out := make(map[string]Repo)
 	for k, v := range c.Repos {

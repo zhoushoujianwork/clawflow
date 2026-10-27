@@ -240,8 +240,8 @@ here — run 'clawflow run' first if you want fresh data.`,
 
 			// Periodic auto-runner: when settings.run_interval_minutes > 0,
 			// fire `clawflow run` on a recurring tick. The ticker shares
-			// the runActive mutex with the manual Run button (via
-			// api.TriggerRun), so the two can never overlap. settings
+			// the per-repo active-run gate with the manual Run button (via
+			// api.TriggerRun), so the two can never overlap on a repo. settings
 			// are re-read every tick — bumping run_interval_minutes or
 			// flipping run_paused via the dashboard takes effect on the
 			// next tick without restarting web.
@@ -495,11 +495,11 @@ here — run 'clawflow run' first if you want fresh data.`,
 // the config at the start of every tick so the user can change the
 // interval / pause state from the dashboard without restarting web.
 //
-// The actual run is dispatched through api.TriggerRun, which shares
-// the same in-memory mutex with the manual Run button — periodic and
-// manual triggers can never overlap, and a long-running operator
-// passes through quietly because TriggerRun returns false until the
-// previous subprocess exits.
+// Each tick starts `clawflow run --repo R` for every due repo that is bound
+// to this machine, has no active pass and fits under max_concurrent_agents
+// (default 4). Dispatch goes through api.TriggerScheduledRuns, which shares
+// the per-repo gate with the manual Run button, so periodic and manual
+// triggers never overlap on a repo while different repos run in parallel.
 //
 // Tick cadence: we drive a 30s coarse ticker and check elapsed time
 // against the configured interval each tick. This way changes to
@@ -511,7 +511,10 @@ func runPeriodicScheduler() {
 	tick := time.NewTicker(checkEvery)
 	defer tick.Stop()
 
-	var lastFire time.Time
+	hostname, _ := os.Hostname()
+	// lastFire is per repo so a repo whose pass is still running (or that
+	// finished early) never makes the others wait or fire again.
+	lastFire := map[string]time.Time{}
 	for range tick.C {
 		cfg, err := config.Load()
 		if err != nil {
@@ -523,19 +526,16 @@ func runPeriodicScheduler() {
 			// Auto-run disabled — clear the published next-fire time
 			// so the dashboard hides the countdown.
 			api.SetSchedulerNextFire(time.Time{})
-			lastFire = time.Time{}
+			lastFire = map[string]time.Time{}
 			continue
 		}
 		intervalDur := time.Duration(interval) * time.Minute
 
-		// Initialize lastFire on the first iteration after the
-		// scheduler "turns on" so we don't fire immediately on web
-		// startup (the user explicitly clicks Run if they want a kick
-		// right after start).
-		if lastFire.IsZero() {
-			lastFire = time.Now()
+		due, nextFire := dueScheduledRepos(cfg, hostname, lastFire, time.Now(), intervalDur)
+		if nextFire.IsZero() {
+			api.SetSchedulerNextFire(time.Time{})
+			continue
 		}
-		nextFire := lastFire.Add(intervalDur)
 		api.SetSchedulerNextFire(nextFire)
 
 		if cfg.Settings.RunPaused {
@@ -545,20 +545,56 @@ func runPeriodicScheduler() {
 			// pick up exactly where we left off.
 			continue
 		}
-		if time.Now().Before(nextFire) {
+		if len(due) == 0 {
 			continue
 		}
 
-		// Time to fire. TriggerRun returns false if the previous run
-		// is still going — that's fine, we just skip and try again
-		// next tick.
-		if api.TriggerRun("", 0) {
-			lastFire = time.Now()
-			fmt.Fprintf(os.Stderr, "[scheduler] auto-fire at %s (next in %s)\n",
-				lastFire.Format("15:04:05"), intervalDur)
-			webLog.Info("web/auto_run", "fired_at", lastFire.UTC().Format(time.RFC3339), "next_in", intervalDur)
+		// Time to fire. Repos with an active pass, and repos beyond the
+		// max_concurrent_agents cap, are skipped and retried next tick.
+		started, _ := api.TriggerScheduledRuns(cfg, hostname, due)
+		now := time.Now()
+		for _, repo := range started {
+			lastFire[repo] = now
+			fmt.Fprintf(os.Stderr, "[scheduler] auto-fire %s at %s (next in %s)\n",
+				repo, now.Format("15:04:05"), intervalDur)
+			webLog.Info("web/auto_run", "repo", repo, "fired_at", now.UTC().Format(time.RFC3339), "next_in", intervalDur)
 		}
 	}
+}
+
+// dueScheduledRepos returns the repos whose auto-run interval has elapsed and
+// the earliest next fire time across all schedulable repos (zero if none).
+// A repo seen for the first time is stamped now, so web startup does not fire
+// immediately (the user clicks Run for a kick). Repos that left the schedule
+// (disabled, rebound) are forgotten. lastFire is updated in place.
+func dueScheduledRepos(cfg *config.Config, hostname string, lastFire map[string]time.Time, now time.Time, interval time.Duration) (due map[string]bool, next time.Time) {
+	eligible := map[string]bool{}
+	for name, repo := range cfg.EnabledRepos() {
+		if cfg.Settings.RunsOnHost(repo, hostname) {
+			eligible[name] = true
+		}
+	}
+	for name := range lastFire {
+		if !eligible[name] {
+			delete(lastFire, name)
+		}
+	}
+	due = map[string]bool{}
+	for name := range eligible {
+		last, ok := lastFire[name]
+		if !ok {
+			lastFire[name] = now
+			last = now
+		}
+		fire := last.Add(interval)
+		if next.IsZero() || fire.Before(next) {
+			next = fire
+		}
+		if !now.Before(fire) {
+			due[name] = true
+		}
+	}
+	return due, next
 }
 
 // openBrowser opens url in the user's default browser. Silent on failure;

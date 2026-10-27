@@ -254,13 +254,7 @@ func lockUnscopedRepos(lg *clog.Logger, pl *passLocks, candidates []string) []st
 // and require_binding rules shared by the scan loop and the web scheduler.
 // An unresolvable hostname (empty) conservatively processes everything.
 func repoRunsHere(settings config.Settings, repoCfg config.Repo, hostname string) bool {
-	if repoCfg.BoundMachine != "" && hostname != "" && repoCfg.BoundMachine != hostname {
-		return false
-	}
-	if settings.RequireBinding && repoCfg.BoundMachine == "" && hostname != "" {
-		return false
-	}
-	return true
+	return settings.RunsOnHost(repoCfg, hostname)
 }
 
 // syncLocked runs a config sync step (auto-pull / auto-push) under the
