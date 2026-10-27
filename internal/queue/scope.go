@@ -26,6 +26,10 @@ func EffectiveScope(repoScope, defaultScope string, hadQueueIssue bool) (scope s
 		raw = defaultScope
 	}
 	switch {
+	case raw == "" && hadQueueIssue:
+		// A legacy queue repo never picks up unlisted work, even before the
+		// migration has persisted queue_scope: ranked.
+		return ScopeRanked, false
 	case raw == "":
 		return ScopeAll, false
 	case ValidScope(raw):
