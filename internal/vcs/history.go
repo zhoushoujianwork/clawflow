@@ -1,6 +1,7 @@
 package vcs
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -101,6 +102,11 @@ func LoadIssueHistory(client Client, repo string, number int) (*IssueHistory, er
 	return h, nil
 }
 
+// ErrNoUnconsumedReopen reports the ordinary state in which an implemented
+// issue has no pending reopen (never reopened, or the reopen was already
+// consumed by a later implementation). It is not a history failure.
+var ErrNoUnconsumedReopen = errors.New("no unconsumed reopen after implementation and close")
+
 // ReopenCycle requires strict timestamp ordering; ties deliberately fail closed.
 // The preceding label remains discoverable after its removal for cycle retries.
 func ReopenCycle(events []IssueEvent) (IssueEvent, error) {
@@ -132,8 +138,11 @@ func ReopenCycle(events []IssueEvent) (IssueEvent, error) {
 			}
 		}
 	}
-	if reopen.ID == "" || implemented.ID == "" || closed.ID == "" || !rt.After(it) || !rt.After(ct) {
-		return IssueEvent{}, fmt.Errorf("no unconsumed reopen after implementation and close")
+	if reopen.ID == "" || implemented.ID == "" || closed.ID == "" || rt.Before(it) || rt.Before(ct) {
+		return IssueEvent{}, ErrNoUnconsumedReopen
+	}
+	if !rt.After(it) || !rt.After(ct) {
+		return IssueEvent{}, fmt.Errorf("ambiguous lifecycle ordering: reopen timestamp ties implementation or close")
 	}
 	return reopen, nil
 }
