@@ -832,7 +832,7 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		if implementationSubjectAllowed(sub) {
 			reopened, reopenErr = discoverReopen(client, fullName, sub)
 			if reopenErr != nil {
-				runLog.Warn("run/reopen_skip", "repo", fullName, "issue", sub.Number, "err", reopenErr.Error())
+				logReopenSkip(fullName, sub.Number, reopenErr)
 			}
 		}
 		var firstMatch *operator.Operator

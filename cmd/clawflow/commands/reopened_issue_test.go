@@ -282,3 +282,45 @@ func TestReopenLocalHistoryAndPrompt(t *testing.T) {
 		t.Fatal("history command not registered")
 	}
 }
+
+func TestLogReopenSkipLevels(t *testing.T) {
+	readLog := withRunLog(t)
+	// Normal steady state: implemented, never reopened.
+	f := &reopenFake{events: reopenEvents()[:1]}
+	sub := &operator.Subject{Number: 7, State: "open", Labels: []string{"agent-implemented"}}
+	_, err := discoverReopen(f, "o/r", sub)
+	if !errors.Is(err, vcs.ErrNoUnconsumedReopen) {
+		t.Fatalf("want ErrNoUnconsumedReopen, got %v", err)
+	}
+	logReopenSkip("o/r", 7, err)
+	// Genuine failures stay WARN.
+	logReopenSkip("o/r", 8, errors.New("reopen history unavailable: boom"))
+	_, tieErr := vcs.ReopenCycle([]vcs.IssueEvent{
+		reopenEvents()[0], reopenEvents()[1],
+		{ID: "r", Type: "reopened", CreatedAt: "2026-01-02T00:00:00Z"},
+	})
+	if tieErr == nil || errors.Is(tieErr, vcs.ErrNoUnconsumedReopen) {
+		t.Fatalf("tied timestamps must be a real error, got %v", tieErr)
+	}
+	logReopenSkip("o/r", 9, tieErr)
+
+	var info, warn1, warn2 string
+	for _, line := range strings.Split(readLog(), "\n") {
+		switch {
+		case strings.Contains(line, "issue=7"):
+			info = line
+		case strings.Contains(line, "issue=8"):
+			warn1 = line
+		case strings.Contains(line, "issue=9"):
+			warn2 = line
+		}
+	}
+	if !strings.Contains(info, "INFO") || !strings.Contains(info, "no_unconsumed_reopen") || strings.Contains(info, "WARN") {
+		t.Errorf("no-reopen must log INFO with reason: %q", info)
+	}
+	for _, l := range []string{warn1, warn2} {
+		if !strings.Contains(l, "WARN") || !strings.Contains(l, "err=") {
+			t.Errorf("real error must log WARN: %q", l)
+		}
+	}
+}

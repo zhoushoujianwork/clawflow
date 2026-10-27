@@ -3,6 +3,7 @@ package commands
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -47,6 +48,18 @@ func withoutImplemented(sub *operator.Subject) *operator.Subject {
 		}
 	}
 	return &copy
+}
+
+// logReopenSkip records why reopen discovery did not yield a reopen context.
+// The absence of an unconsumed reopen is the normal steady state of an
+// implemented-but-unmerged issue and is logged at INFO; every other error
+// (history read failures, inconsistent events) stays at WARN.
+func logReopenSkip(repo string, issue int, err error) {
+	if errors.Is(err, vcs.ErrNoUnconsumedReopen) {
+		runLog.Info("run/reopen_skip", "repo", repo, "issue", issue, "reason", "no_unconsumed_reopen")
+		return
+	}
+	runLog.Warn("run/reopen_skip", "repo", repo, "issue", issue, "err", err.Error())
 }
 
 // discoverReopen never changes remote labels or the registry's shared operator.
