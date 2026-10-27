@@ -1411,6 +1411,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		runLog.Warn("run/end", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name,
 			"status", "failed", "stage", runningMeta.Stage, "err", err.Error(), "cost", "0.0000")
 		if j.repair != nil {
+			// No agent was invoked: release the reservation under the existing
+			// infrastructure budget/backoff instead of terminally blocking repair.
+			if rerr := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, "setup", now); rerr == nil {
+				runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "kind", "setup")
+				logAcceptanceRepair(j, "end", "status", "failed", "kind", "setup", "attempt_consumed", false)
+				return false, false, true
+			} else {
+				runLog.Warn("run/ci_repair_release_failed", "repo", j.repo, "issue", j.sub.Number, "err", rerr.Error())
+			}
 			_ = j.client.AddLabel(j.repo, j.sub.Number, "agent-failed")
 			_ = j.client.PostIssueComment(j.repo, j.sub.Number, j.repair.label()+" repair setup failed: "+err.Error())
 			logAcceptanceRepair(j, "end", "status", "failed", "err", err.Error())
