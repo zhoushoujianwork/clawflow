@@ -206,6 +206,9 @@ type RunLockInfo struct {
 	PID       int       `json:"pid"`
 	StartedAt time.Time `json:"started_at"`
 	Version   string    `json:"version"`
+	// Repo is set on per-repository run locks (run-<owner>__<name>.lock).
+	// Absent on the legacy global lock, so old readers ignore it.
+	Repo string `json:"repo,omitempty"`
 }
 
 // RunLockPath returns the path to the global run lockfile
