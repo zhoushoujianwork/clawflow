@@ -124,9 +124,21 @@ interface PipelineEvent {
   fields: Record<string, string>
 }
 
+interface GlobalQueueEntry {
+  position: number
+  key: string
+  repo: string
+  number: number
+  title?: string
+  tier: string
+  rank?: number
+  state: string
+}
+
 interface Board {
   generated_at: string
   repos: RepoBoard[]
+  global_queue?: GlobalQueueEntry[]
   events: PipelineEvent[]
   runtime: {
     version: string
@@ -279,6 +291,7 @@ function PipelinePage() {
       ) : board ? (
         <>
           <RuntimeHeader runtime={board.runtime} />
+          <GlobalQueuePanel entries={board.global_queue ?? []} />
           {board.repos.length === 0 ? (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
               <p className="text-base font-semibold text-foreground mb-1">No repository is tracked yet</p>
@@ -398,6 +411,27 @@ function RepoSection({ board, repoInfo }: { board: RepoBoard; repoInfo: RepoInfo
         </div>
       )}
     </section>
+  )
+}
+
+function GlobalQueuePanel({ entries }: { entries: GlobalQueueEntry[] }) {
+  if (entries.length === 0) return null
+  return (
+    <div className="bg-card border border-border rounded-xl p-4 mb-4">
+      <p className="text-sm font-semibold text-foreground mb-2">Work queue (all repositories)</p>
+      <ol className="text-xs space-y-1">
+        {entries.map(e => (
+          <li key={e.key} className="flex items-center gap-2">
+            <span className="tabular-nums text-muted-foreground w-6 text-right">{e.position}.</span>
+            <span className="font-mono text-foreground">{e.key}</span>
+            <span className="px-1.5 rounded bg-secondary text-muted-foreground">{e.tier}</span>
+            {e.rank ? <span className="text-muted-foreground tabular-nums">rank {e.rank}</span> : null}
+            <span className="text-muted-foreground">{e.state}</span>
+            {e.title ? <span className="truncate text-muted-foreground">{e.title}</span> : null}
+          </li>
+        ))}
+      </ol>
+    </div>
   )
 }
 

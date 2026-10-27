@@ -46,7 +46,23 @@ type Repo struct {
 	// form an ordered work queue: the runner dispatches implement only for the
 	// first eligible item, one at a time. 0 = no queue (every eligible leaf
 	// issue is dispatched). GitHub only.
+	//
+	// Deprecated: the unified cross-repo queue ignores it for dispatch. Its
+	// open sub-issues are imported into the rank file once (see
+	// internal/queue); the field is kept so old configs stay readable.
 	QueueIssue int `yaml:"queue_issue,omitempty" json:"queue_issue,omitempty"`
+
+	// MaxInFlight caps how many issues of this repo the unified queue lets
+	// run or await review at once (each has its own worktree and PR).
+	// 0 = default 2. Negative values are rejected by Validate.
+	MaxInFlight int `yaml:"max_in_flight,omitempty" json:"max_in_flight,omitempty"`
+
+	// QueueScope selects which open issues of this repo are queue
+	// candidates: "all", "labeled" (label clawflow) or "ranked" (listed in
+	// the rank file, or labeled clawflow and enrolled on sight). Empty falls
+	// back to settings.queue.scope, then "all". Migrating a repo's
+	// queue_issue sets "ranked" so unlisted work is never picked up.
+	QueueScope string `yaml:"queue_scope,omitempty" json:"queue_scope,omitempty"`
 
 	// BoundMachine, when non-empty, restricts processing of this repo to the
 	// machine whose hostname matches this value. Repos with no BoundMachine
@@ -85,6 +101,17 @@ type ExecutionSettings struct {
 	Profile      string            `yaml:"profile,omitempty" json:"profile"`
 	RoleProfiles map[string]string `yaml:"role_profiles,omitempty" json:"role_profiles,omitempty"`
 	CodexSandbox string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
+}
+
+// QueueSettings tunes the unified work queue.
+type QueueSettings struct {
+	// Scope is the default candidate scope for repos without queue_scope:
+	// "all" (default), "labeled" (only issues carrying the label
+	// "clawflow") or "ranked" (only issues in the rank file or labeled).
+	Scope string `yaml:"scope,omitempty"`
+	// ParkAfter is how long an in-flight item may stay blocked before it
+	// stops counting toward max_in_flight (Go duration, default 45m).
+	ParkAfter string `yaml:"park_after,omitempty"`
 }
 
 // Settings holds global ClawFlow settings.
@@ -159,6 +186,9 @@ type Settings struct {
 	// being processed by all machines simultaneously — they must be
 	// explicitly bound first. Synced via Gist as a shared fleet policy.
 	RequireBinding bool `yaml:"require_binding,omitempty"`
+
+	// Queue tunes the unified cross-repo work queue.
+	Queue QueueSettings `yaml:"queue,omitempty"`
 
 	// Language, when set, overrides the language of all AI-generated output
 	// (operator comments, chat replies, Pilot verdicts, doc generation).

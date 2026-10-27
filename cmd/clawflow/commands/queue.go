@@ -3,87 +3,18 @@ package commands
 import (
 	"errors"
 	"fmt"
+	"os"
+	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
-// Queue actions reported by decideQueue.
-const (
-	queueActionPick    = "pick"
-	queueActionWait    = "wait"
-	queueActionBlocked = "blocked"
-)
-
-// queueInput is everything decideQueue needs, expressed as plain data and
-// callbacks so the decision is unit-testable with fakes.
-type queueInput struct {
-	Items []vcs.Issue // direct sub-issues of the queue issue, in provider order
-	// Locked reports whether the item holds a live local execution lock.
-	Locked func(number int) bool
-	// OpenPRs lists open PRs. It is only called when an open item carries
-	// agent-implemented, so repos without delivered work cost no extra request.
-	OpenPRs func() ([]vcs.PR, error)
-	// Eligible reports whether implement would be dispatched for the item right
-	// now. A non-empty reason explains why not.
-	Eligible func(number int) (ok bool, reason string)
-}
-
-// queueDecision is the outcome of one queue evaluation.
-type queueDecision struct {
-	Action string // queueActionPick | queueActionWait | queueActionBlocked
-	Issue  int    // the item the decision is about; 0 when the queue is empty
-	Reason string
-}
-
-// decideQueue picks the single queue item that may be dispatched for
-// implement. At most one item is in flight: while any open item is locked or
-// delivered (agent-implemented with an open PR closing it), nothing else is
-// dispatched. Otherwise only the head (first open item) is considered; if it
-// is not eligible the queue is blocked rather than skipping ahead, so the
-// maintainer's ordering stays authoritative.
-//
-// It fails closed: an unreadable PR list yields a blocked decision.
-func decideQueue(in queueInput) queueDecision {
-	var open []vcs.Issue
-	for _, it := range in.Items {
-		if it.State == "open" {
-			open = append(open, it)
-		}
-	}
-	if len(open) == 0 {
-		return queueDecision{Action: queueActionWait, Reason: "queue_empty"}
-	}
-
-	var prs []vcs.PR
-	var prsLoaded bool
-	for _, it := range open {
-		if in.Locked != nil && in.Locked(it.Number) {
-			return queueDecision{Action: queueActionWait, Issue: it.Number, Reason: "in_flight_locked"}
-		}
-		if !hasLabel(it.Labels, "agent-implemented") {
-			continue
-		}
-		if !prsLoaded {
-			var err error
-			prs, err = in.OpenPRs()
-			if err != nil {
-				return queueDecision{Action: queueActionBlocked, Issue: it.Number, Reason: "open_prs_unreadable: " + err.Error()}
-			}
-			prsLoaded = true
-		}
-		for _, pr := range prs {
-			if vcs.PRReferencesIssue(pr, it.Number) {
-				return queueDecision{Action: queueActionWait, Issue: it.Number, Reason: fmt.Sprintf("in_flight_open_pr #%d", pr.Number)}
-			}
-		}
-	}
-
-	head := open[0]
-	if ok, reason := in.Eligible(head.Number); !ok {
-		return queueDecision{Action: queueActionBlocked, Issue: head.Number, Reason: reason}
-	}
-	return queueDecision{Action: queueActionPick, Issue: head.Number, Reason: "head_eligible"}
-}
+// The unified cross-repo queue lives in internal/queue (pure policy) and
+// queue_unified.go (the per-pass wiring). This file keeps the legacy
+// queue_issue sub-issue reader, now used only for the one-time import.
 
 func hasLabel(labels []string, want string) bool {
 	for _, l := range labels {
@@ -113,33 +44,101 @@ func readQueueItems(client queueSubIssueLister, repo string, queueIssue int) ([]
 	return items, nil
 }
 
-// applyImplementQueue removes every implement job that the repository's work
-// queue does not allow this pass and logs the decision. Jobs of other
-// operators are returned untouched. It is the single call site of the queue
-// policy in the scan. A non-nil itemsErr fails closed: no implement job
-// survives.
-func applyImplementQueue(repo string, queueIssue int, jobs []*runJob, in queueInput, itemsErr error) []*runJob {
-	allow := 0
-	if itemsErr != nil {
-		runLog.Warn("run/queue_blocked", "repo", repo, "queue", queueIssue, "reason", "sub_issues_unreadable", "err", itemsErr.Error())
-	} else {
-		d := decideQueue(in)
-		switch d.Action {
-		case queueActionPick:
-			allow = d.Issue
-			runLog.Info("run/queue_pick", "repo", repo, "queue", queueIssue, "issue", d.Issue, "reason", d.Reason)
-		case queueActionWait:
-			runLog.Info("run/queue_wait", "repo", repo, "queue", queueIssue, "issue", d.Issue, "reason", d.Reason)
+// importQueueIssue appends the open sub-issues of a legacy queue issue to the
+// global rank file in their current order, skipping keys already ranked. It
+// returns the keys that were added.
+func importQueueIssue(client queueSubIssueLister, repo string, queueIssue int) ([]queue.Key, error) {
+	items, err := readQueueItems(client, repo, queueIssue)
+	if err != nil {
+		return nil, err
+	}
+	var added []queue.Key
+	_, err = queue.UpdateRank(func(order []queue.Key) ([]queue.Key, error) {
+		have := queue.Positions(order)
+		added = added[:0]
+		for _, it := range items {
+			if it.State != "open" {
+				continue
+			}
+			k := queue.Key{Repo: repo, Number: it.Number}
+			if _, dup := have[k]; dup {
+				continue
+			}
+			have[k] = len(order)
+			order = append(order, k)
+			added = append(added, k)
+		}
+		return order, nil
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return added, nil
+}
+
+// migrateQueueIssue performs the one-time import of a repo's legacy
+// queue_issue into the rank file, makes sure the repo is scoped "ranked" (so
+// work that was never listed stays unpicked) and emits the one-time
+// deprecation notice. scopeExplicit is true when the repo config already has
+// a queue_scope; otherwise setRankedScope persists queue_scope: ranked. It
+// returns false when a step failed; the caller must then hold back implement
+// for this pass (fail closed) and the step is retried next pass. The state is
+// updated in place; the caller persists it.
+func migrateQueueIssue(client queueSubIssueLister, repo string, queueIssue int, scopeExplicit bool, setRankedScope func() error, st *queue.RepoState) bool {
+	if queueIssue <= 0 {
+		return true
+	}
+	if !st.Imported {
+		added, err := importQueueIssue(client, repo, queueIssue)
+		switch {
+		case err == nil:
+		case errors.Is(err, vcs.ErrNotSupported):
+			// Platform without sub-issues: nothing to preserve.
+			runLog.Warn("queue/import", "repo", repo, "queue", queueIssue, "err", err.Error(), "result", "unsupported")
 		default:
-			runLog.Info("run/queue_blocked", "repo", repo, "queue", queueIssue, "issue", d.Issue, "reason", d.Reason)
+			runLog.Warn("queue/import", "repo", repo, "queue", queueIssue, "err", err.Error(), "result", "retry")
+			return false
 		}
+		st.Imported = true
+		runLog.Info("queue/import", "repo", repo, "queue", queueIssue, "added", len(added))
 	}
-	kept := make([]*runJob, 0, len(jobs))
-	for _, j := range jobs {
-		if j.op != nil && j.op.Name == "implement" && (j.sub == nil || j.sub.Number != allow) {
-			continue
+	if !scopeExplicit {
+		if err := setRankedScope(); err != nil {
+			runLog.Warn("queue/scope", "repo", repo, "err", err.Error(), "result", "retry")
+			return false
 		}
-		kept = append(kept, j)
+		runLog.Info("queue/scope", "repo", repo, "scope", queue.ScopeRanked, "reason", "queue_issue_migration")
 	}
-	return kept
+	if !st.DeprecationShown {
+		st.DeprecationShown = true
+		msg := fmt.Sprintf("queue_issue (#%d) is deprecated and ignored for dispatch; its sub-issues were imported into the unified queue and queue_scope is ranked (clawflow queue list). You may close the queue issue.", queueIssue)
+		fmt.Fprintf(os.Stderr, "[%s] ⚠ %s\n", repo, msg)
+		runLog.Warn("queue/deprecated", "repo", repo, "queue", queueIssue, "detail", msg)
+	}
+	return true
+}
+
+// persistRepoQueueScope writes queue_scope for one repo through the normal
+// config save path under the config sync lock, never overriding a value that
+// is already set.
+func persistRepoQueueScope(repo, scope string) error {
+	var err error
+	if !snapshot.WithConfigSyncLock(time.Minute, func() {
+		var cfg *config.Config
+		if cfg, err = config.Load(); err != nil {
+			return
+		}
+		if _, ok := cfg.Repos[repo]; !ok {
+			err = fmt.Errorf("repo %q not in config", repo)
+			return
+		}
+		if cfg.Repos[repo].QueueScope != "" {
+			return
+		}
+		config.TouchRepo(cfg, repo, func(r config.Repo) config.Repo { r.QueueScope = scope; return r })
+		err = cfg.Save()
+	}) {
+		return errors.New("config sync lock busy")
+	}
+	return err
 }

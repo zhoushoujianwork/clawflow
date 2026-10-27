@@ -31,6 +31,7 @@ import (
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -527,6 +528,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
+	depOpen := queueDepResolver(cfg)
 	for fullName, repoCfg := range allRepos {
 		// Skip repos bound to a different machine. A repo with no BoundMachine
 		// (empty string) is processed by every machine — the common case.
@@ -557,7 +559,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		if fullName == hiddenRepo {
 			issueSink = new([]snapshot.IssueEntry)
 		}
-		repoPending, repoJobs, err := scanRepoOnce(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, issueSink)
+		repoPending, repoJobs, err := scanRepoOnceQ(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, issueSink, queueRuntime{Settings: cfg.Settings.Queue, DepOpen: depOpen})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
 		}
@@ -852,6 +854,11 @@ func isStaleLeafJob(client subIssueLister, op *operator.Operator, repo string, i
 // labeled by a crashed run from an older binary cleanly re-enters the
 // pipeline without manual intervention.
 func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, repoCfg config.Repo, executeHere bool, onlyIssue int, allIssues *[]snapshot.IssueEntry) ([]snapshot.PendingEntry, []*runJob, error) {
+	return scanRepoOnceQ(ctx, reg, fullName, repoCfg, executeHere, onlyIssue, allIssues, queueRuntime{})
+}
+
+// scanRepoOnceQ is scanRepoOnce with the pass-wide queue settings.
+func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string, repoCfg config.Repo, executeHere bool, onlyIssue int, allIssues *[]snapshot.IssueEntry, qrt queueRuntime) ([]snapshot.PendingEntry, []*runJob, error) {
 	scanStart := time.Now()
 	runLog.Info("run/scan", "repo", fullName, "phase", "start")
 	client, err := newVCSClient(repoCfg)
@@ -898,6 +905,9 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	// in the list. Two levels deep covers the current tracking→sub→sub-sub
 	// pattern; deeper nesting is uncommon and can be added later.
 	seen := make(map[int]bool, len(issues))
+	// hasChildren records issues known to have sub-issues (parents); the
+	// work queue never schedules them.
+	hasChildren := map[int]bool{}
 	for _, iss := range issues {
 		seen[iss.Number] = true
 	}
@@ -915,6 +925,9 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		if subErr != nil {
 			debugf("[%s] list sub-issues of #%d: %v (skipping)", fullName, iss.Number, subErr)
 			continue
+		}
+		if len(subs) > 0 {
+			hasChildren[iss.Number] = true
 		}
 		for _, sub := range subs {
 			if seen[sub.Number] || sub.State != "open" {
@@ -937,7 +950,7 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
 	// implementState records, per scanned issue, why implement would not be
-	// dispatched ("" = eligible). Only consulted by the work queue.
+	// dispatched ("" = eligible). Consulted by the work queue.
 	implementState := map[int]string{}
 	capturedAt := time.Now().UTC()
 	targetMatch := "" // operator matched for the --issue target, if any
@@ -1076,35 +1089,50 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		}
 	}
 
-	// Work queue: when the repo sets queue_issue, only the head of the queue
-	// issue's open sub-issues may start implement. Targeted runs are explicit
-	// authorization and bypass it.
-	if executeHere && onlyIssue == 0 && repoCfg.QueueIssue > 0 {
-		items, itemsErr := readQueueItems(client, fullName, repoCfg.QueueIssue)
-		jobs = applyImplementQueue(fullName, repoCfg.QueueIssue, jobs, queueInput{
-			Items:   items,
-			Locked:  func(n int) bool { return snapshot.IsLocked(fullName, n) },
-			OpenPRs: func() ([]vcs.PR, error) { return client.ListOpenPRs(fullName) },
-			Eligible: func(n int) (bool, string) {
-				reason, scanned := implementState[n]
-				if !scanned {
-					return false, "not_in_open_issue_scan"
-				}
-				if reason != "" {
-					return false, reason
-				}
-				// The list API may not report the sub-issue count; confirm the
-				// head is a leaf directly and fail closed if that cannot be read.
-				subs, err := client.ListSubIssues(fullName, n)
-				if err != nil {
-					return false, "leaf_check_failed: " + err.Error()
-				}
-				if len(subs) > 0 {
-					return false, "not_a_leaf"
-				}
-				return true, ""
+	// Unified work queue: order this repo's implement candidates with the
+	// shared global model and keep only the picked ones. Targeted runs are
+	// explicit authorization and bypass it.
+	if executeHere && onlyIssue == 0 {
+		now := qrt.now()
+		state, stateErr := queue.LoadState(fullName)
+		if stateErr != nil {
+			runLog.Warn("queue/state_unreadable", "repo", fullName, "err", stateErr.Error())
+		}
+		migrated := migrateQueueIssue(client, fullName, repoCfg.QueueIssue, repoCfg.QueueScope != "",
+			func() error { return persistRepoQueueScope(fullName, queue.ScopeRanked) }, &state)
+		if migrated && repoCfg.QueueIssue > 0 && repoCfg.QueueScope == "" {
+			repoCfg.QueueScope = queue.ScopeRanked // just persisted
+		}
+		rank, rankErr := queue.LoadRank()
+		if rankErr != nil {
+			runLog.Warn("queue/rank_unreadable", "repo", fullName, "err", rankErr.Error())
+		}
+		maxInFlight, parkAfter, scope := queueRepoParams(repoCfg, qrt.Settings)
+		implementJobs := map[int]bool{}
+		for _, j := range jobs {
+			if j.op != nil && j.op.Name == "implement" && j.sub != nil {
+				implementJobs[j.sub.Number] = true
+			}
+		}
+		plan := planRepoQueue(repoQueueInput{
+			Repo:           fullName,
+			ImplementJobs:  implementJobs,
+			Issues:         issues,
+			HasChildren:    hasChildren,
+			ImplementState: implementState,
+			Locked:         func(n int) bool { return snapshot.IsLocked(fullName, n) },
+			OpenPRs:        func() ([]vcs.PR, error) { return client.ListOpenPRs(fullName) },
+			FlightBlocked: func(_ vcs.Issue, pr *vcs.PR) string {
+				return flightBlockedReason(ctx, client, fullName, repoCfg, pr, now)
 			},
-		}, itemsErr)
+			Scope: scope, MaxInFlight: maxInFlight, ParkAfter: parkAfter,
+			Rank: rank, DepOpen: qrt.DepOpen, State: state, Now: now,
+		})
+		if !migrated {
+			plan.Err = "queue_issue_import_pending"
+		}
+		jobs = applyUnifiedQueue(fullName, jobs, plan)
+		pruneRepoRank(fullName, issues)
 	}
 
 	if executeHere {

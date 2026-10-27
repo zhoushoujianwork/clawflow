@@ -7,142 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
-
-func qItem(n int, labels ...string) vcs.Issue {
-	return vcs.Issue{Number: n, State: "open", Labels: labels}
-}
-
-func qInput(items []vcs.Issue, locked map[int]bool, prs []vcs.PR, prErr error, ineligible map[int]string) queueInput {
-	return queueInput{
-		Items:  items,
-		Locked: func(n int) bool { return locked[n] },
-		OpenPRs: func() ([]vcs.PR, error) {
-			return prs, prErr
-		},
-		Eligible: func(n int) (bool, string) {
-			if r, bad := ineligible[n]; bad {
-				return false, r
-			}
-			return true, ""
-		},
-	}
-}
-
-func TestDecideQueue(t *testing.T) {
-	closing := func(n, pr int) vcs.PR {
-		return vcs.PR{Number: pr, State: "open", HeadBranch: "other", Body: fmt.Sprintf("Fixes #%d", n)}
-	}
-	cases := []struct {
-		name       string
-		in         queueInput
-		wantAction string
-		wantIssue  int
-		wantReason string
-	}{
-		{
-			name:       "first item only, order respected",
-			in:         qInput([]vcs.Issue{qItem(30), qItem(10), qItem(20)}, nil, nil, nil, nil),
-			wantAction: queueActionPick, wantIssue: 30,
-		},
-		{
-			name:       "closed items are not queue items",
-			in:         qInput([]vcs.Issue{{Number: 5, State: "closed"}, qItem(7)}, nil, nil, nil, nil),
-			wantAction: queueActionPick, wantIssue: 7,
-		},
-		{
-			name:       "empty queue waits",
-			in:         qInput(nil, nil, nil, nil, nil),
-			wantAction: queueActionWait, wantReason: "queue_empty",
-		},
-		{
-			name:       "locked head waits",
-			in:         qInput([]vcs.Issue{qItem(1), qItem(2)}, map[int]bool{1: true}, nil, nil, nil),
-			wantAction: queueActionWait, wantIssue: 1, wantReason: "in_flight_locked",
-		},
-		{
-			name:       "locked later item blocks the head",
-			in:         qInput([]vcs.Issue{qItem(1), qItem(2)}, map[int]bool{2: true}, nil, nil, nil),
-			wantAction: queueActionWait, wantIssue: 2, wantReason: "in_flight_locked",
-		},
-		{
-			name:       "implemented item with open closing PR waits",
-			in:         qInput([]vcs.Issue{qItem(1, "agent-implemented"), qItem(2)}, nil, []vcs.PR{closing(1, 90)}, nil, nil),
-			wantAction: queueActionWait, wantIssue: 1, wantReason: "in_flight_open_pr #90",
-		},
-		{
-			name:       "implemented item without open PR is not in flight, head excluded blocks",
-			in:         qInput([]vcs.Issue{qItem(1, "agent-implemented"), qItem(2)}, nil, []vcs.PR{closing(5, 91)}, nil, map[int]string{1: `excluded label "agent-implemented" present`}),
-			wantAction: queueActionBlocked, wantIssue: 1, wantReason: `excluded label "agent-implemented" present`,
-		},
-		{
-			name:       "excluded head blocks and does not skip ahead",
-			in:         qInput([]vcs.Issue{qItem(1, "agent-failed"), qItem(2)}, nil, nil, nil, map[int]string{1: `excluded label "agent-failed" present`}),
-			wantAction: queueActionBlocked, wantIssue: 1, wantReason: `excluded label "agent-failed" present`,
-		},
-		{
-			name:       "parent head blocks",
-			in:         qInput([]vcs.Issue{qItem(1), qItem(2)}, nil, nil, nil, map[int]string{1: "not_a_leaf"}),
-			wantAction: queueActionBlocked, wantIssue: 1, wantReason: "not_a_leaf",
-		},
-		{
-			name:       "unreadable PR list fails closed",
-			in:         qInput([]vcs.Issue{qItem(1, "agent-implemented"), qItem(2)}, nil, nil, errors.New("boom"), nil),
-			wantAction: queueActionBlocked, wantIssue: 1,
-		},
-		{
-			name:       "PR list is not read without delivered items",
-			in:         queueInput{Items: []vcs.Issue{qItem(1)}, OpenPRs: func() ([]vcs.PR, error) { t.Fatal("OpenPRs must not be called"); return nil, nil }, Eligible: func(int) (bool, string) { return true, "" }},
-			wantAction: queueActionPick, wantIssue: 1,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			d := decideQueue(tc.in)
-			if d.Action != tc.wantAction || d.Issue != tc.wantIssue {
-				t.Fatalf("decision = %+v, want action=%s issue=%d", d, tc.wantAction, tc.wantIssue)
-			}
-			if tc.wantReason != "" && !strings.HasPrefix(d.Reason, tc.wantReason) {
-				t.Fatalf("reason = %q, want prefix %q", d.Reason, tc.wantReason)
-			}
-		})
-	}
-}
-
-func TestApplyImplementQueueKeepsOtherOperatorsAndFailsClosed(t *testing.T) {
-	logs := withRunLog(t)
-	impl := &operator.Operator{Name: "implement"}
-	reply := &operator.Operator{Name: "reply-comment"}
-	mk := func() []*runJob {
-		return []*runJob{
-			{op: impl, sub: &operator.Subject{Number: 1}},
-			{op: impl, sub: &operator.Subject{Number: 2}},
-			{op: impl, sub: &operator.Subject{Number: 3}},
-			{op: reply, sub: &operator.Subject{Number: 3}},
-		}
-	}
-	got := applyImplementQueue("o/r", 100, mk(), qInput([]vcs.Issue{qItem(2), qItem(1)}, nil, nil, nil, nil), nil)
-	if len(got) != 2 || got[0].sub.Number != 2 || got[0].op != impl || got[1].op != reply {
-		t.Fatalf("kept = %+v", got)
-	}
-	got = applyImplementQueue("o/r", 100, mk(), queueInput{}, errors.New("HTTP 502"))
-	if len(got) != 1 || got[0].op != reply {
-		t.Fatalf("unreadable queue must drop every implement job, kept %d", len(got))
-	}
-	out := logs()
-	for _, want := range []string{"run/queue_pick", "run/queue_blocked", "sub_issues_unreadable"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("log missing %q:\n%s", want, out)
-		}
-	}
-}
 
 func TestValidateQueueIssue(t *testing.T) {
 	if err := validateQueueIssue(config.Repo{Platform: "github"}, 12); err != nil {
@@ -267,98 +142,509 @@ func runQueueOnce(t *testing.T, onlyIssue int) []int {
 	return dispatched()
 }
 
-func TestRunOnceQueueDispatchesOnlyHead(t *testing.T) {
+func plannerIssue(n int, created string, labels ...string) vcs.Issue {
+	return vcs.Issue{Number: n, State: "open", Labels: labels, CreatedAt: created, Title: fmt.Sprintf("Issue %d", n)}
+}
+
+func plannerInput(repo string, issues ...vcs.Issue) repoQueueInput {
+	state := map[int]string{}
+	jobs := map[int]bool{}
+	for _, is := range issues {
+		state[is.Number] = ""
+		jobs[is.Number] = true
+	}
+	return repoQueueInput{
+		Repo: repo, Issues: issues, ImplementState: state, ImplementJobs: jobs,
+		Locked:      func(int) bool { return false },
+		OpenPRs:     func() ([]vcs.PR, error) { return nil, nil },
+		Scope:       "all",
+		MaxInFlight: 2,
+		ParkAfter:   45 * time.Minute,
+		Now:         time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
+		DepOpen:     func(queue.Key) bool { return true },
+	}
+}
+
+func pickedNumbers(p repoQueuePlan) []int {
+	var out []int
+	for _, e := range p.Result.Entries {
+		if e.Pick {
+			out = append(out, e.Key.Number)
+		}
+	}
+	return out
+}
+
+func TestPlanRepoQueueOrderAndCaps(t *testing.T) {
+	in := plannerInput("o/r",
+		plannerIssue(1, "2026-01-01T00:00:00Z"),
+		plannerIssue(2, "2026-01-02T00:00:00Z", "P1"),
+		plannerIssue(3, "2026-01-03T00:00:00Z"),
+	)
+	if got := pickedNumbers(planRepoQueue(in)); len(got) != 2 || got[0] != 2 || got[1] != 1 {
+		t.Fatalf("picked = %v, want [2 1]", got)
+	}
+	in.Rank = []queue.Key{{Repo: "o/r", Number: 3}}
+	if got := pickedNumbers(planRepoQueue(in)); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("ranked picked = %v, want [2 3]", got)
+	}
+	in.MaxInFlight = 1
+	if got := pickedNumbers(planRepoQueue(in)); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("cap 1 picked = %v", got)
+	}
+}
+
+func TestPlanRepoQueueBlockedDoesNotStall(t *testing.T) {
+	in := plannerInput("o/r", plannerIssue(1, "2026-01-01T00:00:00Z", "agent-failed"), plannerIssue(2, "2026-01-02T00:00:00Z"))
+	in.ImplementState[1] = `excluded label "agent-failed" present`
+	delete(in.ImplementJobs, 1)
+	p := planRepoQueue(in)
+	if got := pickedNumbers(p); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("picked = %v", got)
+	}
+	if p.Result.Entries[0].Label() != "blocked:label_agent-failed" {
+		t.Fatalf("state = %s", p.Result.Entries[0].Label())
+	}
+}
+
+func TestPlanRepoQueueInFlightLockAndPR(t *testing.T) {
+	in := plannerInput("o/r",
+		plannerIssue(1, "2026-01-01T00:00:00Z"),
+		plannerIssue(2, "2026-01-02T00:00:00Z", "agent-implemented"),
+		plannerIssue(3, "2026-01-03T00:00:00Z"),
+		plannerIssue(4, "2026-01-04T00:00:00Z", "agent-implemented"), // no open PR: delivered
+	)
+	in.Locked = func(n int) bool { return n == 1 }
+	in.OpenPRs = func() ([]vcs.PR, error) {
+		return []vcs.PR{{Number: 90, State: "open", HeadBranch: "x", Body: "Fixes #2"}}, nil
+	}
+	p := planRepoQueue(in)
+	if p.Result.InFlight != 2 || len(pickedNumbers(p)) != 0 {
+		t.Fatalf("inflight=%d picked=%v", p.Result.InFlight, pickedNumbers(p))
+	}
+	for _, e := range p.Result.Entries {
+		if e.Key.Number == 4 {
+			t.Fatal("delivered issue must not be a candidate")
+		}
+	}
+}
+
+func TestPlanRepoQueueFailsClosedOnUnreadablePRs(t *testing.T) {
+	logs := withRunLog(t)
+	in := plannerInput("o/r", plannerIssue(1, "2026-01-01T00:00:00Z", "agent-implemented"), plannerIssue(2, "2026-01-02T00:00:00Z"))
+	in.OpenPRs = func() ([]vcs.PR, error) { return nil, errors.New("HTTP 502") }
+	p := planRepoQueue(in)
+	if !strings.Contains(p.Err, "open_prs_unreadable") {
+		t.Fatalf("err = %q", p.Err)
+	}
+	jobs := []*runJob{{op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 2}}, {op: &operator.Operator{Name: "track-progress"}, sub: &operator.Subject{Number: 9}}}
+	kept := applyUnifiedQueue("o/r", jobs, p)
+	if len(kept) != 1 || kept[0].op.Name != "track-progress" {
+		t.Fatalf("kept = %+v", kept)
+	}
+	if !strings.Contains(logs(), "open_prs_unreadable") {
+		t.Fatal("fail-closed reason must be logged")
+	}
+}
+
+func TestPlanRepoQueueScopeLabeledAndParents(t *testing.T) {
+	in := plannerInput("o/r", plannerIssue(1, "2026-01-01T00:00:00Z"), plannerIssue(2, "2026-01-02T00:00:00Z", "clawflow"), plannerIssue(3, "2026-01-03T00:00:00Z", "clawflow"))
+	in.Scope = "labeled"
+	in.HasChildren = map[int]bool{3: true}
+	if got := pickedNumbers(planRepoQueue(in)); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("picked = %v, want [2]", got)
+	}
+}
+
+func TestPlanRepoQueueDependencies(t *testing.T) {
+	a := plannerIssue(1, "2026-01-01T00:00:00Z")
+	a.Body = "Depends on: #2, other/repo#7"
+	in := plannerInput("o/r", a, plannerIssue(2, "2026-01-02T00:00:00Z"), plannerIssue(3, "2026-01-03T00:00:00Z"))
+	in.DepOpen = func(k queue.Key) bool { return k.Repo == "other/repo" && k.Number == 7 }
+	p := planRepoQueue(in)
+	if got := pickedNumbers(p); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("picked = %v", got)
+	}
+	if lbl := p.Result.Entries[0].Label(); lbl != "waiting:dependency" {
+		t.Fatalf("dep state = %s", lbl)
+	}
+	// #2 closed (absent from the open scan) and the cross-repo dep closed.
+	in = plannerInput("o/r", a, plannerIssue(3, "2026-01-03T00:00:00Z"))
+	in.DepOpen = func(queue.Key) bool { return false }
+	if got := pickedNumbers(planRepoQueue(in)); len(got) != 2 || got[0] != 1 {
+		t.Fatalf("closed deps must release: %v", got)
+	}
+}
+
+func TestPlanRepoQueueGitLabRepoParticipates(t *testing.T) {
+	in := plannerInput("group/sub/project", plannerIssue(5, "2026-01-01T00:00:00Z", "P0"), plannerIssue(6, "2026-01-02T00:00:00Z"))
+	p := planRepoQueue(in)
+	if got := pickedNumbers(p); len(got) != 2 || got[0] != 5 {
+		t.Fatalf("picked = %v", got)
+	}
+	if p.Result.Entries[0].Key.String() != "group/sub/project#5" {
+		t.Fatalf("key = %s", p.Result.Entries[0].Key)
+	}
+}
+
+func TestPlanRepoQueueParkAndUnparkLifecycle(t *testing.T) {
+	logs := withRunLog(t)
+	in := plannerInput("o/r",
+		plannerIssue(1, "2026-01-01T00:00:00Z", "agent-implemented"),
+		plannerIssue(2, "2026-01-02T00:00:00Z"),
+		plannerIssue(3, "2026-01-03T00:00:00Z"),
+	)
+	in.MaxInFlight = 1
+	in.OpenPRs = func() ([]vcs.PR, error) {
+		return []vcs.PR{{Number: 90, State: "open", HeadBranch: "x", Body: "Fixes #1"}}, nil
+	}
+	blocked := "ci_failed"
+	in.FlightBlocked = func(vcs.Issue, *vcs.PR) string { return blocked }
+
+	p := planRepoQueue(in)
+	if len(pickedNumbers(p)) != 0 {
+		t.Fatalf("fresh block must hold the slot: %v", pickedNumbers(p))
+	}
+	applyUnifiedQueue("o/r", nil, p)
+
+	in.State, _ = queue.LoadState("o/r")
+	in.Now = in.Now.Add(46 * time.Minute)
+	p = planRepoQueue(in)
+	if got := pickedNumbers(p); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("parked item must free its slot: %v", got)
+	}
+	applyUnifiedQueue("o/r", nil, p)
+
+	blocked = ""
+	in.State, _ = queue.LoadState("o/r")
+	p = planRepoQueue(in)
+	if len(pickedNumbers(p)) != 0 || p.Result.Entries[0].State != queue.StateInFlight {
+		t.Fatalf("unparked item holds its slot again: %v %v", pickedNumbers(p), p.Result.Entries[0])
+	}
+	applyUnifiedQueue("o/r", nil, p)
+	out := logs()
+	for _, want := range []string{"queue/park", "queue/unpark"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in log:\n%s", want, out)
+		}
+	}
+}
+
+func TestPlanRepoQueueFormatWarningsOnce(t *testing.T) {
+	logs := withRunLog(t)
+	bad := plannerIssue(1, "2026-01-01T00:00:00Z", "p1")
+	bad.Body = "Depends on: nonsense"
+	in := plannerInput("o/r", bad)
+	for i := 0; i < 2; i++ {
+		p := planRepoQueue(in)
+		applyUnifiedQueue("o/r", nil, p)
+		in.State, _ = queue.LoadState("o/r")
+	}
+	if n := strings.Count(logs(), "queue/format_warning"); n != 2 {
+		t.Fatalf("want 2 warnings (one per reason, once each), got %d", n)
+	}
+}
+
+func TestRunOnceUnifiedQueueWithoutQueueIssue(t *testing.T) {
+	logs := withRunLog(t)
+	queueConfig(t, 0)
+	queueVCS(t,
+		[]map[string]any{targetedIssue(9), targetedIssue(7), targetedIssue(5, "P0"), targetedIssue(3, "agent-failed")},
+		nil, nil, nil)
+	got := runQueueOnce(t, 0)
+	if len(got) != 2 {
+		t.Fatalf("dispatched = %v, want 2 (default max_in_flight)", got)
+	}
+	if !strings.Contains(logs(), "queue/pick") {
+		t.Fatal("missing queue/pick log")
+	}
+}
+
+func TestRepoSetMaxInFlight(t *testing.T) {
+	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{"o/gh": {Platform: "github"}}})
+	run := func(args ...string) error {
+		cmd := newRepoSetCmd()
+		cmd.SetArgs(args)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		return cmd.Execute()
+	}
+	if err := run("o/gh", "--max-in-flight", "0"); err == nil {
+		t.Fatal("0 must be rejected")
+	}
+	if err := run("o/gh", "--max-in-flight", "3"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := config.Load(); cfg.Repos["o/gh"].MaxInFlight != 3 {
+		t.Fatalf("max_in_flight = %d", cfg.Repos["o/gh"].MaxInFlight)
+	}
+}
+
+func TestQueueRepoParamsDefaults(t *testing.T) {
+	m, p, s := queueRepoParams(config.Repo{}, config.QueueSettings{})
+	if m != 2 || p != 45*time.Minute || s != "all" {
+		t.Fatalf("defaults = %d %s %s", m, p, s)
+	}
+	m, p, s = queueRepoParams(config.Repo{MaxInFlight: 5}, config.QueueSettings{Scope: "labeled", ParkAfter: "10m"})
+	if m != 5 || p != 10*time.Minute || s != "labeled" {
+		t.Fatalf("custom = %d %s %s", m, p, s)
+	}
+	if _, p, _ = queueRepoParams(config.Repo{}, config.QueueSettings{ParkAfter: "junk"}); p != 45*time.Minute {
+		t.Fatalf("bad park_after must fall back, got %s", p)
+	}
+}
+
+type fakeQueueLister struct {
+	subs  []vcs.Issue
+	err   error
+	calls int
+}
+
+func (f *fakeQueueLister) ListSubIssues(string, int) ([]vcs.Issue, error) {
+	f.calls++
+	return f.subs, f.err
+}
+
+func noScopeWrite() error { return nil }
+
+func TestMigrateQueueIssueImportsOnceInOrder(t *testing.T) {
+	logs := withRunLog(t)
+	if err := queue.SaveState(queue.RepoState{Repo: "o/r"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.UpdateRank(func([]queue.Key) ([]queue.Key, error) {
+		return []queue.Key{{Repo: "o/other", Number: 4}, {Repo: "o/r", Number: 7}}, nil
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	lister := &fakeQueueLister{subs: []vcs.Issue{{Number: 9, State: "open"}, {Number: 7, State: "open"}, {Number: 8, State: "closed"}, {Number: 5, State: "open"}}}
+	st, _ := queue.LoadState("o/r")
+	if !migrateQueueIssue(lister, "o/r", 100, false, noScopeWrite, &st) {
+		t.Fatal("migration should succeed")
+	}
+	order, _ := queue.LoadRank()
+	want := []string{"o/other#4", "o/r#7", "o/r#9", "o/r#5"}
+	var got []string
+	for _, k := range order {
+		got = append(got, k.String())
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("rank = %v, want %v", got, want)
+	}
+	if !st.Imported || !st.DeprecationShown {
+		t.Fatalf("state = %+v", st)
+	}
+	// Second pass: no import, no second notice.
+	if !migrateQueueIssue(lister, "o/r", 100, false, noScopeWrite, &st) || lister.calls != 1 {
+		t.Fatalf("import must happen once, calls=%d", lister.calls)
+	}
+	out := logs()
+	if strings.Count(out, "queue/import") != 1 || strings.Count(out, "queue/deprecated") != 1 {
+		t.Fatalf("log:\n%s", out)
+	}
+	// No queue_issue: nothing to do.
+	if !migrateQueueIssue(lister, "o/r", 0, false, noScopeWrite, &queue.RepoState{}) || lister.calls != 1 {
+		t.Fatal("repos without queue_issue are untouched")
+	}
+}
+
+func TestMigrateQueueIssueTransientFailureRetries(t *testing.T) {
 	withRunLog(t)
+	lister := &fakeQueueLister{err: errors.New("HTTP 502")}
+	st := queue.RepoState{Repo: "o/r"}
+	if migrateQueueIssue(lister, "o/r", 100, false, noScopeWrite, &st) || st.Imported {
+		t.Fatal("transient failure must not mark the import done")
+	}
+	lister.err = vcs.ErrNotSupported
+	if !migrateQueueIssue(lister, "o/r", 100, false, noScopeWrite, &st) || !st.Imported {
+		t.Fatal("unsupported platform has nothing to preserve")
+	}
+}
+
+func TestRunOnceQueueIssueIgnoredAfterImport(t *testing.T) {
+	logs := withRunLog(t)
 	queueConfig(t, 100)
-	// 7 is a queue item listed second by GitHub order but lower number; 9 is
-	// the head. 5 is not a queue item.
 	queueVCS(t,
 		[]map[string]any{queueParent(100, 2), targetedIssue(9), targetedIssue(7), targetedIssue(5)},
 		map[int][]int{100: {9, 7}}, nil, nil)
+	got := runQueueOnce(t, 0)
+	// Ranked 9,7 first; max_in_flight 2 -> only those two run, 5 waits.
+	if len(got) != 2 || got[0] != 7 || got[1] != 9 {
+		t.Fatalf("dispatched = %v, want [7 9]", got)
+	}
+	order, _ := queue.LoadRank()
+	if len(order) != 2 || order[0].Number != 9 || order[1].Number != 7 {
+		t.Fatalf("rank = %v", order)
+	}
+	if out := logs(); !strings.Contains(out, "queue/import") || !strings.Contains(out, "queue/deprecated") {
+		t.Fatalf("missing import log:\n%s", out)
+	}
+}
+
+func TestMigrateQueueIssueSetsRankedScopeOrFailsClosed(t *testing.T) {
+	logs := withRunLog(t)
+	lister := &fakeQueueLister{subs: []vcs.Issue{{Number: 1, State: "open"}}}
+	writes := 0
+	st := queue.RepoState{Repo: "o/r"}
+	failing := func() error { writes++; return errors.New("disk full") }
+	if migrateQueueIssue(lister, "o/r", 100, false, failing, &st) {
+		t.Fatal("a failed scope write must hold back implement")
+	}
+	if !st.Imported || st.DeprecationShown {
+		t.Fatalf("import is kept, notice waits for success: %+v", st)
+	}
+	ok := func() error { writes++; return nil }
+	if !migrateQueueIssue(lister, "o/r", 100, false, ok, &st) || writes != 2 || lister.calls != 1 {
+		t.Fatalf("retry: writes=%d calls=%d", writes, lister.calls)
+	}
+	// An explicit queue_scope is never overwritten.
+	writes = 0
+	if !migrateQueueIssue(lister, "o/r", 100, true, failing, &queue.RepoState{Repo: "o/r", Imported: true}) || writes != 0 {
+		t.Fatal("explicit scope must not be touched")
+	}
+	if !strings.Contains(logs(), "queue/scope") {
+		t.Fatal("scope change must be logged")
+	}
+}
+
+func TestPlanRepoQueueRankedScopeAndEnroll(t *testing.T) {
+	logs := withRunLog(t)
+	in := plannerInput("o/r",
+		plannerIssue(1, "2026-01-01T00:00:00Z"),             // unlisted
+		plannerIssue(2, "2026-01-02T00:00:00Z"),             // listed
+		plannerIssue(3, "2026-01-03T00:00:00Z", "clawflow"), // enrolled on sight
+	)
+	in.Scope = queue.ScopeRanked
+	in.MaxInFlight = 5
+	in.Rank = []queue.Key{{Repo: "o/r", Number: 2}}
+	p := planRepoQueue(in)
+	if got := pickedNumbers(p); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("picked = %v, want [2 3]", got)
+	}
+	if len(p.Enroll) != 1 || p.Enroll[0].Number != 3 {
+		t.Fatalf("enroll = %v", p.Enroll)
+	}
+	for _, e := range p.Result.Entries {
+		if e.Key.Number == 1 {
+			t.Fatal("unlisted issue must not be a candidate")
+		}
+	}
+	if kept := applyUnifiedQueue("o/r", nil, p); kept != nil && len(kept) != 0 {
+		t.Fatal("no jobs expected")
+	}
+	if order, _ := queue.LoadRank(); len(order) != 1 || order[0].Number != 3 {
+		t.Fatalf("rank = %v (rank file starts empty in this test)", order)
+	}
+	if !strings.Contains(logs(), "queue/enroll") {
+		t.Fatal("missing queue/enroll")
+	}
+	// Labeled scope ignores the rank.
+	in.Scope = queue.ScopeLabeled
+	if got := pickedNumbers(planRepoQueue(in)); len(got) != 1 || got[0] != 3 {
+		t.Fatalf("labeled picked = %v", got)
+	}
+}
+
+func TestEffectiveScopeFailsClosedForMigratedRepos(t *testing.T) {
+	cases := []struct {
+		repo, def string
+		had       bool
+		want      string
+		fell      bool
+	}{
+		{"", "", false, "all", false},
+		{"", "labeled", false, "labeled", false},
+		{"ranked", "labeled", false, "ranked", false},
+		{"bogus", "", true, "ranked", true},
+		{"bogus", "", false, "all", true},
+		{"", "bogus", true, "ranked", true},
+	}
+	for _, c := range cases {
+		got, fell := queue.EffectiveScope(c.repo, c.def, c.had)
+		if got != c.want || fell != c.fell {
+			t.Errorf("%+v = %s,%v", c, got, fell)
+		}
+	}
+}
+
+func TestRepoSetQueueScope(t *testing.T) {
+	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{"o/gh": {Platform: "github"}}})
+	run := func(args ...string) error {
+		cmd := newRepoSetCmd()
+		cmd.SetArgs(args)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		return cmd.Execute()
+	}
+	if err := run("o/gh", "--queue-scope", "weird"); err == nil {
+		t.Fatal("unknown scope must be rejected")
+	}
+	if err := run("o/gh", "--queue-scope", "ranked"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := config.Load(); cfg.Repos["o/gh"].QueueScope != "ranked" {
+		t.Fatalf("scope = %q", cfg.Repos["o/gh"].QueueScope)
+	}
+	if err := run("o/gh", "--queue-scope", ""); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := config.Load(); cfg.Repos["o/gh"].QueueScope != "" {
+		t.Fatal("empty must clear")
+	}
+}
+
+// End to end: a migrated repo becomes ranked; unlisted work is not dispatched,
+// listed work is, and a clawflow-labeled issue is enrolled and dispatched.
+func TestRunOnceMigratedRepoIsRanked(t *testing.T) {
+	logs := withRunLog(t)
+	queueConfig(t, 100)
+	queueVCS(t,
+		[]map[string]any{queueParent(100, 1), targetedIssue(9), targetedIssue(5), targetedIssue(4), targetedIssue(3, "clawflow")},
+		map[int][]int{100: {9}}, nil, nil)
+	got := runQueueOnce(t, 0)
+	if len(got) != 2 || got[0] != 3 || got[1] != 9 {
+		t.Fatalf("dispatched = %v, want [3 9] (5 and 4 are unlisted)", got)
+	}
+	cfg, _ := config.Load()
+	if cfg.Repos["o/r"].QueueScope != "ranked" {
+		t.Fatalf("queue_scope = %q, want ranked", cfg.Repos["o/r"].QueueScope)
+	}
+	order, _ := queue.LoadRank()
+	var keys []string
+	for _, k := range order {
+		keys = append(keys, k.String())
+	}
+	if strings.Join(keys, ",") != "o/r#9,o/r#3" {
+		t.Fatalf("rank = %v", keys)
+	}
+	if out := logs(); !strings.Contains(out, "queue/enroll") || !strings.Contains(out, "queue/scope") {
+		t.Fatalf("missing logs:\n%s", out)
+	}
+}
+
+func TestRunOnceMigrationHoldsBackWhenScopeWriteFails(t *testing.T) {
+	withRunLog(t)
+	queueConfig(t, 100)
+	queueVCS(t,
+		[]map[string]any{queueParent(100, 1), targetedIssue(9), targetedIssue(5)},
+		map[int][]int{100: {9}}, nil, nil)
+	// Read-only config file: loading works, saving the scope fails.
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".clawflow", "config", "config.yaml")
+	if err := os.Chmod(cfgPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfgPath, 0o644) })
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	if got := runQueueOnce(t, 0); len(got) != 0 {
+		t.Fatalf("dispatched = %v, want none while the scope write fails", got)
+	}
+	// Writable again: the next pass retries, sets ranked and dispatches the listed item.
+	if err := os.Chmod(cfgPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if got := runQueueOnce(t, 0); len(got) != 1 || got[0] != 9 {
-		t.Fatalf("dispatched = %v, want [9]", got)
-	}
-}
-
-func TestRunOnceNoQueueSettingUnchanged(t *testing.T) {
-	withRunLog(t)
-	queueConfig(t, 0)
-	queueVCS(t,
-		[]map[string]any{queueParent(100, 1), targetedIssue(9), targetedIssue(5)},
-		map[int][]int{100: {9}}, nil, nil)
-	// Without queue_issue every scanned issue is queued as before. The list
-	// API carries no sub-issue counts, so the parent (#100) is still queued
-	// here and filtered later by the execution-time stale-leaf recheck.
-	if got := runQueueOnce(t, 0); len(got) != 3 || got[0] != 5 || got[1] != 9 || got[2] != 100 {
-		t.Fatalf("dispatched = %v, want [5 9 100]", got)
-	}
-}
-
-func TestRunOnceQueueExcludedHeadBlocks(t *testing.T) {
-	logs := withRunLog(t)
-	queueConfig(t, 100)
-	queueVCS(t,
-		[]map[string]any{queueParent(100, 2), targetedIssue(9, "agent-failed"), targetedIssue(7), targetedIssue(5)},
-		map[int][]int{100: {9, 7}}, nil, nil)
-	if got := runQueueOnce(t, 0); len(got) != 0 {
-		t.Fatalf("dispatched = %v, want none", got)
-	}
-	if out := logs(); !strings.Contains(out, "run/queue_blocked") || !strings.Contains(out, "agent-failed") {
-		t.Fatalf("missing queue_blocked log:\n%s", out)
-	}
-}
-
-func TestRunOnceQueueOpenPRBlocksRest(t *testing.T) {
-	logs := withRunLog(t)
-	queueConfig(t, 100)
-	pr := map[string]any{"number": 90, "title": "t", "body": "Fixes #9", "state": "open", "head": map[string]string{"ref": "x"}}
-	queueVCS(t,
-		[]map[string]any{queueParent(100, 2), targetedIssue(9, "agent-implemented"), targetedIssue(7)},
-		map[int][]int{100: {9, 7}}, []map[string]any{pr}, nil)
-	if got := runQueueOnce(t, 0); len(got) != 0 {
-		t.Fatalf("dispatched = %v, want none", got)
-	}
-	if out := logs(); !strings.Contains(out, "run/queue_wait") {
-		t.Fatalf("missing queue_wait log:\n%s", out)
-	}
-}
-
-func TestRunOnceQueueUnreadableSubIssuesDispatchNothing(t *testing.T) {
-	logs := withRunLog(t)
-	queueConfig(t, 100)
-	queueVCS(t,
-		[]map[string]any{targetedIssue(100), targetedIssue(9), targetedIssue(5)},
-		nil, nil, map[int]bool{100: true})
-	if got := runQueueOnce(t, 0); len(got) != 0 {
-		t.Fatalf("dispatched = %v, want none", got)
-	}
-	out := logs()
-	if !strings.Contains(out, "WARN") || !strings.Contains(out, "sub_issues_unreadable") {
-		t.Fatalf("missing WARN log:\n%s", out)
-	}
-}
-
-func TestRunOnceTargetedIgnoresQueue(t *testing.T) {
-	withRunLog(t)
-	queueConfig(t, 100)
-	queueVCS(t,
-		[]map[string]any{queueParent(100, 1), targetedIssue(9), targetedIssue(5)},
-		map[int][]int{100: {9}}, nil, nil)
-	if got := runQueueOnce(t, 5); len(got) != 1 || got[0] != 5 {
-		t.Fatalf("dispatched = %v, want [5]", got)
-	}
-}
-
-func TestRunOnceQueueParentHeadBlocks(t *testing.T) {
-	logs := withRunLog(t)
-	queueConfig(t, 100)
-	queueVCS(t,
-		[]map[string]any{queueParent(100, 2), targetedIssue(9), targetedIssue(7), targetedIssue(8)},
-		map[int][]int{100: {9, 7}, 9: {8}}, nil, nil)
-	if got := runQueueOnce(t, 0); len(got) != 0 {
-		t.Fatalf("dispatched = %v, want none", got)
-	}
-	if out := logs(); !strings.Contains(out, "run/queue_blocked") || !strings.Contains(out, "not_a_leaf") {
-		t.Fatalf("missing queue_blocked log:\n%s", out)
+		t.Fatalf("retry dispatched = %v, want [9]", got)
 	}
 }
