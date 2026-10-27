@@ -94,11 +94,13 @@ func native(r execution.Result) Native {
 }
 
 // Execution policies required of each acceptance role. The planner is
-// tools-disabled and read-only. The reviewer runs commands in a disposable
+// read-only in both isolation modes. The reviewer runs commands in a disposable
 // checkout, so it needs the same command-capable policy implement uses.
 const (
-	PlannerPolicy  = "default"
-	ReviewerPolicy = "managed-development"
+	PlannerPolicy    = "default"
+	ToolsDisabled    = "tools-disabled"
+	IsolatedReadonly = "isolated-readonly"
+	ReviewerPolicy   = "managed-development"
 )
 
 // validate requires successful native execution under exactly the given policy.
@@ -113,14 +115,15 @@ func (n Native) validate(dev Identity, policy string) error {
 }
 
 type Plan struct {
-	Version        int       `json:"version"`
-	AttemptID      string    `json:"attempt_id"`
-	ContractDigest string    `json:"contract_digest"`
-	Text           string    `json:"text"`
-	Digest         string    `json:"digest"`
-	Planner        Native    `json:"planner"`
-	StartedAt      time.Time `json:"started_at"`
-	CompletedAt    time.Time `json:"completed_at"`
+	PlannerIsolation string    `json:"planner_isolation"`
+	Version          int       `json:"version"`
+	AttemptID        string    `json:"attempt_id"`
+	ContractDigest   string    `json:"contract_digest"`
+	Text             string    `json:"text"`
+	Digest           string    `json:"digest"`
+	Planner          Native    `json:"planner"`
+	StartedAt        time.Time `json:"started_at"`
+	CompletedAt      time.Time `json:"completed_at"`
 }
 
 func (p Plan) validate(c Contract) error {
@@ -131,6 +134,9 @@ func (p Plan) validate(c Contract) error {
 	if p.Version != Version || p.ContractDigest != d || !nonempty(p.AttemptID, p.Text) || p.Digest != digest(p.Text) ||
 		p.StartedAt.IsZero() || p.CompletedAt.Before(p.StartedAt) {
 		return errors.New("invalid or stale acceptance plan")
+	}
+	if p.PlannerIsolation != ToolsDisabled && p.PlannerIsolation != IsolatedReadonly {
+		return errors.New("invalid planner isolation mode")
 	}
 	return p.Planner.validate(c.Development, PlannerPolicy)
 }

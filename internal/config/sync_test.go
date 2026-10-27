@@ -523,6 +523,7 @@ repos:
 // with the same timestamp but different content produce a conflict error and
 // write config.conflict.yaml.
 func TestMergeConfigs_LWW_SameTimestampDifferentContent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	local := &config.Config{

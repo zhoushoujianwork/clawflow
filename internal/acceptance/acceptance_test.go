@@ -36,7 +36,7 @@ func passing() Record {
 	c := contract()
 	d, _ := c.Digest()
 	now := time.Now().UTC()
-	plan := Plan{Version: Version, ContractDigest: d, AttemptID: "attempt", Text: "independent plan", Planner: native(successful("plan-session", "plan-run")), StartedAt: now.Add(time.Second), CompletedAt: now.Add(2 * time.Second)}
+	plan := Plan{PlannerIsolation: ToolsDisabled, Version: Version, ContractDigest: d, AttemptID: "attempt", Text: "independent plan", Planner: native(successful("plan-session", "plan-run")), StartedAt: now.Add(time.Second), CompletedAt: now.Add(2 * time.Second)}
 	plan.Digest = digest(plan.Text)
 	source := Source{c.HeadSHA, c.BaseSHA, c.IntegrationSHA, true}
 	return Record{Version: Version, Contract: c, ContractDigest: d, Plan: plan, AttemptID: "attempt", Role: "acceptance", Reviewer: native(reviewerResult("review-session", "review-run")), Verdict: Passed, Report: "verified", Evidence: []string{"test evidence", testCommandEvidence}, Before: source, After: source, Completed: true, StartedAt: now, ReviewStartedAt: now.Add(3 * time.Second), CompletedAt: now.Add(4 * time.Second)}
@@ -579,5 +579,97 @@ func TestRunnerNonpassingVerdicts(t *testing.T) {
 				t.Fatal("nonpassing verdict satisfied gate")
 			}
 		})
+	}
+}
+
+func TestPlannerIsolationFallback(t *testing.T) {
+	for _, kind := range []string{"", "unsupported_tools", "auth", "protocol_invalid_result", "fallback failure", "dirty scratch"} {
+		t.Run(kind, func(t *testing.T) {
+			r, scratch, workspace := setupRunner(t)
+			if err := os.Remove(workspace); err != nil {
+				t.Fatal(err)
+			}
+			prepared, calls := false, 0
+			r.Prepare = func(context.Context) (string, error) {
+				_ = savedTestPlan(t, r.Store, contract())
+				prepared = true
+				return workspace, os.Mkdir(workspace, 0700)
+			}
+			base := r.Execute
+			r.Execute = func(ctx context.Context, prompt string, o execution.Options) (execution.Result, error) {
+				calls++
+				if o.Workspace == scratch {
+					if prepared {
+						t.Fatal("checkout prepared during planning")
+					}
+					if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("review checkout exists during planning")
+					}
+					entries, err := os.ReadDir(scratch)
+					if err != nil || len(entries) != 0 {
+						t.Fatal("planner scratch is not empty")
+					}
+					if calls == 1 && kind != "" {
+						k := kind
+						if kind == "fallback failure" || kind == "dirty scratch" {
+							k = "unsupported_tools"
+						}
+						if kind == "dirty scratch" {
+							if err := os.WriteFile(filepath.Join(scratch, "unexpected"), []byte("data"), 0600); err != nil {
+								t.Fatal(err)
+							}
+						}
+						return execution.Result{Status: "error", ErrorKind: k}, &execution.Error{Kind: k}
+					}
+					if calls == 2 {
+						if o.ToolsDisabled || len(o.AllowedTools) != 0 || len(o.DisallowedTools) != 0 || o.PermissionMode != "default" ||
+							!strings.Contains(prompt, "Do not read files outside your working directory or any repository") {
+							t.Fatalf("unsafe fallback: %+v", o)
+						}
+						if kind == "fallback failure" {
+							return execution.Result{Status: "error", ErrorKind: "unsupported_tools"}, &execution.Error{Kind: "unsupported_tools"}
+						}
+						result := successful("planner", "plan-run")
+						result.Text = "independent test plan"
+						return result, nil
+					}
+				}
+				return base(ctx, prompt, o)
+			}
+			record, err := r.Run(context.Background(), contract(), scratch, "")
+			wantCalls, mode := 2, ToolsDisabled
+			if kind == "unsupported_tools" {
+				wantCalls, mode = 3, IsolatedReadonly
+			} else if kind != "" {
+				wantCalls = 1
+				if kind == "fallback failure" {
+					wantCalls = 2
+				}
+				if err == nil || prepared || record.Verdict != Blocked || calls != wantCalls {
+					t.Fatalf("failure did not stop: calls=%d prepared=%v err=%v", calls, prepared, err)
+				}
+				return
+			}
+			if err != nil || !prepared || calls != wantCalls || record.Plan.PlannerIsolation != mode {
+				t.Fatalf("isolation result: calls=%d prepared=%v mode=%s err=%v", calls, prepared, record.Plan.PlannerIsolation, err)
+			}
+			stored, err := r.Store.LoadRecord(contract(), record.AttemptID)
+			if err != nil || stored.Plan.PlannerIsolation != mode || Evaluate(contract(), stored) != nil {
+				t.Fatalf("invalid persisted isolation: %+v %v", stored.Plan, err)
+			}
+		})
+	}
+}
+
+func TestPlanIsolationValidation(t *testing.T) {
+	for _, mode := range []string{ToolsDisabled, IsolatedReadonly, "", "unknown"} {
+		for _, policy := range []string{PlannerPolicy, ReviewerPolicy} {
+			p := passing().Plan
+			p.PlannerIsolation, p.Planner.Policy = mode, policy
+			want := (mode == ToolsDisabled || mode == IsolatedReadonly) && policy == PlannerPolicy
+			if (p.validate(contract()) == nil) != want {
+				t.Fatalf("mode=%q policy=%q", mode, policy)
+			}
+		}
 	}
 }

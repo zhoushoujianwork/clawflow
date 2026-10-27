@@ -8,7 +8,13 @@
 
 The producer derives developer identity from the latest relevant successful managed run's bounded native event stream and verifies its captured issue title/body against current requirements. Missing, unsuccessful, ambiguous or legacy provenance blocks acceptance. Native identities come from execution results, never model-authored JSON.
 
-Each attempt uses an empty planning directory and a separate detached source checkout. Planning has tools disabled. Its immutable plan is persisted before source review begins. Review uses a fresh default-policy read-only session. Source head and cleanliness, current PR head/base, requirements and policy are checked before and after. Source-generated artifacts that dirty the checkout block a passing result.
+每次 attempt 先使用空规划目录，以 `tools-disabled`（`ToolsDisabled: true`、`default`）执行 planner。仅对 `unsupported_tools` 错误，在同一 attempt 内回退一次到 `isolated-readonly`：不传工具限制，保持 `default` 和空 scratch。Codex 的该策略为无网络只读 sandbox。失败回退不再重试，其他 planner 错误保持失败行为。
+
+Runner 保存并重新读取不可变计划后，才调用 prepare 创建、fetch 和 detached checkout 审查工作区。两种模式均验证 native policy 为 `default`，`planner_isolation` 保存在计划及记录内嵌的 plan 中，也出现在 status 和 harvest pass/non-pass 日志。未知或缺失模式不能通过校验。
+
+只读 sandbox 仍可读取其他本地文件，因此 `isolated-readonly` 的源码隔离依赖工作目录隔离、checkout 创建顺序和提示词，而非后端文件读取限制。提示词明确禁止读取工作目录之外的文件或任何仓库；现存其他本地 checkout 属于残余风险。
+
+Reviewer 使用新的 `managed-development` 会话执行构建和测试。审查前后检查本地 HEAD、额外提交及当前 PR head/base、需求和策略；构建产生的修改或未跟踪文件允许存在。
 
 The model returns exactly `status`, `summary` and `evidence`. Exact schema keys are enforced; unknown, duplicate, conflicting-case or trailing JSON fields fail closed. Native errors, cancellation, developer-session reuse, missing evidence and mismatched contracts cannot pass.
 

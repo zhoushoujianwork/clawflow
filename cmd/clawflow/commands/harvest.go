@@ -214,10 +214,10 @@ func harvestRun(ctx context.Context, client vcs.Client, setCtx func(context.Cont
 	switch {
 	case err == nil:
 		merged := attemptAutoMerge(attempt)
-		runLog.Info("run/harvest_end", "repo", fullName, "pr", pr.Number, "issue", issueNum, "verdict", string(record.Verdict), "status", "accepted", "merged", merged, "duration", elapsed)
+		runLog.Info("run/harvest_end", "repo", fullName, "pr", pr.Number, "issue", issueNum, "verdict", string(record.Verdict), "planner_isolation", record.Plan.PlannerIsolation, "status", "accepted", "merged", merged, "duration", elapsed)
 	case errors.Is(err, errAcceptanceNonpass):
 		attempt.notify(harvestNonpassComment(record), harvestMarker(record))
-		runLog.Info("run/harvest_end", "repo", fullName, "pr", pr.Number, "issue", issueNum, "verdict", string(record.Verdict), "status", "nonpass", "merged", false, "duration", elapsed)
+		runLog.Info("run/harvest_end", "repo", fullName, "pr", pr.Number, "issue", issueNum, "verdict", string(record.Verdict), "planner_isolation", record.Plan.PlannerIsolation, "status", "nonpass", "merged", false, "duration", elapsed)
 		fmt.Fprintf(os.Stderr, "%s ✗ acceptance %s for PR #%d\n", prefix, record.Verdict, pr.Number)
 	default:
 		runLog.Warn("run/harvest_end", "repo", fullName, "pr", pr.Number, "issue", issueNum, "status", "error", "merged", false, "duration", elapsed, "err", err.Error())
