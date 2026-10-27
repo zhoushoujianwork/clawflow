@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -440,5 +441,137 @@ func TestAcceptanceRepairLogsStartAndEnd(t *testing.T) {
 	log := string(b)
 	if strings.Count(log, "run/acceptance_repair") != 2 || !strings.Contains(log, "phase=start") || !strings.Contains(log, "phase=end") || !strings.Contains(log, "attempt=2") || !strings.Contains(log, "reason=acceptance_failed") {
 		t.Fatalf("log:\n%s", log)
+	}
+}
+
+func TestAcceptanceRepairSetupFailurePreservesProvenance(t *testing.T) {
+	for _, developer := range []string{"implement", "repair-ci"} {
+		for _, mode := range []string{"missing-events", "empty-events", "executed", "tool", "malformed", "running", "unknown-stage", "usage", "unfinished"} {
+			t.Run(developer+"/"+mode, func(t *testing.T) {
+				f, readLog, reg, cfg := repairAcceptanceFixture(t, "failed")
+				parent := filepath.Dir(snapshot.RunDir("o/r", 42, time.Now()))
+				entries, err := os.ReadDir(parent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					path := filepath.Join(parent, entry.Name(), "meta.json")
+					data, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var previous snapshot.RunMeta
+					if err := json.Unmarshal(data, &previous); err != nil {
+						t.Fatal(err)
+					}
+					previous.Operator = developer
+					if err := snapshot.WriteRunMeta(filepath.Dir(path), previous); err != nil {
+						t.Fatal(err)
+					}
+				}
+				recordVerdict(t, f)
+				dir := writeAcceptanceDevelopment(t, "failed", time.Now(), nil)
+				metaPath := filepath.Join(dir, "meta.json")
+				b, err := os.ReadFile(metaPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var m snapshot.RunMeta
+				if err := json.Unmarshal(b, &m); err != nil {
+					t.Fatal(err)
+				}
+				m.Operator, m.Stage = "repair-ci", "lock-acquired"
+				m.Error = "repair git fetch: exit status 128"
+				events := ""
+				switch mode {
+				case "executed":
+					events = `{"type":"start"}`
+				case "tool":
+					events = `{"type":"progress","tool_category":"command"}`
+				case "malformed":
+					events = `{`
+				case "running":
+					m.Status = "running"
+				case "unknown-stage":
+					m.Stage = ""
+				case "usage":
+					m.Usage = &snapshot.Usage{NumTurns: 1}
+				case "unfinished":
+					m.EndedAt = nil
+				}
+				if err := snapshot.WriteRunMeta(dir, m); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(events), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "missing-events" {
+					if err := os.Remove(filepath.Join(dir, "events.jsonl")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				jobs := scanRepair(t, reg, f, cfg, 0)
+				want := 0
+				if mode == "missing-events" || mode == "empty-events" {
+					want = 1
+				}
+				if len(jobs) != want {
+					t.Fatalf("jobs=%d want=%d log=%s", len(jobs), want, readLog())
+				}
+				if want == 1 && (!strings.Contains(readLog(), "development_setup_failure") || !strings.Contains(readLog(), filepath.Base(dir))) {
+					t.Fatalf("missing ignored-run diagnostic: %s", readLog())
+				}
+			})
+		}
+	}
+}
+
+type setupRepairFake struct {
+	*acceptanceFake
+	labels []string
+}
+
+func (f *setupRepairFake) ListIssueCommentsDetail(string, int) ([]vcs.IssueComment, error) {
+	return nil, nil
+}
+
+func (f *setupRepairFake) AddLabel(_ string, _ int, labels ...string) error {
+	f.labels = append(f.labels, labels...)
+	return nil
+}
+
+func TestAcceptanceRepairWorkdirFailureReleasesAttempt(t *testing.T) {
+	f, readLog, reg, cfg := repairAcceptanceFixture(t, "failed")
+	recordVerdict(t, f)
+	jobs := scanRepair(t, reg, f, cfg, 0)
+	if len(jobs) != 1 {
+		t.Fatalf("jobs=%v", jobs)
+	}
+	client := &setupRepairFake{acceptanceFake: f}
+	jobs[0].client = client
+	// The fixture's local path is empty, so git config fails before agent launch.
+	_, _, failed := runOneOperator(context.Background(), jobs[0], time.Minute)
+	if !failed {
+		t.Fatal("expected setup failure")
+	}
+	if !strings.Contains(readLog(), "run/ci_repair_infra") {
+		t.Fatalf("log=%s", readLog())
+	}
+	if len(f.comments) != 0 || len(client.labels) != 0 {
+		t.Fatalf("setup failure wrote terminal state: comments=%v labels=%v", f.comments, client.labels)
+	}
+	if err := checkRepairBudget(snapshot.DataDir(), "o/r", f.pr.Number, time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if jobs := scanRepair(t, reg, f, cfg, 0); len(jobs) != 0 {
+		t.Fatal("backoff must still prevent immediate retry")
+	}
+	// The next reservation must still be attempt one, after infrastructure backoff.
+	n, err := reserveRepair(snapshot.DataDir(), "o/r", f.pr, repairReasonAcceptance, time.Now().Add(2*time.Hour))
+	if err != nil || n != 1 {
+		t.Fatalf("attempt=%d err=%v", n, err)
+	}
+	if _, err := acceptanceDevelopment("o/r", 42, f.issue.Title+"\n\n"+f.issue.Body); err != nil {
+		t.Fatal(err)
 	}
 }

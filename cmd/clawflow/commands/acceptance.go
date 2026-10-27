@@ -310,7 +310,7 @@ func acceptanceEvent(raw []byte) (execution.Event, error) {
 }
 
 // Only ClawFlow's completed local run metadata and sanitized native event
-// sequence supply developer identity. Never fall back past newer failed work.
+// sequence supply developer identity. Never fall back past newer executed work.
 func acceptanceDevelopment(repo string, issue int, requirements string) (acceptance.Identity, error) {
 	parent := filepath.Dir(snapshot.RunDir(repo, issue, time.Now()))
 	entries, err := os.ReadDir(parent)
@@ -333,6 +333,11 @@ func acceptanceDevelopment(repo string, issue int, requirements string) (accepta
 		}
 		if m.Repo != repo || m.IssueNumber != issue || m.StartedAt.IsZero() {
 			return acceptance.Identity{}, errors.New("development run identity mismatch")
+		}
+		if developmentSetupFailure(m, filepath.Join(parent, entry.Name())) {
+			runLog.Info("run/acceptance_repair_skip", "repo", repo, "issue", issue,
+				"reason", "development_setup_failure", "ignored_run", entry.Name(), "stage", m.Stage)
+			continue
 		}
 		if latestDir != "" && m.StartedAt.Equal(latest.StartedAt) {
 			return acceptance.Identity{}, errors.New("ambiguous development run provenance")
@@ -400,6 +405,23 @@ func acceptanceDevelopment(repo string, issue int, requirements string) (accepta
 		return acceptance.Identity{}, errors.New("incomplete native development evidence")
 	}
 	return acceptance.Identity{SessionID: session, RunID: start.RunID}, nil
+}
+
+// A terminal setup failure cannot supersede source provenance. Stage alone is
+// advisory: require no native events or usage as well. Missing event files are
+// expected here because the runner creates the sink only after workdir setup.
+// Unknown stages, unreadable evidence and in-flight runs must fail closed.
+func developmentSetupFailure(m snapshot.RunMeta, dir string) bool {
+	if m.Status != "failed" || m.Stage != "lock-acquired" || m.EndedAt == nil ||
+		m.EndedAt.Before(m.StartedAt) || m.Usage != nil {
+		return false
+	}
+	path := filepath.Join(dir, "events.jsonl")
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	b, err := acceptanceRead(path, acceptanceFileLimit)
+	return err == nil && len(bytes.TrimSpace(b)) == 0
 }
 
 func acceptanceStorePath(repo string, pr int) string {
