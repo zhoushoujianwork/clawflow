@@ -72,12 +72,16 @@ func acceptanceFixture(t *testing.T) (*acceptanceFake, config.Repo) {
 	calls := 0
 	acceptanceNativeRun = func(_ context.Context, c execution.Config, r execution.Request, _ []string, _ io.Writer, _ func(execution.Observation)) (execution.Result, error) {
 		calls++
-		if c.Profile != "acceptance-profile" || r.Resume || r.SessionKey != "" || r.PermissionMode != "default" {
-			t.Fatalf("unpinned or writable native request: %+v %+v", c, r)
-		}
-		result := execution.Result{Status: "ok", ExecutionPolicy: "default", Profile: c.Profile, Backend: "fixture", Model: "fixture-model", NativeSessionID: execution.NewSessionKey(), RunID: execution.NewSessionKey(), Text: "Independent plan"}
+		wantMode, wantPolicy := "default", "default"
 		if !r.ToolsDisabled {
-			result.Text = `{"status":"passed","summary":"Independent checks complete","evidence":["Source fulfills the plan"]}`
+			wantMode, wantPolicy = "bypassPermissions", "managed-development"
+		}
+		if c.Profile != "acceptance-profile" || r.Resume || r.SessionKey != "" || r.PermissionMode != wantMode {
+			t.Fatalf("unpinned native request: %+v %+v", c, r)
+		}
+		result := execution.Result{Status: "ok", ExecutionPolicy: wantPolicy, Profile: c.Profile, Backend: "fixture", Model: "fixture-model", NativeSessionID: execution.NewSessionKey(), RunID: execution.NewSessionKey(), Text: "Independent plan"}
+		if !r.ToolsDisabled {
+			result.Text = `{"status":"passed","summary":"Independent checks complete","evidence":["Source fulfills the plan","command: go test ./... => ok"]}`
 		}
 		return result, nil
 	}
@@ -440,16 +444,13 @@ func TestRepoAcceptanceRequiredCLI(t *testing.T) {
 }
 
 func TestAcceptanceRunBlocksChangedInputsAndDirtySource(t *testing.T) {
-	for _, mode := range []string{"fetched-head", "dirty", "changed-base", "changed-goal", "no-provenance"} {
+	for _, mode := range []string{"fetched-head", "changed-base", "changed-goal", "no-provenance"} {
 		t.Run(mode, func(t *testing.T) {
 			f, _ := acceptanceFixture(t)
 			baseGit := acceptanceGit
 			acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
 				if mode == "fetched-head" && args[0] == "rev-parse" && args[1] == "FETCH_HEAD" {
 					return strings.Repeat("e", 40), nil
-				}
-				if mode == "dirty" && args[0] == "status" {
-					return " M code.go", nil
 				}
 				return baseGit(ctx, dir, args...)
 			}
@@ -476,9 +477,6 @@ func TestAcceptanceRunBlocksChangedInputsAndDirtySource(t *testing.T) {
 			}
 			if (mode == "fetched-head" || mode == "no-provenance") && calls != 0 {
 				t.Fatal("agent launched without immutable source/provenance")
-			}
-			if mode == "dirty" && calls != 1 {
-				t.Fatal("review launched against dirty source")
 			}
 		})
 	}
@@ -638,5 +636,156 @@ func TestAcceptanceLocalReviewMergeExclusion(t *testing.T) {
 	unlock()
 	if err := explicitAcceptanceMerge(context.Background(), f, "o/r", 11); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// reviewerGit models the review checkout: remotes, HEAD and extra commits.
+type reviewerGit struct {
+	base      func(context.Context, string, ...string) (string, error)
+	remotes   []string
+	removed   []string
+	head      string
+	extra     string
+	mutate    func() // runs once, when the reviewer executes
+	statusOut string
+}
+
+func (g *reviewerGit) run(ctx context.Context, dir string, args ...string) (string, error) {
+	switch args[0] {
+	case "remote":
+		if len(args) == 1 {
+			return strings.Join(g.remotes, "\n"), nil
+		}
+		if args[1] == "remove" {
+			g.removed = append(g.removed, args[2])
+			return "", nil
+		}
+	case "rev-parse":
+		if args[1] == "HEAD" {
+			return g.head, nil
+		}
+	case "rev-list":
+		return g.extra, nil
+	case "status":
+		return g.statusOut, nil
+	}
+	return g.base(ctx, dir, args...)
+}
+
+func TestAcceptanceReviewerRunsCommandsInDisposableCheckout(t *testing.T) {
+	f, _ := acceptanceFixture(t)
+	t.Setenv("GH_TOKEN", "gh-secret")
+	t.Setenv("GITHUB_TOKEN", "github-secret")
+	t.Setenv("GITLAB_TOKEN", "gitlab-secret")
+	t.Setenv("CLAWFLOW_GH_TOKEN", "cf-secret")
+	t.Setenv("KEEP_ME", "kept")
+	g := &reviewerGit{base: acceptanceGit, remotes: []string{"origin", "upstream"}, head: f.pr.HeadSHA, statusOut: "?? build/\n M go.sum"}
+	acceptanceGit = g.run
+	baseRun := acceptanceNativeRun
+	type call struct {
+		req execution.Request
+		env []string
+	}
+	var calls []call
+	acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+		calls = append(calls, call{req, env})
+		return baseRun(ctx, c, req, env, w, observe)
+	}
+	r := produceAcceptance(t, f)
+	if len(calls) != 2 {
+		t.Fatalf("calls: %d", len(calls))
+	}
+	planner, reviewer := calls[0], calls[1]
+	if !planner.req.ToolsDisabled || planner.req.PermissionMode != "default" {
+		t.Fatalf("planner must stay tools-disabled and read-only: %+v", planner.req)
+	}
+	if reviewer.req.ToolsDisabled || reviewer.req.PermissionMode != "bypassPermissions" {
+		t.Fatalf("reviewer must use the command-capable policy: %+v", reviewer.req)
+	}
+	if reviewer.req.Workspace == planner.req.Workspace {
+		t.Fatal("reviewer must run in the review checkout, not planner scratch")
+	}
+	if strings.Join(g.removed, ",") != "origin,upstream" {
+		t.Fatalf("remotes removed: %v", g.removed)
+	}
+	for _, c := range calls {
+		joined := strings.Join(c.env, "\n")
+		for _, secret := range []string{"gh-secret", "github-secret", "gitlab-secret", "cf-secret"} {
+			if strings.Contains(joined, secret) {
+				t.Fatalf("token leaked to native env: %s", secret)
+			}
+		}
+		if !strings.Contains(joined, "KEEP_ME=kept") {
+			t.Fatal("non-credential environment was dropped")
+		}
+	}
+	if !strings.Contains(reviewer.req.Prompt, "command:") {
+		t.Fatal("reviewer prompt does not require command evidence")
+	}
+	if r.Reviewer.Policy != acceptance.ReviewerPolicy || r.Plan.Planner.Policy != acceptance.PlannerPolicy {
+		t.Fatalf("policies not recorded: %+v", r)
+	}
+	// Dirty but same HEAD still satisfies immutability.
+	if !r.Before.Clean || !r.After.Clean || r.Verdict != acceptance.Passed {
+		t.Fatalf("dirty checkout with unchanged HEAD must pass: %+v", r)
+	}
+}
+
+func TestAcceptanceImmutabilityBlocksMovedSource(t *testing.T) {
+	for _, mode := range []string{"head-changed", "new-commit", "remote-head-changed"} {
+		t.Run(mode, func(t *testing.T) {
+			f, _ := acceptanceFixture(t)
+			g := &reviewerGit{base: acceptanceGit, remotes: []string{"origin"}, head: f.pr.HeadSHA}
+			acceptanceGit = g.run
+			baseRun := acceptanceNativeRun
+			acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+				if !req.ToolsDisabled {
+					switch mode {
+					case "head-changed":
+						g.head = strings.Repeat("d", 40)
+					case "new-commit":
+						g.extra = strings.Repeat("d", 40)
+					case "remote-head-changed":
+						f.pr.HeadSHA = strings.Repeat("d", 40)
+					}
+				}
+				return baseRun(ctx, c, req, env, w, observe)
+			}
+			r, err := runAcceptance(context.Background(), f, "o/r", 11)
+			if err == nil || r.Verdict != acceptance.Blocked {
+				t.Fatalf("moved source accepted: verdict=%s err=%v", r.Verdict, err)
+			}
+		})
+	}
+}
+
+func TestAcceptancePassWithoutExecutedCommandIsBlocked(t *testing.T) {
+	f, _ := acceptanceFixture(t)
+	baseRun := acceptanceNativeRun
+	acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+		res, err := baseRun(ctx, c, req, env, w, observe)
+		if !req.ToolsDisabled {
+			res.Text = `{"status":"passed","summary":"read the code","evidence":["static reading only"]}`
+		}
+		return res, err
+	}
+	r, err := runAcceptance(context.Background(), f, "o/r", 11)
+	if err == nil || r.Verdict != acceptance.Blocked {
+		t.Fatalf("pass without executed command accepted: verdict=%s err=%v", r.Verdict, err)
+	}
+}
+
+func TestAcceptanceReviewerEnvStripsTokens(t *testing.T) {
+	in := []string{"PATH=/bin", "gh_token=a", "GITHUB_TOKEN=b", "GITLAB_TOKEN=c", "CLAWFLOW_CLAUDE_API_KEY=k", "CLAWFLOW_ANY_TOKEN=d", "CLAWFLOW_OFFLOAD_PROFILE=p"}
+	out := strings.Join(acceptanceReviewerEnv(in), " ")
+	for _, bad := range []string{"gh_token", "GITHUB_TOKEN", "GITLAB_TOKEN", "CLAWFLOW_ANY_TOKEN"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("%s kept: %s", bad, out)
+		}
+	}
+	for _, good := range []string{"PATH=/bin", "CLAWFLOW_OFFLOAD_PROFILE=p"} {
+		if !strings.Contains(out, good) {
+			t.Fatalf("%s dropped: %s", good, out)
+		}
 	}
 }

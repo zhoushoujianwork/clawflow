@@ -23,6 +23,15 @@ func successful(session, run string) execution.Result {
 	return execution.Result{Status: "ok", NativeSessionID: session, RunID: run, ExecutionPolicy: "default", Profile: "test-profile", Backend: "test-backend", Model: "test-model"}
 }
 
+// reviewerResult is a successful reviewer execution under the command-capable policy.
+func reviewerResult(session, run string) execution.Result {
+	r := successful(session, run)
+	r.ExecutionPolicy = ReviewerPolicy
+	return r
+}
+
+const testCommandEvidence = "command: go test ./... => ok"
+
 func passing() Record {
 	c := contract()
 	d, _ := c.Digest()
@@ -30,7 +39,7 @@ func passing() Record {
 	plan := Plan{Version: Version, ContractDigest: d, AttemptID: "attempt", Text: "independent plan", Planner: native(successful("plan-session", "plan-run")), StartedAt: now.Add(time.Second), CompletedAt: now.Add(2 * time.Second)}
 	plan.Digest = digest(plan.Text)
 	source := Source{c.HeadSHA, c.BaseSHA, c.IntegrationSHA, true}
-	return Record{Version: Version, Contract: c, ContractDigest: d, Plan: plan, AttemptID: "attempt", Role: "acceptance", Reviewer: native(successful("review-session", "review-run")), Verdict: Passed, Report: "verified", Evidence: []string{"test evidence"}, Before: source, After: source, Completed: true, StartedAt: now, ReviewStartedAt: now.Add(3 * time.Second), CompletedAt: now.Add(4 * time.Second)}
+	return Record{Version: Version, Contract: c, ContractDigest: d, Plan: plan, AttemptID: "attempt", Role: "acceptance", Reviewer: native(reviewerResult("review-session", "review-run")), Verdict: Passed, Report: "verified", Evidence: []string{"test evidence", testCommandEvidence}, Before: source, After: source, Completed: true, StartedAt: now, ReviewStartedAt: now.Add(3 * time.Second), CompletedAt: now.Add(4 * time.Second)}
 }
 
 func TestEvaluate(t *testing.T) {
@@ -71,7 +80,9 @@ func TestEvaluate(t *testing.T) {
 		"native exit":            func(r *Record) { r.Reviewer.ExitCode = 1 },
 		"native error":           func(r *Record) { r.Reviewer.Error = "failure" },
 		"native error kind":      func(r *Record) { r.Reviewer.ErrorKind = "canceled" },
-		"native policy":          func(r *Record) { r.Reviewer.Policy = "managed-development" },
+		"native policy":          func(r *Record) { r.Reviewer.Policy = "default" },
+		"no command evidence":    func(r *Record) { r.Evidence = []string{"test evidence"} },
+		"bare command prefix":    func(r *Record) { r.Evidence = []string{"command:  "} },
 		"planner policy":         func(r *Record) { r.Plan.Planner.Policy = "managed-development" },
 		"plan missing":           func(r *Record) { r.Plan.Text = "" },
 		"plan digest":            func(r *Record) { r.Plan.Digest = "wrong" },
@@ -312,11 +323,11 @@ func setupRunner(t *testing.T) (Runner, string, string) {
 		return Source{c.HeadSHA, c.BaseSHA, c.IntegrationSHA, true}, nil
 	}}
 	r.Execute = func(_ context.Context, prompt string, o execution.Options) (execution.Result, error) {
-		if o.Role != "acceptance" || o.PermissionMode != "default" || o.Resume || o.SessionKey != "" {
+		if o.Role != "acceptance" || o.Resume || o.SessionKey != "" {
 			t.Fatal("unsafe execution options")
 		}
 		if o.Workspace == scratch {
-			if !o.ToolsDisabled || len(o.AllowedTools) != 0 {
+			if o.PermissionMode != "default" || !o.ToolsDisabled || len(o.AllowedTools) != 0 {
 				t.Fatal("planner tools enabled")
 			}
 			for _, forbidden := range []string{workspace, s.path, c.HeadSHA, c.BaseSHA, c.IntegrationSHA, c.Development.SessionID, c.Development.RunID, c.TaskID, c.Repository} {
@@ -328,15 +339,15 @@ func setupRunner(t *testing.T) (Runner, string, string) {
 			result.Text = "independent test plan"
 			return result, nil
 		}
-		if o.Workspace != workspace || o.ToolsDisabled {
-			t.Fatal("reviewer workspace/tools mismatch")
+		if o.Workspace != workspace || o.ToolsDisabled || o.PermissionMode != "bypassPermissions" {
+			t.Fatal("reviewer workspace/tools/policy mismatch")
 		}
 		p := savedTestPlan(t, s, c)
 		if !strings.Contains(prompt, p.Text) || !strings.Contains(prompt, c.HeadSHA) || strings.Contains(prompt, c.Development.SessionID) {
 			t.Fatal("review input mismatch")
 		}
-		result := successful("reviewer", "review-run")
-		result.Text = `{"status":"passed","summary":"verified","evidence":["behavior check passed"]}`
+		result := reviewerResult("reviewer", "review-run")
+		result.Text = `{"status":"passed","summary":"verified","evidence":["behavior check passed","` + testCommandEvidence + `"]}`
 		return result, nil
 	}
 	return r, scratch, workspace
@@ -442,7 +453,7 @@ func TestRunnerAdmissionFailures(t *testing.T) {
 }
 
 func TestRunnerFailsClosed(t *testing.T) {
-	cases := []string{"malformed", "trailing", "duplicate", "identity injection", "missing evidence", "empty evidence", "null", "failed native", "exit", "policy", "missing session", "missing run", "self session", "self run", "planner self", "planner failure", "planner empty", "reused session", "reused run", "mutation", "dirty before", "inspect error", "cancel planner", "cancel review", "execution error"}
+	cases := []string{"malformed", "trailing", "duplicate", "identity injection", "missing evidence", "empty evidence", "null", "failed native", "exit", "policy", "no command evidence", "missing session", "missing run", "self session", "self run", "planner self", "planner failure", "planner empty", "reused session", "reused run", "mutation", "dirty before", "inspect error", "cancel planner", "cancel review", "execution error"}
 	for _, mode := range cases {
 		t.Run(mode, func(t *testing.T) {
 			r, scratch, workspace := setupRunner(t)
@@ -487,7 +498,9 @@ func TestRunnerFailsClosed(t *testing.T) {
 				case "exit":
 					result.ExitCode = 1
 				case "policy":
-					result.ExecutionPolicy = "managed-development"
+					result.ExecutionPolicy = "default"
+				case "no command evidence":
+					result.Text = `{"status":"passed","summary":"verified","evidence":["read the code"]}`
 				case "missing session":
 					result.NativeSessionID = ""
 				case "missing run":
