@@ -673,3 +673,12 @@ func TestPlanIsolationValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewerBlockedPolicy(t *testing.T) {
+	prompt := (Runner{TestCommand: "make check"}).reviewPrompt()
+	for _, required := range []string{"Use blocked only when requirements cannot be evaluated", "missing or contradictory requirements", "unavailable source", "additional isolation or tooling", "Return passed or failed", "record those limitations in evidence", "make check"} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("review prompt missing %q", required)
+		}
+	}
+}

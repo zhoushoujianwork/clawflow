@@ -139,7 +139,7 @@ func TestPostIssueComment(t *testing.T) {
 	if err := client.PostIssueComment("owner/repo", 3, "hello from clawflow"); err != nil {
 		t.Fatal(err)
 	}
-	if gotBody != "hello from clawflow" {
+	if !strings.HasPrefix(gotBody, "hello from clawflow\n\n<!-- clawflow:run-id=write-") {
 		t.Errorf("unexpected comment body: %q", gotBody)
 	}
 }

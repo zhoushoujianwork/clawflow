@@ -741,12 +741,6 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		}
 	}
 
-	issues, err := client.ListOpenIssues(fullName)
-	if err != nil {
-		runLog.Warn("run/scan", "repo", fullName, "phase", "list_issues_err", "elapsed", time.Since(scanStart).Round(time.Millisecond), "err", err.Error())
-		return nil, nil, fmt.Errorf("list open issues: %w", err)
-	}
-
 	// Same-name recreation guard: owner/name is reused after delete+recreate
 	// on both platforms but the numeric repo ID is not, and issue numbering
 	// restarts at #1 — so without this check the new repo's runs land in (and
@@ -761,6 +755,16 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 			runLog.Info("run/scan", "repo", fullName, "phase", "repo_recreated", "archived_to", archived)
 			fmt.Fprintf(os.Stderr, "⚠ %s was deleted and recreated on the platform; previous run history archived to %s\n", fullName, archived)
 		}
+	}
+
+	pendingWriteBacks := map[int]bool{}
+	if executeHere {
+		pendingWriteBacks = replayRepoWriteBacks(client, fullName, onlyIssue)
+	}
+	issues, err := client.ListOpenIssues(fullName)
+	if err != nil {
+		runLog.Warn("run/scan", "repo", fullName, "phase", "list_issues_err", "elapsed", time.Since(scanStart).Round(time.Millisecond), "err", err.Error())
+		return nil, nil, fmt.Errorf("list open issues: %w", err)
 	}
 
 	// GitHub sub-issues are not returned by the standard /issues list API.
@@ -838,6 +842,10 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		var firstMatch *operator.Operator
 		implementState[sub.Number] = "implement_operator_unavailable"
 		for _, op := range reg.All() {
+			if pendingWriteBacks[sub.Number] {
+				implementState[sub.Number] = "pending_writeback"
+				continue
+			}
 			isImplement := op.Name == "implement"
 			op = effectiveOperator(op, sub)
 			if op == nil {
@@ -1484,16 +1492,23 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 
 	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
-		Repo:          j.repo,
-		Workdir:       workdir,
-		Timeout:       timeout,
-		Comments:      comments,
-		Role:          role,
-		EventWriter:   eventsFile,
-		ResumeContext: resumeCtx,
-		Language:      j.language,
-		StageFunc:     emitStage,
+		Repo:           j.repo,
+		RunID:          strings.ReplaceAll(j.repo, "/", "__") + "-" + strconv.Itoa(j.sub.Number) + "-" + filepath.Base(runDir),
+		CommentSaveDir: runDir,
+		Workdir:        workdir,
+		Timeout:        timeout,
+		Comments:       comments,
+		Role:           role,
+		EventWriter:    eventsFile,
+		ResumeContext:  resumeCtx,
+		Language:       j.language,
+		StageFunc:      emitStage,
 	})
+	var writebackErr *operator.WriteBackError
+	errors.As(runErr, &writebackErr)
+	if writebackErr != nil {
+		runErr = nil
+	}
 	runDur := time.Since(runStart).Round(time.Second)
 	if eventsFile != nil {
 		_ = eventsFile.Close()
@@ -1518,6 +1533,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			Status:      "finalizing",
 			Stage:       "finalizing",
 			Summary:     output,
+		}
+		if writebackErr != nil {
+			finalizingMeta.WritebackError = writebackErr.Error()
 		}
 		if err := snapshot.WriteRunMeta(runDir, finalizingMeta); err != nil {
 			fmt.Fprintf(os.Stderr, "%s ⚠ finalizing meta: %v\n", prefix, err)
@@ -1692,6 +1710,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rm.Status = "success"
 	}
 
+	if writebackErr != nil {
+		rm.WritebackError = writebackErr.Error()
+	}
 	// Conditional cleanup: only remove the worktree on success/skip.
 	// On failure, preserve it so the next run can resume from the
 	// partial work instead of starting from scratch.
@@ -1778,7 +1799,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// issue #326. Emitted alongside rather than replacing `outcome` so existing
 	// greps over run.log keep working.
 	appliedLabel := outcome
-	if isDisallowedOutcome {
+	if isDisallowedOutcome || writebackErr != nil {
 		appliedLabel = ""
 	}
 	logFn("run/end",
@@ -1786,6 +1807,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		"issue", j.sub.Number,
 		"op", j.op.Name,
 		"status", rm.Status,
+		"writeback_pending", rm.WritebackError != "",
 		"duration", runDur,
 		"outcome", outcome,
 		"applied_label", appliedLabel,

@@ -293,10 +293,11 @@ type RunMeta struct {
 	// "parsing-outcome" → "posting-comment" → "applying-label". It is purely
 	// advisory (the reconciler and circuit breaker key off Status, not Stage)
 	// and omitted from the wire when empty for back-compat with older runs.
-	Stage   string `json:"stage,omitempty"`
-	PRUrl   string `json:"pr_url,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Summary string `json:"summary,omitempty"` // operator's final text output
+	Stage          string `json:"stage,omitempty"`
+	PRUrl          string `json:"pr_url,omitempty"`
+	Error          string `json:"error,omitempty"`
+	WritebackError string `json:"writeback_error,omitempty"`
+	Summary        string `json:"summary,omitempty"` // operator's final text output
 	// Usage is populated from events.jsonl's terminal "result" event after
 	// the run finishes. Nil while the run is still in flight.
 	Usage *Usage `json:"usage,omitempty"`

@@ -27,6 +27,12 @@ const (
 	StageApplyingLabel  = "applying-label"
 )
 
+// WriteBackError means execution succeeded but delivery is incomplete.
+type WriteBackError struct{ Err error }
+
+func (e *WriteBackError) Error() string { return e.Err.Error() }
+func (e *WriteBackError) Unwrap() error { return e.Err }
+
 // ErrNoOutcomeMarker is returned by Run when claude produced non-empty output
 // but the output contained no <!-- clawflow:outcome=… --> marker. This is
 // treated as a recoverable failure (not a permanent one) so the circuit
@@ -318,6 +324,12 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		return trimmed, "", ErrNoOutcomeMarker
 	}
 
+	if outcomeAllowed(op, outcome) && opts.CommentSaveDir != "" {
+		if err := saveWriteBack(op, sub, opts, body, outcome); err != nil {
+			return body, outcome, &WriteBackError{err}
+		}
+	}
+
 	// Write-back phase: post comment, apply outcome label, remove trigger labels.
 	// Run under a deadline so a stalled GitHub/GitLab API call cannot block the
 	// runner indefinitely. Without this, a TCP read that never completes parks
@@ -339,12 +351,18 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	select {
 	case err := <-done:
 		if err != nil {
-			return body, outcome, err
+			if errors.Is(err, ErrDisallowedOutcome) {
+				return body, outcome, err
+			}
+			return body, outcome, &WriteBackError{err}
 		}
 	case <-writeBackCtx.Done():
-		return body, outcome, fmt.Errorf("write-back timed out after %v (GitHub/GitLab API stall): %w", writeBackTimeout, writeBackCtx.Err())
+		return body, outcome, &WriteBackError{fmt.Errorf("write-back timed out after %v (GitHub/GitLab API stall): %w", writeBackTimeout, writeBackCtx.Err())}
 	}
 
+	if opts.CommentSaveDir != "" {
+		_ = os.Remove(filepath.Join(opts.CommentSaveDir, "writeback.json"))
+	}
 	return body, outcome, nil
 }
 
@@ -353,6 +371,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 // and optionally close the issue. Extracted so it can be run under a timeout
 // via a goroutine in Run.
 func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outcome string) error {
+	var writeErrors []error
 	if body != "" {
 		// Append the ClawFlow promo footer before persisting/posting so the
 		// on-disk comment.md matches what actually lands on the issue, and so
@@ -373,16 +392,10 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 
 		emitStage(opts.StageFunc, StagePostingComment)
 		if err := v.PostIssueCommentIdempotent(opts.Repo, sub.Number, body, opts.RunID); err != nil {
-			// Downgrade a comment-post failure to a WARN instead of aborting
-			// write-back. Previously a POST timeout (context deadline exceeded)
-			// returned here and the outcome-label write below never ran, so a
-			// PR that was already opened by `implement` never got its
-			// `agent-implemented` label — the issue stayed eligible
-			// and the next scan re-triggered the operator, opening a duplicate
-			// PR and burning tokens again (issue #293). The comment body is
-			// already persisted to comment.md above and can be recovered, so
-			// the outcome label (the thing that actually gates re-triggering)
-			// must take priority over the cosmetic comment.
+			// Keep applying labels even when the comment fails (#293).
+			// Report all delivery errors together so the saved intent can be
+			// replayed without executing the operator again.
+			writeErrors = append(writeErrors, err)
 			fmt.Fprintf(os.Stderr, "  ⚠ post result comment failed (continuing to label): %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "  ✓ comment posted (%d chars)\n", len(body))
@@ -404,7 +417,7 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 				op.Name, outcome, op.Outcomes)
 			disallowed = fmt.Errorf("%w: %q not in %v (operator %q)", ErrDisallowedOutcome, outcome, op.Outcomes, op.Name)
 		} else if err := v.AddLabel(opts.Repo, sub.Number, outcome); err != nil {
-			return fmt.Errorf("add outcome label %q: %w", outcome, err)
+			writeErrors = append(writeErrors, fmt.Errorf("add outcome label %q: %w", outcome, err))
 		} else {
 			fmt.Fprintf(os.Stderr, "  ✓ outcome label %q added\n", outcome)
 		}
@@ -420,6 +433,7 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 	// trigger label in place only buys a duplicate comment and a second bill.
 	if outcome != "" && len(op.Trigger.LabelsConsumed) > 0 {
 		if err := v.RemoveLabel(opts.Repo, sub.Number, op.Trigger.LabelsConsumed...); err != nil {
+			writeErrors = append(writeErrors, err)
 			fmt.Fprintf(os.Stderr, "  ⚠ consumed label cleanup failed: %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "  ✓ consumed labels removed: %v\n", op.Trigger.LabelsConsumed)
@@ -431,6 +445,7 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 	// lifecycle loop.
 	if outcome == "agent-closed" {
 		if err := v.CloseIssue(opts.Repo, sub.Number); err != nil {
+			writeErrors = append(writeErrors, err)
 			fmt.Fprintf(os.Stderr, "  ⚠ auto-close failed: %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "  ✓ issue #%d closed (all sub-issues complete)\n", sub.Number)
@@ -440,7 +455,7 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 	// Reported last so the comment post and the consumed-label cleanup above
 	// both complete first: the run IS degraded (no terminal label landed) but
 	// everything recoverable has been recovered.
-	return disallowed
+	return errors.Join(append(writeErrors, disallowed)...)
 }
 
 // outcomeAllowed reports whether `label` is in the operator's declared

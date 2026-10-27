@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -343,8 +345,9 @@ func TestRun_CommentPostFails_OutcomeLabelStillApplied(t *testing.T) {
 			return body, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("comment failure should not fail the run; got: %v", err)
+	var writebackErr *WriteBackError
+	if !errors.As(err, &writebackErr) {
+		t.Fatalf("want delivery error after successful execution, got: %v", err)
 	}
 	if outcome != "agent-implemented" {
 		t.Errorf("want outcome agent-implemented, got %q", outcome)
@@ -899,6 +902,48 @@ func TestParseOutcome_Direct(t *testing.T) {
 			}
 			if gotBody != c.wantBody {
 				t.Errorf("body = %q, want %q", gotBody, c.wantBody)
+			}
+		})
+	}
+}
+
+func TestRunDeliveryJournalAndNativeFailure(t *testing.T) {
+	for _, agentFailed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "delivery only", true: "agent failed"}[agentFailed], func(t *testing.T) {
+			dir := t.TempDir()
+			op := &Operator{Name: "implement", Outcomes: []string{"agent-implemented"}}
+			v := newFakeVCS()
+			v.errOnAdd = true
+			_, _, err := Run(context.Background(), op, &Subject{Number: 1}, v, RunOptions{Repo: "o/r", RunID: "stable-run", CommentSaveDir: dir, RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+				output := "Done\n<!-- clawflow:outcome=agent-implemented -->"
+				if agentFailed {
+					return output, errors.New("native final error")
+				}
+				return output, nil
+			}})
+			var delivery *WriteBackError
+			if errors.As(err, &delivery) == agentFailed {
+				t.Fatalf("agentFailed=%v err=%v", agentFailed, err)
+			}
+			_, statErr := os.Stat(filepath.Join(dir, "writeback.json"))
+			if agentFailed {
+				if !os.IsNotExist(statErr) || v.addLabelCalls != 0 {
+					t.Fatal("failed execution created delivery intent")
+				}
+				return
+			}
+			if statErr != nil {
+				t.Fatal(statErr)
+			}
+			v.errOnAdd = false
+			if err := ReplayWriteBack(v, dir); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Contains(v.labels[1], "agent-implemented") {
+				t.Fatal("missing replayed label")
+			}
+			if _, err := os.Stat(filepath.Join(dir, "writeback.json")); !os.IsNotExist(err) {
+				t.Fatal("completed journal not removed")
 			}
 		})
 	}
