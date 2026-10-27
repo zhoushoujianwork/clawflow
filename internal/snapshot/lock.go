@@ -6,9 +6,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// lockFileMu serializes lockfile creation, publication, reclamation and removal
+// within this process. O_EXCL only makes creation atomic: another goroutine
+// must not mistake a not-yet-written payload for a corrupt lock and remove it.
+// This mutex is held for filesystem operations, never for the protected work.
+var lockFileMu sync.Mutex
 
 // LockInfo is the JSON payload written to each lockfile.
 type LockInfo struct {
@@ -35,9 +42,12 @@ func LockPath(repo string, issueNum int) string {
 // on success, an error if the lock is already held by a live process.
 // Stale locks (owner PID is dead) are automatically reclaimed.
 //
-// The lock is created with O_CREATE|O_EXCL so the operation is atomic on
-// POSIX filesystems — two concurrent callers cannot both succeed.
+// The lockfile is created exclusively; in-process acquisition and reclamation
+// are serialized through lockFileMu.
 func AcquireLock(repo string, issueNum int, operatorName string) error {
+	lockFileMu.Lock()
+	defer lockFileMu.Unlock()
+
 	path := LockPath(repo, issueNum)
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -82,8 +92,7 @@ func AcquireLock(repo string, issueNum int, operatorName string) error {
 			existing.PID, existing.Operator, existing.StartedAt.Format(time.RFC3339))
 	}
 
-	// Stale lock — owner is dead. Remove it and re-acquire with O_EXCL so
-	// we don't race with another process doing the same reclaim.
+	// Stale lock — owner is dead. Remove it and retry exclusive creation.
 	_ = os.Remove(path)
 	if err2 := writeExclusive(path, data); err2 != nil {
 		if os.IsExist(err2) {
@@ -99,9 +108,9 @@ func AcquireLock(repo string, issueNum int, operatorName string) error {
 	return nil
 }
 
-// writeExclusive atomically creates path and writes data to it using
-// O_CREATE|O_EXCL. Returns os.ErrExist (via os.IsExist) if the file
-// already exists.
+// writeExclusive exclusively creates path, then writes data to it using
+// O_CREATE|O_EXCL. Creation and payload publication are separate operations.
+// Returns os.ErrExist (via os.IsExist) if the file already exists.
 func writeExclusive(path string, data []byte) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -118,6 +127,9 @@ func writeExclusive(path string, data []byte) error {
 // ReleaseLock removes the lockfile for the given (repo, issue). No-op if
 // the file doesn't exist.
 func ReleaseLock(repo string, issueNum int) {
+	lockFileMu.Lock()
+	defer lockFileMu.Unlock()
+
 	_ = os.Remove(LockPath(repo, issueNum))
 }
 
@@ -148,6 +160,9 @@ func ReadLock(path string) (*LockInfo, error) {
 // CleanStaleLocks walks the locks directory and removes any lockfile whose
 // owner PID is no longer running. Called by ReconcileStaleRuns.
 func CleanStaleLocks() int {
+	lockFileMu.Lock()
+	defer lockFileMu.Unlock()
+
 	lockDir := LockDir()
 	if _, err := os.Stat(lockDir); os.IsNotExist(err) {
 		return 0
@@ -206,6 +221,9 @@ func RunLockPath() string {
 // Stale locks (owner PID is dead) are automatically reclaimed using the
 // same O_CREATE|O_EXCL + PID-liveness pattern as AcquireLock.
 func AcquireRunLock(version string) error {
+	lockFileMu.Lock()
+	defer lockFileMu.Unlock()
+
 	path := RunLockPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir lock dir: %w", err)
@@ -247,8 +265,7 @@ func AcquireRunLock(version string) error {
 			existing.PID, existing.StartedAt.Format(time.RFC3339))
 	}
 
-	// Stale lock — owner is dead. Remove and re-acquire with O_EXCL so we
-	// don't race with another process doing the same reclaim.
+	// Stale lock — owner is dead. Remove it and retry exclusive creation.
 	_ = os.Remove(path)
 	if err2 := writeExclusive(path, data); err2 != nil {
 		if os.IsExist(err2) {
@@ -265,6 +282,9 @@ func AcquireRunLock(version string) error {
 
 // ReleaseRunLock removes the process-level run lockfile. No-op if missing.
 func ReleaseRunLock() {
+	lockFileMu.Lock()
+	defer lockFileMu.Unlock()
+
 	_ = os.Remove(RunLockPath())
 }
 

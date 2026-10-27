@@ -380,28 +380,60 @@ func TestSelfUpgradeLockFile(t *testing.T) {
 }
 
 func TestSelfUpgradeLockSerializesGoroutines(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	won := 0
-	start := make(chan struct{})
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			if _, ok, err := acquireSelfUpgradeLock(); err == nil && ok {
-				mu.Lock()
-				won++
-				mu.Unlock()
+	for _, initial := range []string{"missing", "stale", "corrupt"} {
+		t.Run(initial, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			if initial != "missing" {
+				if err := os.MkdirAll(filepath.Dir(selfUpgradeLockPath()), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				data := "not a PID"
+				if initial == "stale" {
+					data = "2147483646\n"
+					if pidAlive(2147483646) {
+						t.Skip("test PID is alive")
+					}
+				}
+				if err := os.WriteFile(selfUpgradeLockPath(), []byte(data), 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
-		}()
-	}
-	close(start)
-	wg.Wait()
-	// The owner PID is this live test process, so exactly one acquire wins.
-	if won != 1 {
-		t.Fatalf("%d goroutines acquired the lock, want 1", won)
+			const contenders = 20
+			var attempted sync.WaitGroup
+			attempted.Add(contenders)
+			releases := make(chan func(), contenders)
+			start := make(chan struct{})
+			for i := 0; i < contenders; i++ {
+				go func() {
+					defer attempted.Done()
+					<-start
+					release, ok, err := acquireSelfUpgradeLock()
+					if err != nil {
+						t.Errorf("acquire: %v", err)
+					}
+					if ok {
+						releases <- release
+					}
+				}()
+			}
+			close(start)
+			attempted.Wait()
+			close(releases)
+			// Keep every successful acquisition held until all attempts finish.
+			winners := 0
+			for release := range releases {
+				winners++
+				release()
+			}
+			if winners != 1 {
+				t.Fatalf("%d goroutines acquired the lock while held, want 1", winners)
+			}
+			release, ok, err := acquireSelfUpgradeLock()
+			if err != nil || !ok {
+				t.Fatalf("acquire after release: ok=%v err=%v", ok, err)
+			}
+			release()
+		})
 	}
 }
 
