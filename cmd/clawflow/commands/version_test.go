@@ -25,6 +25,36 @@ func TestDescribeAndUnknownComparison(t *testing.T) {
 		}
 	}
 }
+func TestLargeNumericPrereleaseComparison(t *testing.T) {
+	for _, tc := range []struct {
+		name, older, newer string
+	}{
+		{"different lengths", "99999999999999999999", "100000000000000000000"},
+		{"same length", "100000000000000000000", "100000000000000000001"},
+		{"machine integer boundary", "9", "100000000000000000000"},
+		{"numeric before alphanumeric", "100000000000000000000", "100000000000000000000a"},
+		{"numeric before hyphen", "100000000000000000000", "-"},
+		{"nested identifiers", "rc.99999999999999999999", "rc.100000000000000000000"},
+		{"equal large identifier", "100000000000000000000.1", "100000000000000000000.2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			older, newer := "v1.0.0-"+tc.older, "v1.0.0-"+tc.newer
+			if !IsNewerVersion(older, newer) || IsNewerVersion(newer, older) || IsNewerVersion(newer, newer) {
+				t.Errorf("incorrect prerelease ordering: %s < %s", older, newer)
+			}
+			if err := checkReleaseReplacement(newer, older, "release", false, false); err == nil {
+				t.Error("release downgrade accepted without authorization")
+			}
+			if err := checkReleaseReplacement(older, newer, "release", false, false); err != nil {
+				t.Errorf("upgrade rejected: %v", err)
+			}
+			if err := checkReleaseReplacement(newer, older, "release", false, true); err != nil {
+				t.Errorf("explicit downgrade rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestReleaseReplacementPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		current, channel    string

@@ -73,15 +73,23 @@ func IsNewerVersion(current, latest string) bool {
 			if a[i] == b[i] {
 				continue
 			}
-			an, ae := strconv.Atoi(a[i])
-			bn, be := strconv.Atoi(b[i])
-			if ae == nil && be == nil {
+			// Numeric prerelease identifiers have no machine-integer size limit.
+			anumeric := a[i] != "" && strings.Trim(a[i], "0123456789") == ""
+			bnumeric := b[i] != "" && strings.Trim(b[i], "0123456789") == ""
+			if anumeric && bnumeric {
+				an, bn := strings.TrimLeft(a[i], "0"), strings.TrimLeft(b[i], "0")
+				if len(an) != len(bn) {
+					return len(bn) > len(an)
+				}
+				if an == bn {
+					continue
+				}
 				return bn > an
 			}
-			if ae == nil {
+			if anumeric {
 				return true
 			}
-			if be == nil {
+			if bnumeric {
 				return false
 			}
 			return b[i] > a[i]
