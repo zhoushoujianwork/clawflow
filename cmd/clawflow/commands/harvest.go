@@ -319,6 +319,10 @@ func harvestNonpassComment(r acceptance.Record) string {
 	if runes := []rune(summary); len(runes) > harvestSummaryLimit {
 		summary = string(runes[:harvestSummaryLimit]) + "…"
 	}
-	return fmt.Sprintf("🤖 Independent acceptance for PR #%d: %s.\n\n%s\n\n%s",
-		r.Contract.PRNumber, r.Verdict, summary, harvestMarker(r))
+	next := ""
+	if r.Verdict == acceptance.Blocked {
+		next = "\n\nA human decision is needed; automatic repair does not run for a blocked verdict."
+	}
+	return fmt.Sprintf("🤖 Independent acceptance for PR #%d: %s.\n\n%s%s\n\n%s",
+		r.Contract.PRNumber, r.Verdict, summary, next, harvestMarker(r))
 }

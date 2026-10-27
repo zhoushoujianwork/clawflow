@@ -24,11 +24,22 @@ Enrollment preserves monitoring and automatic-merge settings. The scan sweep nev
 - A passing result goes straight to the conditional merge path with the accepted head SHA.
 - A failed or blocked verdict posts one comment on the issue with the status and reviewer summary. Later passes find the recorded verdict and stay silent.
 - Setup or provider errors post nothing, are logged, and make `clawflow run` exit non-zero. They are retried after 15 minutes, up to 3 attempts per head. After that one comment points to `clawflow acceptance run`.
-- There is no repair loop yet. A non-pass PR waits for a new head or a human.
+- A `failed` verdict is repaired on the same PR, see [Repair after a failed verdict](#repair-after-a-failed-verdict). A `blocked` verdict is not: the comment says a human decision is needed.
 
 The PR must be open, non-draft, from the same repository, and reference an open issue with a closing keyword. A successful managed development run must have captured that issue's requirements and trustworthy native execution events. Historical runs missing the requirements snapshot need a new managed development run. The configured acceptance profile must support the existing Offload execution protocol.
 
 The latest completed acceptance attempt must pass for the current requirements, developer identity, head, base and policy. New submissions or changed requirements/configuration need fresh acceptance. A newer failed or cancelled attempt supersedes an older pass. Both automatic merge and explicit `clawflow pr merge` enforce the policy for enrolled repositories, along with required CI and provider protections.
+
+## Repair after a failed verdict
+
+The reviewer never edits. When the latest completed record for the PR's current contract is a reviewer verdict `failed` with evidence, the scan dispatches the existing `repair-ci` operator (development role) against the same PR branch. Conditions: managed same-repository GitHub PR, `acceptance_required` on, and repair budget left.
+
+- The repair prompt carries the reviewer summary and evidence as bounded, redacted, untrusted data, separate from the issue requirements. Requirements stay the source of truth.
+- CI repairs and acceptance repairs share one ledger per PR: at most 3 consumed attempts, a 5 minute cooldown, and infrastructure outcomes (capacity, rate limit, launch, transport, timeout before any tool activity) are released instead of consumed.
+- When the budget is spent, one comment (deduped by marker) is posted and automatic repair stops. Nothing is merged.
+- The repair pushes a normal commit to the existing branch and opens no PR. The new head is a new contract, so CI and a fresh acceptance run follow through the normal harvest rules, with a reviewer session different from the repairing one.
+- `clawflow run --repo owner/repo --issue N` includes this repair for the PR closing N.
+- Logs: `run/acceptance_repair` (phase start/end, attempt, reason), plus `run/acceptance_repair_skip` and the existing harvest events.
 
 ## Targeted run
 

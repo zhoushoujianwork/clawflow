@@ -1230,6 +1230,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			runLog.Warn("run/ci_repair_skip", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
 			return false, false, false
 		}
+		logAcceptanceRepair(j, "start")
 	}
 
 	if j.op.Name == "implement" {
@@ -1406,7 +1407,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			"status", "failed", "stage", runningMeta.Stage, "err", err.Error(), "cost", "0.0000")
 		if j.repair != nil {
 			_ = j.client.AddLabel(j.repo, j.sub.Number, "agent-failed")
-			_ = j.client.PostIssueComment(j.repo, j.sub.Number, "CI repair setup failed: "+err.Error())
+			_ = j.client.PostIssueComment(j.repo, j.sub.Number, j.repair.label()+" repair setup failed: "+err.Error())
+			logAcceptanceRepair(j, "end", "status", "failed", "err", err.Error())
 		} else {
 			checkCircuitBreaker(j, prefix)
 		}
@@ -1563,7 +1565,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 				runLog.Warn("run/ci_repair_release_failed", "repo", j.repo, "issue", j.sub.Number, "err", rerr.Error())
 			} else {
 				repairInfra = true
-				fmt.Fprintf(os.Stderr, "%s → CI repair infrastructure outcome (%s): attempt %d not consumed, backoff applied\n", prefix, kind, j.repair.Attempt)
+				fmt.Fprintf(os.Stderr, "%s → %s repair infrastructure outcome (%s): attempt %d not consumed, backoff applied\n", prefix, j.repair.label(), kind, j.repair.Attempt)
 				runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "kind", kind)
 			}
 		}
@@ -1671,7 +1673,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rm.Status = "skipped-empty"
 	case j.repair != nil && outcome == "agent-failed":
 		rm.Status = "failed"
-		rm.Error = "CI repair could not update existing PR"
+		rm.Error = j.repair.label() + " repair could not update existing PR"
 	default:
 		rm.Status = "success"
 	}
@@ -1777,6 +1779,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		"cost", fmt.Sprintf("%.4f", runCost),
 	)
 
+	logAcceptanceRepair(j, "end", "status", rm.Status, "outcome", outcome, "infra", repairInfra)
+
 	// Apply successful lifecycle follow-up.
 	if rm.Status == "success" {
 		runPostAutomation(ctx, j, outcome, output, prefix)
@@ -1786,7 +1790,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// infrastructure budget, so they must not also trip the circuit breaker
 	// (which would label the issue agent-failed and block further repair).
 	if repairInfra && rm.Status == "failed" {
-		fmt.Printf("%s ✗ CI repair infrastructure failure (not counted toward circuit breaker)\n", prefix)
+		fmt.Printf("%s ✗ %s repair infrastructure failure (not counted toward circuit breaker)\n", prefix, j.repair.label())
 		return false, false, true
 	}
 

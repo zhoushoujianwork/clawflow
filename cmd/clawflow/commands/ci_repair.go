@@ -25,6 +25,25 @@ import (
 type ciRepairContext struct {
 	PR      vcs.PR
 	Attempt int
+	// Acceptance is set when the repair input is a failed independent
+	// acceptance verdict instead of failing CI. Nil means a CI repair.
+	Acceptance *acceptanceFindings
+}
+
+// reason names the repair input for the shared ledger and logs.
+func (r *ciRepairContext) reason() string {
+	if r != nil && r.Acceptance != nil {
+		return repairReasonAcceptance
+	}
+	return repairReasonCI
+}
+
+// label is the human-facing prefix for runner messages.
+func (r *ciRepairContext) label() string {
+	if r.reason() == repairReasonAcceptance {
+		return "Acceptance"
+	}
+	return "CI"
 }
 
 var repairSHA = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
@@ -59,7 +78,8 @@ func ciRepairCandidate(repo string, pr vcs.PR, issue *vcs.Issue) error {
 }
 
 func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Client, repo string, cfg config.Repo, onlyIssue int, normal []*runJob) []*runJob {
-	if !ciRepairEnabled(cfg) {
+	ciOn, accOn := ciRepairEnabled(cfg), acceptanceRepairEnabled(cfg)
+	if !ciOn && !accOn {
 		return nil
 	}
 	skip := func(pr int, err error) { runLog.Warn("run/ci_repair_skip", "repo", repo, "pr", pr, "err", err.Error()) }
@@ -118,17 +138,36 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 			skip(pr.Number, err)
 			continue
 		}
-		status, err := client.GetCIStatus(repo, pr.Number)
-		if err != nil {
-			skip(pr.Number, err)
-			continue
+		var findings *acceptanceFindings
+		ciFailing := false
+		if ciOn {
+			status, err := client.GetCIStatus(repo, pr.Number)
+			if err != nil {
+				skip(pr.Number, err)
+				continue
+			}
+			ciFailing = status == vcs.CIStatusFailure
 		}
-		if status != vcs.CIStatusFailure {
+		switch {
+		case ciFailing:
+			// CI failure evidence: current behavior. A spent shared budget
+			// ends repair with one comment instead of a silent skip.
+			if err := checkRepairBudget(snapshot.DataDir(), repo, pr.Number, time.Now().UTC()); errors.Is(err, errRepairExhausted) {
+				skip(pr.Number, err)
+				repairExhaustedNotice(ctx, client, repo, cfg, pr, n)
+				continue
+			}
+		case accOn:
+			findings = scanAcceptanceRepair(ctx, client, repo, cfg, pr, n)
+			if findings == nil {
+				continue
+			}
+		default:
 			continue
 		}
 		seen[n] = true
 		sub := &operator.Subject{Number: n, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State}
-		jobs = append(jobs, &runJob{op: op, sub: sub, repo: repo, repoCfg: cfg, client: client, repair: &ciRepairContext{PR: pr}})
+		jobs = append(jobs, &runJob{op: op, sub: sub, repo: repo, repoCfg: cfg, client: client, repair: &ciRepairContext{PR: pr, Acceptance: findings}})
 	}
 	return jobs
 }
@@ -150,14 +189,20 @@ func prepareCIRepair(j *runJob, now time.Time) error {
 	if pr.HeadSHA != j.repair.PR.HeadSHA || pr.HeadBranch != j.repair.PR.HeadBranch {
 		return fmt.Errorf("PR head changed since scan")
 	}
-	status, err := j.client.GetCIStatus(j.repo, pr.Number)
-	if err != nil {
-		return err
+	if j.repair.Acceptance != nil {
+		if err := recheckAcceptanceRepair(j, pr); err != nil {
+			return err
+		}
+	} else {
+		status, err := j.client.GetCIStatus(j.repo, pr.Number)
+		if err != nil {
+			return err
+		}
+		if status != vcs.CIStatusFailure {
+			return fmt.Errorf("CI no longer failing: %s", status)
+		}
 	}
-	if status != vcs.CIStatusFailure {
-		return fmt.Errorf("CI no longer failing: %s", status)
-	}
-	attempt, err := reserveCIRepair(snapshot.DataDir(), j.repo, pr, now)
+	attempt, err := reserveRepair(snapshot.DataDir(), j.repo, pr, j.repair.reason(), now)
 	if err != nil {
 		return err
 	}
@@ -183,6 +228,9 @@ type ciRepairAttempt struct {
 	// Released is the infrastructure kind that made this reservation
 	// non-consuming. Empty means the attempt counts against the repair budget.
 	Released string `json:"released,omitempty"`
+	// Reason is the repair input that reserved this attempt ("ci" or
+	// "acceptance"). CI and acceptance repairs share one ledger per PR.
+	Reason string `json:"reason,omitempty"`
 }
 type ciRepairLedger struct {
 	Attempts []ciRepairAttempt `json:"attempts"`
@@ -256,6 +304,50 @@ func saveCIRepairLedger(dir, path string, ledger ciRepairLedger) error {
 }
 
 func reserveCIRepair(root, repo string, pr vcs.PR, now time.Time) (int, error) {
+	return reserveRepair(root, repo, pr, repairReasonCI, now)
+}
+
+// Budget refusals. They wrap a sentinel so callers can tell a spent budget
+// from a transient wait.
+var (
+	errRepairExhausted = errors.New("repair exhausted")
+	errRepairBlocked   = errors.New("repair blocked")
+	errRepairWait      = errors.New("repair waiting")
+)
+
+// repairBudget reports whether the ledger allows another reservation at now.
+func repairBudget(ledger ciRepairLedger, now time.Time) error {
+	consumed, infra := ledger.counts()
+	if consumed >= ciRepairMaxAttempts {
+		return fmt.Errorf("%w: %d total attempts", errRepairExhausted, ciRepairMaxAttempts)
+	}
+	if infra >= ciRepairMaxInfra {
+		last := ledger.Attempts[len(ledger.Attempts)-1]
+		return fmt.Errorf("%w: infrastructure budget exhausted (%d outcomes, last: %s)", errRepairBlocked, infra, last.Released)
+	}
+	if n := len(ledger.Attempts); n > 0 && now.Sub(ledger.Attempts[n-1].At) < ciRepairCooldown {
+		return fmt.Errorf("%w: cooldown 5 minutes", errRepairWait)
+	}
+	if now.Before(ledger.NotBefore) {
+		return fmt.Errorf("%w: infrastructure backoff until %s", errRepairWait, ledger.NotBefore.Format(time.RFC3339))
+	}
+	return nil
+}
+
+// checkRepairBudget is the read-only form of the reservation check. It never
+// creates the ledger.
+func checkRepairBudget(root, repo string, pr int, now time.Time) error {
+	_, path := ciRepairLedgerPath(root, repo, pr)
+	ledger, err := loadCIRepairLedger(path)
+	if err != nil {
+		return err
+	}
+	return repairBudget(ledger, now)
+}
+
+// reserveRepair takes one attempt from the PR's shared ledger. CI and
+// acceptance repairs draw on the same budget, cooldown and backoff.
+func reserveRepair(root, repo string, pr vcs.PR, reason string, now time.Time) (int, error) {
 	dir, path := ciRepairLedgerPath(root, repo, pr.Number)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return 0, err
@@ -264,22 +356,12 @@ func reserveCIRepair(root, repo string, pr vcs.PR, now time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	consumed, infra := ledger.counts()
-	if consumed >= ciRepairMaxAttempts {
-		return 0, fmt.Errorf("CI repair exhausted: %d total attempts", ciRepairMaxAttempts)
+	if err := repairBudget(ledger, now); err != nil {
+		return 0, err
 	}
-	if infra >= ciRepairMaxInfra {
-		last := ledger.Attempts[len(ledger.Attempts)-1]
-		return 0, fmt.Errorf("CI repair blocked: infrastructure budget exhausted (%d outcomes, last: %s)", infra, last.Released)
-	}
-	if n := len(ledger.Attempts); n > 0 && now.Sub(ledger.Attempts[n-1].At) < ciRepairCooldown {
-		return 0, fmt.Errorf("CI repair cooldown: 5 minutes")
-	}
-	if now.Before(ledger.NotBefore) {
-		return 0, fmt.Errorf("CI repair infrastructure backoff until %s", ledger.NotBefore.Format(time.RFC3339))
-	}
+	consumed, _ := ledger.counts()
 	attempt := consumed + 1
-	ledger.Attempts = append(ledger.Attempts, ciRepairAttempt{Head: pr.HeadSHA, Attempt: attempt, At: now})
+	ledger.Attempts = append(ledger.Attempts, ciRepairAttempt{Head: pr.HeadSHA, Attempt: attempt, At: now, Reason: reason})
 	if err := saveCIRepairLedger(dir, path, ledger); err != nil {
 		return 0, err
 	}
@@ -369,6 +451,9 @@ func repairToolActivity(path string) (bool, error) {
 }
 
 func (r *ciRepairContext) prompt(testCommand string) string {
+	if r.Acceptance != nil {
+		return r.acceptancePrompt(testCommand)
+	}
 	return fmt.Sprintf("CI repair context (local reproduction; CI logs are not ingested):\nExisting PR: https://github.com/%s/pull/%d\nHead branch: %s\nExpected head SHA: %s\nCI status: failure\nReserved attempt: %d of 3\nConfigured headless test command: %s\nUpdate this existing PR only. Do not create a new PR.\n", r.PR.HeadRepo, r.PR.Number, r.PR.HeadBranch, r.PR.HeadSHA, r.Attempt, testCommand)
 }
 
