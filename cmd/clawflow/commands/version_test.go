@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -125,5 +126,70 @@ func TestDownloadRefusesSourceBeforeNetwork(t *testing.T) {
 	t.Cleanup(func() { BuildChannel = old })
 	if err := downloadLatestBinary(); err == nil || !strings.Contains(err.Error(), "--release") {
 		t.Fatalf("expected channel refusal, got %v", err)
+	}
+}
+
+func TestSelfUpgradeStaleProcessCannotDowngradeInstalledBinary(t *testing.T) {
+	h := newUpgradeHarness(t)
+	dir := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := runSelfUpgradeCmd(context.Background(), dir, "git", args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-b", "main")
+	git("config", "user.email", "test@example.com")
+	git("config", "user.name", "Test")
+	git("commit", "--allow-empty", "-m", "A")
+	a := git("rev-parse", "HEAD")
+	git("commit", "--allow-empty", "-m", "B")
+	b := git("rev-parse", "HEAD")
+	git("commit", "--allow-empty", "-m", "C")
+	c := git("rev-parse", "HEAD")
+	git("branch", "target", b)
+	git("remote", "add", "origin", dir)
+	h.u.Version, h.u.Commit = a[:7], a
+	// The destination changed while this old process was waiting for the lock.
+	h.u.Lock = func() (func(), bool, error) {
+		script := "#!/bin/sh\nprintf '%s\\n' '" + c[:7] + "' 'channel=source commit=" + c + " branch=main'\n"
+		if err := os.WriteFile(h.dest, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		return func() { h.released++ }, true, nil
+	}
+	h.u.Run = func(ctx context.Context, cwd, name string, args ...string) ([]byte, error) {
+		if len(args) == 1 && args[0] == "version" {
+			data, _ := os.ReadFile(name)
+			if string(data) == "NEW" {
+				return []byte(b[:7] + "\n"), nil
+			}
+		}
+		if name == "git" || name == h.dest {
+			return runSelfUpgradeCmd(ctx, cwd, name, args...)
+		}
+		return h.run(ctx, cwd, name, args...)
+	}
+	out := h.u.Upgrade(context.Background(), config.Repo{LocalPath: dir, BaseBranch: "target"})
+	if out.Result != selfUpgradeFailed || !strings.Contains(out.Reason, "diverged or unknown") {
+		t.Fatalf("stale process accepted older target: %+v", out)
+	}
+	if !strings.Contains(h.installed(), c) || h.called("go build") || h.released != 1 {
+		t.Fatalf("destination changed or unnecessary build: %s, calls=%v, releases=%d", h.installed(), h.calls, h.released)
+	}
+}
+
+func TestSelfUpgradeRejectsUnreadableInstalledIdentity(t *testing.T) {
+	for _, output := range []string{"", "unknown\n", "abcdef0\nchannel=source commit=invalid branch=main\n"} {
+		t.Run(output, func(t *testing.T) {
+			h := newUpgradeHarness(t)
+			h.versions = map[string]string{"OLD": output}
+			out := h.u.Upgrade(context.Background(), selfUpgradeRepo(t))
+			if out.Result != selfUpgradeFailed || h.installed() != "OLD" || h.called("go build") {
+				t.Fatalf("unsafe upgrade with unknown installed identity: %+v", out)
+			}
+		})
 	}
 }

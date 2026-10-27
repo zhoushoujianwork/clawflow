@@ -107,18 +107,22 @@ func trackedBranch() string {
 	return "main"
 }
 func installedCommit() string {
-	if fullSHARE.MatchString(BuildCommit) {
-		return BuildCommit
+	return commitForVersion(Version, BuildCommit)
+}
+
+func commitForVersion(version, commit string) string {
+	if fullSHARE.MatchString(commit) {
+		return commit
 	}
-	if commitPattern.MatchString(Version) {
-		return Version
+	if commitPattern.MatchString(version) {
+		return version
 	}
-	if m := describePattern.FindStringSubmatch(Version); m != nil {
-		_, sha, _ := strings.Cut(Version, "-g")
+	if m := describePattern.FindStringSubmatch(version); m != nil {
+		_, sha, _ := strings.Cut(version, "-g")
 		return sha
 	}
-	if _, ok := parseVersion(Version); ok {
-		return "refs/tags/" + Version
+	if _, ok := parseVersion(version); ok {
+		return "refs/tags/" + version
 	}
 	return ""
 }

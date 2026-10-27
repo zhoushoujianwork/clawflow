@@ -281,6 +281,36 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 	}
 	defer release()
 
+	// The lock may have been held by an upgrade from another process. Read the
+	// destination now: this process's build metadata may already be obsolete.
+	dest, err := u.Executable()
+	if err != nil {
+		return fail("locate running executable: %v", err)
+	}
+	installed, err := u.Run(ctx, filepath.Dir(dest), dest, "version")
+	if err != nil {
+		return fail("read installed version: %v", err)
+	}
+	versionLine, metadata, _ := strings.Cut(strings.TrimSpace(string(installed)), "\n")
+	installedVersion := strings.TrimSpace(versionLine)
+	commit := ""
+	for _, field := range strings.Fields(metadata) {
+		if value, ok := strings.CutPrefix(field, "commit="); ok {
+			if value != "" && !fullSHARE.MatchString(value) {
+				return fail("installed commit metadata is invalid")
+			}
+			commit = value
+			break
+		}
+	}
+	// Keep status checks on the running process unchanged; only this locked
+	// replacement attempt uses the freshly read destination identity.
+	current := *u
+	current.Version = installedVersion
+	current.Commit = commitForVersion(installedVersion, commit)
+	u = &current
+	out.From = installedVersion
+
 	// 1. Fetch the base and resolve its SHA without touching refs or the
 	// working tree of the user's checkout (FETCH_HEAD only).
 	if _, err := u.Run(ctx, localPath, "git", "fetch", "origin", base); err != nil {
@@ -316,10 +346,6 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 		return fail("empty target version")
 	}
 
-	dest, err := u.Executable()
-	if err != nil {
-		return fail("locate running executable: %v", err)
-	}
 	info, err := u.Stat(dest)
 	if err != nil {
 		return fail("stat running executable: %v", err)

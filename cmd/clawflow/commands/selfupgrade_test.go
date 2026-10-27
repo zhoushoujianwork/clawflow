@@ -106,6 +106,9 @@ func (h *upgradeHarness) run(_ context.Context, dir, name string, args ...string
 		if v, ok := h.versions[string(b)]; ok {
 			return []byte(v + "\n"), nil
 		}
+		if string(b) == "OLD" {
+			return []byte(h.u.Version + "\nchannel=source commit=" + h.u.Commit + " branch=main\n"), nil
+		}
 		return []byte(testFullSHA[:7] + "\n"), nil
 	case len(args) >= 2 && args[0] == "execution" && args[1] == "check":
 		return []byte(h.checkJSON), nil
@@ -288,7 +291,9 @@ func TestSelfUpgradeRollsBackWhenInstalledBinaryFailsVerification(t *testing.T) 
 	h.u.Run = func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 		if len(args) == 1 && args[0] == "version" && name == h.dest {
 			n++
-			return []byte("wrongsh\n"), nil
+			if n > 1 {
+				return []byte("wrongsh\n"), nil
+			}
 		}
 		return inner(ctx, dir, name, args...)
 	}
@@ -296,8 +301,8 @@ func TestSelfUpgradeRollsBackWhenInstalledBinaryFailsVerification(t *testing.T) 
 	if out.Result != selfUpgradeFailed || !strings.Contains(out.Reason, "rolled back") {
 		t.Fatalf("outcome = %+v", out)
 	}
-	if n != 1 {
-		t.Fatalf("installed version checked %d times", n)
+	if n != 2 {
+		t.Fatalf("installed version checked %d times, want before and after replacement", n)
 	}
 	if h.installed() != "OLD" {
 		t.Errorf("installed = %q, want OLD restored", h.installed())
