@@ -434,7 +434,7 @@ func conditionalAcceptedMerge(ctx context.Context, client vcs.Client, repo strin
 	}
 	conditional, ok := client.(vcs.ConditionalMerger)
 	if !ok {
-		return errors.New("acceptance requires conditional merge capability")
+		return &mergeGateError{reason: mergeReasonConditionalUnsupp, warn: true, err: errors.New("acceptance requires conditional merge capability")}
 	}
 	rc, _, err := acceptanceConfiguration(repo)
 	if err != nil {
@@ -443,16 +443,16 @@ func conditionalAcceptedMerge(ctx context.Context, client vcs.Client, repo strin
 	if rc.CIRequired {
 		status, err := client.GetCIStatus(repo, pr)
 		if err != nil || status != vcs.CIStatusSuccess {
-			return errors.New("acceptance merge blocked: required CI is not successful")
+			return gateBlock(mergeReasonCINotSuccessful, errors.New("acceptance merge blocked: required CI is not successful"))
 		}
 	}
 	status, err := client.GetPRMergeability(repo, pr)
 	if err != nil || status != vcs.MergeStatusClean {
-		return errors.New("acceptance merge blocked: PR is not mergeable")
+		return gateBlock(mergeReasonNotMergeable, errors.New("acceptance merge blocked: PR is not mergeable"))
 	}
 	fresh, _, err := currentAcceptance(ctx, client, repo, pr)
 	if err != nil {
-		return fmt.Errorf("acceptance merge blocked: %w; run clawflow acceptance run --repo %s --pr %d", err, repo, pr)
+		return gateBlock(acceptanceBlockReason(err), fmt.Errorf("acceptance merge blocked: %w; run clawflow acceptance run --repo %s --pr %d", err, repo, pr))
 	}
 	oldDigest, err := accepted.Digest()
 	if err != nil {
@@ -460,7 +460,7 @@ func conditionalAcceptedMerge(ctx context.Context, client vcs.Client, repo strin
 	}
 	newDigest, err := fresh.Digest()
 	if err != nil || oldDigest != newDigest {
-		return errors.New("acceptance merge blocked: accepted identity changed")
+		return gateBlock(mergeReasonAcceptanceStale, errors.New("acceptance merge blocked: accepted identity changed"))
 	}
 	sha, err := conditional.MergePRAtHead(repo, pr, accepted.HeadSHA)
 	if err == nil && !acceptanceSHA(sha) {

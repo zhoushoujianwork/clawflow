@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -113,34 +114,121 @@ func (a autoMergeAttempt) checkCI() vcs.CIStatus {
 	return waitForCI(a.client, a.repo, a.prNum, timeout, a.prefix)
 }
 
-// attemptAutoMerge runs the full auto-merge sequence for one PR: optional CI
-// gate, mergeability check, merge with transient-race retry, then head-branch
-// cleanup. Returns true only when the merge landed.
+// Reasons an auto-merge attempt can end without merging. Gate blocks (the
+// repo's own acceptance/CI/mergeability policy said "not yet") log at INFO;
+// only genuine failures (provider merge errors, unreadable policy, failed
+// lookups, unsupported capability) log at WARN.
+const (
+	mergeReasonCanceled          = "canceled"
+	mergeReasonPolicyUnreadable  = "policy_unreadable"
+	mergeReasonAcceptanceBusy    = "acceptance_busy"
+	mergeReasonAcceptanceMissing = "acceptance_missing"
+	mergeReasonAcceptanceStale   = "acceptance_stale"
+	mergeReasonCIFailed          = "ci_failed"
+	mergeReasonCIPending         = "ci_pending"
+	mergeReasonCINotSuccessful   = "ci_not_successful"
+	mergeReasonMergeabilityError = "mergeability_error"
+	mergeReasonNotMergeable      = "not_mergeable"
+	mergeReasonConditionalUnsupp = "conditional_merge_unsupported"
+	mergeReasonMergeFailed       = "merge_failed"
+)
+
+// mergeGateError tags an error from the merge path with the reason it blocked
+// the merge. Error() is the wrapped error's text, so user-visible comments and
+// stderr output are unchanged.
+type mergeGateError struct {
+	reason string
+	warn   bool
+	err    error
+}
+
+func (e *mergeGateError) Error() string { return e.err.Error() }
+func (e *mergeGateError) Unwrap() error { return e.err }
+
+func gateBlock(reason string, err error) error {
+	return &mergeGateError{reason: reason, err: err}
+}
+
+// acceptanceBlockReason maps a currentAcceptance failure to a merge reason:
+// absent evidence is "missing"; anything else (stale head, changed contract,
+// nonpassing or unreadable evidence) is "stale".
+func acceptanceBlockReason(err error) string {
+	if errors.Is(err, errAcceptanceMissing) {
+		return mergeReasonAcceptanceMissing
+	}
+	return mergeReasonAcceptanceStale
+}
+
+// mergeResult is the outcome of one auto-merge attempt. When Merged is false,
+// Reason says why and Warn whether it is a failure rather than a gate block.
+type mergeResult struct {
+	Merged bool
+	Reason string
+	Warn   bool
+	Err    error
+}
+
+func blocked(reason string, err error) mergeResult {
+	return mergeResult{Reason: reason, Err: err}
+}
+
+func failed(reason string, err error) mergeResult {
+	return mergeResult{Reason: reason, Warn: true, Err: err}
+}
+
+// log records a non-merge outcome in run.log under event, INFO for gate
+// blocks and WARN for failures. issue 0 means unknown and is omitted.
+func (r mergeResult) log(event, repo string, pr, issue int) {
+	fields := []any{"repo", repo, "pr", pr}
+	if issue != 0 {
+		fields = append(fields, "issue", issue)
+	}
+	fields = append(fields, "reason", r.Reason)
+	if r.Err != nil {
+		fields = append(fields, "err", r.Err.Error())
+	}
+	if r.Warn {
+		runLog.Warn(event, fields...)
+		return
+	}
+	runLog.Info(event, fields...)
+}
+
+// attemptAutoMerge reports only whether the merge landed. Callers that need to
+// know why it did not use attemptAutoMergeResult.
 func attemptAutoMerge(a autoMergeAttempt) bool {
+	return attemptAutoMergeResult(a).Merged
+}
+
+// attemptAutoMergeResult runs the full auto-merge sequence for one PR: optional
+// CI gate, mergeability check, merge with transient-race retry, then head-branch
+// cleanup. Merged is true only when the merge landed; otherwise Reason names
+// the gate or failure that stopped it.
+func attemptAutoMergeResult(a autoMergeAttempt) mergeResult {
 	fmt.Fprintf(os.Stderr, "%s → auto-merge: PR #%d\n", a.prefix, a.prNum)
 	if a.ctx == nil {
 		a.ctx = context.Background()
 	}
-	if a.ctx.Err() != nil {
-		return false
+	if err := a.ctx.Err(); err != nil {
+		return blocked(mergeReasonCanceled, err)
 	}
 	required, err := acceptanceEnrollment(a.repo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s merge blocked: %v\n", a.prefix, err)
-		return false
+		return failed(mergeReasonPolicyUnreadable, err)
 	}
 	required = required || a.repoCfg.AcceptanceRequired
 	merge := func() error { return a.client.MergePR(a.repo, a.prNum) }
 	if required {
 		unlock, err := acceptanceLock(a.repo, a.prNum)
 		if err != nil {
-			return false
+			return blocked(mergeReasonAcceptanceBusy, err)
 		}
 		defer unlock()
 		accepted, _, err := currentAcceptance(a.ctx, a.client, a.repo, a.prNum)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s acceptance blocked: %v; run clawflow acceptance run --repo %s --pr %d\n", a.prefix, err, a.repo, a.prNum)
-			return false
+			return blocked(acceptanceBlockReason(err), err)
 		}
 		merge = func() error { return conditionalAcceptedMerge(a.ctx, a.client, a.repo, a.prNum, accepted) }
 	}
@@ -155,21 +243,21 @@ func attemptAutoMerge(a autoMergeAttempt) bool {
 				a.notify("🤖 CI failed on PR #"+strconv.Itoa(a.prNum)+". Skipping auto-merge.",
 					"CI failed on PR #"+strconv.Itoa(a.prNum))
 			}
-			return false
+			return blocked(mergeReasonCIFailed, nil)
 		default:
 			fmt.Fprintf(os.Stderr, "%s ✗ CI still pending, skipping auto-merge\n", a.prefix)
 			if !a.quiet {
 				a.notify("🤖 CI did not pass within timeout for PR #"+strconv.Itoa(a.prNum)+". Skipping auto-merge.",
 					"CI did not pass within timeout for PR #"+strconv.Itoa(a.prNum))
 			}
-			return false
+			return blocked(mergeReasonCIPending, nil)
 		}
 	}
 
 	mergeStatus, err := a.client.GetPRMergeability(a.repo, a.prNum)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge: mergeability check failed: %v\n", a.prefix, err)
-		return false
+		return failed(mergeReasonMergeabilityError, err)
 	}
 	if mergeStatus != vcs.MergeStatusClean {
 		fmt.Fprintf(os.Stderr, "%s ✗ PR not mergeable (%s)\n", a.prefix, mergeStatus)
@@ -177,7 +265,7 @@ func attemptAutoMerge(a autoMergeAttempt) bool {
 			a.notify("🤖 PR #"+strconv.Itoa(a.prNum)+" is not mergeable (status: "+string(mergeStatus)+"). Skipping auto-merge.",
 				"PR #"+strconv.Itoa(a.prNum)+" is not mergeable")
 		}
-		return false
+		return blocked(mergeReasonNotMergeable, fmt.Errorf("status: %s", mergeStatus))
 	}
 
 	if err := mergeWithRetry(a.prefix,
@@ -192,7 +280,11 @@ func attemptAutoMerge(a autoMergeAttempt) bool {
 		fmt.Fprintf(os.Stderr, "%s ⚠ auto-merge failed: %v\n", a.prefix, err)
 		a.notify("🤖 Auto-merge failed for PR #"+strconv.Itoa(a.prNum)+": "+err.Error(),
 			"🤖 Auto-merge failed for PR #"+strconv.Itoa(a.prNum))
-		return false
+		var gate *mergeGateError
+		if errors.As(err, &gate) {
+			return mergeResult{Reason: gate.reason, Warn: gate.warn, Err: err}
+		}
+		return failed(mergeReasonMergeFailed, err)
 	}
 	// No success comment: the PR's merged state is already visible in the
 	// GitHub/GitLab UI.
@@ -213,7 +305,7 @@ func attemptAutoMerge(a autoMergeAttempt) bool {
 			fmt.Fprintf(os.Stderr, "%s ✓ deleted branch %s\n", a.prefix, head)
 		}
 	}
-	return true
+	return mergeResult{Merged: true}
 }
 
 // sweepMaxMergesPerPass caps how many PRs one scan pass may merge per repo.
@@ -326,7 +418,7 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 			skip.log("run/automerge_skip", fullName, pr.Number)
 			continue
 		}
-		if attemptAutoMerge(autoMergeAttempt{
+		result := attemptAutoMergeResult(autoMergeAttempt{
 			ctx:      ctx,
 			client:   client,
 			repo:     fullName,
@@ -336,17 +428,18 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 			prefix:   prefix,
 			ciPoll:   true,
 			quiet:    true,
-		}) {
+		})
+		if result.Merged {
 			merged++
 		} else {
 			skipped++
-			skipReasons["merge_failed"]++
-			runLog.Warn("run/automerge_skip", "repo", fullName, "pr", pr.Number, "issue", issueNum, "reason", "merge_failed")
+			skipReasons[result.Reason]++
+			result.log("run/automerge_skip", fullName, pr.Number, issueNum)
 		}
 	}
 
 	fields := []any{"repo", fullName, "open_prs", len(prs), "candidates", candidates, "merged", merged, "skipped", skipped}
-	for _, reason := range []string{"draft", "no_closing_keyword", "mergeability_error", "not_clean", "locked", "merge_failed"} {
+	for _, reason := range sweepSkipReasons {
 		if n := skipReasons[reason]; n > 0 {
 			fields = append(fields, "skip_"+reason, n)
 		}
@@ -355,6 +448,16 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 	if merged > 0 {
 		fmt.Fprintf(os.Stderr, "%s ✓ auto-merge sweep: merged %d PR(s)\n", prefix, merged)
 	}
+}
+
+// sweepSkipReasons lists, in report order, every skip reason the sweep breaks
+// out as skip_<reason> on its aggregate run/automerge_sweep line.
+var sweepSkipReasons = []string{
+	"draft", "no_closing_keyword", "mergeability_error", "not_clean", "locked",
+	mergeReasonCanceled, mergeReasonPolicyUnreadable, mergeReasonAcceptanceBusy,
+	mergeReasonAcceptanceMissing, mergeReasonAcceptanceStale,
+	mergeReasonCIFailed, mergeReasonCIPending, mergeReasonCINotSuccessful,
+	mergeReasonNotMergeable, mergeReasonConditionalUnsupp, mergeReasonMergeFailed,
 }
 
 // baseBranchOrMain returns the repo's configured base branch, defaulting to main.
