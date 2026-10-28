@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 type ExecuteFunc func(context.Context, string, execution.Options) (execution.Result, error)
@@ -25,6 +26,9 @@ type Runner struct {
 	// TestCommand is the repository's configured test command; the reviewer is
 	// told to run it. Empty means the reviewer discovers the standard command.
 	TestCommand string
+	CIRequired  bool
+	// CI is queried immediately before review, after independent planning.
+	CI func() (vcs.CIEvidence, error)
 }
 
 func randomID() string { return execution.NewSessionKey() }
@@ -61,7 +65,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if err != nil {
 		return record, err
 	}
-	record = Record{Version: Version, Contract: c, ContractDigest: d, AttemptID: randomID(), Role: "acceptance", Verdict: Blocked, StartedAt: time.Now().UTC()}
+	record = Record{ReviewMode: FullSuite, Version: Version, Contract: c, ContractDigest: d, AttemptID: randomID(), Role: "acceptance", Verdict: Blocked, StartedAt: time.Now().UTC()}
 	if runner.Store == nil {
 		return record, errors.New("acceptance store required")
 	}
@@ -199,6 +203,13 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if err = ctx.Err(); err != nil {
 		return record, err
 	}
+	if runner.CIRequired && runner.CI != nil {
+		ci, ciErr := runner.CI()
+		if ciErr == nil && ci.SuccessfulFor(c.HeadSHA) {
+			record.ReviewMode = CIVerified
+			record.CI = &ci
+		}
+	}
 	record.ReviewStartedAt = time.Now().UTC()
 	// Exclude development identity from the model prompt; the digest still pins
 	// the complete contract, and native identity is verified outside the model.
@@ -216,7 +227,12 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		Plan           string `json:"plan"`
 		PlanDigest     string `json:"plan_digest"`
 	}{d, c.TaskID, c.Generation, c.Repository, c.PRNumber, c.HeadSHA, c.BaseSHA, c.IntegrationSHA, c.PolicyDigest, c.Requirements, plan.Text, plan.Digest})
-	reviewed, reviewErr := execute(ctx, runner.reviewPrompt()+string(input),
+	prompt := "Review mode: full-suite. " + runner.reviewPrompt()
+	if record.ReviewMode == CIVerified {
+		evidence, _ := json.Marshal(record.CI)
+		prompt = strings.Replace(runner.reviewPrompt(), runner.fullSuiteInstruction(), "Required CI succeeded on the exact contract head. Review mode: ci-verified. Run requirement-targeted tests and review the source instead of re-running the full suite. Authoritative CI check identities: "+string(evidence)+". ", 1)
+	}
+	reviewed, reviewErr := execute(ctx, prompt+string(input),
 		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "bypassPermissions"})
 	record.Reviewer = native(reviewed)
 	// Inspect even after execution failure/cancellation; use the caller's context
@@ -276,15 +292,18 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	return record, nil
 }
 
-// reviewPrompt instructs the reviewer. The judged object is the PR head on the
-// provider; the local checkout is disposable, so building and testing is allowed.
-func (runner Runner) reviewPrompt() string {
+func (runner Runner) fullSuiteInstruction() string {
 	test := "the repository's standard test command"
 	if nonempty(runner.TestCommand) {
 		test = "the configured test command `" + strings.TrimSpace(runner.TestCommand) + "`"
 	}
+	return "You must run " + test + " and also tests targeted at the requirements. "
+}
+
+// reviewPrompt permits commands in the disposable checkout of the pinned head.
+func (runner Runner) reviewPrompt() string {
 	return "Review the source against the pinned contract below. The independently saved plan is a review aid, not a requirement source. The review checkout is a disposable detached copy of the PR head; you may build and run tests in it, but do not change tracked source, commit, or switch HEAD, and you have no remote or credentials. " +
-		"You must run " + test + " and also tests targeted at the requirements. " +
+		runner.fullSuiteInstruction() +
 		"Use blocked only when requirements cannot be evaluated, such as missing or contradictory requirements or unavailable source. If the configured test command, targeted tests, and source review produced the required evidence, inability to create additional isolation or tooling beyond that command is a limitation, not grounds for blocked. Return passed or failed based on the requirements and record those limitations in evidence. " +
 		"A failed verdict requires at least one finding tied to a requirement in the contract issue body or a concrete correctness/safety defect in changed code, even outside the plan. Uncovered plan items without a requirement violation or demonstrated defect are advisory only and never cause failed on their own. Each failing finding must name the violated requirement or defect and concrete evidence. Return passed when only advisory findings remain and evidence suffices. Return exactly one JSON object with only status (passed, failed, or blocked), summary (nonempty string), evidence (nonempty array of nonempty strings), and findings (array, empty if none). Each finding has kind (requirement, defect, or advisory), summary (nonempty string), requirement (contract requirement text for kind requirement), defect (correctness/safety violation for kind defect), and evidence (concrete evidence required for either failing kind). " +
 		"Record every command you executed as one evidence entry of the form `" + EvidenceCommandPrefix + " <exact command> => <result>`; a passed verdict whose evidence lists no executed command is rejected. " +

@@ -324,6 +324,7 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 
 func newRepoSetCmd() *cobra.Command {
 	var acceptanceRequired string
+	var acceptanceOverlapCI string
 	var ciRequired string
 	var autoMerge string
 	var selfUpgrade string
@@ -369,6 +370,9 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			// Validate flags before mutating.
+			if cmd.Flags().Changed("acceptance-overlap-ci") && acceptanceOverlapCI != "on" && acceptanceOverlapCI != "off" {
+				return fmt.Errorf("--acceptance-overlap-ci must be on or off")
+			}
 			if cmd.Flags().Changed("acceptance-required") && acceptanceRequired != "on" && acceptanceRequired != "off" {
 				return fmt.Errorf("--acceptance-required must be on or off")
 			}
@@ -406,6 +410,10 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			config.TouchRepo(cfg, ownerRepo, func(r config.Repo) config.Repo {
+				if cmd.Flags().Changed("acceptance-overlap-ci") {
+					v := acceptanceOverlapCI == "on"
+					r.AcceptanceOverlapCI = &v
+				}
 				if cmd.Flags().Changed("acceptance-required") {
 					r.AcceptanceRequired = acceptanceRequired == "on"
 				}
@@ -446,6 +454,7 @@ func newRepoSetCmd() *cobra.Command {
 			fmt.Printf("  ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("  auto_merge:   %v\n", r.AutoMerge)
 			fmt.Printf("  acceptance_required: %v\n", r.AcceptanceRequired)
+			fmt.Printf("  acceptance_overlap_ci: %v\n", r.AcceptanceOverlapsCI())
 			fmt.Printf("  self_upgrade: %v\n", r.SelfUpgrade)
 			if boundMachineSet {
 				if r.BoundMachine == "" {
@@ -478,6 +487,7 @@ func newRepoSetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&ciRequired, "ci-required", "", "require successful CI before auto-merge: on or off")
+	cmd.Flags().StringVar(&acceptanceOverlapCI, "acceptance-overlap-ci", "", "start acceptance during pending CI: on or off (default on when CI is required)")
 	cmd.Flags().StringVar(&acceptanceRequired, "acceptance-required", "", "require current independent acceptance before auto-merge: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&selfUpgrade, "self-upgrade", "", "rebuild and replace the installed binary after a confirmed merge into this repo (only for the repo containing clawflow's source): on or off")

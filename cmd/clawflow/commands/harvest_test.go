@@ -107,7 +107,10 @@ func TestHarvestNoDispatch(t *testing.T) {
 		{name: "not enrolled", setup: func(t *testing.T, _ *acceptanceFake) {
 			setHarvestRepo(t, func(r *config.Repo) { r.AcceptanceRequired = false })
 		}},
-		{name: "ci pending", reason: "ci_not_success", setup: func(_ *testing.T, f *acceptanceFake) { f.ciStatus = vcs.CIStatusPending }},
+		{name: "ci pending overlap disabled", reason: "ci_not_success", setup: func(t *testing.T, f *acceptanceFake) {
+			f.ciStatus = vcs.CIStatusPending
+			setHarvestRepo(t, func(r *config.Repo) { v := false; r.AcceptanceOverlapCI = &v })
+		}},
 		{name: "ci failed", reason: "ci_not_success", setup: func(_ *testing.T, f *acceptanceFake) { f.ciStatus = vcs.CIStatusFailure }},
 		{name: "not mergeable", reason: "not_clean", setup: func(_ *testing.T, f *acceptanceFake) {
 			f.mergeability = map[int]vcs.MergeStatus{11: vcs.MergeStatusConflict}
@@ -451,5 +454,88 @@ func TestHarvestPostsPassingAdvisories(t *testing.T) {
 	}
 	if len(f.expected) != 1 {
 		t.Fatal("advisory prevented merge gate")
+	}
+}
+
+func TestHarvestOverlapsPendingCI(t *testing.T) {
+	f, _, calls := harvestFixture(t)
+	f.ciStatus = vcs.CIStatusPending
+	if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 1 {
+		t.Fatalf("failures=%v calls=%d", failed, *calls)
+	}
+	if len(f.expected) != 0 {
+		t.Fatal("merged while CI pending")
+	}
+	_, record, err := currentAcceptance(context.Background(), f, "o/r", 11)
+	if err != nil || record.ReviewMode != acceptance.FullSuite {
+		t.Fatalf("record=%+v err=%v", record, err)
+	}
+	f.ciStatus = vcs.CIStatusSuccess
+	if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 1 {
+		t.Fatal("repeated acceptance")
+	}
+	if err := conditionalAcceptedMerge(context.Background(), f, "o/r", 11, record.Contract); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.expected) != 1 {
+		t.Fatal("green CI did not permit merge")
+	}
+}
+
+func TestPassingAcceptanceThenCIFailureRepairs(t *testing.T) {
+	f, _, reg, cfg := repairAcceptanceFixture(t, "passed")
+	f.ciStatus = vcs.CIStatusPending
+	record := recordVerdict(t, f)
+	f.ciStatus = vcs.CIStatusFailure
+	if err := conditionalAcceptedMerge(context.Background(), f, "o/r", 11, record.Contract); err == nil || len(f.expected) != 0 {
+		t.Fatal("merged despite failed CI")
+	}
+	jobs := scanRepair(t, reg, f, cfg, 0)
+	if len(jobs) != 1 || jobs[0].repair.Acceptance != nil {
+		t.Fatalf("CI repair not dispatched: %+v", jobs)
+	}
+	_, saved, err := currentAcceptance(context.Background(), f, "o/r", 11)
+	if err != nil || saved.AttemptID != record.AttemptID {
+		t.Fatal("passing evidence lost")
+	}
+}
+
+func TestAcceptanceOverlapCLI(t *testing.T) {
+	harvestFixture(t)
+	for _, value := range []string{"off", "on"} {
+		cmd := newRepoSetCmd()
+		cmd.SetArgs([]string{"o/r", "--acceptance-overlap-ci", value})
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Repos["o/r"].AcceptanceOverlapsCI() != (value == "on") {
+			t.Fatal("overlap flag not persisted")
+		}
+	}
+	cmd := newRepoSetCmd()
+	cmd.SetArgs([]string{"o/r", "--acceptance-overlap-ci=invalid"})
+	if cmd.Execute() == nil {
+		t.Fatal("invalid overlap value accepted")
+	}
+}
+
+type acceptanceCIFake struct{ *acceptanceFake }
+
+func (f *acceptanceCIFake) GetCIEvidence(string, int) (vcs.CIEvidence, error) {
+	return vcs.CIEvidence{HeadSHA: f.pr.HeadSHA, Status: f.ciStatus, CheckIDs: []int64{123}}, nil
+}
+
+func TestAcceptanceWiresExactCIEvidence(t *testing.T) {
+	f, _ := acceptanceFixture(t)
+	record, err := runAcceptance(context.Background(), &acceptanceCIFake{f}, "o/r", 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.ReviewMode != acceptance.CIVerified || record.CI == nil || record.CI.HeadSHA != record.Contract.HeadSHA {
+		t.Fatalf("CI evidence not wired: %+v", record)
 	}
 }

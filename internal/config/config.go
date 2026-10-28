@@ -37,6 +37,8 @@ type Repo struct {
 	CITimeout          int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
+	// AcceptanceOverlapCI defaults to CIRequired when omitted.
+	AcceptanceOverlapCI *bool `yaml:"acceptance_overlap_ci,omitempty" json:"acceptance_overlap_ci,omitempty"`
 	// SelfUpgrade, when true, makes a `clawflow run` pass that confirmed a
 	// merge into this repository's base branch rebuild and replace the
 	// installed binary from the fetched base (see selfupgrade.go). Intended
@@ -1190,4 +1192,12 @@ func ParseRepoInput(input string, gitlabHosts []string) (RepoInfo, error) {
 		}
 	}
 	return RepoInfo{OwnerRepo: fullPath, Platform: "gitlab", BaseURL: baseURL}, nil
+}
+
+// AcceptanceOverlapsCI allows pending CI to overlap independent review.
+func (r Repo) AcceptanceOverlapsCI() bool {
+	if r.AcceptanceOverlapCI != nil {
+		return *r.AcceptanceOverlapCI
+	}
+	return r.CIRequired
 }

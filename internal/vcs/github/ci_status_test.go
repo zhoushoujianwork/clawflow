@@ -205,3 +205,31 @@ func TestGetCIStatusPRIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestCIEvidenceIdentity(t *testing.T) {
+	for _, head := range []string{"captured-sha", "changed-sha"} {
+		t.Run(head, func(t *testing.T) {
+			reads := 0
+			c := ciTestClient(t, map[string]http.HandlerFunc{
+				"GET /repos/o/r/pulls/11": func(w http.ResponseWriter, r *http.Request) {
+					reads++
+					sha := "captured-sha"
+					if reads > 1 {
+						sha = head
+					}
+					fmt.Fprintf(w, `{"head":{"sha":%q}}`, sha)
+				},
+				"GET /repos/o/r/commits/captured-sha/check-runs": func(w http.ResponseWriter, r *http.Request) {
+					fmt.Fprint(w, ciPage(2, ciRun(21, "completed", `"success"`), ciRun(22, "completed", `"success"`)))
+				},
+			})
+			e, err := c.GetCIEvidence("o/r", 11)
+			if err != nil || e.HeadSHA != "captured-sha" || len(e.CheckIDs) != 2 || e.CheckIDs[0] != 21 || e.CheckIDs[1] != 22 {
+				t.Fatalf("%+v %v", e, err)
+			}
+			if (e.Status == vcs.CIStatusSuccess) != (head == "captured-sha") {
+				t.Fatalf("wrong status: %+v", e)
+			}
+		})
+	}
+}
