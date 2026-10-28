@@ -38,7 +38,7 @@ type acceptanceFindings struct {
 	Verdict        string   `json:"verdict"`
 	Summary        string   `json:"summary"`
 	Evidence       []string `json:"evidence"`
-	ContractDigest string   `json:"-"`
+	ContractDigest string   `json:"contract_digest"`
 }
 
 // acceptanceRepairEnabled reports whether failed acceptance verdicts are
@@ -183,8 +183,8 @@ func scanAcceptanceRepair(ctx context.Context, client vcs.Client, repo string, c
 
 // recheckAcceptanceRepair runs under the issue lock just before reservation:
 // the latest verdict must still be the same failed attempt for the same head.
-func recheckAcceptanceRepair(j *runJob, pr vcs.PR) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+func recheckAcceptanceRepair(parent context.Context, j *runJob, pr vcs.PR) error {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	decision, rec, c, err := classifyAcceptanceForRepair(ctx, j.client, j.repo, pr.Number)
 	if decision != acceptanceRepairFailed {

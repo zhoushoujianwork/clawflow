@@ -195,6 +195,34 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 // Called only while holding the existing cross-process issue lock. Reservation
 // precedes workdir/provider startup; a crash intentionally consumes the attempt.
 func prepareCIRepair(j *runJob, now time.Time) error {
+	return prepareCIRepairContext(context.Background(), j, now)
+}
+func prepareCIRepairContext(ctx context.Context, j *runJob, now time.Time) error {
+	if err := checkCIRepair(ctx, j); err != nil {
+		return err
+	}
+	if err := reserveJobRepair(ctx, j, now); err != nil {
+		return err
+	}
+	j.repair.Evidence = ""
+	if j.repair.Acceptance == nil && !j.repair.MergeConflict {
+		if reader, ok := j.client.(interface {
+			GetFailedJobEvidence(string, string, int64) (string, error)
+		}); ok {
+			evidence, err := reader.GetFailedJobEvidence(j.repo, j.repair.PR.HeadSHA, 0)
+			if err == nil {
+				j.repair.Evidence = evidence
+			}
+		}
+	}
+	return nil
+}
+
+// checkCIRepair refreshes eligibility without touching the reservation ledger.
+func checkCIRepair(ctx context.Context, j *runJob) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	pr, err := j.client.GetPR(j.repo, j.repair.PR.Number)
 	if err != nil {
 		return err
@@ -214,14 +242,14 @@ func prepareCIRepair(j *runJob, now time.Time) error {
 		if err != nil {
 			return err
 		}
-		if !j.repoCfg.AutoMerge || status != vcs.MergeStatusConflict {
+		if (j.hooks == nil && !j.repoCfg.AutoMerge) || status != vcs.MergeStatusConflict {
 			return fmt.Errorf("PR no longer eligible for conflict repair: %s", status)
 		}
 		if pr.BaseBranch == "" || !repairSHA.MatchString(pr.BaseSHA) || pr.BaseBranch == pr.HeadBranch {
 			return fmt.Errorf("missing or unsafe base identity")
 		}
 	} else if j.repair.Acceptance != nil {
-		if err := recheckAcceptanceRepair(j, pr); err != nil {
+		if err := recheckAcceptanceRepair(ctx, j, pr); err != nil {
 			return err
 		}
 	} else {
@@ -233,22 +261,8 @@ func prepareCIRepair(j *runJob, now time.Time) error {
 			return fmt.Errorf("CI no longer failing: %s", status)
 		}
 	}
-	attempt, err := reserveRepair(snapshot.DataDir(), j.repo, pr, j.repair.reason(), now)
-	if err != nil {
-		return err
-	}
-	j.repair.PR, j.repair.Attempt = pr, attempt
-	j.repair.Evidence = ""
-	if j.repair.Acceptance == nil && !j.repair.MergeConflict {
-		if reader, ok := j.client.(interface {
-			GetFailedJobEvidence(string, string, int64) (string, error)
-		}); ok {
-			evidence, err := reader.GetFailedJobEvidence(j.repo, pr.HeadSHA, 0)
-			if err == nil {
-				j.repair.Evidence = evidence
-			}
-		}
-	}
+	j.repair.PR = pr
+
 	j.sub.Body, j.sub.Labels = issue.Body, issue.Labels
 	return nil
 }
@@ -637,8 +651,26 @@ func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outco
 	if err != nil || clean != "" {
 		return "", fmt.Errorf("no-change repair left local changes")
 	}
-	if err := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, "no-change", time.Now().UTC()); err != nil {
+	if err := j.releaseRepair("no-change", time.Now().UTC()); err != nil {
 		return "", err
 	}
 	return head, nil
+}
+
+// reserveJobRepair is the shared-state boundary after portable eligibility checks.
+func reserveJobRepair(ctx context.Context, j *runJob, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if j.hooks != nil {
+		if j.hooks.ReserveRepair != nil {
+			return j.hooks.ReserveRepair(ctx, j, now)
+		}
+		return nil
+	}
+	attempt, err := reserveRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.reason(), now)
+	if err == nil {
+		j.repair.Attempt = attempt
+	}
+	return err
 }
