@@ -32,3 +32,29 @@ func TestAcceptancePolicyDefaultsAndRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptanceOverlapDefaultsAndRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  bool
+	}{
+		{"", false}, {"ci_required: true", true},
+		{"ci_required: true\nacceptance_overlap_ci: off", false},
+		{"ci_required: true\nacceptance_overlap_ci: on", true},
+	} {
+		var r, loaded Repo
+		if err := yaml.Unmarshal([]byte(tc.input), &r); err != nil {
+			t.Fatal(err)
+		}
+		data, err := yaml.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal(data, &loaded); err != nil {
+			t.Fatal(err)
+		}
+		if loaded.AcceptanceOverlapsCI() != tc.want {
+			t.Fatalf("%q: %+v", tc.input, loaded)
+		}
+	}
+}

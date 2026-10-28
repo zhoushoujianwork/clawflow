@@ -95,11 +95,12 @@ func newAcceptanceCmd() *cobra.Command {
 				if asJSON {
 					if e := json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
 						PlannerIsolation string `json:"planner_isolation,omitempty"`
+						ReviewMode       string `json:"review_mode,omitempty"`
 						Status           string `json:"status"`
 						Reason           string `json:"reason,omitempty"`
 						Head             string `json:"head_sha,omitempty"`
 						Attempt          string `json:"attempt_id,omitempty"`
-					}{record.Plan.PlannerIsolation, status, reason, c.HeadSHA, record.AttemptID}); e != nil {
+					}{record.Plan.PlannerIsolation, record.ReviewMode, status, reason, c.HeadSHA, record.AttemptID}); e != nil {
 						return e
 					}
 				} else {
@@ -698,7 +699,11 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		}
 		return acceptanceNativeRun(ctx, ec, execution.Request{Version: 1, RequestID: execution.NewSessionKey(), Workspace: opts.Workspace, Prompt: prompt, Instructions: opts.Instructions, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: max(1, timeout.Milliseconds())}, acceptanceReviewerEnv(os.Environ()), opts.Events, nil)
 	}
-	r, err := (acceptance.Runner{Store: store, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
+	var ci func() (vcs.CIEvidence, error)
+	if provider, ok := client.(vcs.CIEvidenceProvider); ok {
+		ci = func() (vcs.CIEvidence, error) { return provider.GetCIEvidence(repo, prNumber) }
+	}
+	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
 	if err == nil {
 		// Run returns nil only after the reviewer report was parsed and the
 		// record was saved, so a failed/blocked verdict reaching here is a

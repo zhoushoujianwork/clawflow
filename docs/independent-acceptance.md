@@ -38,6 +38,18 @@ The PR must be open, non-draft, from the same repository, and reference an open 
 
 The latest completed acceptance attempt must pass for the current requirements, developer identity, head, base and policy. New submissions or changed requirements/configuration need fresh acceptance. A newer failed or cancelled attempt supersedes an older pass. Both automatic merge and explicit `clawflow pr merge` enforce the policy for enrolled repositories, along with required CI and provider protections.
 
+## CI 与验收并行
+
+要求 CI 的仓库默认允许 harvest 在 CI 为 pending 时启动验收；其他候选筛选与重试规则保持不变。可通过以下命令关闭（配置字段为可选布尔值 `acceptance_overlap_ci`）：
+
+```bash
+clawflow repo set owner/repo --acceptance-overlap-ci off
+```
+
+审查开始前，若仓库要求 CI，且 GitHub 现有检查聚合确认全部检查在合约 head 上成功，审查者会收到 head 和 check-run ID，执行需求针对性测试及源码审查，不再重复全量测试。证据的 `review_mode` 为 `ci-verified`，`ci` 保存该次检查身份；其他情况使用 `full-suite`，仍要求标准或配置的全量测试命令。无法提供精确提交与检查身份的适配器也使用全量模式。独立计划阶段不接收 CI 或源码证据。
+
+看板在并行执行时显示 “acceptance running (CI pending)”。通过验收不会绕过 CI 门禁：同一 head 的 CI 成功后才能合并；CI 后续失败时保留验收记录并进入现有修复路径。新 head 仍需重新验收。这里复用已有 check-run 聚合，不新增分支保护规则发现或 workflow-run 身份证明。
+
 ## Repair after a failed verdict
 
 The reviewer never edits. When the latest completed record for the PR's current contract is a reviewer verdict `failed` with evidence, the scan dispatches the existing `repair-ci` operator (development role) against the same PR branch. Conditions: managed same-repository GitHub PR, `acceptance_required` on, and repair budget left.
