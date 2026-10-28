@@ -443,3 +443,55 @@ func TestPostIssueCommentIdempotent_DeduplicatesOnRetry(t *testing.T) {
 		t.Errorf("expected still 1 POST after dedup retry, got %d (duplicate comment posted)", postCalls)
 	}
 }
+
+func TestListSubIssuesReadsEveryPage(t *testing.T) {
+	page := func(from, n int) []map[string]any {
+		rows := make([]map[string]any, n)
+		for i := range rows {
+			rows[i] = map[string]any{"id": from + i, "number": from + i, "title": "t", "state": "open"}
+		}
+		return rows
+	}
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/issues/1/sub_issues": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("per_page") != "100" {
+				t.Errorf("per_page = %q, want 100", r.URL.Query().Get("per_page"))
+			}
+			switch r.URL.Query().Get("page") {
+			case "1":
+				jsonResp(w, 200, page(1, 100))
+			case "2":
+				jsonResp(w, 200, page(101, 5))
+			default:
+				t.Errorf("unexpected page %q", r.URL.Query().Get("page"))
+				jsonResp(w, 200, []map[string]any{})
+			}
+		},
+	})
+	subs, err := client.ListSubIssues("owner/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subs) != 105 || subs[0].Number != 1 || subs[104].Number != 105 {
+		t.Fatalf("got %d sub-issues (first %d, last %d), want 105 in order", len(subs), subs[0].Number, subs[len(subs)-1].Number)
+	}
+}
+
+func TestListSubIssuesFailsOnLaterPageError(t *testing.T) {
+	rows := make([]map[string]any, 100)
+	for i := range rows {
+		rows[i] = map[string]any{"id": i + 1, "number": i + 1, "state": "open"}
+	}
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/issues/1/sub_issues": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("page") == "1" {
+				jsonResp(w, 200, rows)
+				return
+			}
+			http.Error(w, "boom", 502)
+		},
+	})
+	if _, err := client.ListSubIssues("owner/repo", 1); err == nil {
+		t.Fatal("expected an error for a failed later page, got a truncated list")
+	}
+}
