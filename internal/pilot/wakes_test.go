@@ -260,3 +260,59 @@ func TestScheduleAttentionDeliveryAndCostLimitRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestWakeCollectionRetainsUnconsumedEvents(t *testing.T) {
+	for _, stampDelay := range []time.Duration{0, time.Second} {
+		t.Run(stampDelay.String(), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			p, err := project.Create("boundary")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.Repos = []string{"o/r"}
+			now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+			if err := os.MkdirAll(clog.LogsDir(), 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(clog.LogsDir(), "run.log")
+			first := now.Format(time.RFC3339) + " INFO run/end repo=o/r issue=20 applied_label=agent-skipped\n"
+			if err := os.WriteFile(path, []byte(first), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ev, state, err := collectWakeEvidence(p, &config.Config{}, now)
+			if err != nil || len(ev.Attention) != 1 {
+				t.Fatalf("first: %+v %v", ev, err)
+			}
+			// MarkWoken may happen in this second or the next. A later append was
+			// not part of the collected snapshot and must not be acknowledged by it.
+			p.Automation.LastWokenAt = now.Add(stampDelay).Format(time.RFC3339)
+			second := now.Format(time.RFC3339) + " INFO run/harvest_end repo=o/r issue=21 verdict=failed\n"
+			if err := os.WriteFile(path, []byte(first+second), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := saveWakeState(p.Name, state, ev, now); err != nil {
+				t.Fatal(err)
+			}
+			ev, state, err = collectWakeEvidence(p, &config.Config{}, now.Add(time.Hour))
+			if err != nil || len(ev.Attention) != 1 || ev.Attention[0].Issue != "21" {
+				t.Fatalf("unconsumed failure lost: %+v %v", ev, err)
+			}
+			found := false
+			for _, event := range ev.Events {
+				if event.Fields["issue"] == "21" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("pending failure missing from evidence")
+			}
+			if err := saveWakeState(p.Name, state, ev, now.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			ev, _, err = collectWakeEvidence(p, &config.Config{}, now.Add(2*time.Hour))
+			if err != nil || len(ev.Attention) != 0 {
+				t.Fatalf("consumed event replayed: %+v %v", ev, err)
+			}
+		})
+	}
+}

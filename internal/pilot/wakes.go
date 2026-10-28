@@ -128,21 +128,26 @@ func collectWakeEvidence(p *project.Project, cfg *config.Config, now time.Time) 
 			if at.After(latest[r]) {
 				latest[r] = at
 			}
-			if !at.After(since) {
-				continue
-			}
-			ev.Events = append(ev.Events, e)
-			if len(ev.Events) > 100 {
-				ev.Events = ev.Events[1:]
-			}
+			// LastWokenAt is a second-precision scheduling timestamp, not an
+			// acknowledgment of the log snapshot collected before MarkWoken.
+			// Pending attention survives unrelated wakes and cooldowns until
+			// its own source stamp is persisted by saveWakeState.
+			pending := false
 			if kind := attentionEvent(e); kind != "" {
 				issue := e.Fields["issue"]
 				if issue == "" || issue == "0" {
 					issue = "pr-" + e.Fields["pr"]
 				}
 				a := wakeAttention{r, issue, kind, at}
+				pending = a.At.After(state[a.key()].Source)
 				if a.At.After(candidates[a.key()].At) {
 					candidates[a.key()] = a
+				}
+			}
+			if !at.Before(since) || pending {
+				ev.Events = append(ev.Events, e)
+				if len(ev.Events) > 100 {
+					ev.Events = ev.Events[1:]
 				}
 			}
 		}
