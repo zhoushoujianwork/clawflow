@@ -66,6 +66,22 @@ assert.ok(importantEvent({...events[0],event:'queue/park'}))
 const timeline = renderToStaticMarkup(<EventTimeline events={events} filter="important" repo="" repos={repos.map(r=>r.repo)} update={()=>{}}/>)
 assert.ok(timeline.includes('×50 since'))
 assert.ok(!timeline.includes('<details open'))
+// Hidden events must still separate otherwise identical event groups.
+for (const separator of [
+  {...events[1], event:'run/automerge_skip'},
+  {...events[1], fields:{repo:'other',issue:'381'}},
+]) {
+  const separated = [events[0], separator, events[2], events[3]]
+  for (const filter of ['important', 'all']) {
+    for (const repo of ['', 'owner/repo-0']) {
+      const rendered = renderToStaticMarkup(<EventTimeline events={separated} filter={filter} repo={repo} repos={['owner/repo-0','other']} update={()=>{}}/>)
+      const separatorVisible = (!repo || separator.fields.repo === repo) && (filter === 'all' || importantEvent(separator))
+      assert.equal((rendered.match(/<li /g)||[]).length, separatorVisible ? 3 : 2)
+      assert.ok(rendered.includes('×2 since'))
+      assert.ok(!rendered.includes('×3 since'))
+    }
+  }
+}
 assert.equal(preferences({tab:'invalid'}).tab,undefined)
 assert.equal(preferences({tab:'all'}).tab,'all')
 console.log('PASS: 5 repos / 40 items / 50 events; collapsed, tabs, queue truncation, attention, event folding')

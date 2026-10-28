@@ -517,7 +517,7 @@ export function importantEvent(e: PipelineEvent) {
 }
 
 export function EventTimeline({ events, filter, repo, repos, update }: { events: PipelineEvent[]; filter: string; repo: string; repos: string[]; update: (p: Preferences) => void }) {
-  const rows = foldEvents(events.filter(e => (!repo || e.fields.repo === repo) && (filter === 'all' || importantEvent(e)))).reverse()
+  const rows = foldEvents(events).filter(e => (!repo || e.fields.repo === repo) && (filter === 'all' || importantEvent(e))).reverse()
   return <details className="border rounded-xl p-3 mb-4">
     <summary className="text-sm font-semibold cursor-pointer">Events ({rows.length})</summary>
     <div className="flex flex-wrap gap-2 my-3 text-xs">
