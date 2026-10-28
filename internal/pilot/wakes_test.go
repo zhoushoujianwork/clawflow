@@ -328,6 +328,7 @@ func TestBoardWakeTriggers(t *testing.T) {
 		{"head-2", "missing-decided", pipeline.Item{Issue: 3, State: "open", InQueue: true, QueuePosition: 3, HasDecided: pipeline.DecidedSection("## Plan"), UpdatedAt: old}, now.Add(-time.Hour)},
 		{"unqueued", "unqueued-issue", pipeline.Item{Issue: 4, State: "open", UpdatedAt: old}, now.Add(-time.Hour)},
 		{"stuck PR", "stuck-pr", pipeline.Item{Issue: 5, State: "open", InQueue: true, PR: &pipeline.PRInfo{State: "open", UpdatedAt: old}}, now.Add(-time.Hour)},
+		{"attention", "attention:ci failed", pipeline.Item{Issue: 7, State: "open", InQueue: true, QueuePosition: 9, Attention: []string{"ci failed"}, UpdatedAt: old}, now.Add(-time.Hour)},
 		{"digest", "daily-digest", pipeline.Item{Issue: 6, State: "closed"}, now.Add(-25 * time.Hour)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

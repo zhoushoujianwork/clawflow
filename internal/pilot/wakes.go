@@ -258,6 +258,13 @@ func boardAttention(board pipeline.Snapshot, state wakeState, created, now time.
 			add := func(kind string, source time.Time) {
 				out = append(out, wakeAttention{Repo: repo.Repo, Issue: strconv.Itoa(item.Issue), Kind: kind, At: source})
 			}
+			// Board attention items (failed CI, failed verdicts, stalls) wake
+			// Pilot on their own; the item's update time dedupes replays.
+			for _, reason := range item.Attention {
+				if reason != "" {
+					add("attention:"+reason, at)
+				}
+			}
 			if !item.InQueue && item.PR == nil {
 				add("unqueued-issue", at)
 			}
