@@ -3,9 +3,11 @@ package commands
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
 // NewWorkerCmd currently exposes local token administration only.
@@ -24,11 +26,18 @@ func NewWorkerCmd() *cobra.Command {
 			s := coordinator.New(db.DB())
 			switch action {
 			case "create":
+				_, pin, err := coordinator.LoadCertificate(filepath.Join(snapshot.DataDir(), "coordinator"))
+				if err != nil {
+					return err
+				}
 				secret, err := s.CreateToken(cmd.Context(), name)
 				if err != nil {
 					return err
 				}
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), secret)
+				if err == nil {
+					_, err = fmt.Fprintf(cmd.ErrOrStderr(), "SHA-256 fingerprint: %s\n", pin)
+				}
 				return err
 			case "revoke":
 				return s.RevokeToken(cmd.Context(), name)

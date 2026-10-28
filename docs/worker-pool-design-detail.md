@@ -36,14 +36,14 @@ Heartbeat、Complete、Fail 均条件更新：任务必须仍 leased、owner 与
 Complete/Fail 写入 done/failed 和 result；重复结果同样拒绝。
 ExpireLeases(now) 将到期任务退回 pending，清空租约并 attempt+1；下一次领取递增 fence。
 重试上限、repo 并发门禁和验收独立性由后续 runner 接入层执行，不在此基础存储推断。
-所有成功变更与审计同行事务提交；拒绝的 API 调用审计留给 #389，AppendAudit 可供其使用。
+所有成功变更与审计同行事务提交；HTTP 层通过 AppendAudit 记录成功及拒绝的 API 调用。
 
 ## Token
 
 crypto/rand 生成 32 字节随机值，hex 编码后仅创建时返回。
 数据库只保存该 secret 字符串的 SHA-256。VerifyToken 对所有固定长度 hash 使用
 constant-time 比较，不因匹配提前返回，并条件检查 revoked=false 后更新 last_seen。
-ListTokens 仅返回元数据。撤销不可恢复；此切片没有网络认证或 TLS listener。
+ListTokens 仅返回元数据。撤销不可恢复；HTTP 层复用 VerifyToken 进行 bearer 认证（见下文）。
 
 ## 验证
 
@@ -51,3 +51,32 @@ ListTokens 仅返回元数据。撤销不可恢复；此切片没有网络认证
 `CLAWFLOW_TEST_DATABASE_DSN=... go test -race ./internal/coordinator ./internal/store/...`。
 未配置 DSN 时 PG 测试显式跳过；纯 tag 匹配测试仍运行。
 完整验收运行 `go test -race ./...`，需区分本地结果与 GitHub Actions 证据。
+
+## HTTPS worker API（#389）
+
+仅在 settings.coordinator.enabled=true 时，clawflow web 启动独立 HTTPS
+listener；settings.coordinator.listen 默认为 :8093。监听失败使启动失败，
+Web 退出时关闭 worker listener。此入口不提供 dashboard、配置或 merge API。
+
+首次启动或 worker token create 会在 ~/.clawflow/data/coordinator/coordinator.pem
+原子创建 ECDSA P-256 自签证书及私钥（合并 PEM，权限 0600），后续复用。
+已有损坏证书会报错，不自动轮换。SHA-256 指纹基于证书 DER，以 64 位 hex
+输出；启动时显示，token create 将指纹写 stderr、一次性 secret 写 stdout，
+便于安全重定向 token 文件。远程 worker 必须校验该指纹。
+
+所有端点均为 POST，带 Authorization: Bearer <token>，JSON 请求上限 1 MiB，
+请求处理限时 10 秒，并设置 header/read/write/idle 超时。
+worker 身份固定为 token 名称，不能从请求 body 指定其他身份：
+
+- /worker/v1/register：tags、run_untagged（默认 true）、max_parallel（默认 1）、
+  roles、backend、model；返回 {"worker_id":"token-name"}。
+- /worker/v1/claim：请求 {}；返回 {"task":任务对象}，任务字段使用 snake_case，
+  包含 payload、fencing_token、lease_owner、lease_expires_at。无任务时 task 为 null。
+- /worker/v1/tasks/{id}/heartbeat：请求 {"fencing_token":整数}。
+- /worker/v1/tasks/{id}/complete、/fail：请求 {"fencing_token":整数,"result":任意 JSON}。
+
+成功返回 200；认证缺失、未知或撤销返回 401；过期、错误 owner/fencing、
+已结束任务返回 409；非法 JSON/字段返回 400；过大请求返回 413。
+每次请求追加 http:action:status 审计（包括拒绝请求）；审计失败返回 500。
+审计不保存 secret、请求正文或原始 URL。结果仅由 store 持久化，
+runner effects、acceptance 与自动合并接入仍属于后续切片。
