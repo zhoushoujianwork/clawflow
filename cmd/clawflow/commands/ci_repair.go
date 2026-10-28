@@ -3,8 +3,6 @@ package commands
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +17,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -253,190 +252,47 @@ func prepareCIRepair(j *runJob, now time.Time) error {
 	return nil
 }
 
-// Limits for the CI repair ledger. Only attempts that reached real repair work
-// consume the repair budget; infrastructure outcomes (see classifyRepairInfra)
-// are released and counted against a separate bounded budget with backoff.
+// Compatibility wrappers keep the runner's existing ledger API and file format.
 const (
-	ciRepairMaxAttempts = 3
-	ciRepairMaxInfra    = 5
-	ciRepairCooldown    = 5 * time.Minute
-	ciRepairMaxBackoff  = time.Hour
+	ciRepairMaxAttempts = repairledger.MaxAttempts
+	ciRepairMaxInfra    = repairledger.MaxInfra
+	ciRepairCooldown    = repairledger.Cooldown
+	ciRepairMaxBackoff  = repairledger.MaxBackoff
 )
 
-type ciRepairAttempt struct {
-	Head    string    `json:"head"`
-	Attempt int       `json:"attempt"`
-	At      time.Time `json:"at"`
-	// Released is the infrastructure kind that made this reservation
-	// non-consuming. Empty means the attempt counts against the repair budget.
-	Released string `json:"released,omitempty"`
-	// Reason is ci, acceptance, or merge_conflict. All share one ledger per PR.
-	Reason string `json:"reason,omitempty"`
-}
-type ciRepairLedger struct {
-	Attempts []ciRepairAttempt `json:"attempts"`
-	// NotBefore is the infrastructure backoff deadline for the next reservation.
-	NotBefore time.Time `json:"not_before,omitempty"`
-}
+type ciRepairAttempt = repairledger.Attempt
+type ciRepairLedger repairledger.Ledger
 
-// counts returns (consumed repair attempts, released infrastructure outcomes).
-func (l ciRepairLedger) counts() (consumed, infra int) {
-	for _, a := range l.Attempts {
-		if a.Released == "" {
-			consumed++
-		} else if a.Released != "no-change" {
-			infra++
-		}
-	}
-	return
-}
+func (l ciRepairLedger) counts() (int, int) { return repairledger.Ledger(l).Counts() }
 
-func ciRepairLedgerPath(root, repo string, pr int) (dir, path string) {
-	key := sha256.Sum256([]byte(strings.ToLower(repo)))
-	dir = filepath.Join(root, "ci-repair", hex.EncodeToString(key[:]))
-	return dir, filepath.Join(dir, fmt.Sprintf("pr-%d.json", pr))
-}
+var (
+	errRepairExhausted = repairledger.ErrExhausted
+	errRepairBlocked   = repairledger.ErrBlocked
+	errRepairWait      = repairledger.ErrWait
+	ciRepairLedgerPath = repairledger.Path
+)
 
 func loadCIRepairLedger(path string) (ciRepairLedger, error) {
-	var ledger ciRepairLedger
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return ledger, nil
-	}
-	if err != nil {
-		return ledger, err
-	}
-	if err := json.Unmarshal(data, &ledger); err != nil {
-		return ledger, fmt.Errorf("invalid repair ledger: %w", err)
-	}
-	return ledger, nil
+	l, err := repairledger.Load(path)
+	return ciRepairLedger(l), err
 }
-
-func saveCIRepairLedger(dir, path string, ledger ciRepairLedger) error {
-	data, err := json.Marshal(ledger)
-	if err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(dir, ".reserve-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err = f.Write(data); err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	// Persist the directory entry before allowing provider startup.
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+func saveCIRepairLedger(dir, path string, l ciRepairLedger) error {
+	return repairledger.Save(dir, path, repairledger.Ledger(l))
 }
-
+func repairBudget(l ciRepairLedger, now time.Time) error {
+	return repairledger.Budget(repairledger.Ledger(l), now)
+}
+func checkRepairBudget(root, repo string, pr int, now time.Time) error {
+	return repairledger.CheckBudget(root, repo, pr, now)
+}
 func reserveCIRepair(root, repo string, pr vcs.PR, now time.Time) (int, error) {
 	return reserveRepair(root, repo, pr, repairReasonCI, now)
 }
-
-// Budget refusals. They wrap a sentinel so callers can tell a spent budget
-// from a transient wait.
-var (
-	errRepairExhausted = errors.New("repair exhausted")
-	errRepairBlocked   = errors.New("repair blocked")
-	errRepairWait      = errors.New("repair waiting")
-)
-
-// repairBudget reports whether the ledger allows another reservation at now.
-func repairBudget(ledger ciRepairLedger, now time.Time) error {
-	consumed, infra := ledger.counts()
-	if consumed >= ciRepairMaxAttempts {
-		return fmt.Errorf("%w: %d total attempts", errRepairExhausted, ciRepairMaxAttempts)
-	}
-	if infra >= ciRepairMaxInfra {
-		last := ledger.Attempts[len(ledger.Attempts)-1]
-		return fmt.Errorf("%w: infrastructure budget exhausted (%d outcomes, last: %s)", errRepairBlocked, infra, last.Released)
-	}
-	if n := len(ledger.Attempts); n > 0 && now.Sub(ledger.Attempts[n-1].At) < ciRepairCooldown {
-		return fmt.Errorf("%w: cooldown 5 minutes", errRepairWait)
-	}
-	if now.Before(ledger.NotBefore) {
-		return fmt.Errorf("%w: infrastructure backoff until %s", errRepairWait, ledger.NotBefore.Format(time.RFC3339))
-	}
-	return nil
-}
-
-// checkRepairBudget is the read-only form of the reservation check. It never
-// creates the ledger.
-func checkRepairBudget(root, repo string, pr int, now time.Time) error {
-	_, path := ciRepairLedgerPath(root, repo, pr)
-	ledger, err := loadCIRepairLedger(path)
-	if err != nil {
-		return err
-	}
-	return repairBudget(ledger, now)
-}
-
-// reserveRepair takes one attempt from the PR's shared ledger. CI and
-// acceptance and conflict repairs draw on the same budget, cooldown and backoff.
 func reserveRepair(root, repo string, pr vcs.PR, reason string, now time.Time) (int, error) {
-	dir, path := ciRepairLedgerPath(root, repo, pr.Number)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return 0, err
-	}
-	ledger, err := loadCIRepairLedger(path)
-	if err != nil {
-		return 0, err
-	}
-	if err := repairBudget(ledger, now); err != nil {
-		return 0, err
-	}
-	consumed, _ := ledger.counts()
-	attempt := consumed + 1
-	ledger.Attempts = append(ledger.Attempts, ciRepairAttempt{Head: pr.HeadSHA, Attempt: attempt, At: now, Reason: reason})
-	if err := saveCIRepairLedger(dir, path, ledger); err != nil {
-		return 0, err
-	}
-	return attempt, nil
+	return repairledger.Reserve(root, repo, pr, reason, now)
 }
-
-// releaseCIRepair marks the open reservation for `attempt` as non-consuming
-// after an infrastructure or confirmed no-change outcome and applies backoff.
-// Only infrastructure releases count toward the bounded infrastructure budget.
 func releaseCIRepair(root, repo string, pr vcs.PR, attempt int, kind string, now time.Time) error {
-	dir, path := ciRepairLedgerPath(root, repo, pr.Number)
-	ledger, err := loadCIRepairLedger(path)
-	if err != nil {
-		return err
-	}
-	idx := -1
-	for i := len(ledger.Attempts) - 1; i >= 0; i-- {
-		a := ledger.Attempts[i]
-		if a.Released == "" && a.Attempt == attempt && a.Head == pr.HeadSHA {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("no open repair reservation for attempt %d", attempt)
-	}
-	ledger.Attempts[idx].Released = kind
-	_, infra := ledger.counts()
-	backoff := ciRepairCooldown << uint(infra)
-	if backoff > ciRepairMaxBackoff || backoff <= 0 {
-		backoff = ciRepairMaxBackoff
-	}
-	ledger.NotBefore = now.Add(backoff)
-	return saveCIRepairLedger(dir, path, ledger)
+	return repairledger.Release(root, repo, pr, attempt, kind, now)
 }
 
 // classifyRepairInfra reports whether a failed repair run was an infrastructure

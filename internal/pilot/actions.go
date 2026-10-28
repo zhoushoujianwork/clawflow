@@ -32,6 +32,7 @@ type Action struct {
 	Type     string `json:"type"`
 	Repo     string `json:"repo,omitempty"`
 	Issue    int    `json:"issue,omitempty"`
+	PR       int    `json:"pr,omitempty"`
 	Body     string `json:"body,omitempty"`
 	Title    string `json:"title,omitempty"`
 	Label    string `json:"label,omitempty"`
@@ -42,14 +43,15 @@ type Action struct {
 // ActionRecord is the persisted board/audit representation. Pending records
 // reserve budget before effects; uncertain effects are never automatically retried.
 type ActionRecord struct {
-	RunID        string    `json:"run_id"`
-	Actor        string    `json:"actor"`
-	Action       Action    `json:"action"`
-	Digest       string    `json:"digest"`
-	Outcome      string    `json:"outcome"`
-	At           time.Time `json:"at"`
-	CreatedIssue int       `json:"created_issue,omitempty"`
-	Reason       string    `json:"reason,omitempty"`
+	RunID        string           `json:"run_id"`
+	Actor        string           `json:"actor"`
+	Action       Action           `json:"action"`
+	Digest       string           `json:"digest"`
+	Outcome      string           `json:"outcome"`
+	At           time.Time        `json:"at"`
+	CreatedIssue int              `json:"created_issue,omitempty"`
+	Reason       string           `json:"reason,omitempty"`
+	CIRerun      *vcs.CIRerunPlan `json:"ci_rerun,omitempty"`
 }
 
 var actionID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`)
@@ -104,7 +106,7 @@ func ParseActions(output string) (ActionSet, error) {
 func validateAction(raw json.RawMessage) (Action, error) {
 	var a Action
 	// Reserved extensions are recognized even before their payload schemas land.
-	if err := json.Unmarshal(raw, &a); err == nil && (a.Type == "rerun_ci" || a.Type == "override_merge") {
+	if err := json.Unmarshal(raw, &a); err == nil && a.Type == "override_merge" {
 		return a, errors.New("not_implemented")
 	}
 	if err := strictJSON(raw, &a); err != nil {
@@ -115,7 +117,12 @@ func validateAction(raw json.RawMessage) (Action, error) {
 	}
 	fields := "id type repo"
 	switch a.Type {
-	case "rerun_ci", "override_merge":
+	case "rerun_ci":
+		fields += " pr"
+		if a.PR < 1 {
+			return a, errors.New("pr_required")
+		}
+	case "override_merge":
 		return a, errors.New("not_implemented")
 	case "comment", "ask_human", "release":
 		fields += " issue body"
@@ -302,6 +309,7 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 				} else if prev.Outcome == "applied" {
 					r.Outcome = "already_applied"
 					r.CreatedIssue = prev.CreatedIssue
+					r.CIRerun = prev.CIRerun
 				} else {
 					r.Outcome = "uncertain_previous_attempt"
 				}
@@ -325,13 +333,19 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 				if dry {
 					r.Outcome = "valid"
 				} else {
-					n, err := e.execute(a, s.RunID)
+					var n int
+					var err error
+					if a.Type == "rerun_ci" {
+						r.CIRerun, err = e.rerunCI(a, now)
+					} else {
+						n, err = e.execute(a, s.RunID)
+					}
 					r.CreatedIssue = n
 					r.Outcome = "applied"
 					if err != nil {
 						r.Outcome = "failed"
 						r.Reason = "vcs_error"
-						if slices.Contains([]string{"issue_not_found", "issue_running", "open_leaf_required", "ambiguous_spec_markers", "invalid_spec_markers"}, err.Error()) {
+						if slices.Contains([]string{"already_rerun_for_head", "infrastructure_budget_exhausted", "repair_waiting", "unsupported_platform", "no_rerunnable_checks", "unmanaged_pr", "head_changed", "issue_not_found", "issue_running", "open_leaf_required", "ambiguous_spec_markers", "invalid_spec_markers"}, err.Error()) {
 							r.Reason = err.Error()
 						}
 					}

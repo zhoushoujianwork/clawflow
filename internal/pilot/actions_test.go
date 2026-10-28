@@ -84,7 +84,7 @@ func TestActionsParserAndSchema(t *testing.T) {
 			t.Fatalf("accepted %s", raw)
 		}
 	}
-	for _, kind := range []string{"rerun_ci", "override_merge"} {
+	for _, kind := range []string{"override_merge"} {
 		if _, err := validateAction([]byte(`{"id":"a","type":"` + kind + `"}`)); err == nil || err.Error() != "not_implemented" {
 			t.Fatalf("%s: %v", kind, err)
 		}
