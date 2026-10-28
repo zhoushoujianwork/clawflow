@@ -1,4 +1,5 @@
-import { createFileRoute, Outlet, Link } from '@tanstack/react-router'
+import { createFileRoute, Outlet, Link, useLocation } from '@tanstack/react-router'
+import { ReadOnlyContext } from '../lib/session'
 import { VersionBadge } from '../components/VersionBadge'
 import { useCallback, useEffect, useState } from 'react'
 import { useTheme } from '../lib/useTheme'
@@ -12,6 +13,16 @@ export const Route = createFileRoute('/_app')({
 
 function AppLayout() {
   const { theme, toggle } = useTheme()
+  const [readonly, setReadonly] = useState(true)
+  const [sessionReady, setSessionReady] = useState(false)
+  const pathname = useLocation({ select: location => location.pathname })
+  useEffect(() => {
+    fetch('/api/session', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => { setReadonly(d.readonly !== false); setSessionReady(true) })
+      .catch(() => setSessionReady(true))
+  }, [])
+  const allowedPage = ['/dashboard', '/pipeline', '/usage', '/'].includes(pathname)
   const [currentVersion, setCurrentVersion] = useState<string | null>(null)
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
   const [channel, setChannel] = useState('')
@@ -21,8 +32,9 @@ function AppLayout() {
   const [restarting, setRestarting] = useState(false)
   const [showTooltip, setShowTooltip] = useState(false)
 
-  // Check version once on mount
+  // Version details are available only to local sessions.
   useEffect(() => {
+    if (!sessionReady || readonly) return
     fetch('/api/version', { cache: 'no-store' })
       .then(r => r.ok ? r.json() : null)
       .then(d => {
@@ -35,7 +47,7 @@ function AppLayout() {
         }
       })
       .catch(() => {})
-  }, [])
+  }, [sessionReady, readonly])
 
   const triggerUpdate = useCallback(() => {
     setUpdating(true)
@@ -73,6 +85,7 @@ function AppLayout() {
   }, [])
 
   return (
+    <ReadOnlyContext.Provider value={readonly}>
     <ChatProvider>
       <div className="min-h-screen font-ibm-plex-sans" style={{ background: 'hsl(var(--bg-primary))' }}>
         <header
@@ -108,30 +121,30 @@ function AppLayout() {
               >
                 Dashboard
               </Link>
-              <Link
+              {!readonly && <Link
                 to="/repos"
                 className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
                 style={{ color: 'hsl(var(--text-low))' }}
                 activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
               >
                 Repos
-              </Link>
-              <Link
+              </Link>}
+              {!readonly && <Link
                 to="/projects"
                 className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
                 style={{ color: 'hsl(var(--text-low))' }}
                 activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
               >
                 Projects
-              </Link>
-              <Link
+              </Link>}
+              {!readonly && <Link
                 to="/operators"
                 className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
                 style={{ color: 'hsl(var(--text-low))' }}
                 activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
               >
                 Operators
-              </Link>
+              </Link>}
               <Link
                 to="/pipeline"
                 className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
@@ -148,18 +161,19 @@ function AppLayout() {
               >
                 Usage
               </Link>
-              <Link
+              {!readonly && <Link
                 to="/settings"
                 className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
                 style={{ color: 'hsl(var(--text-low))' }}
                 activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
               >
                 Settings
-              </Link>
+              </Link>}
             </nav>
           </div>
 
           <div className="flex items-center gap-2">
+            {readonly && <span className="text-xs">Read-only</span>}
             {/* Version badge with upgrade indicator.
                 Lives in the right-hand cluster (anchored to the right edge by
                 the header's justify-between) so its async appearance after the
@@ -168,7 +182,7 @@ function AppLayout() {
             {currentVersion && (
               <VersionBadge currentVersion={currentVersion} latestVersion={latestVersion} channel={channel} versionDetail={versionDetail} updateAvailable={updateAvailable} updating={updating} restarting={restarting} showTooltip={showTooltip} triggerUpdate={triggerUpdate} setShowTooltip={setShowTooltip} />
             )}
-            <ReportIssueButton />
+            {!readonly && <ReportIssueButton />}
             <a
               href="https://github.com/zhoushoujianwork/clawflow"
               target="_blank"
@@ -190,7 +204,7 @@ function AppLayout() {
                 />
               </svg>
             </a>
-            <SyncPopover />
+            {!readonly && <SyncPopover />}
             <button
               onClick={toggle}
               className="w-7 h-7 flex items-center justify-center rounded-sm transition-colors"
@@ -202,11 +216,14 @@ function AppLayout() {
           </div>
         </header>
         <main>
-          <Outlet />
+          {!sessionReady ? <p className="p-6">Loading session…</p> :
+            readonly && !allowedPage ? <p className="p-6">This page requires local access. <Link to="/dashboard">Open dashboard</Link></p> :
+            <Outlet />}
         </main>
-        <ChatDrawer />
+        {!readonly && <ChatDrawer />}
       </div>
     </ChatProvider>
+    </ReadOnlyContext.Provider>
   )
 }
 
