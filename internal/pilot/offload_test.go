@@ -3,6 +3,7 @@ package pilot
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,16 @@ func TestWakeUsesPilotRole(t *testing.T) {
 		if role != config.RolePilot {
 			t.Errorf("role = %q", role)
 		}
-		return "PILOT-RESULT: no-action", nil
+		marker := "Wake run_id: "
+		pos := strings.LastIndex(prompt, marker)
+		if pos < 0 {
+			t.Fatal("wake prompt missing run ID")
+		}
+		runID := strings.TrimSpace(prompt[pos+len(marker):])
+		if !actionID.MatchString(runID) {
+			t.Fatalf("invalid wake run ID: %q", runID)
+		}
+		return "```pilot-actions\n{\"run_id\":\"" + runID + "\",\"actions\":[]}\n```\nPILOT-RESULT: no-action", nil
 	}
 	if err := wake(context.Background(), p, cfg, &config.Credentials{}, time.Second); err != nil {
 		t.Fatal(err)
