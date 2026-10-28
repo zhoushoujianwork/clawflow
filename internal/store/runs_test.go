@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,13 +86,29 @@ func TestImportRunsCountsAndLegacy(t *testing.T) {
 	write("runs/legacy", legacy)
 	write("runs/costless", fixture("o/r", "failed", "2026-10-02T00:00:00Z", map[string]any{"input_tokens": 7}))
 	write("pilot-runs/project/one", map[string]any{"project": "project", "status": "success", "started_at": "2026-10-01T00:00:00Z"})
+	write("runs/old.orphaned-123/run", legacy)
+	write("pilot-runs/old.orphaned-123/run", legacy)
 	write("runs/invalid", map[string]any{"status": "success"})
 	ctx := context.Background()
-	c, err := s.ImportRuns(ctx, root)
+	var diagnostics []store.ImportDiagnostic
+	report := func(d store.ImportDiagnostic) { diagnostics = append(diagnostics, d) }
+	c, err := s.ImportRuns(ctx, root, report)
 	if err != nil || c != (store.ImportCounts{Imported: 3, Invalid: 1}) {
 		t.Fatalf("first %+v %v", c, err)
 	}
-	c, err = s.ImportRuns(ctx, root)
+	if len(diagnostics) != 1 || diagnostics[0].Path != "runs/invalid/meta.json" || !strings.Contains(diagnostics[0].Reason, "missing run identity") {
+		t.Fatalf("diagnostics: %+v", diagnostics)
+	}
+	diagnostics = nil
+	c, err = s.ImportRuns(ctx, root, report)
+	if len(diagnostics) != 4 {
+		t.Fatalf("diagnostics: %+v", diagnostics)
+	}
+	for _, d := range diagnostics {
+		if d.Status == "skipped" && d.Reason != "unchanged metadata already imported" {
+			t.Fatalf("skip reason: %+v", d)
+		}
+	}
 	if err != nil || c != (store.ImportCounts{Skipped: 3, Invalid: 1}) {
 		t.Fatalf("again %+v %v", c, err)
 	}
@@ -165,5 +182,41 @@ func TestUsageMixedAttributionAndPeriods(t *testing.T) {
 	}
 	if _, ok := sum.ByRepo[""]; ok {
 		t.Fatal("pilot attributed to empty repo")
+	}
+}
+
+func TestImportInvalidFilesAndOrphanedDirectories(t *testing.T) {
+	root := t.TempDir()
+	for rel, raw := range map[string]string{
+		"runs/bad/meta.json":                         "{",
+		"runs/missing/meta.json":                     "{}",
+		"runs/repo.orphaned-123/run/meta.json":       "{}",
+		"pilot-runs/repo.orphaned-123/run/meta.json": "{}",
+	} {
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Invalid and archived files must never reach the database.
+	var s *store.Store
+	var diagnostics []store.ImportDiagnostic
+	counts, err := s.ImportRuns(context.Background(), root, func(d store.ImportDiagnostic) { diagnostics = append(diagnostics, d) })
+	if err != nil || counts.Invalid != 2 || len(diagnostics) != 2 {
+		t.Fatalf("counts=%+v diagnostics=%+v err=%v", counts, diagnostics, err)
+	}
+	if diagnostics[0].Path != "runs/bad/meta.json" || !strings.Contains(diagnostics[0].Reason, "unexpected end") {
+		t.Fatalf("malformed JSON: %+v", diagnostics[0])
+	}
+	if diagnostics[1].Path != "runs/missing/meta.json" || diagnostics[1].Reason != "missing run identity, status or started_at" {
+		t.Fatalf("missing fields: %+v", diagnostics[1])
+	}
+	for _, d := range diagnostics {
+		if d.Status != "invalid" {
+			t.Fatalf("status: %+v", d)
+		}
 	}
 }

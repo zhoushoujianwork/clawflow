@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/store"
+	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
 )
 
 func execRoot(t *testing.T, args ...string) (string, error) {
@@ -79,5 +80,58 @@ func TestDBStatusMasksDSN(t *testing.T) {
 	}
 	if strings.Contains(out, "hunter2") || strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("password leaked: %q / %v", out, err)
+	}
+}
+
+func TestDBMigrateImportsHistoryOnlyWhenEmpty(t *testing.T) {
+	s, dsn := storetest.NewWithDSN(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeMinimalConfig(t, home)
+	t.Setenv(store.DSNEnv, dsn)
+	dir := filepath.Join(home, ".clawflow", "data", "runs", "legacy")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "meta.json")
+	raw := []byte(`{"repo":"o/r","operator":"implement","status":"success","started_at":"2026-10-01T00:00:00Z"}`)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := execRoot(t, "db", "migrate")
+	if err != nil || !strings.Contains(out, "imported=1") {
+		t.Fatalf("migrate: %q %v", out, err)
+	}
+	rows, err := s.Runs(context.Background(), "run", store.RunFilter{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("runs: %+v %v", rows, err)
+	}
+	// A changed file must not be re-imported once the runs table is populated.
+	raw = bytes.ReplaceAll(raw, []byte("success"), []byte("failed"))
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err = execRoot(t, "db", "migrate")
+	if err != nil || strings.Contains(out, "imported=") {
+		t.Fatalf("repeat: %q %v", out, err)
+	}
+	rows, err = s.Runs(context.Background(), "run", store.RunFilter{})
+	if err != nil || len(rows) != 1 || rows[0].Status != "success" {
+		t.Fatalf("reimported: %+v %v", rows, err)
+	}
+	// Explicit import remains available to update existing records.
+	if _, err := execRoot(t, "db", "import-runs"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = execRoot(t, "db", "import-runs")
+	if err != nil || !strings.Contains(out, "skipped runs/legacy/meta.json: unchanged metadata already imported") {
+		t.Fatalf("skip output: %q %v", out, err)
+	}
+	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err = execRoot(t, "db", "import-runs")
+	if err != nil || !strings.Contains(out, "invalid runs/legacy/meta.json: missing run identity") {
+		t.Fatalf("invalid output: %q %v", out, err)
 	}
 }
