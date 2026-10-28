@@ -97,6 +97,9 @@ func queueVCS(t *testing.T, issues []map[string]any, subs map[int][]int, prs []m
 			body = map[string]int{"id": 1}
 		case r.Method == "GET" && r.URL.Path == "/repos/o/r/issues":
 			body = issues
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/labels"):
+			fmt.Sscanf(r.URL.Path, "/repos/o/r/issues/%d/labels", &n)
+			byNum[n]["labels"] = []map[string]string{{"name": "clawflow"}}
 		case r.Method == "GET" && r.URL.Path == "/repos/o/r/pulls":
 			body = prs
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/events"):
@@ -349,7 +352,7 @@ func TestRunOnceUnifiedQueueWithoutQueueIssue(t *testing.T) {
 	logs := withRunLog(t)
 	queueConfig(t, 0)
 	queueVCS(t,
-		[]map[string]any{targetedIssue(9), targetedIssue(7), targetedIssue(5, "P0"), targetedIssue(3, "agent-failed")},
+		[]map[string]any{targetedIssue(9, "clawflow"), targetedIssue(7, "clawflow"), targetedIssue(5, "clawflow", "P0"), targetedIssue(3, "clawflow", "agent-failed")},
 		nil, nil, nil)
 	got := runQueueOnce(t, 0)
 	if len(got) != 2 {
@@ -382,7 +385,7 @@ func TestRepoSetMaxInFlight(t *testing.T) {
 
 func TestQueueRepoParamsDefaults(t *testing.T) {
 	m, p, s := queueRepoParams(config.Repo{}, config.QueueSettings{})
-	if m != 2 || p != 45*time.Minute || s != "all" {
+	if m != 2 || p != 45*time.Minute || s != "labeled" {
 		t.Fatalf("defaults = %d %s %s", m, p, s)
 	}
 	m, p, s = queueRepoParams(config.Repo{MaxInFlight: 5}, config.QueueSettings{Scope: "labeled", ParkAfter: "10m"})
@@ -395,14 +398,21 @@ func TestQueueRepoParamsDefaults(t *testing.T) {
 }
 
 type fakeQueueLister struct {
-	subs  []vcs.Issue
-	err   error
-	calls int
+	subs     []vcs.Issue
+	err      error
+	calls    int
+	labels   []int
+	labelErr error
 }
 
 func (f *fakeQueueLister) ListSubIssues(string, int) ([]vcs.Issue, error) {
 	f.calls++
 	return f.subs, f.err
+}
+
+func (f *fakeQueueLister) AddLabel(_ string, n int, labels ...string) error {
+	f.labels = append(f.labels, n)
+	return f.labelErr
 }
 
 func noScopeWrite() error { return nil }
@@ -481,7 +491,7 @@ func TestRunOnceQueueIssueIgnoredAfterImport(t *testing.T) {
 	}
 }
 
-func TestMigrateQueueIssueSetsRankedScopeOrFailsClosed(t *testing.T) {
+func TestMigrateQueueIssueSetsLabeledScopeOrFailsClosed(t *testing.T) {
 	logs := withRunLog(t)
 	lister := &fakeQueueLister{subs: []vcs.Issue{{Number: 1, State: "open"}}}
 	writes := 0
@@ -552,12 +562,12 @@ func TestEffectiveScopeFailsClosedForMigratedRepos(t *testing.T) {
 		want      string
 		fell      bool
 	}{
-		{"", "", false, "all", false},
+		{"", "", false, "labeled", false},
 		{"", "labeled", false, "labeled", false},
 		{"ranked", "labeled", false, "ranked", false},
-		{"bogus", "", true, "ranked", true},
-		{"bogus", "", false, "all", true},
-		{"", "bogus", true, "ranked", true},
+		{"bogus", "", true, "labeled", true},
+		{"bogus", "", false, "labeled", true},
+		{"", "bogus", true, "labeled", true},
 	}
 	for _, c := range cases {
 		got, fell := queue.EffectiveScope(c.repo, c.def, c.had)
@@ -593,9 +603,9 @@ func TestRepoSetQueueScope(t *testing.T) {
 	}
 }
 
-// End to end: a migrated repo becomes ranked; unlisted work is not dispatched,
+// End to end: a migrated repo becomes labeled; unlisted work is not dispatched,
 // listed work is, and a clawflow-labeled issue is enrolled and dispatched.
-func TestRunOnceMigratedRepoIsRanked(t *testing.T) {
+func TestRunOnceMigratedRepoIsLabeled(t *testing.T) {
 	logs := withRunLog(t)
 	queueConfig(t, 100)
 	queueVCS(t,
@@ -606,18 +616,18 @@ func TestRunOnceMigratedRepoIsRanked(t *testing.T) {
 		t.Fatalf("dispatched = %v, want [3 9] (5 and 4 are unlisted)", got)
 	}
 	cfg, _ := config.Load()
-	if cfg.Repos["o/r"].QueueScope != "ranked" {
-		t.Fatalf("queue_scope = %q, want ranked", cfg.Repos["o/r"].QueueScope)
+	if cfg.Repos["o/r"].QueueScope != "labeled" {
+		t.Fatalf("queue_scope = %q, want labeled", cfg.Repos["o/r"].QueueScope)
 	}
 	order, _ := queue.LoadRank()
 	var keys []string
 	for _, k := range order {
 		keys = append(keys, k.String())
 	}
-	if strings.Join(keys, ",") != "o/r#9,o/r#3" {
+	if strings.Join(keys, ",") != "o/r#9" {
 		t.Fatalf("rank = %v", keys)
 	}
-	if out := logs(); !strings.Contains(out, "queue/enroll") || !strings.Contains(out, "queue/scope") {
+	if out := logs(); !strings.Contains(out, "queue/scope") {
 		t.Fatalf("missing logs:\n%s", out)
 	}
 }
@@ -640,11 +650,41 @@ func TestRunOnceMigrationHoldsBackWhenScopeWriteFails(t *testing.T) {
 	if got := runQueueOnce(t, 0); len(got) != 0 {
 		t.Fatalf("dispatched = %v, want none while the scope write fails", got)
 	}
-	// Writable again: the next pass retries, sets ranked and dispatches the listed item.
+	// Writable again: the next pass retries, sets labeled and dispatches the listed item.
 	if err := os.Chmod(cfgPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got := runQueueOnce(t, 0); len(got) != 1 || got[0] != 9 {
 		t.Fatalf("retry dispatched = %v, want [9]", got)
+	}
+}
+
+func TestDefaultLabelScopeCountsWithoutDispatch(t *testing.T) {
+	in := plannerInput("o/r", plannerIssue(1, "", "clawflow"), plannerIssue(2, ""), plannerIssue(3, ""))
+	_, _, in.Scope = queueRepoParams(config.Repo{}, config.QueueSettings{})
+	in.Issues[2].State = "closed"
+	in.Rank = []queue.Key{{Repo: "o/r", Number: 2}}
+	p := planRepoQueue(in)
+	if len(p.Picks) != 1 || !p.Picks[1] || p.State.NotEnrolled != 1 {
+		t.Fatalf("picks=%v not enrolled=%d", p.Picks, p.State.NotEnrolled)
+	}
+}
+
+func TestMigrationLabelFailureRetries(t *testing.T) {
+	withRunLog(t)
+	queueCmdSetup(t)
+	f := &fakeQueueLister{subs: []vcs.Issue{{Number: 1, State: "open"}, {Number: 2, State: "closed"}}, labelErr: errors.New("label failed")}
+	st := queue.RepoState{Repo: "o/r"}
+	writes := 0
+	persist := func() error { writes++; return nil }
+	if migrateQueueIssue(f, "o/r", 100, false, persist, &st) || st.Imported || writes != 0 || rankStrings(t) != "" {
+		t.Fatal("failed enrollment must not finish migration")
+	}
+	f.labelErr = nil
+	if !migrateQueueIssue(f, "o/r", 100, false, persist, &st) || !st.Imported || writes != 1 || rankStrings(t) != "o/r#1" {
+		t.Fatal("migration did not retry")
+	}
+	if fmt.Sprint(f.labels) != "[1 1]" {
+		t.Fatalf("labels=%v", f.labels)
 	}
 }

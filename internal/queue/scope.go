@@ -16,28 +16,20 @@ func ValidScope(s string) bool {
 	return s == ScopeAll || s == ScopeLabeled || s == ScopeRanked
 }
 
-// EffectiveScope resolves a repo's scope: the repo setting, else the global
-// default, else "all". An unknown value fails closed for repos that ever had
-// a queue_issue ("ranked", so unlisted work is never picked up) and falls
-// back to "all" otherwise. fellBack reports that an unknown value was seen.
-func EffectiveScope(repoScope, defaultScope string, hadQueueIssue bool) (scope string, fellBack bool) {
+// EffectiveScope resolves the repo setting, then the global setting, then
+// labeled. Unknown values also fall back to labeled.
+func EffectiveScope(repoScope, defaultScope string, _ bool) (scope string, fellBack bool) {
 	raw := repoScope
 	if raw == "" {
 		raw = defaultScope
 	}
-	switch {
-	case raw == "" && hadQueueIssue:
-		// A legacy queue repo never picks up unlisted work, even before the
-		// migration has persisted queue_scope: ranked.
-		return ScopeRanked, false
-	case raw == "":
-		return ScopeAll, false
-	case ValidScope(raw):
-		return raw, false
-	case hadQueueIssue:
-		return ScopeRanked, true
+	if raw == "" {
+		return ScopeLabeled, false
 	}
-	return ScopeAll, true
+	if ValidScope(raw) {
+		return raw, false
+	}
+	return ScopeLabeled, true
 }
 
 // Remove returns order without k.

@@ -243,13 +243,13 @@ GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return 
 
 ### Work queue (one queue for all repositories)
 
-All enabled repositories, GitHub and GitLab, share one ClawFlow-native queue. Candidates are the open leaf issues `implement` would accept, narrowed by the repo's `queue_scope` (`clawflow repo set owner/repo --queue-scope all|labeled|ranked`; empty falls back to `settings.queue.scope`, then `all`):
+All enabled repositories, GitHub and GitLab, share one ClawFlow-native queue. Candidates are the open leaf issues `implement` would accept, narrowed by the repo's `queue_scope` (`clawflow repo set owner/repo --queue-scope all|labeled|ranked`; empty falls back to `settings.queue.scope`, then `labeled`):
 
 - `all`: every eligible issue.
-- `labeled`: only issues labeled `clawflow`.
+- `labeled` (default): only issues labeled `clawflow`.
 - `ranked`: only issues listed in the rank file, plus issues labeled `clawflow`, which are appended to the rank on the pass that sees them (`queue/enroll`).
 
-An unknown value falls back to `ranked` for repos that ever had `queue_issue` (unlisted work is never picked up), else `all`. `clawflow repo set` rejects unknown values. Issues already in flight always count, whatever the scope.
+An unknown value falls back to `labeled`. `clawflow repo set` rejects unknown values. Issues already in flight always count, whatever the scope.
 
 Order is `(priority, rank, created_at, key)`:
 
@@ -261,13 +261,15 @@ Order is `(priority, rank, created_at, key)`:
 clawflow queue list [--repo R] [--json]   # global order: key, tier, rank, scope, state
 clawflow queue move owner/repo#12 --top
 clawflow queue add owner/repo#13 [--top | --before K | --after K]   # enroll (default: bottom)
-clawflow queue remove owner/repo#13                                 # drop from the rank
+clawflow queue remove owner/repo#13                                 # remove the clawflow label and rank
 clawflow repo set owner/repo --max-in-flight 3   # per repo, default 2
 ```
 
+`queue add` adds the `clawflow` label as well as rank; `queue remove` removes both, even for unranked issues. `queue list` reports a separate “not enrolled” count of unlabeled open issues from the last pass. Explicit `all` scope still admits unlabeled issues.
+
 Each pass walks the order for its repositories and dispatches while the repo's `max_in_flight` and the global `settings.max_concurrent_agents` allow. An item is in flight while it holds a local lock, or carries `agent-implemented` with an open PR that references it. Blocked items (`agent-failed`, red CI without repair, no acceptance verdict, open dependency) are skipped with a recorded reason and never stall the queue. An in-flight item blocked longer than `settings.queue.park_after` (default `45m`) is parked and stops counting toward `max_in_flight` (at most 2 per repo). Logs: `queue/pick`, `queue/skip`, `queue/park`, `queue/unpark`, `queue/format_warning`, `queue/import`. Targeted runs (`clawflow run --repo R --issue N`) bypass the queue.
 
-`queue_issue` is deprecated. On the first pass its open sub-issues are imported into the rank (`clawflow queue import --repo R --from-issue N` does the same by hand), the repo is set to `queue_scope: ranked` unless it already has an explicit scope, and the field is then ignored. If the config write fails, implement is held back for that repo and the migration retries next pass. The old queue issue is left untouched.
+`queue_issue` is deprecated. On the first pass its open sub-issues receive the `clawflow` label and are imported into the rank (`clawflow queue import --repo R --from-issue N` does the same by hand), the repo is set to `queue_scope: labeled` unless it already has an explicit scope, and the field is then ignored. If the config write fails, implement is held back for that repo and the migration retries next pass. The old queue issue is left untouched.
 
 ---
 

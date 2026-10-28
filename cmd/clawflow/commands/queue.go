@@ -28,6 +28,7 @@ func hasLabel(labels []string, want string) bool {
 // queueSubIssueLister is the slice of vcs.Client the queue read needs.
 type queueSubIssueLister interface {
 	ListSubIssues(repo string, issueNumber int) ([]vcs.Issue, error)
+	AddLabel(repo string, issueNumber int, labels ...string) error
 }
 
 // readQueueItems lists the queue issue's direct sub-issues. Any failure,
@@ -51,6 +52,13 @@ func importQueueIssue(client queueSubIssueLister, repo string, queueIssue int) (
 	items, err := readQueueItems(client, repo, queueIssue)
 	if err != nil {
 		return nil, err
+	}
+	for _, it := range items {
+		if it.State == "open" {
+			if err := client.AddLabel(repo, it.Number, queue.ScopeLabel); err != nil {
+				return nil, fmt.Errorf("enroll %s#%d: %w", repo, it.Number, err)
+			}
+		}
 	}
 	var added []queue.Key
 	_, err = queue.UpdateRank(func(order []queue.Key) ([]queue.Key, error) {
@@ -77,14 +85,13 @@ func importQueueIssue(client queueSubIssueLister, repo string, queueIssue int) (
 }
 
 // migrateQueueIssue performs the one-time import of a repo's legacy
-// queue_issue into the rank file, makes sure the repo is scoped "ranked" (so
-// work that was never listed stays unpicked) and emits the one-time
+// queue_issue into the rank file, makes sure the repo is scoped "labeled" and emits the one-time
 // deprecation notice. scopeExplicit is true when the repo config already has
-// a queue_scope; otherwise setRankedScope persists queue_scope: ranked. It
+// a queue_scope; otherwise setLabeledScope persists queue_scope: labeled. It
 // returns false when a step failed; the caller must then hold back implement
 // for this pass (fail closed) and the step is retried next pass. The state is
 // updated in place; the caller persists it.
-func migrateQueueIssue(client queueSubIssueLister, repo string, queueIssue int, scopeExplicit bool, setRankedScope func() error, st *queue.RepoState) bool {
+func migrateQueueIssue(client queueSubIssueLister, repo string, queueIssue int, scopeExplicit bool, setLabeledScope func() error, st *queue.RepoState) bool {
 	if queueIssue <= 0 {
 		return true
 	}
@@ -103,15 +110,15 @@ func migrateQueueIssue(client queueSubIssueLister, repo string, queueIssue int, 
 		runLog.Info("queue/import", "repo", repo, "queue", queueIssue, "added", len(added))
 	}
 	if !scopeExplicit {
-		if err := setRankedScope(); err != nil {
+		if err := setLabeledScope(); err != nil {
 			runLog.Warn("queue/scope", "repo", repo, "err", err.Error(), "result", "retry")
 			return false
 		}
-		runLog.Info("queue/scope", "repo", repo, "scope", queue.ScopeRanked, "reason", "queue_issue_migration")
+		runLog.Info("queue/scope", "repo", repo, "scope", queue.ScopeLabeled, "reason", "queue_issue_migration")
 	}
 	if !st.DeprecationShown {
 		st.DeprecationShown = true
-		msg := fmt.Sprintf("queue_issue (#%d) is deprecated and ignored for dispatch; its sub-issues were imported into the unified queue and queue_scope is ranked (clawflow queue list). You may close the queue issue.", queueIssue)
+		msg := fmt.Sprintf("queue_issue (#%d) is deprecated and ignored for dispatch; its sub-issues were imported into the unified queue and imported issues carry the clawflow label (clawflow queue list). You may close the queue issue.", queueIssue)
 		fmt.Fprintf(os.Stderr, "[%s] ⚠ %s\n", repo, msg)
 		runLog.Warn("queue/deprecated", "repo", repo, "queue", queueIssue, "detail", msg)
 	}

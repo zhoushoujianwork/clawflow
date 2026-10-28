@@ -76,6 +76,12 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		plan.Previous[e.Number] = e
 	}
 	plan.State.Repo = in.Repo
+	plan.State.NotEnrolled = 0
+	for _, is := range in.Issues {
+		if (is.State == "" || is.State == "open") && !hasLabel(is.Labels, queue.ScopeLabel) {
+			plan.State.NotEnrolled++
+		}
+	}
 
 	open := map[int]bool{}
 	for _, is := range in.Issues {
@@ -300,8 +306,7 @@ func entryIndex(r queue.SelectResult, k queue.Key) int {
 }
 
 // queueRepoParams extracts the per-repo caps and scope from config with
-// defaults. An unknown scope fails closed ("ranked") for repos that ever had
-// a queue_issue.
+// defaults. Unknown scopes fall back to labeled.
 func queueRepoParams(repoCfg config.Repo, qs config.QueueSettings) (maxInFlight int, parkAfter time.Duration, scope string) {
 	maxInFlight = repoCfg.MaxInFlight
 	if maxInFlight < 1 {

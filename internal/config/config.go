@@ -62,8 +62,8 @@ type Repo struct {
 	// QueueScope selects which open issues of this repo are queue
 	// candidates: "all", "labeled" (label clawflow) or "ranked" (listed in
 	// the rank file, or labeled clawflow and enrolled on sight). Empty falls
-	// back to settings.queue.scope, then "all". Migrating a repo's
-	// queue_issue sets "ranked" so unlisted work is never picked up.
+	// back to settings.queue.scope, then "labeled". Migrating a repo's
+	// queue_issue labels imported issues and sets "labeled".
 	QueueScope string `yaml:"queue_scope,omitempty" json:"queue_scope,omitempty"`
 
 	// BoundMachine, when non-empty, restricts processing of this repo to the
@@ -115,7 +115,7 @@ type DatabaseSettings struct {
 // QueueSettings tunes the unified work queue.
 type QueueSettings struct {
 	// Scope is the default candidate scope for repos without queue_scope:
-	// "all" (default), "labeled" (only issues carrying the label
+	// "all", "labeled" (default) (only issues carrying the label
 	// "clawflow") or "ranked" (only issues in the rank file or labeled).
 	Scope string `yaml:"scope,omitempty"`
 	// ParkAfter is how long an in-flight item may stay blocked before it

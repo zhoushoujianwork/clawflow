@@ -31,6 +31,7 @@ type EntryRecord struct {
 // RepoState is the small per-repo file under data/queue-state/. Only the pass
 // holding the repo's run lock writes it.
 type RepoState struct {
+	NotEnrolled      int               `json:"not_enrolled"` // open issues without the enrollment label
 	Version          int               `json:"version"`
 	Repo             string            `json:"repo"`
 	UpdatedAt        time.Time         `json:"updated_at"`

@@ -230,12 +230,12 @@ func TestEffectiveScope(t *testing.T) {
 		want         string
 		wantFellBack bool
 	}{
-		{"", "", false, ScopeAll, false},
-		{"", "", true, ScopeRanked, false},
+		{"", "", false, ScopeLabeled, false},
+		{"", "", true, ScopeLabeled, false},
 		{"", ScopeLabeled, true, ScopeLabeled, false},
 		{ScopeAll, "", true, ScopeAll, false},
-		{"bogus", "", true, ScopeRanked, true},
-		{"bogus", "", false, ScopeAll, true},
+		{"bogus", "", true, ScopeLabeled, true},
+		{"bogus", "", false, ScopeLabeled, true},
 	}
 	for _, c := range cases {
 		got, fell := EffectiveScope(c.repo, c.def, c.hadQueue)
