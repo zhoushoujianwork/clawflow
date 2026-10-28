@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"reflect"
 	"testing"
 
@@ -31,12 +33,12 @@ func TestPlanScheduledRuns(t *testing.T) {
 			[]string{"o/a", "o/b", "o/c", "o/mine", "o/zunset"}},
 		{"active repo skipped", schedCfg(10, false, repos), map[string]bool{"o/a": true}, nil,
 			[]string{"o/b", "o/c", "o/mine", "o/zunset"}},
-		{"cap counts active passes", schedCfg(3, false, repos), map[string]bool{"o/a": true}, nil,
-			[]string{"o/b", "o/c"}},
-		{"default cap is 4", schedCfg(0, false, repos), nil, nil,
-			[]string{"o/a", "o/b", "o/c", "o/mine"}},
-		{"cap full", schedCfg(2, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, nil},
-		{"over cap never negative", schedCfg(1, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, nil},
+		{"agent cap does not count active passes", schedCfg(3, false, repos), map[string]bool{"o/a": true}, nil,
+			[]string{"o/b", "o/c", "o/mine", "o/zunset"}},
+		{"default capacity does not limit passes", schedCfg(0, false, repos), nil, nil,
+			[]string{"o/a", "o/b", "o/c", "o/mine", "o/zunset"}},
+		{"active passes do not consume slots", schedCfg(2, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, []string{"o/c", "o/mine", "o/zunset"}},
+		{"passes can exceed agent slots", schedCfg(1, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, []string{"o/c", "o/mine", "o/zunset"}},
 		{"require_binding drops unbound", schedCfg(10, true, repos), nil, nil, []string{"o/mine"}},
 		{"unscoped pass blocks all", schedCfg(10, false, repos), map[string]bool{unscopedKey: true}, nil, nil},
 		{"only filter", schedCfg(10, false, repos), nil, map[string]bool{"o/b": true, "o/off": true}, []string{"o/b"}},
@@ -94,5 +96,26 @@ func TestCurrentRunStatusReportsActiveRepos(t *testing.T) {
 	runMu.Unlock()
 	if st := currentRunStatus(); st.Status != "running" || len(st.ActiveRepos) != 0 {
 		t.Fatalf("unscoped status = %+v", st)
+	}
+}
+
+func TestCurrentRunStatusAgentSlots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Settings: config.Settings{MaxConcurrentAgents: 2}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	release, err := agentcapacity.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	st := currentRunStatus()
+	if st.AgentSlotsUsed != 1 || st.AgentSlotsTotal != 2 {
+		t.Fatalf("status=%+v", st)
+	}
+	release()
+	if st := currentRunStatus(); st.AgentSlotsUsed != 0 {
+		t.Fatalf("released status=%+v", st)
 	}
 }

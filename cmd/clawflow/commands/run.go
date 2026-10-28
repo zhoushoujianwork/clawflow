@@ -81,9 +81,9 @@ func NewRunCmd() *cobra.Command {
   - for each issue, match against registered operators
   - on first match: execute through Offload, post the result, apply the outcome label
 
-Concurrency is gated by an in-process per-issue mutex; up to
-settings.max_concurrent_agents (default 4) operators run in parallel
-across issues. The "implement" operator is additionally serialized
+Concurrency is gated by an in-process per-issue mutex and machine-wide
+agent slots: settings.max_concurrent_agents (default 4) is shared by all
+passes, including implement, repair and acceptance. The "implement" operator is additionally serialized
 per-repo because it shares a local git clone. Pass --repo and/or
 --issue to narrow the scan.
 
