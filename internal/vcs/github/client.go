@@ -760,6 +760,17 @@ func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
 // cover commit-status contexts, required check names, or workflow-run identity;
 // callers must not treat this observation as an atomic merge authorization.
 func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
+	return c.getCIStatus(repo, prNumber, nil)
+}
+
+func (c *Client) GetCIEvidence(repo string, prNumber int) (vcs.CIEvidence, error) {
+	var evidence vcs.CIEvidence
+	status, err := c.getCIStatus(repo, prNumber, &evidence)
+	evidence.Status = status
+	return evidence, err
+}
+
+func (c *Client) getCIStatus(repo string, prNumber int, evidence *vcs.CIEvidence) (vcs.CIStatus, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return vcs.CIStatusNone, err
@@ -770,6 +781,9 @@ func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
 	}
 	if strings.TrimSpace(pr.HeadSHA) == "" {
 		return vcs.CIStatusNone, fmt.Errorf("github get check runs: missing PR head SHA")
+	}
+	if evidence != nil {
+		evidence.HeadSHA = pr.HeadSHA
 	}
 	// Bound pagination even if the API reports an unexpectedly large count.
 	const pageSize, maxPages = 100, 100
@@ -818,6 +832,9 @@ func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
 				return vcs.CIStatusNone, fmt.Errorf("github get check runs: invalid identity or revision on page %d", page)
 			}
 			seen[run.ID] = true
+			if evidence != nil {
+				evidence.CheckIDs = append(evidence.CheckIDs, run.ID)
+			}
 			switch run.Status {
 			case "completed":
 				if run.Conclusion == nil || *run.Conclusion == "" {

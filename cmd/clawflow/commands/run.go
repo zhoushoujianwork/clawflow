@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,9 +28,11 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -142,26 +145,78 @@ func resolveRunRepos(cfg *config.Config, onlyRepo string, onlyIssue int) (repos 
 	return nil, "", fmt.Errorf("repo %q not found or not enabled", onlyRepo)
 }
 
-// Lock-wait tuning for targeted runs; variables so tests can shorten them.
+// Run-lock hooks and lock-wait tuning for targeted runs; variables so tests
+// can replace them.
 var (
-	acquireRunLock   = snapshot.AcquireRunLock
-	targetedLockWait = 30 * time.Minute
-	runLockPoll      = 5 * time.Second
+	acquireRepoRunLock = snapshot.AcquireRepoRunLock
+	releaseRepoRunLock = snapshot.ReleaseRepoRunLock
+	targetedLockWait   = 30 * time.Minute
+	runLockPoll        = 5 * time.Second
 )
 
-// acquireRunLockForPass takes the global run lock. An unscoped pass that
-// loses the race reports skip=true (exit 0, the next tick retries). A
-// targeted run (--repo + --issue) is an explicit request to process one
-// issue, so exiting 0 would look like the work was done: it waits up to
-// targetedLockWait for the active pass and returns an error on timeout.
-func acquireRunLockForPass(ctx context.Context, lg *clog.Logger, targeted bool) (skip bool, err error) {
-	lockErr := acquireRunLock(Version)
+// passLocks tracks the per-repo run locks one pass holds so every exit path
+// (normal return, signal handler, self-watchdog) releases exactly those.
+type passLocks struct {
+	mu    sync.Mutex
+	repos map[string]bool
+}
+
+func (p *passLocks) add(repo string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.repos == nil {
+		p.repos = map[string]bool{}
+	}
+	p.repos[repo] = true
+}
+
+func (p *passLocks) has(repo string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.repos[repo]
+}
+
+// releaseAll releases every held lock. Safe to call more than once.
+func (p *passLocks) releaseAll() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for repo := range p.repos {
+		releaseRepoRunLock(repo)
+		delete(p.repos, repo)
+	}
+}
+
+// logRepoLocked records that a repo was skipped because another pass (or a
+// legacy global-lock holder) is running it.
+func logRepoLocked(lg *clog.Logger, repo string, lockErr error) {
+	fields := []any{"pid", os.Getpid(), "reason", "repo_locked", "repo", repo}
+	if holder := snapshot.RepoRunLockHolder(repo); holder != nil {
+		fields = append(fields, "holder_pid", holder.PID, "holder_started", holder.StartedAt.Format(time.RFC3339))
+		fmt.Fprintf(os.Stderr, "⚠ %s: clawflow run already active (pid=%d, started=%s) — skipping\n",
+			repo, holder.PID, holder.StartedAt.Format(time.RFC3339))
+	} else {
+		if lockErr != nil {
+			fields = append(fields, "err", lockErr.Error())
+		}
+		fmt.Fprintf(os.Stderr, "⚠ %s: %v — skipping\n", repo, lockErr)
+	}
+	lg.Info("run/skip", fields...)
+}
+
+// acquireRepoLockForPass takes one repo's run lock. An untargeted pass that
+// loses the race reports skip=true (exit 0, the next tick retries). A targeted
+// run (--repo + --issue) is an explicit request to process one issue, so
+// exiting 0 would look like the work was done: it waits up to targetedLockWait
+// for the pass holding that repo and returns an error on timeout.
+func acquireRepoLockForPass(ctx context.Context, lg *clog.Logger, pl *passLocks, repo string, targeted bool) (skip bool, err error) {
+	lockErr := acquireRepoRunLock(repo, Version)
 	if lockErr == nil {
+		pl.add(repo)
 		return false, nil
 	}
 	if targeted {
 		fmt.Fprintf(os.Stderr, "⚠ %v — waiting up to %s for it to finish\n", lockErr, targetedLockWait)
-		lg.Info("run/lock_wait", "pid", os.Getpid(), "reason", lockErr.Error(), "max_wait", targetedLockWait.String())
+		lg.Info("run/lock_wait", "pid", os.Getpid(), "repo", repo, "reason", lockErr.Error(), "max_wait", targetedLockWait.String())
 		deadline := time.Now().Add(targetedLockWait)
 		for lockErr != nil && time.Now().Before(deadline) {
 			select {
@@ -169,27 +224,51 @@ func acquireRunLockForPass(ctx context.Context, lg *clog.Logger, targeted bool) 
 				return false, ctx.Err()
 			case <-time.After(runLockPoll):
 			}
-			lockErr = acquireRunLock(Version)
+			lockErr = acquireRepoRunLock(repo, Version)
 		}
 		if lockErr == nil {
+			pl.add(repo)
 			return false, nil
 		}
-		lg.Warn("run/lock_timeout", "pid", os.Getpid(), "reason", lockErr.Error(), "waited", targetedLockWait.String())
-		return false, fmt.Errorf("another clawflow run is still active after waiting %s: %w", targetedLockWait, lockErr)
+		lg.Warn("run/lock_timeout", "pid", os.Getpid(), "repo", repo, "reason", lockErr.Error(), "waited", targetedLockWait.String())
+		return false, fmt.Errorf("another clawflow run is still active for %s after waiting %s: %w", repo, targetedLockWait, lockErr)
 	}
-	if holder, readErr := snapshot.ReadRunLock(); readErr == nil {
-		lg.Info("run/skip",
-			"pid", os.Getpid(),
-			"holder_pid", holder.PID,
-			"holder_started", holder.StartedAt.Format(time.RFC3339),
-		)
-		fmt.Fprintf(os.Stderr, "⚠ clawflow run already active (pid=%d, started=%s) — skipping\n",
-			holder.PID, holder.StartedAt.Format(time.RFC3339))
-	} else {
-		lg.Info("run/skip", "pid", os.Getpid(), "reason", lockErr.Error())
-		fmt.Fprintf(os.Stderr, "⚠ %v — skipping\n", lockErr)
-	}
+	logRepoLocked(lg, repo, lockErr)
 	return true, nil
+}
+
+// lockUnscopedRepos tries the run lock of every candidate repo and returns the
+// repos whose lock this pass now holds. The others are logged as skipped.
+func lockUnscopedRepos(lg *clog.Logger, pl *passLocks, candidates []string) []string {
+	var got []string
+	for _, repo := range candidates {
+		if err := acquireRepoRunLock(repo, Version); err != nil {
+			logRepoLocked(lg, repo, err)
+			continue
+		}
+		pl.add(repo)
+		got = append(got, repo)
+	}
+	return got
+}
+
+// repoRunsHere reports whether this machine processes the repo: bound_machine
+// and require_binding rules shared by the scan loop and the web scheduler.
+// An unresolvable hostname (empty) conservatively processes everything.
+func repoRunsHere(settings config.Settings, repoCfg config.Repo, hostname string) bool {
+	return settings.RunsOnHost(repoCfg, hostname)
+}
+
+// syncLocked runs a config sync step (auto-pull / auto-push) under the
+// cross-process config sync lock. Concurrent repo-scoped passes would
+// otherwise rewrite config.yaml at the same time; a sync that cannot get the
+// lock within a minute is skipped (it is best-effort and retried next pass).
+func syncLocked(fn func() bool) bool {
+	ok := false
+	if !snapshot.WithConfigSyncLock(time.Minute, func() { ok = fn() }) {
+		return false
+	}
+	return ok
 }
 
 func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.Duration) error {
@@ -212,29 +291,33 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		snapshot.ReconcileLog = lg
 	}
 
-	// Single-instance lock: prevent concurrent clawflow run invocations
-	// (e.g. cron firing while a previous run is still active). On
-	// contention an unscoped pass logs run/skip and exits cleanly so
-	// schedulers don't treat the skip as a failure; a targeted run waits
-	// for the active pass (see acquireRunLockForPass). Stale locks from
-	// crashed processes are reclaimed automatically via PID-liveness check.
-	if skip, err := acquireRunLockForPass(ctx, lg, onlyRepo != "" && onlyIssue != 0); err != nil {
-		return err
-	} else if skip {
-		return nil
+	// Per-repo run locks: a pass locks only the repositories it processes, so
+	// a long pass for repo A (operators, 7-12 min acceptance harvest) does not
+	// block repos B and C. A repo-scoped pass (--repo R) locks R here; an
+	// unscoped pass locks its candidates once the config is loaded below. On
+	// contention an untargeted pass logs run/skip and exits cleanly so
+	// schedulers don't treat the skip as a failure; a targeted run waits for
+	// the pass holding R (see acquireRepoLockForPass). Locks of crashed
+	// processes are reclaimed by the PID-liveness check, and a live holder of
+	// the legacy global run lock (older binary) locks every repo.
+	pl := &passLocks{}
+	defer pl.releaseAll()
+	if onlyRepo != "" {
+		if skip, err := acquireRepoLockForPass(ctx, lg, pl, onlyRepo, onlyIssue != 0); err != nil {
+			return err
+		} else if skip {
+			return nil
+		}
 	}
-	// Release the run lock on normal exit. For unhandled signals (SIGINT/
-	// SIGTERM) the lock is also released explicitly before os.Exit so the
-	// next cron tick isn't blocked by a stale file. The PID-liveness check
-	// in AcquireRunLock handles any remaining crash scenarios.
-	defer snapshot.ReleaseRunLock()
+	// For unhandled signals (SIGINT/SIGTERM) the locks are also released
+	// explicitly before os.Exit so the next tick isn't blocked by a stale file.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sigDone := make(chan struct{})
 	go func() {
 		select {
 		case <-sigCh:
-			snapshot.ReleaseRunLock()
+			pl.releaseAll()
 			os.Exit(0)
 		case <-sigDone:
 		}
@@ -280,7 +363,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		// making sure it doesn't run and write unrecorded, not about it
 		// having misbehaved.
 		operator.TerminateAllActiveCmds()
-		snapshot.ReleaseRunLock()
+		pl.releaseAll()
 		// os.Exit skips the deferred run/exit, so emit it here with the
 		// reason — this is the observable signature the watchdog path must
 		// leave behind (issue #221 acceptance: run/exit reason=timeout).
@@ -293,7 +376,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// picks up any changes pushed from other machines (e.g. new repos,
 	// updated settings). Best-effort: if sync is not configured or the
 	// network is unavailable, we continue with the local config.
-	if api.AutoPull() {
+	if syncLocked(api.AutoPull) {
 		fmt.Fprintf(os.Stderr, "✓ auto-pulled config from Gist\n")
 		lg.Info("run/auto_pull", "result", "ok")
 	}
@@ -315,6 +398,45 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if err != nil {
 		return err
 	}
+	// Resolve the current machine's hostname once. Used to skip repos that
+	// are bound to a different machine (BoundMachine field). Errors are
+	// non-fatal: an empty hostname means no repos will be skipped by the
+	// bound_machine check (safe default).
+	hostname, _ := os.Hostname()
+
+	// Narrow the pass to the repos whose run lock it holds. A repo-scoped
+	// pass already holds onlyRepo's lock and scans just that repo; an
+	// unscoped pass tries every repo it would process and keeps the ones it
+	// won. Repos locked by other passes are left to them and survive in the
+	// snapshots via preserveRepos below.
+	var candidates []string
+	for name, repoCfg := range allRepos {
+		if repoRunsHere(cfg.Settings, repoCfg, hostname) {
+			candidates = append(candidates, name)
+		}
+	}
+	sort.Strings(candidates)
+	scanRepos := make(map[string]config.Repo, len(allRepos))
+	if onlyRepo != "" {
+		scanRepos[onlyRepo] = allRepos[onlyRepo]
+	} else {
+		for _, name := range lockUnscopedRepos(lg, pl, candidates) {
+			scanRepos[name] = allRepos[name]
+		}
+		if len(candidates) > 0 && len(scanRepos) == 0 {
+			lg.Info("run/skip", "pid", os.Getpid(), "reason", "all_repos_locked", "repos", len(candidates))
+			return nil
+		}
+	}
+	// Enabled repos this machine processes but this pass does not hold: their
+	// snapshot entries belong to the pass that does.
+	preserveRepos := map[string]bool{}
+	for _, name := range candidates {
+		if _, mine := scanRepos[name]; !mine && allRepos[name].Enabled {
+			preserveRepos[name] = true
+		}
+	}
+	allRepos = scanRepos
 	if len(allRepos) == 0 {
 		fmt.Println("no enabled repos to scan")
 		return nil
@@ -329,12 +451,6 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		debugf("  operator %s target=%s required=%v excluded=%v",
 			op.Name, op.Trigger.Target, op.Trigger.LabelsRequired, op.Trigger.LabelsExcluded)
 	}
-
-	// Resolve the current machine's hostname once. Used to skip repos that
-	// are bound to a different machine (BoundMachine field). Errors are
-	// non-fatal: an empty hostname means no repos will be skipped by the
-	// bound_machine check (safe default).
-	hostname, _ := os.Hostname()
 
 	// Reconcile any runs whose on-disk state is inconsistent (stuck
 	// "running", missing meta.json) BEFORE we touch anything else, so the
@@ -366,7 +482,11 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// content (issue #329). Covers both new accumulation (going forward,
 	// runOneOperator's cleanup decision now checks content too) and the
 	// pre-existing pile of empty shells from before this fix.
-	if n := pruneEmptyIssueWorktrees(cfg); n > 0 {
+	// Limited to repos this pass holds the run lock for: another pass may be
+	// about to write into an empty-looking worktree of a repo it holds.
+	pruneCfg := *cfg
+	pruneCfg.Repos = allRepos
+	if n := pruneEmptyIssueWorktrees(&pruneCfg); n > 0 {
 		fmt.Fprintf(os.Stderr, "✓ pruned %d empty issue worktree(s)\n", n)
 		lg.Info("run/prune_empty_issue_worktrees", "pruned", n)
 	}
@@ -410,17 +530,15 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
 	upgradeRepos := make(map[string]config.Repo)
+	depOpen := queueDepResolver(cfg)
 	for fullName, repoCfg := range allRepos {
 		// Skip repos bound to a different machine. A repo with no BoundMachine
 		// (empty string) is processed by every machine — the common case.
 		// When hostname resolution failed (empty string), we conservatively
 		// process all repos so a misconfigured machine doesn't silently drop work.
-		if repoCfg.BoundMachine != "" && hostname != "" && repoCfg.BoundMachine != hostname {
-			debugf("repo %s is bound to %s, skipping (current machine: %s)", fullName, repoCfg.BoundMachine, hostname)
-			continue
-		}
-		if cfg.Settings.RequireBinding && repoCfg.BoundMachine == "" && hostname != "" {
-			debugf("repo %s has no bound_machine and require_binding is set, skipping", fullName)
+		if !repoRunsHere(cfg.Settings, repoCfg, hostname) {
+			debugf("repo %s is not processed on this machine (bound_machine=%q, require_binding=%v, current machine: %s), skipping",
+				fullName, repoCfg.BoundMachine, cfg.Settings.RequireBinding, hostname)
 			continue
 		}
 		// Check base_branch before dispatching anything. When the remote has
@@ -446,7 +564,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		if fullName == hiddenRepo {
 			issueSink = new([]snapshot.IssueEntry)
 		}
-		repoPending, repoJobs, err := scanRepoOnce(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, issueSink)
+		repoPending, repoJobs, err := scanRepoOnceQ(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, issueSink, queueRuntime{Settings: cfg.Settings.Queue, DepOpen: depOpen})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
 		}
@@ -490,7 +608,10 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// Phase 2b (sequential): automatic acceptance harvest. Independent
 	// acceptance can take ~30 minutes, so it cannot live in the scan sweep
 	// (scanCtx is 5-15 min). Failures join the exit-status accounting below.
-	failed = append(failed, runHarvestPhase(ctx, cfg, onlyRepo, onlyIssue, timeout, watchdogDeadline)...)
+	// Only repos this pass holds the run lock for are harvested.
+	harvestCfg := *cfg
+	harvestCfg.Repos = allRepos
+	failed = append(failed, runHarvestPhase(ctx, &harvestCfg, onlyRepo, onlyIssue, timeout, watchdogDeadline)...)
 
 	// Phase 3 (sequential): drop pending entries that fired, then write
 	// the snapshots so the dashboard reflects the post-run state.
@@ -558,10 +679,10 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if err := snapshot.WriteUsageSummary(snapshot.UsageEntriesWithPilot(allEntries), cfg.Settings.BillingCycleDay); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot usage summary: %v\n", err)
 	}
-	if err := snapshot.WritePending(pending); err != nil {
+	if err := snapshot.WritePendingMerged(pending, preserveRepos); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot pending: %v\n", err)
 	}
-	if err := snapshot.WriteIssues(globalIssues); err != nil {
+	if err := snapshot.WriteIssuesMerged(globalIssues, preserveRepos); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot issues: %v\n", err)
 	}
 
@@ -573,21 +694,29 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// whole is reported successful as long as the operator phase
 	// completed.
 	//
-	// Gated on --repo / --issue narrowing: ad-hoc single-issue runs
-	// shouldn't wake every project's PM. Only the unscoped pass
-	// (the one a cron / hook normally invokes) triggers PMs.
-	if onlyRepo == "" && onlyIssue == 0 {
-		if n, err := pilot.Schedule(ctx, timeout, watchdogDeadline); err != nil {
-			fmt.Fprintf(os.Stderr, "[pilot] schedule: %v\n", err)
-		} else if n > 0 {
-			fmt.Fprintf(os.Stderr, "[pilot] woke %d project(s)\n", n)
+	// Ad-hoc single-issue runs (--issue) shouldn't wake every project's PM.
+	// Every other pass may: the web scheduler now runs one repo-scoped pass
+	// per repository, so gating on onlyRepo would stop scheduled Pilot wakes.
+	// Passes overlap, so pilot.Schedule is guarded by a try-lock; a pass that
+	// loses the race leaves the wake to the holder, and pilot.Schedule's own
+	// per-project interval prevents repeated wakes across passes.
+	if onlyIssue == 0 {
+		if snapshot.TryAcquirePilotScheduleLock() {
+			if n, err := pilot.Schedule(ctx, timeout, watchdogDeadline); err != nil {
+				fmt.Fprintf(os.Stderr, "[pilot] schedule: %v\n", err)
+			} else if n > 0 {
+				fmt.Fprintf(os.Stderr, "[pilot] woke %d project(s)\n", n)
+			}
+			snapshot.ReleasePilotScheduleLock()
+		} else {
+			lg.Info("run/pilot_skip", "reason", "another_pass_scheduling")
 		}
 	}
 
 	// Auto-push: sync config to Gist after the run so any label/config
 	// changes made during this pass are visible to other machines.
 	// Best-effort: push failure does not fail the run.
-	if api.AutoPush() {
+	if syncLocked(api.AutoPush) {
 		fmt.Fprintf(os.Stderr, "✓ auto-pushed config to Gist\n")
 	}
 
@@ -731,6 +860,11 @@ func isStaleLeafJob(client subIssueLister, op *operator.Operator, repo string, i
 // labeled by a crashed run from an older binary cleanly re-enters the
 // pipeline without manual intervention.
 func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, repoCfg config.Repo, executeHere bool, onlyIssue int, allIssues *[]snapshot.IssueEntry) ([]snapshot.PendingEntry, []*runJob, error) {
+	return scanRepoOnceQ(ctx, reg, fullName, repoCfg, executeHere, onlyIssue, allIssues, queueRuntime{})
+}
+
+// scanRepoOnceQ is scanRepoOnce with the pass-wide queue settings.
+func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string, repoCfg config.Repo, executeHere bool, onlyIssue int, allIssues *[]snapshot.IssueEntry, qrt queueRuntime) ([]snapshot.PendingEntry, []*runJob, error) {
 	scanStart := time.Now()
 	runLog.Info("run/scan", "repo", fullName, "phase", "start")
 	client, err := newVCSClient(repoCfg)
@@ -777,6 +911,9 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	// in the list. Two levels deep covers the current tracking→sub→sub-sub
 	// pattern; deeper nesting is uncommon and can be added later.
 	seen := make(map[int]bool, len(issues))
+	// hasChildren records issues known to have sub-issues (parents); the
+	// work queue never schedules them.
+	hasChildren := map[int]bool{}
 	for _, iss := range issues {
 		seen[iss.Number] = true
 	}
@@ -794,6 +931,9 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		if subErr != nil {
 			debugf("[%s] list sub-issues of #%d: %v (skipping)", fullName, iss.Number, subErr)
 			continue
+		}
+		if len(subs) > 0 {
+			hasChildren[iss.Number] = true
 		}
 		for _, sub := range subs {
 			if seen[sub.Number] || sub.State != "open" {
@@ -816,7 +956,7 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
 	// implementState records, per scanned issue, why implement would not be
-	// dispatched ("" = eligible). Only consulted by the work queue.
+	// dispatched ("" = eligible). Consulted by the work queue.
 	implementState := map[int]string{}
 	capturedAt := time.Now().UTC()
 	targetMatch := "" // operator matched for the --issue target, if any
@@ -955,35 +1095,50 @@ func scanRepoOnce(ctx context.Context, reg *operator.Registry, fullName string, 
 		}
 	}
 
-	// Work queue: when the repo sets queue_issue, only the head of the queue
-	// issue's open sub-issues may start implement. Targeted runs are explicit
-	// authorization and bypass it.
-	if executeHere && onlyIssue == 0 && repoCfg.QueueIssue > 0 {
-		items, itemsErr := readQueueItems(client, fullName, repoCfg.QueueIssue)
-		jobs = applyImplementQueue(fullName, repoCfg.QueueIssue, jobs, queueInput{
-			Items:   items,
-			Locked:  func(n int) bool { return snapshot.IsLocked(fullName, n) },
-			OpenPRs: func() ([]vcs.PR, error) { return client.ListOpenPRs(fullName) },
-			Eligible: func(n int) (bool, string) {
-				reason, scanned := implementState[n]
-				if !scanned {
-					return false, "not_in_open_issue_scan"
-				}
-				if reason != "" {
-					return false, reason
-				}
-				// The list API may not report the sub-issue count; confirm the
-				// head is a leaf directly and fail closed if that cannot be read.
-				subs, err := client.ListSubIssues(fullName, n)
-				if err != nil {
-					return false, "leaf_check_failed: " + err.Error()
-				}
-				if len(subs) > 0 {
-					return false, "not_a_leaf"
-				}
-				return true, ""
+	// Unified work queue: order this repo's implement candidates with the
+	// shared global model and keep only the picked ones. Targeted runs are
+	// explicit authorization and bypass it.
+	if executeHere && onlyIssue == 0 {
+		now := qrt.now()
+		state, stateErr := queue.LoadState(fullName)
+		if stateErr != nil {
+			runLog.Warn("queue/state_unreadable", "repo", fullName, "err", stateErr.Error())
+		}
+		migrated := migrateQueueIssue(client, fullName, repoCfg.QueueIssue, repoCfg.QueueScope != "",
+			func() error { return persistRepoQueueScope(fullName, queue.ScopeRanked) }, &state)
+		if migrated && repoCfg.QueueIssue > 0 && repoCfg.QueueScope == "" {
+			repoCfg.QueueScope = queue.ScopeRanked // just persisted
+		}
+		rank, rankErr := queue.LoadRank()
+		if rankErr != nil {
+			runLog.Warn("queue/rank_unreadable", "repo", fullName, "err", rankErr.Error())
+		}
+		maxInFlight, parkAfter, scope := queueRepoParams(repoCfg, qrt.Settings)
+		implementJobs := map[int]bool{}
+		for _, j := range jobs {
+			if j.op != nil && j.op.Name == "implement" && j.sub != nil {
+				implementJobs[j.sub.Number] = true
+			}
+		}
+		plan := planRepoQueue(repoQueueInput{
+			Repo:           fullName,
+			ImplementJobs:  implementJobs,
+			Issues:         issues,
+			HasChildren:    hasChildren,
+			ImplementState: implementState,
+			Locked:         func(n int) bool { return snapshot.IsLocked(fullName, n) },
+			OpenPRs:        func() ([]vcs.PR, error) { return client.ListOpenPRs(fullName) },
+			FlightBlocked: func(_ vcs.Issue, pr *vcs.PR) string {
+				return flightBlockedReason(ctx, client, fullName, repoCfg, pr, now)
 			},
-		}, itemsErr)
+			Scope: scope, MaxInFlight: maxInFlight, ParkAfter: parkAfter,
+			Rank: rank, DepOpen: qrt.DepOpen, State: state, Now: now,
+		})
+		if !migrated {
+			plan.Err = "queue_issue_import_pending"
+		}
+		jobs = applyUnifiedQueue(fullName, jobs, plan)
+		pruneRepoRank(fullName, issues)
 	}
 
 	if executeHere {
@@ -1426,9 +1581,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		if j.repair != nil {
 			// No agent was invoked: release the reservation under the existing
 			// infrastructure budget/backoff instead of terminally blocking repair.
-			if rerr := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, "setup", now); rerr == nil {
-				runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "kind", "setup")
-				logAcceptanceRepair(j, "end", "status", "failed", "kind", "setup", "attempt_consumed", false)
+			kind := "setup"
+			if errors.Is(err, gitexec.ErrTimeout) {
+				kind = "git_timeout"
+			}
+			if rerr := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, kind, now); rerr == nil {
+				runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "kind", kind)
+				logAcceptanceRepair(j, "end", "status", "failed", "kind", kind, "attempt_consumed", false)
 				return false, false, true
 			} else {
 				runLog.Warn("run/ci_repair_release_failed", "repo", j.repo, "issue", j.sub.Number, "err", rerr.Error())
@@ -1532,10 +1691,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// the reconciler will see "finalizing" (not "running") and know that
 	// VCS side-effects already completed — it will promote to "success"
 	// without re-queuing the issue for a duplicate run.
-	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
-		if confirmedHead == "" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
-			confirmedHead, _ = confirmedDevelopmentHead(ctx, workdir, j)
+	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") &&
+		confirmedHead == "" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
+		var headErr error
+		confirmedHead, headErr = confirmedDevelopmentHead(ctx, workdir, j)
+		if errors.Is(headErr, gitexec.ErrTimeout) {
+			runErr = headErr
 		}
+	}
+	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
 		finalizingMeta := snapshot.RunMeta{
 			HeadSHA:     confirmedHead,
 			Outcome:     outcome,
@@ -1730,9 +1894,6 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 
 	if rm.Status == "success" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
-		if confirmedHead == "" {
-			confirmedHead, _ = confirmedDevelopmentHead(ctx, workdir, j)
-		}
 		rm.HeadSHA = confirmedHead
 	}
 	rm.Outcome = outcome
@@ -2709,10 +2870,6 @@ func dumpGoroutineStacks(lg *clog.Logger) {
 	}
 }
 
-// gitAttemptTimeout bounds a single git subprocess invocation inside
-// runGitWithRetry. A package var (not const) so tests can shrink it.
-var gitAttemptTimeout = 3 * time.Minute
-
 // hardenedGitEnv augments a git command's environment so it can never
 // block on interactive input. GIT_TERMINAL_PROMPT=0 makes git fail
 // instead of prompting for HTTP credentials; the BatchMode/ConnectTimeout
@@ -2721,14 +2878,12 @@ var gitAttemptTimeout = 3 * time.Minute
 // used. See issue #216 — the run hung as an `S+` foreground process with
 // ~0 CPU, the classic signature of git waiting on a credential prompt.
 func hardenedGitEnv(base []string) []string {
-	if base == nil {
-		base = os.Environ()
-	}
-	return append(base,
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10",
-	)
+	return gitexec.Env(base)
 }
+
+// Local operations retain their pre-existing watchdog. Network operations
+// use the configurable shared transport deadline instead.
+var gitAttemptTimeout = 3 * time.Minute
 
 // runBoundedGit runs a git command with a hard wall-clock ceiling. The
 // command is started in its own process group so that on timeout we can
@@ -2788,23 +2943,19 @@ func runGitWithRetryOutput(makeCmd func() *exec.Cmd) (string, error) {
 		mw := io.MultiWriter(os.Stderr, &buf)
 		cmd.Stdout = mw
 		cmd.Stderr = mw
-		// Never let a git subprocess block forever. Two complementary
-		// guards (issue #216):
-		//   1. hardenedGitEnv disables interactive credential/SSH prompts
-		//      so git fails fast instead of waiting on a TTY that will
-		//      never answer (the most likely cause of the 8h hang).
-		//   2. runBoundedGit kills the whole git process group if the
-		//      attempt overruns gitAttemptTimeout, so a black-holed
-		//      network read can't wedge the run indefinitely.
-		cmd.Env = hardenedGitEnv(cmd.Env)
-
-		err := runBoundedGit(cmd, gitAttemptTimeout)
+		var err error
+		if gitexec.IsNetwork(cmd.Args[1:]...) {
+			err = gitexec.Run(context.Background(), cmd)
+		} else {
+			cmd.Env = hardenedGitEnv(cmd.Env)
+			err = runBoundedGit(cmd, gitAttemptTimeout)
+		}
 		if err == nil {
 			return buf.String(), nil
 		}
 
 		output := buf.String()
-		if !isGitLockError(output) {
+		if errors.Is(err, gitexec.ErrTimeout) || !isGitLockError(output) {
 			// Permanent error (incl. attempt timeout) — return
 			// immediately, no retry. A timeout won't fix itself by
 			// retrying and would only delay surfacing the failure.

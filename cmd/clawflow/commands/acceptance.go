@@ -23,6 +23,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -36,9 +37,9 @@ var acceptanceClientFactory = newVCSClient
 var acceptanceNativeRun = execution.Run
 var acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "core.fsmonitor=false"}, args...)...)
-	out, err := cmd.Output()
+	out, err := gitexec.Output(ctx, cmd)
 	if err != nil {
-		return "", fmt.Errorf("acceptance git %s failed", args[0])
+		return "", fmt.Errorf("acceptance git %s failed: %w", args[0], err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -95,11 +96,12 @@ func newAcceptanceCmd() *cobra.Command {
 				if asJSON {
 					if e := json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
 						PlannerIsolation string `json:"planner_isolation,omitempty"`
+						ReviewMode       string `json:"review_mode,omitempty"`
 						Status           string `json:"status"`
 						Reason           string `json:"reason,omitempty"`
 						Head             string `json:"head_sha,omitempty"`
 						Attempt          string `json:"attempt_id,omitempty"`
-					}{record.Plan.PlannerIsolation, status, reason, c.HeadSHA, record.AttemptID}); e != nil {
+					}{record.Plan.PlannerIsolation, record.ReviewMode, status, reason, c.HeadSHA, record.AttemptID}); e != nil {
 						return e
 					}
 				} else {
@@ -612,6 +614,7 @@ func acceptanceReviewerEnv(env []string) []string {
 }
 
 func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Record, error) {
+	ctx = gitexec.WithRepo(ctx, repo)
 	unlock, err := acceptanceLock(repo, prNumber)
 	if err != nil {
 		return acceptance.Record{}, err
@@ -698,7 +701,11 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		}
 		return acceptanceNativeRun(ctx, ec, execution.Request{Version: 1, RequestID: execution.NewSessionKey(), Workspace: opts.Workspace, Prompt: prompt, Instructions: opts.Instructions, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: max(1, timeout.Milliseconds())}, acceptanceReviewerEnv(os.Environ()), opts.Events, nil)
 	}
-	r, err := (acceptance.Runner{Store: store, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
+	var ci func() (vcs.CIEvidence, error)
+	if provider, ok := client.(vcs.CIEvidenceProvider); ok {
+		ci = func() (vcs.CIEvidence, error) { return provider.GetCIEvidence(repo, prNumber) }
+	}
+	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
 	if err == nil {
 		// Run returns nil only after the reviewer report was parsed and the
 		// record was saved, so a failed/blocked verdict reaching here is a

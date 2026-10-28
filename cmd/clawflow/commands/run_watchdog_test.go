@@ -1,10 +1,14 @@
 package commands
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
 
 // Regression tests for issue #216: `clawflow run` hung indefinitely after
@@ -115,6 +119,30 @@ func TestHardenedGitEnvNilBaseUsesEnviron(t *testing.T) {
 	env := hardenedGitEnv(nil)
 	if len(env) < 2 {
 		t.Fatalf("expected at least the two guard vars, got %d entries", len(env))
+	}
+}
+
+func TestRunGitWithRetryTimesOutNetworkCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Settings: config.Settings{GitTimeout: 1}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "git")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nsleep 30 &\nwait\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err := runGitWithRetry(func() *exec.Cmd { return exec.Command(path, "fetch", "origin") })
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected a timeout error from a hanging git command, got nil")
+	}
+	// One attempt (~1s) + no retries. Generous ceiling for CI jitter,
+	// but far below the 30s the command would otherwise take.
+	if elapsed > 5*time.Second {
+		t.Errorf("runGitWithRetry should fail fast on timeout, took %s", elapsed)
 	}
 }
 

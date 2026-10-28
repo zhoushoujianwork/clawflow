@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 func contract() Contract {
@@ -738,5 +739,78 @@ func TestStoredFindingsCannotBypassVerdict(t *testing.T) {
 	r.Findings = []Finding{{Kind: "advisory", Summary: "optional plan test"}}
 	if completeRecord(r) == nil {
 		t.Fatal("advisory-only failure accepted")
+	}
+}
+
+func TestRunnerCIReviewMode(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		required bool
+		head     string
+		status   vcs.CIStatus
+		ids      []int64
+		err      error
+		want     string
+	}{
+		{"verified", true, "head", vcs.CIStatusSuccess, []int64{123}, nil, CIVerified},
+		{"not required", false, "head", vcs.CIStatusSuccess, []int64{123}, nil, FullSuite},
+		{"stale head", true, "old", vcs.CIStatusSuccess, []int64{123}, nil, FullSuite},
+		{"pending", true, "head", vcs.CIStatusPending, []int64{123}, nil, FullSuite},
+		{"failed", true, "head", vcs.CIStatusFailure, []int64{123}, nil, FullSuite},
+		{"no checks", true, "head", vcs.CIStatusNone, nil, nil, FullSuite},
+		{"invalid identities", true, "head", vcs.CIStatusSuccess, []int64{0}, nil, FullSuite},
+		{"duplicate identities", true, "head", vcs.CIStatusSuccess, []int64{123, 123}, nil, FullSuite},
+		{"no identities", true, "head", vcs.CIStatusSuccess, nil, nil, FullSuite},
+		{"unavailable", true, "head", vcs.CIStatusSuccess, []int64{123}, errors.New("offline"), FullSuite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, scratch, workspace := setupRunner(t)
+			r.CIRequired = tc.required
+			r.CI = func() (vcs.CIEvidence, error) {
+				return vcs.CIEvidence{HeadSHA: tc.head, Status: tc.status, CheckIDs: tc.ids}, tc.err
+			}
+			base := r.Execute
+			r.Execute = func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
+				if opts.Workspace == workspace {
+					verified := strings.Contains(prompt, "Review mode: ci-verified")
+					if verified != (tc.want == CIVerified) || strings.Contains(prompt, r.fullSuiteInstruction()) == verified {
+						t.Fatalf("wrong review instructions: %s", prompt)
+					}
+					if verified && !strings.Contains(prompt, `"check_ids":[123]`) {
+						t.Fatal("missing check identities")
+					}
+				}
+				return base(ctx, prompt, opts)
+			}
+			record, err := r.Run(context.Background(), contract(), scratch, workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err := r.Store.LoadRecord(contract(), record.AttemptID)
+			if err != nil || saved.ReviewMode != tc.want || (saved.CI != nil) != (tc.want == CIVerified) {
+				t.Fatalf("record=%+v err=%v", saved, err)
+			}
+		})
+	}
+}
+
+func TestEvaluateCIReviewEvidence(t *testing.T) {
+	r := passing()
+	r.ReviewMode = CIVerified
+	r.CI = &vcs.CIEvidence{HeadSHA: r.Contract.HeadSHA, Status: vcs.CIStatusSuccess, CheckIDs: []int64{123}}
+	if err := Evaluate(contract(), r); err != nil {
+		t.Fatal(err)
+	}
+	r.CI.HeadSHA = "stale"
+	if Evaluate(contract(), r) == nil {
+		t.Fatal("accepted stale CI evidence")
+	}
+	r.CI = nil
+	if Evaluate(contract(), r) == nil {
+		t.Fatal("accepted missing CI evidence")
+	}
+	r.ReviewMode = "unknown"
+	if Evaluate(contract(), r) == nil {
+		t.Fatal("accepted unknown review mode")
 	}
 }

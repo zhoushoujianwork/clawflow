@@ -37,6 +37,8 @@ type Repo struct {
 	CITimeout          int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
+	// AcceptanceOverlapCI defaults to CIRequired when omitted.
+	AcceptanceOverlapCI *bool `yaml:"acceptance_overlap_ci,omitempty" json:"acceptance_overlap_ci,omitempty"`
 	// SelfUpgrade, when true, makes a `clawflow run` pass that confirmed a
 	// merge into this repository's base branch rebuild and replace the
 	// installed binary from the fetched base (see selfupgrade.go). Intended
@@ -46,7 +48,23 @@ type Repo struct {
 	// form an ordered work queue: the runner dispatches implement only for the
 	// first eligible item, one at a time. 0 = no queue (every eligible leaf
 	// issue is dispatched). GitHub only.
+	//
+	// Deprecated: the unified cross-repo queue ignores it for dispatch. Its
+	// open sub-issues are imported into the rank file once (see
+	// internal/queue); the field is kept so old configs stay readable.
 	QueueIssue int `yaml:"queue_issue,omitempty" json:"queue_issue,omitempty"`
+
+	// MaxInFlight caps how many issues of this repo the unified queue lets
+	// run or await review at once (each has its own worktree and PR).
+	// 0 = default 2. Negative values are rejected by Validate.
+	MaxInFlight int `yaml:"max_in_flight,omitempty" json:"max_in_flight,omitempty"`
+
+	// QueueScope selects which open issues of this repo are queue
+	// candidates: "all", "labeled" (label clawflow) or "ranked" (listed in
+	// the rank file, or labeled clawflow and enrolled on sight). Empty falls
+	// back to settings.queue.scope, then "all". Migrating a repo's
+	// queue_issue sets "ranked" so unlisted work is never picked up.
+	QueueScope string `yaml:"queue_scope,omitempty" json:"queue_scope,omitempty"`
 
 	// BoundMachine, when non-empty, restricts processing of this repo to the
 	// machine whose hostname matches this value. Repos with no BoundMachine
@@ -87,11 +105,25 @@ type ExecutionSettings struct {
 	CodexSandbox string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
 }
 
+// QueueSettings tunes the unified work queue.
+type QueueSettings struct {
+	// Scope is the default candidate scope for repos without queue_scope:
+	// "all" (default), "labeled" (only issues carrying the label
+	// "clawflow") or "ranked" (only issues in the rank file or labeled).
+	Scope string `yaml:"scope,omitempty"`
+	// ParkAfter is how long an in-flight item may stay blocked before it
+	// stops counting toward max_in_flight (Go duration, default 45m).
+	ParkAfter string `yaml:"park_after,omitempty"`
+}
+
 // Settings holds global ClawFlow settings.
 type Settings struct {
 	Execution ExecutionSettings `yaml:"execution,omitempty"`
 
 	PollInterval int `yaml:"poll_interval"`
+
+	// GitTimeout bounds each Git network operation in seconds; zero uses 300.
+	GitTimeout int `yaml:"git_timeout,omitempty"`
 
 	AgentTimeout        int      `yaml:"agent_timeout"`
 	MaxConcurrentAgents int      `yaml:"max_concurrent_agents"`
@@ -159,6 +191,9 @@ type Settings struct {
 	// being processed by all machines simultaneously — they must be
 	// explicitly bound first. Synced via Gist as a shared fleet policy.
 	RequireBinding bool `yaml:"require_binding,omitempty"`
+
+	// Queue tunes the unified cross-repo work queue.
+	Queue QueueSettings `yaml:"queue,omitempty"`
 
 	// Language, when set, overrides the language of all AI-generated output
 	// (operator comments, chat replies, Pilot verdicts, doc generation).
@@ -914,6 +949,20 @@ func ConfigPath() string {
 }
 
 // EnabledRepos returns only the repos with enabled: true.
+// RunsOnHost reports whether a repo is processed by the machine named
+// hostname: bound_machine must match when set, and require_binding rejects
+// unbound repos. An empty hostname (unresolvable) conservatively accepts all.
+// Shared by `clawflow run` and the web auto-run scheduler.
+func (s Settings) RunsOnHost(r Repo, hostname string) bool {
+	if r.BoundMachine != "" && hostname != "" && r.BoundMachine != hostname {
+		return false
+	}
+	if s.RequireBinding && r.BoundMachine == "" && hostname != "" {
+		return false
+	}
+	return true
+}
+
 func (c *Config) EnabledRepos() map[string]Repo {
 	out := make(map[string]Repo)
 	for k, v := range c.Repos {
@@ -1146,4 +1195,12 @@ func ParseRepoInput(input string, gitlabHosts []string) (RepoInfo, error) {
 		}
 	}
 	return RepoInfo{OwnerRepo: fullPath, Platform: "gitlab", BaseURL: baseURL}, nil
+}
+
+// AcceptanceOverlapsCI allows pending CI to overlap independent review.
+func (r Repo) AcceptanceOverlapsCI() bool {
+	if r.AcceptanceOverlapCI != nil {
+		return *r.AcceptanceOverlapCI
+	}
+	return r.CIRequired
 }

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/clone"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 )
 
 func NewWorktreeCmd() *cobra.Command {
@@ -28,8 +30,8 @@ func newWorktreeCreateCmd() *cobra.Command {
 	var issue int
 
 	cmd := &cobra.Command{
-		Use:   "create",
-		Short: "Create an isolated git worktree for an issue",
+		Use:     "create",
+		Short:   "Create an isolated git worktree for an issue",
 		Example: "  clawflow worktree create --repo owner/repo --issue 7",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
@@ -80,8 +82,8 @@ func newWorktreeRemoveCmd() *cobra.Command {
 	var issue int
 
 	cmd := &cobra.Command{
-		Use:   "remove",
-		Short: "Remove the worktree for an issue (cleanup after success or failure)",
+		Use:     "remove",
+		Short:   "Remove the worktree for an issue (cleanup after success or failure)",
 		Example: "  clawflow worktree remove --repo owner/repo --issue 7",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
@@ -286,7 +288,7 @@ func expandHomeStr(path string) string {
 func runGit(dir string, args ...string) error {
 	c := exec.Command("git", args...)
 	c.Dir = dir
-	out, err := c.CombinedOutput()
+	out, err := gitexec.CombinedOutput(context.Background(), c)
 	if err != nil {
 		return fmt.Errorf("%w\n%s", err, out)
 	}

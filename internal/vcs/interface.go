@@ -111,6 +111,33 @@ const (
 	CIStatusNone    CIStatus = "no-checks"
 )
 
+// CIEvidence is an exact-head observation, not an atomic merge authorization.
+type CIEvidence struct {
+	HeadSHA  string   `json:"head_sha"`
+	Status   CIStatus `json:"status"`
+	CheckIDs []int64  `json:"check_ids"`
+}
+
+// SuccessfulFor rejects missing or duplicate identities and stale observations.
+func (e CIEvidence) SuccessfulFor(head string) bool {
+	if head == "" || e.HeadSHA != head || e.Status != CIStatusSuccess || len(e.CheckIDs) == 0 {
+		return false
+	}
+	seen := make(map[int64]bool, len(e.CheckIDs))
+	for _, id := range e.CheckIDs {
+		if id <= 0 || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
+}
+
+// CIEvidenceProvider optionally exposes identities from the same CI aggregation.
+type CIEvidenceProvider interface {
+	GetCIEvidence(repo string, prNumber int) (CIEvidence, error)
+}
+
 // Label represents a repository label definition.
 type Label struct {
 	Name  string

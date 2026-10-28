@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 const Version = 1
@@ -195,7 +196,15 @@ func validateFindings(findings []Finding) (bool, error) {
 	return failing, nil
 }
 
+const (
+	FullSuite  = "full-suite"
+	CIVerified = "ci-verified"
+)
+
 type Record struct {
+	ReviewMode string          `json:"review_mode,omitempty"`
+	CI         *vcs.CIEvidence `json:"ci,omitempty"`
+
 	Version         int       `json:"version"`
 	Contract        Contract  `json:"contract"`
 	ContractDigest  string    `json:"contract_digest"`
@@ -241,6 +250,18 @@ func Evaluate(expected Contract, r Record) error {
 	actual, err := r.Contract.Digest()
 	if err != nil || r.Version != Version || actual != d || r.ContractDigest != d {
 		return errors.New("acceptance contract identity or digest mismatch")
+	}
+	switch r.ReviewMode {
+	case "", FullSuite: // Empty is the legacy full-suite record format.
+		if r.CI != nil {
+			return errors.New("full-suite record contains CI substitution evidence")
+		}
+	case CIVerified:
+		if r.CI == nil || !r.CI.SuccessfulFor(expected.HeadSHA) {
+			return errors.New("CI verification does not match the acceptance head")
+		}
+	default:
+		return errors.New("unknown acceptance review mode")
 	}
 	if !r.Completed || r.Cancelled || r.Verdict != Passed || r.Role != "acceptance" || !nonempty(r.AttemptID, r.Report) || len(r.Evidence) == 0 {
 		return errors.New("acceptance attempt is incomplete or nonpassing")

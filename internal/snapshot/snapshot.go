@@ -750,7 +750,7 @@ func WriteUsageSummary(entries []RunIndexEntry, billingCycleDay int) error {
 	})
 	sum.Periods = sortedPeriods
 
-	return writeJSON(filepath.Join(DataDir(), "usage.json"), sum)
+	return withSnapshotLock(func() error { return writeJSON(filepath.Join(DataDir(), "usage.json"), sum) })
 }
 
 // billingPeriod returns the start and end dates of the billing period that
@@ -872,7 +872,7 @@ func WriteRepos(cfg *config.Config) error {
 			BaseBranchHint:  baseHint,
 		})
 	}
-	return writeJSON(filepath.Join(DataDir(), "repos.json"), views)
+	return withSnapshotLock(func() error { return writeJSON(filepath.Join(DataDir(), "repos.json"), views) })
 }
 
 // WriteOperators writes data/operators.json.
@@ -891,14 +891,16 @@ func WriteOperators(reg *operator.Registry) error {
 			Source:            op.Source,
 		})
 	}
-	return writeJSON(filepath.Join(DataDir(), "operators.json"), views)
+	return withSnapshotLock(func() error { return writeJSON(filepath.Join(DataDir(), "operators.json"), views) })
 }
 
 // WriteMeta writes data/meta.json.
 func WriteMeta(version string) error {
-	return writeJSON(filepath.Join(DataDir(), "meta.json"), Meta{
-		ClawFlowVersion: version,
-		LastRefresh:     time.Now().UTC(),
+	return withSnapshotLock(func() error {
+		return writeJSON(filepath.Join(DataDir(), "meta.json"), Meta{
+			ClawFlowVersion: version,
+			LastRefresh:     time.Now().UTC(),
+		})
 	})
 }
 
@@ -1110,6 +1112,31 @@ type IssueEntry struct {
 // dashboard landing in that window must not be rolled back by the older
 // scan-time data.
 func WriteIssues(entries []IssueEntry) error {
+	return WriteIssuesMerged(entries, nil)
+}
+
+// WriteIssuesMerged is WriteIssues for a pass that scanned only some repos.
+// Previously written entries of repos in preserve are kept untouched (another
+// concurrent pass owns them); everything else follows the WriteIssues rules.
+// The read-modify-write runs under the snapshot lock so concurrent passes
+// cannot lose each other's updates. A nil preserve is plain WriteIssues.
+func WriteIssuesMerged(entries []IssueEntry, preserve map[string]bool) error {
+	return withSnapshotLock(func() error {
+		return writeIssuesLocked(entries, func(repo string) bool { return preserve[repo] })
+	})
+}
+
+// ReplaceRepoIssues replaces one repo's entries in issues.json and keeps all
+// other repos' entries as they are on disk.
+func ReplaceRepoIssues(repo string, entries []IssueEntry) error {
+	return withSnapshotLock(func() error {
+		return writeIssuesLocked(entries, func(r string) bool { return r != repo })
+	})
+}
+
+// writeIssuesLocked merges entries into issues.json. keep reports whether the
+// on-disk entries of a repo are preserved verbatim. Caller holds the snapshot lock.
+func writeIssuesLocked(entries []IssueEntry, keep func(repo string) bool) error {
 	if entries == nil {
 		entries = []IssueEntry{}
 	}
@@ -1133,8 +1160,16 @@ func WriteIssues(entries []IssueEntry) error {
 					entries[i] = prev
 				}
 			}
-			// Merge in previously-known closed issues missing from the new batch.
 			for _, e := range old {
+				if keep(e.Repo) {
+					// Owned by a concurrent pass: carry over as-is unless the
+					// caller supplied the same issue explicitly.
+					if !newKeys[key(e)] {
+						entries = append(entries, e)
+					}
+					continue
+				}
+				// Merge in previously-known closed issues missing from the new batch.
 				if e.State == "closed" && !newKeys[key(e)] {
 					entries = append(entries, e)
 				}
@@ -1179,6 +1214,17 @@ func WriteIssues(entries []IssueEntry) error {
 // Idempotent: a clean pending.json comes through unchanged. Returns
 // the number of entries removed so the caller can log it.
 func PrunePending() int {
+	removed := 0
+	if err := withSnapshotLock(func() error {
+		removed = prunePendingLocked()
+		return nil
+	}); err != nil {
+		return 0
+	}
+	return removed
+}
+
+func prunePendingLocked() int {
 	path := filepath.Join(DataDir(), "pending.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -1255,7 +1301,7 @@ func PrunePending() int {
 	if removed == 0 {
 		return 0
 	}
-	_ = WritePending(kept)
+	_ = writePendingLocked(kept, nil)
 	return removed
 }
 
@@ -1263,9 +1309,35 @@ func PrunePending() int {
 // is replaced wholesale on every refresh so stale entries (issues that just
 // got processed) drop off automatically.
 func WritePending(entries []PendingEntry) error {
+	return WritePendingMerged(entries, nil)
+}
+
+// WritePendingMerged is WritePending for a pass that scanned only some repos:
+// previously written entries of repos in preserve are kept (they belong to a
+// concurrent pass), all other previous entries are replaced by entries. The
+// read-modify-write runs under the snapshot lock.
+func WritePendingMerged(entries []PendingEntry, preserve map[string]bool) error {
+	return withSnapshotLock(func() error { return writePendingLocked(entries, preserve) })
+}
+
+func writePendingLocked(entries []PendingEntry, preserve map[string]bool) error {
 	if entries == nil {
 		// JSON [] over null so the dashboard skips a nullability check.
 		entries = []PendingEntry{}
+	}
+	if len(preserve) > 0 {
+		if data, err := os.ReadFile(filepath.Join(DataDir(), "pending.json")); err == nil {
+			var old []PendingEntry
+			if json.Unmarshal(data, &old) == nil {
+				merged := make([]PendingEntry, 0, len(old)+len(entries))
+				for _, e := range old {
+					if preserve[e.Repo] {
+						merged = append(merged, e)
+					}
+				}
+				entries = append(merged, entries...)
+			}
+		}
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Repo != entries[j].Repo {
@@ -1842,19 +1914,22 @@ func ConsecutiveFailures(repo string, issueNum int) int {
 // Returns the FULL collected entry set (post-sort, pre-limit) so the caller
 // can pipe it into WriteUsageSummary without re-walking the tree.
 func WriteRunsIndex(limit int) ([]RunIndexEntry, error) {
-	runsRoot := filepath.Join(DataDir(), "runs")
-	entries := collectRunEntries(runsRoot)
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].StartedAt.After(entries[j].StartedAt)
+	var entries []RunIndexEntry
+	// Collect and write under the snapshot lock so a slower concurrent pass
+	// cannot overwrite a newer index with a stale directory walk.
+	err := withSnapshotLock(func() error {
+		runsRoot := filepath.Join(DataDir(), "runs")
+		entries = collectRunEntries(runsRoot)
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].StartedAt.After(entries[j].StartedAt)
+		})
+		indexed := entries
+		if limit > 0 && len(indexed) > limit {
+			indexed = indexed[:limit]
+		}
+		return writeJSON(filepath.Join(DataDir(), "runs.json"), indexed)
 	})
-	indexed := entries
-	if limit > 0 && len(indexed) > limit {
-		indexed = indexed[:limit]
-	}
-	if err := writeJSON(filepath.Join(DataDir(), "runs.json"), indexed); err != nil {
-		return entries, err
-	}
-	return entries, nil
+	return entries, err
 }
 
 // ReadRunsIndex returns the entries of data/runs.json without touching disk

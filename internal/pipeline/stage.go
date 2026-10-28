@@ -128,6 +128,10 @@ func derivePROpen(e Evidence, ev []string) (Stage, string, []string) {
 	}
 	if a != nil && a.Running {
 		add("acceptance review in progress")
+		if pr.CI == "pending" {
+			add("ci=pending")
+			return StageAcceptanceRunning, "acceptance running (CI pending); independent acceptance is reviewing the PR", ev
+		}
 		return StageAcceptanceRunning, "independent acceptance is reviewing the PR", ev
 	}
 

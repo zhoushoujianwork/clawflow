@@ -20,6 +20,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
@@ -147,7 +148,11 @@ func runSelfUpgradeCmd(ctx context.Context, dir, name string, args ...string) ([
 	c.WaitDelay = 10 * time.Second
 	var stdout, stderr bytes.Buffer
 	c.Stdout, c.Stderr = &stdout, &stderr
-	if err := c.Run(); err != nil {
+	run := c.Run
+	if name == "git" {
+		run = func() error { return gitexec.Run(ctx, c) }
+	}
+	if err := run(); err != nil {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, tail(stderr.String(), 400))
 	}
 	return stdout.Bytes(), nil

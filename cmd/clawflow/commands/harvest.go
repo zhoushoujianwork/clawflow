@@ -37,7 +37,7 @@ var harvestNow = time.Now
 // ~30 minutes, far beyond the sweep's scan budget.
 //
 // Per repo it launches at most one acceptance run per pass, for the first open
-// PR that passes the sweep's candidate filters, has green required CI and has no
+// PR that passes the sweep's candidate filters, has green required CI (or pending CI with overlap enabled) and has no
 // acceptance evidence for its current contract. Repos are processed
 // sequentially. Failures (setup/provider errors, not recorded verdicts) are
 // returned so the run exits non-zero (issue #354).
@@ -160,7 +160,7 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, only
 		}
 		if repoCfg.CIRequired {
 			status, ciErr := client.GetCIStatus(fullName, pr.Number)
-			if ciErr != nil || status != vcs.CIStatusSuccess {
+			if ciErr != nil || (status != vcs.CIStatusSuccess && !(status == vcs.CIStatusPending && repoCfg.AcceptanceOverlapsCI())) {
 				skip("ci_not_success", "pr", pr.Number, "issue", issueNum)
 				continue
 			}
