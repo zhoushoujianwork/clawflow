@@ -169,14 +169,7 @@ func TestAcceptanceRepairNeverForUnmanagedOrForkPRs(t *testing.T) {
 			}
 		})
 	}
-	t.Run("gitlab", func(t *testing.T) {
-		f, _, reg, cfg := repairAcceptanceFixture(t, "failed")
-		recordVerdict(t, f)
-		cfg.Platform = "gitlab"
-		if jobs := scanRepair(t, reg, f, cfg, 0); len(jobs) != 0 {
-			t.Fatalf("jobs=%v", jobs)
-		}
-	})
+
 }
 
 func TestAcceptanceRepairTargetedRun(t *testing.T) {
@@ -800,5 +793,40 @@ func TestRepairExcludesAdvisoryFindings(t *testing.T) {
 	r.Report = strings.Repeat("x", harvestSummaryLimit+100)
 	if !strings.Contains(harvestNonpassComment(r), "ADVISORY_ONLY missing plan tests") {
 		t.Fatal("advisory not rendered")
+	}
+}
+
+func TestGitLabAcceptanceRepair(t *testing.T) {
+	for _, verdict := range []string{"failed", "blocked"} {
+		t.Run(verdict, func(t *testing.T) {
+			f, _, reg, _ := repairAcceptanceFixture(t, verdict)
+			setHarvestRepo(t, func(r *config.Repo) { r.Platform = "gitlab"; r.BaseURL = "https://gitlab.example" })
+			base := acceptanceGit
+			acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+				if args[0] == "config" {
+					return "https://gitlab.example/o/r.git", nil
+				}
+				return base(ctx, dir, args...)
+			}
+			f.pr.URL = "https://gitlab.example/o/r/-/merge_requests/11"
+			recordVerdict(t, f)
+			jobs := scanRepair(t, reg, f, repairRepoConfig(t), 0)
+			if verdict == "blocked" {
+				if len(jobs) != 0 {
+					t.Fatal("blocked verdict dispatched")
+				}
+				return
+			}
+			if len(jobs) != 1 || jobs[0].repair.Acceptance == nil {
+				t.Fatalf("jobs=%v", jobs)
+			}
+			if err := prepareCIRepair(jobs[0], time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			prompt := jobs[0].repair.prompt("go test ./...")
+			if !strings.Contains(prompt, f.pr.URL) || !strings.Contains(prompt, "UNTRUSTED REVIEWER FINDINGS") {
+				t.Fatalf("prompt=%s", prompt)
+			}
+		})
 	}
 }

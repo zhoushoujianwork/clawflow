@@ -17,6 +17,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	warnRetiredWorkflow(node)
+	warnRetiredQueue(node)
 	return nil
 }
 
@@ -28,6 +29,7 @@ func (p *gistPayload) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	warnRetiredWorkflow(node)
+	warnRetiredQueue(node)
 	return nil
 }
 
@@ -54,3 +56,34 @@ func warnRetiredWorkflow(node *yaml.Node) {
 		}
 	}
 }
+
+// warnRetiredQueue reports ignored legacy queue selectors once per process.
+// Decode nodes rather than typed values so even obsolete malformed values
+// remain harmless. Never echo repository names or user-provided values.
+func warnRetiredQueue(node *yaml.Node) {
+	var input struct {
+		Repos map[string]struct {
+			Issue yaml.Node `yaml:"queue_issue"`
+			Scope yaml.Node `yaml:"queue_scope"`
+		} `yaml:"repos"`
+		Settings struct {
+			Queue struct {
+				Scope yaml.Node `yaml:"scope"`
+			} `yaml:"queue"`
+		} `yaml:"settings"`
+	}
+	if err := node.Decode(&input); err != nil {
+		return
+	}
+	found := input.Settings.Queue.Scope.Kind != 0
+	for _, repo := range input.Repos {
+		found = found || repo.Issue.Kind != 0 || repo.Scope.Kind != 0
+	}
+	if found {
+		retiredQueueNotice.Do(func() {
+			fmt.Fprintln(os.Stderr, "clawflow: retired queue selectors are ignored; only the clawflow label enrolls issues; obsolete keys will be dropped on save")
+		})
+	}
+}
+
+var retiredQueueNotice sync.Once

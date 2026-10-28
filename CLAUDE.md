@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-ClawFlow connects GitHub/GitLab issues and PRs to autonomous implementation through `offload`. Humans set project direction and describe features. Eligible open leaf issues of all enabled repos (GitHub and GitLab) share one ClawFlow-native queue ordered by `(P0..P3 label, manual rank in ~/.clawflow/data/queue.json, created_at, key)` with per-repo `max_in_flight`, `queue_scope` (`all|labeled|ranked`; migrated `queue_issue` repos become `ranked`) and `Depends on:` lines (`clawflow queue list/move/add/remove/import`; `queue_issue` is deprecated and imported once), then enter `implement`; analysis, planning, tests and repair happen within that attempt. Questions/comments retain their reply paths, and parents retain `track-progress` through the operational `progress-check` trigger.
+ClawFlow connects GitHub/GitLab issues and PRs to autonomous implementation through `offload`. Humans set project direction and describe features. Eligible open leaf issues of all enabled repos (GitHub and GitLab) share one ClawFlow-native queue ordered by `(P0..P3 label, manual rank in ~/.clawflow/data/queue.json, created_at, key)` with per-repo `max_in_flight` and `Depends on:` lines. Only issues carrying the `clawflow` label are enrolled (`clawflow queue list/move/add/remove`), then enter `implement`; analysis, planning, tests and repair happen within that attempt. Questions/comments retain their reply paths, and parents retain `track-progress` through the operational `progress-check` trigger.
 
 The current runner uses VCS labels/comments for visible coordination, local files for history and locks (`~/.clawflow/locks/`), and bounded repair bookkeeping. `lock_label` and `agent-running` are not execution locks. Pause/cancel controls, machine bindings, terminal exclusions and retry bounds remain in force.
 
@@ -16,7 +16,7 @@ clawflow repo enable owner/repo
 clawflow run --repo owner/repo
 ```
 
-Required CI accepts success only. Failed-CI repair is limited to same-repository GitHub managed PRs, local reproduction, at most three attempts per PR and a five-minute cooldown. It updates the existing branch without force; it uses bounded, redacted exact-head GitHub job-log excerpts as untrusted diagnostic evidence and does not repair forks/GitLab MRs. For `acceptance_required` repos the same operator also repairs a reviewer verdict `failed` (never `blocked`) on the same PR, sharing the per-PR three-attempt ledger; reviewer text is passed as untrusted data. Other GitLab capabilities remain supported.
+Required CI accepts success only. Failed-CI repair is limited to same-repository GitHub managed PRs and same-project GitLab MRs, local reproduction, at most three attempts per PR and a five-minute cooldown. It updates the existing branch without force; it uses bounded, redacted exact-head GitHub/GitLab job-log excerpts as untrusted diagnostic evidence and does not repair forks. For `acceptance_required` repos the same operator also repairs a reviewer verdict `failed` (never `blocked`) on the same PR, sharing the per-PR three-attempt ledger; reviewer text is passed as untrusted data. Other GitLab capabilities remain supported.
 
 The [managed development design](docs/managed-development-design.md) proposes a durable task/effect engine beyond the implemented runner. Do not describe its proposed contracts as existing capabilities. Config sync remains available through `clawflow sync push/pull`, excluding tokens and local paths.
 

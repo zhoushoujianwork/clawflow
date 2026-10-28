@@ -21,9 +21,7 @@ type Evidence struct {
 	AutoMerge  bool
 	CIRequired bool
 
-	// Decision is the latest queue decision about this very issue, if any.
-	Decision *QueueDecision
-	InQueue  bool
+	InQueue bool
 
 	// Now is the evaluation time; a zero value treats retry times as future.
 	Now time.Time
@@ -100,17 +98,6 @@ func Derive(e Evidence) (Stage, string, []string) {
 	if hasLabel(e.Labels, "agent-implemented") {
 		add("label agent-implemented")
 		return StageBlocked, "marked implemented but no pull request was found", ev
-	}
-	if d := e.Decision; d != nil {
-		add("queue %s: %s", d.Action, d.Reason)
-		switch d.Action {
-		case "blocked":
-			return StageBlocked, "queue blocked: " + d.Reason, ev
-		case "pick":
-			return StageQueued, "picked by the queue; waiting for the next run", ev
-		default:
-			return StageQueued, "waiting in the queue: " + d.Reason, ev
-		}
 	}
 	if e.InQueue {
 		return StageQueued, "waiting in the queue", ev

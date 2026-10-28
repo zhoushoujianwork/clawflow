@@ -2,12 +2,16 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +22,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
 )
 
 func repairFixture() (vcs.PR, *vcs.Issue) {
@@ -131,7 +136,7 @@ func TestCIRepairDispatch(t *testing.T) {
 	if got := scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, normal); len(got) != 0 {
 		t.Fatal("duplicate issue job")
 	}
-	for _, change := range []func(*config.Repo){func(c *config.Repo) { c.AutoMerge = false }, func(c *config.Repo) { c.Platform = "gitlab" }, func(c *config.Repo) { c.BoundMachine = "not-this-host" }} {
+	for _, change := range []func(*config.Repo){func(c *config.Repo) { c.AutoMerge = false }, func(c *config.Repo) { c.Platform = "unsupported" }, func(c *config.Repo) { c.BoundMachine = "not-this-host" }} {
 		other := cfg
 		change(&other)
 		before := f.listCalls
@@ -205,6 +210,12 @@ func TestCIRepairUnderLockRecheck(t *testing.T) {
 }
 
 func TestCIRepairFrozenWorkdir(t *testing.T) {
+	for _, platform := range []string{"github", "gitlab"} {
+		t.Run(platform, func(t *testing.T) { testCIRepairFrozenWorkdir(t, platform) })
+	}
+}
+
+func testCIRepairFrozenWorkdir(t *testing.T, platform string) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
@@ -231,17 +242,17 @@ func TestCIRepairFrozenWorkdir(t *testing.T) {
 	git(source, "commit", "-qm", "fixture")
 	git(source, "branch", "fix/issue-9")
 	sha := git(source, "rev-parse", "HEAD")
-	git(source, "remote", "add", "origin", "https://github.com/o/r.git")
-	git(source, "config", "--global", "url."+source+".insteadOf", "https://github.com/o/r.git")
-	// get-url expands insteadOf, so use a separate clone with an SSH-shaped
-	// origin and a command-scoped rewrite only for subprocess network transport.
-	git(source, "remote", "set-url", "origin", "git@github.com:o/r.git")
+	origin := "git@github.com:o/r.git"
+	if platform == "gitlab" {
+		origin = "git@gitlab.example:o/r.git"
+	}
+	git(source, "remote", "add", "origin", origin)
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "url."+source+".insteadOf")
-	t.Setenv("GIT_CONFIG_VALUE_0", "git@github.com:o/r.git")
+	t.Setenv("GIT_CONFIG_VALUE_0", origin)
 	p, _ := repairFixture()
 	p.HeadSHA = sha
-	cfg := config.Repo{LocalPath: source}
+	cfg := config.Repo{LocalPath: source, Platform: platform, BaseURL: "https://gitlab.example"}
 	wt, cleanup, err := setupCIRepairWorkdir(context.Background(), cfg, "o/r", p)
 	if err != nil {
 		t.Fatal(err)
@@ -521,5 +532,107 @@ func TestPublishedHeadPreservesGitTimeout(t *testing.T) {
 	_, err := confirmedDevelopmentHead(context.Background(), t.TempDir(), &runJob{repo: "o/r", repair: &ciRepairContext{PR: pr}})
 	if !errors.Is(err, gitexec.ErrTimeout) {
 		t.Fatalf("timeout lost: %v", err)
+	}
+}
+
+func TestGitLabRepairDispatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	lg, err := clog.Open("run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := runLog
+	runLog = lg
+	t.Cleanup(func() { runLog = old; lg.Close() })
+	sha := strings.Repeat("a", 40)
+	for _, scenario := range []string{"failed", "stale", "fork", "canceled", "head-moved"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			pipelineSHA, status, source := sha, "failed", 1
+			if scenario == "stale" {
+				pipelineSHA = strings.Repeat("b", 40)
+			}
+			if scenario == "fork" {
+				source = 2
+			}
+			if scenario == "canceled" {
+				status = "canceled"
+			}
+			mr := map[string]any{"iid": 11, "description": "Fixes #9", "state": "opened", "source_branch": "fix/issue-9", "target_branch": "main", "sha": sha, "source_project_id": source, "target_project_id": 1, "merge_status": "can_be_merged", "web_url": "https://gitlab.example/o/r/-/merge_requests/11", "head_pipeline": map[string]any{"id": 5, "sha": pipelineSHA}}
+			var mu sync.Mutex
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				if r.Method != "GET" {
+					t.Errorf("unexpected write %s", r.Method)
+					w.WriteHeader(405)
+					return
+				}
+				var value any
+				switch r.URL.Path {
+				case "/api/v4/projects/o/r/merge_requests":
+					value = []any{mr}
+				case "/api/v4/projects/o/r/merge_requests/11":
+					value = mr
+				case "/api/v4/projects/o/r/issues/9":
+					value = map[string]any{"iid": 9, "state": "opened", "labels": []string{"agent-implemented"}}
+				case "/api/v4/projects/o/r/pipelines/5":
+					value = map[string]any{"id": 5, "sha": pipelineSHA, "status": status}
+				case "/api/v4/projects/o/r/pipelines/5/jobs":
+					value = []any{map[string]any{"id": 6, "status": "failed", "name": "tests"}}
+				case "/api/v4/projects/o/r/jobs/6/trace":
+					io.WriteString(w, "FAIL token=secret-value")
+					return
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(404)
+					return
+				}
+				json.NewEncoder(w).Encode(value)
+			}))
+			defer srv.Close()
+			client := gitlab.New("private-token", srv.URL)
+			cfg := config.Repo{Platform: "gitlab", AutoMerge: true, CIRequired: true, LocalPath: "unused"}
+			jobs := scanCIRepairJobs(context.Background(), repairRegistry(t), client, "o/r", cfg, 0, nil)
+			if scenario != "failed" && scenario != "head-moved" {
+				if len(jobs) != 0 {
+					t.Fatalf("unexpected repair: %d", len(jobs))
+				}
+				return
+			}
+			if len(jobs) != 1 {
+				t.Fatalf("jobs=%d", len(jobs))
+			}
+			if scenario == "head-moved" {
+				// Server reads are complete before mutation; the next request sees the new head.
+				mu.Lock()
+				mr["sha"] = strings.Repeat("b", 40)
+				mu.Unlock()
+				if err := prepareCIRepair(jobs[0], time.Now()); err == nil {
+					t.Fatal("accepted moved head")
+				}
+				return
+			}
+			now := time.Now().UTC()
+			if err := prepareCIRepair(jobs[0], now); err != nil {
+				t.Fatal(err)
+			}
+			prompt := jobs[0].repair.prompt("go test ./...")
+			if !strings.Contains(prompt, "https://gitlab.example/o/r/-/merge_requests/11") || !strings.Contains(prompt, "UNTRUSTED CI LOG DATA") || strings.Contains(prompt, "secret-value") || !strings.Contains(prompt, "[redacted]") {
+				t.Fatalf("bad prompt: %s", prompt)
+			}
+			if len(scanCIRepairJobs(context.Background(), repairRegistry(t), client, "o/r", cfg, 0, nil)) != 0 {
+				t.Fatal("cooldown ignored")
+			}
+			if _, err := reserveRepair(snapshot.DataDir(), "o/r", jobs[0].repair.PR, repairReasonAcceptance, now.Add(ciRepairCooldown)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reserveCIRepair(snapshot.DataDir(), "o/r", jobs[0].repair.PR, now.Add(2*ciRepairCooldown)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reserveRepair(snapshot.DataDir(), "o/r", jobs[0].repair.PR, repairReasonAcceptance, now.Add(3*ciRepairCooldown)); !errors.Is(err, errRepairExhausted) {
+				t.Fatalf("shared budget: %v", err)
+			}
+		})
 	}
 }

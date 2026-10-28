@@ -15,7 +15,7 @@ type webRestartOps struct {
 	kickstart func() error
 	alive     func(int) bool
 	signal    func(int) error
-	exec      func(string, int) error
+	exec      func(webPidInfo) error
 	ready     func(string) bool
 	free      func(string) bool
 	now       func() time.Time
@@ -94,7 +94,7 @@ func restartWeb(info webPidInfo, wait time.Duration, ops webRestartOps) error {
 				return nil
 			}
 		} else if !ops.alive(info.PID) && ops.free(addr) {
-			return ops.exec(info.Host, info.Port)
+			return ops.exec(info)
 		}
 		ops.sleep(100 * time.Millisecond)
 	}

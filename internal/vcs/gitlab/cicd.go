@@ -175,7 +175,7 @@ func (c *Client) PlayJob(repo string, jobID int64) (Job, error) {
 // returns plain text, not JSON. An empty trace (job not yet started) yields "".
 func (c *Client) GetJobLog(repo string, jobID int64) (string, error) {
 	path := fmt.Sprintf("/projects/%s/jobs/%d/trace", projectID(repo), jobID)
-	data, status, err := c.doJSON("GET", path, nil)
+	data, status, err := c.evidenceGET(path)
 	if err != nil {
 		return "", err
 	}
@@ -183,7 +183,7 @@ func (c *Client) GetJobLog(repo string, jobID int64) (string, error) {
 		return "", fmt.Errorf("gitlab job %d not found (or has no trace)", jobID)
 	}
 	if status != 200 {
-		return "", fmt.Errorf("gitlab get job trace: HTTP %d: %s", status, strings.TrimSpace(string(data)))
+		return "", fmt.Errorf("gitlab get job trace: HTTP %d", status)
 	}
 	return string(data), nil
 }

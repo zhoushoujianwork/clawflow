@@ -1,3 +1,4 @@
+import { useReadOnly } from '../lib/session'
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
@@ -260,6 +261,7 @@ export const Route = createFileRoute('/_app/dashboard')({
 
 function Dashboard() {
   useDocumentTitle('Dashboard')
+  const readonly = useReadOnly()
   const [runs, setRuns] = useState<Run[]>([])
   const [meta, setMeta] = useState<Meta | null>(null)
   const [repos, setRepos] = useState<Repo[]>([])
@@ -308,7 +310,7 @@ function Dashboard() {
         // issues.json carries the authoritative current state used to override
         // the stale per-run issue_state when deciding closed-issue styling.
         fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-        fetch('/api/settings', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
+        readonly ? Promise.resolve(null) : fetch('/api/settings', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
       ])
       if (cancelled) return
       setRuns(Array.isArray(r) ? r : [])
@@ -329,7 +331,7 @@ function Dashboard() {
       cancelled = true
       clearInterval(id)
     }
-  }, [refreshTick])
+  }, [refreshTick, readonly])
 
   // Real-time runs stream (issue #199). The server pushes the runs index over
   // SSE whenever it changes — including mid-run lifecycle stage transitions —
@@ -338,7 +340,7 @@ function Dashboard() {
   // graceful fallback: EventSource auto-reconnects on drop, and if SSE is
   // unavailable entirely the dashboard still refreshes every 5s.
   useEffect(() => {
-    if (typeof EventSource === 'undefined') return
+    if (readonly || typeof EventSource === 'undefined') return
     let es: EventSource | null = null
     try {
       es = new EventSource('/api/run/stream')
@@ -356,7 +358,7 @@ function Dashboard() {
       /* SSE construction failed; polling fallback already covers updates */
     }
     return () => es?.close()
-  }, [])
+  }, [readonly])
 
   // Poll run status — also picks up the auto-run scheduler state
   // (interval, paused, next fire time) so we render everything in one
@@ -689,7 +691,7 @@ function Dashboard() {
         </div>
         <button
           onClick={triggerRun}
-          disabled={runBusy}
+          disabled={readonly || runBusy}
           className={cn(
             'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
             runBusy
@@ -913,6 +915,7 @@ function AutoRunBanner({
   busy: boolean
   onToggle: () => void
 }) {
+  const readonly = useReadOnly()
   // Format the countdown to next tick. When paused we still show what
   // "would have fired" so the user knows roughly how often this banner
   // will move when they resume — useful sanity check for the interval
@@ -953,7 +956,7 @@ function AutoRunBanner({
       </span>
       <button
         onClick={onToggle}
-        disabled={busy}
+        disabled={readonly || busy}
         className={cn(
           'inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-colors',
           busy
@@ -1251,6 +1254,7 @@ function Row({
   onCancel?: (repo: string, issue: number) => void
   cancelling?: boolean
 }) {
+  const readonly = useReadOnly()
   const dur = durationStr(r.started_at, r.ended_at)
   const runHref = `/runs/${repoSlug(r.repo)}/issue-${r.issue_number}/${runIdFromPath(r.path)}`
   return (
@@ -1301,7 +1305,7 @@ function Row({
           PR <ExternalLink className="w-3 h-3" />
         </a>
       )}
-      {onCancel && (
+      {!readonly && onCancel && (
         <button
           type="button"
           // No confirm() — the button is small but explicit ("cancel"

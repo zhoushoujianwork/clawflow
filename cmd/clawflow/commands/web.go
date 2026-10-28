@@ -42,19 +42,26 @@ var webLog *clog.Logger
 // startup refreshes (repos/projects/operators) right here.
 func NewWebCmd() *cobra.Command {
 	var (
-		port     int
-		host     string
-		openFlag bool
+		port       int
+		host       string
+		openFlag   bool
+		remote     string
+		allowCIDRs []string
 	)
 	cmd := &cobra.Command{
-		Use:   "web",
-		Short: "Serve the local ClawFlow dashboard on localhost",
+		Use:     "web",
+		Short:   "Serve the local ClawFlow dashboard on localhost",
+		Example: "  clawflow web --host 0.0.0.0 --remote readonly --allow-cidr 192.168.0.0/16",
 		Long: `Starts a tiny static file server at http://<host>:<port>/ backed by
 ~/.clawflow/dashboard/. The dashboard renders snapshots written by
 previous 'clawflow run' invocations (repos.json, operators.json,
 PostgreSQL run history, plus per-run events.jsonl for replay). No VCS calls happen
 here — run 'clawflow run' first if you want fresh data.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			remotePolicy, err := webguard.NewRemotePolicy(remote, allowCIDRs)
+			if err != nil {
+				return err
+			}
 			// PostgreSQL is required: fail fast before touching any state
 			// or binding the port.
 			release, err := gateStore(cmd.Context())
@@ -277,6 +284,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			}
 			dataFsrv := http.FileServer(http.Dir(dataDir))
 			mux := http.NewServeMux()
+			mux.HandleFunc("/api/session", remotePolicy.Session)
 			mux.Handle("/data/", http.StripPrefix("/data/", dataFsrv))
 			mux.HandleFunc("/ws/pty", ptyserver.HandlePTY)
 			mux.HandleFunc("/api/labels/add", api.HandleAddLabel)
@@ -397,14 +405,15 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// the WS path can't drift looser than the HTTP path.
 			guard := webguard.New(host, port)
 			ptyserver.ConfigureOriginGuard(host, port)
-			if webguard.IsWildcardHost(host) {
+			fmt.Fprintf(os.Stderr, "Web remote mode: %s\n", remote)
+			if webguard.IsWildcardHost(host) && remote == "off" {
 				fmt.Fprintf(os.Stderr, "⚠ binding %s exposes the dashboard beyond loopback; Host-header rebinding protection is disabled for this bind (Origin/CSRF checks still apply)\n", addr)
 				lg.Warn("web/host_unguarded", "host", host, "port", port)
 			}
 
 			srv := &http.Server{
 				Addr:              addr,
-				Handler:           guard.Middleware(mux),
+				Handler:           remotePolicy.Middleware(guard.Middleware(mux)),
 				ReadHeaderTimeout: 5 * time.Second,
 			}
 
@@ -429,7 +438,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 					fmt.Fprintf(os.Stderr, "respawn: locate self: %v\n", err)
 					return
 				}
-				helper := exec.Command(self, "__respawn", "--addr", addr) //nolint:gosec
+				helper := exec.Command(self, append([]string{"__respawn", "--addr", addr}, remoteArgs(remote, allowCIDRs)...)...) //nolint:gosec
 				helper.Stdin = nil
 				helper.Stdout = os.Stdout
 				helper.Stderr = os.Stderr
@@ -468,7 +477,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// (and future invocations that hit a busy port) know who owns
 			// the dashboard. Best-effort — a write failure shouldn't block
 			// serving, it just degrades the restart UX.
-			if err := writeWebPid(webPidInfo{PID: os.Getpid(), Host: host, Port: port, StartedAt: time.Now(), ServiceName: os.Getenv("XPC_SERVICE_NAME")}); err != nil {
+			if err := writeWebPid(webPidInfo{PID: os.Getpid(), Host: host, Port: port, Remote: remote, AllowCIDRs: allowCIDRs, StartedAt: time.Now(), ServiceName: os.Getenv("XPC_SERVICE_NAME")}); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠ write pid file: %v\n", err)
 			}
 			defer removeWebPid()
@@ -501,6 +510,8 @@ here — run 'clawflow run' first if you want fresh data.`,
 	}
 	cmd.Flags().IntVar(&port, "port", 8090, "TCP port to bind")
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host/IP to bind — 127.0.0.1 by default so the dashboard stays off the LAN")
+	cmd.Flags().StringVar(&remote, "remote", "off", "remote access: off or readonly")
+	cmd.Flags().StringArrayVar(&allowCIDRs, "allow-cidr", nil, "allowed remote client CIDR (repeatable; requires --remote readonly)")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the dashboard in your default browser")
 	cmd.AddCommand(newWebRestartCmd(), newWebServiceCmd())
 	return cmd
@@ -636,6 +647,8 @@ func openBrowser(url string) {
 // in-use port read it to figure out whether the process holding the port
 // is our own — in which case replacing it is safe.
 type webPidInfo struct {
+	Remote      string    `json:"remote,omitempty"`
+	AllowCIDRs  []string  `json:"allow_cidrs,omitempty"`
 	ServiceName string    `json:"service_name,omitempty"`
 	PID         int       `json:"pid"`
 	Host        string    `json:"host"`
@@ -737,12 +750,12 @@ a fresh web instance.`,
 			info, ok := readWebPid()
 			if !ok {
 				fmt.Fprintln(os.Stderr, "no running clawflow web found (no pid file); starting a fresh instance")
-				return execSelfWeb("127.0.0.1", 8090)
+				return execSelfWeb(webPidInfo{Host: "127.0.0.1", Port: 8090})
 			}
 			if !pidAlive(info.PID) {
 				fmt.Fprintf(os.Stderr, "pid file points at pid %d but it is not running; cleaning up and starting fresh\n", info.PID)
 				removeWebPid()
-				return execSelfWeb(info.Host, info.Port)
+				return execSelfWeb(info)
 			}
 			if !isClawflowProcess(info.PID) {
 				return fmt.Errorf("pid %d in pid file is not a clawflow process; refusing to signal it\n  remove %s manually if you're sure it's stale", info.PID, webPidPath())
@@ -759,11 +772,26 @@ a fresh web instance.`,
 // replacing this process in place via syscall.Exec. The user sees one
 // continuous process lineage rather than `web restart` exiting and them
 // having to relaunch `web`.
-func execSelfWeb(host string, port int) error {
+func execSelfWeb(info webPidInfo) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	argv := []string{"clawflow", "web", "--host", host, "--port", strconv.Itoa(port)}
+	argv := webArgs(info)
 	return syscall.Exec(self, argv, os.Environ())
+}
+
+func remoteArgs(mode string, cidrs []string) []string {
+	if mode == "" {
+		mode = "off"
+	}
+	args := []string{"--remote", mode}
+	for _, cidr := range cidrs {
+		args = append(args, "--allow-cidr", cidr)
+	}
+	return args
+}
+
+func webArgs(info webPidInfo) []string {
+	return append([]string{"clawflow", "web", "--host", info.Host, "--port", strconv.Itoa(info.Port)}, remoteArgs(info.Remote, info.AllowCIDRs)...)
 }

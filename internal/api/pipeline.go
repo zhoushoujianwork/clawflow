@@ -13,55 +13,73 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
-// pipelineTTL is how long a computed board is reused. The board is computed on
-// request only (no background polling); the cache keeps a refreshing dashboard
-// from turning every 30s tab refresh into a burst of VCS API calls.
-const pipelineTTL = 30 * time.Second
+const pipelineTTL = 20 * time.Second
+const pipelineTimeout = 10 * time.Second
 
-// pipelineTimeout bounds one board computation, VCS requests included.
-const pipelineTimeout = 90 * time.Second
-
-// PipelineSource builds the repository part of the board. The web command wires
-// it up; it lives outside this package because it reuses runner internals
-// (acceptance contracts, queue policy) that import this package.
+// PipelineSource supplements scheduler snapshots in the background.
 var PipelineSource func(ctx context.Context) (pipeline.Snapshot, error)
-
 var pipelineNow = time.Now
-
+var pipelineWorkers sync.WaitGroup
 var pipelineCache struct {
-	mu   sync.Mutex // also serializes computation so concurrent requests share one
-	at   time.Time
-	snap pipeline.Snapshot
-	ok   bool
+	mu         sync.Mutex
+	at         time.Time
+	snap       pipeline.Snapshot
+	ok         bool
+	refreshing bool
+	err        string
 }
 
-// HandlePipeline handles GET /api/pipeline: a read-only delivery board.
+// HandlePipeline never waits for a VCS request, including on a cold start.
 func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if PipelineSource == nil {
+	disk, diskErr := snapshot.ReadPipeline()
+	now := pipelineNow()
+	pipelineCache.mu.Lock()
+	if diskErr == nil && (!pipelineCache.ok || pipeline.ParseTime(disk.GeneratedAt).After(pipeline.ParseTime(pipelineCache.snap.GeneratedAt))) {
+		pipelineCache.snap, pipelineCache.ok = disk, true
+	}
+	if !pipelineCache.ok && PipelineSource == nil {
+		pipelineCache.mu.Unlock()
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "pipeline board unavailable"})
 		return
 	}
-
-	pipelineCache.mu.Lock()
-	if !pipelineCache.ok || pipelineNow().Sub(pipelineCache.at) >= pipelineTTL {
-		ctx, cancel := context.WithTimeout(r.Context(), pipelineTimeout)
-		snap, err := PipelineSource(ctx)
-		cancel()
-		if err != nil {
-			pipelineCache.mu.Unlock()
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "pipeline board failed: " + err.Error()})
-			return
-		}
-		pipelineCache.snap, pipelineCache.at, pipelineCache.ok = snap, pipelineNow(), true
+	stale := !pipelineCache.ok || now.Sub(pipeline.ParseTime(pipelineCache.snap.GeneratedAt)) >= pipelineTTL
+	if stale && !pipelineCache.refreshing && (pipelineCache.at.IsZero() || now.Sub(pipelineCache.at) >= pipelineTTL) && PipelineSource != nil {
+		pipelineCache.refreshing, pipelineCache.at = true, now
+		source := PipelineSource
+		pipelineWorkers.Add(1)
+		go func() {
+			defer pipelineWorkers.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), pipelineTimeout)
+			defer cancel()
+			fresh, err := source(ctx)
+			pipelineCache.mu.Lock()
+			defer pipelineCache.mu.Unlock()
+			pipelineCache.refreshing = false
+			if err != nil {
+				pipelineCache.err = "pipeline refresh failed: " + err.Error()
+				return
+			}
+			pipelineCache.err = ""
+			if !pipelineCache.ok || !pipeline.ParseTime(fresh.GeneratedAt).Before(pipeline.ParseTime(pipelineCache.snap.GeneratedAt)) {
+				pipelineCache.snap, pipelineCache.ok = fresh, true
+			}
+		}()
 	}
 	snap := pipelineCache.snap
+	if !pipelineCache.ok {
+		snap = pipeline.Snapshot{Repos: []pipeline.RepoBoard{}, Events: []pipeline.Event{}, GlobalQueue: []pipeline.GlobalQueueEntry{}}
+	}
+	for _, repo := range snap.Repos {
+		stale = stale || repo.Stale
+	}
+	board := pipeline.Board{Snapshot: snap, Stale: stale, Refreshing: pipelineCache.refreshing, Error: pipelineCache.err}
 	pipelineCache.mu.Unlock()
-
-	writeJSON(w, http.StatusOK, pipeline.Board{Snapshot: snap, Runtime: pipelineRuntime()})
+	board.Runtime = pipelineRuntime()
+	writeJSON(w, http.StatusOK, board)
 }
 
 // pipelineRuntime is cheap and always fresh: version, scheduler and Offload readiness.

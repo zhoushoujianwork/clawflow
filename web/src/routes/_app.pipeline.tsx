@@ -90,8 +90,8 @@ interface RepoBoard {
   auto_merge: boolean
   ci_required: boolean
   acceptance_required: boolean
-  queue_scope: string
   max_in_flight: number
+  stale?: boolean
   items: Item[]
   error?: string
 }
@@ -115,6 +115,9 @@ interface GlobalQueueEntry {
 }
 
 interface Board {
+  stale: boolean
+  refreshing: boolean
+  error?: string
   generated_at: string
   repos: RepoBoard[]
   global_queue?: GlobalQueueEntry[]
@@ -250,8 +253,9 @@ function PipelinePage() {
         const body = await r.json().catch(() => null)
         throw new Error(body?.error || `HTTP ${r.status}`)
       }
-      setBoard((await r.json()) as Board)
-      setError(null)
+      const next = (await r.json()) as Board
+      setBoard(next)
+      setError(next.error ?? null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -276,7 +280,7 @@ function PipelinePage() {
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground tabular-nums">
-          {board && <span>updated {timeAgo(board.generated_at)}</span>}
+          {board && <span>{board.generated_at ? `updated ${timeAgo(board.generated_at)}` : 'Waiting for first snapshot'}{board.refreshing ? ' · refreshing…' : board.stale ? ' · stale' : ''}</span>}
           <button
             onClick={() => void load()}
             disabled={refreshing}
@@ -308,10 +312,10 @@ function PipelinePage() {
           </div>
           {board.repos.length === 0 ? (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
-              <p className="text-base font-semibold text-foreground mb-1">No repository is tracked yet</p>
-              <p className="text-sm text-muted-foreground">
-                Enable a repository with clawflow repo enable.
-              </p>
+              <p className="text-base font-semibold text-foreground mb-1">{board.generated_at ? 'No repository is tracked yet' : 'Preparing pipeline snapshot…'}</p>
+              {board.generated_at && <p className="text-sm text-muted-foreground">
+                Enable a repository with <code>clawflow repo enable</code> and enroll issues using the clawflow label.
+              </p>}
             </div>
           ) : (
             board.repos.map(r => <RepoSection key={r.repo} board={r} repoInfo={repoInfo} queue={board.global_queue || []} tab={search.tab || 'active'} open={expanded.includes(r.repo)} toggle={() => update({ expanded: expanded.includes(r.repo) ? expanded.filter(n => n !== r.repo).join(',') : [...expanded, r.repo].join(',') })} />)
@@ -340,7 +344,7 @@ export function Attention({ board, repoInfo }: { board: Board; repoInfo: RepoInf
   const rows = board.repos.flatMap(repo => repo.items.flatMap(item => (item.attention || []).map(reason => ({
     repo: repo.repo, issue: item.issue, reason, time: item.updated_at, url: item.pr?.url || issueUrl(repo.repo, item.issue, repoInfo),
   }))))
-  for (const repo of board.repos) if (repo.error) rows.push({ repo: repo.repo, issue: 0, reason: repo.error, time: board.generated_at, url: repoUrl(repo.repo, repoInfo) })
+  for (const repo of board.repos) if (repo.error) rows.push({ repo: repo.repo, issue: 0, reason: (repo.stale ? 'Stale snapshot: ' : '') + repo.error, time: board.generated_at, url: repoUrl(repo.repo, repoInfo) })
   // Only the latest lock outcome for a repository is actionable.
   const locks = new Map<string, PipelineEvent>()
   for (const e of board.events || []) {
@@ -366,7 +370,7 @@ export function RepoSection({ board, repoInfo, queue, tab, open, toggle }: { boa
   let queued = 0
   const visible = filtered.filter(i => !i.in_queue || ++queued <= 6 || showAll)
   const hidden = filtered.length - visible.length
-  const flags = [board.auto_merge ? 'auto-merge' : 'manual merge', board.ci_required ? 'CI' : 'CI off', board.acceptance_required ? 'acceptance' : 'acceptance off', 'scope: ' + board.queue_scope]
+  const flags = [board.auto_merge ? 'auto-merge' : 'manual merge', board.ci_required ? 'CI' : 'CI off', board.acceptance_required ? 'acceptance' : 'acceptance off']
   return <section className="border rounded-xl mb-3 overflow-hidden">
     <button onClick={toggle} aria-expanded={open} className="w-full flex flex-wrap items-center gap-2 p-3 text-left text-xs">
       <ChevronRight className={cn('w-4 h-4 shrink-0', open && 'rotate-90')} />
@@ -376,8 +380,9 @@ export function RepoSection({ board, repoInfo, queue, tab, open, toggle }: { boa
       <span>{inFlight.length}/{board.max_in_flight} in flight{inFlight.length ? ': ' + [...new Set(inFlight.map(i => STAGE_LABEL[i.stage]))].join(', ') : ''}</span>
       <span>{active.filter(i => i.in_queue).length} queued</span>
       <span className="text-muted-foreground">last merge {timeAgo(lastMerge)}</span>
-      {board.error && <span className="text-red-700">{board.error}</span>}
+      {board.stale && <span className="rounded border border-amber-200 bg-amber-50 px-1 text-amber-900">stale</span>}
     </button>
+    {board.error && <div role="alert" className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 break-words">{board.stale ? 'Showing the last snapshot. Refresh failed: ' : ''}{board.error}</div>}
     {open && <div className="border-t">
       {visible.length ? visible.map(item => <ItemRows key={item.issue} item={item} repo={board.repo} repoInfo={repoInfo} />) : <p className="p-3 text-sm text-muted-foreground">No items in this view.</p>}
       {hidden > 0 && <button className="p-3 text-sm text-brand" onClick={() => setShowAll(true)}>+{hidden} more</button>}

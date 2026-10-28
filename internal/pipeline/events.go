@@ -15,7 +15,7 @@ const maxFieldLen = 300
 // eventPrefixes are the run/* areas the board shows; everything else in
 // run.log (per-lock, per-scan chatter) is noise for a delivery view.
 var eventPrefixes = []string{
-	"run/harvest", "run/automerge", "run/queue", "queue/", "run/self_upgrade",
+	"run/harvest", "run/automerge", "queue/", "run/self_upgrade",
 	"run/lock_timeout", "run/target_skip", "run/exit", "run/ci_repair", "run/end",
 }
 
@@ -141,32 +141,6 @@ func ParseEvents(r io.Reader) []Event {
 		out = append(out, ev)
 	}
 	return out
-}
-
-// LastDecision returns the most recent run/queue_{pick,wait,blocked} event of
-// repo's queue, or nil when none is recorded.
-func LastDecision(events []Event, repo string) *QueueDecision {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
-		if ev.Fields["repo"] != repo {
-			continue
-		}
-		var action string
-		switch ev.Event {
-		case "run/queue_pick":
-			action = "pick"
-		case "run/queue_wait":
-			action = "wait"
-		case "run/queue_blocked":
-			action = "blocked"
-		default:
-			continue
-		}
-		d := &QueueDecision{Action: action, Reason: ev.Fields["reason"], At: ev.Time}
-		d.Issue = atoi(ev.Fields["issue"])
-		return d
-	}
-	return nil
 }
 
 func atoi(s string) int {

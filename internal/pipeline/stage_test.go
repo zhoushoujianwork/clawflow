@@ -21,9 +21,6 @@ func TestDeriveStages(t *testing.T) {
 		evidenced string
 	}{
 		{"queued without anything", Evidence{IssueState: "open"}, StageQueued, "next run", ""},
-		{"queued by queue wait", Evidence{IssueState: "open", InQueue: true, Decision: &QueueDecision{Action: "wait", Reason: "in_flight_locked"}}, StageQueued, "in_flight_locked", "queue wait"},
-		{"queue pick stays queued", Evidence{IssueState: "open", InQueue: true, Decision: &QueueDecision{Action: "pick", Reason: "head_eligible"}}, StageQueued, "picked", ""},
-		{"queue blocked", Evidence{IssueState: "open", InQueue: true, Decision: &QueueDecision{Action: "blocked", Reason: "not_a_leaf"}}, StageBlocked, "not_a_leaf", ""},
 		{"implementing", Evidence{IssueState: "open", Run: &RunInfo{Operator: "implement", Status: "running", Stage: "offload-started", Live: true}}, StageImplementing, "offload-started", "implement run"},
 		{"stale running meta is failed", Evidence{IssueState: "open", Run: &RunInfo{Operator: "implement", Status: "running"}}, StageFailed, "runner is gone", ""},
 		{"run failed", Evidence{IssueState: "open", Run: &RunInfo{Operator: "implement", Status: "failed"}}, StageFailed, "failed", ""},
