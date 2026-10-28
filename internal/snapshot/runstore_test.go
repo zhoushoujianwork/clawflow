@@ -130,6 +130,8 @@ func TestOffloadUsageRunRow(t *testing.T) {
 	}{
 		{"subscription", `{"model":"gpt-test","cost_basis":"subscription","cost_usd":null,"usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":20,"output_tokens":50},"cumulative_usage":{"input_tokens":99999,"output_tokens":99999}}`, 180, 800, 20, 50, false},
 		{"incomplete", `{"model":"gpt-test","usage":{}}`, 0, 0, 0, 0, true},
+		{"null usage", `{"model":"gpt-test","usage":null}`, 0, 0, 0, 0, true},
+		{"malformed usage", `{"model":"gpt-test","usage":{"input_tokens":"invalid"}}`, 0, 0, 0, 0, true},
 		{"old runtime", `{}`, 0, 0, 0, 0, true},
 		{"unavailable", `{"model":"gpt-test","usage_unavailable":"provider omitted usage"}`, 0, 0, 0, 0, true},
 		{"invalid", `{"model":"gpt-test","usage":{"input_tokens":1,"cached_input_tokens":2,"cache_write_input_tokens":0,"output_tokens":0}}`, 0, 0, 0, 0, true},

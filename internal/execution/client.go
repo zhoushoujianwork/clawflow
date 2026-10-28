@@ -129,25 +129,25 @@ type Observation struct {
 }
 
 type Result struct {
-	Status           string      `json:"status"`
-	Text             string      `json:"result"`
-	Model            string      `json:"model"`
-	SessionKey       string      `json:"-"`
-	NativeSessionID  string      `json:"session"`
-	Profile          string      `json:"profile"`
-	Backend          string      `json:"backend"`
-	RunID            string      `json:"run_id"`
-	CallerRunID      string      `json:"caller_run_id"`
-	ExecutionPolicy  string      `json:"execution_policy"`
-	ExitCode         int         `json:"exit_code"`
-	ErrorKind        string      `json:"error_kind"`
-	Error            string      `json:"error"`
-	Usage            *TokenUsage `json:"usage"`
-	CostUSD          *float64    `json:"cost_usd"`
-	CostIsEstimate   bool        `json:"cost_is_estimate"`
-	CostBasis        string      `json:"cost_basis"`
-	CostUnavailable  string      `json:"cost_unavailable"`
-	UsageUnavailable string      `json:"usage_unavailable"`
+	Status           string          `json:"status"`
+	Text             string          `json:"result"`
+	Model            string          `json:"model"`
+	SessionKey       string          `json:"-"`
+	NativeSessionID  string          `json:"session"`
+	Profile          string          `json:"profile"`
+	Backend          string          `json:"backend"`
+	RunID            string          `json:"run_id"`
+	CallerRunID      string          `json:"caller_run_id"`
+	ExecutionPolicy  string          `json:"execution_policy"`
+	ExitCode         int             `json:"exit_code"`
+	ErrorKind        string          `json:"error_kind"`
+	Error            string          `json:"error"`
+	Usage            json.RawMessage `json:"usage"`
+	CostUSD          *float64        `json:"cost_usd"`
+	CostIsEstimate   bool            `json:"cost_is_estimate"`
+	CostBasis        string          `json:"cost_basis"`
+	CostUnavailable  string          `json:"cost_unavailable"`
+	UsageUnavailable string          `json:"usage_unavailable"`
 }
 
 // TokenUsage contains this run's inclusive input counts, not cumulative session usage.

@@ -383,9 +383,28 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		add(cand{number: n, title: title, state: "closed", updated: pr.MergedAt})
 	}
 
+	// Keep new issues available to Pilot without changing delivery-board rows.
+	for _, issue := range openIssues {
+		if issue.State == "open" && !seen[issue.Number] && !hasLabel(issue.Labels, queue.ScopeLabel) {
+			board.UnqueuedIssues = append(board.UnqueuedIssues, pipeline.Item{Issue: issue.Number, Title: issue.Title, State: issue.State, UpdatedAt: issue.UpdatedAt})
+		}
+	}
+	sortBoardItems(board.UnqueuedIssues)
+
 	detailed := 0
 	for _, c := range cands {
 		item := pipeline.Item{State: c.state, Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
+		if issue, ok := issueByNum[c.number]; ok {
+			item.HasDecided = pipeline.DecidedSection(issue.Body)
+			if local, ok := client.(*pipelineLocalClient); ok {
+				for _, entry := range local.issues {
+					if entry.Repo == repo && entry.IssueNumber == c.number {
+						item.HasDecided = entry.HasDecided
+						break
+					}
+				}
+			}
+		}
 		ev := pipeline.Evidence{IssueState: c.state, Labels: c.labels, AutoMerge: rc.AutoMerge, CIRequired: rc.CIRequired,
 			AcceptanceRequired: rc.AcceptanceRequired, InQueue: c.queuePos > 0, Now: now}
 		if r, ok := latestRun[c.number]; ok {

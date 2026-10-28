@@ -100,7 +100,7 @@ func newDBMigrateCmd() *cobra.Command {
 			if len(applied) == 0 {
 				fmt.Println("database is up to date")
 			}
-			return nil
+			return importRunHistoryIfEmpty(cmd, s)
 		},
 	}
 }
@@ -157,8 +157,28 @@ func newDBImportRunsCmd() *cobra.Command {
 			return err
 		}
 		defer release()
-		counts, err := activeStore.ImportRuns(cmd.Context(), snapshot.DataDir())
+		counts, err := activeStore.ImportRuns(cmd.Context(), snapshot.DataDir(), reportRunImport(cmd))
 		fmt.Fprintf(cmd.OutOrStdout(), "imported=%d updated=%d skipped=%d invalid=%d\n", counts.Imported, counts.Updated, counts.Skipped, counts.Invalid)
 		return err
 	}}
+}
+
+// The upgrade candidate also runs db migrate, so both paths share this backfill.
+func importRunHistoryIfEmpty(cmd *cobra.Command, s *store.Store) error {
+	var exists bool
+	if err := s.DB().WithContext(cmd.Context()).Raw("SELECT EXISTS (SELECT 1 FROM runs)").Scan(&exists).Error; err != nil {
+		return fmt.Errorf("check run history: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	counts, err := s.ImportRuns(cmd.Context(), snapshot.DataDir(), reportRunImport(cmd))
+	fmt.Fprintf(cmd.OutOrStdout(), "imported=%d updated=%d skipped=%d invalid=%d\n", counts.Imported, counts.Updated, counts.Skipped, counts.Invalid)
+	return err
+}
+
+func reportRunImport(cmd *cobra.Command) func(store.ImportDiagnostic) {
+	return func(d store.ImportDiagnostic) {
+		fmt.Fprintf(cmd.OutOrStdout(), "%s %s: %s\n", d.Status, d.Path, d.Reason)
+	}
 }

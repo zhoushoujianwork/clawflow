@@ -360,7 +360,11 @@ func TestResultModelAndUsage(t *testing.T) {
 				t.Fatal(err)
 			}
 			if mode == "result-model" {
-				if r.Model != "gpt-test" || r.Usage == nil || r.Usage.InputTokens == nil || *r.Usage.InputTokens != 1000 || r.CostBasis != "subscription" || r.CostUSD != nil {
+				var usage TokenUsage
+				if err := json.Unmarshal(r.Usage, &usage); err != nil {
+					t.Fatal(err)
+				}
+				if r.Model != "gpt-test" || r.Usage == nil || usage.InputTokens == nil || *usage.InputTokens != 1000 || r.CostBasis != "subscription" || r.CostUSD != nil {
 					t.Fatalf("%+v", r)
 				}
 			} else if r.Model != "profile-model" {

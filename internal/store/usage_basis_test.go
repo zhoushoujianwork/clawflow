@@ -4,9 +4,9 @@ import "testing"
 
 func TestSubscriptionAggregation(t *testing.T) {
 	b := newBreakdown()
-	r := Run{Model: "gpt-test", Profile: "codex", Payload: `{"usage":{"cost_basis":"subscription"}}`}
+	r := Run{Model: "gpt-test", Profile: "codex", DurationMs: 1234, Payload: `{"usage":{"cost_basis":"subscription"}}`}
 	b.add(r, nil)
-	if b.Totals.TotalCostUSD != nil || b.Totals.SubscriptionRuns != 1 || b.ByModel["gpt-test"].SubscriptionRuns != 1 || b.ByExecutor["codex/"].SubscriptionRuns != 1 {
+	if b.ByModel["gpt-test"].DurationMs != 1234 || b.Totals.TotalCostUSD != nil || b.Totals.SubscriptionRuns != 1 || b.ByModel["gpt-test"].SubscriptionRuns != 1 || b.ByExecutor["codex/"].SubscriptionRuns != 1 {
 		t.Fatalf("%+v", b)
 	}
 	cost := 1.0

@@ -18,7 +18,7 @@ try {
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import assert from 'node:assert/strict'
-import { RuntimeHeader, RepoSection, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
+import { itemPilotActions, PilotTimeline, RuntimeHeader, RepoSection, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
 const runtime = { version:'test', scheduler:{status:'idle'}, execution:{ready:true,profile:'actual',backend:'codex'} }
 const noTier = renderToStaticMarkup(<RuntimeHeader runtime={runtime}/>)
 assert.ok(!noTier.includes('tier:'))
@@ -54,6 +54,27 @@ const all = renderToStaticMarkup(<RepoSection board={repos[0]} {...props} open t
 assert.ok(all.includes('abcdef0'))
 const attention = renderToStaticMarkup(<Attention board={{repos,events:[]}} repoInfo={{}}/>)
 assert.ok(attention.includes('Needs attention (5)'))
+const pilotActions = [
+ {run_id:'wake',actor:'pilot',at:now,outcome:'applied',action:{id:'q',type:'ask_human',repo:'owner/repo-0',issue:2,body:'Which environment? <script>bad</script>'}},
+ {run_id:'wake',actor:'pilot',at:now,outcome:'head_changed',action:{id:'m',type:'override_merge',repo:'owner/repo-0',pr:100,head:'a'.repeat(40)}},
+ {run_id:'wake',actor:'pilot',at:now,outcome:'applied',action:{id:'n',type:'note',repo:'owner/repo-0',body:'Diagnosis recorded'}},
+]
+const pilotAttention = renderToStaticMarkup(<Attention board={{repos,events:[],pilot_actions:pilotActions}} repoInfo={{}}/>)
+assert.ok(pilotAttention.includes('Needs attention (8)'))
+assert.ok(pilotAttention.includes('Which environment?'))
+assert.ok(pilotAttention.includes('override_merge · head_changed'))
+assert.ok(pilotAttention.includes('Diagnosis recorded'))
+assert.ok(!pilotAttention.includes('<script>'))
+assert.equal(itemPilotActions(pilotActions, 'other/repo', {issue:2,pr:{number:100}}).length,0)
+assert.equal(itemPilotActions(pilotActions, 'owner/repo-0', {issue:2}).length,1)
+assert.equal(itemPilotActions(pilotActions, 'owner/repo-0', {issue:100}).length,0)
+assert.equal(itemPilotActions(pilotActions, 'owner/repo-0', {issue:3,pr:{number:100}}).length,1)
+assert.equal(itemPilotActions([{...pilotActions[2],created_issue:7}], 'owner/repo-0', {issue:7}).length,1)
+const pilotTimeline = renderToStaticMarkup(<PilotTimeline actions={pilotActions}/>)
+assert.ok(pilotTimeline.includes('Pilot timeline'))
+assert.ok(pilotTimeline.includes('a'.repeat(40)))
+assert.ok(pilotTimeline.includes('wake'))
+assert.ok(!pilotTimeline.includes('<script>'))
 const events = Array.from({length:50},(_,n)=>({time:new Date(Date.now()+n*1000).toISOString(), level:'info', event:'run/queue_wait', fields:{repo:'owner/repo-0',issue:'381'}}))
 assert.equal(foldEvents(events).length,1)
 assert.equal(foldEvents(events)[0].count,50)

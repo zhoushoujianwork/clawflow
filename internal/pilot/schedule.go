@@ -1,28 +1,7 @@
-// Package pilot wakes per-project "pilot" agents at the
-// end of each `clawflow run` pass. Each enabled project is fanned out
-// to a non-interactive `claude -p` invocation that triages the
-// backlog at the EDGES of the operator pipeline:
-//
-//   - upstream: files new issues, maintains optional category labels
-//     (e.g. a descriptive `bug` label for backlog organization)
-//   - downstream: closes stale, duplicate, or already-fixed issues
-//
-// Operators own autonomous implementation and CI repair; repo-level
-// auto_merge owns merge eligibility. Pilot coordinates the project backlog.
-//
-// Closed loop:
-//
-//	clawflow run → operators process eligible issues →
-//	  pilot.Schedule wakes the Pilot →
-//	  Pilot triages backlog (file/label/close/comment) →
-//	  next `clawflow run` pass executes the changes
-//
-// Pilots are the "what should we be working on, and is the backlog
-// coherent?" layer; operators are the "execute the work that's
-// already on the board" layer.
-//
-// Structured actions are validated, budgeted and audited by the shared executor.
-// The agent prompt treats repositories as read-only.
+// Package pilot schedules event-driven project supervision. The web tick and
+// repository pass completion share a scheduling try-lock; project cooldowns,
+// attention deduplication and existing budgets bound each wake. Agents propose
+// structured actions; deterministic code validates, applies and audits them.
 package pilot
 
 import (
@@ -48,7 +27,7 @@ import (
 )
 
 // Schedule fans out to every project with Automation.Enabled and
-// past its cooldown. Sequential by design: Pilots are heavy claude
+// past its cooldown with new attention evidence. Sequential by design: Pilots are heavy claude
 // invocations, parallelism here would mostly buy rate-limit pain.
 //
 // budgetDeadline is the wall-clock moment `clawflow run`'s self-watchdog
@@ -177,6 +156,16 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration, budgetDeadline 
 			}
 		}
 
+		wakeAt := time.Now()
+		evidence, state, err := collectWakeEvidence(p, cfg, wakeAt)
+		if err != nil {
+			skipLog.Warn("pilot/skip", "project", p.Name, "reason", "wake_evidence", "err", err)
+			continue
+		}
+		if len(evidence.Attention) == 0 {
+			continue
+		}
+
 		fmt.Fprintf(os.Stderr, "[pilot] waking project %q (cooldown=%dmin)\n", p.Name, p.Automation.CooldownMinutes)
 		// Stamp BEFORE the wake so a slow Pilot doesn't get re-fired
 		// the instant it returns. If the wake fails we still want
@@ -187,7 +176,13 @@ func Schedule(ctx context.Context, perWakeTimeout time.Duration, budgetDeadline 
 		if err := project.MarkWoken(p.Name); err != nil {
 			fmt.Fprintf(os.Stderr, "[pilot] %s: mark-woken failed: %v — continuing anyway\n", p.Name, err)
 		}
-		if err := wake(ctx, p, cfg, creds, perWakeTimeout); err != nil {
+		wakeErr := wakeWithEvidence(ctx, p, cfg, creds, perWakeTimeout, &evidence)
+		if !errors.Is(wakeErr, operator.ErrCostLimit) {
+			if err := saveWakeState(p.Name, state, evidence, wakeAt); err != nil {
+				skipLog.Warn("pilot/state", "err", err)
+			}
+		}
+		if err := wakeErr; err != nil {
 			fmt.Fprintf(os.Stderr, "[pilot] %s: wake failed: %v\n", p.Name, err)
 			if errors.Is(err, operator.ErrCostLimit) {
 				restoreCooldownAfterCostLimit(p.Name, prevWokenAt)
@@ -309,6 +304,10 @@ func WakeOne(ctx context.Context, projectName string, timeout time.Duration) err
 var runWakeOffload = operator.RunOffload
 
 func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *config.Credentials, timeout time.Duration) error {
+	return wakeWithEvidence(ctx, p, cfg, creds, timeout, nil)
+}
+
+func wakeWithEvidence(ctx context.Context, p *project.Project, cfg *config.Config, creds *config.Credentials, timeout time.Duration, evidence *wakeEvidence) error {
 	// Bound the ENTIRE wake — including pre-claude digest fetches and
 	// post-claude finalization — to the configured timeout. Without this,
 	// the deadline only covers the `claude -p` subprocess; any blocking
@@ -372,6 +371,9 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	recent := pilotRecentSummaries(p.Name, 3)
 
 	prompt := chat.BuildPilotContext(p.Name, contextMD, deploymentMD, recent, digests, cfg.Settings.Language)
+	if evidence != nil {
+		prompt += evidencePrompt(*evidence)
+	}
 	prompt += "\nWake run_id: " + fmt.Sprintf("%x", startedAt.UnixNano()) + "\n"
 	role := config.RolePilot
 	workdir := project.ProjectDir(p.Name)

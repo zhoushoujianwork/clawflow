@@ -134,7 +134,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	plan := Plan{PlannerIsolation: ToolsDisabled, Version: Version, ContractDigest: d, AttemptID: record.AttemptID, StartedAt: time.Now().UTC()}
 	// Only requirements are sent in phase one: no source locations, Git inputs,
 	// developer output, contract identity, or development session identifiers.
-	planned, err := execute(ctx, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not inspect source or use tools.\n\n"+c.Requirements,
+	planned, err := runner.executeRecorded(ctx, c, "acceptance-plan", execute, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not inspect source or use tools.\n\n"+c.Requirements,
 		execution.Options{Workspace: scratch, Role: "acceptance", PermissionMode: "default", ToolsDisabled: true})
 	record.Plan.PlannerIsolation = ToolsDisabled
 	if err != nil && execution.IsKind(err, "unsupported_tools") && planned.ErrorKind == "unsupported_tools" {
@@ -147,7 +147,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		}
 		plan.PlannerIsolation = IsolatedReadonly
 		record.Plan.PlannerIsolation = IsolatedReadonly
-		planned, err = execute(ctx, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not read files outside your working directory or any repository. Do not inspect source.\n\n"+c.Requirements,
+		planned, err = runner.executeRecorded(ctx, c, "acceptance-plan", execute, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not read files outside your working directory or any repository. Do not inspect source.\n\n"+c.Requirements,
 			execution.Options{Workspace: scratch, Role: "acceptance", PermissionMode: "default"})
 	}
 	if err != nil {
@@ -232,7 +232,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		evidence, _ := json.Marshal(record.CI)
 		prompt = strings.Replace(runner.reviewPrompt(), runner.fullSuiteInstruction(), "Required CI succeeded on the exact contract head. Review mode: ci-verified. Run requirement-targeted tests and review the source instead of re-running the full suite. Authoritative CI check identities: "+string(evidence)+". ", 1)
 	}
-	reviewed, reviewErr := execute(ctx, prompt+string(input),
+	reviewed, reviewErr := runner.executeRecorded(ctx, c, "acceptance-review", execute, prompt+string(input),
 		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "bypassPermissions"})
 	record.Reviewer = native(reviewed)
 	// Inspect even after execution failure/cancellation; use the caller's context

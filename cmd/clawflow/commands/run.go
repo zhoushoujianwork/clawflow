@@ -33,6 +33,7 @@ import (
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
+	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -1264,6 +1265,8 @@ func captureIssuesSnapshot(client vcs.Client, fullName string) []snapshot.IssueE
 			Repo:         fullName,
 			IssueNumber:  iss.Number,
 			IssueTitle:   iss.Title,
+			HasDecided:   pipeline.DecidedSection(iss.Body),
+			UpdatedAt:    iss.UpdatedAt,
 			Labels:       append([]string(nil), iss.Labels...),
 			State:        iss.State,
 			CapturedAt:   capturedAt,

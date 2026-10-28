@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
@@ -79,6 +80,8 @@ func HandleRepoRefreshIssues(w http.ResponseWriter, r *http.Request) {
 			Repo:         req.Repo,
 			IssueNumber:  iss.Number,
 			IssueTitle:   iss.Title,
+			HasDecided:   pipeline.DecidedSection(iss.Body),
+			UpdatedAt:    iss.UpdatedAt,
 			Labels:       append([]string(nil), iss.Labels...),
 			State:        iss.State,
 			CapturedAt:   capturedAt,
