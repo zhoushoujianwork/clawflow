@@ -33,7 +33,8 @@ import (
 // after the replacement restores <path>.prev.
 
 const (
-	selfUpgradeTimeout = 30 * time.Minute
+	selfUpgradeTimeout      = 30 * time.Minute
+	upgradeMigrationTimeout = 5 * time.Minute
 )
 
 var fullSHARE = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -50,6 +51,14 @@ type selfUpgradeOutcome struct {
 	From, To string
 	Result   string
 	Reason   string
+	Detail   string
+}
+
+func (out selfUpgradeOutcome) description() string {
+	if out.Detail != "" {
+		return out.Reason + ": " + out.Detail
+	}
+	return out.Reason
 }
 
 // mergeLedger records, per pass, the repositories where ClawFlow confirmed a
@@ -404,6 +413,12 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 		return fail("candidate execution check: %v", checkErr)
 	}
 
+	// Migrate with the candidate while the installed binary is still intact.
+	if err := u.migrateCandidate(ctx, candidate); err != nil {
+		out.Reason, out.Detail = "migrate", err.Error()
+		return out
+	}
+
 	// 4. Replace atomically; keep the previous binary as <path>.prev.
 	prev := dest + ".prev"
 	staged := dest + ".new"
@@ -438,6 +453,21 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 
 	out.Result, out.Reason = selfUpgradeUpgraded, ""
 	return out
+}
+
+// migrateCandidate applies the candidate's registry before any binary replacement.
+// Older processes remain live, so migrations must be expand-only.
+func (u *selfUpgrader) migrateCandidate(ctx context.Context, candidate string) error {
+	ctx, cancel := context.WithTimeout(ctx, upgradeMigrationTimeout)
+	defer cancel()
+	_, err := u.Run(ctx, filepath.Dir(candidate), candidate, "db", "migrate")
+	if ctx.Err() != nil {
+		return fmt.Errorf("candidate db migrate: %w", ctx.Err())
+	}
+	if err != nil {
+		return fmt.Errorf("candidate db migrate: %w", err)
+	}
+	return nil
 }
 
 // verifyVersion checks that `<bin> version` prints want on its first line.
@@ -514,10 +544,13 @@ func runSelfUpgradePhase(ctx context.Context, cfg *config.Config, u *selfUpgrade
 		if res.Reason != "" {
 			fields = append(fields, "reason", res.Reason)
 		}
+		if res.Detail != "" {
+			fields = append(fields, "detail", res.Detail)
+		}
 		switch res.Result {
 		case selfUpgradeFailed:
 			runLog.Warn("run/self_upgrade", fields...)
-			fmt.Fprintf(os.Stderr, "[%s] ⚠ self-upgrade failed: %s\n", repo, res.Reason)
+			fmt.Fprintf(os.Stderr, "[%s] ⚠ self-upgrade failed: %s\n", repo, res.description())
 			return []firedKey{{Repo: repo, Operator: "self_upgrade"}}
 		case selfUpgradeSkipped:
 			runLog.Info("run/self_upgrade", fields...)
