@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { ChevronRight, ExternalLink, Loader2, RefreshCw } from 'lucide-react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { cn } from '../lib/utils'
@@ -67,6 +67,8 @@ interface Delivery {
 }
 
 interface Item {
+  state?: string
+  attention?: string[]
   issue: number
   title: string
   stage: Stage
@@ -88,6 +90,8 @@ interface RepoBoard {
   auto_merge: boolean
   ci_required: boolean
   acceptance_required: boolean
+  max_in_flight: number
+  stale?: boolean
   items: Item[]
   error?: string
 }
@@ -111,19 +115,33 @@ interface GlobalQueueEntry {
 }
 
 interface Board {
+  stale: boolean
+  refreshing: boolean
+  error?: string
   generated_at: string
   repos: RepoBoard[]
   global_queue?: GlobalQueueEntry[]
   events: PipelineEvent[]
   runtime: {
     version: string
-    scheduler: { status: string; interval_minutes: number; paused: boolean; next_fire_unix_ms?: number; agent_slots_used: number; agent_slots_total: number }
-    execution: { ready: boolean; error?: string }
+    scheduler: { status: string; interval_minutes: number; paused: boolean; next_fire_unix_ms?: number; started_at?: string; last_result?: string; last_ended_at?: string; agent_slots_used: number; agent_slots_total: number }
+    execution: { ready: boolean; error?: string; profile?: string; backend?: string; model?: string; service_tier?: string }
   }
 }
 
+type Preferences = { tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string }
+export function preferences(s: Record<string, unknown>): Preferences {
+  return {
+    tab: s.tab === 'active' || s.tab === 'delivered' || s.tab === 'all' ? s.tab : undefined,
+    expanded: typeof s.expanded === 'string' ? s.expanded : undefined,
+    events: s.events === 'important' || s.events === 'all' ? s.events : undefined,
+    repo: typeof s.repo === 'string' ? s.repo : undefined,
+  }
+}
+const STORAGE_KEY = 'clawflow.pipeline'
 export const Route = createFileRoute('/_app/pipeline')({
   component: PipelinePage,
+  validateSearch: preferences,
 })
 
 const REFRESH_MS = 30_000
@@ -137,7 +155,7 @@ const STAGE_LABEL: Record<Stage, string> = {
   acceptance_pending: 'Acceptance pending',
   acceptance_running: 'Acceptance running',
   accepted: 'Accepted',
-  rejected: 'Rejected',
+  rejected: 'Acceptance failed',
   infra_retry: 'Infra retry',
   merged: 'Merged',
   failed: 'Failed',
@@ -200,6 +218,27 @@ function StageChip({ stage }: { stage: Stage }) {
 
 function PipelinePage() {
   useDocumentTitle('Pipeline')
+  const search = Route.useSearch()
+  const navigate = Route.useNavigate()
+  const [restored, setRestored] = useState(false)
+  useEffect(() => {
+    if (restored) return
+    setRestored(true)
+    try {
+      const stored = preferences(JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'))
+      if (stored.tab === 'all') stored.tab = 'active'
+      if (stored.events === 'all') stored.events = 'important'
+      const next = Object.fromEntries(Object.entries({ ...stored, ...Object.fromEntries(Object.entries(search).filter(([, v]) => v !== undefined)) }))
+      void navigate({ search: next, replace: true })
+    } catch { /* Storage may be disabled. URL remains usable. */ }
+  }, [restored, search, navigate])
+  function update(next: Preferences) {
+    const value = { ...search, ...next }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...value, tab: value.tab === 'all' ? 'active' : value.tab, events: value.events === 'all' ? 'important' : value.events })) } catch { /* URL still persists. */ }
+    void navigate({ search: value })
+  }
+  const expanded = (search.expanded || '').split(',').filter(Boolean)
+
   const repoInfo = useRepoInfoMap()
   const [board, setBoard] = useState<Board | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -214,8 +253,9 @@ function PipelinePage() {
         const body = await r.json().catch(() => null)
         throw new Error(body?.error || `HTTP ${r.status}`)
       }
-      setBoard((await r.json()) as Board)
-      setError(null)
+      const next = (await r.json()) as Board
+      setBoard(next)
+      setError(next.error ?? null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -236,11 +276,11 @@ function PipelinePage() {
         <div>
           <h1 className="text-2xl font-bold text-foreground">Delivery pipeline</h1>
           <p className="text-xs text-muted-foreground mt-1">
-            Issue → PR → CI → acceptance → merge, per repository with auto-merge or a work queue. Read-only.
+            Issue → PR → CI → acceptance → merge. Read-only.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground tabular-nums">
-          {board && <span>updated {timeAgo(board.generated_at)}</span>}
+          {board && <span>{board.generated_at ? `updated ${timeAgo(board.generated_at)}` : 'Waiting for first snapshot'}{board.refreshing ? ' · refreshing…' : board.stale ? ' · stale' : ''}</span>}
           <button
             onClick={() => void load()}
             disabled={refreshing}
@@ -266,196 +306,107 @@ function PipelinePage() {
       ) : board ? (
         <>
           <RuntimeHeader runtime={board.runtime} />
-          <GlobalQueuePanel entries={board.global_queue ?? []} />
+          <Attention board={board} repoInfo={repoInfo} />
+          <div className="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Pipeline items">
+            {(['active', 'delivered', 'all'] as const).map(tab => <button key={tab} role="tab" aria-selected={(search.tab || 'active') === tab} onClick={() => update({ tab })} className={cn('px-3 py-1 rounded border text-sm capitalize', (search.tab || 'active') === tab && 'bg-secondary')}>{tab}</button>)}
+          </div>
           {board.repos.length === 0 ? (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
-              <p className="text-base font-semibold text-foreground mb-1">No repository is tracked yet</p>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-base font-semibold text-foreground mb-1">{board.generated_at ? 'No repository is tracked yet' : 'Preparing pipeline snapshot…'}</p>
+              {board.generated_at && <p className="text-sm text-muted-foreground">
                 Enable a repository with <code>clawflow repo enable</code> and enroll issues using the clawflow label.
-              </p>
+              </p>}
             </div>
           ) : (
-            board.repos.map(r => <RepoSection key={r.repo} board={r} repoInfo={repoInfo} />)
+            board.repos.map(r => <RepoSection key={r.repo} board={r} repoInfo={repoInfo} queue={board.global_queue || []} tab={search.tab || 'active'} open={expanded.includes(r.repo)} toggle={() => update({ expanded: expanded.includes(r.repo) ? expanded.filter(n => n !== r.repo).join(',') : [...expanded, r.repo].join(',') })} />)
           )}
-          <EventTimeline events={board.events} />
+          <EventTimeline events={board.events || []} filter={search.events || 'important'} repo={search.repo || ''} repos={board.repos.map(r => r.repo)} update={update} />
         </>
       ) : null}
     </div>
   )
 }
 
-function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
+export function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
   const s = runtime.scheduler
-  const next = s.next_fire_unix_ms ? new Date(s.next_fire_unix_ms).toISOString() : undefined
-  const schedulerText = s.status === 'running' ? 'run in progress' : s.paused ? 'paused' : s.interval_minutes > 0 ? `every ${s.interval_minutes}m` : 'manual only'
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-5" aria-label="Runtime">
-      <Stat label="Version" value={runtime.version || '—'} mono />
-      <Stat label="Agent slots" value={`${s.agent_slots_used} / ${s.agent_slots_total}`} />
-      <Stat
-        label="Scheduler"
-        value={schedulerText}
-        hint={next && !s.paused && s.status !== 'running' ? `next ${timeAgo(next)}` : undefined}
-      />
-      <Stat
-        label="Execution"
-        value={runtime.execution.ready ? 'ready' : 'not ready'}
-        tone={runtime.execution.ready ? 'ok' : 'bad'}
-        hint={runtime.execution.ready ? undefined : runtime.execution.error}
-      />
-    </div>
-  )
+  return <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs border rounded-lg px-3 py-2 mb-4" aria-label="Runtime">
+    <span>{runtime.version || 'Version unavailable'}</span>
+    <span>Executor: {runtime.execution.profile || 'unavailable'} · backend: {runtime.execution.backend ? runtime.execution.backend + ' (last observed)' : 'unavailable'}{runtime.execution.model && <> · model: {runtime.execution.model}</>}{runtime.execution.service_tier && <> · tier: {runtime.execution.service_tier}</>}</span>
+    <span>Agent slots: {s.agent_slots_used} / {s.agent_slots_total}</span>
+    <span>{s.paused ? 'paused' : s.status} {s.status === 'running' ? (s.started_at ? '· started ' + timeAgo(s.started_at) : '· age unavailable') : ''}</span>
+    <span>Last pass: {s.last_result || 'unavailable'} {s.last_ended_at && timeAgo(s.last_ended_at)}</span>
+    <span className="rounded bg-secondary px-1">Read-only</span>
+    {!runtime.execution.ready && <span className="text-red-700">{runtime.execution.error}</span>}
+  </div>
 }
 
-function Stat({ label, value, hint, mono, tone }: { label: string; value: string; hint?: string; mono?: boolean; tone?: 'ok' | 'bad' }) {
-  return (
-    <div className="bg-card border border-border rounded-xl p-3">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div
-        className={cn(
-          'text-lg font-semibold mt-0.5 break-all',
-          mono && 'font-mono text-base',
-          tone === 'ok' && 'text-green-700',
-          tone === 'bad' && 'text-red-700',
-          !tone && 'text-foreground',
-        )}
-      >
-        {value}
-      </div>
-      {hint && <div className="text-[11px] text-muted-foreground mt-0.5">{hint}</div>}
-    </div>
-  )
+export function Attention({ board, repoInfo }: { board: Board; repoInfo: RepoInfoMap }) {
+  const rows = board.repos.flatMap(repo => repo.items.flatMap(item => (item.attention || []).map(reason => ({
+    repo: repo.repo, issue: item.issue, reason, time: item.updated_at, url: item.pr?.url || issueUrl(repo.repo, item.issue, repoInfo),
+  }))))
+  for (const repo of board.repos) if (repo.error) rows.push({ repo: repo.repo, issue: 0, reason: (repo.stale ? 'Stale snapshot: ' : '') + repo.error, time: board.generated_at, url: repoUrl(repo.repo, repoInfo) })
+  // Only the latest lock outcome for a repository is actionable.
+  const locks = new Map<string, PipelineEvent>()
+  for (const e of board.events || []) {
+    if (e.event === 'run/lock_timeout' || e.event === 'run/end') locks.set(e.fields.repo || '', e)
+  }
+  for (const [repo, e] of locks) if (e.event === 'run/lock_timeout') rows.push({ repo, issue: Number(e.fields.issue) || 0, reason: 'Lock wait timed out: ' + (e.fields.reason || ''), time: e.time, url: e.fields.issue ? issueUrl(repo, Number(e.fields.issue), repoInfo) : repoUrl(repo, repoInfo) })
+  return <section className="mb-4" aria-label="Needs attention">
+    {rows.length ? <><h2 className="font-semibold text-sm mb-2">Needs attention ({rows.length})</h2><ul className="border border-amber-200 rounded-lg divide-y">
+      {rows.map((row, i) => <li key={i} className="p-2 text-xs flex flex-wrap gap-2 break-words"><span className="font-mono break-all">{row.repo}{row.issue ? ' #' + row.issue : ''}</span><span>{row.reason}</span><span className="text-muted-foreground">{timeAgo(row.time)}</span>{row.url && <a className="text-brand underline" href={row.url} target="_blank" rel="noreferrer">Open</a>}</li>)}
+    </ul></> : <p className="text-sm text-muted-foreground">Nothing needs you</p>}
+  </section>
 }
 
-function RepoSection({ board, repoInfo }: { board: RepoBoard; repoInfo: RepoInfoMap }) {
-  const flags = [
-    board.auto_merge && 'auto-merge',
-    board.ci_required && 'CI required',
-    board.acceptance_required && 'acceptance required',
-  ].filter(Boolean) as string[]
-  return (
-    <section className="mb-6">
-      <div className="flex items-center gap-2 flex-wrap mb-2">
-        <a
-          href={repoUrl(board.repo, repoInfo)}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="text-sm font-semibold text-foreground hover:underline font-mono"
-        >
-          {board.repo}
-        </a>
-        {!board.enabled && <span className="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground border border-border">disabled</span>}
-        {flags.map(f => (
-          <span key={f} className="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">
-            {f}
-          </span>
-        ))}
-      </div>
-
-      {board.error && (
-        <div role="alert" className="mb-2 px-3 py-2 rounded-lg border border-amber-200 bg-amber-50 text-xs text-amber-900">
-          {board.error}
-        </div>
-      )}
-
-
-      {board.items.length === 0 ? (
-        <div className="bg-card border border-border rounded-xl p-4 text-sm text-muted-foreground">
-          Nothing in flight. Items appear here when an issue is queued, has a managed PR, or ran recently.
-        </div>
-      ) : (
-        <div className="bg-card border border-border rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
-              <tr>
-                <th className="w-8" aria-label="Expand" />
-                <th className="px-3 py-2 text-left font-semibold">Issue</th>
-                <th className="px-3 py-2 text-left font-semibold">Stage</th>
-                <th className="px-3 py-2 text-left font-semibold">Why</th>
-                <th className="px-3 py-2 text-right font-semibold">Updated</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {board.items.map(it => (
-                <ItemRows key={it.issue} item={it} repo={board.repo} repoInfo={repoInfo} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  )
-}
-
-function GlobalQueuePanel({ entries }: { entries: GlobalQueueEntry[] }) {
-  if (entries.length === 0) return null
-  return (
-    <div className="bg-card border border-border rounded-xl p-4 mb-4">
-      <p className="text-sm font-semibold text-foreground mb-2">Work queue (all repositories)</p>
-      <ol className="text-xs space-y-1">
-        {entries.map(e => (
-          <li key={e.key} className="flex items-center gap-2">
-            <span className="tabular-nums text-muted-foreground w-6 text-right">{e.position}.</span>
-            <span className="font-mono text-foreground">{e.key}</span>
-            <span className="px-1.5 rounded bg-secondary text-muted-foreground">{e.tier}</span>
-            {e.rank ? <span className="text-muted-foreground tabular-nums">rank {e.rank}</span> : null}
-            <span className="text-muted-foreground">{e.state}</span>
-            {e.title ? <span className="truncate text-muted-foreground">{e.title}</span> : null}
-          </li>
-        ))}
-      </ol>
-    </div>
-  )
+export function RepoSection({ board, repoInfo, queue, tab, open, toggle }: { board: RepoBoard; repoInfo: RepoInfoMap; queue: GlobalQueueEntry[]; tab: NonNullable<Preferences['tab']>; open: boolean; toggle: () => void }) {
+  const [showAll, setShowAll] = useState(false)
+  const positions = new Map(queue.filter(q => q.repo === board.repo).map(q => [q.number, q.position]))
+  const items = board.items.map(item => ({ ...item, in_queue: positions.has(item.issue), queue_position: positions.get(item.issue) }))
+    .sort((a, b) => (a.queue_position || Infinity) - (b.queue_position || Infinity))
+  const active = items.filter(i => i.stage !== 'merged' && i.state !== 'closed')
+  const inFlight = active.filter(i => i.run?.live || i.acceptance?.running || i.pr?.state === 'open')
+  const lastMerge = items.map(i => i.delivery?.merged_at || '').sort().slice(-1)[0]
+  const filtered = tab === 'active' ? active : tab === 'delivered' ? items.filter(i => i.stage === 'merged' && i.delivery?.merged_at && Date.now() - Date.parse(i.delivery.merged_at) <= 7 * 86400000) : items
+  let queued = 0
+  const visible = filtered.filter(i => !i.in_queue || ++queued <= 6 || showAll)
+  const hidden = filtered.length - visible.length
+  const flags = [board.auto_merge ? 'auto-merge' : 'manual merge', board.ci_required ? 'CI' : 'CI off', board.acceptance_required ? 'acceptance' : 'acceptance off']
+  return <section className="border rounded-xl mb-3 overflow-hidden">
+    <button onClick={toggle} aria-expanded={open} className="w-full flex flex-wrap items-center gap-2 p-3 text-left text-xs">
+      <ChevronRight className={cn('w-4 h-4 shrink-0', open && 'rotate-90')} />
+      <span className="font-mono font-semibold break-all">{board.repo}</span>
+      {flags.map(f => <span key={f} className="bg-secondary rounded px-1">{f}</span>)}
+      {!board.enabled && <span>disabled</span>}
+      <span>{inFlight.length}/{board.max_in_flight} in flight{inFlight.length ? ': ' + [...new Set(inFlight.map(i => STAGE_LABEL[i.stage]))].join(', ') : ''}</span>
+      <span>{active.filter(i => i.in_queue).length} queued</span>
+      <span className="text-muted-foreground">last merge {timeAgo(lastMerge)}</span>
+      {board.stale && <span className="rounded border border-amber-200 bg-amber-50 px-1 text-amber-900">stale</span>}
+    </button>
+    {board.error && <div role="alert" className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 break-words">{board.stale ? 'Showing the last snapshot. Refresh failed: ' : ''}{board.error}</div>}
+    {open && <div className="border-t">
+      {visible.length ? visible.map(item => <ItemRows key={item.issue} item={item} repo={board.repo} repoInfo={repoInfo} />) : <p className="p-3 text-sm text-muted-foreground">No items in this view.</p>}
+      {hidden > 0 && <button className="p-3 text-sm text-brand" onClick={() => setShowAll(true)}>+{hidden} more</button>}
+      {showAll && queued > 6 && <button className="p-3 text-sm text-brand" onClick={() => setShowAll(false)}>Show head + next 5</button>}
+    </div>}
+  </section>
 }
 
 function ItemRows({ item, repo, repoInfo }: { item: Item; repo: string; repoInfo: RepoInfoMap }) {
   const [open, setOpen] = useState(false)
   const panelId = `pipeline-${repo.replace(/\W+/g, '-')}-${item.issue}`
-  return (
-    <>
-      <tr className="hover:bg-secondary/20">
-        <td className="pl-2">
-          <button
-            onClick={() => setOpen(o => !o)}
-            aria-expanded={open}
-            aria-controls={panelId}
-            aria-label={`${open ? 'Collapse' : 'Expand'} details for issue ${item.issue}`}
-            className="p-1 rounded hover:bg-secondary"
-          >
-            <ChevronRight className={cn('w-4 h-4 transition-transform', open && 'rotate-90')} />
-          </button>
-        </td>
-        <td className="px-3 py-2 align-top">
-          <div className="flex items-center gap-2">
-            {item.in_queue && item.queue_position ? (
-              <span className="text-[11px] text-muted-foreground tabular-nums" title="queue position">
-                {item.queue_position}.
-              </span>
-            ) : null}
-            <a href={issueUrl(repo, item.issue, repoInfo)} target="_blank" rel="noreferrer noopener" className="font-mono text-brand hover:underline">
-              #{item.issue}
-            </a>
-            <span className="text-foreground truncate max-w-[22rem]" title={item.title}>
-              {item.title}
-            </span>
-          </div>
-        </td>
-        <td className="px-3 py-2 align-top">
-          <StageChip stage={item.stage} />
-        </td>
-        <td className="px-3 py-2 align-top text-muted-foreground">{item.why}</td>
-        <td className="px-3 py-2 align-top text-right text-muted-foreground tabular-nums whitespace-nowrap">{timeAgo(item.updated_at)}</td>
-      </tr>
-      {open && (
-        <tr id={panelId} className="bg-secondary/10">
-          <td />
-          <td colSpan={4} className="px-3 py-3">
-            <ItemDetail item={item} />
-          </td>
-        </tr>
-      )}
-    </>
-  )
+  return <div className="border-b last:border-b-0 p-3 text-xs">
+    <div className="flex flex-wrap items-center gap-2 min-w-0">
+      <button onClick={() => setOpen(o => !o)} aria-expanded={open} aria-controls={panelId} aria-label={`Details for issue ${item.issue}`} className="p-1 rounded hover:bg-secondary"><ChevronRight className={cn('w-4 h-4', open && 'rotate-90')} /></button>
+      {item.queue_position && <span className="text-muted-foreground">{item.queue_position}.</span>}
+      <a href={issueUrl(repo, item.issue, repoInfo)} className="text-brand font-mono" target="_blank" rel="noreferrer">#{item.issue}</a>
+      <span className="flex-1 min-w-0 truncate" title={item.title}>{item.title}</span>
+      <StageChip stage={item.stage} />
+      <span className="text-muted-foreground">{timeAgo(item.updated_at)}</span>
+    </div>
+    <p className="mt-1 truncate text-muted-foreground" title={item.why}>{item.why}</p>
+    {item.delivery && <p className="mt-1 break-all"><a href={item.delivery.pr_url} className="text-brand">PR #{item.delivery.pr}</a> · {shortSha(item.delivery.merge_commit_sha)} · {item.delivery.merged_at || 'time unavailable'}</p>}
+    {open && <div id={panelId} className="mt-3"><ItemDetail item={item} /></div>}
+  </div>
 }
 
 function ItemDetail({ item }: { item: Item }) {
@@ -463,9 +414,9 @@ function ItemDetail({ item }: { item: Item }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
       <DetailBlock title="Evidence">
-        {item.evidence.length === 0 ? <span className="text-muted-foreground">none</span> : (
+        {!item.evidence?.length ? <span className="text-muted-foreground">none</span> : (
           <ul className="list-disc pl-4 space-y-0.5">
-            {item.evidence.map((e, i) => <li key={i}>{e}</li>)}
+            {(item.evidence || []).map((e, i) => <li key={i}>{e}</li>)}
           </ul>
         )}
         {run && (
@@ -556,33 +507,36 @@ function DetailBlock({ title, children }: { title: string; children: React.React
   )
 }
 
-function EventTimeline({ events }: { events: PipelineEvent[] }) {
-  // Newest first, as a reader scans from the top.
-  const rows = useMemo(() => [...events].reverse(), [events])
-  return (
-    <section className="mb-5">
-      <h2 className="text-sm font-semibold text-foreground mb-2">Recent runner events</h2>
-      <div className="bg-card border border-border rounded-xl overflow-hidden">
-        {rows.length === 0 ? (
-          <p className="p-4 text-sm text-muted-foreground">No pipeline events in run.log yet.</p>
-        ) : (
-          <ol className="divide-y divide-border text-xs max-h-96 overflow-y-auto">
-            {rows.map((e, i) => (
-              <li key={`${e.time}-${i}`} className="px-3 py-1.5 flex gap-3">
-                <time dateTime={e.time} title={e.time} className="text-muted-foreground tabular-nums whitespace-nowrap w-16 shrink-0">
-                  {timeAgo(e.time)}
-                </time>
-                <span className={cn('font-mono shrink-0', e.level === 'warn' || e.level === 'error' ? 'text-amber-700' : 'text-foreground')}>
-                  {e.event.replace(/^run\//, '')}
-                </span>
-                <span className="text-muted-foreground break-all">
-                  {Object.entries(e.fields).map(([k, v]) => `${k}=${v}`).join(' ')}
-                </span>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-    </section>
-  )
+export function foldEvents(events: PipelineEvent[]) {
+  const folded: (PipelineEvent & { count: number; since: string })[] = []
+  for (const e of events) {
+    const prev = folded[folded.length - 1]
+    const identity = (event: PipelineEvent) => JSON.stringify([event.event, event.level, Object.entries(event.fields).sort(([a], [b]) => a.localeCompare(b))])
+    if (prev && identity(prev) === identity(e)) { prev.count++; prev.time = e.time }
+    else folded.push({ ...e, count: 1, since: e.time })
+  }
+  return folded
+}
+
+export function importantEvent(e: PipelineEvent) {
+  return e.level === 'warn' || e.level === 'error' || /harvest_end|automerge_merged|automerge_success|self_upgrade|lock_timeout|queue_(pick|wait|blocked)|queue\/(pick|wait|blocked|skip|park|unpark)/.test(e.event) || ['failed', 'error', 'merged'].includes(e.fields.status) || Number(e.fields.merged) > 0
+}
+
+export function EventTimeline({ events, filter, repo, repos, update }: { events: PipelineEvent[]; filter: string; repo: string; repos: string[]; update: (p: Preferences) => void }) {
+  const rows = foldEvents(events).filter(e => (!repo || e.fields.repo === repo) && (filter === 'all' || importantEvent(e))).reverse()
+  return <details className="border rounded-xl p-3 mb-4">
+    <summary className="text-sm font-semibold cursor-pointer">Events ({rows.length})</summary>
+    <div className="flex flex-wrap gap-2 my-3 text-xs">
+      <label>Show <select aria-label="Event importance" value={filter} onChange={e => update({ events: e.target.value as Preferences['events'] })} className="bg-card border rounded p-1"><option value="important">Important</option><option value="all">All</option></select></label>
+      <label>Repo <select aria-label="Event repository" className="max-w-full bg-card border rounded p-1" value={repo} onChange={e => update({ repo: e.target.value })}><option value="">All repositories</option>{repos.map(r => <option key={r}>{r}</option>)}</select></label>
+    </div>
+    <ol className="divide-y max-h-96 overflow-auto text-xs">
+      {rows.map((e, i) => <li key={i} className="py-2 flex flex-wrap gap-2 break-all">
+        <time className="text-muted-foreground">{timeAgo(e.time)}</time>
+        <span className={cn('font-mono', ['warn', 'error'].includes(e.level) && 'text-amber-700')}>{e.event.replace(/^run\//, '')}{e.fields.issue ? ' #' + e.fields.issue : ''}{e.count > 1 ? ` ×${e.count} since ${new Date(e.since).toLocaleTimeString()}` : ''}</span>
+        <span className="text-muted-foreground">{Object.entries(e.fields).map(([k, v]) => `${k}=${v}`).join(' ')}</span>
+      </li>)}
+    </ol>
+    {!rows.length && <p className="text-xs text-muted-foreground">No matching events.</p>}
+  </details>
 }

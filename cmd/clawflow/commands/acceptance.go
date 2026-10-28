@@ -238,6 +238,13 @@ func acceptanceOriginMatches(origin string, rc config.Repo, repo string) bool {
 		strings.TrimSuffix(remote.Path, ".git") == strings.TrimRight(base.Path, "/")+"/"+repo
 }
 
+// acceptanceReadError marks a failed VCS read, as opposed to a contract that
+// was read successfully but is not valid. Board builders treat it as a
+// transient repository failure rather than a blocked item.
+type acceptanceReadError struct{ msg string }
+
+func (e acceptanceReadError) Error() string { return e.msg }
+
 func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Contract, config.Repo, execution.Config, vcs.PR, error) {
 	var c acceptance.Contract
 	rc, ec, err := acceptanceConfiguration(repo)
@@ -252,14 +259,17 @@ func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prN
 	}
 	pr, err := client.GetPR(repo, prNumber)
 	if err != nil {
-		return c, rc, ec, pr, errors.New("acceptance PR unavailable")
+		return c, rc, ec, pr, acceptanceReadError{"acceptance PR unavailable"}
 	}
 	issueNum := extractClosesIssue(pr.Body)
 	if pr.Number != prNumber || pr.State != "open" || pr.IsMerged() || pr.Draft || isDraftPR(pr.Title) || !strings.EqualFold(pr.HeadRepo, repo) || issueNum <= 0 || !acceptanceSHA(pr.HeadSHA) || !acceptanceSHA(pr.BaseSHA) || pr.BaseBranch == "" || pr.HeadBranch == "" || (rc.BaseBranch != "" && pr.BaseBranch != rc.BaseBranch) {
 		return c, rc, ec, pr, errors.New("acceptance requires an open same-repository non-draft PR with immutable head/base and a closing issue")
 	}
 	issue, err := client.GetIssue(repo, issueNum)
-	if err != nil || issue == nil || issue.Number != issueNum || issue.State != "open" || strings.TrimSpace(issue.Title+issue.Body) == "" {
+	if err != nil {
+		return c, rc, ec, pr, acceptanceReadError{"acceptance requirements issue unavailable or closed"}
+	}
+	if issue == nil || issue.Number != issueNum || issue.State != "open" || strings.TrimSpace(issue.Title+issue.Body) == "" {
 		return c, rc, ec, pr, errors.New("acceptance requirements issue unavailable or closed")
 	}
 	requirements := issue.Title + "\n\n" + issue.Body

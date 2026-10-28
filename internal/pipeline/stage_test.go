@@ -45,11 +45,13 @@ func TestDeriveStages(t *testing.T) {
 		{"accepted awaiting manual merge", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("success"), Acceptance: passed}, StageAccepted, "manual merge", ""},
 		{"stale pass is not accepted", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("success"), Acceptance: &AcceptanceInfo{Required: true, Attempts: 1, Verdict: "passed"}}, StageAcceptancePending, "no longer matches", ""},
 		{"rejected failed", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("success"), Acceptance: &AcceptanceInfo{Required: true, Attempts: 1, Verdict: "failed"}}, StageRejected, "failed", "verdict=failed"},
-		{"rejected blocked", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("success"), Acceptance: &AcceptanceInfo{Required: true, Attempts: 2, Verdict: "blocked"}}, StageRejected, "blocked", ""},
+		{"rejected blocked", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("success"), Acceptance: &AcceptanceInfo{Required: true, Attempts: 2, Verdict: "blocked"}}, StageBlocked, "blocked", ""},
 		{"infra retry with future time", Evidence{Now: now, IssueState: "open", AcceptanceRequired: true, PR: openPR("success"), Acceptance: &AcceptanceInfo{Required: true, Attempts: 1, InfraAttempts: 1, LatestIsInfra: true, MaxInfraRetries: 3, NextRetryAt: future}}, StageInfraRetry, "next retry at " + future, "infrastructure=1"},
 		{"infra retry due", Evidence{Now: now, IssueState: "open", AcceptanceRequired: true, PR: openPR("success"), Acceptance: &AcceptanceInfo{Required: true, Attempts: 2, InfraAttempts: 2, LatestIsInfra: true, MaxInfraRetries: 3, NextRetryAt: past}}, StageInfraRetry, "due", ""},
 		{"infra exhausted is blocked", Evidence{Now: now, IssueState: "open", AcceptanceRequired: true, PR: openPR("success"), Acceptance: &AcceptanceInfo{Required: true, Attempts: 3, InfraAttempts: 3, LatestIsInfra: true, MaxInfraRetries: 3, NextRetryAt: past}}, StageBlocked, "retries stopped", ""},
 		{"acceptance contract error", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("success"), Acceptance: &AcceptanceInfo{Required: true, Error: "no development provenance"}}, StageBlocked, "no development provenance", ""},
+		{"completed infra attempt wins over pending CI", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("pending"), Acceptance: &AcceptanceInfo{Attempts: 1, InfraAttempts: 1, MaxInfraRetries: 3, LatestIsInfra: true}}, StageInfraRetry, "attempt 1/3", ""},
+		{"completed failed attempt wins over pending CI", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("pending"), Acceptance: &AcceptanceInfo{Attempts: 1, Verdict: "failed"}}, StageRejected, "failed", ""},
 		{"ci failure wins over accepted", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("failure"), Acceptance: passed}, StageCIFailed, "CI failed", ""},
 		{"running reviewer wins over ci", Evidence{IssueState: "open", AcceptanceRequired: true, PR: openPR("failure"), Acceptance: &AcceptanceInfo{Running: true}}, StageAcceptanceRunning, "", ""},
 		{"merged", Evidence{IssueState: "closed", PR: &PRInfo{Number: 7, State: "merged"}}, StageMerged, "merged", "PR #7 is merged"},
@@ -81,5 +83,26 @@ func TestLatest(t *testing.T) {
 	}
 	if Latest("", "x") != "" {
 		t.Fatal("expected empty")
+	}
+}
+
+func TestDeriveLiveRunWinsOverOpenPR(t *testing.T) {
+	for _, op := range []string{"implement", "repair-ci"} {
+		e := Evidence{
+			IssueState:         "open",
+			AcceptanceRequired: true,
+			PR:                 &PRInfo{Number: 7, State: "open", CI: "success"},
+			Acceptance:         &AcceptanceInfo{Attempts: 1, Verdict: "failed"},
+			Run:                &RunInfo{Operator: op, Status: "running", Stage: "offload-started", Live: true},
+		}
+		stage, why, _ := Derive(e)
+		if stage != StageImplementing || !strings.Contains(why, op) {
+			t.Fatalf("%s: stage=%s why=%q, want implementing", op, stage, why)
+		}
+	}
+	// Without a live run the failed verdict still shows.
+	e := Evidence{IssueState: "open", AcceptanceRequired: true, PR: &PRInfo{Number: 7, State: "open", CI: "success"}, Acceptance: &AcceptanceInfo{Attempts: 1, Verdict: "failed"}, Run: &RunInfo{Operator: "repair-ci", Status: "success"}}
+	if stage, _, _ := Derive(e); stage == StageImplementing {
+		t.Fatalf("finished run must not show implementing")
 	}
 }

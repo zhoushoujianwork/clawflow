@@ -6,13 +6,18 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
 func resetPipeline(t *testing.T, src func(context.Context) (pipeline.Snapshot, error)) *time.Time {
@@ -24,11 +29,18 @@ func resetPipeline(t *testing.T, src func(context.Context) (pipeline.Snapshot, e
 	PipelineSource, pipelineNow, VersionInfo.Current = src, func() time.Time { return now }, "v9.9.9-test"
 	pipelineCache.mu.Lock()
 	pipelineCache.ok = false
+	pipelineCache.at = time.Time{}
+	pipelineCache.snap = pipeline.Snapshot{}
+	pipelineCache.err = ""
 	pipelineCache.mu.Unlock()
 	t.Cleanup(func() {
+		pipelineWorkers.Wait()
 		PipelineSource, pipelineNow, VersionInfo.Current = oldSrc, oldNow, oldVer
 		pipelineCache.mu.Lock()
 		pipelineCache.ok = false
+		pipelineCache.at = time.Time{}
+		pipelineCache.snap = pipeline.Snapshot{}
+		pipelineCache.err = ""
 		pipelineCache.mu.Unlock()
 	})
 	return &now
@@ -58,6 +70,9 @@ func fakeSnapshot() pipeline.Snapshot {
 
 func TestHandlePipelineJSONShape(t *testing.T) {
 	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
 	rec := getPipeline(t, http.MethodGet)
 	if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
 		t.Fatalf("status=%d type=%q body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body)
@@ -113,6 +128,92 @@ func TestHandlePipelineEmptyRepoListIsArray(t *testing.T) {
 	}
 }
 
+func TestHandlePipelineStaleSingleFlightLatency(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	now := resetPipeline(t, func(ctx context.Context) (pipeline.Snapshot, error) {
+		calls.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return fakeSnapshot(), nil
+	})
+	*now = now.Add(time.Minute)
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			rec := getPipeline(t, http.MethodGet)
+			if time.Since(start) >= 200*time.Millisecond {
+				t.Error("snapshot response exceeded 200ms")
+			}
+			var b pipeline.Board
+			if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil || !b.Stale || !b.Refreshing || len(b.Repos) != 1 {
+				t.Errorf("response: %s", rec.Body)
+			}
+		}()
+	}
+	wg.Wait()
+	close(release)
+	pipelineWorkers.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("refresh calls=%d", calls.Load())
+	}
+}
+
+func TestHandlePipelineRefreshFailurePreservesSnapshot(t *testing.T) {
+	now := resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) {
+		return pipeline.Snapshot{}, errors.New("provider unavailable")
+	})
+	*now = now.Add(time.Minute)
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	getPipeline(t, http.MethodGet)
+	pipelineWorkers.Wait()
+	rec := getPipeline(t, http.MethodGet)
+	var b pipeline.Board
+	if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil || !b.Stale || b.Error == "" || len(b.Repos) != 1 {
+		t.Fatalf("response: %s", rec.Body)
+	}
+}
+
+func TestHandlePipelineUsesNewerSchedulerSnapshot(t *testing.T) {
+	resetPipeline(t, nil)
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	getPipeline(t, http.MethodGet)
+	fresh := fakeSnapshot()
+	fresh.GeneratedAt = "2026-10-27T12:00:10Z"
+	fresh.Repos[0].Repo = "new/repo"
+	if err := snapshot.WritePipeline(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if rec := getPipeline(t, http.MethodGet); !strings.Contains(rec.Body.String(), "new/repo") {
+		t.Fatal(rec.Body)
+	}
+}
+
+func TestHandlePipelineIsReadOnlyAndNeedsSource(t *testing.T) {
+	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		if rec := getPipeline(t, m); rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s -> %d", m, rec.Code)
+		}
+	}
+	PipelineSource = nil
+	if rec := getPipeline(t, http.MethodGet); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no source -> %d", rec.Code)
+	}
+}
+
 func TestHandlePipelineAgentSlotsStayFresh(t *testing.T) {
 	calls := 0
 	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) {
@@ -162,53 +263,117 @@ func TestHandlePipelineAgentSlotsStayFresh(t *testing.T) {
 	}
 }
 
-func TestHandlePipelineCachesFor30Seconds(t *testing.T) {
-	calls := 0
-	now := resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { calls++; return fakeSnapshot(), nil })
-	for i := 0; i < 3; i++ {
-		getPipeline(t, http.MethodGet)
-	}
-	if calls != 1 {
-		t.Fatalf("calls within TTL = %d, want 1", calls)
-	}
-	*now = now.Add(pipelineTTL - time.Second)
-	getPipeline(t, http.MethodGet)
-	if calls != 1 {
-		t.Fatalf("calls just inside TTL = %d", calls)
-	}
-	*now = now.Add(2 * time.Second)
-	getPipeline(t, http.MethodGet)
-	if calls != 2 {
-		t.Fatalf("calls after TTL = %d, want 2", calls)
-	}
-}
-
-func TestHandlePipelineErrorsAreNotCached(t *testing.T) {
-	calls := 0
-	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) {
-		calls++
-		if calls == 1 {
-			return pipeline.Snapshot{}, errors.New("config unreadable")
-		}
-		return fakeSnapshot(), nil
-	})
-	if rec := getPipeline(t, http.MethodGet); rec.Code != 500 || !strings.Contains(rec.Body.String(), "config unreadable") {
-		t.Fatalf("first: %d %s", rec.Code, rec.Body)
-	}
-	if rec := getPipeline(t, http.MethodGet); rec.Code != 200 || calls != 2 {
-		t.Fatalf("second: %d calls=%d", rec.Code, calls)
-	}
-}
-
-func TestHandlePipelineIsReadOnlyAndNeedsSource(t *testing.T) {
+func TestPipelineRuntimePassTiming(t *testing.T) {
 	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
-	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
-		if rec := getPipeline(t, m); rec.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("%s -> %d", m, rec.Code)
+	runMu.Lock()
+	oldStarts, oldActive, oldResult, oldAt := activeRunStarts, activeRuns, lastPassResult, lastPassAt
+	started := time.Date(2026, 10, 28, 6, 0, 0, 0, time.UTC)
+	activeRunStarts = map[string]time.Time{"o/r": started}
+	activeRuns = map[string]bool{"o/r": true}
+	lastPassResult, lastPassAt = "error", started.Add(-time.Minute)
+	runMu.Unlock()
+	t.Cleanup(func() {
+		runMu.Lock()
+		activeRunStarts, activeRuns, lastPassResult, lastPassAt = oldStarts, oldActive, oldResult, oldAt
+		runMu.Unlock()
+	})
+	rt := pipelineRuntime()
+	if rt.Scheduler.Status != "running" || rt.Scheduler.StartedAt != started.Format(time.RFC3339) || rt.Scheduler.LastResult != "error" || rt.Scheduler.LastEndedAt == "" {
+		t.Fatalf("runtime=%+v", rt)
+	}
+}
+
+// executionFixtures are run metadata records shared by the selection, file and
+// PostgreSQL tests; each is the meta.json a run would persist.
+var executionFixtures = []struct {
+	name                          string
+	records                       []string
+	profile, backend, model, tier string
+}{
+	{"latest result", []string{
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T10:00:00Z","ended_at":"2026-10-28T10:01:00Z","status":"success","development_session":{"profile":"configured-other","backend":"old"}}`,
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T09:00:00Z","ended_at":"2026-10-28T11:00:00Z","status":"success","development_session":{"profile":"actual","backend":"codex"},"model":"recorded-model","service_tier":"priority"}`,
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T12:00:00Z","status":"running","development_session":{"profile":"running","backend":"claude"}}`,
+	}, "actual", "codex", "recorded-model", "priority"},
+	{"missing optional fields do not inherit", []string{
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T10:00:00Z","ended_at":"2026-10-28T10:30:00Z","status":"success","development_session":{"profile":"old","backend":"old"},"model":"old-model","service_tier":"priority"}`,
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T11:00:00Z","ended_at":"2026-10-28T11:30:00Z","status":"success","development_session":{"profile":"new","backend":"claude"}}`,
+	}, "new", "claude", "", ""},
+	{"recorded model usage", []string{
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T11:00:00Z","ended_at":"2026-10-28T11:10:00Z","status":"success","development_session":{"profile":"actual","backend":"codex"},"usage":{"model_usage":{"model-z":{},"model-a":{}}}}`,
+	}, "actual", "codex", "model-a, model-z", ""},
+	{"empty history", nil, "", "", "", ""},
+}
+
+func assertExecution(t *testing.T, ex pipeline.Execution, profile, backend, model, tier string) {
+	t.Helper()
+	raw, _ := json.Marshal(ex)
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"profile": profile, "backend": backend, "model": model, "service_tier": tier} {
+		if want == "" {
+			if _, ok := got[key]; ok {
+				t.Errorf("%s should be omitted: %s", key, raw)
+			}
+		} else if got[key] != want {
+			t.Errorf("%s = %v, want %s", key, got[key], want)
 		}
 	}
-	PipelineSource = nil
-	if rec := getPipeline(t, http.MethodGet); rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("no source -> %d", rec.Code)
+}
+
+func TestLatestExecutionSelection(t *testing.T) {
+	for _, tc := range executionFixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			var runs []snapshot.RunIndexEntry
+			for _, rec := range tc.records {
+				var e snapshot.RunIndexEntry
+				if err := json.Unmarshal([]byte(rec), &e); err != nil {
+					t.Fatal(err)
+				}
+				runs = append(runs, e)
+			}
+			assertExecution(t, latestExecution(runs), tc.profile, tc.backend, tc.model, tc.tier)
+		})
+	}
+}
+
+// Without a bound run store ReadRunsIndex reads data/runs/*/meta.json.
+func TestPipelineRuntimeUsesLatestRecordedExecutionFromFiles(t *testing.T) {
+	for _, tc := range executionFixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "configured-other")
+			snapshot.BindRunStore(nil)
+			for i, rec := range tc.records {
+				dir := filepath.Join(snapshot.DataDir(), "runs", "o__r", "issue-1", "run-"+string(rune('a'+i)))
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(rec), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertExecution(t, pipelineRuntime().Execution, tc.profile, tc.backend, tc.model, tc.tier)
+		})
+	}
+}
+
+// Same fixtures through the PostgreSQL runs table (skipped without a test DSN).
+func TestPipelineRuntimeUsesLatestRecordedExecutionFromDB(t *testing.T) {
+	for _, tc := range executionFixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			s := historyDB(t)
+			resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "configured-other")
+			for i, rec := range tc.records {
+				dir := filepath.Join(snapshot.DataDir(), "runs", "o__r", "issue-1", "run-"+string(rune('a'+i)))
+				if _, err := s.UpsertRun(context.Background(), dir, "run", []byte(rec)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertExecution(t, pipelineRuntime().Execution, tc.profile, tc.backend, tc.model, tc.tier)
+		})
 	}
 }

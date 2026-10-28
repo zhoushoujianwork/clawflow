@@ -48,6 +48,9 @@ type GlobalQueueEntry struct {
 
 // Board is the full /api/pipeline response.
 type Board struct {
+	Stale      bool   `json:"stale"`
+	Refreshing bool   `json:"refreshing"`
+	Error      string `json:"error,omitempty"`
 	Snapshot
 	Runtime Runtime `json:"runtime"`
 }
@@ -61,6 +64,9 @@ type Runtime struct {
 
 // Scheduler mirrors the existing /api/run/status payload.
 type Scheduler struct {
+	StartedAt       string `json:"started_at,omitempty"`
+	LastResult      string `json:"last_result,omitempty"`
+	LastEndedAt     string `json:"last_ended_at,omitempty"`
 	AgentSlotsUsed  int    `json:"agent_slots_used"`
 	AgentSlotsTotal int    `json:"agent_slots_total"`
 	Status          string `json:"status"` // "running" | "idle"
@@ -71,18 +77,24 @@ type Scheduler struct {
 
 // Execution reports whether the Offload execution profile is usable.
 type Execution struct {
-	Ready bool   `json:"ready"`
-	Error string `json:"error,omitempty"`
+	Model       string `json:"model,omitempty"`
+	ServiceTier string `json:"service_tier,omitempty"`
+	Backend     string `json:"backend,omitempty"`
+	Profile     string `json:"profile,omitempty"`
+	Ready       bool   `json:"ready"`
+	Error       string `json:"error,omitempty"`
 }
 
 // RepoBoard is the board for one repository.
 type RepoBoard struct {
+	Stale              bool   `json:"stale"`
 	Repo               string `json:"repo"`
 	Enabled            bool   `json:"enabled"`
 	Platform           string `json:"platform"`
 	AutoMerge          bool   `json:"auto_merge"`
 	CIRequired         bool   `json:"ci_required"`
 	AcceptanceRequired bool   `json:"acceptance_required"`
+	MaxInFlight        int    `json:"max_in_flight"`
 	Items              []Item `json:"items"`
 	// Error is set when the repository could not be read at all.
 	Error string `json:"error,omitempty"`
@@ -90,6 +102,8 @@ type RepoBoard struct {
 
 // Item is one issue travelling through the delivery pipeline.
 type Item struct {
+	State         string   `json:"state,omitempty"`
+	Attention     []string `json:"attention,omitempty"`
 	Issue         int      `json:"issue"`
 	Title         string   `json:"title"`
 	Stage         Stage    `json:"stage"`

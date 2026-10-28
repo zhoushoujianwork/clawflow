@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
@@ -25,7 +27,7 @@ import (
 const (
 	pipelineMaxPRDetails   = sweepMaxCandidates // PRs that get CI/mergeability/acceptance reads
 	pipelineRecentRunDays  = 7
-	pipelineRecentMerged   = 10
+	pipelineRecentMerged   = 100
 	pipelineMergedWindow   = 14 * 24 * time.Hour
 	pipelineSummaryLimit   = 600
 	pipelineLogTailBytes   = 4 << 20
@@ -44,6 +46,8 @@ type pipelineRecentPRLister interface {
 
 // pipelineDeps are the boundaries buildPipeline reads through; tests replace them.
 type pipelineDeps struct {
+	parallel  int
+	previous  map[string]pipeline.RepoBoard
 	cfg       *config.Config
 	newClient func(config.Repo) (vcs.Client, error)
 	now       func() time.Time
@@ -53,7 +57,9 @@ type pipelineDeps struct {
 	// globalQueue returns the unified queue in dispatch order; nil = none.
 	globalQueue func() []queue.ListEntry
 	// acceptance returns nil when the repo has no acceptance evidence to show.
-	acceptance func(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) *pipeline.AcceptanceInfo
+	// A non-nil error means a VCS or evidence read failed; the caller must treat
+	// the repository entry as failed so the previous snapshot is kept as stale.
+	acceptance func(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) (*pipeline.AcceptanceInfo, error)
 }
 
 func defaultPipelineDeps() (pipelineDeps, error) {
@@ -63,6 +69,7 @@ func defaultPipelineDeps() (pipelineDeps, error) {
 	}
 	return pipelineDeps{
 		cfg:       cfg,
+		parallel:  4,
 		newClient: acceptanceClientFactory,
 		now:       time.Now,
 		runs:      snapshot.ReadRunsIndex,
@@ -87,14 +94,18 @@ func PipelineSnapshot(ctx context.Context) (pipeline.Snapshot, error) {
 	if err != nil {
 		return pipeline.Snapshot{}, err
 	}
-	return buildPipeline(ctx, deps), nil
+	s := buildPipeline(ctx, pipelineSnapshotDeps(deps, false))
+	if err := snapshot.WritePipeline(s); err != nil {
+		runLogWarn("pipeline snapshot write", err)
+	}
+	return s, nil
 }
 
 // buildPipeline gathers the delivery board. Per-repository failures are
 // reported on that repository's board instead of failing the whole response.
 func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	now := d.now()
-	snap := pipeline.Snapshot{GeneratedAt: now.UTC().Format(time.RFC3339), Repos: []pipeline.RepoBoard{}, Events: []pipeline.Event{}}
+	snap := pipeline.Snapshot{GeneratedAt: now.UTC().Format(time.RFC3339Nano), Repos: []pipeline.RepoBoard{}, Events: []pipeline.Event{}}
 
 	events, evErr := d.events()
 	if evErr != nil {
@@ -111,15 +122,46 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	}
 	slices.Sort(names)
 
+	var queueRows []queue.ListEntry
+	if d.globalQueue != nil {
+		queueRows = d.globalQueue()
+	}
+	d.globalQueue = func() []queue.ListEntry { return queueRows }
 	runs := d.runs()
 	tracked := map[string]bool{}
-	for _, name := range names {
-		if ctx.Err() != nil {
-			break
-		}
-		tracked[name] = true
-		snap.Repos = append(snap.Repos, buildRepoBoard(ctx, d, name, d.cfg.Repos[name], runs, events, now))
+	snap.Repos = make([]pipeline.RepoBoard, len(names))
+	workers := d.parallel
+	if workers < 1 {
+		workers = 1
 	}
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for index, name := range names {
+		tracked[name] = true
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(index int, name string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			// A repository budget also bounds every individual HTTP call made by
+			// the provider's context-aware client, without abandoning goroutines.
+			repoCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			board := buildRepoBoard(repoCtx, d, name, d.cfg.Repos[name], runs, events, now)
+			if repoCtx.Err() != nil {
+				board.Error = "VCS refresh: " + repoCtx.Err().Error()
+			}
+			if board.Error != "" {
+				if old, ok := d.previous[name]; ok {
+					old.Error = board.Error
+					board = old
+				}
+				board.Stale = true
+			}
+			snap.Repos[index] = board
+		}(index, name)
+	}
+	wg.Wait()
 	snap.Events = pipeline.Relevant(events, tracked)
 	snap.GlobalQueue = []pipeline.GlobalQueueEntry{}
 	if d.globalQueue != nil {
@@ -131,6 +173,40 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 				Position: len(snap.GlobalQueue) + 1, Key: r.Key, Repo: r.Repo, Number: r.Number,
 				Title: pipelineClip(r.Title, 200), Tier: r.Tier, Rank: r.Rank, State: r.State,
 			})
+		}
+	}
+	// Queue candidates must remain visible before their first run or PR, and a
+	// queue row whose issue is running right now reports in_flight.
+	for i := range snap.GlobalQueue {
+		q := &snap.GlobalQueue[i]
+		for bi := range snap.Repos {
+			b := &snap.Repos[bi]
+			if b.Repo != q.Repo {
+				continue
+			}
+			found := false
+			for ii := range b.Items {
+				item := &b.Items[ii]
+				if item.Issue != q.Number {
+					continue
+				}
+				found = true
+				if item.Run != nil && item.Run.Live || item.Acceptance != nil && item.Acceptance.Running {
+					q.State = "in_flight"
+				}
+				item.InQueue = true
+				item.QueuePosition = q.Position
+				break
+			}
+			if !found {
+				item := pipeline.Item{State: "open", Issue: q.Number, Title: q.Title, InQueue: true, QueuePosition: q.Position, Stage: pipeline.StageQueued, Why: q.State, Evidence: []string{"scheduler queue snapshot"}}
+				if strings.HasPrefix(q.State, "blocked:") {
+					item.Stage = pipeline.StageBlocked
+					item.Attention = []string{q.State}
+				}
+				b.Items = append(b.Items, item)
+			}
+			sortBoardItems(b.Items)
 		}
 	}
 	return snap
@@ -155,12 +231,22 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 	board := pipeline.RepoBoard{
 		Repo: repo, Enabled: rc.Enabled, Platform: platform, AutoMerge: rc.AutoMerge,
 		CIRequired: rc.CIRequired, AcceptanceRequired: rc.AcceptanceRequired,
-		Items: []pipeline.Item{},
+		Items: []pipeline.Item{}, MaxInFlight: rc.MaxInFlight,
+	}
+	if board.MaxInFlight <= 0 {
+		board.MaxInFlight = 1
 	}
 	client, err := d.newClient(rc)
 	if err != nil {
 		board.Error = pipelineClip("VCS client unavailable: "+err.Error(), pipelineErrLimit)
 		return board
+	}
+	if local, ok := client.(*pipelineLocalClient); ok {
+		local.board = d.previous[repo]
+		if local.offline && local.board.Repo != "" && local.missingIssues {
+			board.Error = "scheduler issue snapshot unavailable"
+			return board
+		}
 	}
 	if rcx, ok := client.(interface{ SetRequestContext(context.Context) }); ok {
 		rcx.SetRequestContext(ctx)
@@ -229,16 +315,45 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 				continue
 			}
 			it, ok := issueByNum[row.Number]
-			if !ok || !hasLabel(it.Labels, queue.ScopeLabel) {
+			if !ok {
+				// Queue rows stay visible before their issue is readable.
+				it = vcs.Issue{Number: row.Number, Title: row.Title, State: "open"}
+			} else if !hasLabel(it.Labels, queue.ScopeLabel) {
 				continue
 			}
 			add(cand{number: it.Number, queuePos: row.Position, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
 		}
 	}
+	// Unresolved failures need attention regardless of queue enrolment or run retention.
+	for _, it := range openIssues {
+		if it.State == "open" && slices.Contains(it.Labels, "agent-failed") {
+			add(cand{number: it.Number, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
+		}
+	}
+	missingIssueReads := 0
 	for _, n := range prOrder {
 		it, ok := issueByNum[n]
 		if !ok {
-			continue // PR closes an issue that is not open: not in flight
+			if local, cached := client.(*pipelineLocalClient); cached && !local.hasSnapshotIssue(repo, n) {
+				if !local.offline && missingIssueReads >= pipelineMaxPRDetails {
+					board.Error = "missing issue lookup limit reached"
+				} else {
+					if !local.offline {
+						missingIssueReads++
+					}
+					recovered, err := local.missingPRIssue(repo, n)
+					if err != nil {
+						board.Error = pipelineClip("read missing PR issue: "+err.Error(), pipelineErrLimit)
+					}
+					if recovered != nil && recovered.State == "open" {
+						it, ok = *recovered, true
+						issueByNum[n] = it
+					}
+				}
+			}
+		}
+		if !ok {
+			continue // Confirmed closed/absent, or unavailable with an error note.
 		}
 		add(cand{number: n, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
 	}
@@ -270,7 +385,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 
 	detailed := 0
 	for _, c := range cands {
-		item := pipeline.Item{Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
+		item := pipeline.Item{State: c.state, Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
 		ev := pipeline.Evidence{IssueState: c.state, Labels: c.labels, AutoMerge: rc.AutoMerge, CIRequired: rc.CIRequired,
 			AcceptanceRequired: rc.AcceptanceRequired, InQueue: c.queuePos > 0, Now: now}
 		if r, ok := latestRun[c.number]; ok {
@@ -290,8 +405,14 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 				HeadBranch: pr.HeadBranch, HeadSHA: pr.HeadSHA, UpdatedAt: pr.UpdatedAt}
 			if detailed < pipelineMaxPRDetails {
 				detailed++
-				fillPRDetail(client, repo, pi)
-				if a := d.acceptance(ctx, client, repo, rc, pr, now); a != nil {
+				if err := fillPRDetail(client, repo, pi); err != nil {
+					board.Error = pipelineClip(err.Error(), pipelineErrLimit)
+				}
+				a, accErr := d.acceptance(ctx, client, repo, rc, pr, now)
+				if accErr != nil {
+					board.Error = pipelineClip("acceptance: "+accErr.Error(), pipelineErrLimit)
+				}
+				if a != nil {
 					item.Acceptance, ev.Acceptance = a, a
 				}
 			} else {
@@ -306,6 +427,33 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 
 		item.Stage, item.Why, item.Evidence = pipeline.Derive(ev)
+		if item.Stage != pipeline.StageMerged {
+			if item.Stage == pipeline.StageBlocked || item.Stage == pipeline.StageFailed || item.Stage == pipeline.StageRejected {
+				item.Attention = append(item.Attention, item.Why)
+			}
+			if slices.Contains(c.labels, "agent-failed") && item.Stage != pipeline.StageFailed {
+				item.Attention = append(item.Attention, "agent-failed")
+			}
+			if item.PR != nil && item.PR.State == "open" {
+				if !rc.AutoMerge {
+					item.Attention = append(item.Attention, "waiting for review (manual merge)")
+				}
+				if err := checkRepairBudget(snapshot.DataDir(), repo, item.PR.Number, now); errors.Is(err, errRepairExhausted) || errors.Is(err, errRepairBlocked) {
+					item.Attention = append(item.Attention, err.Error())
+				}
+			}
+			if d.globalQueue != nil && (item.Run == nil || !item.Run.Live) {
+				for _, q := range d.globalQueue() {
+					if q.Repo == repo && q.Number == c.number && strings.HasPrefix(q.State, "blocked:") && item.Stage == pipeline.StageQueued {
+						item.Stage, item.Why = pipeline.StageBlocked, q.State
+						item.Attention = append(item.Attention, q.State)
+					}
+				}
+			}
+		}
+		if local, ok := client.(*pipelineLocalClient); ok && local.offline && item.Stage == pipeline.StageAcceptancePending && item.Acceptance != nil && item.Acceptance.Verdict == "passed" {
+			item.Why = "the last stored acceptance passed; current contract verification is pending"
+		}
 		if item.Stage == pipeline.StageMerged && item.Delivery == nil && item.PR != nil {
 			item.Delivery = &pipeline.Delivery{PR: item.PR.Number, PRURL: item.PR.URL}
 		}
@@ -327,9 +475,14 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		board.Items = append(board.Items, item)
 	}
 
-	// Queue items first in queue order, then the rest by recency.
-	sort.SliceStable(board.Items, func(i, j int) bool {
-		a, b := board.Items[i], board.Items[j]
+	sortBoardItems(board.Items)
+	return board
+}
+
+// sortBoardItems puts queue items first in queue order, then the rest by recency.
+func sortBoardItems(items []pipeline.Item) {
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
 		if a.InQueue != b.InQueue {
 			return a.InQueue
 		}
@@ -338,7 +491,6 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 		return pipeline.ParseTime(a.UpdatedAt).After(pipeline.ParseTime(b.UpdatedAt))
 	})
-	return board
 }
 
 // pipelinePRs returns open PRs and recently merged PRs, using one cheap page
@@ -377,29 +529,33 @@ func pipelinePRIssue(pr vcs.PR) int {
 }
 
 // fillPRDetail reads CI (exact head SHA aggregation) and mergeability.
-func fillPRDetail(client vcs.Client, repo string, pi *pipeline.PRInfo) {
+func fillPRDetail(client vcs.Client, repo string, pi *pipeline.PRInfo) error {
+	var detailErr error
 	status, err := client.GetCIStatus(repo, pi.Number)
 	if err != nil {
 		pi.CI, pi.CIError = "unknown", pipelineClip(err.Error(), pipelineErrLimit)
+		detailErr = err
 	} else {
 		pi.CI = string(status)
 	}
 	if m, err := client.GetPRMergeability(repo, pi.Number); err != nil {
 		pi.Mergeable = "unknown"
+		detailErr = err
 	} else {
 		pi.Mergeable = string(m)
 	}
+	return detailErr
 }
 
 // pipelineAcceptance reads the latest acceptance evidence for the PR's current
 // contract. It is read-only: it never creates a store, runs a reviewer or
 // takes the acceptance lock. nil means there is nothing to show.
-func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) *pipeline.AcceptanceInfo {
+func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) (*pipeline.AcceptanceInfo, error) {
 	path := acceptanceStorePath(repo, pr.Number)
 	st, statErr := os.Lstat(path)
 	haveStore := statErr == nil && st.IsDir() && st.Mode().Perm()&0077 == 0
 	if !rc.AcceptanceRequired && !haveStore {
-		return nil
+		return nil, nil
 	}
 	info := &pipeline.AcceptanceInfo{Required: rc.AcceptanceRequired, MaxInfraRetries: harvestMaxInfra}
 	info.Running = snapshot.IsLocked("acceptance-"+acceptanceHash(repo), pr.Number)
@@ -407,22 +563,32 @@ func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc 
 	c, _, _, _, err := acceptanceContract(ctx, client, repo, pr.Number)
 	if err != nil {
 		info.Error = pipelineClip(err.Error(), pipelineErrLimit)
-		return info
+		var readErr acceptanceReadError
+		if errors.As(err, &readErr) {
+			return info, err
+		}
+		return info, nil
 	}
 	if !haveStore {
-		return info // contract is buildable; no attempt has been recorded yet
+		return info, nil // contract is buildable; no attempt has been recorded yet
 	}
 	store, err := acceptance.OpenStore(path)
 	if err != nil {
 		info.Error = "acceptance evidence unavailable"
-		return info
+		return info, errors.New(info.Error)
 	}
 	defer store.Close()
 	records, err := store.CompleteRecords(c)
 	if err != nil {
 		info.Error = "acceptance evidence unreadable"
-		return info
+		return info, errors.New(info.Error)
 	}
+	return pipelineAcceptanceRecords(info, c, records, true), nil
+}
+
+// pipelineAcceptanceRecords shares presentation while keeping offline history
+// separate from validation against the current live contract.
+func pipelineAcceptanceRecords(info *pipeline.AcceptanceInfo, c acceptance.Contract, records []acceptance.Record, current bool) *pipeline.AcceptanceInfo {
 	info.Attempts = len(records)
 	var lastInfra time.Time
 	for _, r := range records {
@@ -448,7 +614,7 @@ func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc 
 		return info
 	}
 	info.Verdict = string(latest.Verdict)
-	info.Valid = acceptance.Evaluate(c, latest) == nil
+	info.Valid = current && acceptance.Evaluate(c, latest) == nil
 	return info
 }
 
