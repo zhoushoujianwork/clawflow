@@ -40,7 +40,7 @@ func (c *pipelineLocalClient) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 			haveRepo = true
 		}
 		if i.Repo == repo && i.State == "open" {
-			out = append(out, vcs.Issue{Number: i.IssueNumber, Title: i.IssueTitle, State: i.State, Labels: i.Labels, UpdatedAt: i.CapturedAt.UTC().Format(time.RFC3339)})
+			out = append(out, vcs.Issue{Number: i.IssueNumber, Title: i.IssueTitle, State: i.State, Labels: i.Labels, UpdatedAt: i.UpdatedAt})
 		}
 	}
 	if !haveRepo && !c.offline {

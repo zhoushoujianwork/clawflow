@@ -96,12 +96,14 @@ type RepoBoard struct {
 	AcceptanceRequired bool   `json:"acceptance_required"`
 	MaxInFlight        int    `json:"max_in_flight"`
 	Items              []Item `json:"items"`
+	UnqueuedIssues     []Item `json:"unqueued_issues,omitempty"`
 	// Error is set when the repository could not be read at all.
 	Error string `json:"error,omitempty"`
 }
 
 // Item is one issue travelling through the delivery pipeline.
 type Item struct {
+	HasDecided    *bool    `json:"has_decided,omitempty"`
 	State         string   `json:"state,omitempty"`
 	Attention     []string `json:"attention,omitempty"`
 	Issue         int      `json:"issue"`

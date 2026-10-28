@@ -316,3 +316,91 @@ func TestWakeCollectionRetainsUnconsumedEvents(t *testing.T) {
 		})
 	}
 }
+
+func TestBoardWakeTriggers(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name, kind string
+		item       pipeline.Item
+		created    time.Time
+	}{
+		{"head-2", "missing-decided", pipeline.Item{Issue: 3, State: "open", InQueue: true, QueuePosition: 3, HasDecided: pipeline.DecidedSection("## Plan"), UpdatedAt: old}, now.Add(-time.Hour)},
+		{"unqueued", "unqueued-issue", pipeline.Item{Issue: 4, State: "open", UpdatedAt: old}, now.Add(-time.Hour)},
+		{"stuck PR", "stuck-pr", pipeline.Item{Issue: 5, State: "open", InQueue: true, PR: &pipeline.PRInfo{State: "open", UpdatedAt: old}}, now.Add(-time.Hour)},
+		{"digest", "daily-digest", pipeline.Item{Issue: 6, State: "closed"}, now.Add(-25 * time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			p, err := project.Create("board")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.Repos = []string{"o/r"}
+			p.CreatedAt = tc.created.Format(time.RFC3339)
+			p.Automation.LastWokenAt = now.Add(-time.Minute).Format(time.RFC3339)
+			board := pipeline.Snapshot{GeneratedAt: now.Format(time.RFC3339), Repos: []pipeline.RepoBoard{{Repo: "o/r", Items: []pipeline.Item{tc.item}}}}
+			if tc.kind == "unqueued-issue" {
+				board.Repos[0].Items = nil
+				board.Repos[0].UnqueuedIssues = []pipeline.Item{tc.item}
+			}
+			board.Repos = append(board.Repos, pipeline.RepoBoard{Repo: "other/r", UnqueuedIssues: []pipeline.Item{{Issue: 99, State: "open"}}})
+			if err := snapshot.WritePipeline(board); err != nil {
+				t.Fatal(err)
+			}
+			ev, state, err := collectWakeEvidence(p, &config.Config{}, now)
+			if err != nil || len(ev.Attention) != 1 || ev.Attention[0].Kind != tc.kind {
+				t.Fatalf("missing trigger: %+v, %v", ev.Attention, err)
+			}
+			if err := saveWakeState(p.Name, state, ev, now); err != nil {
+				t.Fatal(err)
+			}
+			// A new snapshot timestamp alone must never generate another wake,
+			// even after a process reload and a full day's cooldown.
+			board.GeneratedAt = now.Add(26 * time.Hour).Format(time.RFC3339)
+			if err := snapshot.WritePipeline(board); err != nil {
+				t.Fatal(err)
+			}
+			ev, _, err = collectWakeEvidence(p, &config.Config{}, now.Add(26*time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, a := range ev.Attention {
+				if a.Kind == tc.kind {
+					t.Fatalf("unchanged condition replayed: %+v", a)
+				}
+			}
+			if tc.kind == "daily-digest" {
+				board.Repos[0].Items[0].Title = "new delivery"
+				if err := snapshot.WritePipeline(board); err != nil {
+					t.Fatal(err)
+				}
+				ev, _, err = collectWakeEvidence(p, &config.Config{}, now.Add(26*time.Hour))
+				if err != nil || len(ev.Attention) != 1 || ev.Attention[0].Kind != "daily-digest" {
+					t.Fatalf("changed digest lost: %+v %v", ev, err)
+				}
+			}
+		})
+	}
+}
+
+func TestBoardWakeNegativeConditions(t *testing.T) {
+	now := time.Now().UTC()
+	board := pipeline.Snapshot{Repos: []pipeline.RepoBoard{{Repo: "o/r", Items: []pipeline.Item{
+		{Issue: 1, State: "closed"},
+		{Issue: 2, State: "open", InQueue: true, QueuePosition: 4, HasDecided: pipeline.DecidedSection("")},
+		{Issue: 3, State: "open", InQueue: true, QueuePosition: 3, HasDecided: pipeline.DecidedSection("## Decided\nship")},
+		{Issue: 4, State: "open", InQueue: true, QueuePosition: 3}, // Unknown on legacy snapshots.
+		{Issue: 5, State: "open", InQueue: true, PR: &pipeline.PRInfo{State: "open", UpdatedAt: now.Add(-time.Hour).Format(time.RFC3339Nano)}},
+		{Issue: 6, State: "open", InQueue: true, PR: &pipeline.PRInfo{State: "closed", UpdatedAt: now.Add(-2 * time.Hour).Format(time.RFC3339)}},
+		{Issue: 7, State: "open", InQueue: true, PR: &pipeline.PRInfo{State: "open"}},
+	}}}}
+	if got := boardAttention(board, wakeState{}, now.Add(-time.Hour), now); len(got) != 0 {
+		t.Fatalf("unexpected: %+v", got)
+	}
+	board.Repos[0].Items = []pipeline.Item{{Issue: 8, State: "open"}}
+	board.Repos[0].Stale = true
+	if got := boardAttention(board, wakeState{}, now, now); len(got) != 0 {
+		t.Fatalf("stale evidence: %+v", got)
+	}
+}
