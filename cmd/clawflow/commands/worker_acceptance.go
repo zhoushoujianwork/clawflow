@@ -148,7 +148,8 @@ func (s *coordinatorResults) finishAcceptance(ctx context.Context, t *coordinato
 	if json.Unmarshal(t.Payload, &p) != nil || p.Acceptance == nil || p.TaskID != t.ID || len(r.Effects) != 0 || r.DevelopmentEvents != "" {
 		return coordinator.ErrInvalid
 	}
-	if p.AcceptanceWorker != "any" && (p.AcceptanceWorker != "different" || worker == p.DevelopmentWorker || p.DevelopmentWorker == "") {
+	// Routing policy never relaxes the independence required for uploaded evidence.
+	if (p.AcceptanceWorker != "any" && p.AcceptanceWorker != "different") || worker == p.DevelopmentWorker || p.DevelopmentWorker == "" {
 		return coordinator.ErrInvalid
 	}
 	if r.Acceptance == nil {

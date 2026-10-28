@@ -80,7 +80,7 @@ func acceptanceUploadTask(t *testing.T, c acceptance.Contract) *resultStoreFake 
 }
 
 func TestCoordinatorAcceptanceUpload(t *testing.T) {
-	for _, mode := range []string{"valid", "stale", "self-worker", "self-session", "tampered", "head", "command"} {
+	for _, mode := range []string{"valid", "valid-any", "stale", "self-worker", "self-worker-any", "missing-worker-any", "self-session", "tampered", "head", "command"} {
 		t.Run(mode, func(t *testing.T) {
 			f, _ := acceptanceFixture(t)
 			r := produceAcceptance(t, f)
@@ -94,10 +94,18 @@ func TestCoordinatorAcceptanceUpload(t *testing.T) {
 			switch mode {
 			case "stale":
 				fence = 0
-			case "self-worker":
+			case "valid-any", "self-worker", "self-worker-any", "missing-worker-any":
 				var p coordinatorPayload
 				_ = json.Unmarshal(backing.task.Payload, &p)
-				p.DevelopmentWorker = "w"
+				if mode != "self-worker" {
+					p.AcceptanceWorker = "any"
+				}
+				if mode == "self-worker" || mode == "self-worker-any" {
+					p.DevelopmentWorker = "w"
+				}
+				if mode == "missing-worker-any" {
+					p.DevelopmentWorker = ""
+				}
 				backing.task.Payload, _ = json.Marshal(p)
 			case "self-session":
 				r.Reviewer.SessionID = r.Contract.Development.SessionID
@@ -110,7 +118,7 @@ func TestCoordinatorAcceptanceUpload(t *testing.T) {
 			}
 			raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "success"}, Acceptance: &r})
 			err := s.Complete(context.Background(), "upload", "w", fence, raw)
-			if mode != "valid" {
+			if mode != "valid" && mode != "valid-any" {
 				if err == nil {
 					t.Fatal("accepted invalid upload")
 				}
