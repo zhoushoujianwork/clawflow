@@ -45,6 +45,10 @@ func (r *Repo) UnmarshalYAML(node *yaml.Node) error {
 	if value != nil {
 		decoded.PilotOverrideMerge = *value
 	}
+	decoded.WorkerTags, err = migrateHostTag(node, decoded.WorkerTags)
+	if err != nil {
+		return err
+	}
 	*r = Repo(decoded)
 	return nil
 }
@@ -61,6 +65,10 @@ func (r *syncableRepo) UnmarshalYAML(node *yaml.Node) error {
 	}
 	if value != nil {
 		decoded.PilotOverrideMerge = *value
+	}
+	decoded.WorkerTags, err = migrateHostTag(node, decoded.WorkerTags)
+	if err != nil {
+		return err
 	}
 	*r = syncableRepo(decoded)
 	return nil

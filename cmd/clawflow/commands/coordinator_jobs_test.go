@@ -514,3 +514,14 @@ func TestCoordinatorDispatchPreservesFatalErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestCoordinatorHostAffinitySurvivesKindOverride(t *testing.T) {
+	j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7}, repoCfg: config.Repo{
+		WorkerTags: []string{"codex", "host-work-mac"}, WorkerTagsByKind: map[string][]string{"implement": {"heavy"}},
+	}}
+	task, payload := coordinatorTask(j, time.Minute)
+	want := []string{"github", "heavy", "host-work-mac"}
+	if !reflect.DeepEqual(task.Tags, want) || !reflect.DeepEqual(payload.Tags, want) {
+		t.Fatalf("lost host affinity: %+v / %+v", task.Tags, payload.Tags)
+	}
+}

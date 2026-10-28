@@ -99,3 +99,17 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.clawflow.worker.plis
 # 停止服务（SIGTERM 会取消正在执行的任务）
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.clawflow.worker.plist
 ```
+
+## 主机亲和性迁移
+
+每个 worker 自动注册 `host-<hostname>`（转为小写并去掉结尾 `.local`）。
+在仓库配置中添加 `worker_tags: [host-work-mac]`，即可只让匹配主机领取任务。
+如设置 `worker_tags_by_kind`，该类型的能力标签覆盖仓库默认标签；仓库 host 标签仍保留，保证主机约束适用于每类任务。
+
+旧 `bound_machine: Work-Mac.local` 自动追加 `host-work-mac` 到 `worker_tags`，
+迁移提示每进程只显示一次；`require_binding` 忽略并提示。保存或同步输出时省略两字段，保留其他设置。
+`clawflow repo set owner/repo --bound-machine Work-Mac.local` 仍可使用，但会提示弃用并替换 host 标签；
+空值清除 host 标签，保留其他能力标签。`repo show` 显示 `worker_tags`。
+
+coordinator 的扫描、定向运行、harvest 不受机器绑定限制。未启用 coordinator 时保持本机运行能力，
+不会因为迁移的 host 标签跳过仓库；主机限制在 worker 领取任务时生效。

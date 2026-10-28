@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -192,6 +193,21 @@ func RunDir(repo string, issueNum int, startedAt time.Time) string {
 	)
 }
 
+// repoHostBinding projects required host tags into the legacy dashboard field.
+// Multiple host constraints remain visible rather than appearing unbound.
+func repoHostBinding(r config.Repo) string {
+	hosts := []string{}
+	for _, tag := range r.WorkerTags {
+		if host, ok := strings.CutPrefix(tag, "host-"); ok && host != "" && !slices.Contains(hosts, host) {
+			hosts = append(hosts, host)
+		}
+	}
+	if len(hosts) == 0 && r.BoundMachine != "" {
+		hosts = append(hosts, strings.TrimPrefix(config.HostTag(r.BoundMachine), "host-"))
+	}
+	return strings.Join(hosts, ", ")
+}
+
 // RepoView is the dashboard-facing view of one monitored repo. Credentials
 // are deliberately NOT included — the dashboard is local but still renders
 // in a browser and we don't want tokens in the DOM.
@@ -203,9 +219,10 @@ type RepoView struct {
 	LocalPath  string `json:"local_path,omitempty"`
 	Enabled    bool   `json:"enabled"`
 	AutoMerge  bool   `json:"auto_merge"`
-	// BoundMachine is the hostname this repo is restricted to, or empty if
-	// unbound. Exposed to the dashboard so the bind/unbind button can show
-	// the current binding state without a separate API call.
+	// WorkerTags is the authoritative repository affinity and capability set.
+	WorkerTags []string `json:"worker_tags,omitempty"`
+	// BoundMachine is a compatibility display value derived from host tags.
+	// It keeps existing dashboard bind/unbind controls consistent on refresh.
 	BoundMachine string `json:"bound_machine,omitempty"`
 	// Projects lists every project this repo belongs to, name-sorted
 	// (multi-membership, issue #267). PrimaryProject names the authoritative
@@ -609,7 +626,8 @@ func WriteRepos(cfg *config.Config) error {
 			LocalPath:       r.LocalPath,
 			Enabled:         r.Enabled,
 			AutoMerge:       r.AutoMerge,
-			BoundMachine:    r.BoundMachine,
+			BoundMachine:    repoHostBinding(r),
+			WorkerTags:      r.WorkerTags,
 			Projects:        projectNames,
 			PrimaryProject:  primaryName,
 			BaseBranchValid: baseValid,

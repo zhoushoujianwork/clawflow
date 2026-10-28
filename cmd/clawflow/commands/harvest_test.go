@@ -597,3 +597,31 @@ func TestHarvestGitLabConditionalMerge(t *testing.T) {
 		t.Fatalf("failed=%v calls=%d merges=%d log=%s", failed, *calls, merges.Load(), readLog())
 	}
 }
+
+func TestHarvestIgnoresRetiredBinding(t *testing.T) {
+	_, _, calls := harvestFixture(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := cfg.Repos["o/r"]
+	repo.BoundMachine = "other-host"
+	repo.WorkerTags = []string{"host-other-host"}
+	cfg.Repos["o/r"] = repo
+	cfg.Settings.RequireBinding = true
+	cfg.Settings.Coordinator.Enabled = true
+	enqueued := 0
+	oldEnqueue := enqueueWorkerAcceptanceFn
+	t.Cleanup(func() { enqueueWorkerAcceptanceFn = oldEnqueue })
+	enqueueWorkerAcceptanceFn = func(_ context.Context, _ vcs.Client, name string, rc config.Repo, pr vcs.PR, _ time.Duration) error {
+		if name != "o/r" || !rc.CoordinatorMode || pr.Number != 11 || !reflect.DeepEqual(rc.WorkerTags, []string{"host-other-host"}) {
+			t.Fatalf("acceptance routing lost repository scope or host tags: %s %+v %+v", name, rc, pr)
+		}
+		enqueued++
+		return nil
+	}
+	failed := runHarvestPhase(context.Background(), cfg, "o/r", 0, 30*time.Minute, time.Now().Add(2*time.Hour))
+	if len(failed) != 0 || enqueued != 1 || *calls != 0 {
+		t.Fatalf("legacy binding prevented enqueue or ran local acceptance: failed=%v enqueued=%d local=%d", failed, enqueued, *calls)
+	}
+}

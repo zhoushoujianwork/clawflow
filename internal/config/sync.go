@@ -21,10 +21,7 @@ const GistDescription = "clawflow-config"
 // syncableRepo is a Repo with local_path stripped for upload.
 // We keep the same field tags so it round-trips cleanly through YAML.
 //
-// bound_machine IS synced: it's a fleet-wide directive ("only machine X
-// should process this repo"), not a per-machine local fact. Without sync,
-// every machine in the fleet would have to be re-bound by hand, which
-// defeats the purpose of the binding.
+// Host affinity is synced as worker_tags.
 type syncableRepo struct {
 	AcceptanceWorker string              `yaml:"acceptance_worker,omitempty"`
 	WorkerTags       []string            `yaml:"worker_tags,omitempty"`
@@ -46,7 +43,7 @@ type syncableRepo struct {
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	PilotOverrideMerge bool              `yaml:"pilot_override_merge,omitempty"`
 	SelfUpgrade        bool              `yaml:"self_upgrade,omitempty"`
-	BoundMachine       string            `yaml:"bound_machine,omitempty"`
+	BoundMachine       string            `yaml:"-"`
 	MaxInFlight        int               `yaml:"max_in_flight,omitempty"`
 	UpdatedAt          time.Time         `yaml:"updated_at,omitempty"`
 	UpdatedBy          string            `yaml:"updated_by,omitempty"`

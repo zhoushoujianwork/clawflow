@@ -109,7 +109,7 @@ function RepoList() {
         }
         setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
       }
-      if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+      if (settings?.global?.hostname) setHostname((settings.global.hostname as string).toLowerCase().replace(/\.local$/, ''))
       setProjects(Array.isArray(proj) ? proj as ProjectEntry[] : [])
       setLoading(false)
     })

@@ -58,15 +58,8 @@ type Repo struct {
 	// 0 = default 2. Negative values are rejected by Validate.
 	MaxInFlight int `yaml:"max_in_flight,omitempty" json:"max_in_flight,omitempty"`
 
-	// BoundMachine, when non-empty, restricts processing of this repo to the
-	// machine whose hostname matches this value. Repos with no BoundMachine
-	// (or whose BoundMachine matches the current hostname) are processed
-	// normally. This allows multiple machines sharing a synced config to each
-	// own a subset of repos without stepping on each other.
-	//
-	// Like local_path, this field is machine-specific and is intentionally
-	// excluded from cloud sync (see syncableRepo in sync.go).
-	BoundMachine string `yaml:"bound_machine,omitempty"`
+	// BoundMachine is a deprecated Go input alias; serialization migrates it to WorkerTags.
+	BoundMachine string `yaml:"-"`
 
 	// PrimaryProject names the authoritative project for this repo when it
 	// belongs to more than one project (multi-membership, issue #267). The
@@ -205,11 +198,8 @@ type Settings struct {
 	// to stop retrying. 0 or unset defaults to 3.
 	MaxConsecutiveFailures int `yaml:"max_consecutive_failures,omitempty"`
 
-	// RequireBinding, when true, causes `clawflow run` to skip repos
-	// whose BoundMachine is empty. This prevents newly synced repos from
-	// being processed by all machines simultaneously — they must be
-	// explicitly bound first. Synced via Gist as a shared fleet policy.
-	RequireBinding bool `yaml:"require_binding,omitempty"`
+	// RequireBinding is retained for source compatibility and is ignored.
+	RequireBinding bool `yaml:"-"`
 
 	// Queue tunes the unified cross-repo work queue.
 	Queue QueueSettings `yaml:"queue,omitempty"`
@@ -968,24 +958,11 @@ func ConfigPath() string {
 	return filepath.Join(home, ".clawflow", "config", "config.yaml")
 }
 
-// EnabledRepos returns only the repos with enabled: true.
-// RunsOnHost reports whether a repo is processed by the machine named
-// hostname: bound_machine must match when set, and require_binding rejects
-// unbound repos. An empty hostname (unresolvable) conservatively accepts all.
-// Shared by `clawflow run` and the web auto-run scheduler.
-func (s Settings) RunsOnHost(r Repo, hostname string) bool {
-	if s.Coordinator.Enabled {
-		return true
-	}
-	if r.BoundMachine != "" && hostname != "" && r.BoundMachine != hostname {
-		return false
-	}
-	if s.RequireBinding && r.BoundMachine == "" && hostname != "" {
-		return false
-	}
-	return true
-}
+// RunsOnHost accepts all repositories. Host affinity is enforced by worker
+// task-tag matching, never by independent scan or harvest loops.
+func (s Settings) RunsOnHost(r Repo, hostname string) bool { return true }
 
+// EnabledRepos returns only the repos with enabled: true.
 func (c *Config) EnabledRepos() map[string]Repo {
 	out := make(map[string]Repo)
 	for k, v := range c.Repos {

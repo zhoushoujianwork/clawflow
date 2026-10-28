@@ -91,6 +91,7 @@ func newRepoShowCmd() *cobra.Command {
 			fmt.Printf("ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("acceptance_required: %v\n", r.AcceptanceRequired)
 			fmt.Printf("self_upgrade: %v\n", r.SelfUpgrade)
+			fmt.Printf("worker_tags:  %v\n", r.WorkerTags)
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
 			fmt.Printf("local_path:   %s\n", r.LocalPath)
 			if r.Description != "" {
@@ -412,7 +413,7 @@ func newRepoSetCmd() *cobra.Command {
 					r.PrimaryProject = primaryProject
 				}
 				if boundMachineSet {
-					r.BoundMachine = boundMachine
+					r = r.WithHostTag(boundMachine)
 				}
 				if maxInFlightSet {
 					r.MaxInFlight = maxInFlight
@@ -432,13 +433,7 @@ func newRepoSetCmd() *cobra.Command {
 			fmt.Printf("  acceptance_required: %v\n", r.AcceptanceRequired)
 			fmt.Printf("  acceptance_overlap_ci: %v\n", r.AcceptanceOverlapsCI())
 			fmt.Printf("  self_upgrade: %v\n", r.SelfUpgrade)
-			if boundMachineSet {
-				if r.BoundMachine == "" {
-					fmt.Printf("  bound_machine: (cleared)\n")
-				} else {
-					fmt.Printf("  bound_machine: %s\n", r.BoundMachine)
-				}
-			}
+			fmt.Printf("  worker_tags: %v\n", r.WorkerTags)
 			if maxInFlightSet {
 				fmt.Printf("  max_in_flight: %d\n", r.MaxInFlight)
 			}
@@ -460,6 +455,7 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
 	cmd.Flags().IntVar(&maxInFlight, "max-in-flight", 0, "max issues of this repo running or awaiting review at once in the unified queue (>=1, default 2)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
+	_ = cmd.Flags().MarkDeprecated("bound-machine", "use worker_tags with host-<hostname> instead")
 	return cmd
 }
 

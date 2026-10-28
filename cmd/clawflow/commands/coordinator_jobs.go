@@ -95,6 +95,12 @@ func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordi
 	tags := append([]string{}, j.repoCfg.WorkerTags...)
 	if override, ok := j.repoCfg.WorkerTagsByKind[kind]; ok {
 		tags = append([]string{}, override...)
+		// Host affinity applies to every task kind, including legacy pins.
+		for _, tag := range j.repoCfg.WorkerTags {
+			if strings.HasPrefix(tag, "host-") {
+				tags = append(tags, tag)
+			}
+		}
 	}
 	hostTag := platform
 	if u, err := url.Parse(j.repoCfg.BaseURL); err == nil && u.Hostname() != "" {
@@ -102,7 +108,7 @@ func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordi
 	}
 	tags = append(tags, hostTag)
 	if j.repoCfg.BoundMachine != "" {
-		tags = append(tags, "host-"+strings.TrimSuffix(strings.ToLower(j.repoCfg.BoundMachine), ".local"))
+		tags = append(tags, config.HostTag(j.repoCfg.BoundMachine))
 	}
 	priority := j.repoCfg.Priority * 3
 	for _, label := range j.sub.Labels {

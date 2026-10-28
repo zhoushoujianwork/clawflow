@@ -318,7 +318,7 @@ function Dashboard() {
       setRepos(Array.isArray(rp) ? rp : [])
       setPending(Array.isArray(pd) ? pd : [])
       setIssues(Array.isArray(iss) ? iss : [])
-      if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+      if (settings?.global?.hostname) setHostname((settings.global.hostname as string).toLowerCase().replace(/\.local$/, ''))
       setLoading(false)
     }
 

@@ -221,7 +221,7 @@ func TestRunOnceUnknownRepoErrors(t *testing.T) {
 	}
 }
 
-func TestRunOnceTargetedRespectsBinding(t *testing.T) {
+func TestRunOnceTargetedIgnoresRetiredBinding(t *testing.T) {
 	host, _ := os.Hostname()
 	if host == "" {
 		t.Skip("hostname unavailable")
@@ -244,8 +244,8 @@ func TestRunOnceTargetedRespectsBinding(t *testing.T) {
 			if err := runOnce(context.Background(), "o/r", 7, time.Minute); err != nil {
 				t.Fatal(err)
 			}
-			if len(dispatched()) != 0 {
-				t.Fatalf("dispatched %v despite binding", dispatched())
+			if len(dispatched()) != 1 {
+				t.Fatalf("legacy binding prevented dispatch: %v", dispatched())
 			}
 		})
 	}
