@@ -65,6 +65,8 @@ type Scheduler struct {
 	StartedAt       string `json:"started_at,omitempty"`
 	LastResult      string `json:"last_result,omitempty"`
 	LastEndedAt     string `json:"last_ended_at,omitempty"`
+	AgentSlotsUsed  int    `json:"agent_slots_used"`
+	AgentSlotsTotal int    `json:"agent_slots_total"`
 	Status          string `json:"status"` // "running" | "idle"
 	IntervalMinutes int    `json:"interval_minutes"`
 	Paused          bool   `json:"paused"`

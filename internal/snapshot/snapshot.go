@@ -257,8 +257,11 @@ type DevelopmentSession struct {
 }
 
 type RunMeta struct {
+	Profile string `json:"profile,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Machine string `json:"machine,omitempty"`
 	// Optional execution metadata is preserved when present; never infer a tier.
-	Model              string             `json:"model,omitempty"`
 	ServiceTier        string             `json:"service_tier,omitempty"`
 	RepairReason       string             `json:"repair_reason,omitempty"`
 	DevelopmentSession DevelopmentSession `json:"development_session,omitempty"`
@@ -329,6 +332,8 @@ type RunMeta struct {
 // "result" event. All fields are summable across runs so callers can build
 // aggregates without re-parsing events.jsonl.
 type Usage struct {
+	TokensUnavailable        bool                  `json:"tokens_unavailable,omitempty"`
+	CostUnavailable          bool                  `json:"cost_unavailable,omitempty"`
 	DurationMs               int64                 `json:"duration_ms"`
 	NumTurns                 int                   `json:"num_turns"`
 	TotalCostUSD             float64               `json:"total_cost_usd"`
@@ -353,6 +358,7 @@ type Usage struct {
 // ModelUsage is the per-model slice of a single run. The keys mirror Usage
 // so the dashboard can render the same column set at any aggregation level.
 type ModelUsage struct {
+	CostUnavailable          bool    `json:"cost_unavailable,omitempty"`
 	InputTokens              int64   `json:"input_tokens"`
 	OutputTokens             int64   `json:"output_tokens"`
 	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
@@ -365,11 +371,11 @@ type ModelUsage struct {
 // modelUsage values are camelCase, so we declare a sibling struct with
 // camelCase JSON tags for them.
 type rawResultEvent struct {
-	Type         string  `json:"type"`
-	DurationMs   int64   `json:"duration_ms"`
-	NumTurns     int     `json:"num_turns"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
-	Usage        struct {
+	Type         string   `json:"type"`
+	DurationMs   int64    `json:"duration_ms"`
+	NumTurns     int      `json:"num_turns"`
+	TotalCostUSD *float64 `json:"total_cost_usd"`
+	Usage        *struct {
 		InputTokens              int64 `json:"input_tokens"`
 		OutputTokens             int64 `json:"output_tokens"`
 		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
@@ -379,11 +385,11 @@ type rawResultEvent struct {
 }
 
 type rawModelUsage struct {
-	InputTokens              int64   `json:"inputTokens"`
-	OutputTokens             int64   `json:"outputTokens"`
-	CacheReadInputTokens     int64   `json:"cacheReadInputTokens"`
-	CacheCreationInputTokens int64   `json:"cacheCreationInputTokens"`
-	CostUSD                  float64 `json:"costUSD"`
+	InputTokens              int64    `json:"inputTokens"`
+	OutputTokens             int64    `json:"outputTokens"`
+	CacheReadInputTokens     int64    `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int64    `json:"cacheCreationInputTokens"`
+	CostUSD                  *float64 `json:"costUSD"`
 }
 
 // rawAssistantEvent is the private projection of an `"type":"assistant"` line
@@ -529,14 +535,19 @@ func ExtractUsage(eventsPath string) (*Usage, error) {
 		return &fb, nil
 	}
 
-	u := &Usage{
-		DurationMs:               lastResult.DurationMs,
-		NumTurns:                 lastResult.NumTurns,
-		TotalCostUSD:             lastResult.TotalCostUSD,
-		InputTokens:              lastResult.Usage.InputTokens,
-		OutputTokens:             lastResult.Usage.OutputTokens,
-		CacheReadInputTokens:     lastResult.Usage.CacheReadInputTokens,
-		CacheCreationInputTokens: lastResult.Usage.CacheCreationInputTokens,
+	if lastResult.Usage == nil && lastResult.TotalCostUSD == nil && len(lastResult.ModelUsage) == 0 {
+		return nil, nil
+	}
+	u := &Usage{DurationMs: lastResult.DurationMs, NumTurns: lastResult.NumTurns, CostUnavailable: lastResult.TotalCostUSD == nil, TokensUnavailable: lastResult.Usage == nil}
+	if v := lastResult.Usage; v != nil {
+		u.InputTokens = v.InputTokens
+		u.OutputTokens = v.OutputTokens
+		u.CacheReadInputTokens = v.CacheReadInputTokens
+		u.CacheCreationInputTokens = v.CacheCreationInputTokens
+	}
+
+	if lastResult.TotalCostUSD != nil {
+		u.TotalCostUSD = *lastResult.TotalCostUSD
 	}
 	if len(lastResult.ModelUsage) > 0 {
 		u.ModelUsage = make(map[string]ModelUsage, len(lastResult.ModelUsage))
@@ -546,308 +557,16 @@ func ExtractUsage(eventsPath string) (*Usage, error) {
 				OutputTokens:             m.OutputTokens,
 				CacheReadInputTokens:     m.CacheReadInputTokens,
 				CacheCreationInputTokens: m.CacheCreationInputTokens,
-				CostUSD:                  m.CostUSD,
+				CostUnavailable:          m.CostUSD == nil,
+			}
+			if m.CostUSD != nil {
+				v := u.ModelUsage[name]
+				v.CostUSD = *m.CostUSD
+				u.ModelUsage[name] = v
 			}
 		}
 	}
 	return u, nil
-}
-
-// UsageAggregate is a summable totals row used in the dashboard's per-operator,
-// per-repo, and grand-total slices. Tokens and cost roll up across runs.
-type UsageAggregate struct {
-	Runs                     int     `json:"runs"`
-	TotalCostUSD             float64 `json:"total_cost_usd"`
-	InputTokens              int64   `json:"input_tokens"`
-	OutputTokens             int64   `json:"output_tokens"`
-	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
-	DurationMs               int64   `json:"duration_ms"`
-}
-
-// ModelAggregate is the per-model slice across runs. No DurationMs because a
-// single run's duration spans every model it called — attributing it to one
-// would double-count.
-type ModelAggregate struct {
-	CostUSD                  float64 `json:"cost_usd"`
-	InputTokens              int64   `json:"input_tokens"`
-	OutputTokens             int64   `json:"output_tokens"`
-	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
-}
-
-// UsageSummary is the dashboard-facing payload at data/usage.json. It bundles
-// the grand total plus per-operator, per-repo, and per-model breakdowns so
-// /usage can render every panel from a single fetch.
-type UsageSummary struct {
-	GeneratedAt time.Time                 `json:"generated_at"`
-	Totals      UsageAggregate            `json:"totals"`
-	ByOperator  map[string]UsageAggregate `json:"by_operator"`
-	ByRepo      map[string]UsageAggregate `json:"by_repo"`
-	ByModel     map[string]ModelAggregate `json:"by_model"`
-	Periods     []PeriodSummary           `json:"periods,omitempty"`
-}
-
-// PeriodSummary holds usage aggregated within a single billing period.
-type PeriodSummary struct {
-	PeriodStart string                    `json:"period_start"`
-	PeriodEnd   string                    `json:"period_end"`
-	Totals      UsageAggregate            `json:"totals"`
-	ByOperator  map[string]UsageAggregate `json:"by_operator"`
-	ByRepo      map[string]UsageAggregate `json:"by_repo"`
-	ByModel     map[string]ModelAggregate `json:"by_model"`
-	DailyTrend  []DailyPoint              `json:"daily_trend"`
-}
-
-// DailyPoint is one day's aggregated usage within a billing period.
-type DailyPoint struct {
-	Date         string                    `json:"date"`
-	Runs         int                       `json:"runs"`
-	TotalCostUSD float64                   `json:"total_cost_usd"`
-	InputTokens  int64                     `json:"input_tokens"`
-	OutputTokens int64                     `json:"output_tokens"`
-	ByOperator   map[string]UsageAggregate `json:"by_operator,omitempty"`
-	ByRepo       map[string]UsageAggregate `json:"by_repo,omitempty"`
-	ByModel      map[string]ModelAggregate `json:"by_model,omitempty"`
-}
-
-// PilotOperatorPrefix namespaces Pilot wakes inside the by_operator
-// breakdown. A wake costs an order of magnitude more than a single
-// operator run (~$14 vs ~$1), so it gets its own bucket per project
-// instead of being folded into an existing operator key — mixing them
-// would distort per-operator cost analysis.
-const PilotOperatorPrefix = "pilot:"
-
-// PilotEntriesAsRuns adapts Pilot wakes into the RunIndexEntry shape so
-// WriteUsageSummary can aggregate both pipelines without changing its
-// signature. Wakes with no usage yet (in flight, or killed before the
-// terminal "result" event) are dropped, mirroring how WriteUsageSummary
-// skips usage-less operator runs.
-//
-// Repo is deliberately left empty: one wake spans every repo in the
-// project, so attributing its cost to a single repo would be wrong.
-// WriteUsageSummary skips empty repo keys for that reason.
-func PilotEntriesAsRuns(pilot []PilotRunIndexEntry) []RunIndexEntry {
-	out := make([]RunIndexEntry, 0, len(pilot))
-	for _, p := range pilot {
-		if p.Usage == nil {
-			continue
-		}
-		out = append(out, RunIndexEntry{
-			RunMeta: RunMeta{
-				Operator:  PilotOperatorPrefix + p.Project,
-				StartedAt: p.StartedAt,
-				EndedAt:   p.EndedAt,
-				Status:    p.Status,
-				Summary:   p.Summary,
-				Usage:     p.Usage,
-			},
-			Path: p.Path,
-		})
-	}
-	return out
-}
-
-// UsageEntriesWithPilot returns the operator entries plus every Pilot wake
-// on disk, adapted to the same shape — the full input WriteUsageSummary
-// needs to report total spend. Pilot was previously invisible in
-// usage.json even though it is the most expensive class of run (issue #321).
-//
-// Walking data/pilot-runs/ here also backfills usage into any pilot
-// meta.json that predates usage capture, exactly like collectRunEntries
-// does for operator runs.
-func UsageEntriesWithPilot(operatorEntries []RunIndexEntry) []RunIndexEntry {
-	pilot := PilotEntriesAsRuns(collectPilotRunEntries(filepath.Join(DataDir(), "pilot-runs")))
-	merged := make([]RunIndexEntry, 0, len(operatorEntries)+len(pilot))
-	merged = append(merged, operatorEntries...)
-	merged = append(merged, pilot...)
-	return merged
-}
-
-// RefreshUsageSummary rebuilds data/usage.json from both run trees without
-// rewriting runs.json / pilot-runs.json. Used at the end of a Pilot wake:
-// `clawflow run` writes usage.json in Phase 3, BEFORE Pilot runs in Phase 4,
-// so without this the wake's spend would stay invisible until the next pass.
-func RefreshUsageSummary(billingCycleDay int) error {
-	entries := collectRunEntries(filepath.Join(DataDir(), "runs"))
-	return WriteUsageSummary(UsageEntriesWithPilot(entries), billingCycleDay)
-}
-
-// WriteUsageSummary aggregates usage across the supplied entries and writes
-// data/usage.json. billingCycleDay (1-28) controls when monthly periods start;
-// 0 defaults to 1 (calendar month). Entries without usage (run still in flight,
-// or pre-feature data on disk) are simply skipped.
-//
-// Entries with an empty Repo (Pilot wakes — see PilotEntriesAsRuns) still
-// count toward Totals / ByOperator / ByModel but are left out of ByRepo,
-// so the per-repo table never carries a nameless bucket. ByRepo therefore
-// sums to less than Totals whenever Pilot ran.
-func WriteUsageSummary(entries []RunIndexEntry, billingCycleDay int) error {
-	if billingCycleDay < 1 || billingCycleDay > 28 {
-		billingCycleDay = 1
-	}
-
-	sum := UsageSummary{
-		GeneratedAt: time.Now().UTC(),
-		ByOperator:  map[string]UsageAggregate{},
-		ByRepo:      map[string]UsageAggregate{},
-		ByModel:     map[string]ModelAggregate{},
-	}
-
-	// periodKey → *PeriodSummary for grouping
-	type periodKey struct{ start, end time.Time }
-	periods := map[periodKey]*PeriodSummary{}
-
-	for _, e := range entries {
-		if e.Usage == nil {
-			continue
-		}
-		u := e.Usage
-
-		// All-time aggregation (unchanged)
-		addUsage(&sum.Totals, u)
-		op := sum.ByOperator[e.Operator]
-		addUsage(&op, u)
-		sum.ByOperator[e.Operator] = op
-		if e.Repo != "" {
-			repo := sum.ByRepo[e.Repo]
-			addUsage(&repo, u)
-			sum.ByRepo[e.Repo] = repo
-		}
-		for name, m := range u.ModelUsage {
-			cur := sum.ByModel[name]
-			cur.CostUSD += m.CostUSD
-			cur.InputTokens += m.InputTokens
-			cur.OutputTokens += m.OutputTokens
-			cur.CacheReadInputTokens += m.CacheReadInputTokens
-			cur.CacheCreationInputTokens += m.CacheCreationInputTokens
-			sum.ByModel[name] = cur
-		}
-
-		// Period aggregation
-		pStart, pEnd := billingPeriod(e.StartedAt, billingCycleDay)
-		pk := periodKey{pStart, pEnd}
-		ps, ok := periods[pk]
-		if !ok {
-			ps = &PeriodSummary{
-				PeriodStart: pStart.Format("2006-01-02"),
-				PeriodEnd:   pEnd.Format("2006-01-02"),
-				ByOperator:  map[string]UsageAggregate{},
-				ByRepo:      map[string]UsageAggregate{},
-				ByModel:     map[string]ModelAggregate{},
-			}
-			periods[pk] = ps
-		}
-		addUsage(&ps.Totals, u)
-		pop := ps.ByOperator[e.Operator]
-		addUsage(&pop, u)
-		ps.ByOperator[e.Operator] = pop
-		if e.Repo != "" {
-			prepo := ps.ByRepo[e.Repo]
-			addUsage(&prepo, u)
-			ps.ByRepo[e.Repo] = prepo
-		}
-		for name, m := range u.ModelUsage {
-			cur := ps.ByModel[name]
-			cur.CostUSD += m.CostUSD
-			cur.InputTokens += m.InputTokens
-			cur.OutputTokens += m.OutputTokens
-			cur.CacheReadInputTokens += m.CacheReadInputTokens
-			cur.CacheCreationInputTokens += m.CacheCreationInputTokens
-			ps.ByModel[name] = cur
-		}
-	}
-
-	// Build daily trends and collect periods sorted newest-first
-	var sortedPeriods []PeriodSummary
-	for pk, ps := range periods {
-		ps.DailyTrend = buildDailyTrend(entries, pk.start, pk.end)
-		sortedPeriods = append(sortedPeriods, *ps)
-	}
-	sort.Slice(sortedPeriods, func(i, j int) bool {
-		return sortedPeriods[i].PeriodStart > sortedPeriods[j].PeriodStart
-	})
-	sum.Periods = sortedPeriods
-
-	return withSnapshotLock(func() error { return writeJSON(filepath.Join(DataDir(), "usage.json"), sum) })
-}
-
-// billingPeriod returns the start and end dates of the billing period that
-// contains t, given a cycle start day (1-28).
-func billingPeriod(t time.Time, cycleDay int) (start, end time.Time) {
-	y, m, _ := t.UTC().Date()
-	if t.Day() >= cycleDay {
-		start = time.Date(y, m, cycleDay, 0, 0, 0, 0, time.UTC)
-	} else {
-		start = time.Date(y, m-1, cycleDay, 0, 0, 0, 0, time.UTC)
-	}
-	end = time.Date(start.Year(), start.Month()+1, cycleDay-1, 0, 0, 0, 0, time.UTC)
-	return
-}
-
-// buildDailyTrend produces a DailyPoint for every day in [periodStart, periodEnd],
-// filling in zeros for days with no runs. Each point includes per-operator,
-// per-repo, and per-model breakdowns so the frontend can drill down on click.
-func buildDailyTrend(entries []RunIndexEntry, periodStart, periodEnd time.Time) []DailyPoint {
-	dayMap := map[string]*DailyPoint{}
-	for d := periodStart; !d.After(periodEnd); d = d.AddDate(0, 0, 1) {
-		key := d.Format("2006-01-02")
-		dayMap[key] = &DailyPoint{
-			Date:       key,
-			ByOperator: map[string]UsageAggregate{},
-			ByRepo:     map[string]UsageAggregate{},
-			ByModel:    map[string]ModelAggregate{},
-		}
-	}
-	for _, e := range entries {
-		if e.Usage == nil {
-			continue
-		}
-		day := e.StartedAt.UTC().Format("2006-01-02")
-		dp, ok := dayMap[day]
-		if !ok {
-			continue
-		}
-		dp.Runs++
-		dp.TotalCostUSD += e.Usage.TotalCostUSD
-		dp.InputTokens += e.Usage.InputTokens
-		dp.OutputTokens += e.Usage.OutputTokens
-
-		op := dp.ByOperator[e.Operator]
-		addUsage(&op, e.Usage)
-		dp.ByOperator[e.Operator] = op
-
-		if e.Repo != "" {
-			repo := dp.ByRepo[e.Repo]
-			addUsage(&repo, e.Usage)
-			dp.ByRepo[e.Repo] = repo
-		}
-
-		for name, m := range e.Usage.ModelUsage {
-			cur := dp.ByModel[name]
-			cur.CostUSD += m.CostUSD
-			cur.InputTokens += m.InputTokens
-			cur.OutputTokens += m.OutputTokens
-			cur.CacheReadInputTokens += m.CacheReadInputTokens
-			cur.CacheCreationInputTokens += m.CacheCreationInputTokens
-			dp.ByModel[name] = cur
-		}
-	}
-	out := make([]DailyPoint, 0, len(dayMap))
-	for d := periodStart; !d.After(periodEnd); d = d.AddDate(0, 0, 1) {
-		out = append(out, *dayMap[d.Format("2006-01-02")])
-	}
-	return out
-}
-
-func addUsage(agg *UsageAggregate, u *Usage) {
-	agg.Runs++
-	agg.TotalCostUSD += u.TotalCostUSD
-	agg.InputTokens += u.InputTokens
-	agg.OutputTokens += u.OutputTokens
-	agg.CacheReadInputTokens += u.CacheReadInputTokens
-	agg.CacheCreationInputTokens += u.CacheCreationInputTokens
-	agg.DurationMs += u.DurationMs
 }
 
 // WriteRepos writes data/repos.json.
@@ -933,7 +652,7 @@ func WriteRunMeta(runDir string, m RunMeta) error {
 	if m.StartedAt.IsZero() {
 		m.StartedAt = time.Now().UTC()
 	}
-	return writeJSON(filepath.Join(runDir, "meta.json"), m)
+	return persistRun(runDir, "run", m)
 }
 
 // MigrateFailedToCancelled walks every run dir and rewrites meta.json's
@@ -1281,20 +1000,14 @@ func prunePendingLocked() int {
 		}
 	}
 
-	// Latest StartedAt per (repo, issue, operator), read from runs.json
-	// (already indexed by WriteRunsIndex, so no filesystem walk here). A
+	// Latest StartedAt per (repo, issue, operator), read from current history. A
 	// pending entry is stale once a run of the same operator started at or
 	// after the entry was captured, regardless of the run's outcome.
 	latestRunStart := make(map[string]time.Time) // key: "repo#num#operator"
-	if data, err := os.ReadFile(filepath.Join(DataDir(), "runs.json")); err == nil {
-		var runs []RunIndexEntry
-		if json.Unmarshal(data, &runs) == nil {
-			for _, r := range runs {
-				k := fmt.Sprintf("%s#%d#%s", r.Repo, r.IssueNumber, r.Operator)
-				if cur, ok := latestRunStart[k]; !ok || r.StartedAt.After(cur) {
-					latestRunStart[k] = r.StartedAt
-				}
-			}
+	for _, r := range ReadRunsIndex() {
+		k := fmt.Sprintf("%s#%d#%s", r.Repo, r.IssueNumber, r.Operator)
+		if cur, ok := latestRunStart[k]; !ok || r.StartedAt.After(cur) {
+			latestRunStart[k] = r.StartedAt
 		}
 	}
 
@@ -1925,55 +1638,29 @@ func ConsecutiveFailures(repo string, issueNum int) int {
 	return count
 }
 
-// WriteRunsIndex walks data/runs/* and writes data/runs.json containing the
-// most recent `limit` runs sorted by StartedAt desc. Used by the dashboard
-// to render its home page without having to crawl the filesystem over
-// HTTP.
-//
-// Returns the FULL collected entry set (post-sort, pre-limit) so the caller
-// can pipe it into WriteUsageSummary without re-walking the tree.
+// WriteRunsIndex is a compatibility reader for callers that used to refresh
+// the dashboard cache. PostgreSQL writers update rows directly; no index is written.
 func WriteRunsIndex(limit int) ([]RunIndexEntry, error) {
-	var entries []RunIndexEntry
-	// Collect and write under the snapshot lock so a slower concurrent pass
-	// cannot overwrite a newer index with a stale directory walk.
-	err := withSnapshotLock(func() error {
-		runsRoot := filepath.Join(DataDir(), "runs")
-		entries = collectRunEntries(runsRoot)
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].StartedAt.After(entries[j].StartedAt)
-		})
-		indexed := entries
-		if limit > 0 && len(indexed) > limit {
-			indexed = indexed[:limit]
-		}
-		return writeJSON(filepath.Join(DataDir(), "runs.json"), indexed)
-	})
-	return entries, err
+	if RunStore() != nil {
+		return databaseRuns(limit)
+	}
+	entries := collectRunEntries(filepath.Join(DataDir(), "runs"))
+	sort.Slice(entries, func(i, j int) bool { return entries[i].StartedAt.After(entries[j].StartedAt) })
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
 }
 
-// ReadRunsIndex returns the entries of data/runs.json without touching disk
-// state. A missing or unreadable index yields nil: it is a cache of recent
-// runs, not an authority.
-func ReadRunsIndex() []RunIndexEntry {
-	data, err := os.ReadFile(filepath.Join(DataDir(), "runs.json"))
-	if err != nil {
-		return nil
-	}
-	var entries []RunIndexEntry
-	if json.Unmarshal(data, &entries) != nil {
-		return nil
-	}
-	return entries
-}
+// ReadRunsIndex reads current SQL state, or local history for file-only tooling.
+func ReadRunsIndex() []RunIndexEntry { entries, _ := WriteRunsIndex(0); return entries }
 
 // collectRunEntries walks data/runs/* and reads every meta.json it finds.
 // Malformed files are skipped silently — we'd rather render an incomplete
 // list than fail the entire index write.
 //
-// Side effect: if a run has terminated (status != "running") and meta.Usage
-// is nil, we attempt to extract usage from the sibling events.jsonl and
-// rewrite meta.json. This backfills historical runs the first time the
-// summary is built without forcing a full re-walk on every refresh.
+// This local-history reader does not rewrite metadata. Usage repair is explicit
+// through `usage backfill --apply`, which binds the PostgreSQL store.
 func collectRunEntries(root string) []RunIndexEntry {
 	// Non-nil empty slice so JSON renders as [] instead of null when there
 	// are no runs yet — saves the dashboard a nullability check.
@@ -1995,16 +1682,6 @@ func collectRunEntries(root string) []RunIndexEntry {
 		var m RunMeta
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil
-		}
-		// Backfill Usage on terminated runs so historical data on disk gets
-		// reflected in /usage on the next refresh. Best-effort: any error
-		// here is non-fatal — we still want the index entry.
-		if m.Usage == nil && m.Status != "" && m.Status != "running" && m.Status != "finalizing" {
-			runDir := filepath.Dir(path)
-			if u, err := ExtractUsage(filepath.Join(runDir, "events.jsonl")); err == nil && u != nil {
-				m.Usage = u
-				_ = WriteRunMeta(runDir, m)
-			}
 		}
 		relDir := strings.TrimPrefix(filepath.Dir(path), DataDir())
 		entry := RunIndexEntry{
@@ -2095,6 +1772,10 @@ func WriteProjects() error {
 // of Pilot's stdout. Absent on legacy / failed-to-parse runs, in which
 // case the UI falls back to the free-form Summary.
 type PilotRunMeta struct {
+	Profile   string     `json:"profile,omitempty"`
+	Backend   string     `json:"backend,omitempty"`
+	Model     string     `json:"model,omitempty"`
+	Machine   string     `json:"machine,omitempty"`
 	Project   string     `json:"project"`
 	StartedAt time.Time  `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
@@ -2164,7 +1845,7 @@ func WritePilotRunMeta(runDir string, m PilotRunMeta) error {
 	if m.StartedAt.IsZero() {
 		m.StartedAt = time.Now().UTC()
 	}
-	return writeJSON(filepath.Join(runDir, "meta.json"), m)
+	return persistRun(runDir, "pilot", m)
 }
 
 // PilotRunIndexEntry is a flattened row for the dashboard's Pilot runs list.
@@ -2173,19 +1854,15 @@ type PilotRunIndexEntry struct {
 	Path string `json:"path"`
 }
 
-// WritePilotRunsIndex walks data/pilot-runs/* and writes data/pilot-runs.json.
+// WritePilotRunsIndex reads history without writing a dashboard cache.
 func WritePilotRunsIndex(limit int) ([]PilotRunIndexEntry, error) {
-	root := filepath.Join(DataDir(), "pilot-runs")
-	entries := collectPilotRunEntries(root)
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].StartedAt.After(entries[j].StartedAt)
-	})
-	indexed := entries
-	if limit > 0 && len(indexed) > limit {
-		indexed = indexed[:limit]
+	if RunStore() != nil {
+		return databasePilotRuns(limit)
 	}
-	if err := writeJSON(filepath.Join(DataDir(), "pilot-runs.json"), indexed); err != nil {
-		return entries, err
+	entries := collectPilotRunEntries(filepath.Join(DataDir(), "pilot-runs"))
+	sort.Slice(entries, func(i, j int) bool { return entries[i].StartedAt.After(entries[j].StartedAt) })
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
 	}
 	return entries, nil
 }

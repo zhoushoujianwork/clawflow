@@ -800,13 +800,8 @@ func (c *Client) getCIStatus(repo string, prNumber int, evidence *vcs.CIEvidence
 			return vcs.CIStatusNone, fmt.Errorf("github get check runs: HTTP %d", status)
 		}
 		var raw struct {
-			TotalCount *int `json:"total_count"`
-			CheckRuns  []struct {
-				ID         int64   `json:"id"`
-				HeadSHA    string  `json:"head_sha"`
-				Status     string  `json:"status"`
-				Conclusion *string `json:"conclusion"`
-			} `json:"check_runs"`
+			TotalCount *int          `json:"total_count"`
+			CheckRuns  []vcs.CICheck `json:"check_runs"`
 		}
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return vcs.CIStatusNone, err
@@ -834,6 +829,7 @@ func (c *Client) getCIStatus(repo string, prNumber int, evidence *vcs.CIEvidence
 			seen[run.ID] = true
 			if evidence != nil {
 				evidence.CheckIDs = append(evidence.CheckIDs, run.ID)
+				evidence.Checks = append(evidence.Checks, run)
 			}
 			switch run.Status {
 			case "completed":

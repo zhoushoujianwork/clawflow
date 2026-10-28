@@ -471,7 +471,7 @@ function ProjectDetail() {
   function fetchBacklog() {
     Promise.all([
       fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-      fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+      fetch('/api/runs', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
       fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
     ]).then(([issues, runs, pending]) => {
       setAllIssues(Array.isArray(issues) ? issues : [])

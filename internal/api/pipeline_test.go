@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -116,6 +118,55 @@ func TestHandlePipelineEmptyRepoListIsArray(t *testing.T) {
 	}
 }
 
+func TestHandlePipelineAgentSlotsStayFresh(t *testing.T) {
+	calls := 0
+	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) {
+		calls++
+		return fakeSnapshot(), nil
+	})
+	cfg := &config.Config{Settings: config.Settings{MaxConcurrentAgents: 2}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	check := func(used int) {
+		t.Helper()
+		rec := getPipeline(t, http.MethodGet)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+		}
+		var board struct {
+			Runtime struct {
+				Scheduler map[string]json.RawMessage `json:"scheduler"`
+			} `json:"runtime"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &board); err != nil {
+			t.Fatal(err)
+		}
+		for key, want := range map[string]int{"agent_slots_used": used, "agent_slots_total": 2} {
+			value, ok := board.Runtime.Scheduler[key]
+			if !ok {
+				t.Fatalf("missing %s: %s", key, rec.Body)
+			}
+			var got int
+			if err := json.Unmarshal(value, &got); err != nil || got != want {
+				t.Fatalf("%s=%s, want %d (decode error: %v)", key, value, want, err)
+			}
+		}
+	}
+	check(0)
+	release, err := agentcapacity.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	check(1)
+	release()
+	check(0)
+	if calls != 1 {
+		t.Fatalf("snapshot calls=%d, want cached snapshot", calls)
+	}
+}
+
 func TestHandlePipelineCachesFor30Seconds(t *testing.T) {
 	calls := 0
 	now := resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { calls++; return fakeSnapshot(), nil })
@@ -187,45 +238,97 @@ func TestPipelineRuntimePassTiming(t *testing.T) {
 	}
 }
 
-func TestPipelineRuntimeUsesLatestRecordedExecution(t *testing.T) {
-	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
-	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "configured-other")
-	if err := os.MkdirAll(snapshot.DataDir(), 0700); err != nil {
+// executionFixtures are run metadata records shared by the selection, file and
+// PostgreSQL tests; each is the meta.json a run would persist.
+var executionFixtures = []struct {
+	name                          string
+	records                       []string
+	profile, backend, model, tier string
+}{
+	{"latest result", []string{
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T10:00:00Z","ended_at":"2026-10-28T10:01:00Z","status":"success","development_session":{"profile":"configured-other","backend":"old"}}`,
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T09:00:00Z","ended_at":"2026-10-28T11:00:00Z","status":"success","development_session":{"profile":"actual","backend":"codex"},"model":"recorded-model","service_tier":"priority"}`,
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T12:00:00Z","status":"running","development_session":{"profile":"running","backend":"claude"}}`,
+	}, "actual", "codex", "recorded-model", "priority"},
+	{"missing optional fields do not inherit", []string{
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T10:00:00Z","ended_at":"2026-10-28T10:30:00Z","status":"success","development_session":{"profile":"old","backend":"old"},"model":"old-model","service_tier":"priority"}`,
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T11:00:00Z","ended_at":"2026-10-28T11:30:00Z","status":"success","development_session":{"profile":"new","backend":"claude"}}`,
+	}, "new", "claude", "", ""},
+	{"recorded model usage", []string{
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T11:00:00Z","ended_at":"2026-10-28T11:10:00Z","status":"success","development_session":{"profile":"actual","backend":"codex"},"usage":{"model_usage":{"model-z":{},"model-a":{}}}}`,
+	}, "actual", "codex", "model-a, model-z", ""},
+	{"empty history", nil, "", "", "", ""},
+}
+
+func assertExecution(t *testing.T, ex pipeline.Execution, profile, backend, model, tier string) {
+	t.Helper()
+	raw, _ := json.Marshal(ex)
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(snapshot.DataDir(), "runs.json")
-	for _, tc := range []struct{ name, records, profile, backend, model, tier string }{
-		{"latest result", `[
-   {"started_at":"2026-10-28T10:00:00Z","ended_at":"2026-10-28T10:01:00Z","development_session":{"profile":"configured-other","backend":"old"}},
-   {"started_at":"2026-10-28T09:00:00Z","ended_at":"2026-10-28T11:00:00Z","development_session":{"profile":"actual","backend":"codex"},"model":"recorded-model","service_tier":"priority"},
-   {"started_at":"2026-10-28T12:00:00Z","status":"running"}
-  ]`, "actual", "codex", "recorded-model", "priority"},
-		{"missing optional fields do not inherit", `[
-   {"started_at":"2026-10-28T10:00:00Z","development_session":{"profile":"old","backend":"old"},"model":"old-model","service_tier":"priority"},
-   {"started_at":"2026-10-28T11:00:00Z","development_session":{"profile":"new","backend":"claude"}}
-  ]`, "new", "claude", "", ""},
-		{"recorded model usage", `[{"started_at":"2026-10-28T11:00:00Z","development_session":{"profile":"actual","backend":"codex"},"usage":{"model_usage":{"model-z":{},"model-a":{}}}}]`, "actual", "codex", "model-a, model-z", ""},
-		{"empty history", "[]", "", "", "", ""},
-	} {
+	for key, want := range map[string]string{"profile": profile, "backend": backend, "model": model, "service_tier": tier} {
+		if want == "" {
+			if _, ok := got[key]; ok {
+				t.Errorf("%s should be omitted: %s", key, raw)
+			}
+		} else if got[key] != want {
+			t.Errorf("%s = %v, want %s", key, got[key], want)
+		}
+	}
+}
+
+func TestLatestExecutionSelection(t *testing.T) {
+	for _, tc := range executionFixtures {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := os.WriteFile(path, []byte(tc.records), 0600); err != nil {
-				t.Fatal(err)
+			var runs []snapshot.RunIndexEntry
+			for _, rec := range tc.records {
+				var e snapshot.RunIndexEntry
+				if err := json.Unmarshal([]byte(rec), &e); err != nil {
+					t.Fatal(err)
+				}
+				runs = append(runs, e)
 			}
-			rt := pipelineRuntime()
-			raw, _ := json.Marshal(rt.Execution)
-			var got map[string]any
-			if err := json.Unmarshal(raw, &got); err != nil {
-				t.Fatal(err)
-			}
-			for key, want := range map[string]string{"profile": tc.profile, "backend": tc.backend, "model": tc.model, "service_tier": tc.tier} {
-				if want == "" {
-					if _, ok := got[key]; ok {
-						t.Errorf("%s should be omitted: %s", key, raw)
-					}
-				} else if got[key] != want {
-					t.Errorf("%s = %v, want %s", key, got[key], want)
+			assertExecution(t, latestExecution(runs), tc.profile, tc.backend, tc.model, tc.tier)
+		})
+	}
+}
+
+// Without a bound run store ReadRunsIndex reads data/runs/*/meta.json.
+func TestPipelineRuntimeUsesLatestRecordedExecutionFromFiles(t *testing.T) {
+	for _, tc := range executionFixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "configured-other")
+			snapshot.BindRunStore(nil)
+			for i, rec := range tc.records {
+				dir := filepath.Join(snapshot.DataDir(), "runs", "o__r", "issue-1", "run-"+string(rune('a'+i)))
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(rec), 0600); err != nil {
+					t.Fatal(err)
 				}
 			}
+			assertExecution(t, pipelineRuntime().Execution, tc.profile, tc.backend, tc.model, tc.tier)
+		})
+	}
+}
+
+// Same fixtures through the PostgreSQL runs table (skipped without a test DSN).
+func TestPipelineRuntimeUsesLatestRecordedExecutionFromDB(t *testing.T) {
+	for _, tc := range executionFixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			s := historyDB(t)
+			resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "configured-other")
+			for i, rec := range tc.records {
+				dir := filepath.Join(snapshot.DataDir(), "runs", "o__r", "issue-1", "run-"+string(rune('a'+i)))
+				if _, err := s.UpsertRun(context.Background(), dir, "run", []byte(rec)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertExecution(t, pipelineRuntime().Execution, tc.profile, tc.backend, tc.model, tc.tier)
 		})
 	}
 }

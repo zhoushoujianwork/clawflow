@@ -70,6 +70,8 @@ func pipelineRuntime() pipeline.Runtime {
 	rt := pipeline.Runtime{
 		Version: VersionInfo.Current,
 		Scheduler: pipeline.Scheduler{
+			AgentSlotsUsed:  rs.AgentSlotsUsed,
+			AgentSlotsTotal: rs.AgentSlotsTotal,
 			Status:          rs.Status,
 			IntervalMinutes: rs.IntervalMinutes,
 			Paused:          rs.Paused,
@@ -92,34 +94,61 @@ func pipelineRuntime() pipeline.Runtime {
 	}
 	runMu.Unlock()
 	// Display one recorded execution, independent of today's configured profile.
-	var latest time.Time
-	for _, run := range snapshot.ReadRunsIndex() {
-		session := run.DevelopmentSession
-		if session.Profile == "" && session.Backend == "" {
-			continue
-		}
-		at := run.StartedAt
-		if run.EndedAt != nil && !run.EndedAt.IsZero() {
-			at = *run.EndedAt
-		}
-		if !at.After(latest) {
-			continue
-		}
-		rt.Execution = pipeline.Execution{Profile: session.Profile, Backend: session.Backend, Model: run.Model, ServiceTier: run.ServiceTier}
-		if rt.Execution.Model == "" && run.Usage != nil {
-			var models []string
-			for model := range run.Usage.ModelUsage {
-				models = append(models, model)
-			}
-			slices.Sort(models)
-			rt.Execution.Model = strings.Join(models, ", ")
-		}
-		latest = at
-	}
+	// ReadRunsIndex reads PostgreSQL when a run store is bound (file fallback otherwise).
+	rt.Execution = latestExecution(snapshot.ReadRunsIndex())
 	if err := execution.Ready(); err != nil {
 		rt.Execution.Error = err.Error()
 	} else {
 		rt.Execution.Ready = true
 	}
 	return rt
+}
+
+// recordedValue maps the "unknown" placeholder that the run store writes for
+// missing profile/backend/model back to "not recorded".
+func recordedValue(s string) string {
+	if strings.TrimSpace(s) == "unknown" {
+		return ""
+	}
+	return s
+}
+
+// latestExecution picks the execution identity of the most recently completed
+// run that recorded a development session. Completion time is ended_at; legacy
+// rows without it fall back to started_at unless the run is still in flight.
+// Optional fields (model, service tier) come only from the winning run, never
+// from older ones; the model falls back to the sorted model_usage keys and no
+// tier is invented. Readiness is left for the caller to fill in.
+func latestExecution(runs []snapshot.RunIndexEntry) pipeline.Execution {
+	var latest time.Time
+	var out pipeline.Execution
+	for _, run := range runs {
+		profile, backend := recordedValue(run.DevelopmentSession.Profile), recordedValue(run.DevelopmentSession.Backend)
+		if profile == "" && backend == "" {
+			continue
+		}
+		at := run.StartedAt
+		if run.EndedAt != nil && !run.EndedAt.IsZero() {
+			at = *run.EndedAt
+		} else {
+			switch run.Status {
+			case "running", "finalizing", "pending", "queued":
+				continue
+			}
+		}
+		if !at.After(latest) {
+			continue
+		}
+		out = pipeline.Execution{Profile: profile, Backend: backend, Model: recordedValue(run.Model), ServiceTier: run.ServiceTier}
+		if out.Model == "" && run.Usage != nil {
+			var models []string
+			for model := range run.Usage.ModelUsage {
+				models = append(models, model)
+			}
+			slices.Sort(models)
+			out.Model = strings.Join(models, ", ")
+		}
+		latest = at
+	}
+	return out
 }

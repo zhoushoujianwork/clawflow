@@ -121,7 +121,7 @@ interface Board {
   events: PipelineEvent[]
   runtime: {
     version: string
-    scheduler: { status: string; interval_minutes: number; paused: boolean; next_fire_unix_ms?: number; started_at?: string; last_result?: string; last_ended_at?: string }
+    scheduler: { status: string; interval_minutes: number; paused: boolean; next_fire_unix_ms?: number; started_at?: string; last_result?: string; last_ended_at?: string; agent_slots_used: number; agent_slots_total: number }
     execution: { ready: boolean; error?: string; profile?: string; backend?: string; model?: string; service_tier?: string }
   }
 }
@@ -328,6 +328,7 @@ export function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
   return <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs border rounded-lg px-3 py-2 mb-4" aria-label="Runtime">
     <span>{runtime.version || 'Version unavailable'}</span>
     <span>Executor: {runtime.execution.profile || 'unavailable'} · backend: {runtime.execution.backend ? runtime.execution.backend + ' (last observed)' : 'unavailable'}{runtime.execution.model && <> · model: {runtime.execution.model}</>}{runtime.execution.service_tier && <> · tier: {runtime.execution.service_tier}</>}</span>
+    <span>Agent slots: {s.agent_slots_used} / {s.agent_slots_total}</span>
     <span>{s.paused ? 'paused' : s.status} {s.status === 'running' ? (s.started_at ? '· started ' + timeAgo(s.started_at) : '· age unavailable') : ''}</span>
     <span>Last pass: {s.last_result || 'unavailable'} {s.last_ended_at && timeAgo(s.last_ended_at)}</span>
     <span className="rounded bg-secondary px-1">Read-only</span>
