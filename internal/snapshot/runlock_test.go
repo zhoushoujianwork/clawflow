@@ -28,8 +28,8 @@ func TestAcquireRunLock_BasicAcquireRelease(t *testing.T) {
 
 	// Release and verify.
 	ReleaseRunLock()
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("run lockfile should be removed after ReleaseRunLock")
+	if _, err := os.Stat(path); err != nil || LockHeld(path) {
+		t.Error("run lockfile must persist unlocked after ReleaseRunLock")
 	}
 
 	// Re-acquire after release should succeed.

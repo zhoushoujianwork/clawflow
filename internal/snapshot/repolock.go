@@ -2,11 +2,14 @@ package snapshot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 )
 
 // Per-repository run locks.
@@ -30,9 +33,12 @@ func RepoRunLockPath(repo string) string {
 // liveLegacyRunLock returns the holder of the legacy global run lock when its
 // owner process is alive.
 func liveLegacyRunLock() (*RunLockInfo, bool) {
-	info, err := ReadRunLock()
-	if err != nil || !processAlive(info.PID) {
+	if !LockHeld(RunLockPath()) {
 		return nil, false
+	}
+	info, err := ReadRunLock()
+	if err != nil {
+		info = &RunLockInfo{}
 	}
 	return info, true
 }
@@ -43,8 +49,7 @@ func runLockHeldError(info *RunLockInfo) error {
 }
 
 // AcquireRepoRunLock takes the run lock for one repository. It fails when a
-// live process holds that repo's lock or the legacy global lock. Stale locks
-// (dead owner PID) are reclaimed.
+// live process holds that repo's lock or the legacy global lock.
 func AcquireRepoRunLock(repo, version string) error {
 	if legacy, ok := liveLegacyRunLock(); ok {
 		return runLockHeldError(legacy)
@@ -71,8 +76,7 @@ func AcquireRepoRunLock(repo, version string) error {
 	return nil
 }
 
-// ReleaseRepoRunLock removes this process's lock for repo. A lock owned by
-// another live process is left alone. No-op if missing.
+// ReleaseRepoRunLock unlocks this process's descriptor without deleting the file.
 func ReleaseRepoRunLock(repo string) {
 	releasePIDLock(RepoRunLockPath(repo))
 }
@@ -89,7 +93,11 @@ func RepoRunLockHolder(repo string) *RunLockInfo {
 	if legacy, ok := liveLegacyRunLock(); ok {
 		return legacy
 	}
-	if info, err := ReadRepoRunLock(repo); err == nil && processAlive(info.PID) {
+	if LockHeld(RepoRunLockPath(repo)) {
+		info, err := ReadRepoRunLock(repo)
+		if err != nil {
+			return &RunLockInfo{Repo: repo}
+		}
 		return info
 	}
 	return nil
@@ -109,8 +117,14 @@ func AnyRunLockHeldExcept(pid int) (bool, *RunLockInfo) {
 	}
 	matches, _ := filepath.Glob(filepath.Join(LockDir(), runLockPrefix+"*.lock"))
 	for _, path := range matches {
-		if info, err := readRunLockFile(path); err == nil && info.PID != pid && processAlive(info.PID) {
-			return true, info
+		if LockHeld(path) {
+			info, err := readRunLockFile(path)
+			if err != nil {
+				return true, &RunLockInfo{}
+			}
+			if info.PID != pid {
+				return true, info
+			}
 		}
 	}
 	return false, nil
@@ -128,75 +142,40 @@ func readRunLockFile(path string) (*RunLockInfo, error) {
 	return &info, nil
 }
 
-// publishLockFile creates path with data in one step: the payload is written
-// to a private temp file which is then hard-linked into place. Unlike
-// create-then-write, no other process can observe a half-written lockfile and
-// mistake it for a corrupt one. Returns an os.IsExist error when path exists.
-func publishLockFile(path string, data []byte) error {
-	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	defer os.Remove(tmp)
-	err := os.Link(tmp, path)
-	if err == nil || os.IsExist(err) {
-		return err
-	}
-	// Filesystem without hard links: fall back to exclusive create.
-	return writeExclusive(path, data)
-}
+// heldFiles is guarded by lockFileMu; descriptors stay open for the entire
+// protected operation, not just while publishing the owner record.
+var heldFiles = make(map[string]*os.File)
 
-// acquirePIDLock creates the lockfile at path for info, reclaiming it when the
-// existing owner is dead or the payload is corrupt. When a live process holds
-// it, the returned holder is non-nil together with a non-nil error.
-func acquirePIDLock(path string, info RunLockInfo) (*RunLockInfo, error) {
+func acquireFileLock(path string, info any) error {
 	lockFileMu.Lock()
 	defer lockFileMu.Unlock()
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir lock dir: %w", err)
+	if heldFiles[path] != nil {
+		return filelock.ErrHeld
 	}
-	data, err := json.Marshal(info)
-	if err != nil {
-		return nil, err
+	f, err := filelock.Try(path, info)
+	if err == nil {
+		heldFiles[path] = f
 	}
-	for attempt := 0; attempt < 3; attempt++ {
-		err := publishLockFile(path, data)
-		if err == nil {
-			return nil, nil
-		}
-		if !os.IsExist(err) {
-			return nil, fmt.Errorf("create lockfile: %w", err)
-		}
-		existing, readErr := readRunLockFile(path)
-		if readErr == nil && processAlive(existing.PID) {
-			return existing, fmt.Errorf("lock %s held by pid %d", filepath.Base(path), existing.PID)
-		}
-		if readErr != nil && os.IsNotExist(readErr) {
-			continue // released between the link attempt and the read
-		}
-		// Stale (dead owner) or corrupt. Remove only if it is still the same
-		// file we judged dead, so a lock freshly re-created by another
-		// process is not deleted.
-		again, againErr := readRunLockFile(path)
-		if (readErr == nil && againErr == nil && again.PID == existing.PID) || (readErr != nil && againErr != nil) {
-			_ = os.Remove(path)
-		}
-	}
-	if existing, readErr := readRunLockFile(path); readErr == nil {
-		return existing, fmt.Errorf("lock %s held by pid %d", filepath.Base(path), existing.PID)
-	}
-	return nil, fmt.Errorf("lock %s already held by another process", filepath.Base(path))
+	return err
 }
 
-// releasePIDLock removes the lockfile when this process owns it (or it is
-// unreadable). A lock reclaimed by another live process is left in place.
+func acquirePIDLock(path string, info RunLockInfo) (*RunLockInfo, error) {
+	err := acquireFileLock(path, info)
+	if errors.Is(err, filelock.ErrHeld) {
+		holder, readErr := readRunLockFile(path)
+		if readErr != nil {
+			holder = &RunLockInfo{}
+		}
+		return holder, err
+	}
+	return nil, err
+}
+
 func releasePIDLock(path string) {
 	lockFileMu.Lock()
 	defer lockFileMu.Unlock()
-
-	if info, err := readRunLockFile(path); err == nil && info.PID != os.Getpid() {
-		return
+	if f := heldFiles[path]; f != nil {
+		filelock.Release(f)
+		delete(heldFiles, path)
 	}
-	_ = os.Remove(path)
 }

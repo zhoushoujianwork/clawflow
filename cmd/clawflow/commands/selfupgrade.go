@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -188,45 +188,29 @@ func selfUpgradeLockPath() string {
 	return filepath.Join(snapshot.LockDir(), "self-upgrade.lock")
 }
 
-// selfUpgradeLockMu serializes create/write/reclaim within this process.
-// O_EXCL alone exposes an empty file before its owner PID has been written.
+// selfUpgradeLockMu serializes descriptor publication and release.
 var selfUpgradeLockMu sync.Mutex
 
-// acquireSelfUpgradeLock takes an O_EXCL lockfile holding the owner PID.
-// A lock whose owner is dead is reclaimed.
 func acquireSelfUpgradeLock() (func(), bool, error) {
 	selfUpgradeLockMu.Lock()
 	defer selfUpgradeLockMu.Unlock()
-	path := selfUpgradeLockPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	f, err := filelock.Try(selfUpgradeLockPath(), snapshot.RunLockInfo{
+		PID: os.Getpid(), StartedAt: time.Now().UTC(), Version: Version,
+	})
+	if errors.Is(err, filelock.ErrHeld) {
+		return nil, false, nil
+	}
+	if err != nil {
 		return nil, false, err
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil {
-			_, werr := fmt.Fprintf(f, "%d\n", os.Getpid())
-			cerr := f.Close()
-			if werr != nil || cerr != nil {
-				_ = os.Remove(path)
-				return nil, false, errors.Join(werr, cerr)
-			}
-			return func() {
-				selfUpgradeLockMu.Lock()
-				defer selfUpgradeLockMu.Unlock()
-				_ = os.Remove(path)
-			}, true, nil
-		}
-		if !os.IsExist(err) {
-			return nil, false, err
-		}
-		data, rerr := os.ReadFile(path)
-		pid, perr := strconv.Atoi(strings.TrimSpace(string(data)))
-		if rerr == nil && perr == nil && pidAlive(pid) {
-			return nil, false, nil
-		}
-		_ = os.Remove(path) // stale or unreadable: reclaim and retry once
-	}
-	return nil, false, nil
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			selfUpgradeLockMu.Lock()
+			defer selfUpgradeLockMu.Unlock()
+			filelock.Release(f)
+		})
+	}, true, nil
 }
 
 // copyExecutable copies src to dst with mode and fsyncs it.
