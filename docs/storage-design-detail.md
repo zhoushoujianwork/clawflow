@@ -18,6 +18,12 @@ User-facing overview: [storage-design.md](storage-design.md). Code: `internal/st
 - There is no GORM AutoMigrate at startup. Schema changes are explicit migrations applied by `clawflow db migrate`.
 - `EnsureReady` (used by `run` and `web`) resolves the DSN, opens the store and fails if any migration is pending. The command gate lives in `cmd/clawflow/commands/db.go` (`requireStore`, overridable only from tests).
 
+### 升级兼容性
+
+自升级和 release 通道的 `clawflow update` 在替换已安装二进制之前，使用候选二进制执行 `db migrate`（最多 5 分钟）。失败或超时会中止升级，保留旧二进制；自升级记录 `run/self_upgrade result=failed reason=migrate`，错误详情可在流水线看板查看。没有待执行迁移时，此步骤为空操作。成功替换后，源码自升级按原有流程重启正在运行的 web 服务。
+
+迁移必须 **expand-only**，兼容上一版本二进制的读写：允许新增表、索引及兼容的列（例如 nullable 或有默认值），禁止删除或重命名旧列、改变旧字段语义，或增加会拒绝旧版写入的约束。迁移期间旧 web/run 进程仍在运行，替换后的回滚也可能恢复旧二进制。每个迁移独立提交，因此升级失败时较早成功的迁移可能保留；不得依赖二进制回滚来回滚数据库。
+
 ## Test harness
 
 `internal/store/storetest.New(t)` reads `CLAWFLOW_TEST_DATABASE_DSN` and skips the test when it is unset. For each test it creates a unique schema, opens a Store whose connections use that schema as `search_path` (pgx runtime parameter), and drops the schema with `CASCADE` in `t.Cleanup`. CI runs a `postgres:17` service and sets the variable so store tests always run there.

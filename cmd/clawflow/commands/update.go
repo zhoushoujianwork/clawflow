@@ -57,9 +57,9 @@ Older or unknown releases also require --allow-downgrade.`,
 				u := newSelfUpgrader()
 				result := u.Upgrade(ctx, repo)
 				if result.Result == selfUpgradeFailed {
-					return fmt.Errorf("source upgrade: %s", result.Reason)
+					return fmt.Errorf("source upgrade: %s", result.description())
 				}
-				fmt.Println(result.Result + ": " + result.Reason)
+				fmt.Println(result.Result + ": " + result.description())
 				return nil
 			}
 			return downloadReleaseBinary(release, allowDowngrade)
@@ -171,7 +171,26 @@ func (u *selfUpgrader) downloadReleaseBinary(explicitRelease, allowDowngrade boo
 	if version == tag && channel == "release" {
 		return nil
 	}
-	return atomicReplace(dest, staged)
+	// Close the writable descriptor before executing the downloaded candidate
+	// (Linux rejects executing a file still open for writing).
+	if err := staged.Chmod(0o755); err != nil {
+		return err
+	}
+	if err := staged.Close(); err != nil {
+		return err
+	}
+	if err := codesignIfDarwin(staged.Name()); err != nil {
+		fmt.Printf("  [warn] codesign step skipped: %v\n", err)
+	}
+	if err := u.migrateCandidate(context.Background(), staged.Name()); err != nil {
+		return fmt.Errorf("release upgrade aborted: %w", err)
+	}
+	candidate, err := os.Open(staged.Name())
+	if err != nil {
+		return err
+	}
+	defer candidate.Close()
+	return atomicReplace(dest, candidate)
 }
 
 // latestReleaseAsset finds the download URL for the current OS/arch binary
@@ -253,7 +272,7 @@ func rebuildFromSource(repoDir string) error {
 	defer cancel()
 	result := newSelfUpgrader().Upgrade(ctx, config.Repo{LocalPath: repoDir, BaseBranch: trackedBranch()})
 	if result.Result == selfUpgradeFailed {
-		return fmt.Errorf("source upgrade: %s", result.Reason)
+		return fmt.Errorf("source upgrade: %s", result.description())
 	}
 	return nil
 }
