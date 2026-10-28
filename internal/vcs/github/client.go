@@ -1132,6 +1132,9 @@ func (c *Client) GetPRMergeability(repo string, prNumber int) (vcs.MergeStatus, 
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.MergeStatusUnknown, err
 	}
+	if raw.MergeableState == "dirty" {
+		return vcs.MergeStatusConflict, nil
+	}
 	if raw.Mergeable == nil {
 		return vcs.MergeStatusPending, nil
 	}
@@ -1162,13 +1165,12 @@ func (c *Client) ListSubIssues(repo string, issueNumber int) ([]vcs.Issue, error
 	if err != nil {
 		return nil, err
 	}
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/sub_issues", owner, name, issueNumber)
-	data, status, err := c.do("GET", path, nil)
+	// Read every page: GitHub returns 30 sub-issues per page by default, and a
+	// truncated list silently drops queue items and parent/leaf structure.
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/sub_issues?per_page=100", owner, name, issueNumber)
+	data, err := c.allPages(path)
 	if err != nil {
-		return nil, err
-	}
-	if status != 200 {
-		return nil, fmt.Errorf("github list sub-issues: HTTP %d", status)
+		return nil, fmt.Errorf("github list sub-issues: %w", err)
 	}
 	var raw []struct {
 		ID     int64  `json:"id"`

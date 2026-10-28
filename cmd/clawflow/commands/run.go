@@ -1757,6 +1757,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			Stage:              "finalizing",
 			Summary:            output,
 		}
+		if j.repair != nil {
+			finalizingMeta.RepairReason = j.repair.reason()
+		}
 		if outcome == "no-change" {
 			finalizingMeta.OutcomeReason = output
 		}
@@ -1937,6 +1940,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rm.Status = "success"
 	}
 
+	if j.repair != nil {
+		rm.RepairReason = j.repair.reason()
+	}
 	if rm.Status == "success" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
 		rm.HeadSHA = confirmedHead
 	}

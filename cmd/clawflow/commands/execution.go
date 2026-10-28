@@ -64,7 +64,7 @@ CLAWFLOW_OFFLOAD_PROFILE still wins, as it does during execution.`,
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the report as JSON")
-	cmd.Flags().StringVar(&role, "role", "", "Apply settings.execution.role_profiles for this role")
+	cmd.Flags().StringVar(&role, "role", "", "Apply settings.execution.role_profiles for this role (including pilot)")
 	return cmd
 }
 
@@ -100,13 +100,7 @@ func runExecutionCheck(cmd *cobra.Command, role string) execution.Report {
 	if err != nil {
 		return execution.ConfigBlockedReport(err.Error())
 	}
-	if profile := c.RoleProfiles[role]; role != "" && profile != "" {
-		c.Profile = profile
-	}
-	// An explicit environment profile overrides role selection, as in Execute.
-	if profile, ok := os.LookupEnv("CLAWFLOW_OFFLOAD_PROFILE"); ok {
-		c.Profile = profile
-	}
+	c.Profile = execution.ProfileForRole(c, role)
 	return execution.ProbeCapabilities(cmd.Context(), c)
 }
 

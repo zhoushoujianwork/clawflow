@@ -112,7 +112,7 @@ func TestHarvestNoDispatch(t *testing.T) {
 			setHarvestRepo(t, func(r *config.Repo) { v := false; r.AcceptanceOverlapCI = &v })
 		}},
 		{name: "ci failed", reason: "ci_not_success", setup: func(_ *testing.T, f *acceptanceFake) { f.ciStatus = vcs.CIStatusFailure }},
-		{name: "not mergeable", reason: "not_clean", setup: func(_ *testing.T, f *acceptanceFake) {
+		{name: "not mergeable", reason: "conflict", setup: func(_ *testing.T, f *acceptanceFake) {
 			f.mergeability = map[int]vcs.MergeStatus{11: vcs.MergeStatusConflict}
 		}},
 		{name: "draft", reason: "draft", setup: func(_ *testing.T, f *acceptanceFake) {

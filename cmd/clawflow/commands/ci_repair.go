@@ -28,12 +28,16 @@ type ciRepairContext struct {
 	Attempt  int
 	Evidence string
 	// Acceptance is set when the repair input is a failed independent
-	// acceptance verdict instead of failing CI. Nil means a CI repair.
-	Acceptance *acceptanceFindings
+	// acceptance verdict. MergeConflict takes precedence over CI/acceptance.
+	Acceptance    *acceptanceFindings
+	MergeConflict bool
 }
 
 // reason names the repair input for the shared ledger and logs.
 func (r *ciRepairContext) reason() string {
+	if r != nil && r.MergeConflict {
+		return "merge_conflict"
+	}
 	if r != nil && r.Acceptance != nil {
 		return repairReasonAcceptance
 	}
@@ -42,6 +46,9 @@ func (r *ciRepairContext) reason() string {
 
 // label is the human-facing prefix for runner messages.
 func (r *ciRepairContext) label() string {
+	if r.MergeConflict {
+		return "Merge conflict"
+	}
 	if r.reason() == repairReasonAcceptance {
 		return "Acceptance"
 	}
@@ -81,7 +88,7 @@ func ciRepairCandidate(repo string, pr vcs.PR, issue *vcs.Issue) error {
 
 func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Client, repo string, cfg config.Repo, onlyIssue int, normal []*runJob) []*runJob {
 	ciOn, accOn := ciRepairEnabled(cfg), acceptanceRepairEnabled(cfg)
-	if !ciOn && !accOn {
+	if !ciOn && !accOn && !cfg.AutoMerge {
 		return nil
 	}
 	skip := func(pr int, err error) { runLog.Warn("run/ci_repair_skip", "repo", repo, "pr", pr, "err", err.Error()) }
@@ -141,8 +148,17 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 			continue
 		}
 		var findings *acceptanceFindings
+		conflict := false
+		if cfg.AutoMerge {
+			status, err := client.GetPRMergeability(repo, pr.Number)
+			if err != nil {
+				skip(pr.Number, err)
+				continue
+			}
+			conflict = status == vcs.MergeStatusConflict
+		}
 		ciFailing := false
-		if ciOn {
+		if ciOn && !conflict {
 			status, err := client.GetCIStatus(repo, pr.Number)
 			if err != nil {
 				skip(pr.Number, err)
@@ -151,12 +167,14 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 			ciFailing = status == vcs.CIStatusFailure
 		}
 		switch {
-		case ciFailing:
+		case conflict || ciFailing:
 			// CI failure evidence: current behavior. A spent shared budget
 			// ends repair with one comment instead of a silent skip.
-			if err := checkRepairBudget(snapshot.DataDir(), repo, pr.Number, time.Now().UTC()); errors.Is(err, errRepairExhausted) {
+			if err := checkRepairBudget(snapshot.DataDir(), repo, pr.Number, time.Now().UTC()); err != nil {
 				skip(pr.Number, err)
-				repairExhaustedNotice(ctx, client, repo, cfg, pr, n)
+				if errors.Is(err, errRepairExhausted) {
+					repairExhaustedNotice(ctx, client, repo, cfg, pr, n)
+				}
 				continue
 			}
 		case accOn:
@@ -169,7 +187,7 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 		}
 		seen[n] = true
 		sub := &operator.Subject{Number: n, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State}
-		jobs = append(jobs, &runJob{op: op, sub: sub, repo: repo, repoCfg: cfg, client: client, repair: &ciRepairContext{PR: pr, Acceptance: findings}})
+		jobs = append(jobs, &runJob{op: op, sub: sub, repo: repo, repoCfg: cfg, client: client, repair: &ciRepairContext{PR: pr, Acceptance: findings, MergeConflict: conflict}})
 	}
 	return jobs
 }
@@ -191,7 +209,18 @@ func prepareCIRepair(j *runJob, now time.Time) error {
 	if pr.HeadSHA != j.repair.PR.HeadSHA || pr.HeadBranch != j.repair.PR.HeadBranch {
 		return fmt.Errorf("PR head changed since scan")
 	}
-	if j.repair.Acceptance != nil {
+	if j.repair.MergeConflict {
+		status, err := j.client.GetPRMergeability(j.repo, pr.Number)
+		if err != nil {
+			return err
+		}
+		if !j.repoCfg.AutoMerge || status != vcs.MergeStatusConflict {
+			return fmt.Errorf("PR no longer eligible for conflict repair: %s", status)
+		}
+		if pr.BaseBranch == "" || !repairSHA.MatchString(pr.BaseSHA) || pr.BaseBranch == pr.HeadBranch {
+			return fmt.Errorf("missing or unsafe base identity")
+		}
+	} else if j.repair.Acceptance != nil {
 		if err := recheckAcceptanceRepair(j, pr); err != nil {
 			return err
 		}
@@ -210,7 +239,7 @@ func prepareCIRepair(j *runJob, now time.Time) error {
 	}
 	j.repair.PR, j.repair.Attempt = pr, attempt
 	j.repair.Evidence = ""
-	if j.repair.Acceptance == nil {
+	if j.repair.Acceptance == nil && !j.repair.MergeConflict {
 		if reader, ok := j.client.(interface {
 			GetFailedJobEvidence(string, string, int64) (string, error)
 		}); ok {
@@ -241,8 +270,7 @@ type ciRepairAttempt struct {
 	// Released is the infrastructure kind that made this reservation
 	// non-consuming. Empty means the attempt counts against the repair budget.
 	Released string `json:"released,omitempty"`
-	// Reason is the repair input that reserved this attempt ("ci" or
-	// "acceptance"). CI and acceptance repairs share one ledger per PR.
+	// Reason is ci, acceptance, or merge_conflict. All share one ledger per PR.
 	Reason string `json:"reason,omitempty"`
 }
 type ciRepairLedger struct {
@@ -359,7 +387,7 @@ func checkRepairBudget(root, repo string, pr int, now time.Time) error {
 }
 
 // reserveRepair takes one attempt from the PR's shared ledger. CI and
-// acceptance repairs draw on the same budget, cooldown and backoff.
+// acceptance and conflict repairs draw on the same budget, cooldown and backoff.
 func reserveRepair(root, repo string, pr vcs.PR, reason string, now time.Time) (int, error) {
 	dir, path := ciRepairLedgerPath(root, repo, pr.Number)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -468,6 +496,9 @@ func repairToolActivity(path string) (bool, error) {
 }
 
 func (r *ciRepairContext) prompt(testCommand string) string {
+	if r.MergeConflict {
+		return fmt.Sprintf("Merge conflict repair context:\nReason: merge_conflict\nExisting PR: https://github.com/%s/pull/%d\nHead branch: %s\nExpected head SHA: %s\nMerge conflict with %s at %s\nReserved attempt: %d of 3 (shared with CI and acceptance)\nConfigured headless test command: %s\nFetch the current base into origin/<base>, verify it matches the expected base SHA, then git merge origin/<base> (merge commit). Never rebase or force-push. Resolve conflicts preserving both changes' intent under the issue requirements. Run configured tests and push to the same head branch. Do not create a new PR. If resolution is unsafe, report BLOCKED with conflicting files and emit agent-failed.\n", r.PR.HeadRepo, r.PR.Number, r.PR.HeadBranch, r.PR.HeadSHA, r.PR.BaseBranch, r.PR.BaseSHA, r.Attempt, testCommand)
+	}
 	if r.Acceptance != nil {
 		return r.acceptancePrompt(testCommand)
 	}
@@ -561,10 +592,34 @@ func confirmedDevelopmentHead(ctx context.Context, workdir string, j *runJob) (s
 	if len(fields) != 2 || fields[0] != head || fields[1] != "refs/heads/"+branch {
 		return "", fmt.Errorf("development head is not published")
 	}
+
+	if j.repair != nil && j.repair.MergeConflict {
+		if head == j.repair.PR.HeadSHA {
+			return "", fmt.Errorf("conflict repair did not change head")
+		}
+		for _, ancestor := range []string{j.repair.PR.HeadSHA, j.repair.PR.BaseSHA} {
+			if _, err := acceptanceGit(ctx, workdir, "merge-base", "--is-ancestor", ancestor, head); err != nil {
+				return "", fmt.Errorf("conflict repair must preserve PR and base history: %w", err)
+			}
+		}
+		clean, err := acceptanceGit(ctx, workdir, "status", "--porcelain")
+		if err != nil || clean != "" {
+			return "", fmt.Errorf("conflict repair left local changes")
+		}
+	}
 	return head, nil
 }
 
 func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outcome, body string) (string, error) {
+	// Validate conflict repair before operator write-back, not during the later
+	// best-effort provenance lookup. A success marker alone cannot prove a merge.
+	if j.repair != nil && j.repair.MergeConflict && outcome == "agent-implemented" {
+		head, err := confirmedDevelopmentHead(ctx, workdir, j)
+		if err != nil {
+			return "", fmt.Errorf("conflict repair verification: %w", err)
+		}
+		return head, nil
+	}
 	if outcome != "no-change" {
 		return "", nil
 	}

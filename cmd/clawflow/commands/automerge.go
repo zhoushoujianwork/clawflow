@@ -364,6 +364,9 @@ func autoMergeCandidate(client vcs.Client, fullName string, pr vcs.PR) (issueNum
 		fmt.Fprintf(os.Stderr, "[%s] ⚠ auto-merge sweep: mergeability of PR #%d: %v\n", fullName, pr.Number, mErr)
 		return issueNum, true, &prSkip{reason: "mergeability_error", warn: true, fields: []any{"issue", issueNum, "reason", "mergeability_error", "err", mErr.Error()}}
 	}
+	if status == vcs.MergeStatusConflict {
+		return issueNum, true, &prSkip{reason: "conflict", warn: true, fields: []any{"issue", issueNum, "reason", "conflict", "status", string(status)}}
+	}
 	if status != vcs.MergeStatusClean {
 		return issueNum, true, &prSkip{reason: "not_clean", warn: true, fields: []any{"issue", issueNum, "reason", "not_clean", "status", string(status)}}
 	}
@@ -453,7 +456,7 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 // sweepSkipReasons lists, in report order, every skip reason the sweep breaks
 // out as skip_<reason> on its aggregate run/automerge_sweep line.
 var sweepSkipReasons = []string{
-	"draft", "no_closing_keyword", "mergeability_error", "not_clean", "locked",
+	"draft", "no_closing_keyword", "mergeability_error", "conflict", "not_clean", "locked",
 	mergeReasonCanceled, mergeReasonPolicyUnreadable, mergeReasonAcceptanceBusy,
 	mergeReasonAcceptanceMissing, mergeReasonAcceptanceStale,
 	mergeReasonCIFailed, mergeReasonCIPending, mergeReasonCINotSuccessful,

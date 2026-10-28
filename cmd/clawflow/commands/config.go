@@ -158,6 +158,7 @@ func newConfigShowCmd() *cobra.Command {
 
 			execConfig := execution.WithEnvironment(cfg.Settings.Execution)
 			fmt.Printf("Execution:    Offload profile=%s\n", execConfig.Profile)
+			fmt.Printf("Pilot:        Offload profile=%s\n", execution.ProfileForRole(execConfig, config.RolePilot))
 			if err := execution.ValidateConfig(execConfig); err != nil {
 				fmt.Printf("Readiness:    %s\n", err)
 			} else {
