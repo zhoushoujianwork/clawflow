@@ -822,3 +822,36 @@ func TestPipelineAcceptanceReadFailureKeepsPreviousRepoEntry(t *testing.T) {
 		t.Fatalf("b=%+v", b)
 	}
 }
+
+func TestPipelineDecidedSnapshotEvidence(t *testing.T) {
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 20, State: "open", Labels: []string{"agent-failed"}, Body: "## Decided\nShip", UpdatedAt: pipelineT0.Add(-time.Hour).Format(time.RFC3339)}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
+	live := buildPipeline(context.Background(), d)
+	item := itemFor(t, live.Repos[0], 20)
+	if item.HasDecided == nil || !*item.HasDecided {
+		t.Fatalf("live decision lost: %+v", item)
+	}
+	local := &pipelineLocalClient{Client: f, issues: []snapshot.IssueEntry{{Repo: "o/r", IssueNumber: 20, State: "open", Labels: []string{"agent-failed"}, HasDecided: pipeline.DecidedSection("## Decided"), UpdatedAt: f.issues[0].UpdatedAt, CapturedAt: pipelineT0}}}
+	d.newClient = func(config.Repo) (vcs.Client, error) { return local, nil }
+	persisted := buildPipeline(context.Background(), d)
+	item = itemFor(t, persisted.Repos[0], 20)
+	if item.HasDecided == nil || !*item.HasDecided || item.UpdatedAt != f.issues[0].UpdatedAt {
+		t.Fatalf("snapshot evidence lost or refresh mistaken for change: %+v", item)
+	}
+	local.issues[0].HasDecided = nil
+	legacy := buildPipeline(context.Background(), d)
+	if itemFor(t, legacy.Repos[0], 20).HasDecided != nil {
+		t.Fatal("legacy snapshot treated as inspected body")
+	}
+}
+
+func TestPipelineIncludesUnqueuedEvidence(t *testing.T) {
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 20, State: "open", UpdatedAt: pipelineT0.Format(time.RFC3339)}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
+	b := buildPipeline(context.Background(), d).Repos[0]
+	if len(b.Items) != 0 || len(b.UnqueuedIssues) != 1 || b.UnqueuedIssues[0].Issue != 20 {
+		t.Fatalf("missing unqueued evidence: %+v", b)
+	}
+}

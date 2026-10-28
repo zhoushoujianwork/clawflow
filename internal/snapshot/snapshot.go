@@ -815,6 +815,8 @@ type PendingEntry struct {
 // have it) but always populated by the scanner — consumed by Pilot's
 // issue_digest to compute "new in last 24h" without an extra API call.
 type IssueEntry struct {
+	HasDecided  *bool     `json:"has_decided,omitempty"`
+	UpdatedAt   string    `json:"updated_at,omitempty"`
 	Repo        string    `json:"repo"`
 	IssueNumber int       `json:"issue_number"`
 	IssueTitle  string    `json:"issue_title,omitempty"`

@@ -103,6 +103,12 @@ type QueueSettings struct {
 	ParkAfter string `yaml:"park_after,omitempty"`
 }
 
+// PilotSettings tunes event-driven supervision.
+type PilotSettings struct {
+	// StallAfter is the minimum quiet period for a live repository pass.
+	StallAfter string `yaml:"stall_after,omitempty"`
+}
+
 // CoordinatorSettings reserves the optional worker API listener configuration.
 type CoordinatorSettings struct {
 	Enabled bool   `yaml:"enabled,omitempty"`
@@ -118,6 +124,7 @@ func (s CoordinatorSettings) ListenAddress() string {
 
 // Settings holds global ClawFlow settings.
 type Settings struct {
+	Pilot       PilotSettings       `yaml:"pilot,omitempty"`
 	Coordinator CoordinatorSettings `yaml:"coordinator,omitempty"`
 	Execution   ExecutionSettings   `yaml:"execution,omitempty"`
 

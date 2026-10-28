@@ -243,6 +243,7 @@ func TestScheduleRejectsUnsupportedBudgetBeforeLaunch(t *testing.T) {
 	if err := project.SetAutomation("budget-rejected", true, 60); err != nil {
 		t.Fatal(err)
 	}
+	seedAttention(t, "budget-rejected")
 	woken, err := Schedule(context.Background(), 30*time.Second, time.Time{})
 	if err != nil || woken != 0 {
 		t.Fatalf("woken=%d err=%v", woken, err)
@@ -331,6 +332,7 @@ func TestScheduleProceedsWhenBudgetSufficient(t *testing.T) {
 		t.Fatalf("enable automation %s: %v", name, err)
 	}
 
+	seedAttention(t, name)
 	// Plenty of runway relative to the wake's own timeout.
 	deadline := time.Now().Add(time.Hour)
 	if _, err := Schedule(context.Background(), 30*time.Second, deadline); err != nil {

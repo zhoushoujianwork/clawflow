@@ -1,0 +1,50 @@
+[
+  {
+    "name": "offload-20-spec-gap",
+    "source": "#410 / #407 中提供的 2026-10-27 案例摘要；非原始日志或模型输出。fixture/* 是测试仓库标识。",
+    "repo": "fixture/offload",
+    "issue": 20,
+    "duties": [2, 3, 4, 8],
+    "evidence": "offload #20：规格假定存在 retry chain，但实现中不存在该重试链，代理因此 BLOCKED。应先纠正规格假设。",
+    "output": {
+      "run_id": "offload-20-spec-gap",
+      "actions": [
+        {"id":"decided","type":"edit_spec","repo":"fixture/offload","issue":20,"section":"Decided","body":"原因分类：spec_gap。现有实现不存在规格假定的 retry chain；本项不应依赖该链。验收前以只读方式确认发布 main 的相关文件指针，列明实际可验证的验收标准，不能为了通过而降低标准。"},
+        {"id":"feasibility","type":"comment","repo":"fixture/offload","issue":20,"body":"职责 3、4：入队前补齐 Decided、验收标准和经核实的文件指针；检查队头前一至两个位置是否也依赖这一错误假设。缺少发布 main 证据时先标明待确认，不虚构文件或重试机制。"},
+        {"id":"report","type":"note","repo":"fixture/offload","body":"职责 8：offload #20 被 spec_gap 阻塞，已提出规格修正和可行性核查计划；尚无解除原因的证据，不自动 release，不宣称动作已完成。"}
+      ]
+    }
+  },
+  {
+    "name": "agent-host-15-sandbox-ps",
+    "source": "#410 / #407 中提供的 2026-10-27 案例摘要；非原始日志或模型输出。",
+    "repo": "fixture/agent-host",
+    "issue": 15,
+    "duties": [2, 8],
+    "evidence": "Agent-Host #15：验证涉及 Python 3.9 SQLite WAL；沙箱拒绝 ps，导致代理 BLOCKED。这不证明产品缺陷。",
+    "output": {
+      "run_id": "agent-host-15-sandbox-ps",
+      "actions": [
+        {"id":"verification","type":"ask_human","repo":"fixture/agent-host","issue":15,"body":"原因分类：environment_sandbox。ps 被沙箱拒绝；请指定可获授权的验证路径，以保留 Python 3.9 / SQLite WAL 的验收要求完成验证。"},
+        {"id":"report","type":"note","repo":"fixture/agent-host","body":"职责 8：Agent-Host #15 的现有证据仅能确认环境限制，不能判定为产品缺陷。保留原验收标准；获授权验证尚未完成，不 release，不宣称已通过。"}
+      ]
+    }
+  },
+  {
+    "name": "stalled-git-fetch",
+    "source": "#407 中提供的 2026-10-27 45 分钟 git fetch 停滞与 #403 根因事项摘要；未提供合并后部署证据。",
+    "repo": "fixture/clawflow",
+    "issue": 403,
+    "duties": [1, 5, 7, 8],
+    "evidence": "git fetch 停滞 45 分钟，冻结队列；已有关联根因事项 #403（无界 git 操作）。未提供发布 main 新 SHA 或安装版本的证据。",
+    "output": {
+      "run_id": "stalled-git-fetch",
+      "actions": [
+        {"id":"health","type":"note","repo":"fixture/clawflow","body":"职责 1：原因分类 transient_infrastructure，git fetch 已停滞 45 分钟，影响队列进展。记录现有证据，进程级恢复交由代码负责；不得调用 restart_service 或杀进程。"},
+        {"id":"root-cause","type":"comment","repo":"fixture/clawflow","issue":403,"body":"职责 5：将本次 45 分钟 git fetch 停滞关联到现有 #403 无界 git 根因事项，比较其他运行的同类失败，避免重复建单；没有证据时不归因于产品改动。"},
+        {"id":"post-merge","type":"note","repo":"fixture/clawflow","body":"职责 7：发布 main SHA 与安装版本证据缺失。先只读核对发布基线及已安装版本，再报告是否需要升级；此轮不安装、不重启，也不宣称合并后操作完成。"},
+        {"id":"report","type":"note","repo":"fixture/clawflow","body":"职责 8：队列受 git fetch 停滞影响，根因跟踪 #403；恢复和发布版本核查仍待完成。报告计划，不将本地检查当作 CI 或独立验收。"}
+      ]
+    }
+  }
+]
