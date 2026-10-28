@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -32,18 +33,16 @@ var (
 // empty, so it cannot collide.
 const unscopedKey = ""
 
-// defaultMaxScheduledRuns caps concurrent scheduler passes when
-// settings.max_concurrent_agents is unset.
-const defaultMaxScheduledRuns = 4
-
 type runRequest struct {
 	Repo  string `json:"repo,omitempty"`
 	Issue int    `json:"issue,omitempty"`
 }
 
 type runResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+	AgentSlotsUsed  int    `json:"agent_slots_used"`
+	AgentSlotsTotal int    `json:"agent_slots_total"`
+	Status          string `json:"status"`
+	Message         string `json:"message,omitempty"`
 	// Scheduler fields — populated by HandleRunStatus so the dashboard
 	// can render the auto-run banner ("every 5m · next in 2:14") in one
 	// fetch alongside the running/idle indicator.
@@ -97,18 +96,13 @@ func TriggerRun(repo string, issue int) bool {
 // PlanScheduledRuns is the scheduler's pure decision: which repos to start a
 // pass for now. A repo qualifies when it is enabled, belongs on this machine
 // (bound_machine / require_binding), is in only (when only is non-nil) and has
-// no active pass. At most max(settings.max_concurrent_agents, default 4)
-// passes may be active, so the result is capped at the remaining slots. An
-// active unscoped pass blocks everything. Result order is alphabetical.
+// no active pass. Agent capacity is enforced at the execution boundary, not
+// by counting passes (which also do non-agent work). An active unscoped pass
+// blocks everything. Result order is alphabetical.
 func PlanScheduledRuns(cfg *config.Config, hostname string, active map[string]bool, only map[string]bool) []string {
 	if active[unscopedKey] {
 		return nil
 	}
-	limit := cfg.Settings.MaxConcurrentAgents
-	if limit <= 0 {
-		limit = defaultMaxScheduledRuns
-	}
-	slots := limit - len(active)
 	var names []string
 	for name, repo := range cfg.EnabledRepos() {
 		if only != nil && !only[name] {
@@ -120,12 +114,6 @@ func PlanScheduledRuns(cfg *config.Config, hostname string, active map[string]bo
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	if slots < 0 {
-		slots = 0
-	}
-	if len(names) > slots {
-		names = names[:slots]
-	}
 	return names
 }
 
@@ -285,6 +273,8 @@ func currentRunStatus() runResponse {
 	}
 
 	resp := runResponse{Status: status, ActiveRepos: repos}
+	resp.AgentSlotsTotal, _ = agentcapacity.Total()
+	resp.AgentSlotsUsed = agentcapacity.Used()
 	if cfg, err := config.Load(); err == nil {
 		resp.IntervalMinutes = cfg.Settings.RunIntervalMinutes
 		resp.Paused = cfg.Settings.RunPaused
