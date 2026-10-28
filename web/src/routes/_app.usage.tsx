@@ -6,6 +6,7 @@ import { type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 
 interface UsageAggregate {
+  subscription_runs?: number
   runs: number
   total_cost_usd: number | null
   input_tokens: number | null
@@ -16,6 +17,7 @@ interface UsageAggregate {
 }
 
 interface ModelAggregate {
+  subscription_runs?: number
   cost_usd: number | null
   input_tokens: number | null
   output_tokens: number | null
@@ -92,9 +94,9 @@ function durationStr(ms: number): string {
   return `${h}h${m % 60}m`
 }
 
-function fmtCost(usd: number | null): string {
- if (usd == null) return "Not reported"
-  return `$${usd.toFixed(4)}`
+export function fmtCost(usd: number | null, subscriptions = 0): string {
+ if (usd == null) return subscriptions > 0 ? "Subscription" : "Not reported"
+ return `$${usd.toFixed(4)}${subscriptions > 0 ? " + subscription" : ""}`
 }
 
 function fmtNum(n: number | null): string {
@@ -251,7 +253,7 @@ function UsagePage() {
         <section key={group.title} className="bg-card border border-border rounded-xl p-4 mb-4">
           <h2 className="font-semibold mb-2">{group.title}</h2>
           <table className="w-full text-sm"><thead><tr><th className="text-left">Name</th><th>Runs</th><th>Cost</th><th>Tokens</th></tr></thead>
-            <tbody>{Object.entries(group.rows).map(([name, row]) => <tr key={name}><td>{name}</td><td className="text-center">{row.runs}</td><td className="text-center">{fmtCost(row.total_cost_usd)}</td><td className="text-center">{fmtNum(tokenTotal(row.input_tokens,row.output_tokens))}</td></tr>)}</tbody>
+            <tbody>{Object.entries(group.rows).map(([name, row]) => <tr key={name}><td>{name}</td><td className="text-center">{row.runs}</td><td className="text-center">{fmtCost(row.total_cost_usd, row.subscription_runs)}</td><td className="text-center">{fmtNum(tokenTotal(row.input_tokens,row.output_tokens))}</td></tr>)}</tbody>
           </table>
         </section>
       ))}
@@ -274,7 +276,7 @@ function UsagePage() {
               <StatCard label="Total runs" value={fmtNum(viewTotals.runs)} />
               <StatCard
                 label="Total cost"
-                value={fmtCost(viewTotals.total_cost_usd)}
+                value={fmtCost(viewTotals.total_cost_usd, viewTotals.subscription_runs)}
                 tone="brand"
                 hint="includes Pilot wakes"
               />
@@ -327,7 +329,7 @@ function UsagePage() {
                     </td>
                     <td className="px-4 py-2 text-right text-muted-foreground">{r.runs}</td>
                     <td className="px-4 py-2 text-right text-foreground font-medium">
-                      {fmtCost(r.total_cost_usd)}
+                      {fmtCost(r.total_cost_usd, r.subscription_runs)}
                     </td>
                     <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.input_tokens)}</td>
                     <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.output_tokens)}</td>
@@ -355,7 +357,7 @@ function UsagePage() {
                 {modelRows.map(r => (
                   <tr key={r.name} className="hover:bg-secondary/20">
                     <td className="px-4 py-2 font-mono text-foreground">{r.name}</td>
-                    <td className="px-4 py-2 text-right text-foreground font-medium">{fmtCost(r.cost_usd)}</td>
+                    <td className="px-4 py-2 text-right text-foreground font-medium">{fmtCost(r.cost_usd, r.subscription_runs)}</td>
                     <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.input_tokens)}</td>
                     <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.output_tokens)}</td>
                     <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.cache_read_input_tokens)}</td>
@@ -390,7 +392,7 @@ function UsagePage() {
                     </td>
                     <td className="px-4 py-2 text-right text-muted-foreground">{r.runs}</td>
                     <td className="px-4 py-2 text-right text-foreground font-medium">
-                      {fmtCost(r.total_cost_usd)}
+                      {fmtCost(r.total_cost_usd, r.subscription_runs)}
                     </td>
                   </tr>
                 ))}
@@ -451,7 +453,7 @@ function DailyChart({ data, selectedDay, onSelectDay }: { data: DailyPoint[]; se
                     textAnchor="middle"
                     className="fill-foreground text-[10px]"
                   >
-                    {fmtCost(d.total_cost_usd)}
+                    {fmtCost(d.total_cost_usd, d.subscription_runs)}
                   </text>
                 )}
               </g>
@@ -487,7 +489,7 @@ function DailyChart({ data, selectedDay, onSelectDay }: { data: DailyPoint[]; se
             return (
               <>
                 {d.date} — {d.runs} run{d.runs !== 1 ? 's' : ''},{' '}
-                {fmtCost(d.total_cost_usd)},{' '}
+                {fmtCost(d.total_cost_usd, d.subscription_runs)},{' '}
                 {fmtNum(tokenTotal(d.input_tokens, d.output_tokens))} tokens
                 {selectedDay && <span className="ml-2 text-muted-foreground/60">(click again to deselect)</span>}
               </>

@@ -2,10 +2,13 @@ package snapshot
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,5 +117,58 @@ func TestTerminalUsageWithoutCostRemainsUnreported(t *testing.T) {
 				t.Fatalf("row=%+v", rows[0])
 			}
 		})
+	}
+}
+
+// TestOffloadUsageRunRow exercises the same metadata-to-row boundary used by
+// implement, repair-ci and pilot without requiring a live database.
+func TestOffloadUsageRunRow(t *testing.T) {
+	for _, tc := range []struct {
+		name, record               string
+		input, read, write, output int64
+		unavailable                bool
+	}{
+		{"subscription", `{"model":"gpt-test","cost_basis":"subscription","cost_usd":null,"usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":20,"output_tokens":50},"cumulative_usage":{"input_tokens":99999,"output_tokens":99999}}`, 180, 800, 20, 50, false},
+		{"incomplete", `{"model":"gpt-test","usage":{}}`, 0, 0, 0, 0, true},
+		{"null usage", `{"model":"gpt-test","usage":null}`, 0, 0, 0, 0, true},
+		{"malformed usage", `{"model":"gpt-test","usage":{"input_tokens":"invalid"}}`, 0, 0, 0, 0, true},
+		{"old runtime", `{}`, 0, 0, 0, 0, true},
+		{"unavailable", `{"model":"gpt-test","usage_unavailable":"provider omitted usage"}`, 0, 0, 0, 0, true},
+		{"invalid", `{"model":"gpt-test","usage":{"input_tokens":1,"cached_input_tokens":2,"cache_write_input_tokens":0,"output_tokens":0}}`, 0, 0, 0, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var result execution.Result
+			if err := json.Unmarshal([]byte(tc.record), &result); err != nil {
+				t.Fatal(err)
+			}
+			u := UsageFromResult(result)
+			raw, err := json.Marshal(RunMeta{Repo: "o/r", Operator: "implement", Status: "success", StartedAt: time.Now(), Model: result.Model, Usage: u})
+			if err != nil {
+				t.Fatal(err)
+			}
+			row, _, err := store.DecodeRun(t.TempDir(), "run", raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantModel := result.Model
+			if wantModel == "" {
+				wantModel = "unknown"
+			}
+			if row.Model != wantModel || row.CostUSD != nil {
+				t.Fatalf("row=%+v", row)
+			}
+			if tc.unavailable {
+				if row.InputTokens != nil || row.OutputTokens != nil || u.UsageUnavailable == "" {
+					t.Fatalf("unavailable: %+v", u)
+				}
+			} else if row.InputTokens == nil || *row.InputTokens != tc.input || *row.CacheReadInputTokens != tc.read || *row.CacheCreationInputTokens != tc.write || *row.OutputTokens != tc.output || !strings.Contains(row.Payload, `"cost_basis":"subscription"`) {
+				t.Fatalf("row=%+v", row)
+			}
+		})
+	}
+	cost := 0.0
+	u := UsageFromResult(execution.Result{CostUSD: &cost, CostIsEstimate: true})
+	if u.CostUnavailable || !u.CostIsEstimate {
+		t.Fatalf("zero estimate: %+v", u)
 	}
 }

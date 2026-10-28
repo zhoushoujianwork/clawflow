@@ -349,3 +349,27 @@ func TestOffloadSharedCapacity(t *testing.T) {
 		})
 	}
 }
+
+func TestResultModelAndUsage(t *testing.T) {
+	for _, mode := range []string{"result-model", "result-model-different", "result-model-final-empty", "event-model", "final-model-empty"} {
+		t.Run(mode, func(t *testing.T) {
+			c, req := fixture(t)
+			t.Setenv("OFFLOAD_TEST_MODE", mode)
+			r, err := Run(context.Background(), c, req, nil, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(mode, "result-model") {
+				var usage TokenUsage
+				if err := json.Unmarshal(r.Usage, &usage); err != nil {
+					t.Fatal(err)
+				}
+				if r.Model != "gpt-test" || r.Usage == nil || usage.InputTokens == nil || *usage.InputTokens != 1000 || r.CostBasis != "subscription" || r.CostUSD != nil {
+					t.Fatalf("%+v", r)
+				}
+			} else if r.Model != "profile-model" {
+				t.Fatalf("%+v", r)
+			}
+		})
+	}
+}

@@ -129,20 +129,33 @@ type Observation struct {
 }
 
 type Result struct {
-	Status          string          `json:"status"`
-	Text            string          `json:"result"`
-	Model           string          `json:"model"`
-	SessionKey      string          `json:"-"`
-	NativeSessionID string          `json:"session"`
-	Profile         string          `json:"profile"`
-	Backend         string          `json:"backend"`
-	RunID           string          `json:"run_id"`
-	CallerRunID     string          `json:"caller_run_id"`
-	ExecutionPolicy string          `json:"execution_policy"`
-	ExitCode        int             `json:"exit_code"`
-	ErrorKind       string          `json:"error_kind"`
-	Error           string          `json:"error"`
-	Usage           json.RawMessage `json:"usage"`
+	Status           string          `json:"status"`
+	Text             string          `json:"result"`
+	Model            string          `json:"model"`
+	SessionKey       string          `json:"-"`
+	NativeSessionID  string          `json:"session"`
+	Profile          string          `json:"profile"`
+	Backend          string          `json:"backend"`
+	RunID            string          `json:"run_id"`
+	CallerRunID      string          `json:"caller_run_id"`
+	ExecutionPolicy  string          `json:"execution_policy"`
+	ExitCode         int             `json:"exit_code"`
+	ErrorKind        string          `json:"error_kind"`
+	Error            string          `json:"error"`
+	Usage            json.RawMessage `json:"usage"`
+	CostUSD          *float64        `json:"cost_usd"`
+	CostIsEstimate   bool            `json:"cost_is_estimate"`
+	CostBasis        string          `json:"cost_basis"`
+	CostUnavailable  string          `json:"cost_unavailable"`
+	UsageUnavailable string          `json:"usage_unavailable"`
+}
+
+// TokenUsage contains this run's inclusive input counts, not cumulative session usage.
+type TokenUsage struct {
+	InputTokens           *int64 `json:"input_tokens"`
+	CachedInputTokens     *int64 `json:"cached_input_tokens"`
+	CacheWriteInputTokens *int64 `json:"cache_write_input_tokens"`
+	OutputTokens          *int64 `json:"output_tokens"`
 }
 
 // Event contains sanitized metadata only; final answer text comes from stdout.
@@ -428,7 +441,11 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	}
 	if tail.final != nil {
 		e := tail.final
-		result = Result{NativeSessionID: e.Session, SessionKey: e.Session, Profile: c.Profile, Backend: e.Backend, Model: e.Model, RunID: e.RunID, CallerRunID: e.CallerRunID, Status: e.Status, ErrorKind: e.ErrorKind, ExitCode: e.ExitCode}
+		model := e.Model
+		if model == "" {
+			model = tail.model
+		}
+		result = Result{NativeSessionID: e.Session, SessionKey: e.Session, Profile: c.Profile, Backend: e.Backend, Model: model, RunID: e.RunID, CallerRunID: e.CallerRunID, Status: e.Status, ErrorKind: e.ErrorKind, ExitCode: e.ExitCode}
 	}
 	if exceeded {
 		return result, &Error{Kind: "protocol_output_limit"}
@@ -465,6 +482,9 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 			return result, runCtx.Err()
 		}
 		return result, &Error{Kind: "protocol_invalid_result"}
+	}
+	if decoded.Model == "" {
+		decoded.Model = result.Model
 	}
 	result = decoded
 	result.Text = redact(result.Text, env)
