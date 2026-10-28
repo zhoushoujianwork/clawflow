@@ -16,7 +16,7 @@ clawflow repo enable owner/repo
 clawflow run --repo owner/repo
 ```
 
-Required CI accepts success only. Failed-CI repair is limited to same-repository GitHub managed PRs, local reproduction, at most three attempts per PR and a five-minute cooldown. It updates the existing branch without force; it uses bounded, redacted exact-head GitHub job-log excerpts as untrusted diagnostic evidence and does not repair forks/GitLab MRs. For `acceptance_required` repos the same operator also repairs a reviewer verdict `failed` (never `blocked`) on the same PR, sharing the per-PR three-attempt ledger; reviewer text is passed as untrusted data. Other GitLab capabilities remain supported.
+Required CI accepts success only. Failed-CI repair is limited to same-repository GitHub managed PRs and same-project GitLab MRs, local reproduction, at most three attempts per PR and a five-minute cooldown. It updates the existing branch without force; it uses bounded, redacted exact-head GitHub/GitLab job-log excerpts as untrusted diagnostic evidence and does not repair forks. For `acceptance_required` repos the same operator also repairs a reviewer verdict `failed` (never `blocked`) on the same PR, sharing the per-PR three-attempt ledger; reviewer text is passed as untrusted data. Other GitLab capabilities remain supported.
 
 The [managed development design](docs/managed-development-design.md) proposes a durable task/effect engine beyond the implemented runner. Do not describe its proposed contracts as existing capabilities. Config sync remains available through `clawflow sync push/pull`, excluding tokens and local paths.
 

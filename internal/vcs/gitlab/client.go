@@ -545,31 +545,7 @@ func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
 }
 
 func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d/pipelines?per_page=1", projectID(repo), prNumber)
-	data, status, err := c.doJSON("GET", path, nil)
-	if err != nil {
-		return vcs.CIStatusNone, err
-	}
-	if status != 200 {
-		return vcs.CIStatusNone, fmt.Errorf("gitlab get MR pipelines: HTTP %d", status)
-	}
-	var raw []struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return vcs.CIStatusNone, err
-	}
-	if len(raw) == 0 {
-		return vcs.CIStatusNone, nil
-	}
-	switch raw[0].Status {
-	case "success":
-		return vcs.CIStatusSuccess, nil
-	case "failed", "canceled":
-		return vcs.CIStatusFailure, nil
-	default:
-		return vcs.CIStatusPending, nil
-	}
+	return c.GetCIStatusAtHead(repo, prNumber, "")
 }
 
 // SearchIssues runs GitLab's project-scoped issue search via the

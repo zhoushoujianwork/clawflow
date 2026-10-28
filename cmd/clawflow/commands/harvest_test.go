@@ -554,6 +554,7 @@ func TestHarvestGitLabConditionalMerge(t *testing.T) {
 			"sha": f.pr.HeadSHA, "diff_refs": map[string]string{"base_sha": f.pr.BaseSHA},
 			"source_branch": f.pr.HeadBranch, "target_branch": "main",
 			"source_project_id": 1, "target_project_id": 1, "merge_status": "can_be_merged",
+			"head_pipeline": map[string]any{"id": 5, "sha": f.pr.HeadSHA},
 		}
 		var result any
 		switch r.Method + " " + r.URL.Path {
@@ -566,8 +567,8 @@ func TestHarvestGitLabConditionalMerge(t *testing.T) {
 			result = mr
 		case "GET /api/v4/projects/o/r/issues/42":
 			result = map[string]any{"iid": 42, "title": f.issue.Title, "description": f.issue.Body, "state": "opened"}
-		case "GET /api/v4/projects/o/r/merge_requests/11/pipelines":
-			result = []any{map[string]string{"status": "success"}}
+		case "GET /api/v4/projects/o/r/pipelines/5":
+			result = map[string]any{"id": 5, "sha": f.pr.HeadSHA, "status": "success"}
 		case "PUT /api/v4/projects/o/r/merge_requests/11/merge":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["sha"] != f.pr.HeadSHA || body["merge_when_pipeline_succeeds"] != false {
