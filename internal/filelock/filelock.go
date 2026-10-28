@@ -2,6 +2,7 @@
 package filelock
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 var ErrHeld = errors.New("lock already held")
@@ -35,6 +37,31 @@ func legacyHeld(data []byte) bool {
 // Try acquires a lock before publishing its informational owner record.
 // The pathname must never be unlinked, including after release or process death.
 func Try(path string, owner any) (*os.File, error) {
+	return acquire(context.Background(), path, owner, false)
+}
+
+// Wait uses blocking flock for kernel owners. Only legacy PID owners require
+// polling, since old binaries do not participate in the advisory-lock protocol.
+func Wait(ctx context.Context, path string, owner any) (*os.File, error) {
+	for {
+		f, err := acquire(ctx, path, owner, true)
+		if !errors.Is(err, ErrHeld) {
+			return f, err
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func acquire(ctx context.Context, path string, owner any, wait bool) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
@@ -42,11 +69,42 @@ func Try(path string, owner any) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if wait {
+		// Closing a descriptor does not cancel flock portably. The worker owns
+		// it until the syscall returns, and releases it if the caller timed out.
+		// Never publish an owner record from an abandoned wait.
+		result := make(chan error)
+		go func() {
+			var lockErr error
+			for {
+				lockErr = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+				if !errors.Is(lockErr, syscall.EINTR) {
+					break
+				}
+			}
+			select {
+			case result <- lockErr:
+			case <-ctx.Done():
+				Release(f)
+			}
+		}()
+		select {
+		case err = <-result:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	} else {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	}
+	if err != nil {
 		f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, ErrHeld
 		}
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		Release(f)
 		return nil, err
 	}
 	data, err := io.ReadAll(f)
