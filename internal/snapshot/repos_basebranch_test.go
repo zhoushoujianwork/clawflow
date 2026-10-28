@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -100,5 +101,37 @@ func TestWriteRepos_NoLocalPathStaysValid(t *testing.T) {
 		if !v.BaseBranchValid {
 			t.Errorf("%s should not be flagged (unvalidatable): %+v", name, v)
 		}
+	}
+}
+
+func TestWriteReposMigratedHostBinding(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, tc := range []struct {
+		name string
+		repo config.Repo
+		host string
+	}{
+		{"legacy", config.Repo{BoundMachine: "Work-Mac.LOCAL", WorkerTags: []string{"codex"}}, "work-mac"},
+		{"tags", config.Repo{WorkerTags: []string{"codex", "host-beta"}}, "beta"},
+		{"multiple", config.Repo{WorkerTags: []string{"host-beta", "host-alpha"}}, "beta, alpha"},
+		{"unbound", config.Repo{WorkerTags: []string{"codex"}}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{Repos: map[string]config.Repo{"o/r": tc.repo}}
+			if err := cfg.Save(); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := config.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := WriteRepos(loaded); err != nil {
+				t.Fatal(err)
+			}
+			view := readRepoViews(t)["o/r"]
+			if view.BoundMachine != tc.host || !reflect.DeepEqual(view.WorkerTags, loaded.Repos["o/r"].WorkerTags) {
+				t.Fatalf("affinity lost: %+v", view)
+			}
+		})
 	}
 }

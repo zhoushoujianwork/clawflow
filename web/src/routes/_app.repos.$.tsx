@@ -106,7 +106,7 @@ function RepoDetail() {
       setRuns((Array.isArray(allRuns) ? allRuns : []).filter((r: Run) => r.repo === fullName))
       setPending((Array.isArray(allPending) ? allPending : []).filter((p: PendingEntry) => p.repo === fullName))
       setAllIssues((Array.isArray(allIssuesData) ? allIssuesData : []).filter((i: IssueEntry) => i.repo === fullName))
-      if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+      if (settings?.global?.hostname) setHostname((settings.global.hostname as string).toLowerCase().replace(/\.local$/, ''))
       if (settings?.global?.default_ide) {
         const ide = settings.global.default_ide as string
         const schemeMap: Record<string, string> = {

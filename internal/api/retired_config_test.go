@@ -99,5 +99,33 @@ func TestLegacyRepoBindUpdatesHostTags(t *testing.T) {
 		if got := strings.Join(loaded.Repos["o/r"].WorkerTags, ","); got != tc.want {
 			t.Fatalf("tags=%q want %q", got, tc.want)
 		}
+		data, err := os.ReadFile(snapshot.DataDir() + "/repos.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var views []struct {
+			BoundMachine string   `json:"bound_machine"`
+			WorkerTags   []string `json:"worker_tags"`
+		}
+		if err := json.Unmarshal(data, &views); err != nil {
+			t.Fatal(err)
+		}
+		wantHost := ""
+		if strings.Contains(tc.want, "host-work-mac") {
+			wantHost = "work-mac"
+		}
+		if len(views) != 1 || views[0].BoundMachine != wantHost || strings.Join(views[0].WorkerTags, ",") != tc.want {
+			t.Fatalf("binding lost on refresh: %s", data)
+		}
+		var response struct {
+			BoundMachine string `json:"bound_machine"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.BoundMachine != wantHost {
+			t.Fatalf("response differs from snapshot: %s", w.Body.String())
+		}
+
 	}
 }

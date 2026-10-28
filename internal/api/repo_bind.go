@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -90,7 +91,7 @@ func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 			return r
 		})
 		if req.Bind {
-			results[name] = hostname
+			results[name] = strings.TrimPrefix(config.HostTag(hostname), "host-")
 		} else {
 			results[name] = ""
 		}
@@ -105,7 +106,7 @@ func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Push the new bound_machine to Gist synchronously. Without this, the
+	// Push the new worker_tags to Gist synchronously. Without this, the
 	// next AutoPull (clawflow run / web startup) would silently revert
 	// the local change to whatever the cloud last had — that's the
 	// "I bound it but after restart it came back" bug.
