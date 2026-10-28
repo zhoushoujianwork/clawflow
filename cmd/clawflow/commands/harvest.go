@@ -49,7 +49,6 @@ func runHarvestPhase(ctx context.Context, cfg *config.Config, onlyRepo string, o
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	hostname, _ := os.Hostname()
 	repos := cfg.EnabledRepos()
 	if onlyIssue != 0 {
 		repos = map[string]config.Repo{}
@@ -69,14 +68,8 @@ func runHarvestPhase(ctx context.Context, cfg *config.Config, onlyRepo string, o
 			break
 		}
 		repoCfg := repos[fullName]
-		// Same executeHere / binding semantics as the scan in runOnce.
+		// Use the same repository scope as the scan in runOnce.
 		if onlyRepo != "" && onlyRepo != fullName {
-			continue
-		}
-		if repoCfg.BoundMachine != "" && hostname != "" && repoCfg.BoundMachine != hostname {
-			continue
-		}
-		if cfg.Settings.RequireBinding && repoCfg.BoundMachine == "" && hostname != "" {
 			continue
 		}
 		if f := harvestRepo(ctx, fullName, repoCfg, onlyIssue, timeout, watchdogDeadline); f != nil {

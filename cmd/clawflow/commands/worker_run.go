@@ -85,7 +85,7 @@ func configureWorker(cmd *cobra.Command) {
 		if err != nil {
 			return err
 		}
-		o.Tags = append(o.Tags, "host-"+strings.TrimSuffix(strings.ToLower(hostname), ".local"))
+		o.Tags = append(o.Tags, config.HostTag(hostname))
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return runWorker(ctx, api, o, 30*time.Second, 5*time.Second, func(ctx context.Context, t *coordinator.Task) (*runJob, time.Duration, error) {

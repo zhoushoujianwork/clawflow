@@ -253,10 +253,8 @@ settings:
 	}
 }
 
-// TestMarshalForGist_IncludesBoundMachine verifies that bound_machine IS
-// included in the Gist payload — it's a fleet-wide directive about which
-// machine should run a repo, not a per-machine local fact.
-func TestMarshalForGist_IncludesBoundMachine(t *testing.T) {
+// Legacy host affinity is synced as worker_tags, never as bound_machine.
+func TestMarshalForGist_MigratesBoundMachine(t *testing.T) {
 	cfg := &config.Config{
 		Repos: map[string]config.Repo{
 			"owner/repo": {
@@ -274,11 +272,11 @@ func TestMarshalForGist_IncludesBoundMachine(t *testing.T) {
 	}
 
 	payload := string(data)
-	if !strings.Contains(payload, "bound_machine") {
-		t.Error("bound_machine key should appear in Gist payload")
+	if strings.Contains(payload, "bound_machine") {
+		t.Error("bound_machine key must not appear in Gist payload")
 	}
-	if !strings.Contains(payload, "my-laptop") {
-		t.Error("bound_machine value should appear in Gist payload")
+	if !strings.Contains(payload, "host-my-laptop") {
+		t.Error("migrated host tag should appear in Gist payload")
 	}
 }
 
@@ -312,7 +310,7 @@ repos:
 	}
 
 	repo := merged.Repos["owner/repo"]
-	if repo.BoundMachine != "new-laptop" {
+	if strings.Join(repo.WorkerTags, ",") != "host-new-laptop" {
 		t.Errorf("bound_machine should follow remote: got %q, want %q", repo.BoundMachine, "new-laptop")
 	}
 	// local_path is still the one preserved-locally field.

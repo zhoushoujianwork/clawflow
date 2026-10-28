@@ -597,3 +597,21 @@ func TestHarvestGitLabConditionalMerge(t *testing.T) {
 		t.Fatalf("failed=%v calls=%d merges=%d log=%s", failed, *calls, merges.Load(), readLog())
 	}
 }
+
+func TestHarvestIgnoresRetiredBinding(t *testing.T) {
+	_, _, calls := harvestFixture(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := cfg.Repos["o/r"]
+	repo.BoundMachine = "other-host"
+	repo.WorkerTags = []string{"host-other-host"}
+	cfg.Repos["o/r"] = repo
+	cfg.Settings.RequireBinding = true
+	cfg.Settings.Coordinator.Enabled = true
+	runHarvestPhase(context.Background(), cfg, "o/r", 0, 30*time.Minute, time.Now().Add(2*time.Hour))
+	if *calls != 1 {
+		t.Fatalf("legacy binding prevented harvest: calls=%d", *calls)
+	}
+}

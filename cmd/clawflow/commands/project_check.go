@@ -219,7 +219,7 @@ func inspectProject(name string) projectCheckResult {
 				r.add("primary_project", repo, status, "Authoritative project: "+rc.PrimaryProject, "")
 			}
 		}
-		checkMachine(&r, "repo_binding", repo, rc.BoundMachine, host, hostErr, cfg.Settings.RequireBinding)
+		r.add("worker_tags", repo, "warning", "Worker tag matching is enforced at claim time; worker availability unverified", "")
 		platform := rc.Platform
 		if platform == "" {
 			platform = "github"

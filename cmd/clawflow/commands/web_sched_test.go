@@ -25,8 +25,8 @@ func TestDueScheduledRepos(t *testing.T) {
 	if _, ok := last["o/off"]; ok {
 		t.Fatal("disabled repo scheduled")
 	}
-	if _, ok := last["o/els"]; ok {
-		t.Fatal("repo bound elsewhere scheduled")
+	if _, ok := last["o/els"]; !ok {
+		t.Fatal("legacy binding must not prevent scheduling")
 	}
 
 	// A fires earlier than B; only A is due, independent of B.

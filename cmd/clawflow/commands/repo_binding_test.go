@@ -27,6 +27,7 @@ func TestRepoSetBoundMachine(t *testing.T) {
 				cfg := &config.Config{Repos: map[string]config.Repo{"ns/repo": {
 					Enabled: automation, AutoMerge: automation,
 					BoundMachine:   "old-host",
+					WorkerTags:     []string{"codex"},
 					PrimaryProject: "existing-project", BaseBranch: "develop",
 					LocalPath: "/isolated/checkout", Description: "keep description",
 					Labels: map[string]string{"trigger": "ready"},
@@ -35,7 +36,7 @@ func TestRepoSetBoundMachine(t *testing.T) {
 					t.Fatal(err)
 				}
 				want := cfg.Repos["ns/repo"]
-				want.BoundMachine = tc.binding
+				want = want.WithHostTag(tc.binding)
 				cmd := newRepoSetCmd()
 				cmd.SetArgs(append([]string{"ns/repo"}, tc.flags...))
 				if err := cmd.Execute(); err != nil {
@@ -78,7 +79,7 @@ func TestRepoSetBoundMachinePreservedWithAutomationFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := loaded.Repos["ns/repo"]
-	if r.BoundMachine != "Work-Mac.local" || r.Enabled || r.AutoMerge || r.PrimaryProject != "existing-project" {
+	if strings.Join(r.WorkerTags, ",") != "host-work-mac" || r.Enabled || r.AutoMerge || r.PrimaryProject != "existing-project" {
 		t.Fatalf("unexpected repository settings: %+v", r)
 	}
 }
