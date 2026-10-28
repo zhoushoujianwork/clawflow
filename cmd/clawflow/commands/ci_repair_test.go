@@ -136,13 +136,18 @@ func TestCIRepairDispatch(t *testing.T) {
 	if got := scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, normal); len(got) != 0 {
 		t.Fatal("duplicate issue job")
 	}
-	for _, change := range []func(*config.Repo){func(c *config.Repo) { c.AutoMerge = false }, func(c *config.Repo) { c.Platform = "unsupported" }, func(c *config.Repo) { c.BoundMachine = "not-this-host" }} {
+	for _, change := range []func(*config.Repo){func(c *config.Repo) { c.AutoMerge = false }, func(c *config.Repo) { c.Platform = "unsupported" }} {
 		other := cfg
 		change(&other)
 		before := f.listCalls
 		if len(scanCIRepairJobs(context.Background(), reg, f, "o/r", other, 0, nil)) != 0 || f.listCalls != before {
 			t.Fatal("disabled scope called VCS")
 		}
+	}
+	other := cfg
+	other.BoundMachine = "not-this-host"
+	if got := scanCIRepairJobs(context.Background(), reg, f, "o/r", other, 0, nil); len(got) != 1 {
+		t.Fatal("legacy binding blocked repair")
 	}
 	for _, original := range reg.All() {
 		if original.Name == "repair-ci" {

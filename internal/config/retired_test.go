@@ -44,7 +44,7 @@ settings:
 				t.Fatal(err)
 			}
 			r := cfg.Repos["group/project"]
-			if r.Enabled || r.AutoMerge || !r.CIRequired || r.Platform != "gitlab" || r.BaseURL != "https://gitlab.example.test" || r.BaseBranch != "develop" || r.LocalPath != "/checkout" || r.BoundMachine != "worker-1" || r.PrimaryProject != "delivery" || !cfg.Settings.RunPaused {
+			if r.Enabled || r.AutoMerge || !r.CIRequired || r.Platform != "gitlab" || r.BaseURL != "https://gitlab.example.test" || r.BaseBranch != "develop" || r.LocalPath != "/checkout" || strings.Join(r.WorkerTags, ",") != "host-worker-1" || r.PrimaryProject != "delivery" || !cfg.Settings.RunPaused {
 				t.Fatalf("migration changed active settings: %+v / %+v", r, cfg.Settings)
 			}
 			if err := cfg.Save(); err != nil {

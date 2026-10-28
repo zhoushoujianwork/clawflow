@@ -29,17 +29,17 @@ func TestPlanScheduledRuns(t *testing.T) {
 		only   map[string]bool
 		want   []string
 	}{
-		{"all eligible, bound elsewhere and disabled skipped", schedCfg(10, false, repos), nil, nil,
-			[]string{"o/a", "o/b", "o/c", "o/mine", "o/zunset"}},
+		{"all eligible, disabled skipped", schedCfg(10, false, repos), nil, nil,
+			[]string{"o/a", "o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
 		{"active repo skipped", schedCfg(10, false, repos), map[string]bool{"o/a": true}, nil,
-			[]string{"o/b", "o/c", "o/mine", "o/zunset"}},
+			[]string{"o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
 		{"agent cap does not count active passes", schedCfg(3, false, repos), map[string]bool{"o/a": true}, nil,
-			[]string{"o/b", "o/c", "o/mine", "o/zunset"}},
+			[]string{"o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
 		{"default capacity does not limit passes", schedCfg(0, false, repos), nil, nil,
-			[]string{"o/a", "o/b", "o/c", "o/mine", "o/zunset"}},
-		{"active passes do not consume slots", schedCfg(2, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, []string{"o/c", "o/mine", "o/zunset"}},
-		{"passes can exceed agent slots", schedCfg(1, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, []string{"o/c", "o/mine", "o/zunset"}},
-		{"require_binding drops unbound", schedCfg(10, true, repos), nil, nil, []string{"o/mine"}},
+			[]string{"o/a", "o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
+		{"active passes do not consume slots", schedCfg(2, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, []string{"o/c", "o/mine", "o/other", "o/zunset"}},
+		{"passes can exceed agent slots", schedCfg(1, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, []string{"o/c", "o/mine", "o/other", "o/zunset"}},
+		{"require_binding ignored", schedCfg(10, true, repos), nil, nil, []string{"o/a", "o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
 		{"unscoped pass blocks all", schedCfg(10, false, repos), map[string]bool{unscopedKey: true}, nil, nil},
 		{"only filter", schedCfg(10, false, repos), nil, map[string]bool{"o/b": true, "o/off": true}, []string{"o/b"}},
 	}

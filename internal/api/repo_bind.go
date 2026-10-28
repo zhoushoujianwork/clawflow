@@ -28,11 +28,8 @@ type repoBindResponse struct {
 }
 
 // HandleRepoBind handles POST /api/repo/bind.
-// When bind=true and machine is empty, sets BoundMachine to the current
-// machine's hostname. When bind=true and machine is non-empty, pins
-// BoundMachine to that value (used by the dashboard's bound-machine
-// dropdown to reassign repos across a known fleet). When bind=false,
-// clears BoundMachine (unbinds the repo).
+// Binding requests replace host tags, preserving other worker capabilities.
+// The legacy response shape remains compatible with dashboard callers.
 // Supports both single-repo (repo field) and batch (repos field) modes.
 func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -86,13 +83,17 @@ func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 		}
 		config.TouchRepo(cfg, name, func(r config.Repo) config.Repo {
 			if req.Bind {
-				r.BoundMachine = hostname
+				r = r.WithHostTag(hostname)
 			} else {
-				r.BoundMachine = ""
+				r = r.WithHostTag("")
 			}
 			return r
 		})
-		results[name] = cfg.Repos[name].BoundMachine
+		if req.Bind {
+			results[name] = hostname
+		} else {
+			results[name] = ""
+		}
 	}
 
 	if err := cfg.Save(); err != nil {

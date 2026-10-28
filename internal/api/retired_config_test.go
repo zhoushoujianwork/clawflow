@@ -34,7 +34,7 @@ func TestRetiredRepoApprovalDoesNotEnableAutomation(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := loaded.Repos["o/r"]
-	if r.Enabled || r.AutoMerge || !r.CIRequired || r.BoundMachine != "worker-1" || r.BaseBranch != "develop" {
+	if r.Enabled || r.AutoMerge || !r.CIRequired || strings.Join(r.WorkerTags, ",") != "host-worker-1" || r.BaseBranch != "develop" {
 		t.Fatalf("retired request changed operational settings: %+v", r)
 	}
 	data, err := os.ReadFile(snapshot.DataDir() + "/repos.json")
@@ -74,5 +74,30 @@ func TestProvidersPilotProfile(t *testing.T) {
 				t.Fatalf("%s", w.Body)
 			}
 		})
+	}
+}
+
+func TestLegacyRepoBindUpdatesHostTags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {WorkerTags: []string{"codex", "host-old"}}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ body, want string }{
+		{`{"repo":"o/r","bind":true,"machine":"Work-Mac.local"}`, "codex,host-work-mac"},
+		{`{"repo":"o/r","bind":false}`, "codex"},
+	} {
+		w := httptest.NewRecorder()
+		HandleRepoBind(w, httptest.NewRequest(http.MethodPost, "/api/repo/bind", strings.NewReader(tc.body)))
+		if w.Code != http.StatusOK {
+			t.Fatal(w.Body.String())
+		}
+		loaded, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(loaded.Repos["o/r"].WorkerTags, ","); got != tc.want {
+			t.Fatalf("tags=%q want %q", got, tc.want)
+		}
 	}
 }

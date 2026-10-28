@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
+	"gopkg.in/yaml.v3"
 )
 
 var ctx = context.Background()
@@ -367,5 +369,18 @@ func TestAcceptedResultStaysFencedUntilEffectsFinish(t *testing.T) {
 	active, err = s.Active(ctx)
 	if err != nil || len(active) != 0 {
 		t.Fatal(active, err)
+	}
+}
+
+func TestMigratedHostEligibility(t *testing.T) {
+	var repo config.Repo
+	if err := yaml.Unmarshal([]byte("bound_machine: Work-Mac.local\nworker_tags: [codex]\n"), &repo); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"Work-Mac.local", "other.local"} {
+		worker := Worker{Tags: []string{"codex", config.HostTag(host)}, RunUntagged: true}
+		if got := eligible(repo.WorkerTags, worker); got != (host == "Work-Mac.local") {
+			t.Fatalf("host %s eligibility = %v", host, got)
+		}
 	}
 }

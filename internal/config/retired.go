@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -18,6 +20,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	}
 	warnRetiredWorkflow(node)
 	warnRetiredQueue(node)
+	warnRetiredBinding(node)
 	return nil
 }
 
@@ -30,6 +33,7 @@ func (p *gistPayload) UnmarshalYAML(node *yaml.Node) error {
 	}
 	warnRetiredWorkflow(node)
 	warnRetiredQueue(node)
+	warnRetiredBinding(node)
 	return nil
 }
 
@@ -87,3 +91,76 @@ func warnRetiredQueue(node *yaml.Node) {
 }
 
 var retiredQueueNotice sync.Once
+
+var retiredBindingNotice sync.Once
+
+func warnRetiredBinding(node *yaml.Node) {
+	var input struct {
+		Settings struct {
+			Binding yaml.Node `yaml:"require_binding"`
+		} `yaml:"settings"`
+	}
+	if node.Decode(&input) == nil && input.Settings.Binding.Kind != 0 {
+		retiredBindingNotice.Do(func() { fmt.Fprintln(os.Stderr, "clawflow: require_binding is retired and ignored; omitted on save") })
+	}
+}
+
+// HostTag normalizes the hostname using the worker registration convention.
+func HostTag(hostname string) string {
+	if hostname == "" {
+		return ""
+	}
+	return "host-" + strings.TrimSuffix(strings.ToLower(hostname), ".local")
+}
+
+// WithHostTag replaces host affinity while preserving other capabilities.
+func (r Repo) WithHostTag(hostname string) Repo {
+	tags := []string(nil)
+	for _, tag := range r.WorkerTags {
+		if !strings.HasPrefix(tag, "host-") {
+			tags = append(tags, tag)
+		}
+	}
+	if tag := HostTag(hostname); tag != "" {
+		tags = append(tags, tag)
+	}
+	r.WorkerTags, r.BoundMachine = tags, ""
+	return r
+}
+
+var retiredHostNotice sync.Once
+
+func migrateHostTag(node *yaml.Node, tags []string) ([]string, error) {
+	var input struct {
+		Host string `yaml:"bound_machine"`
+	}
+	if err := node.Decode(&input); err != nil {
+		return nil, err
+	}
+	if input.Host != "" {
+		tag := HostTag(input.Host)
+		if !slices.Contains(tags, tag) {
+			tags = append(tags, tag)
+		}
+		retiredHostNotice.Do(func() {
+			fmt.Fprintln(os.Stderr, "clawflow: bound_machine migrated to a required host tag in worker_tags; omitted on save")
+		})
+	}
+	return tags, nil
+}
+
+func (r Repo) MarshalYAML() (any, error) {
+	type current Repo
+	if tag := HostTag(r.BoundMachine); tag != "" && !slices.Contains(r.WorkerTags, tag) {
+		r.WorkerTags = append(append([]string(nil), r.WorkerTags...), tag)
+	}
+	return current(r), nil
+}
+
+func (r syncableRepo) MarshalYAML() (any, error) {
+	type current syncableRepo
+	if tag := HostTag(r.BoundMachine); tag != "" && !slices.Contains(r.WorkerTags, tag) {
+		r.WorkerTags = append(append([]string(nil), r.WorkerTags...), tag)
+	}
+	return current(r), nil
+}

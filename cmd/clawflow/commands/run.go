@@ -92,7 +92,7 @@ Targeted run: --repo owner/repo --issue N works on a configured repo even
 when it is disabled (so the web auto-run scheduler never sees it). Only that
 issue is dispatched, and only PRs that close it are considered by the
 acceptance harvest and the auto-merge sweep. Unknown repos still fail, and
-bound_machine / require_binding apply as usual.`,
+Host affinity is enforced by worker task tags.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if onlyIssue != 0 && onlyRepo == "" {
 				return fmt.Errorf("--issue requires --repo")
@@ -260,9 +260,7 @@ func lockUnscopedRepos(lg *clog.Logger, pl *passLocks, candidates []string) []st
 	return got
 }
 
-// repoRunsHere reports whether this machine processes the repo: bound_machine
-// and require_binding rules shared by the scan loop and the web scheduler.
-// An unresolvable hostname (empty) conservatively processes everything.
+// repoRunsHere shares scan eligibility with the web scheduler.
 func repoRunsHere(settings config.Settings, repoCfg config.Repo, hostname string) bool {
 	return settings.RunsOnHost(repoCfg, hostname)
 }
@@ -413,10 +411,8 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if err != nil {
 		return err
 	}
-	// Resolve the current machine's hostname once. Used to skip repos that
-	// are bound to a different machine (BoundMachine field). Errors are
-	// non-fatal: an empty hostname means no repos will be skipped by the
-	// bound_machine check (safe default).
+	// Resolve the hostname for shared scheduler compatibility. Host affinity
+	// is enforced only by worker task tags.
 	hostname, _ := os.Hostname()
 
 	// Narrow the pass to the repos whose run lock it holds. A repo-scoped
@@ -556,13 +552,9 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	for fullName, repoCfg := range allRepos {
 		repoCfg.CoordinatorMode = cfg.Settings.Coordinator.Enabled
 		repoCfg.CoordinatorActive = activeTasks[fullName]
-		// Skip repos bound to a different machine. A repo with no BoundMachine
-		// (empty string) is processed by every machine — the common case.
-		// When hostname resolution failed (empty string), we conservatively
-		// process all repos so a misconfigured machine doesn't silently drop work.
+		// Apply shared scheduling eligibility.
 		if !repoRunsHere(cfg.Settings, repoCfg, hostname) {
-			debugf("repo %s is not processed on this machine (bound_machine=%q, require_binding=%v, current machine: %s), skipping",
-				fullName, repoCfg.BoundMachine, cfg.Settings.RequireBinding, hostname)
+			debugf("repo %s is not eligible for scheduling, skipping", fullName)
 			continue
 		}
 		// Check base_branch before dispatching anything. When the remote has
