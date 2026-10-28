@@ -574,3 +574,126 @@ func TestPipelinePassReadsNewAcceptanceRecord(t *testing.T) {
 		t.Fatalf("new infrastructure result absent: %+v", info)
 	}
 }
+
+type pipelineMissingIssueFake struct {
+	*pipelineFake
+	issue      *vcs.Issue
+	issueErr   error
+	issueReads int
+}
+
+func (f *pipelineMissingIssueFake) GetIssue(string, int) (*vcs.Issue, error) {
+	f.issueReads++
+	return f.issue, f.issueErr
+}
+
+func TestPipelinePartialIssueSnapshotKeepsActivePR(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := &pipelineMissingIssueFake{pipelineFake: newPipelineFake(), issue: &vcs.Issue{Number: 7, Title: "older open issue", State: "open"}}
+	f.open = []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", State: "open"}}
+	var issues []snapshot.IssueEntry
+	for n := 100; n < 200; n++ {
+		issues = append(issues, snapshot.IssueEntry{Repo: "o/r", IssueNumber: n, State: "closed"})
+	}
+	d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineLocalClient{Client: f, issues: issues}, nil }
+	s := buildPipeline(context.Background(), d)
+	if len(s.Repos[0].Items) != 1 || s.Repos[0].Items[0].Issue != 7 || s.Repos[0].Items[0].PR.Number != 8 {
+		t.Fatalf("active PR lost: %+v", s.Repos[0])
+	}
+	if f.issueReads != 1 {
+		t.Fatalf("missing issue reads=%d", f.issueReads)
+	}
+	if err := snapshot.WriteIssues(issues); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WritePipeline(s); err != nil {
+		t.Fatal(err)
+	}
+	offline := buildPipeline(context.Background(), pipelineSnapshotDeps(d, true))
+	if len(offline.Repos[0].Items) != 1 || offline.Repos[0].Items[0].PR.Number != 8 || f.issueReads != 1 {
+		t.Fatalf("offline pass lost recovered PR or read VCS: %+v reads=%d", offline, f.issueReads)
+	}
+}
+
+func TestPipelineMissingPRIssueReadResults(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		issue *vcs.Issue
+		err   error
+		stale bool
+	}{
+		{name: "closed", issue: &vcs.Issue{Number: 7, State: "closed"}},
+		{name: "not found"},
+		{name: "provider error", err: errors.New("provider unavailable"), stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			f := &pipelineMissingIssueFake{pipelineFake: newPipelineFake(), issue: tc.issue, issueErr: tc.err}
+			f.open = []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", State: "open"}}
+			d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+			d.previous = map[string]pipeline.RepoBoard{"o/r": {Repo: "o/r", Items: []pipeline.Item{{Issue: 7, Title: "retained"}}}}
+			d.newClient = func(config.Repo) (vcs.Client, error) {
+				return &pipelineLocalClient{Client: f, issues: []snapshot.IssueEntry{{Repo: "o/r", IssueNumber: 100, State: "closed"}}}, nil
+			}
+			s := buildPipeline(context.Background(), d)
+			b := s.Repos[0]
+			if b.Stale != tc.stale || (tc.stale && (b.Error == "" || len(b.Items) != 1)) || (!tc.stale && len(b.Items) != 0) {
+				t.Fatalf("repo=%+v", b)
+			}
+		})
+	}
+}
+
+func TestPipelineMissingPRIssueReadBudget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := &pipelineMissingIssueFake{pipelineFake: newPipelineFake(), issueErr: errors.New("unavailable")}
+	for n := 1; n <= pipelineMaxPRDetails+5; n++ {
+		f.open = append(f.open, vcs.PR{Number: n, HeadBranch: "fix/issue-" + strconv.Itoa(n), State: "open"})
+	}
+	d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineLocalClient{Client: f}, nil }
+	s := buildPipeline(context.Background(), d)
+	if f.issueReads != pipelineMaxPRDetails || !s.Repos[0].Stale || s.Repos[0].Error == "" {
+		t.Fatalf("reads=%d repo=%+v", f.issueReads, s.Repos[0])
+	}
+}
+
+func TestPipelineKnownClosedSnapshotDoesNotFetchIssue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := &pipelineMissingIssueFake{pipelineFake: newPipelineFake()}
+	f.open = []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", State: "open"}}
+	d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) {
+		return &pipelineLocalClient{Client: f, issues: []snapshot.IssueEntry{{Repo: "o/r", IssueNumber: 7, State: "closed"}}}, nil
+	}
+	s := buildPipeline(context.Background(), d)
+	if f.issueReads != 0 || len(s.Repos[0].Items) != 0 {
+		t.Fatalf("reads=%d repo=%+v", f.issueReads, s.Repos[0])
+	}
+}
+
+type pipelineMissingIssueSlowFake struct {
+	*pipelineMissingIssueFake
+	ctx context.Context
+}
+
+func (f *pipelineMissingIssueSlowFake) SetRequestContext(ctx context.Context) { f.ctx = ctx }
+func (f *pipelineMissingIssueSlowFake) GetIssue(string, int) (*vcs.Issue, error) {
+	<-f.ctx.Done()
+	return nil, f.ctx.Err()
+}
+func TestPipelineMissingPRIssueTimeout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := &pipelineMissingIssueSlowFake{pipelineMissingIssueFake: &pipelineMissingIssueFake{pipelineFake: newPipelineFake()}}
+	f.open = []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", State: "open"}}
+	d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.previous = map[string]pipeline.RepoBoard{"o/r": {Repo: "o/r", Items: []pipeline.Item{{Issue: 7, Title: "retained"}}}}
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineLocalClient{Client: f}, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	s := buildPipeline(ctx, d)
+	if !s.Repos[0].Stale || s.Repos[0].Error == "" || len(s.Repos[0].Items) != 1 {
+		t.Fatalf("repo=%+v", s.Repos[0])
+	}
+}

@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -200,4 +201,35 @@ func pipelineLocalAcceptance(_ context.Context, _ vcs.Client, repo string, rc co
 		return info
 	}
 	return pipelineAcceptanceRecords(info, acceptance.Contract{}, records, false)
+}
+
+// The scheduler's all-issues snapshot is capped and cannot prove absence.
+func (c *pipelineLocalClient) hasSnapshotIssue(repo string, number int) bool {
+	for _, issue := range c.issues {
+		if issue.Repo == repo && issue.IssueNumber == number {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *pipelineLocalClient) missingPRIssue(repo string, number int) (*vcs.Issue, error) {
+	if !c.offline {
+		issue, err := c.Client.GetIssue(repo, number)
+		if err != nil {
+			return nil, err
+		}
+		if issue != nil && issue.Number != number {
+			return nil, errors.New("issue identity mismatch")
+		}
+		return issue, nil
+	}
+	// Pass-end publication performs no VCS reads. Retain previously observed
+	// open issues behind active PRs instead of interpreting a capped page as closed.
+	for _, item := range c.board.Items {
+		if item.Issue == number && item.PR != nil && item.PR.State == "open" {
+			return &vcs.Issue{Number: number, Title: item.Title, State: "open", UpdatedAt: item.UpdatedAt}, nil
+		}
+	}
+	return nil, errors.New("issue absent from partial scheduler snapshot")
 }

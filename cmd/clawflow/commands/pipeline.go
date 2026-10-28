@@ -320,10 +320,30 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 		add(cand{number: e.Number, queuePos: queuePosition(board.Queue, e.Number), title: e.Title, labels: e.Labels, state: e.State, updated: e.UpdatedAt})
 	}
+	missingIssueReads := 0
 	for _, n := range prOrder {
 		it, ok := issueByNum[n]
 		if !ok {
-			continue // PR closes an issue that is not open: not in flight
+			if local, cached := client.(*pipelineLocalClient); cached && !local.hasSnapshotIssue(repo, n) {
+				if !local.offline && missingIssueReads >= pipelineMaxPRDetails {
+					board.Error = "missing issue lookup limit reached"
+				} else {
+					if !local.offline {
+						missingIssueReads++
+					}
+					recovered, err := local.missingPRIssue(repo, n)
+					if err != nil {
+						board.Error = pipelineClip("read missing PR issue: "+err.Error(), pipelineErrLimit)
+					}
+					if recovered != nil && recovered.State == "open" {
+						it, ok = *recovered, true
+						issueByNum[n] = it
+					}
+				}
+			}
+		}
+		if !ok {
+			continue // Confirmed closed/absent, or unavailable with an error note.
 		}
 		add(cand{number: n, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
 	}
