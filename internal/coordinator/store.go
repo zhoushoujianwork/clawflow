@@ -22,24 +22,24 @@ var (
 )
 
 type Task struct {
-	ID             string `gorm:"primaryKey"`
-	Kind           string
-	Repo           string
-	Issue          int
-	PR             int
-	Operator       string
-	Payload        json.RawMessage `gorm:"type:jsonb"`
-	Tags           []string        `gorm:"serializer:json;type:jsonb"`
-	Priority       int
-	QueuePosition  int64
-	State          string
-	Attempt        int
-	LeaseOwner     string
-	LeaseExpiresAt *time.Time
-	FencingToken   int64
-	Result         json.RawMessage `gorm:"type:jsonb"`
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID             string          `gorm:"primaryKey" json:"id"`
+	Kind           string          `json:"kind"`
+	Repo           string          `json:"repo"`
+	Issue          int             `json:"issue"`
+	PR             int             `json:"pr"`
+	Operator       string          `json:"operator"`
+	Payload        json.RawMessage `gorm:"type:jsonb" json:"payload"`
+	Tags           []string        `gorm:"serializer:json;type:jsonb" json:"tags"`
+	Priority       int             `json:"priority"`
+	QueuePosition  int64           `json:"queue_position"`
+	State          string          `json:"state"`
+	Attempt        int             `json:"attempt"`
+	LeaseOwner     string          `json:"lease_owner"`
+	LeaseExpiresAt *time.Time      `json:"lease_expires_at"`
+	FencingToken   int64           `json:"fencing_token"`
+	Result         json.RawMessage `gorm:"type:jsonb" json:"result"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 func (Task) TableName() string { return "coordinator_tasks" }

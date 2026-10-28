@@ -474,6 +474,21 @@ here — run 'clawflow run' first if you want fresh data.`,
 				return err
 			}
 
+			defer ln.Close()
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			coordinatorErrors := make(chan error, 1)
+			stopCoordinator, err := startCoordinator(cmd.Context(), cfg.Settings.Coordinator, cmd.ErrOrStderr(), func(err error) {
+				coordinatorErrors <- err
+				_ = srv.Close()
+			})
+			if err != nil {
+				return fmt.Errorf("start coordinator: %w", err)
+			}
+			defer stopCoordinator()
+
 			// Record this instance in the pid file so `clawflow web restart`
 			// (and future invocations that hit a busy port) know who owns
 			// the dashboard. Best-effort — a write failure shouldn't block
@@ -506,7 +521,12 @@ here — run 'clawflow run' first if you want fresh data.`,
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				return err
 			}
-			return nil
+			select {
+			case err := <-coordinatorErrors:
+				return fmt.Errorf("coordinator: %w", err)
+			default:
+				return nil
+			}
 		},
 	}
 	cmd.Flags().IntVar(&port, "port", 8090, "TCP port to bind")
