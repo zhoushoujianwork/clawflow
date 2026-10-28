@@ -72,6 +72,7 @@ func reopenJob(t *testing.T, f *reopenFake) *runJob {
 }
 
 func TestReopenPreparation(t *testing.T) {
+	withRunLog(t)
 	for _, tc := range []struct {
 		name   string
 		change func(*reopenFake)
@@ -79,7 +80,6 @@ func TestReopenPreparation(t *testing.T) {
 	}{
 		{"eligible", func(*reopenFake) {}, true},
 		{"no previous PR", func(f *reopenFake) { f.noPreviousPR = true }, true},
-		{"retry after label removal", func(f *reopenFake) { f.issue.Labels = nil }, true},
 		{"awaiting CI", func(f *reopenFake) { f.events = f.events[:1] }, false},
 		{"consumed", func(f *reopenFake) {
 			f.events = append(f.events, vcs.IssueEvent{ID: "github-4", Type: "labeled", Label: "agent-implemented", CreatedAt: "2026-01-05T00:00:00Z"})
@@ -162,7 +162,8 @@ func TestReopenLockPreventsHistoryAndWrites(t *testing.T) {
 func TestReopenOrdinaryDuplicateGuardAndComments(t *testing.T) {
 	f := newReopenFake()
 	f.issue.Labels = nil
-	f.events = nil
+	// Even old reopen events must not trigger a lookup without the label.
+	f.eventErr = errors.New("history endpoint unavailable")
 	f.open = []vcs.PR{{Number: 11, Body: "Fixes #9"}}
 	if err := prepareImplementation(reopenJob(t, f)); err == nil {
 		t.Fatal("ordinary duplicate accepted")
