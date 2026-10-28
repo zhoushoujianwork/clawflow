@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
@@ -84,4 +85,47 @@ func TestPilotMergeUpgrade(t *testing.T) {
 	if called != 1 {
 		t.Fatalf("upgrade calls %d", called)
 	}
+}
+
+func TestPilotNoVerdictReason(t *testing.T) {
+	ctx := context.Background()
+	t.Run("provenance", func(t *testing.T) {
+		f, _ := acceptanceFixture(t)
+		// Replace the successful development run with one that did not succeed.
+		os.RemoveAll(filepath.Dir(snapshot.RunDir("o/r", 42, time.Now())))
+		writeAcceptanceDevelopment(t, "failed", time.Now().Add(-time.Minute), nil)
+		got, err := pilotNoVerdictReason(ctx, f, "o/r", 11)
+		if err != nil || got != pilot.NoVerdictProvenance {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+	t.Run("infra exhausted", func(t *testing.T) {
+		f, _ := acceptanceFixture(t)
+		failProvider()
+		for i := 0; i < harvestMaxInfra; i++ {
+			if got, err := pilotNoVerdictReason(ctx, f, "o/r", 11); err != nil || got != "" {
+				t.Fatalf("before exhaustion (%d attempts): %q, %v", i, got, err)
+			}
+			if _, err := runAcceptance(ctx, f, "o/r", 11); err == nil {
+				t.Fatal("provider failure should be an error")
+			}
+		}
+		got, err := pilotNoVerdictReason(ctx, f, "o/r", 11)
+		if err != nil || got != pilot.NoVerdictInfraBudget {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+	t.Run("never attempted", func(t *testing.T) {
+		f, _ := acceptanceFixture(t)
+		if got, err := pilotNoVerdictReason(ctx, f, "o/r", 11); err != nil || got != "" {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+	t.Run("other contract error", func(t *testing.T) {
+		f, _ := acceptanceFixture(t)
+		f.pr.Draft = true
+		if got, err := pilotNoVerdictReason(ctx, f, "o/r", 11); err == nil || got != "" {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
 }

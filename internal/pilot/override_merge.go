@@ -27,6 +27,20 @@ func refuseOverride(reason string) error { r := overrideRefusal(reason); return 
 // OverrideMerged is wired by the CLI to the normal self-upgrade merge trigger.
 var OverrideMerged = func(string) {}
 
+// Reasons ClawFlow may positively establish for a missing acceptance verdict.
+const (
+	NoVerdictProvenance  = "provenance"
+	NoVerdictInfraBudget = "infra_exhausted"
+)
+
+// OverrideNoVerdictReason is wired by the CLI to the acceptance contract and
+// harvest infrastructure budget checks. It returns NoVerdictProvenance when the
+// contract for the current head fails with the development-provenance error,
+// NoVerdictInfraBudget when the infrastructure budget is exhausted, and "" when
+// no positive reason exists. The default establishes nothing, so case (a) fails
+// closed unless the CLI wiring is present.
+var OverrideNoVerdictReason = func(context.Context, vcs.Client, string, int) (string, error) { return "", nil }
+
 func overrideStorePath(repo string, pr int) string {
 	b, _ := json.Marshal(repo)
 	return filepath.Join(snapshot.DataDir(), "acceptance", fmt.Sprintf("%x", sha256.Sum256(b)), strconv.Itoa(pr))
@@ -89,9 +103,27 @@ func (e ActionExecutor) overrideMerge(a Action, run string, prior map[string]Act
 	if err != nil {
 		return refuseOverride("verdict_present_or_unreadable")
 	}
+	// Infrastructure-only attempts never produced a reviewer verdict, so they
+	// do not count as one. Any other record, including an incomplete one, does.
+	verdicts := 0
+	for _, r := range records {
+		if !acceptance.IsInfrastructure(r) {
+			verdicts++
+		}
+	}
 	gate := "no_verdict"
 	var findings []acceptance.Finding
-	if len(records) > 0 {
+	if verdicts == 0 {
+		// No record is necessary but not sufficient: ClawFlow itself must show
+		// that provenance or the infrastructure budget explains the absence.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		reason, err := OverrideNoVerdictReason(ctx, c, a.Repo, a.PR)
+		cancel()
+		if err != nil || (reason != NoVerdictProvenance && reason != NoVerdictInfraBudget) {
+			return refuseOverride("no_positive_reason")
+		}
+		gate = "no_verdict:" + reason
+	} else {
 		r := records[len(records)-1]
 		if !r.Completed || r.Cancelled || r.Verdict != acceptance.Failed {
 			return refuseOverride("verdict_present_or_unreadable")

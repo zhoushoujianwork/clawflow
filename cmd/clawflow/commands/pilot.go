@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -11,10 +12,30 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"gopkg.in/yaml.v3"
 )
 
-func init() { pilot.OverrideMerged = confirmedMerges.note }
+func init() {
+	pilot.OverrideMerged = confirmedMerges.note
+	pilot.OverrideNoVerdictReason = pilotNoVerdictReason
+}
+
+// pilotNoVerdictReason reports why a PR head has no acceptance verdict, using
+// the same contract and infrastructure-budget logic as harvest. harvestInfraDecision
+// builds the contract, so a development-provenance failure surfaces as its error.
+func pilotNoVerdictReason(ctx context.Context, client vcs.Client, repo string, pr int) (string, error) {
+	d, _, err := harvestInfraDecision(ctx, client, repo, pr, harvestNow())
+	switch {
+	case errors.Is(err, errDevelopmentHeadMissing):
+		return pilot.NoVerdictProvenance, nil
+	case err != nil:
+		return "", err
+	case d == harvestInfraExhausted:
+		return pilot.NoVerdictInfraBudget, nil
+	}
+	return "", nil
+}
 
 var pilotUpgrade = func(ctx context.Context, cfg *config.Config) error {
 	return failedRunsError(runSelfUpgradePhase(ctx, cfg, newSelfUpgrader()))

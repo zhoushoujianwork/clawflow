@@ -208,7 +208,9 @@ Allowed fields by type, in addition to id/type/repo:
   Actions jobs selected by exact-head CI checks once per head. Infrastructure limits apply.
 - override_merge: pr, head (reviewed 40-character SHA), followups (create_issue action IDs).
   Requires repo pilot_override_merge opt-in and successful exact-head CI. Only an
-  independently readable store with no current-head verdict, or a failed verdict
+  independently readable store with no current-head verdict that ClawFlow also
+  attributes to missing development provenance or an exhausted acceptance
+  infrastructure budget (else no_positive_reason), or a failed verdict
   whose every failing finding has structured head locations outside changed hunks,
   can qualify. Legacy/unlocated, in-diff, blocked, passed or unreadable evidence
   cannot be overridden. Create one follow-up per failing finding, in finding order,

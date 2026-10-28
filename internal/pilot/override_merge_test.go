@@ -1,6 +1,7 @@
 package pilot
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -99,7 +100,7 @@ func (c *overrideClient) MergePRAtHead(_ string, _ int, head string) (string, er
 
 func TestOverrideMergeGuards(t *testing.T) {
 	dir, base, head := diffFixture(t)
-	for _, mode := range []string{"absent", "failed_outside", "failed_inside", "legacy", "blocked", "passed", "incomplete", "corrupt", "missing_store", "disabled", "ci_failed", "ci_stale", "head_changed", "missing_followup", "audit_failed", "day_limit", "dry_run"} {
+	for _, mode := range []string{"absent", "absent_infra_exhausted", "no_positive_reason", "no_reason_error", "infra_records_no_reason", "failed_outside", "failed_inside", "legacy", "blocked", "passed", "incomplete", "corrupt", "missing_store", "disabled", "ci_failed", "ci_stale", "head_changed", "missing_followup", "audit_failed", "day_limit", "dry_run"} {
 		t.Run(mode, func(t *testing.T) {
 			e, ac := testExecutor(t)
 			e.Config = &config.Config{Repos: map[string]config.Repo{"o/r": {PilotOverrideMerge: true, LocalPath: dir, SelfUpgrade: true}}}
@@ -109,6 +110,21 @@ func TestOverrideMergeGuards(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if mode == "absent_infra_exhausted" || mode == "infra_records_no_reason" {
+				contract := acceptance.Contract{Version: acceptance.Version, TaskID: "task", Generation: 1, Repository: "o/r", PRNumber: 11, HeadSHA: head, BaseSHA: base, PolicyDigest: "policy", Requirements: "requirements", Development: acceptance.Identity{SessionID: "dev", RunID: "dev-run"}}
+				digest, err := contract.Digest()
+				if err != nil {
+					t.Fatal(err)
+				}
+				now := time.Now().Add(-time.Hour)
+				for i := 0; i < 3; i++ {
+					// Infrastructure attempts: completed, blocked, no reviewer evidence.
+					r := acceptance.Record{Version: acceptance.Version, Contract: contract, ContractDigest: digest, AttemptID: fmt.Sprintf("infra%d", i), Role: "acceptance", Completed: true, Verdict: acceptance.Blocked, Report: "provider unavailable", StartedAt: now.Add(time.Duration(i) * time.Minute), CompletedAt: now.Add(time.Duration(i)*time.Minute + time.Second)}
+					if err := store.SaveRecord(r); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			if strings.HasPrefix(mode, "failed_") || mode == "legacy" || mode == "blocked" || mode == "passed" || mode == "incomplete" {
 				contract := acceptance.Contract{Version: acceptance.Version, TaskID: "task", Generation: 1, Repository: "o/r", PRNumber: 11, HeadSHA: head, BaseSHA: base, PolicyDigest: "policy", Requirements: "requirements", Development: acceptance.Identity{SessionID: "dev", RunID: "dev-run"}}
 				digest, err := contract.Digest()
@@ -116,7 +132,7 @@ func TestOverrideMergeGuards(t *testing.T) {
 					t.Fatal(err)
 				}
 				now := time.Now()
-				r := acceptance.Record{Version: acceptance.Version, Contract: contract, ContractDigest: digest, AttemptID: "attempt", Role: "acceptance", Completed: true, Verdict: acceptance.Failed, Report: "failed", StartedAt: now, CompletedAt: now.Add(time.Second), Findings: []acceptance.Finding{{Kind: "defect", Summary: "defect", Defect: "defect", Evidence: "evidence", Locations: []acceptance.FindingLocation{{Path: "file.txt", Line: 1, Side: "head"}}}}}
+				r := acceptance.Record{Version: acceptance.Version, Contract: contract, ContractDigest: digest, AttemptID: "attempt", Role: "acceptance", Completed: true, Verdict: acceptance.Failed, Report: "failed", Evidence: []string{"proof"}, StartedAt: now, CompletedAt: now.Add(time.Second), Findings: []acceptance.Finding{{Kind: "defect", Summary: "defect", Defect: "defect", Evidence: "evidence", Locations: []acceptance.FindingLocation{{Path: "file.txt", Line: 1, Side: "head"}}}}}
 				switch mode {
 				case "failed_inside":
 					r.Findings[0].Locations[0].Line = 2
@@ -154,6 +170,19 @@ func TestOverrideMergeGuards(t *testing.T) {
 			case "day_limit":
 				e.MaxDay = 1
 			}
+			oldReason := OverrideNoVerdictReason
+			defer func() { OverrideNoVerdictReason = oldReason }()
+			OverrideNoVerdictReason = func(context.Context, vcs.Client, string, int) (string, error) {
+				switch mode {
+				case "absent_infra_exhausted":
+					return NoVerdictInfraBudget, nil
+				case "no_positive_reason", "infra_records_no_reason":
+					return "", nil
+				case "no_reason_error":
+					return NoVerdictProvenance, errors.New("contract unavailable")
+				}
+				return NoVerdictProvenance, nil
+			}
 			old := OverrideMerged
 			upgraded := false
 			OverrideMerged = func(string) { upgraded = true }
@@ -168,7 +197,7 @@ func TestOverrideMergeGuards(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := records[1]
-			success := mode == "absent" || mode == "failed_outside"
+			success := mode == "absent" || mode == "absent_infra_exhausted" || mode == "failed_outside"
 			if success {
 				if r.Outcome != "applied" || len(c.calls) != 3 || !strings.HasPrefix(c.calls[1], "audit:") || c.calls[2] != "merge" || !upgraded {
 					t.Fatalf("%+v calls=%v upgrade=%v", r, c.calls, upgraded)
@@ -189,6 +218,20 @@ func TestOverrideMergeGuards(t *testing.T) {
 			}
 			if mode == "dry_run" && (r.Outcome != "valid" || len(c.calls) != 0) {
 				t.Fatalf("dry run %+v %v", r, c.calls)
+			}
+			if mode == "no_positive_reason" || mode == "no_reason_error" || mode == "infra_records_no_reason" {
+				if r.Reason != "no_positive_reason" {
+					t.Fatalf("%+v", r)
+				}
+			}
+			if mode == "absent" || mode == "absent_infra_exhausted" {
+				want := "no_verdict:" + NoVerdictProvenance
+				if mode == "absent_infra_exhausted" {
+					want = "no_verdict:" + NoVerdictInfraBudget
+				}
+				if !strings.Contains(c.calls[1], "Bypassed gate: `"+want+"`") {
+					t.Fatalf("audit lacks reason %s: %s", want, c.calls[1])
+				}
 			}
 			if mode == "blocked" || mode == "passed" || mode == "incomplete" || mode == "corrupt" || mode == "missing_store" {
 				if r.Reason != "verdict_present_or_unreadable" {
