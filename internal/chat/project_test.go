@@ -418,7 +418,7 @@ func containsStr(s, substr string) bool {
 
 func TestBuildPilotContext_CategoryHygieneIsOptional(t *testing.T) {
 	prompt := BuildPilotContext("test-project", "", "", nil, nil, "")
-	if !containsStr(prompt, "Eligible unlabeled issues already enter implementation") {
+	if !containsStr(prompt, "Only issues carrying the clawflow label enter implementation") {
 		t.Fatal("missing direct implementation guidance")
 	}
 	if containsStr(prompt, "operators won't pick them up otherwise") || containsStr(prompt, "Fix missing trigger labels") {

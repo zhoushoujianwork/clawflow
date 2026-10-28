@@ -102,8 +102,15 @@ type QueueSettings struct {
 	ParkAfter string `yaml:"park_after,omitempty"`
 }
 
+// PilotSettings tunes event-driven supervision.
+type PilotSettings struct {
+	// StallAfter is the minimum quiet period for a live repository pass.
+	StallAfter string `yaml:"stall_after,omitempty"`
+}
+
 // Settings holds global ClawFlow settings.
 type Settings struct {
+	Pilot     PilotSettings     `yaml:"pilot,omitempty"`
 	Execution ExecutionSettings `yaml:"execution,omitempty"`
 
 	// Database holds the PostgreSQL connection settings (machine-local secret).
