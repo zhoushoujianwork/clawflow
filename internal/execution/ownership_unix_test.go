@@ -105,3 +105,40 @@ func TestOwnershipReleasedOnProcessExitWithoutUnlink(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnershipStateDirIsolation(t *testing.T) {
+	home, state, workspace := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAWFLOW_STATE_DIR", state)
+	release, err := acquireOwnership(workspace, "profile", "session", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := os.Stat(filepath.Join(home, ".clawflow")); !os.IsNotExist(err) {
+		t.Fatalf("worker touched normal-home state: %v", err)
+	}
+	paths, err := filepath.Glob(filepath.Join(state, "execution-locks", "*.lock"))
+	if err != nil || len(paths) != 2 {
+		t.Fatalf("worker ownership files: %v %v", paths, err)
+	}
+	if extra, err := acquireOwnership(workspace, "profile", "session", true); !IsKind(err, "session_busy") {
+		if extra != nil {
+			extra()
+		}
+		t.Fatalf("same-state ownership not enforced: %v", err)
+	}
+	t.Setenv("CLAWFLOW_STATE_DIR", "")
+	releaseDefault, err := acquireOwnership(workspace, "profile", "session", true)
+	if err != nil {
+		t.Fatalf("worker blocks default-state execution: %v", err)
+	}
+	defer releaseDefault()
+	release()
+	if extra, err := acquireOwnership(workspace, "profile", "session", true); !IsKind(err, "session_busy") {
+		if extra != nil {
+			extra()
+		}
+		t.Fatalf("worker release changed default ownership: %v", err)
+	}
+}
