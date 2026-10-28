@@ -16,9 +16,11 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
+	"github.com/zhoushoujianwork/clawflow/internal/webguard"
 )
 
 func resetPipeline(t *testing.T, src func(context.Context) (pipeline.Snapshot, error)) *time.Time {
@@ -422,5 +424,66 @@ func TestPipelinePilotAudit(t *testing.T) {
 	}
 	if len(board.PilotActions) != 0 || board.PilotError == "" {
 		t.Fatalf("unreadable audit: %+v", board)
+	}
+}
+
+func TestPipelineWorkerPoolLANContract(t *testing.T) {
+	now := resetPipeline(t, nil)
+	pipelineCache.mu.Lock()
+	pipelineCache.ok = true
+	pipelineCache.snap = pipeline.Snapshot{GeneratedAt: now.Format(time.RFC3339), Repos: []pipeline.RepoBoard{}}
+	pipelineCache.mu.Unlock()
+	old := WorkerPoolSource
+	t.Cleanup(func() { WorkerPoolSource = old })
+	pool := coordinator.Board{GeneratedAt: *now, Workers: []coordinator.BoardWorker{{Name: "worker", Tags: []string{"macos"}, Roles: []string{"operator"}, Live: true, LastSeen: now, LastHeartbeat: now, RunningTasks: []string{"task"}}}, Tasks: []coordinator.BoardTask{{ID: "task", State: "leased", Stage: "running", Tags: []string{}, Priority: 2, Worker: "worker", LeaseExpiresAt: now, Attempt: 1}}, Throughput: coordinator.Throughput{Since: now.Add(-time.Hour), Done: 2, Failed: 1}}
+	WorkerPoolSource = func(ctx context.Context) (coordinator.Board, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("missing request timeout")
+		}
+		return pool, nil
+	}
+	policy, err := webguard.NewRemotePolicy("readonly", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := policy.Middleware(http.HandlerFunc(HandlePipeline))
+	request := func(method string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "/api/pipeline", nil)
+		r.RemoteAddr = "192.168.1.2:12345"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	w := request("GET")
+	if w.Code != 200 {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	var decoded map[string]json.RawMessage
+	if err = json.Unmarshal(w.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	expected, _ := json.Marshal(pool)
+	if string(decoded["worker_pool"]) != string(expected) {
+		t.Fatalf("pool: %s", decoded["worker_pool"])
+	}
+	for _, key := range []string{`"name"`, `"tags"`, `"roles"`, `"live"`, `"last_seen"`, `"last_heartbeat"`, `"running_tasks"`, `"state"`, `"stage"`, `"priority"`, `"worker"`, `"lease_expires_at"`, `"attempt"`, `"throughput"`, `"done"`, `"failed"`} {
+		if !strings.Contains(string(decoded["worker_pool"]), key) {
+			t.Fatalf("missing %s", key)
+		}
+	}
+	for _, method := range []string{"POST", "PUT", "DELETE"} {
+		if got := request(method).Code; got != 403 {
+			t.Fatalf("%s: %d", method, got)
+		}
+	}
+	WorkerPoolSource = func(context.Context) (coordinator.Board, error) { return coordinator.Board{}, errors.New("secret DSN") }
+	w = request("GET")
+	if !strings.Contains(w.Body.String(), `"worker_pool_error":"Worker pool unavailable"`) || strings.Contains(w.Body.String(), "secret DSN") {
+		t.Fatalf("error: %s", w.Body)
+	}
+	WorkerPoolSource = nil
+	w = request("GET")
+	if !strings.Contains(w.Body.String(), `"worker_pool":null`) || strings.Contains(w.Body.String(), "worker_pool_error") {
+		t.Fatalf("disabled: %s", w.Body)
 	}
 }

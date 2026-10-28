@@ -124,7 +124,16 @@ interface PilotAction {
   reason?: string
 }
 
+interface WorkerPool {
+  generated_at: string
+  workers: { name: string; tags: string[]; roles: string[]; live: boolean; last_seen: string | null; last_heartbeat: string | null; running_tasks: string[] }[]
+  tasks: { id: string; repo: string; issue: number; pr: number; kind: string; state: string; stage: string; tags: string[]; priority: number; worker: string; lease_expires_at: string | null; attempt: number }[]
+  throughput: { since: string; done: number; failed: number }
+}
+
 interface Board {
+  worker_pool?: WorkerPool | null
+  worker_pool_error?: string
   pilot_actions?: PilotAction[]
   pilot_error?: string
   stale: boolean
@@ -318,6 +327,7 @@ function PipelinePage() {
       ) : board ? (
         <>
           <RuntimeHeader runtime={board.runtime} />
+          <WorkerPoolPanel pool={board.worker_pool} error={board.worker_pool_error} />
           <Attention board={board} repoInfo={repoInfo} />
           <div className="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Pipeline items">
             {(['active', 'delivered', 'all'] as const).map(tab => <button key={tab} role="tab" aria-selected={(search.tab || 'active') === tab} onClick={() => update({ tab })} className={cn('px-3 py-1 rounded border text-sm capitalize', (search.tab || 'active') === tab && 'bg-secondary')}>{tab}</button>)}
@@ -572,4 +582,36 @@ export function PilotTimeline({ actions }: { actions: PilotAction[] }) {
 export function itemPilotActions(actions: PilotAction[], repo: string, item: Item) {
   return actions.filter(a => a.action.repo === repo &&
     ((a.action.issue && a.action.issue === item.issue) || (a.created_issue && a.created_issue === item.issue) || (a.action.pr && a.action.pr === item.pr?.number)))
+}
+
+function WorkerPoolPanel({ pool, error }: { pool?: WorkerPool | null; error?: string }) {
+  return <section aria-label="Worker pool" className="border rounded-xl p-3 mb-4 text-xs">
+    <h2 className="font-semibold text-sm mb-2">Worker pool · Read-only</h2>
+    {error ? <p role="alert">{error}</p> : !pool ? <p className="text-muted-foreground">Coordinator disabled</p> : <>
+      <p className="mb-3">Last hour: {pool.throughput.done} done · {pool.throughput.failed} failed · updated {timeAgo(pool.generated_at)}</p>
+      <p className="text-muted-foreground mb-2">Live means an authenticated worker request within 120 seconds. Heartbeats renew task leases.</p>
+      <div className="overflow-x-auto"><table className="w-full text-left">
+        <caption className="text-left font-semibold">Workers ({pool.workers.length})</caption>
+        <thead><tr>{['Name', 'Tags', 'Roles', 'Status', 'Last seen', 'Last heartbeat', 'Running tasks'].map(h => <th key={h} className="p-2">{h}</th>)}</tr></thead>
+        <tbody>{pool.workers.map(w => <tr key={w.name} className="border-t">
+          <td className="p-2">{w.name}</td><td className="p-2">{w.tags.join(', ') || '—'}</td><td className="p-2">{w.roles.join(', ') || '—'}</td>
+          <td className="p-2">{w.live ? 'live' : 'stale'}</td><td className="p-2" title={w.last_seen || ''}>{timeAgo(w.last_seen || undefined)}</td>
+          <td className="p-2" title={w.last_heartbeat || ''}>{timeAgo(w.last_heartbeat || undefined)}</td>
+          <td className="p-2 break-all">{w.running_tasks.join(', ') || '—'}</td>
+        </tr>)}</tbody>
+      </table></div>
+      {!pool.workers.length && <p className="py-2 text-muted-foreground">No registered workers.</p>}
+      <div className="overflow-x-auto mt-3"><table className="w-full text-left">
+        <caption className="text-left font-semibold">Tasks ({pool.tasks.length})</caption>
+        <thead><tr>{['Task / repository', 'Kind', 'State / stage', 'Tags', 'Priority', 'Worker', 'Lease expiry', 'Retries'].map(h => <th key={h} className="p-2">{h}</th>)}</tr></thead>
+        <tbody>{pool.tasks.map(t => <tr key={t.id} className="border-t">
+          <td className="p-2 break-all" title={t.id}>{t.id.slice(0, 12)} · {t.repo} {t.pr ? `PR #${t.pr}` : `#${t.issue}`}</td>
+          <td className="p-2">{t.kind}</td><td className="p-2">{t.state}{t.stage !== t.state ? ` / ${t.stage}` : ''}</td>
+          <td className="p-2">{t.tags.join(', ') || '—'}</td><td className="p-2">{t.priority}</td><td className="p-2">{t.worker || '—'}</td>
+          <td className="p-2">{t.lease_expires_at ? new Date(t.lease_expires_at).toLocaleString() : '—'}</td><td className="p-2">{t.attempt}</td>
+        </tr>)}</tbody>
+      </table></div>
+      {!pool.tasks.length && <p className="py-2 text-muted-foreground">No tasks.</p>}
+    </>}
+  </section>
 }

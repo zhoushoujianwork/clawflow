@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
@@ -20,6 +21,10 @@ const pipelineTimeout = 10 * time.Second
 
 // PipelineSource supplements scheduler snapshots in the background.
 var PipelineSource func(ctx context.Context) (pipeline.Snapshot, error)
+
+// WorkerPoolSource is bound before the dashboard starts serving.
+var WorkerPoolSource func(context.Context) (coordinator.Board, error)
+
 var pipelineNow = time.Now
 var pipelineWorkers sync.WaitGroup
 var pipelineCache struct {
@@ -104,11 +109,25 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		actionError = "Pilot action history unavailable"
 	}
+	var pool *coordinator.Board
+	poolError := ""
+	if WorkerPoolSource != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), pipelineTimeout)
+		defer cancel()
+		fresh, err := WorkerPoolSource(ctx)
+		if err != nil {
+			poolError = "Worker pool unavailable"
+		} else {
+			pool = &fresh
+		}
+	}
 	writeJSON(w, http.StatusOK, struct {
 		pipeline.Board
-		PilotActions []pilot.ActionRecord `json:"pilot_actions"`
-		PilotError   string               `json:"pilot_error,omitempty"`
-	}{board, actions, actionError})
+		PilotActions    []pilot.ActionRecord `json:"pilot_actions"`
+		PilotError      string               `json:"pilot_error,omitempty"`
+		WorkerPool      *coordinator.Board   `json:"worker_pool"`
+		WorkerPoolError string               `json:"worker_pool_error,omitempty"`
+	}{board, actions, actionError, pool, poolError})
 }
 
 // pipelineRuntime is cheap and always fresh: version, scheduler and Offload readiness.
