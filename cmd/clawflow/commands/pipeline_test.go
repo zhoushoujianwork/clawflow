@@ -439,3 +439,32 @@ func TestPipelineRepairBudgetAttention(t *testing.T) {
 		t.Fatalf("missing budget attention: %+v", item)
 	}
 }
+
+func TestPipelineIncludesStandaloneFailedIssues(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, scope := range []string{"ranked", "labeled"} {
+		t.Run(scope, func(t *testing.T) {
+			f := newPipelineFake()
+			f.issues = []vcs.Issue{{Number: 91, Title: "unresolved", State: "open", Labels: []string{"agent-failed"}, UpdatedAt: pipelineT0.Add(-30 * 24 * time.Hour).Format(time.RFC3339)}, {Number: 92, State: "open"}}
+			d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, QueueScope: scope}})
+			d.runs = func() []snapshot.RunIndexEntry {
+				return []snapshot.RunIndexEntry{{RunMeta: snapshot.RunMeta{Repo: "o/r", IssueNumber: 91, Operator: "implement", Status: "failed", StartedAt: pipelineT0.Add(-30 * 24 * time.Hour)}}}
+			}
+			b := buildPipeline(context.Background(), d).Repos[0]
+			if len(b.Items) != 1 {
+				t.Fatalf("want only unresolved failed issue, got %+v", b.Items)
+			}
+			it := itemFor(t, b, 91)
+			if it.Stage != pipeline.StageFailed || it.InQueue || !strings.Contains(strings.Join(it.Attention, " "), "agent-failed") {
+				t.Fatalf("missing standalone failure: %+v", it)
+			}
+			// Inclusion from both the queue and labels must still produce one row.
+			d.globalQueue = func() []queue.ListEntry {
+				return []queue.ListEntry{{Repo: "o/r", Number: 91, Key: "o/r#91", State: "blocked:label_agent-failed"}}
+			}
+			if got := buildPipeline(context.Background(), d).Repos[0].Items; len(got) != 1 || !got[0].InQueue {
+				t.Fatalf("duplicate or lost queue membership: %+v", got)
+			}
+		})
+	}
+}

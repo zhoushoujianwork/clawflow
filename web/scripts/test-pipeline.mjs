@@ -18,7 +18,13 @@ try {
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import assert from 'node:assert/strict'
-import { RepoSection, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
+import { RuntimeHeader, RepoSection, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
+const runtime = { version:'test', scheduler:{status:'idle'}, execution:{ready:true,profile:'actual',backend:'codex'} }
+const noTier = renderToStaticMarkup(<RuntimeHeader runtime={runtime}/>)
+assert.ok(!noTier.includes('tier:'))
+const withTier = renderToStaticMarkup(<RuntimeHeader runtime={{...runtime, execution:{...runtime.execution,model:'recorded-model',service_tier:'priority'}}}/>)
+assert.ok(withTier.includes('recorded-model'))
+assert.ok(withTier.includes('priority'))
 const now = new Date().toISOString()
 const repos = Array.from({length: 5}, (_, r) => ({
   repo: 'owner/repo-' + r, enabled:true, auto_merge:false, ci_required:true,

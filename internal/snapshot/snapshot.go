@@ -257,6 +257,9 @@ type DevelopmentSession struct {
 }
 
 type RunMeta struct {
+	// Optional execution metadata is preserved when present; never infer a tier.
+	Model              string             `json:"model,omitempty"`
+	ServiceTier        string             `json:"service_tier,omitempty"`
 	RepairReason       string             `json:"repair_reason,omitempty"`
 	DevelopmentSession DevelopmentSession `json:"development_session,omitempty"`
 	HeadSHA            string             `json:"head_sha,omitempty"`

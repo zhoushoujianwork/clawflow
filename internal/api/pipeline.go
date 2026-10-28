@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"net/http"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,16 +91,30 @@ func pipelineRuntime() pipeline.Runtime {
 		rt.Scheduler.LastEndedAt = lastPassAt.UTC().Format(time.RFC3339)
 	}
 	runMu.Unlock()
-	if cfg, err := execution.LoadConfig(); err == nil {
-		rt.Execution.Profile = cfg.Profile
-	}
+	// Display one recorded execution, independent of today's configured profile.
 	var latest time.Time
 	for _, run := range snapshot.ReadRunsIndex() {
 		session := run.DevelopmentSession
-		if session.Profile == rt.Execution.Profile && session.Backend != "" && run.StartedAt.After(latest) {
-			rt.Execution.Backend = session.Backend
-			latest = run.StartedAt
+		if session.Profile == "" && session.Backend == "" {
+			continue
 		}
+		at := run.StartedAt
+		if run.EndedAt != nil && !run.EndedAt.IsZero() {
+			at = *run.EndedAt
+		}
+		if !at.After(latest) {
+			continue
+		}
+		rt.Execution = pipeline.Execution{Profile: session.Profile, Backend: session.Backend, Model: run.Model, ServiceTier: run.ServiceTier}
+		if rt.Execution.Model == "" && run.Usage != nil {
+			var models []string
+			for model := range run.Usage.ModelUsage {
+				models = append(models, model)
+			}
+			slices.Sort(models)
+			rt.Execution.Model = strings.Join(models, ", ")
+		}
+		latest = at
 	}
 	if err := execution.Ready(); err != nil {
 		rt.Execution.Error = err.Error()

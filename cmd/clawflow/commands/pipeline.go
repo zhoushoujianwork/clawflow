@@ -295,6 +295,12 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 		add(cand{number: e.Number, queuePos: queuePosition(board.Queue, e.Number), title: e.Title, labels: e.Labels, state: e.State, updated: e.UpdatedAt})
 	}
+	// Unresolved failures need attention regardless of queue scope or run retention.
+	for _, it := range openIssues {
+		if it.State == "open" && slices.Contains(it.Labels, "agent-failed") {
+			add(cand{number: it.Number, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
+		}
+	}
 	for _, n := range prOrder {
 		it, ok := issueByNum[n]
 		if !ok {

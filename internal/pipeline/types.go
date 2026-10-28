@@ -73,10 +73,12 @@ type Scheduler struct {
 
 // Execution reports whether the Offload execution profile is usable.
 type Execution struct {
-	Backend string `json:"backend,omitempty"`
-	Profile string `json:"profile,omitempty"`
-	Ready   bool   `json:"ready"`
-	Error   string `json:"error,omitempty"`
+	Model       string `json:"model,omitempty"`
+	ServiceTier string `json:"service_tier,omitempty"`
+	Backend     string `json:"backend,omitempty"`
+	Profile     string `json:"profile,omitempty"`
+	Ready       bool   `json:"ready"`
+	Error       string `json:"error,omitempty"`
 }
 
 // RepoBoard is the board for one repository.

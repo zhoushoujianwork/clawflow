@@ -6,11 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
 func resetPipeline(t *testing.T, src func(context.Context) (pipeline.Snapshot, error)) *time.Time {
@@ -181,5 +184,48 @@ func TestPipelineRuntimePassTiming(t *testing.T) {
 	rt := pipelineRuntime()
 	if rt.Scheduler.Status != "running" || rt.Scheduler.StartedAt != started.Format(time.RFC3339) || rt.Scheduler.LastResult != "error" || rt.Scheduler.LastEndedAt == "" {
 		t.Fatalf("runtime=%+v", rt)
+	}
+}
+
+func TestPipelineRuntimeUsesLatestRecordedExecution(t *testing.T) {
+	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "configured-other")
+	if err := os.MkdirAll(snapshot.DataDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(snapshot.DataDir(), "runs.json")
+	for _, tc := range []struct{ name, records, profile, backend, model, tier string }{
+		{"latest result", `[
+   {"started_at":"2026-10-28T10:00:00Z","ended_at":"2026-10-28T10:01:00Z","development_session":{"profile":"configured-other","backend":"old"}},
+   {"started_at":"2026-10-28T09:00:00Z","ended_at":"2026-10-28T11:00:00Z","development_session":{"profile":"actual","backend":"codex"},"model":"recorded-model","service_tier":"priority"},
+   {"started_at":"2026-10-28T12:00:00Z","status":"running"}
+  ]`, "actual", "codex", "recorded-model", "priority"},
+		{"missing optional fields do not inherit", `[
+   {"started_at":"2026-10-28T10:00:00Z","development_session":{"profile":"old","backend":"old"},"model":"old-model","service_tier":"priority"},
+   {"started_at":"2026-10-28T11:00:00Z","development_session":{"profile":"new","backend":"claude"}}
+  ]`, "new", "claude", "", ""},
+		{"recorded model usage", `[{"started_at":"2026-10-28T11:00:00Z","development_session":{"profile":"actual","backend":"codex"},"usage":{"model_usage":{"model-z":{},"model-a":{}}}}]`, "actual", "codex", "model-a, model-z", ""},
+		{"empty history", "[]", "", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.records), 0600); err != nil {
+				t.Fatal(err)
+			}
+			rt := pipelineRuntime()
+			raw, _ := json.Marshal(rt.Execution)
+			var got map[string]any
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range map[string]string{"profile": tc.profile, "backend": tc.backend, "model": tc.model, "service_tier": tc.tier} {
+				if want == "" {
+					if _, ok := got[key]; ok {
+						t.Errorf("%s should be omitted: %s", key, raw)
+					}
+				} else if got[key] != want {
+					t.Errorf("%s = %v, want %s", key, got[key], want)
+				}
+			}
+		})
 	}
 }
