@@ -1,0 +1,406 @@
+package commands
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+)
+
+type coordinatorPayload struct {
+	TaskID      string   `json:"task_id"`
+	Kind        string   `json:"kind"`
+	Operator    string   `json:"operator"`
+	SkillDigest string   `json:"skill_digest"`
+	Repo        string   `json:"repo"`
+	Platform    string   `json:"platform"`
+	BaseURL     string   `json:"base_url"`
+	Issue       int      `json:"issue"`
+	Role        string   `json:"role"`
+	Language    string   `json:"language"`
+	TimeoutSec  int64    `json:"timeout_sec"`
+	Tags        []string `json:"tags"`
+	RepoPolicy  struct {
+		BaseBranch  string `json:"base_branch"`
+		TestCommand string `json:"test_command"`
+		CIRequired  bool   `json:"ci_required"`
+	} `json:"repo_policy"`
+	ReopenEventID string             `json:"reopen_event_id"`
+	Repair        *coordinatorRepair `json:"repair,omitempty"`
+	Scan          struct {
+		Labels     []string  `json:"labels"`
+		SubTotal   int       `json:"sub_total"`
+		ObservedAt time.Time `json:"observed_at"`
+	} `json:"scan"`
+}
+
+type coordinatorRepair struct {
+	PR         int                 `json:"pr"`
+	HeadSHA    string              `json:"head_sha"`
+	HeadBranch string              `json:"head_branch"`
+	HeadRepo   string              `json:"head_repo"`
+	BaseSHA    string              `json:"base_sha"`
+	BaseBranch string              `json:"base_branch"`
+	Attempt    int                 `json:"attempt"`
+	Reason     string              `json:"reason"`
+	Acceptance *acceptanceFindings `json:"acceptance,omitempty"`
+}
+
+// skillDigest excludes machine-local paths while covering executable semantics.
+func skillDigest(op *operator.Operator) string {
+	copy := *op
+	copy.Source = ""
+	b, _ := json.Marshal(copy)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordinatorPayload) {
+	kind := "reply"
+	if j.op.Name == "implement" {
+		kind = "implement"
+	}
+	if j.repair != nil {
+		kind = "repair"
+	}
+	platform := j.repoCfg.Platform
+	if platform == "" {
+		platform = "github"
+	}
+	tags := append([]string{}, j.repoCfg.WorkerTags...)
+	if override, ok := j.repoCfg.WorkerTagsByKind[kind]; ok {
+		tags = append([]string{}, override...)
+	}
+	hostTag := platform
+	if u, err := url.Parse(j.repoCfg.BaseURL); err == nil && u.Hostname() != "" {
+		hostTag = strings.ToLower(u.Hostname())
+	}
+	tags = append(tags, hostTag)
+	if j.repoCfg.BoundMachine != "" {
+		tags = append(tags, "host-"+strings.TrimSuffix(strings.ToLower(j.repoCfg.BoundMachine), ".local"))
+	}
+	priority := j.repoCfg.Priority * 3
+	for _, label := range j.sub.Labels {
+		if tag, ok := strings.CutPrefix(label, "worker:"); ok && tag != "" {
+			tags = append(tags, tag)
+		}
+		switch label {
+		case "priority:high":
+			priority--
+		case "priority:low":
+			priority++
+		}
+	}
+	sort.Strings(tags)
+	unique := tags[:0]
+	for _, tag := range tags {
+		if len(unique) == 0 || unique[len(unique)-1] != tag {
+			unique = append(unique, tag)
+		}
+	}
+	p := coordinatorPayload{Kind: kind, Operator: j.op.Name, SkillDigest: skillDigest(j.op), Repo: j.repo, Platform: platform, BaseURL: j.repoCfg.BaseURL, Issue: j.sub.Number, Role: roleForOperator(j.op.Name), Language: j.language, TimeoutSec: int64(timeout / time.Second), Tags: unique}
+	p.RepoPolicy.BaseBranch, p.RepoPolicy.TestCommand, p.RepoPolicy.CIRequired = j.repoCfg.BaseBranch, j.repoCfg.TestCommand, j.repoCfg.CIRequired
+	p.Scan.Labels, p.Scan.SubTotal, p.Scan.ObservedAt = append([]string{}, j.sub.Labels...), j.sub.SubTotal, time.Now().UTC()
+	if j.reopen != nil {
+		p.ReopenEventID = j.reopen.Event.ID
+	}
+	t := coordinator.Task{Kind: kind, Repo: j.repo, Issue: j.sub.Number, Operator: j.op.Name, Tags: unique, Priority: priority}
+	if j.repair != nil {
+		r := j.repair
+		t.PR = r.PR.Number
+		p.Repair = &coordinatorRepair{PR: r.PR.Number, HeadSHA: r.PR.HeadSHA, HeadBranch: r.PR.HeadBranch, HeadRepo: r.PR.HeadRepo, BaseSHA: r.PR.BaseSHA, BaseBranch: r.PR.BaseBranch, Attempt: r.Attempt, Reason: r.reason(), Acceptance: r.Acceptance}
+	}
+	return t, p
+}
+
+func enqueueCoordinatorJobs(ctx context.Context, jobs []*runJob, timeout time.Duration) ([]firedKey, []firedKey, error) {
+	db, err := requireStore(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer db.Close()
+	return dispatchCoordinatorJobs(ctx, coordinator.New(db.DB()), jobs, timeout)
+}
+
+type coordinatorQueue interface {
+	EnqueuePrepared(context.Context, coordinator.Task, func(*coordinator.Task) error) (*coordinator.Task, error)
+	ExpireLeases(context.Context, time.Time) ([]coordinator.Task, error)
+}
+
+func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*runJob, timeout time.Duration) ([]firedKey, []firedKey, error) {
+	if _, err := s.ExpireLeases(ctx, time.Now().UTC()); err != nil {
+		return nil, nil, err
+	}
+	rank, err := queue.LoadRank()
+	if err != nil {
+		return nil, nil, err
+	}
+	positions := queue.Positions(rank)
+	var fired, failed []firedKey
+	for _, j := range jobs {
+		if j.harvest != nil {
+			failed = append(failed, j.harvest(ctx)...)
+			continue
+		}
+		t, p := coordinatorTask(j, timeout)
+		t.QueuePosition = int64(len(rank))
+		if pos, ok := positions[queue.Key{Repo: j.repo, Number: j.sub.Number}]; ok {
+			t.QueuePosition = int64(pos)
+		}
+		reserved := false
+		var repairPreparationErr error
+		_, err := s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
+			if j.repair != nil {
+				repairPreparationErr = prepareCIRepairContext(ctx, j, time.Now().UTC())
+				if repairPreparationErr != nil {
+					return repairPreparationErr
+				}
+				reserved = true
+				p.Repair.Attempt = j.repair.Attempt
+			}
+			p.TaskID = t.ID
+			var err error
+			t.Payload, err = json.Marshal(p)
+			return err
+		})
+		if err != nil {
+			// Match local execution: a repair preparation failure skips only
+			// this job. Store failures and pass cancellation remain fatal.
+			if repairPreparationErr != nil && errors.Is(err, repairPreparationErr) && ctx.Err() == nil {
+				runLog.Warn("run/ci_repair_skip", "repo", j.repo, "issue", j.sub.Number, "err", repairPreparationErr.Error())
+				continue
+			}
+			if reserved {
+				_ = j.releaseRepair("enqueue", time.Now().UTC())
+			}
+			return fired, failed, fmt.Errorf("enqueue %s#%d: %w", j.repo, j.sub.Number, err)
+		}
+		fired = append(fired, firedKey{Repo: j.repo, IssueNumber: j.sub.Number, Operator: j.op.Name})
+	}
+	return fired, failed, nil
+}
+
+// coordinatorResults seals a fenced result before making any remote writes.
+// Duplicate requests cannot replay effects, including after a partial VCS failure.
+// The stored report remains available for diagnosis when a write fails.
+type coordinatorResults struct {
+	coordinator.WorkerStore
+	tasks interface {
+		Task(context.Context, string) (*coordinator.Task, error)
+		AcceptResult(context.Context, string, string, int64, json.RawMessage) error
+		FinishResult(context.Context, string, string, int64, bool) error
+	}
+	loadJob func(context.Context, *coordinator.Task) (*runJob, error)
+	apply   func(context.Context, *coordinator.Task, *runJob, *coordinatorReport) error
+}
+
+type coordinatorReport struct {
+	jobResult
+	Events []json.RawMessage `json:"events,omitempty"`
+}
+
+func (s *coordinatorResults) Complete(ctx context.Context, id, worker string, fence int64, raw json.RawMessage) error {
+	return s.finish(ctx, id, worker, fence, raw, false)
+}
+func (s *coordinatorResults) Fail(ctx context.Context, id, worker string, fence int64, raw json.RawMessage) error {
+	return s.finish(ctx, id, worker, fence, raw, true)
+}
+func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fence int64, raw json.RawMessage, failed bool) error {
+	var r coordinatorReport
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return coordinator.ErrInvalid
+	}
+	switch r.Status {
+	case "success", "failed", "disallowed-outcome", "skipped-empty", "output-limit", "lease-lost", "skipped", "cancelled", "auth-error", "no-marker", "rate-limited", "cost-limit":
+	default:
+		return coordinator.ErrInvalid
+	}
+	t, err := s.tasks.Task(ctx, id)
+	if err != nil {
+		return err
+	}
+	// Fast rejection before loading config or creating a VCS client. The store
+	// checks again under a row lock when sealing, including lease expiry.
+	if t.State != "leased" || t.LeaseOwner != worker || t.FencingToken != fence || t.LeaseExpiresAt == nil || !t.LeaseExpiresAt.After(time.Now()) {
+		return coordinator.ErrStaleLease
+	}
+	j, err := s.loadJob(ctx, t)
+	if err != nil {
+		return err
+	}
+	for _, e := range r.Effects {
+		if e.Repo != t.Repo || (e.Number != t.Issue && e.Number != t.PR) || e.Number <= 0 {
+			return coordinator.ErrInvalid
+		}
+		switch e.Kind {
+		case "issue-comment", "pr-comment", "add-label", "remove-label", "close-issue":
+		default:
+			return coordinator.ErrInvalid
+		}
+	}
+	// Keep the most recent events, bounded independently of the HTTP body cap.
+	if len(r.Events) > 100 {
+		r.Events = r.Events[len(r.Events)-100:]
+	}
+	size := 0
+	for i := len(r.Events) - 1; i >= 0; i-- {
+		size += len(r.Events[i])
+		if size > 64<<10 {
+			r.Events = r.Events[i+1:]
+			break
+		}
+	}
+	bounded, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+
+	if err = s.tasks.AcceptResult(ctx, id, worker, fence, bounded); err != nil {
+		return err
+	}
+	if err = s.apply(ctx, t, j, &r); err != nil {
+		_ = s.WorkerStore.AppendAudit(ctx, worker, id, "result-apply-failed")
+		return err
+	}
+	return s.tasks.FinishResult(ctx, id, worker, fence, failed)
+
+}
+
+func loadCoordinatorJob(ctx context.Context, t *coordinator.Task) (*runJob, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	rc, ok := cfg.Repos[t.Repo]
+	if !ok {
+		return nil, fmt.Errorf("task repository is no longer configured")
+	}
+	client, err := newVCSClient(rc)
+	if err != nil {
+		return nil, err
+	}
+	if c, ok := client.(interface{ SetRequestContext(context.Context) }); ok {
+		c.SetRequestContext(ctx)
+	}
+	reg, err := loadRegistry()
+	if err != nil {
+		return nil, err
+	}
+	var op *operator.Operator
+	for _, o := range reg.All() {
+		if o.Name == t.Operator {
+			op = o
+			break
+		}
+	}
+	if op == nil {
+		return nil, fmt.Errorf("task operator is no longer registered")
+	}
+	var p coordinatorPayload
+	if err = json.Unmarshal(t.Payload, &p); err != nil {
+		return nil, err
+	}
+	j := &runJob{repo: t.Repo, repoCfg: rc, client: client, op: op, sub: &operator.Subject{Number: t.Issue}}
+	if p.Repair != nil {
+		r := p.Repair
+		j.repair = &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict"}
+	}
+	return j, nil
+}
+
+func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob, r *coordinatorReport) (applyErr error) {
+	now := time.Now().UTC()
+	status := r.Status
+	if r.Status == "lease-lost" {
+		status = "cancelled"
+	}
+	if j.repair != nil && r.InfraKind != "" {
+		if err := j.releaseRepair(r.InfraKind, now); err != nil {
+			return err
+		}
+		if status == "failed" {
+			status = "skipped"
+		}
+	}
+	meta := snapshot.RunMeta{Repo: t.Repo, IssueNumber: t.Issue, Operator: t.Operator, StartedAt: t.CreatedAt, EndedAt: &now, Status: status, Outcome: r.Outcome, Error: r.Error, Usage: r.Usage, HeadSHA: r.HeadSHA, PRUrl: r.PRURL, Summary: r.Output}
+	dir := snapshot.RunDir(t.Repo, t.Issue, t.CreatedAt) + "-task-" + t.ID
+	if err := snapshot.WriteRunMeta(dir, meta); err != nil {
+		return err
+	}
+	defer func() {
+		if applyErr != nil {
+			meta.WritebackError = "coordinator result effects incomplete; inspect task and VCS before recovery"
+			_ = snapshot.WriteRunMeta(dir, meta)
+		}
+	}()
+	if r.Status == "lease-lost" {
+		return nil
+	}
+	for _, e := range r.Effects {
+		var err error
+		switch e.Kind {
+		case "issue-comment":
+			if e.RunID != "" {
+				err = j.client.PostIssueCommentIdempotent(e.Repo, e.Number, e.Body, e.RunID)
+			} else {
+				err = j.client.PostIssueComment(e.Repo, e.Number, e.Body)
+			}
+		case "pr-comment":
+			err = j.client.PostPRComment(e.Repo, e.Number, e.Body)
+		case "add-label":
+			err = j.client.AddLabel(e.Repo, e.Number, e.Labels...)
+		case "remove-label":
+			err = j.client.RemoveLabel(e.Repo, e.Number, e.Labels...)
+		case "close-issue":
+			err = j.client.CloseIssue(e.Repo, e.Number)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
+	if r.Status == "success" {
+		runPostAutomation(ctx, j, r.Outcome, r.Output, prefix)
+	}
+	switch status {
+	case "failed", "disallowed-outcome", "skipped-empty", "output-limit":
+		checkCircuitBreaker(j, prefix)
+	}
+	return nil
+}
+
+func activeCoordinatorIssues(ctx context.Context) (map[string]map[int]bool, error) {
+	db, err := requireStore(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	tasks, err := coordinator.New(db.DB()).Active(ctx)
+	if err != nil {
+		return nil, err
+	}
+	active := map[string]map[int]bool{}
+	for _, t := range tasks {
+		if t.Kind != "implement" && t.Kind != "repair" {
+			continue
+		}
+		if active[t.Repo] == nil {
+			active[t.Repo] = map[int]bool{}
+		}
+		active[t.Repo][t.Issue] = true
+	}
+	return active, nil
+}

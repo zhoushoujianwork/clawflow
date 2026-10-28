@@ -106,6 +106,12 @@ func (s *Store) RegisterWorker(ctx context.Context, w Worker) error {
 
 // Enqueue returns the existing active task on a dedupe conflict, without replacing its payload.
 func (s *Store) Enqueue(ctx context.Context, input Task) (*Task, error) {
+	return s.EnqueuePrepared(ctx, input, nil)
+}
+
+// EnqueuePrepared prepares a new payload only after active-task deduplication.
+// The repository advisory lock serializes producers across coordinator processes.
+func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*Task) error) (*Task, error) {
 	if input.Repo == "" || input.Issue < 0 || input.PR < 0 || (input.Issue == 0 && input.PR == 0) || input.Operator == "" {
 		return nil, ErrInvalid
 	}
@@ -129,6 +135,30 @@ func (s *Store) Enqueue(ctx context.Context, input Task) (*Task, error) {
 		t.Tags = []string{}
 	}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", t.Repo).Error; err != nil {
+			return err
+		}
+		q := tx.Where("repo = ? AND kind = ? AND state IN ?", t.Repo, t.Kind, []string{"pending", "leased"})
+		if t.PR > 0 {
+			q = q.Where("pr = ?", t.PR)
+		} else {
+			q = q.Where("pr = 0 AND issue = ?", t.Issue)
+		}
+		var existing Task
+		if err := q.First(&existing).Error; err == nil {
+			t = existing
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if prepare != nil {
+			if err := prepare(&t); err != nil {
+				return err
+			}
+		}
+		if !json.Valid(t.Payload) {
+			return ErrInvalid
+		}
 		r := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&t)
 		if r.Error != nil {
 			return r.Error
@@ -136,7 +166,7 @@ func (s *Store) Enqueue(ctx context.Context, input Task) (*Task, error) {
 		if r.RowsAffected == 1 {
 			return audit(tx, "", t.ID, "enqueue")
 		}
-		q := tx.Where("repo = ? AND kind = ? AND state IN ?", t.Repo, t.Kind, []string{"pending", "leased"})
+		q = tx.Where("repo = ? AND kind = ? AND state IN ?", t.Repo, t.Kind, []string{"pending", "leased"})
 		if t.PR > 0 {
 			q = q.Where("pr = ?", t.PR)
 		} else {
@@ -270,4 +300,46 @@ func (s *Store) ExpireLeases(ctx context.Context, now time.Time) ([]Task, error)
 		return nil
 	})
 	return tasks, err
+}
+
+// Task returns coordinator-owned routing metadata, never worker-supplied identity.
+func (s *Store) Task(ctx context.Context, id string) (*Task, error) {
+	var t Task
+	err := s.db.WithContext(ctx).First(&t, "id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrStaleLease
+	}
+	return &t, err
+}
+
+func (s *Store) Active(ctx context.Context) ([]Task, error) {
+	var tasks []Task
+	err := s.db.WithContext(ctx).Where("state IN ?", []string{"pending", "leased"}).Find(&tasks).Error
+	return tasks, err
+}
+
+// AcceptResult atomically fences out further reports and lease expiry while
+// coordinator effects are in flight. The task remains active until FinishResult.
+// A failed external write is retained for diagnosis, never blindly replayed.
+func (s *Store) AcceptResult(ctx context.Context, id, worker string, fence int64, result json.RawMessage) error {
+	if !json.Valid(result) {
+		return ErrInvalid
+	}
+	return s.leaseUpdate(ctx, id, worker, fence, "result-accepted", map[string]interface{}{"result": result, "lease_expires_at": nil})
+}
+func (s *Store) FinishResult(ctx context.Context, id, worker string, fence int64, failed bool) error {
+	state := "done"
+	if failed {
+		state = "failed"
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		r := tx.Model(&Task{}).Where("id = ? AND lease_owner = ? AND fencing_token = ? AND state = 'leased' AND lease_expires_at IS NULL AND result IS NOT NULL", id, worker, fence).Update("state", state)
+		if r.Error != nil {
+			return r.Error
+		}
+		if r.RowsAffected != 1 {
+			return ErrStaleLease
+		}
+		return audit(tx, worker, id, "result-applied")
+	})
 }
