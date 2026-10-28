@@ -257,6 +257,7 @@ type DevelopmentSession struct {
 }
 
 type RunMeta struct {
+	RepairReason       string             `json:"repair_reason,omitempty"`
 	DevelopmentSession DevelopmentSession `json:"development_session,omitempty"`
 	HeadSHA            string             `json:"head_sha,omitempty"`
 	Outcome            string             `json:"outcome,omitempty"`

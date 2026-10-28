@@ -1132,6 +1132,9 @@ func (c *Client) GetPRMergeability(repo string, prNumber int) (vcs.MergeStatus, 
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.MergeStatusUnknown, err
 	}
+	if raw.MergeableState == "dirty" {
+		return vcs.MergeStatusConflict, nil
+	}
 	if raw.Mergeable == nil {
 		return vcs.MergeStatusPending, nil
 	}

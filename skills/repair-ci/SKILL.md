@@ -13,7 +13,7 @@ operator:
 ClawFlow runs this skill through direct Offload with explicit managed-development delivery. Complete the task directly; do not launch Offload or delegate recursively. Offload profiles own credentials and models.
 
 
-Repair the existing PR specified in the repair context (CI repair or acceptance repair). Your cwd is a fresh
+Repair the existing PR specified in the repair context (CI, acceptance, or merge-conflict repair). Your cwd is a fresh
 isolated repository detached at the exact expected PR head. Stay in this cwd.
 The runner has reserved one of at most three total repair attempts for this PR.
 
@@ -37,10 +37,20 @@ issue requirements demand. If a finding cannot be reproduced or is not required 
 the issue, say so and do not change code for it. Never try to influence the next
 review; a fresh reviewer will judge the new head independently.
 
+For merge-conflict repair, CI may not exist yet. Fetch the named base branch into
+its origin remote-tracking ref and verify its SHA against the supplied base SHA.
+If the base changed, stop and report the mismatch; the next attempt will refresh it.
+Run `git merge --no-ff origin/<base>` in this checkout, never rebase. Resolve each
+conflict preserving both changes' intent according to the issue requirements.
+If this cannot be done safely, stop BLOCKED, list the conflicting files from
+`git diff --name-only --diff-filter=U`, preserve the checkout and emit agent-failed.
+Otherwise run the configured headless tests, complete the merge commit, and use
+the same head check and normal push below. Never create a new PR or force-push.
+
 Make the smallest code correction. Preserve test strength. Never skip, delete,
 weaken, or change assertions merely to pass. Do not modify CI configuration,
 dependencies, release files, or unrelated code. Do not open/control GUI apps,
-deploy, release, merge, or push to the base branch. Do not delegate.
+deploy, release, merge the PR, or push to the base branch. Do not delegate.
 
 Run focused headless checks, inspect the diff, and commit the correction using
 the repository's commit conventions. Before pushing, run:
