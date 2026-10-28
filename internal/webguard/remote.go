@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"path"
 	"strings"
 )
@@ -38,7 +39,13 @@ func peerIP(r *http.Request) net.IP {
 	if err != nil {
 		return nil
 	}
-	return net.ParseIP(host)
+	// ParseAddr accepts IPv6 zones from TCP peers; policy checks use only
+	// the address bytes, since a zone identifies the local interface.
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return nil
+	}
+	return net.IP(addr.AsSlice())
 }
 
 func (p *RemotePolicy) ReadOnly(r *http.Request) bool {

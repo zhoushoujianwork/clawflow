@@ -35,6 +35,12 @@ func TestRemotePolicy(t *testing.T) {
 		{"spoof loopback", "192.168.1.2:10", "POST", "/api/run", "127.0.0.1", nil, 403},
 		{"spoof cidr", "192.168.1.2:10", "GET", "/", "10.0.0.1", []string{"10.0.0.0/8"}, 403},
 		{"invalid peer", "invalid", "GET", "/", "", nil, 403},
+		{"scoped ipv6 read", "[fe80::1234%en0]:12345", "GET", "/api/pipeline", "", nil, 200},
+		{"scoped ipv6 head", "[fe80::1234%en0]:12345", "HEAD", "/api/pipeline", "", nil, 200},
+		{"scoped ipv6 cidr allowed", "[fe80::1234%en0]:12345", "GET", "/api/pipeline", "", []string{"fe80::/10"}, 200},
+		{"scoped ipv6 cidr denied", "[fe80::1234%en0]:12345", "GET", "/api/pipeline", "", []string{"fd00::/8"}, 403},
+		{"scoped ipv6 write denied", "[fe80::1234%en0]:12345", "POST", "/api/run", "127.0.0.1", nil, 403},
+		{"scoped ipv6 sensitive denied", "[fe80::1234%en0]:12345", "GET", "/api/settings", "", nil, 403},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, err := NewRemotePolicy("readonly", tc.cidrs)
