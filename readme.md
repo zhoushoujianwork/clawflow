@@ -243,13 +243,7 @@ GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return 
 
 ### Work queue (one queue for all repositories)
 
-All enabled repositories, GitHub and GitLab, share one ClawFlow-native queue. Candidates are the open leaf issues `implement` would accept, narrowed by the repo's `queue_scope` (`clawflow repo set owner/repo --queue-scope all|labeled|ranked`; empty falls back to `settings.queue.scope`, then `all`):
-
-- `all`: every eligible issue.
-- `labeled`: only issues labeled `clawflow`.
-- `ranked`: only issues listed in the rank file, plus issues labeled `clawflow`, which are appended to the rank on the pass that sees them (`queue/enroll`).
-
-An unknown value falls back to `ranked` for repos that ever had `queue_issue` (unlisted work is never picked up), else `all`. `clawflow repo set` rejects unknown values. Issues already in flight always count, whatever the scope.
+All enabled repositories, GitHub and GitLab, share one ClawFlow-native queue. An open leaf issue is enrolled only when it carries the `clawflow` label and meets the existing eligibility rules. Priority labels and manual rank control order, never enrollment. Existing in-flight work still counts toward concurrency limits.
 
 Order is `(priority, rank, created_at, key)`:
 
@@ -258,16 +252,16 @@ Order is `(priority, rank, created_at, key)`:
 - Dependencies: one body line `Depends on: #12, owner/repo#34` (max 10). Items wait while a dependency is open; a cycle blocks all its members (`dependency_cycle`).
 
 ```bash
-clawflow queue list [--repo R] [--json]   # global order: key, tier, rank, scope, state
+clawflow queue list [--repo R] [--json]   # global order: key, tier, rank, state
 clawflow queue move owner/repo#12 --top
 clawflow queue add owner/repo#13 [--top | --before K | --after K]   # enroll (default: bottom)
-clawflow queue remove owner/repo#13                                 # drop from the rank
+clawflow queue remove owner/repo#13                                 # remove the clawflow label and rank
 clawflow repo set owner/repo --max-in-flight 3   # per repo, default 2
 ```
 
-Each pass walks the order for its repositories and dispatches while the repo's `max_in_flight` and the global `settings.max_concurrent_agents` allow. An item is in flight while it holds a local lock, or carries `agent-implemented` with an open PR that references it. Blocked items (`agent-failed`, red CI without repair, no acceptance verdict, open dependency) are skipped with a recorded reason and never stall the queue. An in-flight item blocked longer than `settings.queue.park_after` (default `45m`) is parked and stops counting toward `max_in_flight` (at most 2 per repo). Logs: `queue/pick`, `queue/skip`, `queue/park`, `queue/unpark`, `queue/format_warning`, `queue/import`. Targeted runs (`clawflow run --repo R --issue N`) bypass the queue.
+`queue add` adds the `clawflow` label as well as rank; `queue remove` removes both, even for unranked issues. `queue list` reports a separate “not enrolled” count per repository of unlabeled open issues from the last pass.
 
-`queue_issue` is deprecated. On the first pass its open sub-issues are imported into the rank (`clawflow queue import --repo R --from-issue N` does the same by hand), the repo is set to `queue_scope: ranked` unless it already has an explicit scope, and the field is then ignored. If the config write fails, implement is held back for that repo and the migration retries next pass. The old queue issue is left untouched.
+Each pass walks the order for its repositories and dispatches while the repo's `max_in_flight` and the global `settings.max_concurrent_agents` allow. An item is in flight while it holds a local lock, or carries `agent-implemented` with an open PR that references it. Blocked items (`agent-failed`, red CI without repair, no acceptance verdict, open dependency) are skipped with a recorded reason and never stall the queue. An in-flight item blocked longer than `settings.queue.park_after` (default `45m`) is parked and stops counting toward `max_in_flight` (at most 2 per repo). Logs: `queue/pick`, `queue/skip`, `queue/park`, `queue/unpark`, `queue/format_warning`, `queue/import`. Targeted runs (`clawflow run --repo R --issue N`) bypass the queue.
 
 ---
 

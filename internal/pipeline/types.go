@@ -30,8 +30,7 @@ type Snapshot struct {
 	Repos       []RepoBoard `json:"repos"`
 	Events      []Event     `json:"events"`
 	// GlobalQueue is the single cross-repository work queue in dispatch
-	// order (priority tier, manual rank, age). Additive: the per-repo
-	// Queue fields keep their shape.
+	// order (priority tier, manual rank, age).
 	GlobalQueue []GlobalQueueEntry `json:"global_queue"`
 }
 
@@ -84,39 +83,9 @@ type RepoBoard struct {
 	AutoMerge          bool   `json:"auto_merge"`
 	CIRequired         bool   `json:"ci_required"`
 	AcceptanceRequired bool   `json:"acceptance_required"`
-	QueueIssue         int    `json:"queue_issue,omitempty"`
-	Queue              *Queue `json:"queue,omitempty"`
 	Items              []Item `json:"items"`
 	// Error is set when the repository could not be read at all.
 	Error string `json:"error,omitempty"`
-}
-
-// Queue is the repository work queue (queue_issue's ordered sub-issues).
-type Queue struct {
-	Issue    int            `json:"issue"`
-	Entries  []QueueEntry   `json:"entries"`
-	Decision *QueueDecision `json:"decision,omitempty"`
-	Error    string         `json:"error,omitempty"`
-}
-
-// QueueEntry is one sub-issue of the queue issue, in provider order.
-type QueueEntry struct {
-	Position int    `json:"position"`
-	Number   int    `json:"number"`
-	Title    string `json:"title"`
-	State    string `json:"state"`
-	// Action/Reason carry the runner's latest queue decision when it is about
-	// this entry ("pick" | "wait" | "blocked").
-	Action string `json:"action,omitempty"`
-	Reason string `json:"reason,omitempty"`
-}
-
-// QueueDecision is the runner's most recent queue decision, taken from run.log.
-type QueueDecision struct {
-	Action string `json:"action"` // "pick" | "wait" | "blocked"
-	Issue  int    `json:"issue,omitempty"`
-	Reason string `json:"reason,omitempty"`
-	At     string `json:"at"`
 }
 
 // Item is one issue travelling through the delivery pipeline.

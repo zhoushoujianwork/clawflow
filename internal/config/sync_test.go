@@ -622,53 +622,11 @@ func TestMigrateTimestamps(t *testing.T) {
 	}
 }
 
-// TestQueueIssueRoundTrip verifies queue_issue survives YAML save/load and the
-// Gist sync path, and is omitted when unset.
-func TestQueueIssueRoundTrip(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cfg := &config.Config{Repos: map[string]config.Repo{
-		"o/queued": {BaseBranch: "main", QueueIssue: 42},
-		"o/plain":  {BaseBranch: "main"},
-	}}
-	if err := cfg.Save(); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(config.ConfigPath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(raw), "queue_issue") != 1 {
-		t.Fatalf("queue_issue must be written once and omitted when 0:\n%s", raw)
-	}
-	loaded, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Repos["o/queued"].QueueIssue != 42 || loaded.Repos["o/plain"].QueueIssue != 0 {
-		t.Fatalf("round trip lost queue_issue: %+v", loaded.Repos)
-	}
-
-	data, err := config.MarshalForGist(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "queue_issue: 42") {
-		t.Fatalf("gist payload missing queue_issue:\n%s", data)
-	}
-	merged, err := config.MergeConfigs(&config.Config{Repos: map[string]config.Repo{}}, data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if merged.Repos["o/queued"].QueueIssue != 42 {
-		t.Fatalf("merge lost queue_issue: %+v", merged.Repos["o/queued"])
-	}
-}
-
-// TestQueueScopeAndMaxInFlightSync verifies the unified queue repo settings
+// TestMaxInFlightSync verifies the unified queue repo settings
 // survive YAML save/load and the Gist sync path.
-func TestQueueScopeAndMaxInFlightSync(t *testing.T) {
+func TestMaxInFlightSync(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := &config.Config{Repos: map[string]config.Repo{"o/q": {BaseBranch: "main", QueueScope: "ranked", MaxInFlight: 3}}}
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/q": {BaseBranch: "main", MaxInFlight: 3}}}
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -676,7 +634,7 @@ func TestQueueScopeAndMaxInFlightSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := loaded.Repos["o/q"]; r.QueueScope != "ranked" || r.MaxInFlight != 3 {
+	if r := loaded.Repos["o/q"]; r.MaxInFlight != 3 {
 		t.Fatalf("round trip: %+v", r)
 	}
 	data, err := config.MarshalForGist(loaded)
@@ -687,7 +645,7 @@ func TestQueueScopeAndMaxInFlightSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := merged.Repos["o/q"]; r.QueueScope != "ranked" || r.MaxInFlight != 3 {
+	if r := merged.Repos["o/q"]; r.MaxInFlight != 3 {
 		t.Fatalf("sync lost queue settings: %+v", r)
 	}
 }

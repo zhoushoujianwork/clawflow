@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -195,9 +196,9 @@ func TestWebRestartRoutingAndWait(t *testing.T) {
 				},
 				signal: func(int) error { signals++; return nil },
 				alive:  func(int) bool { return now.Before(time.Unix(0, 0).Add(200 * time.Millisecond)) },
-				exec: func(host string, port int) error {
+				exec: func(info webPidInfo) error {
 					execs++
-					if host != "0.0.0.0" || port != 8090 {
+					if info.Host != "0.0.0.0" || info.Port != 8090 || info.Remote != "readonly" || len(info.AllowCIDRs) != 1 {
 						t.Fatal("lost bind flags")
 					}
 					return nil
@@ -212,7 +213,7 @@ func TestWebRestartRoutingAndWait(t *testing.T) {
 				free: func(string) bool { probes++; return tc.failure != "timeout" && probes > 1 },
 				now:  func() time.Time { return now }, sleep: func(d time.Duration) { now = now.Add(d) },
 			}
-			err := restartWeb(webPidInfo{PID: 42, Host: "0.0.0.0", Port: 8090}, time.Second, ops)
+			err := restartWeb(webPidInfo{PID: 42, Host: "0.0.0.0", Port: 8090, Remote: "readonly", AllowCIDRs: []string{"192.168.0.0/16"}}, time.Second, ops)
 			if (err != nil) != (tc.failure != "") {
 				t.Fatalf("err=%v", err)
 			}
@@ -291,11 +292,11 @@ func TestWebServiceKickstart(t *testing.T) {
 
 func TestWebServicePidRecord(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	want := webPidInfo{PID: 42, Host: "127.0.0.1", Port: 8090, ServiceName: webServiceLabel}
+	want := webPidInfo{PID: 42, Host: "127.0.0.1", Port: 8090, ServiceName: webServiceLabel, Remote: "readonly", AllowCIDRs: []string{"192.168.0.0/16"}}
 	if err := writeWebPid(want); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := readWebPid(); !ok || got != want {
+	if got, ok := readWebPid(); !ok || !reflect.DeepEqual(got, want) {
 		t.Fatalf("pid record=%+v valid=%t", got, ok)
 	}
 	if err := os.WriteFile(webPidPath(), []byte(`{"pid":42,"host":"localhost","port":8090}`), 0600); err != nil {
@@ -325,12 +326,23 @@ func TestWebRestartDoesNotAcceptOldListener(t *testing.T) {
 			alive:     func(int) bool { return true },
 			ready:     func(string) bool { t.Fatal("probed old listener"); return true },
 			free:      func(string) bool { t.Fatal("probed before old process exited"); return true },
-			exec:      func(string, int) error { t.Fatal("started duplicate instance"); return nil },
+			exec:      func(webPidInfo) error { t.Fatal("started duplicate instance"); return nil },
 			now:       func() time.Time { return now },
 			sleep:     func(d time.Duration) { now = now.Add(d) },
 		}
 		if err := restartWeb(webPidInfo{PID: 42, Host: "localhost", Port: 8090}, time.Second, ops); err == nil {
 			t.Fatal("reported success while old process remained alive")
 		}
+	}
+}
+
+func TestWebRestartArguments(t *testing.T) {
+	info := webPidInfo{Host: "::", Port: 8090, Remote: "readonly", AllowCIDRs: []string{"192.168.0.0/16", "fd00::/8"}}
+	want := []string{"clawflow", "web", "--host", "::", "--port", "8090", "--remote", "readonly", "--allow-cidr", "192.168.0.0/16", "--allow-cidr", "fd00::/8"}
+	if got := webArgs(info); !reflect.DeepEqual(got, want) {
+		t.Fatalf("args=%v want=%v", got, want)
+	}
+	if got := remoteArgs("", nil); !reflect.DeepEqual(got, []string{"--remote", "off"}) {
+		t.Fatalf("legacy=%v", got)
 	}
 }
