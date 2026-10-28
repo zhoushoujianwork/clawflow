@@ -22,6 +22,13 @@ func envOrFile(envKey, fileVal string) string {
 
 // Repo holds per-repository settings.
 type Repo struct {
+	// CoordinatorMode and CoordinatorActive are pass-local scheduling inputs.
+	CoordinatorActive map[int]bool        `yaml:"-" json:"-"`
+	CoordinatorMode   bool                `yaml:"-" json:"-"`
+	WorkerTags        []string            `yaml:"worker_tags,omitempty" json:"worker_tags,omitempty"`
+	WorkerTagsByKind  map[string][]string `yaml:"worker_tags_by_kind,omitempty" json:"worker_tags_by_kind,omitempty"`
+	Priority          int                 `yaml:"priority,omitempty" json:"priority,omitempty"`
+
 	PilotOverrideMerge bool              `yaml:"pilot_override_merge,omitempty" json:"pilot_override_merge,omitempty"`
 	Enabled            bool              `yaml:"enabled"`
 	Platform           string            `yaml:"platform,omitempty"` // "github" (default) or "gitlab"
@@ -966,6 +973,9 @@ func ConfigPath() string {
 // unbound repos. An empty hostname (unresolvable) conservatively accepts all.
 // Shared by `clawflow run` and the web auto-run scheduler.
 func (s Settings) RunsOnHost(r Repo, hostname string) bool {
+	if s.Coordinator.Enabled {
+		return true
+	}
 	if r.BoundMachine != "" && hostname != "" && r.BoundMachine != hostname {
 		return false
 	}

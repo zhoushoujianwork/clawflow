@@ -96,11 +96,11 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 		return nil
 	}
 	host, err := os.Hostname()
-	if cfg.BoundMachine != "" && (err != nil || host != cfg.BoundMachine) {
+	if !cfg.CoordinatorMode && cfg.BoundMachine != "" && (err != nil || host != cfg.BoundMachine) {
 		skip(0, fmt.Errorf("repository bound to another machine"))
 		return nil
 	}
-	if cfg.LocalPath == "" {
+	if cfg.LocalPath == "" && !cfg.CoordinatorMode {
 		skip(0, fmt.Errorf("CI repair requires local_path"))
 		return nil
 	}

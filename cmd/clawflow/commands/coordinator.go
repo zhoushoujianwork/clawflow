@@ -27,7 +27,9 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		db.Close()
 		return nil, err
 	}
-	server := coordinator.NewServer(settings.ListenAddress(), coordinator.New(db.DB()), cert)
+	tasks := coordinator.New(db.DB())
+	results := &coordinatorResults{WorkerStore: tasks, tasks: tasks, loadJob: loadCoordinatorJob, apply: applyCoordinatorReport}
+	server := coordinator.NewServer(settings.ListenAddress(), results, cert)
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		db.Close()

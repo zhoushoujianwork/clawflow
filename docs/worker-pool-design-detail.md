@@ -80,3 +80,37 @@ worker 身份固定为 token 名称，不能从请求 body 指定其他身份：
 每次请求追加 http:action:status 审计（包括拒绝请求）；审计失败返回 500。
 审计不保存 secret、请求正文或原始 URL。结果仅由 store 持久化，
 runner effects、acceptance 与自动合并接入仍属于后续切片。
+
+## Coordinator 调度与结果接收（#398）
+
+`settings.coordinator.enabled: true` 时，run 扫描继续执行队列选择、harvest、
+sweep、快照和 Pilot；算子任务改为入队 implement / repair / reply。
+本机无需实现任务的 clone，machine binding 转为 `host-<小写主机名>` 任务标签
+（去掉 `.local`）。本机模式仍保留原有绑定与 clone 检查。
+
+仓库支持 `worker_tags`、`worker_tags_by_kind` 和整数 `priority`；每种 kind 的
+标签覆盖仓库默认标签，再加入 `worker:<tag>` issue 标签和平台标签（默认
+`github` / `gitlab`，自定义 `base_url` 使用其小写 hostname）。priority 越小越优先，
+同一仓库 priority 内 `priority:high` 先于 normal、low，随后按全局 queue 手工
+位置及任务创建时间排序。pending、leased 任务计入仓库在途容量。
+
+payload 包含 task_id、kind、operator、skill_digest、repo、platform、base_url、
+issue、role、language、timeout_sec、tags、repo_policy、reopen_event_id、repair、scan。
+skill_digest 是解析后的 Operator（Source 清空）JSON 的 SHA-256；不包含本机路径。
+repair 中传递 coordinator 预留的 attempt、PR head 身份和独立验收 findings。
+重复入队先去重，不再次预留修复次数。
+
+worker complete/fail 的 result 使用 jobResult JSON，可附带 `events` 数组；只保留
+末尾最多 100 条且总计不超过 64 KiB。HTTP 请求大小仍受 1 MiB 限制。
+coordinator 使用自己的 VCS client 执行按序 effects，再根据 outcome/output 做
+post-automation；worker 的 PRNumber 不决定合并目标。usage 与终态进入本地 run
+记录及已绑定的 PostgreSQL run index，修复 ledger 和熔断也由 coordinator 更新。
+
+接收结果时，在行锁内重新验证 owner、fencing token 和未过期租约，再保存 result，
+清空 lease_expires_at；任务保持 leased 以阻止重复入队和重新领取。成功应用后才
+转为 done/failed。重复或旧 token 返回 409，不重放任何 effect。
+
+外部 VCS 写入不能与数据库事务原子提交。本切片采用至多一次尝试：写回失败或
+接收后进程退出时，保留 leased + result + 空 lease_expires_at，禁止自动重放，避免
+重复评论/关闭。写回失败记录 result-apply-failed 审计和 run 的 WritebackError。
+恢复前需检查已落地的 VCS 效果；这里尚未实现自动恢复或通用 effect outbox。

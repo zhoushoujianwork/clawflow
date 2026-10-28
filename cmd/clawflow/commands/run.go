@@ -543,10 +543,19 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	lg.Info("run/scan_phase", "pid", os.Getpid(), "repos", len(allRepos), "budget", scanBudget.String())
 
 	var pending []snapshot.PendingEntry
+	var activeTasks map[string]map[int]bool
+	if cfg.Settings.Coordinator.Enabled {
+		activeTasks, err = activeCoordinatorIssues(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	var jobs []*runJob
 	upgradeRepos := make(map[string]config.Repo)
 	depOpen := queueDepResolver(cfg)
 	for fullName, repoCfg := range allRepos {
+		repoCfg.CoordinatorMode = cfg.Settings.Coordinator.Enabled
+		repoCfg.CoordinatorActive = activeTasks[fullName]
 		// Skip repos bound to a different machine. A repo with no BoundMachine
 		// (empty string) is processed by every machine — the common case.
 		// When hostname resolution failed (empty string), we conservatively
@@ -626,7 +635,15 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	jobs = append([]*runJob{{harvest: func(ctx context.Context) []firedKey {
 		return runHarvestPhase(ctx, &harvestCfg, onlyRepo, onlyIssue, timeout, watchdogDeadline)
 	}}}, jobs...)
-	fired, failed := runJobsParallel(ctx, jobs, workers, timeout)
+	var fired, failed []firedKey
+	if cfg.Settings.Coordinator.Enabled {
+		fired, failed, err = enqueueCoordinatorJobs(ctx, jobs, timeout)
+		if err != nil {
+			return err
+		}
+	} else {
+		fired, failed = runJobsParallel(ctx, jobs, workers, timeout)
+	}
 
 	// Phase 3 (sequential): drop pending entries that fired, then write
 	// the snapshots so the dashboard reflects the post-run state.
@@ -791,7 +808,7 @@ func deterministicSkip(op *operator.Operator, repoCfg config.Repo) bool {
 	if op == nil {
 		return false
 	}
-	if op.Name == "implement" && repoCfg.LocalPath == "" {
+	if op.Name == "implement" && repoCfg.LocalPath == "" && !repoCfg.CoordinatorMode {
 		return true
 	}
 	return false
@@ -1093,7 +1110,7 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 				continue
 			}
 			// Skip issues already locked by another process.
-			if snapshot.IsLocked(fullName, iss.Number) {
+			if snapshot.IsLocked(fullName, iss.Number) || repoCfg.CoordinatorActive[iss.Number] {
 				debugf("  · skipping #%d: locked by another process", iss.Number)
 				continue
 			}
@@ -1131,7 +1148,7 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			Issues:         issues,
 			HasChildren:    hasChildren,
 			ImplementState: implementState,
-			Locked:         func(n int) bool { return snapshot.IsLocked(fullName, n) },
+			Locked:         func(n int) bool { return snapshot.IsLocked(fullName, n) || repoCfg.CoordinatorActive[n] },
 			OpenPRs: func() ([]vcs.PR, error) {
 				prs, err := client.ListOpenPRs(fullName)
 				if err == nil {

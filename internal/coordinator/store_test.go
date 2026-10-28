@@ -310,3 +310,62 @@ func TestConcurrentDedupe(t *testing.T) {
 		t.Fatalf("dedupe created %d tasks", len(unique))
 	}
 }
+
+func TestPreparedEnqueueDeduplicatesBeforeReservation(t *testing.T) {
+	s, _, _ := setup(t)
+	calls := 0
+	input := Task{Kind: "repair", Repo: "o/r", Issue: 7, PR: 8, Operator: "repair-ci"}
+	prepare := func(task *Task) error {
+		calls++
+		task.Payload = json.RawMessage(`{"task_id":"` + task.ID + `","attempt":1}`)
+		return nil
+	}
+	first, err := s.EnqueuePrepared(ctx, input, prepare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.EnqueuePrepared(ctx, input, prepare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || first.ID != second.ID || !strings.Contains(string(second.Payload), second.ID) {
+		t.Fatal(calls, first, second)
+	}
+}
+
+func TestAcceptedResultStaysFencedUntilEffectsFinish(t *testing.T) {
+	s, _, _ := setup(t)
+	enqueue(t, s, 7)
+	register(t, s, "w", 1)
+	leased := claim(t, s, "w")
+	raw := json.RawMessage(`{"status":"success"}`)
+	if err := s.AcceptResult(ctx, leased.ID, "w", leased.FencingToken-1, raw); !errors.Is(err, ErrStaleLease) {
+		t.Fatal(err)
+	}
+	if err := s.AcceptResult(ctx, leased.ID, "w", leased.FencingToken, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcceptResult(ctx, leased.ID, "w", leased.FencingToken, raw); !errors.Is(err, ErrStaleLease) {
+		t.Fatal(err)
+	}
+	if err := s.Heartbeat(ctx, leased.ID, "w", leased.FencingToken); !errors.Is(err, ErrStaleLease) {
+		t.Fatal(err)
+	}
+	if tasks, err := s.ExpireLeases(ctx, time.Now().Add(time.Hour)); err != nil || len(tasks) != 0 {
+		t.Fatal(tasks, err)
+	}
+	active, err := s.Active(ctx)
+	if err != nil || len(active) != 1 || !strings.Contains(string(active[0].Result), `"success"`) {
+		t.Fatal(active, err)
+	}
+	if err := s.FinishResult(ctx, leased.ID, "w", leased.FencingToken, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishResult(ctx, leased.ID, "w", leased.FencingToken, false); !errors.Is(err, ErrStaleLease) {
+		t.Fatal(err)
+	}
+	active, err = s.Active(ctx)
+	if err != nil || len(active) != 0 {
+		t.Fatal(active, err)
+	}
+}
