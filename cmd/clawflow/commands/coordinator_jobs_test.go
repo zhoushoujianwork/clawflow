@@ -415,3 +415,30 @@ func TestCoordinatorRunOnceEnqueuesAndPreservesCapacity(t *testing.T) {
 		t.Fatal(payload)
 	}
 }
+
+func TestCoordinatorRepairScanExcludesActiveIssue(t *testing.T) {
+	withRunLog(t)
+	pr, issue := repairFixture()
+	reg := repairRegistry(t)
+	for _, onlyIssue := range []int{0, issue.Number} {
+		for _, tc := range []struct {
+			name   string
+			active map[int]bool
+			want   int
+		}{
+			{name: "no active tasks", want: 1},
+			{name: "same issue active", active: map[int]bool{issue.Number: true}, want: 0},
+			{name: "other issue active", active: map[int]bool{issue.Number + 1: true}, want: 1},
+		} {
+			t.Run(fmt.Sprintf("target-%d/%s", onlyIssue, tc.name), func(t *testing.T) {
+				cfg := config.Repo{CoordinatorMode: true, CoordinatorActive: tc.active, AutoMerge: true, CIRequired: true}
+				client := &repairClient{pr: pr, issue: issue, status: vcs.CIStatusFailure}
+				// Normal scanning omits the active issue, so it is absent from normal jobs.
+				jobs := scanCIRepairJobs(context.Background(), reg, client, "o/r", cfg, onlyIssue, nil)
+				if len(jobs) != tc.want {
+					t.Fatalf("repair jobs = %d, want %d (active=%v)", len(jobs), tc.want, tc.active)
+				}
+			})
+		}
+	}
+}

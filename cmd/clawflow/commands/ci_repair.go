@@ -130,7 +130,7 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 			break
 		}
 		n := extractClosesIssue(listed.Body)
-		if n == 0 || seen[n] || (onlyIssue != 0 && onlyIssue != n) || snapshot.IsLocked(repo, n) {
+		if n == 0 || seen[n] || (onlyIssue != 0 && onlyIssue != n) || snapshot.IsLocked(repo, n) || cfg.CoordinatorActive[n] {
 			continue
 		}
 		pr, err := client.GetPR(repo, listed.Number)
