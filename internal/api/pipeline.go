@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -79,7 +81,34 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 	board := pipeline.Board{Snapshot: snap, Stale: stale, Refreshing: pipelineCache.refreshing, Error: pipelineCache.err}
 	pipelineCache.mu.Unlock()
 	board.Runtime = pipelineRuntime()
-	writeJSON(w, http.StatusOK, board)
+	records, err := pilot.ReadActionRecords(filepath.Join(snapshot.DataDir(), "pilot-actions.jsonl"))
+	actions := []pilot.ActionRecord{}
+	if err == nil {
+		// Pending and terminal records share an identity; show the latest state once.
+		latest := map[string]int{}
+		for _, record := range records {
+			if !slices.ContainsFunc(board.Repos, func(repo pipeline.RepoBoard) bool { return repo.Repo == record.Action.Repo }) {
+				continue
+			}
+			key := record.RunID + "/" + record.Action.ID
+			if index, ok := latest[key]; ok {
+				actions[index] = record
+			} else {
+				latest[key] = len(actions)
+				actions = append(actions, record)
+			}
+		}
+		slices.SortStableFunc(actions, func(a, b pilot.ActionRecord) int { return a.At.Compare(b.At) })
+	}
+	actionError := ""
+	if err != nil {
+		actionError = "Pilot action history unavailable"
+	}
+	writeJSON(w, http.StatusOK, struct {
+		pipeline.Board
+		PilotActions []pilot.ActionRecord `json:"pilot_actions"`
+		PilotError   string               `json:"pilot_error,omitempty"`
+	}{board, actions, actionError})
 }
 
 // pipelineRuntime is cheap and always fresh: version, scheduler and Offload readiness.

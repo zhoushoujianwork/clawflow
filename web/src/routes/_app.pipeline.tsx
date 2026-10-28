@@ -114,7 +114,19 @@ interface GlobalQueueEntry {
   state: string
 }
 
+interface PilotAction {
+  created_issue?: number
+  run_id: string
+  actor: string
+  action: { id: string; type: string; repo: string; issue?: number; pr?: number; body?: string; head?: string; followups?: string[] }
+  outcome: string
+  at: string
+  reason?: string
+}
+
 interface Board {
+  pilot_actions?: PilotAction[]
+  pilot_error?: string
   stale: boolean
   refreshing: boolean
   error?: string
@@ -318,7 +330,7 @@ function PipelinePage() {
               </p>}
             </div>
           ) : (
-            board.repos.map(r => <RepoSection key={r.repo} board={r} repoInfo={repoInfo} queue={board.global_queue || []} tab={search.tab || 'active'} open={expanded.includes(r.repo)} toggle={() => update({ expanded: expanded.includes(r.repo) ? expanded.filter(n => n !== r.repo).join(',') : [...expanded, r.repo].join(',') })} />)
+            board.repos.map(r => <RepoSection key={r.repo} board={r} pilotActions={board.pilot_actions} repoInfo={repoInfo} queue={board.global_queue || []} tab={search.tab || 'active'} open={expanded.includes(r.repo)} toggle={() => update({ expanded: expanded.includes(r.repo) ? expanded.filter(n => n !== r.repo).join(',') : [...expanded, r.repo].join(',') })} />)
           )}
           <EventTimeline events={board.events || []} filter={search.events || 'important'} repo={search.repo || ''} repos={board.repos.map(r => r.repo)} update={update} />
         </>
@@ -351,14 +363,16 @@ export function Attention({ board, repoInfo }: { board: Board; repoInfo: RepoInf
     if (e.event === 'run/lock_timeout' || e.event === 'run/end') locks.set(e.fields.repo || '', e)
   }
   for (const [repo, e] of locks) if (e.event === 'run/lock_timeout') rows.push({ repo, issue: Number(e.fields.issue) || 0, reason: 'Lock wait timed out: ' + (e.fields.reason || ''), time: e.time, url: e.fields.issue ? issueUrl(repo, Number(e.fields.issue), repoInfo) : repoUrl(repo, repoInfo) })
+  for (const a of board.pilot_actions || []) rows.push({ repo: a.action.repo, issue: a.action.issue || a.action.pr || 0, reason: pilotSummary(a), time: a.at, url: a.action.pr ? board.repos.find(r => r.repo === a.action.repo)?.items.find(i => i.pr?.number === a.action.pr)?.pr?.url || repoUrl(a.action.repo, repoInfo) : a.action.issue ? issueUrl(a.action.repo, a.action.issue, repoInfo) : repoUrl(a.action.repo, repoInfo) })
   return <section className="mb-4" aria-label="Needs attention">
+    {board.pilot_error && <p role="alert">{board.pilot_error}</p>}
     {rows.length ? <><h2 className="font-semibold text-sm mb-2">Needs attention ({rows.length})</h2><ul className="border border-amber-200 rounded-lg divide-y">
       {rows.map((row, i) => <li key={i} className="p-2 text-xs flex flex-wrap gap-2 break-words"><span className="font-mono break-all">{row.repo}{row.issue ? ' #' + row.issue : ''}</span><span>{row.reason}</span><span className="text-muted-foreground">{timeAgo(row.time)}</span>{row.url && <a className="text-brand underline" href={row.url} target="_blank" rel="noreferrer">Open</a>}</li>)}
     </ul></> : <p className="text-sm text-muted-foreground">Nothing needs you</p>}
   </section>
 }
 
-export function RepoSection({ board, repoInfo, queue, tab, open, toggle }: { board: RepoBoard; repoInfo: RepoInfoMap; queue: GlobalQueueEntry[]; tab: NonNullable<Preferences['tab']>; open: boolean; toggle: () => void }) {
+export function RepoSection({ board, repoInfo, queue, tab, open, toggle, pilotActions = [] }: { pilotActions?: PilotAction[]; board: RepoBoard; repoInfo: RepoInfoMap; queue: GlobalQueueEntry[]; tab: NonNullable<Preferences['tab']>; open: boolean; toggle: () => void }) {
   const [showAll, setShowAll] = useState(false)
   const positions = new Map(queue.filter(q => q.repo === board.repo).map(q => [q.number, q.position]))
   const items = board.items.map(item => ({ ...item, in_queue: positions.has(item.issue), queue_position: positions.get(item.issue) }))
@@ -384,14 +398,14 @@ export function RepoSection({ board, repoInfo, queue, tab, open, toggle }: { boa
     </button>
     {board.error && <div role="alert" className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 break-words">{board.stale ? 'Showing the last snapshot. Refresh failed: ' : ''}{board.error}</div>}
     {open && <div className="border-t">
-      {visible.length ? visible.map(item => <ItemRows key={item.issue} item={item} repo={board.repo} repoInfo={repoInfo} />) : <p className="p-3 text-sm text-muted-foreground">No items in this view.</p>}
+      {visible.length ? visible.map(item => <ItemRows key={item.issue} item={item} pilotActions={itemPilotActions(pilotActions, board.repo, item)} repo={board.repo} repoInfo={repoInfo} />) : <p className="p-3 text-sm text-muted-foreground">No items in this view.</p>}
       {hidden > 0 && <button className="p-3 text-sm text-brand" onClick={() => setShowAll(true)}>+{hidden} more</button>}
       {showAll && queued > 6 && <button className="p-3 text-sm text-brand" onClick={() => setShowAll(false)}>Show head + next 5</button>}
     </div>}
   </section>
 }
 
-function ItemRows({ item, repo, repoInfo }: { item: Item; repo: string; repoInfo: RepoInfoMap }) {
+function ItemRows({ item, repo, repoInfo, pilotActions }: { pilotActions: PilotAction[]; item: Item; repo: string; repoInfo: RepoInfoMap }) {
   const [open, setOpen] = useState(false)
   const panelId = `pipeline-${repo.replace(/\W+/g, '-')}-${item.issue}`
   return <div className="border-b last:border-b-0 p-3 text-xs">
@@ -405,7 +419,7 @@ function ItemRows({ item, repo, repoInfo }: { item: Item; repo: string; repoInfo
     </div>
     <p className="mt-1 truncate text-muted-foreground" title={item.why}>{item.why}</p>
     {item.delivery && <p className="mt-1 break-all"><a href={item.delivery.pr_url} className="text-brand">PR #{item.delivery.pr}</a> · {shortSha(item.delivery.merge_commit_sha)} · {item.delivery.merged_at || 'time unavailable'}</p>}
-    {open && <div id={panelId} className="mt-3"><ItemDetail item={item} /></div>}
+    {open && <div id={panelId} className="mt-3"><ItemDetail item={item} /><PilotTimeline actions={pilotActions} /></div>}
   </div>
 }
 
@@ -539,4 +553,23 @@ export function EventTimeline({ events, filter, repo, repos, update }: { events:
     </ol>
     {!rows.length && <p className="text-xs text-muted-foreground">No matching events.</p>}
   </details>
+}
+
+function pilotSummary(a: PilotAction) {
+  return `Pilot ${a.action.type} · ${a.outcome}${a.action.body ? ': ' + a.action.body : ''}${a.reason ? ' · ' + a.reason : ''}`
+}
+
+export function PilotTimeline({ actions }: { actions: PilotAction[] }) {
+  if (!actions.length) return null
+  return <DetailBlock title="Pilot timeline"><ol className="space-y-2">
+    {actions.map(a => <li key={a.run_id + '/' + a.action.id} className="whitespace-pre-wrap break-words">
+      <time>{a.at}</time> · {pilotSummary(a)}
+      <div className="text-muted-foreground">{a.actor} · run {a.run_id}{a.action.head && <> · reviewed head <code>{a.action.head}</code></>}{a.action.followups?.length ? ' · follow-ups: ' + a.action.followups.join(', ') : ''}</div>
+    </li>)}
+  </ol></DetailBlock>
+}
+
+export function itemPilotActions(actions: PilotAction[], repo: string, item: Item) {
+  return actions.filter(a => a.action.repo === repo &&
+    ((a.action.issue && a.action.issue === item.issue) || (a.created_issue && a.created_issue === item.issue) || (a.action.pr && a.action.pr === item.pr?.number)))
 }

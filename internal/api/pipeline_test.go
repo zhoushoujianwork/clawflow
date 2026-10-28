@@ -16,6 +16,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -375,5 +376,51 @@ func TestPipelineRuntimeUsesLatestRecordedExecutionFromDB(t *testing.T) {
 			}
 			assertExecution(t, pipelineRuntime().Execution, tc.profile, tc.backend, tc.model, tc.tier)
 		})
+	}
+}
+
+func TestPipelinePilotAudit(t *testing.T) {
+	resetPipeline(t, nil)
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(snapshot.DataDir(), "pilot-actions.jsonl")
+	records := []pilot.ActionRecord{
+		{RunID: "wake", Action: pilot.Action{ID: "question", Type: "ask_human", Repo: "o/r", Issue: 4, Body: "Which environment?"}, Outcome: "pending"},
+		{RunID: "wake", Action: pilot.Action{ID: "question", Type: "ask_human", Repo: "o/r", Issue: 4, Body: "Which environment?"}, Outcome: "applied"},
+		{RunID: "wake", Action: pilot.Action{ID: "merge", Type: "override_merge", Repo: "o/r", PR: 11, Head: strings.Repeat("a", 40)}, Outcome: "head_changed"},
+		{RunID: "other", Action: pilot.Action{ID: "hidden", Repo: "other/repo"}, Outcome: "applied"},
+	}
+	var data []byte
+	for _, r := range records {
+		b, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, append(b, '\n')...)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var board struct {
+		PilotActions []pilot.ActionRecord `json:"pilot_actions"`
+		PilotError   string               `json:"pilot_error"`
+	}
+	response := getPipeline(t, http.MethodGet)
+	if err := json.Unmarshal(response.Body.Bytes(), &board); err != nil {
+		t.Fatal(err)
+	}
+	if len(board.PilotActions) != 2 || board.PilotActions[0].Outcome != "applied" || board.PilotActions[0].Action.Body != "Which environment?" || board.PilotActions[1].Action.PR != 11 || board.PilotActions[1].Outcome != "head_changed" {
+		t.Fatalf("audit: %+v", board)
+	}
+	if err := os.WriteFile(path, []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	response = getPipeline(t, http.MethodGet)
+	if err := json.Unmarshal(response.Body.Bytes(), &board); err != nil {
+		t.Fatal(err)
+	}
+	if len(board.PilotActions) != 0 || board.PilotError == "" {
+		t.Fatalf("unreadable audit: %+v", board)
 	}
 }
