@@ -206,7 +206,18 @@ Allowed fields by type, in addition to id/type/repo:
 - note: body, persisted for the board.
 - rerun_ci: pr (positive PR number). GitHub managed PRs only; reruns failed
   Actions jobs selected by exact-head CI checks once per head. Infrastructure limits apply.
-Unknown fields/actions are rejected. override_merge returns not_implemented. restart_service is not allowed in this slice.
+- override_merge: pr, head (reviewed 40-character SHA), followups (create_issue action IDs).
+  Requires repo pilot_override_merge opt-in and successful exact-head CI. Only an
+  independently readable store with no current-head verdict that ClawFlow also
+  attributes to missing development provenance or an exhausted acceptance
+  infrastructure budget (else no_positive_reason), or a failed verdict
+  whose every failing finding has structured head locations outside changed hunks,
+  can qualify. Legacy/unlocated, in-diff, blocked, passed or unreadable evidence
+  cannot be overridden. Create one follow-up per failing finding, in finding order,
+  before this action in the same set (one root-cause issue for no verdict).
+  ClawFlow checks locations mechanically, posts an audit before pinned merge and
+  signals normal self-upgrade. This action shares the daily action budget.
+Unknown fields/actions are rejected. restart_service is not allowed in this slice.
 Limits: five actions per wake, two new issues per wake, twenty actions per UTC
  day across repositories. Pending or failed attempts consume budget. Reapplication
 of the same run_id/id never repeats an effect; uncertain attempts need inspection.

@@ -665,8 +665,20 @@ func TestSelfUpgradeSurvivesGistRoundTrip(t *testing.T) {
 	}
 }
 
-// TestMarshalForGist_OmitsDatabaseDSN verifies the PostgreSQL DSN secret is
-// never written to the synced payload.
+func TestPilotOverrideMergeSync(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {PilotOverrideMerge: enabled}}}
+		data, err := config.MarshalForGist(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		merged, err := config.MergeConfigs(&config.Config{Repos: map[string]config.Repo{}}, data)
+		if err != nil || merged.Repos["o/r"].PilotOverrideMerge != enabled {
+			t.Fatalf("sync: %+v %v", merged, err)
+		}
+	}
+}
+
 func TestMarshalForGist_OmitsDatabaseDSN(t *testing.T) {
 	cfg := &config.Config{Repos: map[string]config.Repo{}}
 	cfg.Settings.Database.DSN = "postgres://u:topsecret@h/db"

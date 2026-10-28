@@ -814,3 +814,30 @@ func TestEvaluateCIReviewEvidence(t *testing.T) {
 		t.Fatal("accepted unknown review mode")
 	}
 }
+
+func TestRecordsAtHeadIndependentOfContract(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r := passing()
+	if err := s.SaveRecord(r); err != nil {
+		t.Fatal(err)
+	}
+	records, err := s.RecordsAtHead(r.Contract.Repository, r.Contract.PRNumber, r.Contract.HeadSHA)
+	if err != nil || len(records) != 1 || records[0].Verdict != Passed {
+		t.Fatalf("%+v %v", records, err)
+	}
+	records, err = s.RecordsAtHead(r.Contract.Repository, r.Contract.PRNumber, "other-head")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("%+v %v", records, err)
+	}
+	// An unreadable record cannot be dismissed as belonging to some other head.
+	if err := os.WriteFile(filepath.Join(s.path, "unreadable.record"), []byte("bad"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordsAtHead(r.Contract.Repository, r.Contract.PRNumber, "other-head"); err == nil {
+		t.Fatal("unreadable record treated as absent")
+	}
+}

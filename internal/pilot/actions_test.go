@@ -85,7 +85,7 @@ func TestActionsParserAndSchema(t *testing.T) {
 		}
 	}
 	for _, kind := range []string{"override_merge"} {
-		if _, err := validateAction([]byte(`{"id":"a","type":"` + kind + `"}`)); err == nil || err.Error() != "not_implemented" {
+		if _, err := validateAction([]byte(`{"id":"a","type":"` + kind + `"}`)); err == nil || err.Error() != "pr_and_head_required" {
 			t.Fatalf("%s: %v", kind, err)
 		}
 	}
@@ -172,7 +172,7 @@ func TestActionEffectsAndDryRun(t *testing.T) {
 func TestActionsRejectionsAndUncertainAttempt(t *testing.T) {
 	e, c := testExecutor(t)
 	r, err := e.Apply(actionSet("wake", `{"id":"a","type":"override_merge"}`, `{"id":"b","type":"note","body":"x","repo":"other/repo"}`, `{"id":"c","type":"label_remove","issue":1,"label":"agent-failed"}`), false)
-	if err != nil || r[0].Outcome != "not_implemented" || r[1].Outcome != "repo_not_allowed" || r[2].Outcome != "label_not_allowed" || len(c.calls) != 0 {
+	if err != nil || r[0].Outcome != "pr_and_head_required" || r[1].Outcome != "repo_not_allowed" || r[2].Outcome != "label_not_allowed" || len(c.calls) != 0 {
 		t.Fatalf("%+v %v", r, err)
 	}
 	c.issue.Labels = []string{"agent-running"}

@@ -28,16 +28,18 @@ type ActionSet struct {
 	Actions []json.RawMessage `json:"actions"`
 }
 type Action struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Repo     string `json:"repo,omitempty"`
-	Issue    int    `json:"issue,omitempty"`
-	PR       int    `json:"pr,omitempty"`
-	Body     string `json:"body,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Label    string `json:"label,omitempty"`
-	Section  string `json:"section,omitempty"`
-	Position string `json:"position,omitempty"`
+	Head      string   `json:"head,omitempty"`
+	Followups []string `json:"followups,omitempty"`
+	ID        string   `json:"id"`
+	Type      string   `json:"type"`
+	Repo      string   `json:"repo,omitempty"`
+	Issue     int      `json:"issue,omitempty"`
+	PR        int      `json:"pr,omitempty"`
+	Body      string   `json:"body,omitempty"`
+	Title     string   `json:"title,omitempty"`
+	Label     string   `json:"label,omitempty"`
+	Section   string   `json:"section,omitempty"`
+	Position  string   `json:"position,omitempty"`
 }
 
 // ActionRecord is the persisted board/audit representation. Pending records
@@ -105,10 +107,6 @@ func ParseActions(output string) (ActionSet, error) {
 
 func validateAction(raw json.RawMessage) (Action, error) {
 	var a Action
-	// Reserved extensions are recognized even before their payload schemas land.
-	if err := json.Unmarshal(raw, &a); err == nil && a.Type == "override_merge" {
-		return a, errors.New("not_implemented")
-	}
 	if err := strictJSON(raw, &a); err != nil {
 		return a, errors.New("invalid_schema")
 	}
@@ -123,7 +121,15 @@ func validateAction(raw json.RawMessage) (Action, error) {
 			return a, errors.New("pr_required")
 		}
 	case "override_merge":
-		return a, errors.New("not_implemented")
+		fields += " pr head followups"
+		if a.PR < 1 || !rerunHead.MatchString(a.Head) {
+			return a, errors.New("pr_and_head_required")
+		}
+		for _, id := range a.Followups {
+			if !actionID.MatchString(id) {
+				return a, errors.New("invalid_followup")
+			}
+		}
 	case "comment", "ask_human", "release":
 		fields += " issue body"
 		if a.Issue < 1 || strings.TrimSpace(a.Body) == "" {
@@ -175,6 +181,7 @@ func validateAction(raw json.RawMessage) (Action, error) {
 // ActionExecutor serializes all local callers using a dedicated audit lock.
 // Defaults are five actions/wake, two creations/wake and twenty actions/UTC day.
 type ActionExecutor struct {
+	Config          *config.Config
 	Path            string
 	Actor           string
 	DefaultRepo     string
@@ -185,7 +192,7 @@ type ActionExecutor struct {
 }
 
 func NewActionExecutor(cfg *config.Config, creds *config.Credentials, repos []string, actor string) ActionExecutor {
-	return ActionExecutor{Path: filepath.Join(snapshot.DataDir(), "pilot-actions.jsonl"), Actor: actor, Repos: repos, Client: func(repo string) (vcs.Client, error) { return clientFor(repo, cfg, creds) }}
+	return ActionExecutor{Config: cfg, Path: filepath.Join(snapshot.DataDir(), "pilot-actions.jsonl"), Actor: actor, Repos: repos, Client: func(repo string) (vcs.Client, error) { return clientFor(repo, cfg, creds) }}
 }
 func ReadActionRecords(path string) ([]ActionRecord, error) {
 	f, err := os.Open(path)
@@ -300,6 +307,8 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 		switch {
 		case validation != nil:
 			r.Outcome = validation.Error()
+		case a.Type == "override_merge" && (e.Config == nil || !e.Config.Repos[a.Repo].PilotOverrideMerge):
+			r.Outcome = "override_merge_disabled"
 		case !slices.Contains(e.Repos, a.Repo):
 			r.Outcome = "repo_not_allowed"
 		default:
@@ -335,7 +344,9 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 				} else {
 					var n int
 					var err error
-					if a.Type == "rerun_ci" {
+					if a.Type == "override_merge" {
+						err = e.overrideMerge(a, s.RunID, previous)
+					} else if a.Type == "rerun_ci" {
 						r.CIRerun, err = e.rerunCI(a, now)
 					} else {
 						n, err = e.execute(a, s.RunID)
@@ -345,6 +356,10 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 					if err != nil {
 						r.Outcome = "failed"
 						r.Reason = "vcs_error"
+						var refusal *overrideRefusal
+						if errors.As(err, &refusal) {
+							r.Reason = refusal.Error()
+						}
 						if slices.Contains([]string{"already_rerun_for_head", "infrastructure_budget_exhausted", "repair_waiting", "unsupported_platform", "no_rerunnable_checks", "unmanaged_pr", "head_changed", "issue_not_found", "issue_running", "open_leaf_required", "ambiguous_spec_markers", "invalid_spec_markers"}, err.Error()) {
 							r.Reason = err.Error()
 						}

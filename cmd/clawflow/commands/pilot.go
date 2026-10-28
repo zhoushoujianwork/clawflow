@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -10,8 +12,47 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"gopkg.in/yaml.v3"
 )
+
+func init() {
+	pilot.OverrideMerged = confirmedMerges.note
+	pilot.OverrideNoVerdictReason = pilotNoVerdictReason
+}
+
+// pilotNoVerdictReason reports why a PR head has no acceptance verdict, using
+// the same contract and infrastructure-budget logic as harvest. harvestInfraDecision
+// builds the contract, so a development-provenance failure surfaces as its error.
+func pilotNoVerdictReason(ctx context.Context, client vcs.Client, repo string, pr int) (string, error) {
+	d, _, err := harvestInfraDecision(ctx, client, repo, pr, harvestNow())
+	switch {
+	case errors.Is(err, errDevelopmentHeadMissing):
+		return pilot.NoVerdictProvenance, nil
+	case err != nil:
+		return "", err
+	case d == harvestInfraExhausted:
+		return pilot.NoVerdictInfraBudget, nil
+	}
+	return "", nil
+}
+
+var pilotUpgrade = func(ctx context.Context, cfg *config.Config) error {
+	return failedRunsError(runSelfUpgradePhase(ctx, cfg, newSelfUpgrader()))
+}
+
+func upgradePilotMerges(ctx context.Context, cfg *config.Config, results []pilot.ActionRecord) error {
+	selected := &config.Config{Settings: cfg.Settings, Repos: map[string]config.Repo{}}
+	for _, r := range results {
+		if r.Action.Type == "override_merge" && r.Outcome == "applied" && cfg.Repos[r.Action.Repo].SelfUpgrade {
+			selected.Repos[r.Action.Repo] = cfg.Repos[r.Action.Repo]
+		}
+	}
+	if len(selected.Repos) == 0 {
+		return nil
+	}
+	return pilotUpgrade(ctx, selected)
+}
 
 // NewPilotCmd returns the `clawflow pilot` parent command. Subcommands
 // expose Pilot operations that don't naturally belong on `project`
@@ -111,6 +152,11 @@ func newPilotApplyCmd() *cobra.Command {
 			}
 			if err = json.NewEncoder(cmd.OutOrStdout()).Encode(results); err != nil {
 				return err
+			}
+			if !dry {
+				if err := upgradePilotMerges(cmd.Context(), cfg, results); err != nil {
+					return err
+				}
 			}
 			for _, r := range results {
 				if r.Outcome != "applied" && r.Outcome != "already_applied" && r.Outcome != "valid" {
