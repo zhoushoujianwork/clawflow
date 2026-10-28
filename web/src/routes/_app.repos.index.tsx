@@ -79,7 +79,7 @@ function RepoList() {
       fetch('/data/repos.json', { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : []))
         .catch(() => []),
-      fetch('/data/runs.json', { cache: 'no-store' })
+      fetch('/api/runs', { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : []))
         .catch(() => []),
       fetch('/api/settings', { cache: 'no-store' })

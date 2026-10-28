@@ -117,13 +117,6 @@ func (j *runJob) releaseRepair(kind string, now time.Time) error {
 	}
 	return releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, kind, now)
 }
-func (j *runJob) writeRunsIndex() error {
-	if j.hooks != nil && j.hooks.SkipIndex {
-		return nil
-	}
-	_, err := snapshot.WriteRunsIndex(50)
-	return err
-}
 
 // Preserve the optional diagnostic reader through the wrapper.
 func (c *fencedClient) GetFailedJobEvidence(repo, head string, runID int64) (string, error) {

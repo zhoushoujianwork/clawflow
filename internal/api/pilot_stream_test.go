@@ -19,6 +19,12 @@ import (
 // PilotRunDir uses so lexical ordering matches chronological ordering.
 func plantPilotMeta(t *testing.T, project, stamp, body string) {
 	t.Helper()
+	if snapshot.RunStore() == nil {
+		historyDB(t)
+	}
+	if _, err := snapshot.RunStore().UpsertRun(context.Background(), filepath.Join(snapshot.DataDir(), "pilot-runs", project, stamp), "pilot", []byte(body)); err != nil {
+		t.Fatal(err)
+	}
 	dir := filepath.Join(snapshot.DataDir(), "pilot-runs", project, stamp)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir pilot run dir: %v", err)
@@ -118,6 +124,9 @@ func TestPilotStream_MissingProject(t *testing.T) {
 
 func TestPilotStream_NoRunsYieldsNull(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	if snapshot.RunStore() == nil {
+		historyDB(t)
+	}
 	got, err := readLatestPilotMetaCompact("demo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -134,6 +143,9 @@ func TestPilotStream_PicksLatestRunDir(t *testing.T) {
 	plantPilotMeta(t, "demo", "2026-06-01T17-14-55Z",
 		`{"project":"demo","status":"running","started_at":"2026-06-01T17:14:55Z"}`)
 
+	if snapshot.RunStore() == nil {
+		historyDB(t)
+	}
 	got, err := readLatestPilotMetaCompact("demo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

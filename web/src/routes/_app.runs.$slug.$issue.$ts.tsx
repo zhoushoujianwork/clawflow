@@ -9,21 +9,21 @@ import { Markdown } from '../components/Markdown'
 import { TraceView, type RawEvent } from '../components/TraceView'
 
 interface ModelUsage {
-  input_tokens: number
-  output_tokens: number
-  cache_read_input_tokens: number
-  cache_creation_input_tokens: number
-  cost_usd: number
+  input_tokens: number | null
+  output_tokens: number | null
+  cache_read_input_tokens: number | null | null
+  cache_creation_input_tokens: number | null | null
+  cost_usd: number | null
 }
 
 interface Usage {
   duration_ms: number
   num_turns: number
-  total_cost_usd: number
-  input_tokens: number
-  output_tokens: number
-  cache_read_input_tokens: number
-  cache_creation_input_tokens: number
+  total_cost_usd: number | null
+  input_tokens: number | null
+  output_tokens: number | null
+  cache_read_input_tokens: number | null | null
+  cache_creation_input_tokens: number | null | null
   model_usage?: Record<string, ModelUsage>
   // Tokens summed from per-message usage because the run was killed before
   // claude's terminal result event. Cost is unknown on this path (issue #322).
@@ -67,7 +67,7 @@ function RunDetail() {
 
     const refetch = async () => {
       const [metaRes, evRes] = await Promise.all([
-        fetch(`${basePath}/meta.json`, { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
+        fetch(`/api/runs?path=${encodeURIComponent(basePath.slice(6))}`, { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).then(rows => rows[0] ?? null).catch(() => null),
         fetch(`${basePath}/events.jsonl`, { cache: 'no-store' }).then(r => (r.ok ? r.text() : '')).catch(() => ''),
       ])
       if (cancelled) return
@@ -404,12 +404,13 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
  * (run still in flight, or pre-feature data on disk that hasn't been
  * backfilled yet).
  */
-function UsagePanel({ meta }: { meta: RunMeta | null }) {
-  if (!meta || !meta.usage) return null
+export function UsagePanel({ meta }: { meta: RunMeta | null }) {
+  if (!meta) return null
+ if (!meta.usage) return <section className="mb-6 text-sm"><h2 className="font-semibold">Usage</h2><p>Cost: Not reported · Tokens: Not reported</p></section>
   const u = meta.usage
 
   const models = u.model_usage
-    ? Object.entries(u.model_usage).sort((a, b) => b[1].cost_usd - a[1].cost_usd)
+    ? Object.entries(u.model_usage).sort((a, b) => (b[1].cost_usd ?? 0) - (a[1].cost_usd ?? 0))
     : []
 
   return (
@@ -427,15 +428,15 @@ function UsagePanel({ meta }: { meta: RunMeta | null }) {
         <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm tabular-nums">
           <Stat
             label="cost"
-            value={u.estimated ? 'n/a (killed mid-run)' : `$${u.total_cost_usd.toFixed(4)}`}
+            value={u.total_cost_usd == null || u.estimated ? 'Not reported' : `$${u.total_cost_usd.toFixed(4)}`}
             highlight
           />
           <Stat label="duration" value={msToShort(u.duration_ms)} />
           <Stat label="turns" value={String(u.num_turns)} />
-          <Stat label="input" value={u.input_tokens.toLocaleString()} />
-          <Stat label="output" value={u.output_tokens.toLocaleString()} />
-          {u.cache_read_input_tokens > 0 && (
-            <Stat label="cache read" value={u.cache_read_input_tokens.toLocaleString()} />
+          <Stat label="input" value={(u.input_tokens?.toLocaleString() ?? "Not reported")} />
+          <Stat label="output" value={(u.output_tokens?.toLocaleString() ?? "Not reported")} />
+          {(u.cache_read_input_tokens ?? 0) > 0 && (
+            <Stat label="cache read" value={(u.cache_read_input_tokens?.toLocaleString() ?? "Not reported")} />
           )}
         </div>
         {models.length > 0 && (
@@ -457,13 +458,13 @@ function UsagePanel({ meta }: { meta: RunMeta | null }) {
                   <tr key={name} style={{ color: 'hsl(var(--text-normal))' }}>
                     <td className="py-0.5 font-mono">{name}</td>
                     <td className="py-0.5 text-right" style={{ color: 'hsl(var(--text-high))' }}>
-                      ${m.cost_usd.toFixed(4)}
+                      {m.cost_usd == null ? "Not reported" : `$${m.cost_usd.toFixed(4)}`}
                     </td>
                     <td className="py-0.5 text-right" style={{ color: 'hsl(var(--text-low))' }}>
-                      {m.input_tokens.toLocaleString()}
+                      {(m.input_tokens?.toLocaleString() ?? "Not reported")}
                     </td>
                     <td className="py-0.5 text-right" style={{ color: 'hsl(var(--text-low))' }}>
-                      {m.output_tokens.toLocaleString()}
+                      {(m.output_tokens?.toLocaleString() ?? "Not reported")}
                     </td>
                   </tr>
                 ))}
