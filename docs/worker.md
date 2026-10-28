@@ -32,6 +32,20 @@ Worker 自动添加小写且去掉 `.local` 后缀的 `host-<hostname>` 标签�
 配置、凭据、自定义 skills 仍从正常 home 读取。与 coordinator 共用主机时应指定独立目录；
 两个独立 worker 也应分别使用不同目录和 token。显式配置的 clone 路径保持不变。
 
+## 只读 Worker pool 看板
+
+启用 coordinator 后，`/pipeline` 展示 workers、任务表及最近一小时 done / failed 数量。
+数据通过现有 `GET /api/pipeline` 的 `worker_pool` 字段返回，LAN readonly 会话无需 worker token。
+未启用时该字段为 `null`；数据库读取失败时返回通用 `worker_pool_error`，不暴露连接信息。
+
+Worker 名称来自注册身份；`live` 表示 token 未撤销且最近 120 秒内有认证请求
+（包括空闲时领取任务的轮询），否则为 `stale`。`last_heartbeat` 单独展示最近一次成功续租时间，
+从未续租的 worker 显示为空。运行任务仅包含尚未过期的租约；租约过期显示 `lease_expired`，
+已收到结果且等待 coordinator 写回的任务显示 `finalizing`。看板读取不回收或修改租约。
+任务表的重试次数直接使用存储的 `attempt`（初始值 0，租约回收时增加）。
+吞吐量统计终态任务的 `updated_at` 落在 `(当前时间 - 1 小时, 当前时间]` 内的数量，不包含 cancelled。
+接口仅投影调度元数据，不返回 token/hash、fencing token、任务 payload 或 result。
+
 ## macOS LaunchAgent
 
 将以下模板保存为 `~/Library/LaunchAgents/com.clawflow.worker.plist`。
