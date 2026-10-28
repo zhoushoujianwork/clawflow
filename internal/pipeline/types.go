@@ -49,6 +49,9 @@ type GlobalQueueEntry struct {
 
 // Board is the full /api/pipeline response.
 type Board struct {
+	Stale      bool   `json:"stale"`
+	Refreshing bool   `json:"refreshing"`
+	Error      string `json:"error,omitempty"`
 	Snapshot
 	Runtime Runtime `json:"runtime"`
 }
@@ -76,6 +79,7 @@ type Execution struct {
 
 // RepoBoard is the board for one repository.
 type RepoBoard struct {
+	Stale              bool   `json:"stale"`
 	Repo               string `json:"repo"`
 	Enabled            bool   `json:"enabled"`
 	Platform           string `json:"platform"`

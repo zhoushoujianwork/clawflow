@@ -7,10 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
 func resetPipeline(t *testing.T, src func(context.Context) (pipeline.Snapshot, error)) *time.Time {
@@ -22,11 +25,18 @@ func resetPipeline(t *testing.T, src func(context.Context) (pipeline.Snapshot, e
 	PipelineSource, pipelineNow, VersionInfo.Current = src, func() time.Time { return now }, "v9.9.9-test"
 	pipelineCache.mu.Lock()
 	pipelineCache.ok = false
+	pipelineCache.at = time.Time{}
+	pipelineCache.snap = pipeline.Snapshot{}
+	pipelineCache.err = ""
 	pipelineCache.mu.Unlock()
 	t.Cleanup(func() {
+		pipelineWorkers.Wait()
 		PipelineSource, pipelineNow, VersionInfo.Current = oldSrc, oldNow, oldVer
 		pipelineCache.mu.Lock()
 		pipelineCache.ok = false
+		pipelineCache.at = time.Time{}
+		pipelineCache.snap = pipeline.Snapshot{}
+		pipelineCache.err = ""
 		pipelineCache.mu.Unlock()
 	})
 	return &now
@@ -58,6 +68,9 @@ func fakeSnapshot() pipeline.Snapshot {
 
 func TestHandlePipelineJSONShape(t *testing.T) {
 	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
 	rec := getPipeline(t, http.MethodGet)
 	if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
 		t.Fatalf("status=%d type=%q body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body)
@@ -113,41 +126,76 @@ func TestHandlePipelineEmptyRepoListIsArray(t *testing.T) {
 	}
 }
 
-func TestHandlePipelineCachesFor30Seconds(t *testing.T) {
-	calls := 0
-	now := resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { calls++; return fakeSnapshot(), nil })
-	for i := 0; i < 3; i++ {
-		getPipeline(t, http.MethodGet)
-	}
-	if calls != 1 {
-		t.Fatalf("calls within TTL = %d, want 1", calls)
-	}
-	*now = now.Add(pipelineTTL - time.Second)
-	getPipeline(t, http.MethodGet)
-	if calls != 1 {
-		t.Fatalf("calls just inside TTL = %d", calls)
-	}
-	*now = now.Add(2 * time.Second)
-	getPipeline(t, http.MethodGet)
-	if calls != 2 {
-		t.Fatalf("calls after TTL = %d, want 2", calls)
-	}
-}
-
-func TestHandlePipelineErrorsAreNotCached(t *testing.T) {
-	calls := 0
-	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) {
-		calls++
-		if calls == 1 {
-			return pipeline.Snapshot{}, errors.New("config unreadable")
+func TestHandlePipelineStaleSingleFlightLatency(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	now := resetPipeline(t, func(ctx context.Context) (pipeline.Snapshot, error) {
+		calls.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
 		}
 		return fakeSnapshot(), nil
 	})
-	if rec := getPipeline(t, http.MethodGet); rec.Code != 500 || !strings.Contains(rec.Body.String(), "config unreadable") {
-		t.Fatalf("first: %d %s", rec.Code, rec.Body)
+	*now = now.Add(time.Minute)
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
 	}
-	if rec := getPipeline(t, http.MethodGet); rec.Code != 200 || calls != 2 {
-		t.Fatalf("second: %d calls=%d", rec.Code, calls)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			rec := getPipeline(t, http.MethodGet)
+			if time.Since(start) >= 200*time.Millisecond {
+				t.Error("snapshot response exceeded 200ms")
+			}
+			var b pipeline.Board
+			if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil || !b.Stale || !b.Refreshing || len(b.Repos) != 1 {
+				t.Errorf("response: %s", rec.Body)
+			}
+		}()
+	}
+	wg.Wait()
+	close(release)
+	pipelineWorkers.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("refresh calls=%d", calls.Load())
+	}
+}
+
+func TestHandlePipelineRefreshFailurePreservesSnapshot(t *testing.T) {
+	now := resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) {
+		return pipeline.Snapshot{}, errors.New("provider unavailable")
+	})
+	*now = now.Add(time.Minute)
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	getPipeline(t, http.MethodGet)
+	pipelineWorkers.Wait()
+	rec := getPipeline(t, http.MethodGet)
+	var b pipeline.Board
+	if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil || !b.Stale || b.Error == "" || len(b.Repos) != 1 {
+		t.Fatalf("response: %s", rec.Body)
+	}
+}
+
+func TestHandlePipelineUsesNewerSchedulerSnapshot(t *testing.T) {
+	resetPipeline(t, nil)
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	getPipeline(t, http.MethodGet)
+	fresh := fakeSnapshot()
+	fresh.GeneratedAt = "2026-10-27T12:00:10Z"
+	fresh.Repos[0].Repo = "new/repo"
+	if err := snapshot.WritePipeline(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if rec := getPipeline(t, http.MethodGet); !strings.Contains(rec.Body.String(), "new/repo") {
+		t.Fatal(rec.Body)
 	}
 }
 

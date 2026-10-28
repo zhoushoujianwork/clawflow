@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -344,5 +345,163 @@ func TestBuildPipelineGlobalQueue(t *testing.T) {
 	d.globalQueue = nil
 	if snap = buildPipeline(context.Background(), d); snap.GlobalQueue == nil || len(snap.GlobalQueue) != 0 {
 		t.Fatalf("empty queue must serialize as [], got %#v", snap.GlobalQueue)
+	}
+}
+
+// A provider that observes the same request context as the real adapters.
+type pipelineSlowFake struct {
+	*pipelineFake
+	ctx context.Context
+}
+
+func (f *pipelineSlowFake) SetRequestContext(ctx context.Context) { f.ctx = ctx }
+func (f *pipelineSlowFake) ListOpenIssues(string) ([]vcs.Issue, error) {
+	<-f.ctx.Done()
+	return nil, f.ctx.Err()
+}
+
+func TestPipelineTimeoutRetainsRepoSnapshot(t *testing.T) {
+	f := newPipelineFake()
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineSlowFake{pipelineFake: newPipelineFake()}, nil }
+	d.previous = map[string]pipeline.RepoBoard{"o/r": {Repo: "o/r", Items: []pipeline.Item{{Issue: 7, Title: "retained"}}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	s := buildPipeline(ctx, d)
+	if len(s.Repos) != 1 || !s.Repos[0].Stale || s.Repos[0].Error == "" || s.Repos[0].Items[0].Issue != 7 {
+		t.Fatalf("snapshot=%+v", s)
+	}
+}
+
+func TestPipelinePassSnapshotUsesLocalEvidence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {Enabled: true}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WriteIssues([]snapshot.IssueEntry{{Repo: "o/r", IssueNumber: 7, IssueTitle: "local issue", State: "open", CapturedAt: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WritePipelinePRs("o/r", []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", HeadSHA: "new-head", State: "open"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := snapshot.ReadPipeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Repos) != 1 || len(s.Repos[0].Items) != 1 || s.Repos[0].Items[0].PR.Number != 8 || s.GeneratedAt == "" {
+		t.Fatalf("snapshot=%+v", s)
+	}
+}
+
+func TestRunPassWritesPipelineOnEarlyExit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// No enabled repositories: the end-of-pass publication still runs.
+	_ = runOnce(context.Background(), "", 0, time.Second)
+	if _, err := snapshot.ReadPipeline(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type pipelineCountingFake struct {
+	*pipelineFake
+	active, maximum *atomic.Int32
+}
+
+func (f *pipelineCountingFake) ListOpenIssues(string) ([]vcs.Issue, error) {
+	n := f.active.Add(1)
+	for old := f.maximum.Load(); n > old; old = f.maximum.Load() {
+		if f.maximum.CompareAndSwap(old, n) {
+			break
+		}
+	}
+	defer f.active.Add(-1)
+	time.Sleep(20 * time.Millisecond)
+	return nil, nil
+}
+func TestPipelineRefreshConcurrencyBound(t *testing.T) {
+	repos := map[string]config.Repo{}
+	for i := 0; i < 12; i++ {
+		repos["o/r"+strconv.Itoa(i)] = config.Repo{Enabled: true}
+	}
+	d := pipelineTestDeps(newPipelineFake(), repos)
+	var active, maximum atomic.Int32
+	d.parallel = 4
+	d.newClient = func(config.Repo) (vcs.Client, error) {
+		return &pipelineCountingFake{pipelineFake: newPipelineFake(), active: &active, maximum: &maximum}, nil
+	}
+	s := buildPipeline(context.Background(), d)
+	if len(s.Repos) != 12 || maximum.Load() > 4 || maximum.Load() < 2 {
+		t.Fatalf("repos=%d concurrency=%d", len(s.Repos), maximum.Load())
+	}
+}
+
+func TestPipelineSnapshotDoesNotReuseCIAtChangedHead(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := snapshot.WritePipelinePRs("o/r", []vcs.PR{{Number: 8, HeadSHA: "new"}}); err != nil {
+		t.Fatal(err)
+	}
+	c := &pipelineLocalClient{offline: true, board: pipeline.RepoBoard{Items: []pipeline.Item{{PR: &pipeline.PRInfo{Number: 8, HeadSHA: "old", CI: "success", Mergeable: "clean"}}}}}
+	ci, err := c.GetCIStatus("o/r", 8)
+	if err != nil || ci != "unknown" {
+		t.Fatalf("ci=%s err=%v", ci, err)
+	}
+	merge, err := c.GetPRMergeability("o/r", 8)
+	if err != nil || merge != "unknown" {
+		t.Fatalf("merge=%s err=%v", merge, err)
+	}
+}
+
+func TestPipelinePassMissingIssuesKeepsSnapshot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {Enabled: true}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	old := pipeline.Snapshot{GeneratedAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano), Repos: []pipeline.RepoBoard{{Repo: "o/r", Items: []pipeline.Item{{Issue: 7, Title: "retained"}}}}}
+	if err := snapshot.WritePipeline(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := snapshot.ReadPipeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh.Repos) != 1 || !fresh.Repos[0].Stale || fresh.Repos[0].Error == "" || len(fresh.Repos[0].Items) != 1 {
+		t.Fatalf("snapshot=%+v", fresh)
+	}
+	// A delayed older writer must not replace the more recent pass.
+	if err := snapshot.WritePipeline(old); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := snapshot.ReadPipeline()
+	if err != nil || latest.GeneratedAt != fresh.GeneratedAt {
+		t.Fatalf("latest=%+v err=%v", latest, err)
+	}
+}
+
+type pipelineMergeErrorFake struct{ *pipelineFake }
+
+func (f *pipelineMergeErrorFake) GetPRMergeability(string, int) (vcs.MergeStatus, error) {
+	return vcs.MergeStatus("unknown"), errors.New("provider unavailable")
+}
+func TestPipelineMergeabilityFailureMarksRepoStale(t *testing.T) {
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 7, State: "open"}}
+	f.open = []vcs.PR{{Number: 8, State: "open", HeadBranch: "fix/issue-7"}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineMergeErrorFake{f}, nil }
+	s := buildPipeline(context.Background(), d)
+	if !s.Repos[0].Stale || s.Repos[0].Error == "" {
+		t.Fatalf("repo=%+v", s.Repos[0])
 	}
 }

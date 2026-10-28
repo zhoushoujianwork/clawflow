@@ -394,6 +394,13 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// Publish on every exit after configuration is available, including failed passes.
+	defer func() {
+		if err := writePassPipeline(); err != nil {
+			fmt.Fprintf(os.Stderr, "snapshot pipeline: %v\n", err)
+		}
+	}()
+
 	allRepos, hiddenRepo, err := resolveRunRepos(cfg, onlyRepo, onlyIssue)
 	if err != nil {
 		return err
@@ -1133,7 +1140,15 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			HasChildren:    hasChildren,
 			ImplementState: implementState,
 			Locked:         func(n int) bool { return snapshot.IsLocked(fullName, n) },
-			OpenPRs:        func() ([]vcs.PR, error) { return client.ListOpenPRs(fullName) },
+			OpenPRs: func() ([]vcs.PR, error) {
+				prs, err := client.ListOpenPRs(fullName)
+				if err == nil {
+					if e := snapshot.WritePipelinePRs(fullName, prs); e != nil {
+						runLogWarn("pipeline PR snapshot", e)
+					}
+				}
+				return prs, err
+			},
 			FlightBlocked: func(_ vcs.Issue, pr *vcs.PR) string {
 				return flightBlockedReason(ctx, client, fullName, repoCfg, pr, now)
 			},
