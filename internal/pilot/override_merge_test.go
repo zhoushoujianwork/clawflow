@@ -100,7 +100,7 @@ func (c *overrideClient) MergePRAtHead(_ string, _ int, head string) (string, er
 
 func TestOverrideMergeGuards(t *testing.T) {
 	dir, base, head := diffFixture(t)
-	for _, mode := range []string{"absent", "absent_infra_exhausted", "no_positive_reason", "no_reason_error", "infra_records_no_reason", "failed_outside", "failed_inside", "legacy", "blocked", "passed", "incomplete", "corrupt", "missing_store", "disabled", "ci_failed", "ci_stale", "head_changed", "missing_followup", "audit_failed", "day_limit", "dry_run"} {
+	for _, mode := range []string{"absent", "absent_infra_exhausted", "no_positive_reason", "no_reason_error", "infra_records_no_reason", "failed_outside", "failed_inside", "failed_then_infra", "legacy", "blocked", "passed", "incomplete", "corrupt", "missing_store", "disabled", "ci_failed", "ci_stale", "head_changed", "missing_followup", "audit_failed", "day_limit", "dry_run"} {
 		t.Run(mode, func(t *testing.T) {
 			e, ac := testExecutor(t)
 			e.Config = &config.Config{Repos: map[string]config.Repo{"o/r": {PilotOverrideMerge: true, LocalPath: dir, SelfUpgrade: true}}}
@@ -147,6 +147,21 @@ func TestOverrideMergeGuards(t *testing.T) {
 				}
 				if err := store.SaveRecord(r); err != nil {
 					t.Fatal(err)
+				}
+				if mode == "failed_then_infra" {
+					r.AttemptID = "later-infra"
+					r.Verdict = acceptance.Blocked
+					r.Evidence = nil
+					r.Findings = nil
+					r.Report = "provider unavailable"
+					r.StartedAt = now.Add(2 * time.Minute)
+					r.CompletedAt = now.Add(3 * time.Minute)
+					if !acceptance.IsInfrastructure(r) {
+						t.Fatal("fixture must be infrastructure-only")
+					}
+					if err := store.SaveRecord(r); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			store.Close()
@@ -197,7 +212,7 @@ func TestOverrideMergeGuards(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := records[1]
-			success := mode == "absent" || mode == "absent_infra_exhausted" || mode == "failed_outside"
+			success := mode == "absent" || mode == "absent_infra_exhausted"
 			if success {
 				if r.Outcome != "applied" || len(c.calls) != 3 || !strings.HasPrefix(c.calls[1], "audit:") || c.calls[2] != "merge" || !upgraded {
 					t.Fatalf("%+v calls=%v upgrade=%v", r, c.calls, upgraded)
@@ -213,6 +228,16 @@ func TestOverrideMergeGuards(t *testing.T) {
 				for _, call := range c.calls {
 					if call == "merge" {
 						t.Fatal("merged")
+					}
+				}
+			}
+			if strings.HasPrefix(mode, "failed_") || mode == "legacy" {
+				if r.Reason != "reviewer_verdict_present" {
+					t.Fatalf("expected reviewer refusal, got %+v", r)
+				}
+				for _, call := range c.calls {
+					if strings.HasPrefix(call, "audit:") {
+						t.Fatal("audited a prohibited override")
 					}
 				}
 			}
