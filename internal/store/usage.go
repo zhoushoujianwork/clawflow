@@ -89,9 +89,28 @@ func (b *UsageBreakdown) add(r Run, models []RunModelUsage) {
 	if len(models) == 0 {
 		models = []RunModelUsage{{Model: r.Model, CostUSD: r.CostUSD, InputTokens: r.InputTokens, OutputTokens: r.OutputTokens, CacheReadInputTokens: r.CacheReadInputTokens, CacheCreationInputTokens: r.CacheCreationInputTokens}}
 	}
-	for _, m := range models {
+	// Attribute the full run duration to its sole model, or the model with the
+	// most output tokens. Missing tokens count as zero; ties use the model name.
+	durationModel := 0
+	outputTokens := func(m RunModelUsage) int64 {
+		if m.OutputTokens == nil {
+			return 0
+		}
+		return *m.OutputTokens
+	}
+	for i, m := range models {
+		best := models[durationModel]
+		if outputTokens(m) > outputTokens(best) || (outputTokens(m) == outputTokens(best) && m.Model < best.Model) {
+			durationModel = i
+		}
+	}
+	for i, m := range models {
+		var duration int64
+		if i == durationModel {
+			duration = r.DurationMs
+		}
 		a := b.ByModel[m.Model]
-		a.UsageAggregate.add(Run{CostUSD: m.CostUSD, InputTokens: m.InputTokens, OutputTokens: m.OutputTokens, CacheReadInputTokens: m.CacheReadInputTokens, CacheCreationInputTokens: m.CacheCreationInputTokens})
+		a.UsageAggregate.add(Run{DurationMs: duration, CostUSD: m.CostUSD, InputTokens: m.InputTokens, OutputTokens: m.OutputTokens, CacheReadInputTokens: m.CacheReadInputTokens, CacheCreationInputTokens: m.CacheCreationInputTokens})
 		a.CostUSD = a.TotalCostUSD
 		b.ByModel[m.Model] = a
 	}

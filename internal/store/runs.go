@@ -259,8 +259,19 @@ func (s *Store) UpsertRun(ctx context.Context, dir, kind string, raw []byte) (st
 
 type ImportCounts struct{ Imported, Updated, Skipped, Invalid int }
 
-func (s *Store) ImportRuns(ctx context.Context, root string) (ImportCounts, error) {
+// ImportDiagnostic reports a skipped or invalid metadata file relative to the data directory.
+type ImportDiagnostic struct {
+	Path, Status, Reason string
+}
+
+func (s *Store) ImportRuns(ctx context.Context, root string, report ...func(ImportDiagnostic)) (ImportCounts, error) {
 	var counts ImportCounts
+	diagnostic := func(path, status, reason string) {
+		rel, _ := filepath.Rel(root, path)
+		for _, fn := range report {
+			fn(ImportDiagnostic{Path: filepath.ToSlash(rel), Status: status, Reason: reason})
+		}
+	}
 	for _, tree := range []struct{ name, kind string }{{"runs", "run"}, {"pilot-runs", "pilot"}} {
 		err := filepath.WalkDir(filepath.Join(root, tree.name), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -268,6 +279,9 @@ func (s *Store) ImportRuns(ctx context.Context, root string) (ImportCounts, erro
 					return nil
 				}
 				return err
+			}
+			if d.IsDir() && strings.Contains(d.Name(), ".orphaned-") {
+				return filepath.SkipDir
 			}
 			if d.IsDir() || d.Name() != "meta.json" {
 				return nil
@@ -278,6 +292,7 @@ func (s *Store) ImportRuns(ctx context.Context, root string) (ImportCounts, erro
 			}
 			if _, _, err := DecodeRun(filepath.Dir(path), tree.kind, raw); err != nil {
 				counts.Invalid++
+				diagnostic(path, "invalid", err.Error())
 				return nil
 			}
 			result, err := s.UpsertRun(ctx, filepath.Dir(path), tree.kind, raw)
@@ -291,6 +306,7 @@ func (s *Store) ImportRuns(ctx context.Context, root string) (ImportCounts, erro
 				counts.Updated++
 			case "skipped":
 				counts.Skipped++
+				diagnostic(path, "skipped", "unchanged metadata already imported")
 			}
 			return nil
 		})
