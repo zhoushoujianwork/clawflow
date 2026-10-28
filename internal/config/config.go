@@ -108,10 +108,24 @@ type PilotSettings struct {
 	StallAfter string `yaml:"stall_after,omitempty"`
 }
 
+// CoordinatorSettings reserves the optional worker API listener configuration.
+type CoordinatorSettings struct {
+	Enabled bool   `yaml:"enabled,omitempty"`
+	Listen  string `yaml:"listen,omitempty"`
+}
+
+func (s CoordinatorSettings) ListenAddress() string {
+	if s.Listen == "" {
+		return ":8093"
+	}
+	return s.Listen
+}
+
 // Settings holds global ClawFlow settings.
 type Settings struct {
-	Pilot     PilotSettings     `yaml:"pilot,omitempty"`
-	Execution ExecutionSettings `yaml:"execution,omitempty"`
+	Pilot       PilotSettings       `yaml:"pilot,omitempty"`
+	Coordinator CoordinatorSettings `yaml:"coordinator,omitempty"`
+	Execution   ExecutionSettings   `yaml:"execution,omitempty"`
 
 	// Database holds the PostgreSQL connection settings (machine-local secret).
 	Database DatabaseSettings `yaml:"database,omitempty"`

@@ -71,3 +71,35 @@ func TestParseRepoInput(t *testing.T) {
 		})
 	}
 }
+
+func TestCoordinatorDefaults(t *testing.T) {
+	var settings config.Settings
+	if settings.Coordinator.Enabled || settings.Coordinator.ListenAddress() != ":8093" {
+		t.Fatalf("unexpected coordinator defaults: %+v", settings.Coordinator)
+	}
+	settings.Coordinator.Listen = "127.0.0.1:9999"
+	if settings.Coordinator.ListenAddress() != "127.0.0.1:9999" {
+		t.Fatal("explicit listener ignored")
+	}
+}
+
+func TestPilotAndCoordinatorSettingsRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	original := &config.Config{Settings: config.Settings{
+		Pilot:       config.PilotSettings{StallAfter: "45m"},
+		Coordinator: config.CoordinatorSettings{Enabled: true, Listen: "127.0.0.1:9999"},
+	}}
+	if err := original.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Settings.Pilot != original.Settings.Pilot {
+		t.Fatalf("pilot settings lost: %+v", loaded.Settings.Pilot)
+	}
+	if loaded.Settings.Coordinator != original.Settings.Coordinator {
+		t.Fatalf("coordinator settings lost: %+v", loaded.Settings.Coordinator)
+	}
+}
