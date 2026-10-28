@@ -8,6 +8,8 @@ import (
 	"slices"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
@@ -32,7 +34,7 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 	defer db.Close()
 	s := coordinator.New(db.DB())
 	issue := extractClosesIssue(pr.Body)
-	dev, err := s.LatestDevelopment(ctx, repo, issue, pr.Number, c.HeadSHA)
+	dev, err := acceptanceDevelopmentWorker(ctx, s, rc, repo, issue, pr, c)
 	if err != nil {
 		return err
 	}
@@ -214,4 +216,24 @@ func (s *coordinatorResults) finishAcceptance(ctx context.Context, t *coordinato
 	}
 	// The normal coordinator sweep consumes this record for repair or conditional merge.
 	return nil
+}
+
+// Resolve worker ownership only at a head justified by the existing provenance check.
+type acceptanceDevelopmentLookup interface {
+	LatestDevelopment(context.Context, string, int, int, string) (*coordinator.Task, error)
+}
+
+func acceptanceDevelopmentWorker(ctx context.Context, s acceptanceDevelopmentLookup, rc config.Repo, repo string, issue int, pr vcs.PR, c acceptance.Contract) (*coordinator.Task, error) {
+	dev, err := s.LatestDevelopment(ctx, repo, issue, pr.Number, c.HeadSHA)
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return dev, err
+	}
+	identity, head, err := acceptanceInheritedDevelopmentHead(ctx, rc, repo, issue, pr)
+	if err != nil {
+		return nil, err
+	}
+	if identity != c.Development {
+		return nil, errors.New("inherited development identity changed")
+	}
+	return s.LatestDevelopment(ctx, repo, issue, pr.Number, head)
 }

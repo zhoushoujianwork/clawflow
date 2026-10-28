@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -277,5 +279,67 @@ func TestFailedWorkerAcceptanceRecordsInfrastructure(t *testing.T) {
 	}
 	if acceptance.Evaluate(c, r) == nil {
 		t.Fatal("infrastructure failure passed gate")
+	}
+}
+
+type acceptanceDevelopmentLookupFake struct {
+	head    string
+	queried []string
+}
+
+func (s *acceptanceDevelopmentLookupFake) LatestDevelopment(_ context.Context, _ string, _, _ int, head string) (*coordinator.Task, error) {
+	s.queried = append(s.queried, head)
+	if head != s.head {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return &coordinator.Task{LeaseOwner: "original-developer"}, nil
+}
+
+func TestAcceptanceDevelopmentWorkerBaseMerge(t *testing.T) {
+	for _, mode := range []string{"exact", "base-merge", "unproven", "identity-changed"} {
+		t.Run(mode, func(t *testing.T) {
+			f, rc := acceptanceFixture(t)
+			git, proven := provenanceGitFixture(t, f)
+			f.pr.HeadSHA, f.pr.BaseSHA = proven, git("rev-parse", "main")
+			if mode != "exact" {
+				git("checkout", "main")
+				git("commit", "--allow-empty", "-m", "base update")
+				git("checkout", f.pr.HeadBranch)
+				git("merge", "--no-ff", "main", "-m", "merge")
+				f.pr.HeadSHA, f.pr.BaseSHA = git("rev-parse", "HEAD"), git("rev-parse", "main")
+			}
+			c, _, _, _, err := acceptanceContract(context.Background(), f, "o/r", 11)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "unproven" {
+				git("commit", "--allow-empty", "-m", "outside development")
+				f.pr.HeadSHA = git("rev-parse", "HEAD")
+				c.HeadSHA = f.pr.HeadSHA
+			}
+			if mode == "identity-changed" {
+				c.Development.SessionID = "another-session"
+			}
+			lookup := &acceptanceDevelopmentLookupFake{head: proven}
+			dev, err := acceptanceDevelopmentWorker(context.Background(), lookup, rc, "o/r", 42, f.pr, c)
+			if mode == "unproven" || mode == "identity-changed" {
+				if err == nil {
+					t.Fatal("accepted unproven development worker")
+				}
+				if len(lookup.queried) != 1 {
+					t.Fatalf("queried untrusted ancestor: %v", lookup.queried)
+				}
+				return
+			}
+			if err != nil || dev.LeaseOwner != "original-developer" {
+				t.Fatalf("development worker: %+v %v", dev, err)
+			}
+			if lookup.queried[len(lookup.queried)-1] != proven {
+				t.Fatalf("wrong development head: %v", lookup.queried)
+			}
+			if mode == "base-merge" && c.HeadSHA == proven {
+				t.Fatal("contract lost merged head")
+			}
+		})
 	}
 }
