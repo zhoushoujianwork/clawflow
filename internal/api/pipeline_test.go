@@ -55,16 +55,14 @@ func fakeSnapshot() pipeline.Snapshot {
 	return pipeline.Snapshot{
 		GeneratedAt: "2026-10-27T12:00:00Z",
 		Repos: []pipeline.RepoBoard{{
-			Repo: "o/r", Enabled: true, Platform: "github", AutoMerge: true, QueueIssue: 9,
-			Queue: &pipeline.Queue{Issue: 9, Entries: []pipeline.QueueEntry{{Position: 1, Number: 4, Title: "first", State: "open", Action: "pick", Reason: "head_eligible"}},
-				Decision: &pipeline.QueueDecision{Action: "pick", Issue: 4, Reason: "head_eligible", At: "2026-10-27T11:59:00Z"}},
+			Repo: "o/r", Enabled: true, Platform: "github", AutoMerge: true,
 			Items: []pipeline.Item{{
 				Issue: 4, Title: "first", Stage: pipeline.StageInfraRetry, Why: "acceptance hit an infrastructure error", Evidence: []string{"ci=success"},
 				PR:         &pipeline.PRInfo{Number: 11, State: "open", HeadSHA: strings.Repeat("a", 40), CI: "success", Mergeable: "clean"},
 				Acceptance: &pipeline.AcceptanceInfo{Required: true, Attempts: 1, InfraAttempts: 1, LatestIsInfra: true, NextRetryAt: "2026-10-27T12:15:00Z", PlannerSession: "plan-1", ReviewerSession: "rev-1"},
 			}},
 		}},
-		Events: []pipeline.Event{{Time: "2026-10-27T11:59:00Z", Level: "info", Event: "run/queue_pick", Fields: map[string]string{"repo": "o/r", "issue": "4"}}},
+		Events: []pipeline.Event{{Time: "2026-10-27T11:59:00Z", Level: "info", Event: "queue/pick", Fields: map[string]string{"repo": "o/r", "issue": "4"}}},
 	}
 }
 
@@ -103,7 +101,7 @@ func TestHandlePipelineJSONShape(t *testing.T) {
 	}
 	repo := board.Repos[0]
 	item := repo.Items[0]
-	if repo.Repo != "o/r" || repo.Queue.Decision.Action != "pick" || item.Stage != pipeline.StageInfraRetry ||
+	if repo.Repo != "o/r" || item.Stage != pipeline.StageInfraRetry ||
 		item.PR.Number != 11 || item.Acceptance.NextRetryAt != "2026-10-27T12:15:00Z" || item.Acceptance.ReviewerSession != "rev-1" {
 		t.Fatalf("board = %+v", repo)
 	}
@@ -111,7 +109,7 @@ func TestHandlePipelineJSONShape(t *testing.T) {
 		t.Fatalf("events = %+v", board.Events)
 	}
 	// Exact wire names the frontend depends on.
-	for _, want := range []string{`"stage":"infra_retry"`, `"next_retry_at"`, `"infra_attempts":1`, `"head_sha"`, `"queue_issue":9`} {
+	for _, want := range []string{`"stage":"infra_retry"`, `"next_retry_at"`, `"infra_attempts":1`, `"head_sha"`} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("body lacks %s: %s", want, rec.Body)
 		}

@@ -81,29 +81,6 @@ interface Item {
   delivery?: Delivery
 }
 
-interface QueueDecision {
-  action: 'pick' | 'wait' | 'blocked'
-  issue?: number
-  reason?: string
-  at: string
-}
-
-interface QueueEntry {
-  position: number
-  number: number
-  title: string
-  state: string
-  action?: string
-  reason?: string
-}
-
-interface Queue {
-  issue: number
-  entries: QueueEntry[]
-  decision?: QueueDecision
-  error?: string
-}
-
 interface RepoBoard {
   repo: string
   enabled: boolean
@@ -111,8 +88,6 @@ interface RepoBoard {
   auto_merge: boolean
   ci_required: boolean
   acceptance_required: boolean
-  queue_issue?: number
-  queue?: Queue
   items: Item[]
   error?: string
 }
@@ -300,9 +275,7 @@ function PipelinePage() {
             <div className="bg-card border border-border rounded-xl p-10 text-center">
               <p className="text-base font-semibold text-foreground mb-1">{board.generated_at ? 'No repository is tracked yet' : 'Preparing pipeline snapshot…'}</p>
               {board.generated_at && <p className="text-sm text-muted-foreground">
-                Enable <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">auto_merge</code> or set a{' '}
-                <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">queue_issue</code> with{' '}
-                <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">clawflow repo set</code>.
+                Enable a repository with <code>clawflow repo enable</code> and enroll issues using the clawflow label.
               </p>}
             </div>
           ) : (
@@ -389,7 +362,6 @@ function RepoSection({ board, repoInfo }: { board: RepoBoard; repoInfo: RepoInfo
         </div>
       )}
 
-      {board.queue && <QueuePanel queue={board.queue} repo={board.repo} repoInfo={repoInfo} />}
 
       {board.items.length === 0 ? (
         <div className="bg-card border border-border rounded-xl p-4 text-sm text-muted-foreground">
@@ -436,58 +408,6 @@ function GlobalQueuePanel({ entries }: { entries: GlobalQueueEntry[] }) {
           </li>
         ))}
       </ol>
-    </div>
-  )
-}
-
-function QueuePanel({ queue, repo, repoInfo }: { queue: Queue; repo: string; repoInfo: RepoInfoMap }) {
-  const d = queue.decision
-  const open = queue.entries.filter(e => e.state === 'open')
-  return (
-    <div className="bg-card border border-border rounded-xl p-3 mb-2">
-      <div className="flex items-center gap-2 flex-wrap text-xs">
-        <span className="font-semibold text-foreground">Queue</span>
-        <a href={issueUrl(repo, queue.issue, repoInfo)} target="_blank" rel="noreferrer noopener" className="text-brand hover:underline font-mono">
-          #{queue.issue}
-        </a>
-        <span className="text-muted-foreground">{open.length} open</span>
-        {d ? (
-          <span
-            data-decision={d.action}
-            className={cn(
-              'px-1.5 py-0.5 rounded border font-medium',
-              d.action === 'pick' ? GREEN : d.action === 'blocked' ? RED : AMBER,
-            )}
-          >
-            {d.action}
-            {d.issue ? ` #${d.issue}` : ''}
-            {d.reason ? `: ${d.reason}` : ''}
-          </span>
-        ) : (
-          <span className="text-muted-foreground">no decision logged yet</span>
-        )}
-        {d && <span className="text-muted-foreground">{timeAgo(d.at)}</span>}
-      </div>
-      {queue.error && <p className="text-xs text-red-700 mt-1">Queue unreadable: {queue.error}</p>}
-      {open.length > 0 && (
-        <ol className="mt-2 space-y-0.5 text-xs">
-          {open.map(e => (
-            <li key={e.number} className="flex items-center gap-2">
-              <span className="w-5 text-right text-muted-foreground tabular-nums">{e.position}.</span>
-              <a href={issueUrl(repo, e.number, repoInfo)} target="_blank" rel="noreferrer noopener" className="font-mono text-brand hover:underline">
-                #{e.number}
-              </a>
-              <span className="truncate text-foreground">{e.title}</span>
-              {e.action && (
-                <span className="text-muted-foreground shrink-0">
-                  {e.action}
-                  {e.reason ? `: ${e.reason}` : ''}
-                </span>
-              )}
-            </li>
-          ))}
-        </ol>
-      )}
     </div>
   )
 }

@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -11,6 +12,27 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
+type queueLabelFake struct {
+	vcs.Client
+	calls []string
+	err   error
+}
+
+func (f *queueLabelFake) AddLabel(repo string, n int, labels ...string) error {
+	f.calls = append(f.calls, fmt.Sprintf("add %s#%d %s", repo, n, strings.Join(labels, ",")))
+	return f.err
+}
+func (f *queueLabelFake) RemoveLabel(repo string, n int, labels ...string) error {
+	f.calls = append(f.calls, fmt.Sprintf("remove %s#%d %s", repo, n, strings.Join(labels, ",")))
+	return f.err
+}
+func mockQueueLabels(t *testing.T) *queueLabelFake {
+	f := &queueLabelFake{}
+	old := queueEnrollmentClient
+	queueEnrollmentClient = func(repo string) (vcs.Client, string, config.Repo, error) { return f, repo, config.Repo{}, nil }
+	t.Cleanup(func() { queueEnrollmentClient = old })
+	return f
+}
 func queueCmdSetup(t *testing.T) {
 	t.Helper()
 	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{
@@ -89,12 +111,12 @@ func TestQueueListCommand(t *testing.T) {
 		}
 	}
 	must(queue.SaveState(queue.RepoState{Repo: "o/r", Entries: []queue.EntryRecord{
-		{Number: 1, Title: "old", Priority: "P2", Rank: -1, State: "eligible", Created: "2026-01-01T00:00:00Z"},
-		{Number: 2, Title: "urgent", Priority: "P0", Rank: -1, State: "in_flight", Created: "2026-01-02T00:00:00Z"},
-		{Number: 3, Title: "stuck", Priority: "P2", Rank: -1, State: "blocked", Reason: "label_agent-failed", Created: "2026-01-03T00:00:00Z"},
+		{Number: 1, Title: "old", Labeled: true, Priority: "P2", Rank: -1, State: "eligible", Created: "2026-01-01T00:00:00Z"},
+		{Number: 2, Title: "urgent", Labeled: true, Priority: "P0", Rank: -1, State: "in_flight", Created: "2026-01-02T00:00:00Z"},
+		{Number: 3, Title: "stuck", Labeled: true, Priority: "P2", Rank: -1, State: "blocked", Reason: "label_agent-failed", Created: "2026-01-03T00:00:00Z"},
 	}}))
 	must(queue.SaveState(queue.RepoState{Repo: "g/sub/p", Entries: []queue.EntryRecord{
-		{Number: 4, Title: "gl", Priority: "P2", Rank: -1, State: "waiting", Reason: "dependency", Created: "2025-12-01T00:00:00Z"},
+		{Number: 4, Title: "gl", Labeled: true, Priority: "P2", Rank: -1, State: "waiting", Reason: "dependency", Created: "2025-12-01T00:00:00Z"},
 	}}))
 	_, err := runQueueCmd(t, "move", "o/r#3", "--top")
 	must(err)
@@ -124,28 +146,8 @@ func TestQueueListCommand(t *testing.T) {
 	}
 }
 
-func TestQueueImportOrderAppendsAndSkipsDuplicates(t *testing.T) {
-	queueCmdSetup(t)
-	if _, err := runQueueCmd(t, "move", "o/r#7", "--top"); err != nil {
-		t.Fatal(err)
-	}
-	lister := &fakeQueueLister{subs: []vcs.Issue{{Number: 5, State: "open"}, {Number: 7, State: "open"}, {Number: 6, State: "closed"}, {Number: 4, State: "open"}}}
-	added, err := importQueueIssue(lister, "o/r", 100)
-	if err != nil || len(added) != 2 {
-		t.Fatalf("added = %v %v", added, err)
-	}
-	if got := rankStrings(t); got != "o/r#7,o/r#5,o/r#4" {
-		t.Fatalf("rank = %s", got)
-	}
-	if added, err = importQueueIssue(lister, "o/r", 100); err != nil || len(added) != 0 {
-		t.Fatalf("re-import must add nothing: %v %v", added, err)
-	}
-	if _, err := importQueueIssue(&fakeQueueLister{err: vcs.ErrNotSupported}, "g/sub/p", 1); err == nil {
-		t.Fatal("unsupported platform must error for the explicit command")
-	}
-}
-
 func TestQueueAddAndRemoveCommands(t *testing.T) {
+	f := mockQueueLabels(t)
 	queueCmdSetup(t)
 	steps := []struct {
 		args []string
@@ -166,6 +168,12 @@ func TestQueueAddAndRemoveCommands(t *testing.T) {
 			t.Fatalf("%v: rank = %s, want %s", s.args, got, s.want)
 		}
 	}
+	if len(f.calls) != len(steps) || f.calls[0] != "add o/r#1 clawflow" || f.calls[5] != "remove o/r#5 clawflow" {
+		t.Fatalf("label calls: %v", f.calls)
+	}
+	if _, err := runQueueCmd(t, "remove", "o/r#99"); err != nil {
+		t.Fatal(err)
+	}
 	// Adding an already ranked key repositions it without duplicating.
 	if _, err := runQueueCmd(t, "add", "o/r#4"); err != nil || rankStrings(t) != "o/r#3,o/r#1,g/sub/p#2,o/r#4" {
 		t.Fatalf("re-add: %s %v", rankStrings(t), err)
@@ -174,7 +182,7 @@ func TestQueueAddAndRemoveCommands(t *testing.T) {
 		{"add", "x/unknown#1"},
 		{"add", "nonsense"},
 		{"add", "o/r#9", "--top", "--before", "o/r#1"},
-		{"remove", "o/r#99"},
+
 		{"remove", "bad"},
 	} {
 		before := rankStrings(t)
@@ -187,23 +195,54 @@ func TestQueueAddAndRemoveCommands(t *testing.T) {
 	}
 }
 
-func TestQueueListShowsScopeAndHidesOutOfScope(t *testing.T) {
-	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{
-		"o/r": {Platform: "github", Enabled: true, QueueScope: "ranked"},
-		"o/l": {Platform: "github", Enabled: true, QueueScope: "labeled"},
-		"o/a": {Platform: "github", Enabled: true},
-	}})
-	entries := []queue.EntryRecord{
-		{Number: 1, Priority: "P2", Rank: -1, State: "eligible", Created: "2026-01-01T00:00:00Z"},
-		{Number: 2, Priority: "P2", Rank: -1, State: "eligible", Created: "2026-01-02T00:00:00Z", Labeled: true},
-		{Number: 3, Priority: "P2", Rank: -1, State: "in_flight", Created: "2026-01-03T00:00:00Z"},
+func TestQueueLabelFailurePreservesRank(t *testing.T) {
+	queueCmdSetup(t)
+	f := mockQueueLabels(t)
+	if _, err := runQueueCmd(t, "move", "o/r#1", "--top"); err != nil {
+		t.Fatal(err)
 	}
-	for _, repo := range []string{"o/r", "o/l", "o/a"} {
-		if err := queue.SaveState(queue.RepoState{Repo: repo, Entries: entries}); err != nil {
+	f.err = fmt.Errorf("provider unavailable")
+	for _, args := range [][]string{{"add", "o/r#2"}, {"remove", "o/r#1"}} {
+		if _, err := runQueueCmd(t, args...); err == nil {
+			t.Fatal("expected label error")
+		}
+		if got := rankStrings(t); got != "o/r#1" {
+			t.Fatalf("rank changed: %s", got)
+		}
+	}
+}
+
+func TestQueueListNotEnrolledCount(t *testing.T) {
+	queueCmdSetup(t)
+	for repo, count := range map[string]int{"o/r": 2, "g/sub/p": 3} {
+		if err := queue.SaveState(queue.RepoState{Repo: repo, NotEnrolled: count}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := runQueueCmd(t, "add", "o/r#1"); err != nil {
+	for _, tc := range []struct{ repo, want string }{{"", "o/r: not enrolled: 2"}, {"o/r", "o/r: not enrolled: 2"}} {
+		out, err := runQueueCmd(t, "list", "--repo", tc.repo)
+		if tc.repo == "" && !strings.Contains(out, "g/sub/p: not enrolled: 3") {
+			t.Fatalf("missing per-repo count: %s", out)
+		}
+		if tc.repo != "" && strings.Contains(out, "g/sub/p") {
+			t.Fatalf("unexpected repo: %s", out)
+		}
+		if err != nil || !strings.Contains(out, tc.want) {
+			t.Fatalf("output %q, error %v", out, err)
+		}
+	}
+}
+
+func TestQueueListOnlyEnrolledCandidates(t *testing.T) {
+	queueCmdSetup(t)
+	if err := queue.SaveState(queue.RepoState{Repo: "o/r", Entries: []queue.EntryRecord{
+		{Number: 1, Priority: "P0", State: "eligible"},
+		{Number: 2, Priority: "P2", State: "eligible", Labeled: true},
+		{Number: 3, Priority: "P2", State: "in_flight"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runQueueCmd(t, "move", "o/r#1", "--top"); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runQueueCmd(t, "list", "--json")
@@ -214,24 +253,25 @@ func TestQueueListShowsScopeAndHidesOutOfScope(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		t.Fatal(err)
 	}
-	got := map[string]string{}
-	for _, r := range rows {
-		got[r.Key] = r.Scope
+	if len(rows) != 2 || rows[0].Number != 2 || rows[1].Number != 3 {
+		t.Fatalf("rows=%+v", rows)
 	}
-	want := map[string]string{
-		"o/r#1": "ranked", "o/r#2": "ranked", "o/r#3": "ranked", // ranked or labeled or in flight
-		"o/l#2": "labeled", "o/l#3": "labeled", // unlabeled #1 hidden
-		"o/a#1": "all", "o/a#2": "all", "o/a#3": "all",
+	table, err := runQueueCmd(t, "list")
+	if err != nil || strings.Contains(table, "SCOPE") {
+		t.Fatalf("table=%q err=%v", table, err)
 	}
-	if len(got) != len(want) {
-		t.Fatalf("rows = %v", got)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("%s scope = %q, want %q (rows %v)", k, got[k], v, got)
+}
+
+func TestRetiredQueueCommandsAbsent(t *testing.T) {
+	cmd := newRepoSetCmd()
+	for _, flag := range []string{"queue" + "-issue", "queue" + "-scope"} {
+		if cmd.Flags().Lookup(flag) != nil {
+			t.Fatalf("retired flag %q still registered", flag)
 		}
 	}
-	if tbl, _ := runQueueCmd(t, "list"); !strings.Contains(tbl, "SCOPE") {
-		t.Fatalf("table lacks scope column:\n%s", tbl)
+	for _, child := range NewQueueCmd().Commands() {
+		if child.Name() == "import" {
+			t.Fatal("retired import command registered")
+		}
 	}
 }

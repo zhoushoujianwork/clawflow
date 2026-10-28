@@ -113,7 +113,7 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	for name, rc := range d.cfg.Repos {
 		// Every enabled repo dispatches work through the unified queue, so it
 		// belongs on the board even without auto-merge (e.g. MRs merged by hand).
-		if rc.Enabled || rc.AutoMerge || rc.QueueIssue > 0 {
+		if rc.Enabled || rc.AutoMerge {
 			names = append(names, name)
 		}
 	}
@@ -209,7 +209,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 	}
 	board := pipeline.RepoBoard{
 		Repo: repo, Enabled: rc.Enabled, Platform: platform, AutoMerge: rc.AutoMerge,
-		CIRequired: rc.CIRequired, AcceptanceRequired: rc.AcceptanceRequired, QueueIssue: rc.QueueIssue,
+		CIRequired: rc.CIRequired, AcceptanceRequired: rc.AcceptanceRequired,
 		Items: []pipeline.Item{},
 	}
 	client, err := d.newClient(rc)
@@ -226,32 +226,6 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 	}
 	if rcx, ok := client.(interface{ SetRequestContext(context.Context) }); ok {
 		rcx.SetRequestContext(ctx)
-	}
-
-	// Queue: ordered sub-issues plus the runner's latest decision from run.log.
-	var decision *pipeline.QueueDecision
-	var queueIssues []vcs.Issue
-	if rc.QueueIssue > 0 {
-		q := &pipeline.Queue{Issue: rc.QueueIssue, Entries: []pipeline.QueueEntry{}}
-		board.Queue = q
-		decision = pipeline.LastDecision(events, repo)
-		q.Decision = decision
-		if queueIssues, err = readQueueItems(client, repo, rc.QueueIssue); err != nil {
-			q.Error = pipelineClip(err.Error(), pipelineErrLimit)
-			queueIssues = nil
-		}
-		pos := 0
-		for _, it := range queueIssues {
-			e := pipeline.QueueEntry{Position: 0, Number: it.Number, Title: it.Title, State: it.State}
-			if it.State == "open" {
-				pos++
-				e.Position = pos
-			}
-			if decision != nil && decision.Issue == it.Number {
-				e.Action, e.Reason = decision.Action, decision.Reason
-			}
-			q.Entries = append(q.Entries, e)
-		}
 	}
 
 	openIssues, err := client.ListOpenIssues(repo)
@@ -311,14 +285,17 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 			cands = append(cands, c)
 		}
 	}
-	for _, e := range queueIssues {
-		// Closed queue entries only matter when they delivered something.
-		if e.State != "open" {
-			if _, ok := mergedByIssue[e.Number]; !ok {
+	if d.globalQueue != nil {
+		for _, row := range d.globalQueue() {
+			if row.Repo != repo {
 				continue
 			}
+			it, ok := issueByNum[row.Number]
+			if !ok || !hasLabel(it.Labels, queue.ScopeLabel) {
+				continue
+			}
+			add(cand{number: it.Number, queuePos: row.Position, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
 		}
-		add(cand{number: e.Number, queuePos: queuePosition(board.Queue, e.Number), title: e.Title, labels: e.Labels, state: e.State, updated: e.UpdatedAt})
 	}
 	missingIssueReads := 0
 	for _, n := range prOrder {
@@ -378,9 +355,6 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		item := pipeline.Item{Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
 		ev := pipeline.Evidence{IssueState: c.state, Labels: c.labels, AutoMerge: rc.AutoMerge, CIRequired: rc.CIRequired,
 			AcceptanceRequired: rc.AcceptanceRequired, InQueue: c.queuePos > 0, Now: now}
-		if decision != nil && decision.Issue == c.number {
-			ev.Decision = decision
-		}
 		if r, ok := latestRun[c.number]; ok {
 			ri := &pipeline.RunInfo{Operator: r.Operator, Status: r.Status, Stage: r.RunMeta.Stage, StartedAt: r.StartedAt.UTC().Format(time.RFC3339),
 				Live: d.locked(repo, c.number)}
@@ -452,18 +426,6 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		return pipeline.ParseTime(a.UpdatedAt).After(pipeline.ParseTime(b.UpdatedAt))
 	})
 	return board
-}
-
-func queuePosition(q *pipeline.Queue, number int) int {
-	if q == nil {
-		return 0
-	}
-	for _, e := range q.Entries {
-		if e.Number == number {
-			return e.Position
-		}
-	}
-	return 0
 }
 
 // pipelinePRs returns open PRs and recently merged PRs, using one cheap page

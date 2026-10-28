@@ -29,7 +29,7 @@ func TestParseLineNoFieldsAndWarn(t *testing.T) {
 	if !ok || ev.Event != "run/exit" || ev.Level != "warn" || len(ev.Fields) != 0 {
 		t.Fatalf("%+v %v", ev, ok)
 	}
-	ev, ok = ParseLine(`2026-10-27T04:09:43Z INFO  run/queue_blocked repo=o/r reason="sub issues\nunreadable" tail`)
+	ev, ok = ParseLine(`2026-10-27T04:09:43Z INFO  queue/skip repo=o/r reason="sub issues\nunreadable" tail`)
 	if !ok || ev.Fields["reason"] != "sub issues\nunreadable" {
 		t.Fatalf("%+v %v", ev, ok)
 	}
@@ -56,7 +56,7 @@ func TestParseEventsFiltersAreas(t *testing.T) {
 		"2026-10-27T04:00:01Z INFO  run/lock pid=1 repo=o/r issue=1 op=implement",
 		"2026-10-27T04:00:02Z INFO  run/harvest_skip repo=o/r reason=ci_not_success pr=3",
 		"2026-10-27T04:00:03Z INFO  run/automerge_sweep repo=o/r merged=0",
-		"2026-10-27T04:00:04Z INFO  run/queue_pick repo=o/r queue=9 issue=4 reason=head_eligible",
+		"2026-10-27T04:00:04Z INFO  queue/pick repo=o/r queue=9 issue=4 reason=head_eligible",
 		"2026-10-27T04:00:05Z INFO  run/self_upgrade from=v1 to=v2",
 		"2026-10-27T04:00:06Z INFO  run/target_skip repo=o/r issue=4 reason=issue_not_open",
 		"2026-10-27T04:00:07Z INFO  run/exit pid=1",
@@ -68,27 +68,9 @@ func TestParseEventsFiltersAreas(t *testing.T) {
 	for _, e := range got {
 		names = append(names, e.Event)
 	}
-	want := "run/harvest_skip run/automerge_sweep run/queue_pick run/self_upgrade run/target_skip run/exit"
+	want := "run/harvest_skip run/automerge_sweep queue/pick run/self_upgrade run/target_skip run/exit"
 	if strings.Join(names, " ") != want {
 		t.Fatalf("events = %v", names)
-	}
-}
-
-func TestLastDecision(t *testing.T) {
-	evs := ParseEvents(strings.NewReader(strings.Join([]string{
-		"2026-10-27T04:00:00Z INFO  run/queue_pick repo=o/r queue=9 issue=4 reason=head_eligible",
-		"2026-10-27T04:01:00Z INFO  run/queue_wait repo=other/x queue=1 issue=8 reason=in_flight_locked",
-		"2026-10-27T04:02:00Z INFO  run/queue_blocked repo=o/r queue=9 issue=5 reason=not_a_leaf",
-	}, "\n")))
-	d := LastDecision(evs, "o/r")
-	if d == nil || d.Action != "blocked" || d.Issue != 5 || d.Reason != "not_a_leaf" || d.At != "2026-10-27T04:02:00Z" {
-		t.Fatalf("%+v", d)
-	}
-	if d := LastDecision(evs, "other/x"); d == nil || d.Action != "wait" {
-		t.Fatalf("%+v", d)
-	}
-	if LastDecision(evs, "none/none") != nil {
-		t.Fatal("expected nil")
 	}
 }
 
