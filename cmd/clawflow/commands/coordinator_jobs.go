@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -160,10 +161,12 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 			t.QueuePosition = int64(pos)
 		}
 		reserved := false
+		var repairPreparationErr error
 		_, err := s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
 			if j.repair != nil {
-				if err := prepareCIRepairContext(ctx, j, time.Now().UTC()); err != nil {
-					return err
+				repairPreparationErr = prepareCIRepairContext(ctx, j, time.Now().UTC())
+				if repairPreparationErr != nil {
+					return repairPreparationErr
 				}
 				reserved = true
 				p.Repair.Attempt = j.repair.Attempt
@@ -174,6 +177,12 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 			return err
 		})
 		if err != nil {
+			// Match local execution: a repair preparation failure skips only
+			// this job. Store failures and pass cancellation remain fatal.
+			if repairPreparationErr != nil && errors.Is(err, repairPreparationErr) && ctx.Err() == nil {
+				runLog.Warn("run/ci_repair_skip", "repo", j.repo, "issue", j.sub.Number, "err", repairPreparationErr.Error())
+				continue
+			}
 			if reserved {
 				_ = j.releaseRepair("enqueue", time.Now().UTC())
 			}

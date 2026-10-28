@@ -442,3 +442,75 @@ func TestCoordinatorRepairScanExcludesActiveIssue(t *testing.T) {
 		}
 	}
 }
+
+func TestCoordinatorDispatchContinuesAfterRepairEligibilityChange(t *testing.T) {
+	for _, change := range []string{"head changed", "CI recovered"} {
+		t.Run(change, func(t *testing.T) {
+			withRunLog(t)
+			pr, issue := repairFixture()
+			client := &repairClient{pr: pr, issue: issue, status: vcs.CIStatusFailure}
+			if change == "head changed" {
+				client.pr.HeadSHA = strings.Repeat("b", 40)
+			} else {
+				client.status = vcs.CIStatusSuccess
+			}
+			repair := &runJob{repo: "o/r", repoCfg: config.Repo{AutoMerge: true, CIRequired: true}, client: client,
+				op: &operator.Operator{Name: "repair-ci"}, sub: &operator.Subject{Number: issue.Number}, repair: &ciRepairContext{PR: pr}}
+			reply := &runJob{repo: "o/r", op: &operator.Operator{Name: "reply-comment"}, sub: &operator.Subject{Number: issue.Number + 1}}
+			harvested := false
+			jobs := []*runJob{repair, reply, {harvest: func(context.Context) []firedKey { harvested = true; return nil }}}
+			s := &resultStoreFake{}
+			fired, failed, err := dispatchCoordinatorJobs(context.Background(), s, jobs, time.Minute)
+			if err != nil {
+				t.Fatalf("repair eligibility change aborted dispatch: %v", err)
+			}
+			want := []firedKey{{Repo: "o/r", IssueNumber: reply.sub.Number, Operator: "reply-comment"}}
+			if !reflect.DeepEqual(fired, want) || len(failed) != 0 || s.task.Issue != reply.sub.Number || s.task.Kind != "reply" || !harvested {
+				t.Fatalf("fired=%v failed=%v task=%+v harvested=%v", fired, failed, s.task, harvested)
+			}
+			_, path := ciRepairLedgerPath(snapshot.DataDir(), repair.repo, pr.Number)
+			ledger, err := loadCIRepairLedger(path)
+			if err != nil || len(ledger.Attempts) != 0 {
+				t.Fatalf("ineligible repair reserved an attempt: %+v, %v", ledger, err)
+			}
+		})
+	}
+}
+
+type coordinatorEnqueueFailure struct {
+	resultStoreFake
+	err error
+}
+
+func (s *coordinatorEnqueueFailure) EnqueuePrepared(context.Context, coordinator.Task, func(*coordinator.Task) error) (*coordinator.Task, error) {
+	return nil, s.err
+}
+
+func TestCoordinatorDispatchPreservesFatalErrors(t *testing.T) {
+	withRunLog(t)
+	pr, issue := repairFixture()
+	job := &runJob{repo: "o/r", repoCfg: config.Repo{AutoMerge: true, CIRequired: true},
+		client: &repairClient{pr: pr, issue: issue, status: vcs.CIStatusFailure},
+		op:     &operator.Operator{Name: "repair-ci"}, sub: &operator.Subject{Number: issue.Number}, repair: &ciRepairContext{PR: pr}}
+	storeErr := errors.New("store unavailable")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name  string
+		ctx   context.Context
+		store coordinatorQueue
+		want  error
+	}{
+		{"store failure", context.Background(), &coordinatorEnqueueFailure{err: storeErr}, storeErr},
+		{"pass cancelled", cancelled, &resultStoreFake{}, context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			harvested := false
+			jobs := []*runJob{job, {harvest: func(context.Context) []firedKey { harvested = true; return nil }}}
+			fired, failed, err := dispatchCoordinatorJobs(tc.ctx, tc.store, jobs, time.Minute)
+			if !errors.Is(err, tc.want) || len(fired) != 0 || len(failed) != 0 || harvested {
+				t.Fatalf("fired=%v failed=%v err=%v harvested=%v", fired, failed, err, harvested)
+			}
+		})
+	}
+}
