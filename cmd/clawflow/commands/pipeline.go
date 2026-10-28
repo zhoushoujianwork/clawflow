@@ -396,6 +396,9 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 
 		item.Stage, item.Why, item.Evidence = pipeline.Derive(ev)
+		if local, ok := client.(*pipelineLocalClient); ok && local.offline && item.Stage == pipeline.StageAcceptancePending && item.Acceptance != nil && item.Acceptance.Verdict == "passed" {
+			item.Why = "the last stored acceptance passed; current contract verification is pending"
+		}
 		if item.Stage == pipeline.StageMerged && item.Delivery == nil && item.PR != nil {
 			item.Delivery = &pipeline.Delivery{PR: item.PR.Number, PRURL: item.PR.URL}
 		}
@@ -529,6 +532,12 @@ func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc 
 		info.Error = "acceptance evidence unreadable"
 		return info
 	}
+	return pipelineAcceptanceRecords(info, c, records, true)
+}
+
+// pipelineAcceptanceRecords shares presentation while keeping offline history
+// separate from validation against the current live contract.
+func pipelineAcceptanceRecords(info *pipeline.AcceptanceInfo, c acceptance.Contract, records []acceptance.Record, current bool) *pipeline.AcceptanceInfo {
 	info.Attempts = len(records)
 	var lastInfra time.Time
 	for _, r := range records {
@@ -554,7 +563,7 @@ func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc 
 		return info
 	}
 	info.Verdict = string(latest.Verdict)
-	info.Valid = acceptance.Evaluate(c, latest) == nil
+	info.Valid = current && acceptance.Evaluate(c, latest) == nil
 	return info
 }
 

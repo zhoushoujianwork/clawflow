@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -143,14 +144,7 @@ func pipelineSnapshotDeps(d pipelineDeps, offline bool) pipelineDeps {
 		}
 	}
 	if offline {
-		d.acceptance = func(_ context.Context, _ vcs.Client, repo string, _ config.Repo, pr vcs.PR, _ time.Time) *pipeline.AcceptanceInfo {
-			for _, i := range d.previous[repo].Items {
-				if i.PR != nil && i.PR.Number == pr.Number && i.PR.HeadSHA == pr.HeadSHA {
-					return i.Acceptance
-				}
-			}
-			return nil
-		}
+		d.acceptance = pipelineLocalAcceptance
 	}
 	return d
 }
@@ -176,4 +170,34 @@ func (c *pipelineLocalClient) sameHead(repo string, p *pipeline.PRInfo) bool {
 		}
 	}
 	return false
+}
+
+// pipelineLocalAcceptance reads newly completed records without reconstructing
+// the live contract (which requires VCS calls). Valid remains false offline.
+func pipelineLocalAcceptance(_ context.Context, _ vcs.Client, repo string, rc config.Repo, pr vcs.PR, _ time.Time) *pipeline.AcceptanceInfo {
+	path := acceptanceStorePath(repo, pr.Number)
+	st, err := os.Lstat(path)
+	if os.IsNotExist(err) && !rc.AcceptanceRequired {
+		return nil
+	}
+	info := &pipeline.AcceptanceInfo{Required: rc.AcceptanceRequired, MaxInfraRetries: harvestMaxInfra, Running: snapshot.IsLocked("acceptance-"+acceptanceHash(repo), pr.Number)}
+	if os.IsNotExist(err) {
+		return info
+	}
+	if err != nil || !st.IsDir() || st.Mode().Perm()&0077 != 0 {
+		info.Error = "acceptance evidence unavailable"
+		return info
+	}
+	store, err := acceptance.OpenStore(path)
+	if err != nil {
+		info.Error = "acceptance evidence unavailable"
+		return info
+	}
+	defer store.Close()
+	records, err := store.CompleteRecordsAtHead(repo, pr.Number, pr.HeadSHA)
+	if err != nil {
+		info.Error = "acceptance evidence unreadable"
+		return info
+	}
+	return pipelineAcceptanceRecords(info, acceptance.Contract{}, records, false)
 }

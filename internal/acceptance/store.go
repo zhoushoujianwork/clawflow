@@ -570,3 +570,54 @@ func (s *Store) DevelopmentAtHead(repo string, pr int, task, head string) (map[I
 	}
 	return identities, nil
 }
+
+// CompleteRecordsAtHead returns the completed attempts for the most recently
+// completed contract at the observed PR head. This is a read-only dashboard
+// view, not proof that requirements, base or policy still match that contract.
+func (s *Store) CompleteRecordsAtHead(repo string, pr int, head string) ([]Record, error) {
+	dir, err := s.root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(10001)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if len(entries) > 10000 {
+		return nil, errors.New("too many acceptance records")
+	}
+	var latest *Record
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".record") {
+			continue
+		}
+		var r Record
+		if err := s.read(entry.Name(), &r); err != nil {
+			return nil, err
+		}
+		if r.Contract.Repository != repo || r.Contract.PRNumber != pr || r.Contract.HeadSHA != head {
+			continue
+		}
+		r, err = s.loadRecord(r.Contract, entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		if !r.Completed {
+			continue
+		}
+		if err := completeRecord(r); err != nil {
+			return nil, err
+		}
+		if latest != nil && r.CompletedAt.Equal(latest.CompletedAt) {
+			return nil, errors.New("ambiguous acceptance attempt ordering")
+		}
+		if latest == nil || r.CompletedAt.After(latest.CompletedAt) {
+			latest = &r
+		}
+	}
+	if latest == nil {
+		return nil, nil
+	}
+	return s.CompleteRecords(latest.Contract)
+}

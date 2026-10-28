@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
@@ -503,5 +504,73 @@ func TestPipelineMergeabilityFailureMarksRepoStale(t *testing.T) {
 	s := buildPipeline(context.Background(), d)
 	if !s.Repos[0].Stale || s.Repos[0].Error == "" {
 		t.Fatalf("repo=%+v", s.Repos[0])
+	}
+}
+
+func TestPipelinePassReadsNewAcceptanceRecord(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {Enabled: true, AcceptanceRequired: true}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WriteIssues([]snapshot.IssueEntry{{Repo: "o/r", IssueNumber: 7, State: "open", CapturedAt: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WritePipelinePRs("o/r", []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", HeadSHA: "head", State: "open"}}); err != nil {
+		t.Fatal(err)
+	}
+	// First publish before any acceptance attempt exists.
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	c := acceptance.Contract{Version: acceptance.Version, TaskID: "o/r:issue:7", Generation: 1, Repository: "o/r", PRNumber: 8, HeadSHA: "head", BaseSHA: "base", PolicyDigest: "policy", Requirements: "requirement", Development: acceptance.Identity{SessionID: "dev", RunID: "run"}}
+	digest, err := c.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := acceptance.OpenStore(acceptanceStorePath("o/r", 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	record := acceptance.Record{Version: acceptance.Version, Contract: c, ContractDigest: digest, AttemptID: "review-1", Role: "acceptance", Verdict: acceptance.Failed, Report: "new result", Evidence: []string{"test failed"}, Completed: true, StartedAt: now.Add(-time.Minute), CompletedAt: now}
+	if err := store.SaveRecord(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := snapshot.ReadPipeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := s.Repos[0].Items[0].Acceptance
+	if info == nil || info.Verdict != "failed" || info.Attempts != 1 || info.Summary != "new result" {
+		t.Fatalf("pass did not read new acceptance record: %+v", info)
+	}
+	if info.Valid {
+		t.Fatal("offline evidence must not claim current contract validation")
+	}
+	// A subsequent infrastructure attempt supersedes the displayed verdict.
+	record.AttemptID = "review-2"
+	record.StartedAt = now.Add(time.Minute)
+	record.CompletedAt = now.Add(2 * time.Minute)
+	record.Evidence = nil
+	record.Verdict = acceptance.Blocked
+	record.Report = "reviewer unavailable"
+	if err := store.SaveRecord(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = snapshot.ReadPipeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info = s.Repos[0].Items[0].Acceptance
+	if info == nil || info.Verdict != "" || info.Attempts != 2 || info.InfraAttempts != 1 || !info.LatestIsInfra || info.NextRetryAt == "" {
+		t.Fatalf("new infrastructure result absent: %+v", info)
 	}
 }
