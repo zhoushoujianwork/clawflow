@@ -62,6 +62,8 @@ type Runtime struct {
 
 // Scheduler mirrors the existing /api/run/status payload.
 type Scheduler struct {
+	AgentSlotsUsed  int    `json:"agent_slots_used"`
+	AgentSlotsTotal int    `json:"agent_slots_total"`
 	Status          string `json:"status"` // "running" | "idle"
 	IntervalMinutes int    `json:"interval_minutes"`
 	Paused          bool   `json:"paused"`

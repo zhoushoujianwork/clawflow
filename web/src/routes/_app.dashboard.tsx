@@ -21,7 +21,7 @@ import { VcsIcon } from '../components/VcsIcon'
 import { SubIssueRing } from '../components/IssueList'
 
 /**
- * Shape of one entry in /data/runs.json. Mirrors snapshot.RunIndexEntry on
+ * Shape of one entry in /api/runs. Mirrors snapshot.RunIndexEntry on
  * the Go side — if the Go type gains a field, add it here and the dashboard
  * renders richer detail.
  */
@@ -298,7 +298,7 @@ function Dashboard() {
     const refetch = async (initial: boolean) => {
       if (initial) setLoading(true)
       const [r, m, rp, pd, iss, settings] = await Promise.all([
-        fetch('/data/runs.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
+        fetch('/api/runs', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
         fetch('/data/meta.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
         fetch('/data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
         // pending.json is only written by clawflow versions that snapshot the

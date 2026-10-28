@@ -36,6 +36,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot/budget"
@@ -341,12 +342,20 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	runDir := snapshot.PilotRunDir(p.Name, startedAt)
 	_ = os.MkdirAll(runDir, 0o755)
 
+	machine, _ := os.Hostname()
+	profile := ""
+	if c, err := execution.LoadConfig(); err == nil {
+		profile = execution.ProfileForRole(c, config.RolePilot)
+	}
 	meta := snapshot.PilotRunMeta{
+		Machine: machine, Profile: profile,
 		Project:   p.Name,
 		StartedAt: startedAt.UTC(),
 		Status:    "running",
 	}
-	_ = snapshot.WritePilotRunMeta(runDir, meta)
+	if err := snapshot.WritePilotRunMeta(runDir, meta); err != nil {
+		return fmt.Errorf("persist pilot run: %w", err)
+	}
 	lg.Info("pilot/start", "project", p.Name, "role", config.RolePilot, "timeout", timeout)
 
 	// Refresh CLAUDE.md from current project.yaml + cfg.Repos before
@@ -386,6 +395,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		defer os.Unsetenv(budget.EnvPath)
 	}
 
+	ctx = operator.WithExecutionResultObserver(ctx, func(r execution.Result) { meta.Profile = r.Profile; meta.Backend = r.Backend; meta.Model = r.Model })
 	output, err := runWakeOffload(ctx, prompt, workdir, timeout, eventsFile, role)
 	if eventsFile != nil {
 		_ = eventsFile.Close()
@@ -489,7 +499,9 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil && u != nil {
 		meta.Usage = u
 	}
-	_ = snapshot.WritePilotRunMeta(runDir, meta)
+	if err := snapshot.WritePilotRunMeta(runDir, meta); err != nil {
+		return fmt.Errorf("persist pilot run: %w", err)
+	}
 
 	// Use the appropriate log level so patrol grep -E "ERROR|WARN" catches
 	// failures. Previously all outcomes used lg.Info, making auth failures
@@ -524,16 +536,6 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		fmt.Fprintf(os.Stderr, "[pilot] %s: hit its --max-budget-usd cap (Settings.PilotMaxBudgetUSD=%.2f) — output salvaged, cooldown applies normally\n", p.Name, cfg.Settings.EffectivePilotMaxBudgetUSD())
 	default:
 		lg.Info("pilot/end", endLogKV...)
-	}
-
-	if _, ierr := snapshot.WritePilotRunsIndex(20); ierr != nil {
-		fmt.Fprintf(os.Stderr, "[pilot] %s: snapshot pilot-runs index: %v\n", p.Name, ierr)
-	}
-	// usage.json is written in Phase 3 of `clawflow run`, before Pilot wakes
-	// in Phase 4 — refresh it here so this wake's cost lands on the dashboard
-	// in the same pass instead of one pass late (issue #321).
-	if uerr := snapshot.RefreshUsageSummary(cfg.Settings.BillingCycleDay); uerr != nil {
-		fmt.Fprintf(os.Stderr, "[pilot] %s: snapshot usage summary: %v\n", p.Name, uerr)
 	}
 
 	// Consecutive failure threshold alerting: when the last N wakes (including

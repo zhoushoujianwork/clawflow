@@ -43,6 +43,11 @@ The wake updates LastWokenAt, so the cooldown clock restarts from
 this wake's start time (mirroring a scheduled wake's behaviour).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			release, err := gateStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer release()
 			timeout := time.Duration(timeoutMin) * time.Minute
 			if err := pilot.WakeOne(cmd.Context(), args[0], timeout); err != nil {
 				return fmt.Errorf("wake %s: %w", args[0], err)

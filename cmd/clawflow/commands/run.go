@@ -28,6 +28,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
@@ -80,9 +81,9 @@ func NewRunCmd() *cobra.Command {
   - for each issue, match against registered operators
   - on first match: execute through Offload, post the result, apply the outcome label
 
-Concurrency is gated by an in-process per-issue mutex; up to
-settings.max_concurrent_agents (default 4) operators run in parallel
-across issues. The "implement" operator is additionally serialized
+Concurrency is gated by an in-process per-issue mutex and machine-wide
+agent slots: settings.max_concurrent_agents (default 4) is shared by all
+passes, including implement, repair and acceptance. The "implement" operator is additionally serialized
 per-repo because it shares a local git clone. Pass --repo and/or
 --issue to narrow the scan.
 
@@ -672,19 +673,6 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		globalIssues = append(kept, recaptured...)
 	}
 
-	// Refresh the runs index so the dashboard shows this run at the top.
-	// WriteRunsIndex returns the FULL entry set so we can hand it to
-	// WriteUsageSummary without re-walking the runs tree.
-	allEntries, err := snapshot.WriteRunsIndex(50)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "snapshot runs index: %v\n", err)
-	}
-	// Pilot wakes live in a parallel tree (data/pilot-runs/) and are the most
-	// expensive class of run, so they must be merged in or usage.json
-	// under-reports total spend by ~3x (issue #321).
-	if err := snapshot.WriteUsageSummary(snapshot.UsageEntriesWithPilot(allEntries), cfg.Settings.BillingCycleDay); err != nil {
-		fmt.Fprintf(os.Stderr, "snapshot usage summary: %v\n", err)
-	}
 	if err := snapshot.WritePendingMerged(pending, preserveRepos); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot pending: %v\n", err)
 	}
@@ -1532,7 +1520,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	runDir := snapshot.RunDir(j.repo, j.sub.Number, startedAt)
 	_ = os.MkdirAll(runDir, 0o755)
 
+	machine, _ := os.Hostname()
 	runningMeta := snapshot.RunMeta{
+		Machine:     machine,
+		Profile:     configuredDevelopmentProfile(roleForOperator(j.op.Name)),
 		Operator:    j.op.Name,
 		Repo:        j.repo,
 		IssueNumber: j.sub.Number,
@@ -1550,24 +1541,17 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}()
 	if err := snapshot.WriteRunMeta(runDir, runningMeta); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ✗ initial run meta: %v\n", prefix, err)
-	}
-	if err := j.writeRunsIndex(); err != nil {
-		fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (running): %v\n", prefix, err)
+		runningMeta.Status = "failed"
+		runningMeta.Error = err.Error()
+		return false, false, false
 	}
 
-	// emitStage persists a fine-grained lifecycle transition while the run is
-	// still in flight: it advances runningMeta.Stage and rewrites BOTH meta.json
-	// AND runs.json. Rewriting runs.json on every stage is the crux of issue
-	// #199 — the dashboard polls runs.json (not meta.json), so without this the
-	// frontend was frozen on the start-of-run snapshot and intermediate stages
-	// were invisible. Status stays "running" throughout; Stage is advisory.
+	// Each lifecycle transition persists metadata and upserts its SQL row, so
+	// polling and SSE readers observe the same current stage.
 	emitStage := func(stage string) {
 		runningMeta.Stage = stage
 		if err := snapshot.WriteRunMeta(runDir, runningMeta); err != nil {
 			fmt.Fprintf(os.Stderr, "%s ⚠ stage meta (%s): %v\n", prefix, stage, err)
-		}
-		if err := j.writeRunsIndex(); err != nil {
-			fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (%s): %v\n", prefix, stage, err)
 		}
 	}
 
@@ -1631,6 +1615,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			cleanup = resumedWorktreeCleanup(j.repoCfg.LocalPath, wtResult.Path)
 		} else {
 			wtResult, cleanup, err = setupCIRepairWorkdir(ctx, j.repoCfg, j.repo, j.repair.PR)
+		}
+		if err == nil && (j.repair.MergeConflict || j.repair.Acceptance != nil) {
+			err = refreshRepairBase(ctx, wtResult.Path, j)
 		}
 	} else if j.reopen != nil {
 		wtResult, cleanup, err = setupReopenWorktreeContext(ctx, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch, j.reopen)
@@ -1751,6 +1738,11 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
 		sessionOpts = developmentResumeOptions(ctx, j, previousRun, wtResult, detailComments, resumeCtx, &runningMeta, func() { _ = snapshot.WriteRunMeta(runDir, runningMeta) })
 	}
+	ctx = operator.WithExecutionResultObserver(ctx, func(r execution.Result) {
+		runningMeta.Profile = r.Profile
+		runningMeta.Backend = r.Backend
+		runningMeta.Model = r.Model
+	})
 	confirmedHead := ""
 	output, outcome, runErr := runJobOperator(ctx, j.op, j.sub, j.client, operator.RunOptions{
 		SessionKey:          sessionOpts.SessionKey,
@@ -1803,18 +1795,19 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
 		finalizingMeta := snapshot.RunMeta{
 			DevelopmentSession: runningMeta.DevelopmentSession,
-			HeadSHA:            confirmedHead,
-			Outcome:            outcome,
-			Operator:           j.op.Name,
-			Repo:               j.repo,
-			IssueNumber:        j.sub.Number,
-			IssueTitle:         j.sub.Title,
-			IssueBody:          j.sub.Body,
-			IssueState:         j.sub.State,
-			StartedAt:          startedAt.UTC(),
-			Status:             "finalizing",
-			Stage:              "finalizing",
-			Summary:            output,
+			Profile:            runningMeta.Profile, Backend: runningMeta.Backend, Model: runningMeta.Model, Machine: runningMeta.Machine,
+			HeadSHA:     confirmedHead,
+			Outcome:     outcome,
+			Operator:    j.op.Name,
+			Repo:        j.repo,
+			IssueNumber: j.sub.Number,
+			IssueTitle:  j.sub.Title,
+			IssueBody:   j.sub.Body,
+			IssueState:  j.sub.State,
+			StartedAt:   startedAt.UTC(),
+			Status:      "finalizing",
+			Stage:       "finalizing",
+			Summary:     output,
 		}
 		if j.repair != nil {
 			finalizingMeta.RepairReason = j.repair.reason()
@@ -1923,14 +1916,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	endedAt := time.Now().UTC()
 	rm := snapshot.RunMeta{
 		DevelopmentSession: runningMeta.DevelopmentSession,
-		Operator:           j.op.Name,
-		Repo:               j.repo,
-		IssueNumber:        j.sub.Number,
-		IssueTitle:         j.sub.Title,
-		IssueBody:          j.sub.Body,
-		StartedAt:          startedAt.UTC(),
-		EndedAt:            &endedAt,
-		Summary:            output,
+		Profile:            runningMeta.Profile, Backend: runningMeta.Backend, Model: runningMeta.Model, Machine: runningMeta.Machine,
+		Operator:    j.op.Name,
+		Repo:        j.repo,
+		IssueNumber: j.sub.Number,
+		IssueTitle:  j.sub.Title,
+		IssueBody:   j.sub.Body,
+		StartedAt:   startedAt.UTC(),
+		EndedAt:     &endedAt,
+		Summary:     output,
 	}
 	switch {
 	case ctx.Err() != nil:
@@ -2091,15 +2085,6 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 	if err := snapshot.WriteRunMeta(runDir, rm); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ run meta: %v\n", prefix, err)
-	}
-	// Rewrite runs.json on the terminal transition too. The dashboard's Running
-	// list reads runs.json (not meta.json), and until now the only post-run
-	// rebuild was the end-of-pass Phase 3 write — so a finished operator kept
-	// showing "running" until every sibling in the pass also finished (or a
-	// sibling's emitStage incidentally re-walked the metas). Refreshing here
-	// flips this row to its final status immediately on completion.
-	if err := j.writeRunsIndex(); err != nil {
-		fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (%s): %v\n", prefix, rm.Status, err)
 	}
 	// Upgrade to WARN for non-success statuses so deployment.md patrol's
 	// "grep -E ERROR|WARN" actively catches failures (issue #204).

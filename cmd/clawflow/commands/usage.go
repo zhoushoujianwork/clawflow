@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/zhoushoujianwork/clawflow/internal/config"
+
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
@@ -42,6 +42,13 @@ Defaults to a dry run because this rewrites money-bearing records. Re-run
 with --apply once the plan looks right.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if apply {
+				release, err := gateStore(cmd.Context())
+				if err != nil {
+					return err
+				}
+				defer release()
+			}
 			entries, err := snapshot.BackfillUsage(!apply)
 			if err != nil {
 				return fmt.Errorf("backfill: %w", err)
@@ -69,17 +76,7 @@ with --apply once the plan looks right.`,
 			if !apply {
 				return nil
 			}
-			// usage.json is derived data — rebuild it so the dashboard shows
-			// the recovered spend without waiting for the next pass.
-			cfg, cerr := config.Load()
-			billingDay := 1
-			if cerr == nil {
-				billingDay = cfg.Settings.BillingCycleDay
-			}
-			if err := snapshot.RefreshUsageSummary(billingDay); err != nil {
-				return fmt.Errorf("refresh usage summary: %w", err)
-			}
-			fmt.Println("  usage.json rebuilt")
+			fmt.Println("  PostgreSQL usage updated")
 			return nil
 		},
 	}
@@ -88,8 +85,8 @@ with --apply once the plan looks right.`,
 }
 
 func costLabel(u *snapshot.Usage) string {
-	if u.Estimated {
-		return "n/a (estimated)"
+	if u.Estimated || u.CostUnavailable {
+		return "n/a (not reported)"
 	}
 	return fmt.Sprintf("$%.4f", u.TotalCostUSD)
 }

@@ -189,7 +189,7 @@ func checkConflictRepairRun(t *testing.T, mode string) {
 			}
 			return newHead + "\trefs/heads/" + f.pr.HeadBranch, nil
 		case "merge-base":
-			if (mode == "missing-base" && args[2] == f.pr.BaseSHA) || (mode == "missing-head" && args[2] == f.pr.HeadSHA) {
+			if (mode == "missing-base" && args[2] == jobs[0].repair.PR.BaseSHA) || (mode == "missing-head" && args[2] == f.pr.HeadSHA) {
 				return "", errors.New("not ancestor")
 			}
 			return "", nil

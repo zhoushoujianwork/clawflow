@@ -3,9 +3,9 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,16 +14,23 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
-// plantRuns writes a runs.json under the (HOME-rooted) data dir so the stream
-// handler has something to emit.
+// plantRuns updates one SQL row to exercise stream change detection.
 func plantRuns(t *testing.T, body string) {
 	t.Helper()
-	path := filepath.Join(snapshot.DataDir(), "runs.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir data dir: %v", err)
+	if snapshot.RunStore() == nil {
+		historyDB(t)
 	}
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatalf("write runs.json: %v", err)
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(body), &rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range rows {
+		m["repo"] = "o/r"
+		m["started_at"] = "2026-10-28T00:00:00Z"
+		raw, _ := json.Marshal(m)
+		if _, err := snapshot.RunStore().UpsertRun(context.Background(), filepath.Join(snapshot.DataDir(), "runs", "one"), "run", raw); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -121,10 +128,10 @@ func TestRunStream_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestRunStream_MissingFileYieldsEmptyArray(t *testing.T) {
+func TestRunStream_EmptyDatabaseYieldsEmptyArray(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	// No runs.json planted — readRunsCompact must yield "[]" rather than error.
-	got, err := readRunsCompact(filepath.Join(snapshot.DataDir(), "runs.json"))
+	historyDB(t)
+	got, err := readRunsCompact(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

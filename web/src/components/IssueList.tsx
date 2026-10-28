@@ -13,7 +13,7 @@ import { useChatDrawer } from '../lib/chatContext'
 // and uses a 5-section layout that adds an "Awaiting implementation"
 // bucket so users can spot the bottleneck.
 //
-// Inputs are the raw arrays read from /data/issues.json /data/runs.json
+// Inputs are the raw arrays read from /data/issues.json /api/runs
 // /data/pending.json — callers filter them however they need (single
 // repo for the repo page, project.repos.includes(repo) for the project
 // page) before passing in. useIssueGroups merges and sorts; the visual
