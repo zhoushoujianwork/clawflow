@@ -223,7 +223,16 @@ func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 				}
 				return err
 			}
-			if !eligible(t.Tags, w) {
+			if t.Kind == "acceptance" {
+				var live []Worker
+				if err := tx.Table("coordinator_workers").Select("coordinator_workers.*").Joins("JOIN coordinator_tokens ON coordinator_tokens.name = coordinator_workers.id").Where("coordinator_tokens.revoked = false AND coordinator_tokens.last_seen > clock_timestamp() - interval '120 seconds'").Find(&live).Error; err != nil {
+					return err
+				}
+				if err := resolveAcceptancePolicy(&t, live); err != nil {
+					return err
+				}
+			}
+			if !eligible(t.Tags, w) || !acceptanceAllowed(t, w) {
 				skipped = append(skipped, t.ID)
 				continue
 			}

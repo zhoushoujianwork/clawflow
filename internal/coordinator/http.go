@@ -14,6 +14,9 @@ import (
 
 const MaxRequestBytes = 1 << 20
 
+// JSON escaping can expand the capped 32 MiB native metadata up to sixfold.
+const MaxReportBytes = 6*(32<<20) + MaxRequestBytes
+
 // WorkerStore is the existing persistence contract used by the worker listener.
 type WorkerStore interface {
 	VerifyToken(context.Context, string) (*Token, error)
@@ -74,7 +77,11 @@ func NewHandler(store WorkerStore) http.Handler {
 				status = http.StatusMethodNotAllowed
 				return nil
 			}
-			r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBytes)
+			limit := int64(MaxRequestBytes)
+			if action == "complete" || action == "fail" {
+				limit = MaxReportBytes
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 			decode := func(v any) error {
 				d := json.NewDecoder(r.Body)
 				d.DisallowUnknownFields()

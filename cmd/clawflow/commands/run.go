@@ -2093,6 +2093,11 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil && u != nil {
 		rm.Usage = u
 	}
+	if j.hooks != nil && rm.Status == "success" && ctx.Err() == nil && (j.op.Name == "implement" || j.repair != nil) {
+		if events, err := acceptanceRead(filepath.Join(runDir, "events.jsonl"), acceptanceFileLimit); err == nil {
+			j.result.DevelopmentEvents = string(events)
+		}
+	}
 	j.result.Status, j.result.Error = rm.Status, rm.Error
 	j.result.Outcome, j.result.Output = outcome, output
 	j.result.Usage, j.result.HeadSHA = rm.Usage, rm.HeadSHA

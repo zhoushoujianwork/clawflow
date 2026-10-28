@@ -1,0 +1,94 @@
+package coordinator
+
+import (
+	"context"
+	"encoding/json"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"slices"
+	"strconv"
+)
+
+// AcceptanceRouting is coordinator-owned task policy, never a worker assertion.
+type AcceptanceRouting struct {
+	AcceptanceWorker  string `json:"acceptance_worker"`
+	DevelopmentWorker string `json:"development_worker"`
+}
+
+func AcceptanceEligible(tags []string, w Worker) bool {
+	return slices.Contains(w.Roles, "acceptance") && eligible(tags, w)
+}
+
+func acceptanceAllowed(t Task, w Worker) bool {
+	if t.Kind != "acceptance" {
+		return len(w.Roles) == 0 || slices.Contains(w.Roles, "operator")
+	}
+	var p AcceptanceRouting
+	if json.Unmarshal(t.Payload, &p) != nil || !AcceptanceEligible(t.Tags, w) {
+		return false
+	}
+	return p.AcceptanceWorker == "any" || (p.AcceptanceWorker == "different" && p.DevelopmentWorker != "" && p.DevelopmentWorker != w.ID)
+}
+
+// LatestDevelopment ties the developer worker to the same PR and submitted head.
+func (s *Store) LatestDevelopment(ctx context.Context, repo string, issue, pr int, head string) (*Task, error) {
+	var task Task
+	err := s.db.WithContext(ctx).Select("id", "lease_owner").Where("repo = ? AND issue = ? AND kind IN ? AND state = 'done' AND result->>'status' = 'success' AND result->>'head_sha' = ? AND (pr = ? OR result->>'pr_number' = ?)", repo, issue, []string{"implement", "repair"}, head, pr, strconv.Itoa(pr)).Order("created_at DESC, id DESC").First(&task).Error
+	return &task, err
+}
+
+// Resolve default independence when a worker actually claims, not when enqueued.
+func resolveAcceptancePolicy(t *Task, live []Worker) error {
+	if t.Kind != "acceptance" {
+		return nil
+	}
+	var p map[string]json.RawMessage
+	if json.Unmarshal(t.Payload, &p) != nil || p == nil {
+		return ErrInvalid
+	}
+	var policy string
+	if raw := p["acceptance_worker"]; len(raw) > 0 && json.Unmarshal(raw, &policy) != nil {
+		return ErrInvalid
+	}
+	if policy != "" {
+		if policy != "any" && policy != "different" {
+			return ErrInvalid
+		}
+		return nil
+	}
+	count := 0
+	for _, w := range live {
+		if AcceptanceEligible(t.Tags, w) {
+			count++
+		}
+	}
+	policy = "any"
+	if count > 1 {
+		policy = "different"
+	}
+	p["acceptance_worker"], _ = json.Marshal(policy)
+	var err error
+	t.Payload, err = json.Marshal(p)
+	return err
+}
+
+// Changed contracts fence out obsolete reviews so deduplication cannot retain
+// a stale task forever. Concurrent uploads serialize against this row update.
+func (s *Store) CancelSupersededAcceptance(ctx context.Context, repo string, pr int, contract json.RawMessage) error {
+	if !json.Valid(contract) {
+		return ErrInvalid
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var cancelled []Task
+		err := tx.Model(&cancelled).Clauses(clause.Returning{}).Where("repo = ? AND pr = ? AND kind = 'acceptance' AND state IN ? AND payload->'acceptance' IS DISTINCT FROM ?::jsonb", repo, pr, []string{"pending", "leased"}, string(contract)).Updates(map[string]any{"state": "cancelled", "lease_expires_at": nil}).Error
+		if err != nil {
+			return err
+		}
+		for _, task := range cancelled {
+			if err := audit(tx, "", task.ID, "acceptance-superseded"); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}

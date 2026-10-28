@@ -22,20 +22,21 @@ type jobHooks struct {
 }
 
 type jobResult struct {
-	Status      string          `json:"status"`
-	Outcome     string          `json:"outcome,omitempty"`
-	Output      string          `json:"output,omitempty"`
-	Error       string          `json:"error,omitempty"`
-	Usage       *snapshot.Usage `json:"usage,omitempty"`
-	Cost        float64         `json:"cost"`
-	InfraKind   string          `json:"infra_kind,omitempty"`
-	PRNumber    int             `json:"pr_number,omitempty"`
-	PRURL       string          `json:"pr_url,omitempty"`
-	Branch      string          `json:"branch,omitempty"`
-	HeadSHA     string          `json:"head_sha,omitempty"`
-	RateLimited bool            `json:"rate_limited"`
-	CostLimited bool            `json:"cost_limited"`
-	Effects     []jobEffect     `json:"effects,omitempty"`
+	DevelopmentEvents string          `json:"development_events,omitempty"`
+	Status            string          `json:"status"`
+	Outcome           string          `json:"outcome,omitempty"`
+	Output            string          `json:"output,omitempty"`
+	Error             string          `json:"error,omitempty"`
+	Usage             *snapshot.Usage `json:"usage,omitempty"`
+	Cost              float64         `json:"cost"`
+	InfraKind         string          `json:"infra_kind,omitempty"`
+	PRNumber          int             `json:"pr_number,omitempty"`
+	PRURL             string          `json:"pr_url,omitempty"`
+	Branch            string          `json:"branch,omitempty"`
+	HeadSHA           string          `json:"head_sha,omitempty"`
+	RateLimited       bool            `json:"rate_limited"`
+	CostLimited       bool            `json:"cost_limited"`
+	Effects           []jobEffect     `json:"effects,omitempty"`
 }
 
 type jobEffect struct {

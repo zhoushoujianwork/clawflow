@@ -49,8 +49,8 @@ func configureWorker(cmd *cobra.Command) {
 	f.IntVar(&o.MaxParallel, "max-parallel", 1, "最大并行任务数")
 	cmd.Args = cobra.NoArgs
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
-		if o.MaxParallel < 1 || len(o.Roles) != 1 || o.Roles[0] != "operator" {
-			return fmt.Errorf("max-parallel 必须为正数；当前仅支持 operator 角色")
+		if o.MaxParallel < 1 || len(o.Roles) == 0 || slices.ContainsFunc(o.Roles, func(r string) bool { return r != "operator" && r != "acceptance" }) {
+			return fmt.Errorf("max-parallel 必须为正数；角色必须为 operator 或 acceptance")
 		}
 		api, err := newWorkerAPI(o)
 		if err != nil {
@@ -134,7 +134,11 @@ func (a *workerAPI) post(ctx context.Context, path string, in, out any) error {
 	if err != nil {
 		return err
 	}
-	if len(data) > coordinator.MaxRequestBytes {
+	limit := coordinator.MaxRequestBytes
+	if strings.HasSuffix(path, "/complete") || strings.HasSuffix(path, "/fail") {
+		limit = coordinator.MaxReportBytes
+	}
+	if len(data) > limit {
 		return fmt.Errorf("worker report exceeds coordinator limit")
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", a.base+"/worker/v1/"+path, bytes.NewReader(data))
@@ -239,8 +243,13 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 			eligible = false
 		}
 	}
+	if t.Kind != "acceptance" && !slices.Contains(o.Roles, "operator") {
+		eligible = false
+	}
 	if !eligible {
 		result.Error = "任务标签与 worker 不匹配"
+	} else if t.Kind == "acceptance" {
+		return runWorkerAcceptanceTask(ctx, parent, api, o, t, stop, done)
 	} else {
 		j, timeout, err := build(ctx, t)
 		if err != nil {
@@ -259,7 +268,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 	close(stop)
 	lost := <-done
 	if lost || parent.Err() != nil {
-		result = &jobResult{Status: "lease-lost", Error: "worker lease lost or execution cancelled"}
+		return nil
 	}
 	action := "fail"
 	if result.Status == "success" || result.Status == "skipped" {

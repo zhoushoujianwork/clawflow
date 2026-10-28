@@ -693,3 +693,19 @@ func TestMarshalForGist_OmitsDatabaseDSN(t *testing.T) {
 		t.Error("MarshalForGist must not mutate the caller's config")
 	}
 }
+
+func TestAcceptanceWorkerSyncRoundTrip(t *testing.T) {
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {AcceptanceWorker: "different", WorkerTagsByKind: map[string][]string{"acceptance": {"review"}}}}}
+	raw, err := config.MarshalForGist(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := config.MergeConfigs(&config.Config{Repos: map[string]config.Repo{}}, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := merged.Repos["o/r"]
+	if r.AcceptanceWorker != "different" || len(r.WorkerTagsByKind["acceptance"]) != 1 {
+		t.Fatalf("policy lost in sync: %+v", r)
+	}
+}

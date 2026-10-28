@@ -19,10 +19,10 @@ clawflow worker --coordinator https://HOST:8093 \
 `--run-untagged` 默认开启，可用 `--run-untagged=false` 禁止无标签任务。
 Worker 自动添加小写且去掉 `.local` 后缀的 `host-<hostname>` 标签。
 任务的所有标签都必须满足；平台标签（如 `github`）需通过 `--tags` 显式声明。
-本切片仅支持 `operator` 角色，acceptance 角色属于后续切片。
+使用 `--roles acceptance` 运行独立验收，或 `--roles operator,acceptance` 同时支持两类任务。
 
 每个空闲槽位领取一个任务，空队列每 5 秒重试。执行期间每 30 秒续租；
-续租失败（包括 HTTP 409）立即取消任务 context，并尽力回传 `lease-lost`，不回传失效 effects。
+续租失败（包括 HTTP 409）立即取消任务 context，停止上传该任务的结果、证据和 effects。
 执行前校验本地 operator 的 `skill_digest`；不同版本或用户覆盖导致不一致时拒绝执行，
 需先对齐 worker 与 coordinator 的算子版本。正常结果及 effects 使用原 fencing token 回传。
 连接或结果上报失败会退出，由服务管理器重启；未成功回传的任务由 coordinator 的租约回收处理。
@@ -45,6 +45,23 @@ Worker 名称来自注册身份；`live` 表示 token 未撤销且最近 120 秒
 任务表的重试次数直接使用存储的 `attempt`（初始值 0，租约回收时增加）。
 吞吐量统计终态任务的 `updated_at` 落在 `(当前时间 - 1 小时, 当前时间]` 内的数量，不包含 cancelled。
 接口仅投影调度元数据，不返回 token/hash、fencing token、任务 payload 或 result。
+
+## 独立验收
+
+协调器沿用已有 harvest 条件，在 CI 成功且缺少验收证据或允许基础设施重试时创建验收任务。
+仓库配置 `worker_tags_by_kind.acceptance` 覆盖通用 `worker_tags`，平台标签与 issue 的
+`worker:<tag>` 标签仍须全部匹配。`acceptance_worker: different` 排除该 PR 最新开发任务的
+worker；`any` 允许同一 worker。未配置时，在领取任务时统计最近 120 秒在线且角色、标签匹配的
+验收 worker：超过一个使用 `different`，否则使用 `any`。会话独立性始终强制检查。
+
+成功的 implement/repair 回传原生 `development_events` JSONL（最多 32 MiB，仅元数据）。
+协调器验证租约、PR head 和原生事件身份后，将其以 `0600` 权限写入对应运行目录。
+缺失、截断或无效证据不会成为可信开发溯源；验收门禁保持关闭。
+
+验收 worker 须配置已有本地 checkout 的 `local_path`，用于验证仓库 origin；实际验收使用协调器生成的契约，在本机临时目录运行 planner 和具备命令执行能力的 reviewer。
+计划和验收记录通过带 fencing token 的完成请求上传。协调器复核当前契约、摘要、原生身份、
+执行命令证据及不同 worker 策略后保存记录；原有协调器流程继续处理失败验收修复和条件合并。
+worker 不决定合并，基础设施失败记录仍受现有重试次数和冷却时间限制。
 
 ## macOS LaunchAgent
 

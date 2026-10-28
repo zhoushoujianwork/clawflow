@@ -26,6 +26,7 @@ const GistDescription = "clawflow-config"
 // every machine in the fleet would have to be re-bound by hand, which
 // defeats the purpose of the binding.
 type syncableRepo struct {
+	AcceptanceWorker string              `yaml:"acceptance_worker,omitempty"`
 	WorkerTags       []string            `yaml:"worker_tags,omitempty"`
 	WorkerTagsByKind map[string][]string `yaml:"worker_tags_by_kind,omitempty"`
 	Priority         int                 `yaml:"priority,omitempty"`
@@ -56,7 +57,7 @@ type syncableRepo struct {
 // toSyncable converts a Repo to its syncable representation (strips local_path).
 func toSyncable(r Repo) syncableRepo {
 	return syncableRepo{
-		WorkerTags: r.WorkerTags, WorkerTagsByKind: r.WorkerTagsByKind, Priority: r.Priority,
+		AcceptanceWorker: r.AcceptanceWorker, WorkerTags: r.WorkerTags, WorkerTagsByKind: r.WorkerTagsByKind, Priority: r.Priority,
 		Enabled:            r.Enabled,
 		Platform:           r.Platform,
 		BaseURL:            r.BaseURL,
@@ -83,7 +84,7 @@ func toSyncable(r Repo) syncableRepo {
 // local_path (the only genuinely machine-local field).
 func fromSyncable(s syncableRepo, localPath string) Repo {
 	return Repo{
-		WorkerTags: s.WorkerTags, WorkerTagsByKind: s.WorkerTagsByKind, Priority: s.Priority,
+		AcceptanceWorker: s.AcceptanceWorker, WorkerTags: s.WorkerTags, WorkerTagsByKind: s.WorkerTagsByKind, Priority: s.Priority,
 		Enabled:            s.Enabled,
 		Platform:           s.Platform,
 		BaseURL:            s.BaseURL,
