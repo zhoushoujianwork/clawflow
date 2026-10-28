@@ -504,7 +504,8 @@ type Credentials struct {
 const (
 	RoleChat     = "chat"     // `clawflow chat` REPL + project-gen
 	RoleEval     = "eval"     // operators whose name starts with "evaluate-"
-	RoleOperator = "operator" // every other operator + project Pilot
+	RoleOperator = "operator" // every other operator
+	RolePilot    = "pilot"    // project Pilot wakes
 	RoleLight    = "light"    // lightweight operators: reply-comment, reply-question, track-progress
 )
 

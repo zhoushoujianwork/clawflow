@@ -1,11 +1,14 @@
 package snapshot
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 )
 
 // The dashboard snapshot files (issues.json, pending.json, runs.json, ...) are
@@ -15,12 +18,11 @@ import (
 
 var (
 	// snapshotLockWait bounds how long a writer waits for the snapshot lock;
-	// variables so tests can shorten them.
+	// variable so tests can shorten it.
 	snapshotLockWait = 30 * time.Second
-	snapshotLockPoll = 25 * time.Millisecond
 
 	// snapMu serializes goroutines of this process so they queue in memory
-	// instead of polling the lockfile against each other.
+	// instead of waiting in the kernel against each other.
 	snapMu sync.Mutex
 )
 
@@ -30,28 +32,32 @@ func SnapshotLockPath() string {
 }
 
 // AcquireSnapshotLock takes the cross-process snapshot lock, waiting up to
-// 30s. Locks of dead owners are reclaimed. Callers inside this package should
+// 30s. The kernel releases locks on process exit. Callers inside this package should
 // use withSnapshotLock, which also serializes goroutines of this process.
 func AcquireSnapshotLock() error {
 	return acquireWaiting(SnapshotLockPath(), snapshotLockWait)
 }
 
-// acquireWaiting polls acquirePIDLock until it succeeds or wait elapses.
+// acquireWaiting uses blocking flock without holding the descriptor registry
+// mutex, so the current owner can release while this caller waits.
 func acquireWaiting(path string, wait time.Duration) error {
-	deadline := time.Now().Add(wait)
-	for {
-		holder, err := acquirePIDLock(path, RunLockInfo{PID: os.Getpid(), StartedAt: time.Now().UTC()})
-		if err == nil {
-			return nil
-		}
-		if holder == nil {
-			return err // not contention (e.g. unwritable lock dir)
-		}
-		if !time.Now().Before(deadline) {
-			return fmt.Errorf("%s still held by pid %d after %s", filepath.Base(path), holder.PID, wait)
-		}
-		time.Sleep(snapshotLockPoll)
+	if wait <= 0 {
+		_, err := acquirePIDLock(path, RunLockInfo{PID: os.Getpid(), StartedAt: time.Now().UTC()})
+		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	f, err := filelock.Wait(ctx, path, RunLockInfo{PID: os.Getpid(), StartedAt: time.Now().UTC()})
+	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s still held after %s: %w", filepath.Base(path), wait, err)
+		}
+		return err
+	}
+	lockFileMu.Lock()
+	heldFiles[path] = f
+	lockFileMu.Unlock()
+	return nil
 }
 
 // ReleaseSnapshotLock releases the snapshot lock if this process holds it.

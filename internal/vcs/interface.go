@@ -113,9 +113,36 @@ const (
 
 // CIEvidence is an exact-head observation, not an atomic merge authorization.
 type CIEvidence struct {
-	HeadSHA  string   `json:"head_sha"`
-	Status   CIStatus `json:"status"`
-	CheckIDs []int64  `json:"check_ids"`
+	HeadSHA  string    `json:"head_sha"`
+	Status   CIStatus  `json:"status"`
+	CheckIDs []int64   `json:"check_ids"`
+	Checks   []CICheck `json:"checks,omitempty"`
+}
+
+// CICheck carries suite provenance from the same exact-head aggregation.
+type CICheck struct {
+	ID         int64   `json:"id"`
+	HeadSHA    string  `json:"head_sha"`
+	Status     string  `json:"status"`
+	Conclusion *string `json:"conclusion"`
+	CheckSuite struct {
+		ID int64 `json:"id"`
+	} `json:"check_suite"`
+	App struct {
+		Slug string `json:"slug"`
+	} `json:"app"`
+}
+
+// CIRerunPlan includes checks that cannot be mapped to a rerunnable Actions run.
+type CIRerunPlan struct {
+	HeadSHA       string  `json:"head_sha"`
+	RunIDs        []int64 `json:"run_ids"`
+	NotRerunnable []int64 `json:"not_rerunnable_check_ids,omitempty"`
+	RerunIDs      []int64 `json:"rerun_ids,omitempty"`
+}
+type CIRerunProvider interface {
+	PlanCIRerun(repo string, prNumber int) (CIRerunPlan, error)
+	RerunFailedJobs(repo string, runID int64) error
 }
 
 // SuccessfulFor rejects missing or duplicate identities and stale observations.

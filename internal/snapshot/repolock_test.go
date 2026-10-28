@@ -36,8 +36,8 @@ func TestRepoRunLock_DifferentReposBothAcquire(t *testing.T) {
 		t.Fatalf("info=%+v err=%v", info, err)
 	}
 	ReleaseRepoRunLock("o/a")
-	if _, err := os.Stat(RepoRunLockPath("o/a")); !os.IsNotExist(err) {
-		t.Fatal("lock not removed")
+	if _, err := os.Stat(RepoRunLockPath("o/a")); err != nil || LockHeld(RepoRunLockPath("o/a")) {
+		t.Fatal("lock must persist unlocked")
 	}
 	if err := AcquireRepoRunLock("o/a", "v1"); err != nil {
 		t.Fatalf("re-acquire: %v", err)

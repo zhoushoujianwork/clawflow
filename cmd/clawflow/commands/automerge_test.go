@@ -291,10 +291,10 @@ func TestSweepAutoMergePRs_NotCleanReasonInRunLog(t *testing.T) {
 	}
 	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
 	log := readLog()
-	if !strings.Contains(log, "run/automerge_skip") || !strings.Contains(log, "reason=not_clean") || !strings.Contains(log, "status=conflict") {
-		t.Errorf("expected a run/automerge_skip line with reason=not_clean status=conflict, got:\n%s", log)
+	if !strings.Contains(log, "run/automerge_skip") || !strings.Contains(log, "reason=conflict") || !strings.Contains(log, "status=conflict") {
+		t.Errorf("expected a run/automerge_skip line with reason=conflict status=conflict, got:\n%s", log)
 	}
-	if !strings.Contains(log, "skip_not_clean=1") {
+	if !strings.Contains(log, "skip_conflict=1") {
 		t.Errorf("expected aggregate line to break out skip_not_clean, got:\n%s", log)
 	}
 }

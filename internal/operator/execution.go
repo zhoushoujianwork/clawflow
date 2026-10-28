@@ -2,8 +2,10 @@ package operator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
@@ -49,13 +51,107 @@ func RunOffload(ctx context.Context, prompt, workdir string, timeout time.Durati
 	}
 	opts.MaxBudgetUSD, _ = ctx.Value(budgetKey{}).(float64)
 	result, err := execution.Execute(ctx, prompt, opts)
+	return result.Text, classifyExecutionError(err)
+}
+
+func classifyExecutionError(err error) error {
 	if execution.IsKind(err, "capacity") {
-		return result.Text, errors.Join(ErrRateLimit, ErrCapacity, err)
+		return errors.Join(ErrRateLimit, ErrCapacity, err)
 	}
 	for kind, sentinel := range map[string]error{"rate_limit": ErrRateLimit, "auth": ErrAuthError, "output_limit": ErrOutputLimit, "cost_limit": ErrCostLimit, "budget_exceeded": ErrBudgetExceeded} {
 		if execution.IsKind(err, kind) {
-			return result.Text, errors.Join(sentinel, err)
+			return errors.Join(sentinel, err)
 		}
 	}
-	return result.Text, err
+	return err
+}
+
+// runDevelopment retries a rejected native resume once, retaining the full fresh prompt.
+func runDevelopment(ctx context.Context, prompt string, opts RunOptions, instructions ...string) (string, error) {
+	execute := opts.ExecuteFunc
+	if execute == nil {
+		execute = execution.Execute
+	}
+	activity := &developmentActivity{dst: opts.EventWriter}
+	options := execution.Options{Workspace: opts.Workdir, Role: opts.Role, Timeout: opts.Timeout, Events: activity, PermissionMode: "bypassPermissions"}
+	if len(instructions) > 0 {
+		options.Instructions = instructions[0]
+	}
+	options.MaxBudgetUSD, _ = ctx.Value(budgetKey{}).(float64)
+	options.Resume = opts.SessionKey != "" && opts.ResumePrompt != ""
+	options.SessionKey = opts.SessionKey
+	selected := prompt
+	if options.Resume {
+		selected = opts.ResumePrompt
+	}
+	result, err := execute(ctx, selected, options)
+	resumed := options.Resume
+	if resumed && err != nil && ctx.Err() == nil && ((strings.TrimSpace(result.Text) == "" && !activity.progress) || resumeSpecificError(err)) {
+		if opts.PrepareFreshSession != nil {
+			if resetErr := opts.PrepareFreshSession(); resetErr != nil {
+				if opts.OnExecutionResult != nil {
+					opts.OnExecutionResult(result, resetErr, true)
+				}
+				return result.Text, resetErr
+			}
+		}
+		if opts.OnSessionResume != nil {
+			opts.OnSessionResume("fresh", executionErrorKind(err))
+		}
+		options.Resume, options.SessionKey = false, ""
+		result, err = execute(ctx, prompt, options)
+		resumed = false
+	} else if resumed && opts.OnSessionResume != nil {
+		opts.OnSessionResume("resumed", "eligible")
+	}
+	if opts.OnExecutionResult != nil {
+		opts.OnExecutionResult(result, err, resumed)
+	}
+	return result.Text, classifyExecutionError(err)
+}
+
+func executionErrorKind(err error) string {
+	var e *execution.Error
+	if errors.As(err, &e) {
+		return e.Kind
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	if err != nil {
+		return "execution"
+	}
+	return ""
+}
+
+func resumeSpecificError(err error) bool {
+	kind := executionErrorKind(err)
+	return strings.Contains(kind, "session") || strings.Contains(kind, "resume") || strings.Contains(kind, "ownership") || strings.Contains(kind, "backend") || strings.Contains(kind, "profile")
+}
+
+// Execution supplies validated sanitized event records. Startup notifications
+// do not indicate work. Treat all other progress conservatively as work so a
+// partially executed turn is not replayed, including unknown native event types.
+type developmentActivity struct {
+	dst      io.Writer
+	progress bool
+}
+
+func (w *developmentActivity) Write(p []byte) (int, error) {
+	var event execution.Event
+	if json.Unmarshal(p, &event) == nil && event.Type == "progress" {
+		switch event.NativeType {
+		case "thread.started", "turn.started":
+			// A session or turn can start before any work is produced.
+		default:
+			w.progress = true
+		}
+	}
+	if w.dst != nil {
+		return w.dst.Write(p)
+	}
+	return len(p), nil
 }

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -135,11 +136,16 @@ func acceptanceConfiguration(repo string) (config.Repo, execution.Config, error)
 	}
 	rc, ok := cfg.Repos[repo]
 	parts := strings.Split(repo, "/")
-	if !ok || len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.ContainsAny(repo, "\\\x00\r\n") || strings.Contains(repo, "..") {
+	if !ok || len(parts) < 2 || (rc.Platform != "gitlab" && len(parts) != 2) || strings.ContainsAny(repo, "\\\x00\r\n") || strings.Contains(repo, "..") {
 		return rc, execution.Config{}, errors.New("acceptance requires a registered owner/repository")
 	}
-	if rc.Platform != "" && rc.Platform != "github" {
-		return rc, execution.Config{}, errors.New("independent acceptance currently supports GitHub only")
+	for _, part := range parts {
+		if part == "" {
+			return rc, execution.Config{}, errors.New("acceptance requires a registered owner/repository")
+		}
+	}
+	if rc.Platform != "" && rc.Platform != "github" && rc.Platform != "gitlab" {
+		return rc, execution.Config{}, errors.New("independent acceptance requires GitHub or GitLab")
 	}
 	c := execution.WithEnvironment(cfg.Settings.Execution)
 	if p := c.RoleProfiles["acceptance"]; p != "" {
@@ -206,10 +212,30 @@ func acceptanceOrigin(ctx context.Context, rc config.Repo, repo string) (string,
 		return "", errors.New("acceptance local checkout unavailable")
 	}
 	origin, err := acceptanceGit(ctx, dir, "config", "--get", "remote.origin.url")
-	if err != nil || !(strings.HasPrefix(origin, "https://github.com/") || strings.HasPrefix(origin, "git@github.com:")) || !strings.EqualFold(extractOwnerRepo(origin), repo) {
+	if err != nil || !acceptanceOriginMatches(origin, rc, repo) {
 		return "", errors.New("acceptance checkout origin does not match repository")
 	}
 	return origin, nil
+}
+
+// acceptanceOriginMatches binds the checkout to the configured provider instance.
+func acceptanceOriginMatches(origin string, rc config.Repo, repo string) bool {
+	if rc.Platform != "gitlab" {
+		return (strings.HasPrefix(origin, "https://github.com/") || strings.HasPrefix(origin, "git@github.com:")) && strings.EqualFold(extractOwnerRepo(origin), repo)
+	}
+	base, err := url.Parse(rc.BaseURL)
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return false
+	}
+	expectedPath := strings.Trim(strings.TrimRight(base.Path, "/")+"/"+repo, "/")
+	if strings.HasPrefix(origin, "git@") {
+		host, path, ok := strings.Cut(strings.TrimPrefix(origin, "git@"), ":")
+		return ok && strings.EqualFold(host, base.Hostname()) && strings.TrimSuffix(path, ".git") == expectedPath
+	}
+	remote, err := url.Parse(origin)
+	return err == nil && (remote.Scheme == "https" || remote.Scheme == "http") && remote.User == nil &&
+		strings.EqualFold(remote.Host, base.Host) && remote.RawQuery == "" && remote.Fragment == "" &&
+		strings.TrimSuffix(remote.Path, ".git") == strings.TrimRight(base.Path, "/")+"/"+repo
 }
 
 func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Contract, config.Repo, execution.Config, vcs.PR, error) {

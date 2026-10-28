@@ -52,8 +52,8 @@ func withoutImplemented(sub *operator.Subject) *operator.Subject {
 
 // logReopenSkip records why reopen discovery did not yield a reopen context.
 // The absence of an unconsumed reopen is the normal steady state of an
-// implemented-but-unmerged issue and is logged at INFO; every other error
-// (history read failures, inconsistent events) stays at WARN.
+// implemented-but-unmerged issue and is logged at INFO. Discovery handles
+// unavailable history separately; inconsistent lifecycle evidence stays at WARN.
 func logReopenSkip(repo string, issue int, err error) {
 	if errors.Is(err, vcs.ErrNoUnconsumedReopen) {
 		runLog.Info("run/reopen_skip", "repo", repo, "issue", issue, "reason", "no_unconsumed_reopen")
@@ -63,39 +63,31 @@ func logReopenSkip(repo string, issue int, err error) {
 }
 
 // discoverReopen never changes remote labels or the registry's shared operator.
-// A missing capability is acceptable for an ordinary, never-delivered issue.
+// Only delivered issues need lifecycle evidence; ordinary issues must not
+// depend on provider support for lifecycle endpoints.
 func discoverReopen(client vcs.Client, repo string, sub *operator.Subject) (*reopenContext, error) {
+	if !sub.HasLabel("agent-implemented") {
+		return nil, nil
+	}
+	unavailable := func() (*reopenContext, error) {
+		runLog.Info("run/reopen_skip", "repo", repo, "issue", sub.Number, "reason", "history_unavailable")
+		return nil, nil
+	}
 	lister, ok := client.(vcs.IssueEventLister)
 	if !ok {
-		if sub.HasLabel("agent-implemented") {
-			return nil, fmt.Errorf("reopen history: %w", vcs.ErrNotSupported)
-		}
-		return nil, nil
+		return unavailable()
 	}
 	events, err := lister.ListIssueEvents(repo, sub.Number)
 	if err != nil {
-		return nil, fmt.Errorf("reopen history unavailable: %w", err)
+		return unavailable()
 	}
 	event, cycleErr := vcs.ReopenCycle(events)
 	if cycleErr != nil {
-		if sub.HasLabel("agent-implemented") {
-			return nil, cycleErr
-		}
-		// If there has been a reopen since implementation but the evidence is
-		// ambiguous, do not silently treat a retry as first-time work.
-		var implemented, reopened bool
-		for _, e := range events {
-			implemented = implemented || (e.Type == "labeled" && e.Label == "agent-implemented")
-			reopened = reopened || e.Type == "reopened"
-		}
-		if implemented && reopened {
-			return nil, cycleErr
-		}
-		return nil, nil
+		return nil, cycleErr
 	}
 	h, err := vcs.LoadIssueHistory(client, repo, sub.Number)
 	if err != nil {
-		return nil, err
+		return unavailable()
 	}
 	verified, err := vcs.ReopenCycle(h.Events)
 	if err != nil || verified.ID != event.ID {

@@ -81,6 +81,10 @@ func (f *repairClient) GetPR(string, int) (vcs.PR, error)             { return f
 func (f *repairClient) GetIssue(string, int) (*vcs.Issue, error)      { return f.issue, nil }
 func (f *repairClient) GetCIStatus(string, int) (vcs.CIStatus, error) { return f.status, f.ciErr }
 
+func (f *repairClient) GetPRMergeability(string, int) (vcs.MergeStatus, error) {
+	return vcs.MergeStatusClean, nil
+}
+
 func repairRegistry(t *testing.T) *operator.Registry {
 	t.Helper()
 	reg := operator.NewRegistry()
@@ -127,7 +131,7 @@ func TestCIRepairDispatch(t *testing.T) {
 	if got := scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, normal); len(got) != 0 {
 		t.Fatal("duplicate issue job")
 	}
-	for _, change := range []func(*config.Repo){func(c *config.Repo) { c.AutoMerge = false }, func(c *config.Repo) { c.CIRequired = false }, func(c *config.Repo) { c.Platform = "gitlab" }, func(c *config.Repo) { c.BoundMachine = "not-this-host" }} {
+	for _, change := range []func(*config.Repo){func(c *config.Repo) { c.AutoMerge = false }, func(c *config.Repo) { c.Platform = "gitlab" }, func(c *config.Repo) { c.BoundMachine = "not-this-host" }} {
 		other := cfg
 		change(&other)
 		before := f.listCalls

@@ -242,17 +242,33 @@ type Meta struct {
 }
 
 // RunMeta describes one operator run. events.jsonl lives alongside it.
+// DevelopmentSession records only native development identity, never reviewer state.
+type DevelopmentSession struct {
+	RepairHeadSHA  string `json:"repair_head_sha,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+	Profile        string `json:"profile,omitempty"`
+	Backend        string `json:"backend,omitempty"`
+	Role           string `json:"role,omitempty"`
+	Workdir        string `json:"workdir,omitempty"`
+	BaseSHA        string `json:"base_sha,omitempty"`
+	ErrorKind      string `json:"error_kind,omitempty"`
+	ResumeCount    int    `json:"resume_count,omitempty"`
+	BackendChanged bool   `json:"backend_changed,omitempty"`
+}
+
 type RunMeta struct {
-	HeadSHA       string    `json:"head_sha,omitempty"`
-	Outcome       string    `json:"outcome,omitempty"`
-	OutcomeReason string    `json:"outcome_reason,omitempty"`
-	Operator      string    `json:"operator"`
-	Repo          string    `json:"repo"`
-	IssueNumber   int       `json:"issue_number"`
-	IssueTitle    string    `json:"issue_title,omitempty"`
-	IssueBody     string    `json:"issue_body"`
-	IssueState    string    `json:"issue_state,omitempty"` // "open" | "closed"
-	StartedAt     time.Time `json:"started_at"`
+	RepairReason       string             `json:"repair_reason,omitempty"`
+	DevelopmentSession DevelopmentSession `json:"development_session,omitempty"`
+	HeadSHA            string             `json:"head_sha,omitempty"`
+	Outcome            string             `json:"outcome,omitempty"`
+	OutcomeReason      string             `json:"outcome_reason,omitempty"`
+	Operator           string             `json:"operator"`
+	Repo               string             `json:"repo"`
+	IssueNumber        int                `json:"issue_number"`
+	IssueTitle         string             `json:"issue_title,omitempty"`
+	IssueBody          string             `json:"issue_body"`
+	IssueState         string             `json:"issue_state,omitempty"` // "open" | "closed"
+	StartedAt          time.Time          `json:"started_at"`
 	// EndedAt is a pointer so a nil value omits the JSON key for a still-
 	// running run. With a value type, Go's `omitempty` does NOT skip a zero
 	// time.Time (`omitempty` only skips nil/0/""/empty), so the wire format
@@ -1416,7 +1432,7 @@ var runnerStillAlive = func(repo string, issueNum int, metaStart time.Time) bool
 	if err != nil {
 		return false
 	}
-	if !processAlive(info.PID) {
+	if !IsLocked(repo, issueNum) {
 		return false
 	}
 	// AcquireLock and the meta.json write happen back-to-back at runner

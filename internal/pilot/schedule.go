@@ -21,15 +21,8 @@
 // coherent?" layer; operators are the "execute the work that's
 // already on the board" layer.
 //
-// Two safety rails are enforced via prompt (not code), since the Pilot
-// invokes the same `clawflow` CLI users do and the CLI doesn't know
-// whether its caller is a Pilot or a human:
-//
-//   - Pilot must skip issues carrying agent-running (operator mid-flight).
-//   - Pilot must not duplicate its own prior actions; cooldown gives this
-//     room to mean something. If runaway Pilot noise is observed in the
-//     wild, the next iteration will add a pilot-touched marker label
-//     so the runner can enforce mechanically rather than by prompt.
+// Structured actions are validated, budgeted and audited by the shared executor.
+// The agent prompt treats repositories as read-only.
 package pilot
 
 import (
@@ -312,6 +305,8 @@ func WakeOne(ctx context.Context, projectName string, timeout time.Duration) err
 //
 // Each wake is persisted to ~/.clawflow/data/pilot-runs/<project>/<ts>/
 // with meta.json + events.jsonl so the dashboard can show Pilot activity.
+var runWakeOffload = operator.RunOffload
+
 func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *config.Credentials, timeout time.Duration) error {
 	// Bound the ENTIRE wake — including pre-claude digest fetches and
 	// post-claude finalization — to the configured timeout. Without this,
@@ -352,7 +347,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		Status:    "running",
 	}
 	_ = snapshot.WritePilotRunMeta(runDir, meta)
-	lg.Info("pilot/start", "project", p.Name, "role", config.RoleOperator, "timeout", timeout)
+	lg.Info("pilot/start", "project", p.Name, "role", config.RolePilot, "timeout", timeout)
 
 	// Refresh CLAUDE.md from current project.yaml + cfg.Repos before
 	// every wake. `claude -p` will auto-load it from the workdir, giving
@@ -368,7 +363,8 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	recent := pilotRecentSummaries(p.Name, 3)
 
 	prompt := chat.BuildPilotContext(p.Name, contextMD, deploymentMD, recent, digests, cfg.Settings.Language)
-	role := config.RoleOperator
+	prompt += "\nWake run_id: " + fmt.Sprintf("%x", startedAt.UnixNano()) + "\n"
+	role := config.RolePilot
 	workdir := project.ProjectDir(p.Name)
 
 	eventsFile, _ := os.Create(filepath.Join(runDir, "events.jsonl"))
@@ -390,7 +386,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		defer os.Unsetenv(budget.EnvPath)
 	}
 
-	output, err := operator.RunOffload(ctx, prompt, workdir, timeout, eventsFile, role)
+	output, err := runWakeOffload(ctx, prompt, workdir, timeout, eventsFile, role)
 	if eventsFile != nil {
 		_ = eventsFile.Close()
 	}
@@ -404,6 +400,24 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		if s, rerr := budget.Read(budgetPath); rerr == nil {
 			fmt.Fprintf(os.Stderr, "[pilot] %s: budget %d/%d ops used\n", p.Name, s.Used, s.Max)
 			lg.Info("pilot/budget", "project", p.Name, "used", s.Used, "max", s.Max)
+		}
+	}
+
+	if err == nil {
+		actions, actionErr := ParseActions(output)
+		if actionErr == nil {
+			actions.RunID = fmt.Sprintf("%x", startedAt.UnixNano())
+			executor := NewActionExecutor(cfg, creds, p.Repos, "pilot")
+			var records []ActionRecord
+			records, actionErr = executor.Apply(actions, false)
+			for _, record := range records {
+				if record.Outcome != "applied" && record.Outcome != "already_applied" {
+					actionErr = fmt.Errorf("pilot action %s: %s", record.Action.ID, record.Outcome)
+				}
+			}
+		}
+		if actionErr != nil {
+			err = fmt.Errorf("pilot actions: %w", actionErr)
 		}
 	}
 

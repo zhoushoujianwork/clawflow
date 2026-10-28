@@ -38,7 +38,7 @@ type acceptanceFindings struct {
 	Verdict        string   `json:"verdict"`
 	Summary        string   `json:"summary"`
 	Evidence       []string `json:"evidence"`
-	ContractDigest string   `json:"-"`
+	ContractDigest string   `json:"contract_digest"`
 }
 
 // acceptanceRepairEnabled reports whether failed acceptance verdicts are
@@ -183,8 +183,8 @@ func scanAcceptanceRepair(ctx context.Context, client vcs.Client, repo string, c
 
 // recheckAcceptanceRepair runs under the issue lock just before reservation:
 // the latest verdict must still be the same failed attempt for the same head.
-func recheckAcceptanceRepair(j *runJob, pr vcs.PR) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+func recheckAcceptanceRepair(parent context.Context, j *runJob, pr vcs.PR) error {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	decision, rec, c, err := classifyAcceptanceForRepair(ctx, j.client, j.repo, pr.Number)
 	if decision != acceptanceRepairFailed {
@@ -216,7 +216,7 @@ func acceptanceRepairExhaustedMarker(pr int) string {
 }
 
 func acceptanceRepairExhaustedComment(pr int) string {
-	return fmt.Sprintf("🤖 Automatic repair for PR #%d stopped: the shared repair budget (%d attempts for CI and acceptance repairs) is spent. The PR was not merged. A human should review it, or push a fix.\n\n%s",
+	return fmt.Sprintf("🤖 Automatic repair for PR #%d stopped: the shared repair budget (%d attempts for CI, acceptance and merge-conflict repairs) is spent. The PR was not merged. A human should review it, or push a fix.\n\n%s",
 		pr, ciRepairMaxAttempts, acceptanceRepairExhaustedMarker(pr))
 }
 
@@ -247,6 +247,11 @@ BEGIN UNTRUSTED REVIEWER FINDINGS (JSON)
 // logAcceptanceRepair writes a run/acceptance_repair event for acceptance
 // repairs only.
 func logAcceptanceRepair(j *runJob, phase string, extra ...any) {
+	if j != nil && j.repair != nil && j.repair.MergeConflict {
+		fields := append([]any{"phase", phase, "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "reason", j.repair.reason(), "base_sha", j.repair.PR.BaseSHA}, extra...)
+		runLog.Info("run/conflict_repair", fields...)
+		return
+	}
 	if j == nil || j.repair == nil || j.repair.Acceptance == nil {
 		return
 	}

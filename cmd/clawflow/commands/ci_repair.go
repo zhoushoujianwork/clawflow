@@ -3,8 +3,6 @@ package commands
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +17,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -28,12 +27,16 @@ type ciRepairContext struct {
 	Attempt  int
 	Evidence string
 	// Acceptance is set when the repair input is a failed independent
-	// acceptance verdict instead of failing CI. Nil means a CI repair.
-	Acceptance *acceptanceFindings
+	// acceptance verdict. MergeConflict takes precedence over CI/acceptance.
+	Acceptance    *acceptanceFindings
+	MergeConflict bool
 }
 
 // reason names the repair input for the shared ledger and logs.
 func (r *ciRepairContext) reason() string {
+	if r != nil && r.MergeConflict {
+		return "merge_conflict"
+	}
 	if r != nil && r.Acceptance != nil {
 		return repairReasonAcceptance
 	}
@@ -42,6 +45,9 @@ func (r *ciRepairContext) reason() string {
 
 // label is the human-facing prefix for runner messages.
 func (r *ciRepairContext) label() string {
+	if r.MergeConflict {
+		return "Merge conflict"
+	}
 	if r.reason() == repairReasonAcceptance {
 		return "Acceptance"
 	}
@@ -81,7 +87,7 @@ func ciRepairCandidate(repo string, pr vcs.PR, issue *vcs.Issue) error {
 
 func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Client, repo string, cfg config.Repo, onlyIssue int, normal []*runJob) []*runJob {
 	ciOn, accOn := ciRepairEnabled(cfg), acceptanceRepairEnabled(cfg)
-	if !ciOn && !accOn {
+	if !ciOn && !accOn && !cfg.AutoMerge {
 		return nil
 	}
 	skip := func(pr int, err error) { runLog.Warn("run/ci_repair_skip", "repo", repo, "pr", pr, "err", err.Error()) }
@@ -141,8 +147,17 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 			continue
 		}
 		var findings *acceptanceFindings
+		conflict := false
+		if cfg.AutoMerge {
+			status, err := client.GetPRMergeability(repo, pr.Number)
+			if err != nil {
+				skip(pr.Number, err)
+				continue
+			}
+			conflict = status == vcs.MergeStatusConflict
+		}
 		ciFailing := false
-		if ciOn {
+		if ciOn && !conflict {
 			status, err := client.GetCIStatus(repo, pr.Number)
 			if err != nil {
 				skip(pr.Number, err)
@@ -151,12 +166,14 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 			ciFailing = status == vcs.CIStatusFailure
 		}
 		switch {
-		case ciFailing:
+		case conflict || ciFailing:
 			// CI failure evidence: current behavior. A spent shared budget
 			// ends repair with one comment instead of a silent skip.
-			if err := checkRepairBudget(snapshot.DataDir(), repo, pr.Number, time.Now().UTC()); errors.Is(err, errRepairExhausted) {
+			if err := checkRepairBudget(snapshot.DataDir(), repo, pr.Number, time.Now().UTC()); err != nil {
 				skip(pr.Number, err)
-				repairExhaustedNotice(ctx, client, repo, cfg, pr, n)
+				if errors.Is(err, errRepairExhausted) {
+					repairExhaustedNotice(ctx, client, repo, cfg, pr, n)
+				}
 				continue
 			}
 		case accOn:
@@ -169,7 +186,7 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 		}
 		seen[n] = true
 		sub := &operator.Subject{Number: n, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State}
-		jobs = append(jobs, &runJob{op: op, sub: sub, repo: repo, repoCfg: cfg, client: client, repair: &ciRepairContext{PR: pr, Acceptance: findings}})
+		jobs = append(jobs, &runJob{op: op, sub: sub, repo: repo, repoCfg: cfg, client: client, repair: &ciRepairContext{PR: pr, Acceptance: findings, MergeConflict: conflict}})
 	}
 	return jobs
 }
@@ -177,6 +194,34 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 // Called only while holding the existing cross-process issue lock. Reservation
 // precedes workdir/provider startup; a crash intentionally consumes the attempt.
 func prepareCIRepair(j *runJob, now time.Time) error {
+	return prepareCIRepairContext(context.Background(), j, now)
+}
+func prepareCIRepairContext(ctx context.Context, j *runJob, now time.Time) error {
+	if err := checkCIRepair(ctx, j); err != nil {
+		return err
+	}
+	if err := reserveJobRepair(ctx, j, now); err != nil {
+		return err
+	}
+	j.repair.Evidence = ""
+	if j.repair.Acceptance == nil && !j.repair.MergeConflict {
+		if reader, ok := j.client.(interface {
+			GetFailedJobEvidence(string, string, int64) (string, error)
+		}); ok {
+			evidence, err := reader.GetFailedJobEvidence(j.repo, j.repair.PR.HeadSHA, 0)
+			if err == nil {
+				j.repair.Evidence = evidence
+			}
+		}
+	}
+	return nil
+}
+
+// checkCIRepair refreshes eligibility without touching the reservation ledger.
+func checkCIRepair(ctx context.Context, j *runJob) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	pr, err := j.client.GetPR(j.repo, j.repair.PR.Number)
 	if err != nil {
 		return err
@@ -191,8 +236,19 @@ func prepareCIRepair(j *runJob, now time.Time) error {
 	if pr.HeadSHA != j.repair.PR.HeadSHA || pr.HeadBranch != j.repair.PR.HeadBranch {
 		return fmt.Errorf("PR head changed since scan")
 	}
-	if j.repair.Acceptance != nil {
-		if err := recheckAcceptanceRepair(j, pr); err != nil {
+	if j.repair.MergeConflict {
+		status, err := j.client.GetPRMergeability(j.repo, pr.Number)
+		if err != nil {
+			return err
+		}
+		if (j.hooks == nil && !j.repoCfg.AutoMerge) || status != vcs.MergeStatusConflict {
+			return fmt.Errorf("PR no longer eligible for conflict repair: %s", status)
+		}
+		if pr.BaseBranch == "" || !repairSHA.MatchString(pr.BaseSHA) || pr.BaseBranch == pr.HeadBranch {
+			return fmt.Errorf("missing or unsafe base identity")
+		}
+	} else if j.repair.Acceptance != nil {
+		if err := recheckAcceptanceRepair(ctx, j, pr); err != nil {
 			return err
 		}
 	} else {
@@ -204,211 +260,53 @@ func prepareCIRepair(j *runJob, now time.Time) error {
 			return fmt.Errorf("CI no longer failing: %s", status)
 		}
 	}
-	attempt, err := reserveRepair(snapshot.DataDir(), j.repo, pr, j.repair.reason(), now)
-	if err != nil {
-		return err
-	}
-	j.repair.PR, j.repair.Attempt = pr, attempt
-	j.repair.Evidence = ""
-	if j.repair.Acceptance == nil {
-		if reader, ok := j.client.(interface {
-			GetFailedJobEvidence(string, string, int64) (string, error)
-		}); ok {
-			evidence, err := reader.GetFailedJobEvidence(j.repo, pr.HeadSHA, 0)
-			if err == nil {
-				j.repair.Evidence = evidence
-			}
-		}
-	}
+	j.repair.PR = pr
+
 	j.sub.Body, j.sub.Labels = issue.Body, issue.Labels
 	return nil
 }
 
-// Limits for the CI repair ledger. Only attempts that reached real repair work
-// consume the repair budget; infrastructure outcomes (see classifyRepairInfra)
-// are released and counted against a separate bounded budget with backoff.
+// Compatibility wrappers keep the runner's existing ledger API and file format.
 const (
-	ciRepairMaxAttempts = 3
-	ciRepairMaxInfra    = 5
-	ciRepairCooldown    = 5 * time.Minute
-	ciRepairMaxBackoff  = time.Hour
+	ciRepairMaxAttempts = repairledger.MaxAttempts
+	ciRepairMaxInfra    = repairledger.MaxInfra
+	ciRepairCooldown    = repairledger.Cooldown
+	ciRepairMaxBackoff  = repairledger.MaxBackoff
 )
 
-type ciRepairAttempt struct {
-	Head    string    `json:"head"`
-	Attempt int       `json:"attempt"`
-	At      time.Time `json:"at"`
-	// Released is the infrastructure kind that made this reservation
-	// non-consuming. Empty means the attempt counts against the repair budget.
-	Released string `json:"released,omitempty"`
-	// Reason is the repair input that reserved this attempt ("ci" or
-	// "acceptance"). CI and acceptance repairs share one ledger per PR.
-	Reason string `json:"reason,omitempty"`
-}
-type ciRepairLedger struct {
-	Attempts []ciRepairAttempt `json:"attempts"`
-	// NotBefore is the infrastructure backoff deadline for the next reservation.
-	NotBefore time.Time `json:"not_before,omitempty"`
-}
+type ciRepairAttempt = repairledger.Attempt
+type ciRepairLedger repairledger.Ledger
 
-// counts returns (consumed repair attempts, released infrastructure outcomes).
-func (l ciRepairLedger) counts() (consumed, infra int) {
-	for _, a := range l.Attempts {
-		if a.Released == "" {
-			consumed++
-		} else if a.Released != "no-change" {
-			infra++
-		}
-	}
-	return
-}
+func (l ciRepairLedger) counts() (int, int) { return repairledger.Ledger(l).Counts() }
 
-func ciRepairLedgerPath(root, repo string, pr int) (dir, path string) {
-	key := sha256.Sum256([]byte(strings.ToLower(repo)))
-	dir = filepath.Join(root, "ci-repair", hex.EncodeToString(key[:]))
-	return dir, filepath.Join(dir, fmt.Sprintf("pr-%d.json", pr))
-}
+var (
+	errRepairExhausted = repairledger.ErrExhausted
+	errRepairBlocked   = repairledger.ErrBlocked
+	errRepairWait      = repairledger.ErrWait
+	ciRepairLedgerPath = repairledger.Path
+)
 
 func loadCIRepairLedger(path string) (ciRepairLedger, error) {
-	var ledger ciRepairLedger
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return ledger, nil
-	}
-	if err != nil {
-		return ledger, err
-	}
-	if err := json.Unmarshal(data, &ledger); err != nil {
-		return ledger, fmt.Errorf("invalid repair ledger: %w", err)
-	}
-	return ledger, nil
+	l, err := repairledger.Load(path)
+	return ciRepairLedger(l), err
 }
-
-func saveCIRepairLedger(dir, path string, ledger ciRepairLedger) error {
-	data, err := json.Marshal(ledger)
-	if err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(dir, ".reserve-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err = f.Write(data); err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	// Persist the directory entry before allowing provider startup.
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+func saveCIRepairLedger(dir, path string, l ciRepairLedger) error {
+	return repairledger.Save(dir, path, repairledger.Ledger(l))
 }
-
+func repairBudget(l ciRepairLedger, now time.Time) error {
+	return repairledger.Budget(repairledger.Ledger(l), now)
+}
+func checkRepairBudget(root, repo string, pr int, now time.Time) error {
+	return repairledger.CheckBudget(root, repo, pr, now)
+}
 func reserveCIRepair(root, repo string, pr vcs.PR, now time.Time) (int, error) {
 	return reserveRepair(root, repo, pr, repairReasonCI, now)
 }
-
-// Budget refusals. They wrap a sentinel so callers can tell a spent budget
-// from a transient wait.
-var (
-	errRepairExhausted = errors.New("repair exhausted")
-	errRepairBlocked   = errors.New("repair blocked")
-	errRepairWait      = errors.New("repair waiting")
-)
-
-// repairBudget reports whether the ledger allows another reservation at now.
-func repairBudget(ledger ciRepairLedger, now time.Time) error {
-	consumed, infra := ledger.counts()
-	if consumed >= ciRepairMaxAttempts {
-		return fmt.Errorf("%w: %d total attempts", errRepairExhausted, ciRepairMaxAttempts)
-	}
-	if infra >= ciRepairMaxInfra {
-		last := ledger.Attempts[len(ledger.Attempts)-1]
-		return fmt.Errorf("%w: infrastructure budget exhausted (%d outcomes, last: %s)", errRepairBlocked, infra, last.Released)
-	}
-	if n := len(ledger.Attempts); n > 0 && now.Sub(ledger.Attempts[n-1].At) < ciRepairCooldown {
-		return fmt.Errorf("%w: cooldown 5 minutes", errRepairWait)
-	}
-	if now.Before(ledger.NotBefore) {
-		return fmt.Errorf("%w: infrastructure backoff until %s", errRepairWait, ledger.NotBefore.Format(time.RFC3339))
-	}
-	return nil
-}
-
-// checkRepairBudget is the read-only form of the reservation check. It never
-// creates the ledger.
-func checkRepairBudget(root, repo string, pr int, now time.Time) error {
-	_, path := ciRepairLedgerPath(root, repo, pr)
-	ledger, err := loadCIRepairLedger(path)
-	if err != nil {
-		return err
-	}
-	return repairBudget(ledger, now)
-}
-
-// reserveRepair takes one attempt from the PR's shared ledger. CI and
-// acceptance repairs draw on the same budget, cooldown and backoff.
 func reserveRepair(root, repo string, pr vcs.PR, reason string, now time.Time) (int, error) {
-	dir, path := ciRepairLedgerPath(root, repo, pr.Number)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return 0, err
-	}
-	ledger, err := loadCIRepairLedger(path)
-	if err != nil {
-		return 0, err
-	}
-	if err := repairBudget(ledger, now); err != nil {
-		return 0, err
-	}
-	consumed, _ := ledger.counts()
-	attempt := consumed + 1
-	ledger.Attempts = append(ledger.Attempts, ciRepairAttempt{Head: pr.HeadSHA, Attempt: attempt, At: now, Reason: reason})
-	if err := saveCIRepairLedger(dir, path, ledger); err != nil {
-		return 0, err
-	}
-	return attempt, nil
+	return repairledger.Reserve(root, repo, pr, reason, now)
 }
-
-// releaseCIRepair marks the open reservation for `attempt` as non-consuming
-// after an infrastructure or confirmed no-change outcome and applies backoff.
-// Only infrastructure releases count toward the bounded infrastructure budget.
 func releaseCIRepair(root, repo string, pr vcs.PR, attempt int, kind string, now time.Time) error {
-	dir, path := ciRepairLedgerPath(root, repo, pr.Number)
-	ledger, err := loadCIRepairLedger(path)
-	if err != nil {
-		return err
-	}
-	idx := -1
-	for i := len(ledger.Attempts) - 1; i >= 0; i-- {
-		a := ledger.Attempts[i]
-		if a.Released == "" && a.Attempt == attempt && a.Head == pr.HeadSHA {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("no open repair reservation for attempt %d", attempt)
-	}
-	ledger.Attempts[idx].Released = kind
-	_, infra := ledger.counts()
-	backoff := ciRepairCooldown << uint(infra)
-	if backoff > ciRepairMaxBackoff || backoff <= 0 {
-		backoff = ciRepairMaxBackoff
-	}
-	ledger.NotBefore = now.Add(backoff)
-	return saveCIRepairLedger(dir, path, ledger)
+	return repairledger.Release(root, repo, pr, attempt, kind, now)
 }
 
 // classifyRepairInfra reports whether a failed repair run was an infrastructure
@@ -468,6 +366,9 @@ func repairToolActivity(path string) (bool, error) {
 }
 
 func (r *ciRepairContext) prompt(testCommand string) string {
+	if r.MergeConflict {
+		return fmt.Sprintf("Merge conflict repair context:\nReason: merge_conflict\nExisting PR: https://github.com/%s/pull/%d\nHead branch: %s\nExpected head SHA: %s\nMerge conflict with %s at %s\nReserved attempt: %d of 3 (shared with CI and acceptance)\nConfigured headless test command: %s\nFetch the current base into origin/<base>, verify it matches the expected base SHA, then git merge origin/<base> (merge commit). Never rebase or force-push. Resolve conflicts preserving both changes' intent under the issue requirements. Run configured tests and push to the same head branch. Do not create a new PR. If resolution is unsafe, report BLOCKED with conflicting files and emit agent-failed.\n", r.PR.HeadRepo, r.PR.Number, r.PR.HeadBranch, r.PR.HeadSHA, r.PR.BaseBranch, r.PR.BaseSHA, r.Attempt, testCommand)
+	}
 	if r.Acceptance != nil {
 		return r.acceptancePrompt(testCommand)
 	}
@@ -561,10 +462,34 @@ func confirmedDevelopmentHead(ctx context.Context, workdir string, j *runJob) (s
 	if len(fields) != 2 || fields[0] != head || fields[1] != "refs/heads/"+branch {
 		return "", fmt.Errorf("development head is not published")
 	}
+
+	if j.repair != nil && j.repair.MergeConflict {
+		if head == j.repair.PR.HeadSHA {
+			return "", fmt.Errorf("conflict repair did not change head")
+		}
+		for _, ancestor := range []string{j.repair.PR.HeadSHA, j.repair.PR.BaseSHA} {
+			if _, err := acceptanceGit(ctx, workdir, "merge-base", "--is-ancestor", ancestor, head); err != nil {
+				return "", fmt.Errorf("conflict repair must preserve PR and base history: %w", err)
+			}
+		}
+		clean, err := acceptanceGit(ctx, workdir, "status", "--porcelain")
+		if err != nil || clean != "" {
+			return "", fmt.Errorf("conflict repair left local changes")
+		}
+	}
 	return head, nil
 }
 
 func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outcome, body string) (string, error) {
+	// Validate conflict repair before operator write-back, not during the later
+	// best-effort provenance lookup. A success marker alone cannot prove a merge.
+	if j.repair != nil && j.repair.MergeConflict && outcome == "agent-implemented" {
+		head, err := confirmedDevelopmentHead(ctx, workdir, j)
+		if err != nil {
+			return "", fmt.Errorf("conflict repair verification: %w", err)
+		}
+		return head, nil
+	}
 	if outcome != "no-change" {
 		return "", nil
 	}
@@ -582,8 +507,26 @@ func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outco
 	if err != nil || clean != "" {
 		return "", fmt.Errorf("no-change repair left local changes")
 	}
-	if err := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, "no-change", time.Now().UTC()); err != nil {
+	if err := j.releaseRepair("no-change", time.Now().UTC()); err != nil {
 		return "", err
 	}
 	return head, nil
+}
+
+// reserveJobRepair is the shared-state boundary after portable eligibility checks.
+func reserveJobRepair(ctx context.Context, j *runJob, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if j.hooks != nil {
+		if j.hooks.ReserveRepair != nil {
+			return j.hooks.ReserveRepair(ctx, j, now)
+		}
+		return nil
+	}
+	attempt, err := reserveRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.reason(), now)
+	if err == nil {
+		j.repair.Attempt = attempt
+	}
+	return err
 }

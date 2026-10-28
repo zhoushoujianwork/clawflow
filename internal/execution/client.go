@@ -59,6 +59,18 @@ func WithEnvironment(c Config) Config {
 	return c
 }
 
+// ProfileForRole resolves a role override with the same environment precedence as execution.
+func ProfileForRole(c Config, role string) string {
+	profile := c.Profile
+	if override := c.RoleProfiles[role]; override != "" {
+		profile = override
+	}
+	if override, ok := os.LookupEnv("CLAWFLOW_OFFLOAD_PROFILE"); ok {
+		profile = override
+	}
+	return profile
+}
+
 func ValidateConfig(c Config) error {
 	command := c.Command
 	if command == "" {
@@ -403,6 +415,15 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if eventErr != nil {
 		return result, eventErr
 	}
+	// Preserve validated stream identity even if interruption prevents a final
+	// event or stdout. Never recover answer text/outcomes from events.
+	if tail.session != "" {
+		result = Result{NativeSessionID: tail.session, SessionKey: tail.session, Profile: c.Profile, Backend: tail.backend, Model: tail.model, RunID: tail.runID, CallerRunID: req.RequestID}
+	}
+	if tail.final != nil {
+		e := tail.final
+		result = Result{NativeSessionID: e.Session, SessionKey: e.Session, Profile: c.Profile, Backend: e.Backend, Model: e.Model, RunID: e.RunID, CallerRunID: e.CallerRunID, Status: e.Status, ErrorKind: e.ErrorKind, ExitCode: e.ExitCode}
+	}
 	if exceeded {
 		return result, &Error{Kind: "protocol_output_limit"}
 	}
@@ -432,12 +453,14 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, &Error{Kind: "transport"}
 	}
 	raw := bytes.TrimSpace(output)
-	if !validJSON(raw) || json.Unmarshal(raw, &result) != nil || !hasFields(raw, "status", "exit_code", "profile", "run_id", "caller_run_id", "execution_policy") {
+	var decoded Result
+	if !validJSON(raw) || json.Unmarshal(raw, &decoded) != nil || !hasFields(raw, "status", "exit_code", "profile", "run_id", "caller_run_id", "execution_policy") {
 		if runCtx.Err() != nil {
 			return result, runCtx.Err()
 		}
-		return Result{}, &Error{Kind: "protocol_invalid_result"}
+		return result, &Error{Kind: "protocol_invalid_result"}
 	}
+	result = decoded
 	result.Text = redact(result.Text, env)
 	result.Error = redact(result.Error, env)
 	result.SessionKey = result.NativeSessionID
@@ -475,7 +498,7 @@ var capacityMessage = regexp.MustCompile(`(?i)\bat capacity\b|\boverloaded\b|\bc
 
 func safeKind(s string) string {
 	switch s {
-	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "timeout", "canceled", "execution", "launch", "events_io":
+	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "unknown_session", "session_expired", "session_not_found", "ownership_mismatch", "backend_mismatch", "profile_mismatch", "resume_rejected", "context_exhausted", "context_limit", "context_length_exceeded", "timeout", "canceled", "execution", "launch", "events_io":
 		return s
 	}
 	return "execution"
@@ -509,13 +532,7 @@ func execute(ctx context.Context, prompt string, opts Options, observe func(Obse
 	if err != nil {
 		return Result{}, err
 	}
-	if profile := c.RoleProfiles[opts.Role]; profile != "" {
-		c.Profile = profile
-	}
-	// An explicit environment profile overrides role selection too.
-	if profile, ok := os.LookupEnv("CLAWFLOW_OFFLOAD_PROFILE"); ok {
-		c.Profile = profile
-	}
+	c.Profile = ProfileForRole(c, opts.Role)
 	if opts.Profile != "" {
 		c.Profile = opts.Profile
 	} // Pin returned profile on resume.

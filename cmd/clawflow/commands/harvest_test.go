@@ -2,12 +2,16 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +20,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
 )
 
 // harvestFixture builds the acceptance fixture with the repo enabled, a run.log
@@ -112,7 +117,7 @@ func TestHarvestNoDispatch(t *testing.T) {
 			setHarvestRepo(t, func(r *config.Repo) { v := false; r.AcceptanceOverlapCI = &v })
 		}},
 		{name: "ci failed", reason: "ci_not_success", setup: func(_ *testing.T, f *acceptanceFake) { f.ciStatus = vcs.CIStatusFailure }},
-		{name: "not mergeable", reason: "not_clean", setup: func(_ *testing.T, f *acceptanceFake) {
+		{name: "not mergeable", reason: "conflict", setup: func(_ *testing.T, f *acceptanceFake) {
 			f.mergeability = map[int]vcs.MergeStatus{11: vcs.MergeStatusConflict}
 		}},
 		{name: "draft", reason: "draft", setup: func(_ *testing.T, f *acceptanceFake) {
@@ -537,5 +542,57 @@ func TestAcceptanceWiresExactCIEvidence(t *testing.T) {
 	}
 	if record.ReviewMode != acceptance.CIVerified || record.CI == nil || record.CI.HeadSHA != record.Contract.HeadSHA {
 		t.Fatalf("CI evidence not wired: %+v", record)
+	}
+}
+
+func TestHarvestGitLabConditionalMerge(t *testing.T) {
+	f, readLog, calls := harvestFixture(t)
+	var merges atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mr := map[string]any{
+			"iid": 11, "title": f.pr.Title, "description": f.pr.Body, "state": "opened",
+			"sha": f.pr.HeadSHA, "diff_refs": map[string]string{"base_sha": f.pr.BaseSHA},
+			"source_branch": f.pr.HeadBranch, "target_branch": "main",
+			"source_project_id": 1, "target_project_id": 1, "merge_status": "can_be_merged",
+		}
+		var result any
+		switch r.Method + " " + r.URL.Path {
+		case "DELETE /api/v4/projects/o/r/repository/branches/fix/issue-42":
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case "GET /api/v4/projects/o/r/merge_requests":
+			result = []any{mr}
+		case "GET /api/v4/projects/o/r/merge_requests/11":
+			result = mr
+		case "GET /api/v4/projects/o/r/issues/42":
+			result = map[string]any{"iid": 42, "title": f.issue.Title, "description": f.issue.Body, "state": "opened"}
+		case "GET /api/v4/projects/o/r/merge_requests/11/pipelines":
+			result = []any{map[string]string{"status": "success"}}
+		case "PUT /api/v4/projects/o/r/merge_requests/11/merge":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["sha"] != f.pr.HeadSHA || body["merge_when_pipeline_succeeds"] != false {
+				t.Errorf("unexpected merge request: %v, err=%v", body, err)
+			}
+			merges.Add(1)
+			result = map[string]string{"state": "merged", "merge_commit_sha": strings.Repeat("c", 40)}
+		default:
+			t.Errorf("unexpected GitLab request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(result)
+	}))
+	defer srv.Close()
+	setHarvestRepo(t, func(r *config.Repo) { r.Platform = "gitlab"; r.BaseURL = srv.URL })
+	oldGit := acceptanceGit
+	acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+		if args[0] == "config" {
+			return srv.URL + "/o/r.git", nil
+		}
+		return oldGit(ctx, dir, args...)
+	}
+	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return gitlab.New("test-token", srv.URL), nil }
+	if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 1 || merges.Load() != 1 {
+		t.Fatalf("failed=%v calls=%d merges=%d log=%s", failed, *calls, merges.Load(), readLog())
 	}
 }

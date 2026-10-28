@@ -255,7 +255,11 @@ func TestReopenedLifecycleScanToCompletion(t *testing.T) {
 			if !strings.Contains(workdir, "reopen-"+job.reopen.token()) {
 				t.Fatalf("workdir not cycle-scoped: %s", workdir)
 			}
-			if _, err := os.Stat(workdir); !os.IsNotExist(err) {
+			if _, err := os.Stat(workdir); name == "label outage" {
+				if err != nil {
+					t.Fatalf("write-back failure lost native session worktree: %v", err)
+				}
+			} else if !os.IsNotExist(err) {
 				t.Fatalf("successful worktree not cleaned: %v", err)
 			}
 			if snapshot.IsLocked("o/r", 9) {

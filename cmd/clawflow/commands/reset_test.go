@@ -162,7 +162,7 @@ func TestResetPartialFailureAndRecheck(t *testing.T) {
 	if !bytes.Contains(data, []byte(`"status": "failed"`)) {
 		t.Fatalf("%s", data)
 	}
-	if _, err := os.Stat(snapshot.RunLockPath()); !os.IsNotExist(err) {
+	if snapshot.LockHeld(snapshot.RunLockPath()) {
 		t.Fatal("run lock not released")
 	}
 	// A new live process between preview and apply is refused before pausing.
@@ -299,10 +299,24 @@ func TestApplyResetRefusesWhilePerRepoRunLockHeld(t *testing.T) {
 	if err := applyReset(&r, cfg); err == nil || !strings.Contains(err.Error(), "stop active clawflow run") {
 		t.Fatalf("err = %v", err)
 	}
-	if _, err := os.Stat(snapshot.RunLockPath()); !os.IsNotExist(err) {
+	if snapshot.LockHeld(snapshot.RunLockPath()) {
 		t.Fatal("legacy lock not released after refusal")
 	}
 	if _, err := os.Stat(filepath.Join(root, "data", "sentinel")); err != nil {
 		t.Fatal("data moved despite refusal")
+	}
+}
+
+func TestResetPersistentLockOwner(t *testing.T) {
+	resetTestHome(t)
+	if err := snapshot.AcquireLock("o/r", 1, "implement"); err != nil {
+		t.Fatal(err)
+	}
+	if err := resetIdle(false); err == nil {
+		t.Fatal("reset accepted active issue lock")
+	}
+	snapshot.ReleaseLock("o/r", 1)
+	if err := resetIdle(false); err != nil {
+		t.Fatalf("released owner blocked reset: %v", err)
 	}
 }
