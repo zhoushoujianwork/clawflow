@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -156,15 +157,31 @@ func (s Source) matches(c Contract) bool {
 	return s.Clean && s.HeadSHA == c.HeadSHA && s.BaseSHA == c.BaseSHA && s.IntegrationSHA == c.IntegrationSHA
 }
 
+// FindingLocation identifies a source line in the reviewed head revision.
+type FindingLocation struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Side string `json:"side"`
+}
+
+// Validate rejects paths outside the repository and locations outside the head revision.
+func (l FindingLocation) Validate() error {
+	if l.Path == "" || path.IsAbs(l.Path) || path.Clean(l.Path) != l.Path || l.Path == "." || l.Path == ".." || strings.HasPrefix(l.Path, "../") || strings.ContainsAny(l.Path, "\\\x00\r\n:") || l.Line < 1 || l.Side != "head" {
+		return errors.New("invalid finding location: repo-relative path, positive line and head side required")
+	}
+	return nil
+}
+
 // Finding separates actionable requirement/defect evidence from review advice.
 // Requirement names a contract requirement; Defect names a correctness/safety
 // violation in changed code. Advisory items cannot make acceptance fail.
 type Finding struct {
-	Kind        string `json:"kind"`
-	Summary     string `json:"summary"`
-	Requirement string `json:"requirement,omitempty"`
-	Defect      string `json:"defect,omitempty"`
-	Evidence    string `json:"evidence,omitempty"`
+	Locations   []FindingLocation `json:"locations,omitempty"`
+	Kind        string            `json:"kind"`
+	Summary     string            `json:"summary"`
+	Requirement string            `json:"requirement,omitempty"`
+	Defect      string            `json:"defect,omitempty"`
+	Evidence    string            `json:"evidence,omitempty"`
 }
 
 func (f Finding) Failing() bool {
@@ -174,6 +191,11 @@ func (f Finding) Failing() bool {
 func validateFindings(findings []Finding) (bool, error) {
 	failing := false
 	for _, f := range findings {
+		for _, l := range f.Locations {
+			if err := l.Validate(); err != nil {
+				return false, err
+			}
+		}
 		if !nonempty(f.Summary) {
 			return false, errors.New("finding requires summary")
 		}

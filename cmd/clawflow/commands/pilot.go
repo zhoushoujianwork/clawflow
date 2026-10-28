@@ -1,18 +1,22 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/user"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
+	"gopkg.in/yaml.v3"
 )
 
 // NewPilotCmd returns the `clawflow pilot` parent command. Subcommands
 // expose Pilot operations that don't naturally belong on `project`
-// (which manages the project itself, not the AI driving it). Today
-// there is just `wake` — the manual-trigger entry point used by the
-// dashboard's "Wake now" button and reachable from a terminal.
+// (which manages the project itself, not the AI driving it). It supports
+// manual wakes and validated action application for external supervisors.
 func NewPilotCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pilot",
@@ -21,7 +25,7 @@ func NewPilotCmd() *cobra.Command {
 automatically at the end of every 'clawflow run' pass, throttled by
 the project's cooldown. This command lets you trigger a wake on demand.`,
 	}
-	cmd.AddCommand(newPilotWakeCmd())
+	cmd.AddCommand(newPilotWakeCmd(), newPilotApplyCmd())
 	return cmd
 }
 
@@ -47,5 +51,73 @@ this wake's start time (mirroring a scheduled wake's behaviour).`,
 		},
 	}
 	cmd.Flags().IntVar(&timeoutMin, "timeout", 60, "wake timeout in minutes")
+	return cmd
+}
+
+func newPilotApplyCmd() *cobra.Command {
+	var repo, file string
+	var dry bool
+	cmd := &cobra.Command{Use: "apply", Short: "校验并执行结构化 Pilot 动作", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			data, err := os.ReadFile(file)
+			if err != nil {
+				return err
+			}
+			set, err := pilot.DecodeActions(data)
+			if err != nil {
+				return err
+			}
+			var cfg *config.Config
+			if dry {
+				// Load does legacy migration; dry-run must not write config.
+				raw, readErr := os.ReadFile(config.ConfigPath())
+				if readErr != nil {
+					return readErr
+				}
+				cfg = &config.Config{}
+				if err := yaml.Unmarshal(raw, cfg); err != nil {
+					return err
+				}
+			} else {
+				cfg, err = config.Load()
+				if err != nil {
+					return err
+				}
+			}
+			if _, ok := cfg.Repos[repo]; !ok {
+				return fmt.Errorf("repo %q not configured", repo)
+			}
+			var creds *config.Credentials
+			if !dry {
+				creds, err = config.LoadCredentials()
+				if err != nil {
+					return err
+				}
+			}
+			u, err := user.Current()
+			if err != nil {
+				return err
+			}
+			executor := pilot.NewActionExecutor(cfg, creds, []string{repo}, "cli:"+u.Username)
+			executor.DefaultRepo = repo
+			results, err := executor.Apply(set, dry)
+			if err != nil {
+				return err
+			}
+			if err = json.NewEncoder(cmd.OutOrStdout()).Encode(results); err != nil {
+				return err
+			}
+			for _, r := range results {
+				if r.Outcome != "applied" && r.Outcome != "already_applied" && r.Outcome != "valid" {
+					return fmt.Errorf("pilot action %s: %s", r.Action.ID, r.Outcome)
+				}
+			}
+			return nil
+		}}
+	cmd.Flags().StringVar(&repo, "repo", "", "目标仓库")
+	cmd.Flags().StringVar(&file, "file", "", "动作 JSON 文件")
+	cmd.Flags().BoolVar(&dry, "dry-run", false, "仅打印校验结果，不写入或执行动作")
+	_ = cmd.MarkFlagRequired("repo")
+	_ = cmd.MarkFlagRequired("file")
 	return cmd
 }
