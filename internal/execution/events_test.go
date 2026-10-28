@@ -397,6 +397,37 @@ func TestOffloadEventTailPartialRecordsAndBounds(t *testing.T) {
 	}
 }
 
+func TestInterruptedRunRetainsValidatedProgressIdentity(t *testing.T) {
+	for _, mode := range []string{"timeout", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			c, req, _ := streamingFixture(t)
+			req.TimeoutMS = 1500
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			observed := false
+			result, err := Run(ctx, c, req, nil, nil, func(Observation) {
+				observed = true
+				if mode == "canceled" {
+					cancel()
+				}
+			})
+			wantErr := context.DeadlineExceeded
+			if mode == "canceled" {
+				wantErr = context.Canceled
+			}
+			if !observed || !errors.Is(err, wantErr) {
+				t.Fatalf("progress=%v err=%v", observed, err)
+			}
+			if result.NativeSessionID != "native-actual" || result.SessionKey != "native-actual" || result.Profile != c.Profile || result.Backend != "claude" || result.Model != "profile-model" || result.RunID != "stream-run" || result.CallerRunID != req.RequestID {
+				t.Fatalf("lost validated identity: %+v", result)
+			}
+			if result.Text != "" || result.Status != "" || result.ErrorKind != "" {
+				t.Fatalf("progress became a terminal result: %+v", result)
+			}
+		})
+	}
+}
+
 func TestTimeoutRetainsValidatedFinalIdentity(t *testing.T) {
 	c, req, gate := streamingFixture(t)
 	t.Setenv("CLAWFLOW_EVENTS_MODE", "final-then-timeout")

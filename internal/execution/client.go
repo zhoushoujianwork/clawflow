@@ -403,8 +403,11 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if eventErr != nil {
 		return result, eventErr
 	}
-	// Preserve validated final identity when timeout or a transport failure
-	// prevents reading stdout. Never recover answer text/outcomes from events.
+	// Preserve validated stream identity even if interruption prevents a final
+	// event or stdout. Never recover answer text/outcomes from events.
+	if tail.session != "" {
+		result = Result{NativeSessionID: tail.session, SessionKey: tail.session, Profile: c.Profile, Backend: tail.backend, Model: tail.model, RunID: tail.runID, CallerRunID: req.RequestID}
+	}
 	if tail.final != nil {
 		e := tail.final
 		result = Result{NativeSessionID: e.Session, SessionKey: e.Session, Profile: c.Profile, Backend: e.Backend, Model: e.Model, RunID: e.RunID, CallerRunID: e.CallerRunID, Status: e.Status, ErrorKind: e.ErrorKind, ExitCode: e.ExitCode}
