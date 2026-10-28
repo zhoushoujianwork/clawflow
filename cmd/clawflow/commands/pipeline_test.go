@@ -16,23 +16,23 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
-// pipelineFake serves one repository's issues, queue and PRs.
+// pipelineFake serves one repository's issues and PRs.
 type pipelineFake struct {
 	*sweepFake
-	issues    []vcs.Issue
-	queue     []vcs.Issue
-	queueErr  error
-	open      []vcs.PR
-	closed    []vcs.PR
-	ci        map[int]vcs.CIStatus
-	ciErr     map[int]error
-	prLists   int
-	detailReq int
+	issues        []vcs.Issue
+	subIssueCalls int
+	open          []vcs.PR
+	closed        []vcs.PR
+	ci            map[int]vcs.CIStatus
+	ciErr         map[int]error
+	prLists       int
+	detailReq     int
 }
 
 func (f *pipelineFake) ListOpenIssues(string) ([]vcs.Issue, error) { return f.issues, nil }
 func (f *pipelineFake) ListSubIssues(string, int) ([]vcs.Issue, error) {
-	return f.queue, f.queueErr
+	f.subIssueCalls++
+	return nil, errors.New("unexpected sub-issue request")
 }
 func (f *pipelineFake) ListRecentPRs(_, state string, _ int) ([]vcs.PR, error) {
 	f.prLists++
@@ -83,13 +83,13 @@ func itemFor(t *testing.T, b pipeline.RepoBoard, issue int) pipeline.Item {
 	return pipeline.Item{}
 }
 
-func TestBuildPipelineEnabledAutoMergeOrQueueRepos(t *testing.T) {
+func TestBuildPipelineEnabledOrAutoMergeRepos(t *testing.T) {
 	f := newPipelineFake()
 	d := pipelineTestDeps(f, map[string]config.Repo{
 		"o/plain":    {Enabled: true},
 		"o/merge":    {Enabled: false, AutoMerge: true},
-		"o/queue":    {Enabled: true, QueueIssue: 9},
-		"o/both":     {AutoMerge: true, QueueIssue: 3},
+		"o/queue":    {Enabled: true},
+		"o/both":     {AutoMerge: true},
 		"o/disabled": {},
 	})
 	snap := buildPipeline(context.Background(), d)
@@ -110,34 +110,21 @@ func TestBuildPipelineEnabledAutoMergeOrQueueRepos(t *testing.T) {
 
 func TestBuildPipelineQueueAndItems(t *testing.T) {
 	f := newPipelineFake()
-	f.queue = []vcs.Issue{
-		{Number: 20, Title: "second", State: "open"},
-		{Number: 10, Title: "first", State: "open", Labels: []string{"agent-implemented"}},
-		{Number: 5, Title: "old", State: "closed"},
-	}
 	f.issues = []vcs.Issue{
-		{Number: 10, Title: "first", State: "open", Labels: []string{"agent-implemented"}},
-		{Number: 20, Title: "second", State: "open"},
+		{Number: 10, Title: "first", State: "open", Labels: []string{"agent-implemented", "clawflow"}},
+		{Number: 20, Title: "second", State: "open", Labels: []string{"clawflow"}},
 	}
 	f.open = []vcs.PR{{Number: 31, Title: "fix: first", State: "open", HeadBranch: "fix/issue-10", HeadSHA: strings.Repeat("a", 40), URL: "https://github.com/o/r/pull/31", UpdatedAt: "2026-10-27T11:00:00Z"}}
 	f.ci = map[int]vcs.CIStatus{31: vcs.CIStatusFailure}
-	events := []pipeline.Event{{Time: "2026-10-27T11:59:00Z", Event: "run/queue_wait", Fields: map[string]string{"repo": "o/r", "issue": "10", "reason": "in_flight_open_pr #31"}}}
-	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, QueueIssue: 9, CIRequired: true}})
-	d.events = func() ([]pipeline.Event, error) { return events, nil }
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, CIRequired: true}})
+	d.globalQueue = func() []queue.ListEntry {
+		return []queue.ListEntry{{Repo: "o/r", Number: 20, Position: 1}, {Repo: "o/r", Number: 10, Position: 2}}
+	}
 
 	snap := buildPipeline(context.Background(), d)
 	b := snap.Repos[0]
-	if b.Queue == nil || b.Queue.Issue != 9 || len(b.Queue.Entries) != 3 {
-		t.Fatalf("queue = %+v", b.Queue)
-	}
-	if e := b.Queue.Entries; e[0].Number != 20 || e[0].Position != 1 || e[1].Number != 10 || e[1].Position != 2 || e[2].Position != 0 {
-		t.Fatalf("entries order/position: %+v", e)
-	}
-	if dec := b.Queue.Decision; dec == nil || dec.Action != "wait" || dec.Issue != 10 {
-		t.Fatalf("decision = %+v", dec)
-	}
-	if b.Queue.Entries[1].Action != "wait" || b.Queue.Entries[1].Reason != "in_flight_open_pr #31" {
-		t.Fatalf("entry decision = %+v", b.Queue.Entries[1])
+	if f.subIssueCalls != 0 {
+		t.Fatal("legacy sub-issues requested")
 	}
 	if len(b.Items) != 2 || b.Items[0].Issue != 20 || b.Items[1].Issue != 10 {
 		t.Fatalf("items must follow queue order: %+v", b.Items)
@@ -147,16 +134,6 @@ func TestBuildPipelineQueueAndItems(t *testing.T) {
 	}
 	if got := itemFor(t, b, 20); got.Stage != pipeline.StageQueued || !got.InQueue || got.QueuePosition != 1 {
 		t.Fatalf("item 20 = %+v", got)
-	}
-}
-
-func TestBuildPipelineQueueReadFailureIsReportedNotFatal(t *testing.T) {
-	f := newPipelineFake()
-	f.queueErr = errors.New("HTTP 502")
-	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {QueueIssue: 9}})
-	b := buildPipeline(context.Background(), d).Repos[0]
-	if b.Queue == nil || !strings.Contains(b.Queue.Error, "502") || len(b.Queue.Entries) != 0 {
-		t.Fatalf("queue = %+v", b.Queue)
 	}
 }
 

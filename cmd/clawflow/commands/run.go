@@ -1106,16 +1106,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 		if stateErr != nil {
 			runLog.Warn("queue/state_unreadable", "repo", fullName, "err", stateErr.Error())
 		}
-		migrated := migrateQueueIssue(client, fullName, repoCfg.QueueIssue, repoCfg.QueueScope != "",
-			func() error { return persistRepoQueueScope(fullName, queue.ScopeRanked) }, &state)
-		if migrated && repoCfg.QueueIssue > 0 && repoCfg.QueueScope == "" {
-			repoCfg.QueueScope = queue.ScopeRanked // just persisted
-		}
 		rank, rankErr := queue.LoadRank()
 		if rankErr != nil {
 			runLog.Warn("queue/rank_unreadable", "repo", fullName, "err", rankErr.Error())
 		}
-		maxInFlight, parkAfter, scope := queueRepoParams(repoCfg, qrt.Settings)
+		maxInFlight, parkAfter := queueRepoParams(repoCfg, qrt.Settings)
 		implementJobs := map[int]bool{}
 		for _, j := range jobs {
 			if j.op != nil && j.op.Name == "implement" && j.sub != nil {
@@ -1133,12 +1128,10 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			FlightBlocked: func(_ vcs.Issue, pr *vcs.PR) string {
 				return flightBlockedReason(ctx, client, fullName, repoCfg, pr, now)
 			},
-			Scope: scope, MaxInFlight: maxInFlight, ParkAfter: parkAfter,
+			MaxInFlight: maxInFlight, ParkAfter: parkAfter,
 			Rank: rank, DepOpen: qrt.DepOpen, State: state, Now: now,
 		})
-		if !migrated {
-			plan.Err = "queue_issue_import_pending"
-		}
+
 		jobs = applyUnifiedQueue(fullName, jobs, plan)
 		pruneRepoRank(fullName, issues)
 	}

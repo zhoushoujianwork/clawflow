@@ -222,25 +222,3 @@ func TestMove(t *testing.T) {
 		t.Error("self anchor must fail")
 	}
 }
-
-func TestEffectiveScope(t *testing.T) {
-	cases := []struct {
-		repo, def    string
-		hadQueue     bool
-		want         string
-		wantFellBack bool
-	}{
-		{"", "", false, ScopeAll, false},
-		{"", "", true, ScopeRanked, false},
-		{"", ScopeLabeled, true, ScopeLabeled, false},
-		{ScopeAll, "", true, ScopeAll, false},
-		{"bogus", "", true, ScopeRanked, true},
-		{"bogus", "", false, ScopeAll, true},
-	}
-	for _, c := range cases {
-		got, fell := EffectiveScope(c.repo, c.def, c.hadQueue)
-		if got != c.want || fell != c.wantFellBack {
-			t.Errorf("EffectiveScope(%q, %q, %v) = %q, %v; want %q, %v", c.repo, c.def, c.hadQueue, got, fell, c.want, c.wantFellBack)
-		}
-	}
-}
