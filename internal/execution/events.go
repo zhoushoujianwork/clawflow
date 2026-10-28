@@ -143,7 +143,7 @@ func (t *eventTail) accept(raw []byte) error {
 		}
 	case "progress":
 	case "final":
-		if (t.session != "" && e.Session != t.session) || (t.backend != "" && e.Backend != t.backend) || (t.model != "" && e.Model != t.model) {
+		if (t.session != "" && e.Session != t.session) || (t.backend != "" && e.Backend != t.backend) || (t.model != "" && e.Model != "" && e.Model != t.model) {
 			return &Error{Kind: "protocol_identity_mismatch"}
 		}
 		if !hasFields(raw, "status", "exit_code") || (e.Status != "ok" && e.Status != "error" && e.Status != "timeout") || (e.Status == "ok" && (e.ExitCode != 0 || e.ErrorKind != "")) || (e.Status != "ok" && e.ExitCode == 0) {
@@ -196,7 +196,7 @@ func (t *eventTail) finish(result Result) error {
 		return &Error{Kind: "protocol_missing_final"}
 	}
 	e := t.final
-	if t.runID != result.RunID || e.CallerRunID != result.CallerRunID || e.Session != result.NativeSessionID || e.Backend != result.Backend || e.Model != result.Model || e.Status != result.Status || e.ExitCode != result.ExitCode || e.ErrorKind != result.ErrorKind {
+	if t.runID != result.RunID || e.CallerRunID != result.CallerRunID || e.Session != result.NativeSessionID || e.Backend != result.Backend || (e.Model != "" && e.Model != result.Model) || e.Status != result.Status || e.ExitCode != result.ExitCode || e.ErrorKind != result.ErrorKind {
 		return &Error{Kind: "protocol_final_mismatch"}
 	}
 	if (t.session != "" && t.session != result.NativeSessionID) || (t.backend != "" && t.backend != result.Backend) || (t.model != "" && t.model != result.Model) {

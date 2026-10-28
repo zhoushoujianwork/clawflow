@@ -395,7 +395,12 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		defer os.Unsetenv(budget.EnvPath)
 	}
 
-	ctx = operator.WithExecutionResultObserver(ctx, func(r execution.Result) { meta.Profile = r.Profile; meta.Backend = r.Backend; meta.Model = r.Model })
+	ctx = operator.WithExecutionResultObserver(ctx, func(r execution.Result) {
+		meta.Profile = r.Profile
+		meta.Backend = r.Backend
+		meta.Model = r.Model
+		meta.Usage = snapshot.UsageFromResult(r)
+	})
 	output, err := runWakeOffload(ctx, prompt, workdir, timeout, eventsFile, role)
 	if eventsFile != nil {
 		_ = eventsFile.Close()

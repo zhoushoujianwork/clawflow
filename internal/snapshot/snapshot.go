@@ -325,8 +325,8 @@ type RunMeta struct {
 	Error          string `json:"error,omitempty"`
 	WritebackError string `json:"writeback_error,omitempty"`
 	Summary        string `json:"summary,omitempty"` // operator's final text output
-	// Usage is populated from events.jsonl's terminal "result" event after
-	// the run finishes. Nil while the run is still in flight.
+	// Usage is populated from events.jsonl, falling back to the Offload result.
+	// Nil while the run is still in flight.
 	Usage *Usage `json:"usage,omitempty"`
 }
 
@@ -334,6 +334,10 @@ type RunMeta struct {
 // "result" event. All fields are summable across runs so callers can build
 // aggregates without re-parsing events.jsonl.
 type Usage struct {
+	CostBasis                string                `json:"cost_basis,omitempty"`
+	CostIsEstimate           bool                  `json:"cost_is_estimate,omitempty"`
+	UsageUnavailable         string                `json:"usage_unavailable,omitempty"`
+	CostUnavailableReason    string                `json:"cost_unavailable_reason,omitempty"`
 	TokensUnavailable        bool                  `json:"tokens_unavailable,omitempty"`
 	CostUnavailable          bool                  `json:"cost_unavailable,omitempty"`
 	DurationMs               int64                 `json:"duration_ms"`

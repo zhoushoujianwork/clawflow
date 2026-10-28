@@ -92,6 +92,9 @@ func Emit(args map[string]string, text, kind, mode string) {
 	event := func(seq int, typ string) {
 		e := map[string]any{"schema_version": 1, "type": typ, "run_id": "run-actual", "caller_run_id": caller, "seq": seq, "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "session": session, "backend": "claude", "model": result["model"]}
 		if typ == "final" {
+			if mode == "final-model-empty" {
+				e["model"] = ""
+			}
 			e["status"] = status
 			e["exit_code"] = code
 			e["error_kind"] = kind
@@ -100,6 +103,9 @@ func Emit(args map[string]string, text, kind, mode string) {
 			e["seq"] = 7
 		}
 		_ = json.NewEncoder(f).Encode(e)
+	}
+	if mode == "result-model" {
+		result["model"] = ""
 	}
 	event(1, "start")
 	event(2, "progress")
@@ -126,6 +132,15 @@ func Emit(args map[string]string, text, kind, mode string) {
 	if mode == "truncated" {
 		fmt.Print(`{"status":`)
 		os.Exit(code)
+	}
+	if mode == "result-model" {
+		result["model"] = "gpt-test"
+		result["cost_basis"] = "subscription"
+		result["cost_usd"] = nil
+		result["usage"] = map[string]int64{"input_tokens": 1000, "cached_input_tokens": 800, "cache_write_input_tokens": 0, "output_tokens": 50}
+	}
+	if mode == "event-model" {
+		result["model"] = ""
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(result)
 	if mode == "duplicate-stdout" {

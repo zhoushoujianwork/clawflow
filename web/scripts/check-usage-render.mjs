@@ -7,6 +7,11 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 const server = await createServer({ configFile: false, plugins: [react()], optimizeDeps: { noDiscovery: true, entries: [] }, server: { middlewareMode: true }, appType: 'custom' })
 try {
+  const { fmtCost } = await server.ssrLoadModule('/src/routes/_app.usage.tsx')
+  assert.equal(fmtCost(null, 1), 'Subscription')
+  assert.equal(fmtCost(null, 0), 'Not reported')
+  assert.equal(fmtCost(0, 0), '$0.0000')
+  assert.equal(fmtCost(1.25, 1), '$1.2500 + subscription')
   const { UsagePanel } = await server.ssrLoadModule('/src/routes/_app.runs.$slug.$issue.$ts.tsx')
   const { PilotRunDetailModal } = await server.ssrLoadModule('/src/components/PilotRun.tsx')
   const base = { status: 'success', started_at: '2026-10-28T00:00:00Z', project: 'project' }

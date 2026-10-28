@@ -2,12 +2,14 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"time"
 )
 
 // Nullable totals distinguish unreported usage from measured zero.
 type UsageAggregate struct {
+	SubscriptionRuns         int      `json:"subscription_runs,omitempty"`
 	Runs                     int      `json:"runs"`
 	TotalCostUSD             *float64 `json:"total_cost_usd"`
 	InputTokens              *int64   `json:"input_tokens"`
@@ -66,6 +68,15 @@ func addFloat(a **float64, b *float64) {
 }
 func (a *UsageAggregate) add(r Run) {
 	a.Runs++
+	// The metadata payload already persists cost basis; no schema/backfill is needed.
+	var meta struct {
+		Usage struct {
+			CostBasis string `json:"cost_basis"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal([]byte(r.Payload), &meta) == nil && meta.Usage.CostBasis == "subscription" {
+		a.SubscriptionRuns++
+	}
 	a.DurationMs += r.DurationMs
 	addFloat(&a.TotalCostUSD, r.CostUSD)
 	addInt(&a.InputTokens, r.InputTokens)
@@ -91,7 +102,7 @@ func (b *UsageBreakdown) add(r Run, models []RunModelUsage) {
 	}
 	for _, m := range models {
 		a := b.ByModel[m.Model]
-		a.UsageAggregate.add(Run{CostUSD: m.CostUSD, InputTokens: m.InputTokens, OutputTokens: m.OutputTokens, CacheReadInputTokens: m.CacheReadInputTokens, CacheCreationInputTokens: m.CacheCreationInputTokens})
+		a.UsageAggregate.add(Run{Payload: r.Payload, CostUSD: m.CostUSD, InputTokens: m.InputTokens, OutputTokens: m.OutputTokens, CacheReadInputTokens: m.CacheReadInputTokens, CacheCreationInputTokens: m.CacheCreationInputTokens})
 		a.CostUSD = a.TotalCostUSD
 		b.ByModel[m.Model] = a
 	}
