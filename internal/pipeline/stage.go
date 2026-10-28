@@ -134,6 +134,16 @@ func derivePROpen(e Evidence, ev []string) (Stage, string, []string) {
 		}
 		return StageAcceptanceRunning, "independent acceptance is reviewing the PR", ev
 	}
+	// A live implement/repair run (lock held) wins over static PR, CI and
+	// verdict state: the board must show what is happening now. Failed CI keeps
+	// its own stage, which already reports a running repair.
+	if e.Run != nil && e.Run.Live && pr.CI != "failure" {
+		why := fmt.Sprintf("%s is running on PR #%d", e.Run.Operator, pr.Number)
+		if e.Run.Stage != "" {
+			why += " (" + e.Run.Stage + ")"
+		}
+		return StageImplementing, why, ev
+	}
 
 	// Completed non-passing acceptance evidence remains actionable even while CI changes.
 	if e.AcceptanceRequired && a != nil && a.Attempts > 0 && (a.LatestIsInfra || a.Verdict == "failed" || a.Verdict == "blocked") {

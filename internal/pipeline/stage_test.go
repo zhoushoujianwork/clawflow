@@ -88,3 +88,24 @@ func TestLatest(t *testing.T) {
 		t.Fatal("expected empty")
 	}
 }
+
+func TestDeriveLiveRunWinsOverOpenPR(t *testing.T) {
+	for _, op := range []string{"implement", "repair-ci"} {
+		e := Evidence{
+			IssueState:         "open",
+			AcceptanceRequired: true,
+			PR:                 &PRInfo{Number: 7, State: "open", CI: "success"},
+			Acceptance:         &AcceptanceInfo{Attempts: 1, Verdict: "failed"},
+			Run:                &RunInfo{Operator: op, Status: "running", Stage: "offload-started", Live: true},
+		}
+		stage, why, _ := Derive(e)
+		if stage != StageImplementing || !strings.Contains(why, op) {
+			t.Fatalf("%s: stage=%s why=%q, want implementing", op, stage, why)
+		}
+	}
+	// Without a live run the failed verdict still shows.
+	e := Evidence{IssueState: "open", AcceptanceRequired: true, PR: &PRInfo{Number: 7, State: "open", CI: "success"}, Acceptance: &AcceptanceInfo{Attempts: 1, Verdict: "failed"}, Run: &RunInfo{Operator: "repair-ci", Status: "success"}}
+	if stage, _, _ := Derive(e); stage == StageImplementing {
+		t.Fatalf("finished run must not show implementing")
+	}
+}
