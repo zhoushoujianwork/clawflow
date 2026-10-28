@@ -168,7 +168,7 @@ func TestCoordinatorHTTPFencedOrderedResults(t *testing.T) {
 	s, _, c, svc := resultFixture(t)
 	server := httptest.NewServer(coordinator.NewHandler(svc))
 	defer server.Close()
-	report := coordinatorReport{jobResult: jobResult{Status: "success", Effects: []jobEffect{
+	report := coordinatorReport{jobResult: jobResult{Status: "success", Usage: &snapshot.Usage{ModelUsage: map[string]snapshot.ModelUsage{"model": {InputTokens: 3}}}, Effects: []jobEffect{
 		{Kind: "issue-comment", Repo: "o/r", Number: 7, Body: "hello"},
 		{Kind: "add-label", Repo: "o/r", Number: 7, Labels: []string{"done"}},
 		{Kind: "remove-label", Repo: "o/r", Number: 7, Labels: []string{"pending"}},

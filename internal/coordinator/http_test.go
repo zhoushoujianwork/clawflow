@@ -290,3 +290,17 @@ func TestWorkerHTTPGuards(t *testing.T) {
 		t.Fatalf("defaults: %+v", store.worker)
 	}
 }
+
+func TestWorkerReportAllowsBoundedDevelopmentMetadata(t *testing.T) {
+	s := httptest.NewServer(NewHandler(&apiStore{}))
+	defer s.Close()
+	body := `{"fencing_token":7,"result":{"development_events":"` + strings.Repeat("x", MaxRequestBytes) + `"}}`
+	status, _ := request(t, s, "tasks/task/complete", "Bearer valid", body)
+	if status != 200 {
+		t.Fatalf("capped development metadata rejected: %d", status)
+	}
+	status, _ = request(t, s, "tasks/task/heartbeat", "Bearer valid", body)
+	if status != 413 {
+		t.Fatalf("heartbeat accepted oversized body: %d", status)
+	}
+}

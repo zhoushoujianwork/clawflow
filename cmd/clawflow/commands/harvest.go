@@ -68,6 +68,7 @@ func runHarvestPhase(ctx context.Context, cfg *config.Config, onlyRepo string, o
 			break
 		}
 		repoCfg := repos[fullName]
+		repoCfg.CoordinatorMode = cfg.Settings.Coordinator.Enabled
 		// Use the same repository scope as the scan in runOnce.
 		if onlyRepo != "" && onlyRepo != fullName {
 			continue
@@ -163,7 +164,7 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, only
 		}
 		if repoCfg.CIRequired {
 			status, ciErr := client.GetCIStatus(fullName, pr.Number)
-			if ciErr != nil || (status != vcs.CIStatusSuccess && !(status == vcs.CIStatusPending && repoCfg.AcceptanceOverlapsCI())) {
+			if ciErr != nil || (status != vcs.CIStatusSuccess && !(status == vcs.CIStatusPending && !repoCfg.CoordinatorMode && repoCfg.AcceptanceOverlapsCI())) {
 				skip("ci_not_success", "pr", pr.Number, "issue", issueNum)
 				continue
 			}
@@ -227,6 +228,13 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, only
 	}
 	if selected >= 0 {
 		pr := eligible[selected]
+		if repoCfg.CoordinatorMode {
+			if err := enqueueWorkerAcceptanceFn(ctx, client, fullName, repoCfg, pr, runTimeout); err != nil {
+				runLog.Warn("run/acceptance_enqueue", "repo", fullName, "pr", pr.Number, "err", err.Error())
+				return &firedKey{Repo: fullName, IssueNumber: extractClosesIssue(pr.Body), Operator: "acceptance"}
+			}
+			return nil
+		}
 		return harvestRun(ctx, client, setCtx, fullName, repoCfg, pr, extractClosesIssue(pr.Body), runTimeout)
 	}
 	return nil

@@ -130,6 +130,9 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 					_, _ = io.WriteString(w, `{"worker_id":"test"}`)
 				case "/worker/v1/claim":
 					if claimed.Swap(true) {
+						if mode == "lease-lost" || mode == "heartbeat-error" {
+							cancel()
+						}
 						_ = json.NewEncoder(w).Encode(map[string]any{"task": nil})
 					} else {
 						_ = json.NewEncoder(w).Encode(map[string]any{"task": task})
@@ -224,16 +227,16 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 						t.Fatalf("bad result: %+v", result)
 					}
 				case "lease-lost", "heartbeat-error":
-					if result.Status != "lease-lost" || len(result.Effects) != 0 {
-						t.Fatalf("bad lost result: %+v", result)
-					}
+					t.Fatalf("lost lease uploaded a result: %+v", result)
 				default:
 					if executed.Load() || result.Status != "failed" || result.Error == "" {
 						t.Fatalf("task not refused: %+v", result)
 					}
 				}
 			default:
-				t.Fatal("no completion report")
+				if mode != "lease-lost" && mode != "heartbeat-error" {
+					t.Fatal("no completion report")
+				}
 			}
 		})
 	}

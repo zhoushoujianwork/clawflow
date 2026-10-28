@@ -22,6 +22,7 @@ func envOrFile(envKey, fileVal string) string {
 
 // Repo holds per-repository settings.
 type Repo struct {
+	AcceptanceWorker string `yaml:"acceptance_worker,omitempty" json:"acceptance_worker,omitempty"`
 	// CoordinatorMode and CoordinatorActive are pass-local scheduling inputs.
 	CoordinatorActive map[int]bool        `yaml:"-" json:"-"`
 	CoordinatorMode   bool                `yaml:"-" json:"-"`

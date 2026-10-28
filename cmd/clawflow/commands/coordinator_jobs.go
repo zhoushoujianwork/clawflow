@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,12 +10,16 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -21,19 +27,22 @@ import (
 )
 
 type coordinatorPayload struct {
-	TaskID      string   `json:"task_id"`
-	Kind        string   `json:"kind"`
-	Operator    string   `json:"operator"`
-	SkillDigest string   `json:"skill_digest"`
-	Repo        string   `json:"repo"`
-	Platform    string   `json:"platform"`
-	BaseURL     string   `json:"base_url"`
-	Issue       int      `json:"issue"`
-	Role        string   `json:"role"`
-	Language    string   `json:"language"`
-	TimeoutSec  int64    `json:"timeout_sec"`
-	Tags        []string `json:"tags"`
-	RepoPolicy  struct {
+	Acceptance        *acceptance.Contract `json:"acceptance,omitempty"`
+	AcceptanceWorker  string               `json:"acceptance_worker,omitempty"`
+	DevelopmentWorker string               `json:"development_worker,omitempty"`
+	TaskID            string               `json:"task_id"`
+	Kind              string               `json:"kind"`
+	Operator          string               `json:"operator"`
+	SkillDigest       string               `json:"skill_digest"`
+	Repo              string               `json:"repo"`
+	Platform          string               `json:"platform"`
+	BaseURL           string               `json:"base_url"`
+	Issue             int                  `json:"issue"`
+	Role              string               `json:"role"`
+	Language          string               `json:"language"`
+	TimeoutSec        int64                `json:"timeout_sec"`
+	Tags              []string             `json:"tags"`
+	RepoPolicy        struct {
 		BaseBranch  string `json:"base_branch"`
 		TestCommand string `json:"test_command"`
 		CIRequired  bool   `json:"ci_required"`
@@ -70,6 +79,9 @@ func skillDigest(op *operator.Operator) string {
 
 func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordinatorPayload) {
 	kind := "reply"
+	if j.op.Name == "acceptance" {
+		kind = "acceptance"
+	}
 	if j.op.Name == "implement" {
 		kind = "implement"
 	}
@@ -214,6 +226,7 @@ type coordinatorResults struct {
 }
 
 type coordinatorReport struct {
+	Acceptance *acceptance.Record `json:"acceptance,omitempty"`
 	jobResult
 	Events []json.RawMessage `json:"events,omitempty"`
 }
@@ -225,10 +238,21 @@ func (s *coordinatorResults) Fail(ctx context.Context, id, worker string, fence 
 	return s.finish(ctx, id, worker, fence, raw, true)
 }
 func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fence int64, raw json.RawMessage, failed bool) error {
-	var r coordinatorReport
-	if err := json.Unmarshal(raw, &r); err != nil {
+	type Result = jobResult
+	var wire struct {
+		Result
+		Usage      json.RawMessage    `json:"usage,omitempty"`
+		Acceptance *acceptance.Record `json:"acceptance,omitempty"`
+		Events     []json.RawMessage  `json:"events,omitempty"`
+	}
+	if err := acceptance.DecodeExact(raw, &wire); err != nil {
 		return coordinator.ErrInvalid
 	}
+	// Usage contains a dynamic model-name map, unlike the fixed evidence schema.
+	if len(wire.Usage) > 0 && json.Unmarshal(wire.Usage, &wire.Result.Usage) != nil {
+		return coordinator.ErrInvalid
+	}
+	r := coordinatorReport{jobResult: wire.Result, Acceptance: wire.Acceptance, Events: wire.Events}
 	switch r.Status {
 	case "success", "failed", "disallowed-outcome", "skipped-empty", "output-limit", "lease-lost", "skipped", "cancelled", "auth-error", "no-marker", "rate-limited", "cost-limit":
 	default:
@@ -242,6 +266,12 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	// checks again under a row lock when sealing, including lease expiry.
 	if t.State != "leased" || t.LeaseOwner != worker || t.FencingToken != fence || t.LeaseExpiresAt == nil || !t.LeaseExpiresAt.After(time.Now()) {
 		return coordinator.ErrStaleLease
+	}
+	if t.Kind == "acceptance" {
+		return s.finishAcceptance(ctx, t, worker, fence, raw, &r, failed)
+	}
+	if r.Acceptance != nil {
+		return coordinator.ErrInvalid
 	}
 	j, err := s.loadJob(ctx, t)
 	if err != nil {
@@ -343,6 +373,9 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 	}
 	meta := snapshot.RunMeta{Repo: t.Repo, IssueNumber: t.Issue, Operator: t.Operator, StartedAt: t.CreatedAt, EndedAt: &now, Status: status, Outcome: r.Outcome, Error: r.Error, Usage: r.Usage, HeadSHA: r.HeadSHA, PRUrl: r.PRURL, Summary: r.Output}
 	dir := snapshot.RunDir(t.Repo, t.Issue, t.CreatedAt) + "-task-" + t.ID
+	if err := persistDevelopmentEvents(ctx, t, j, r, dir); err != nil {
+		return err
+	}
 	if err := snapshot.WriteRunMeta(dir, meta); err != nil {
 		return err
 	}
@@ -409,4 +442,42 @@ func activeCoordinatorIssues(ctx context.Context) (map[string]map[int]bool, erro
 		active[t.Repo][t.Issue] = true
 	}
 	return active, nil
+}
+
+// Only native metadata validated by the local provenance checker is persisted.
+func persistDevelopmentEvents(ctx context.Context, t *coordinator.Task, j *runJob, r *coordinatorReport, dir string) error {
+	if (t.Kind != "implement" && t.Kind != "repair") || r.Status != "success" || r.DevelopmentEvents == "" || ctx.Err() != nil {
+		return nil
+	}
+	if _, err := developmentIdentityBytes([]byte(r.DevelopmentEvents)); err != nil {
+		return nil
+	}
+	scanner := bufio.NewScanner(bytes.NewBufferString(r.DevelopmentEvents))
+	scanner.Buffer(make([]byte, 4096), execution.MaxEventBytes)
+	for scanner.Scan() {
+		var event execution.Event
+		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&event) != nil {
+			return nil
+		}
+	}
+	if scanner.Err() != nil {
+		return nil
+	}
+	number := t.PR
+	if number == 0 {
+		number = r.PRNumber
+	}
+	if number <= 0 || !acceptanceSHA(r.HeadSHA) {
+		return nil
+	}
+	pr, err := j.client.GetPR(t.Repo, number)
+	if err != nil || pr.HeadSHA != r.HeadSHA || extractClosesIssue(pr.Body) != t.Issue {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(r.DevelopmentEvents), 0600)
 }

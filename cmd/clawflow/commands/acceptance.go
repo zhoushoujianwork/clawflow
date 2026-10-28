@@ -246,6 +246,9 @@ type acceptanceReadError struct{ msg string }
 func (e acceptanceReadError) Error() string { return e.msg }
 
 func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Contract, config.Repo, execution.Config, vcs.PR, error) {
+	if pinned, ok := ctx.Value(workerAcceptanceKey{}).(*coordinatorPayload); ok {
+		return workerAcceptanceContract(ctx, client, repo, prNumber, pinned)
+	}
 	var c acceptance.Contract
 	rc, ec, err := acceptanceConfiguration(repo)
 	if err != nil {
@@ -426,6 +429,13 @@ func developmentIdentity(dir string) (acceptance.Identity, error) {
 	b, err := acceptanceRead(filepath.Join(dir, "events.jsonl"), acceptanceFileLimit)
 	if err != nil {
 		return acceptance.Identity{}, err
+	}
+	return developmentIdentityBytes(b)
+}
+
+func developmentIdentityBytes(b []byte) (acceptance.Identity, error) {
+	if len(b) > acceptanceFileLimit {
+		return acceptance.Identity{}, errors.New("development evidence exceeds limit")
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(b))
 	scanner.Buffer(make([]byte, 4096), execution.MaxEventBytes)
