@@ -163,3 +163,23 @@ func TestHandlePipelineIsReadOnlyAndNeedsSource(t *testing.T) {
 		t.Fatalf("no source -> %d", rec.Code)
 	}
 }
+
+func TestPipelineRuntimePassTiming(t *testing.T) {
+	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+	runMu.Lock()
+	oldStarts, oldActive, oldResult, oldAt := activeRunStarts, activeRuns, lastPassResult, lastPassAt
+	started := time.Date(2026, 10, 28, 6, 0, 0, 0, time.UTC)
+	activeRunStarts = map[string]time.Time{"o/r": started}
+	activeRuns = map[string]bool{"o/r": true}
+	lastPassResult, lastPassAt = "error", started.Add(-time.Minute)
+	runMu.Unlock()
+	t.Cleanup(func() {
+		runMu.Lock()
+		activeRunStarts, activeRuns, lastPassResult, lastPassAt = oldStarts, oldActive, oldResult, oldAt
+		runMu.Unlock()
+	})
+	rt := pipelineRuntime()
+	if rt.Scheduler.Status != "running" || rt.Scheduler.StartedAt != started.Format(time.RFC3339) || rt.Scheduler.LastResult != "error" || rt.Scheduler.LastEndedAt == "" {
+		t.Fatalf("runtime=%+v", rt)
+	}
+}

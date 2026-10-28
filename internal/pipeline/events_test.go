@@ -139,3 +139,10 @@ func TestReadEventsTail(t *testing.T) {
 		t.Fatalf("last = %v", evs[len(evs)-1])
 	}
 }
+
+func TestLockTimeoutIsBoardEvent(t *testing.T) {
+	events := ParseEvents(strings.NewReader("2026-10-27T04:00:00Z WARN run/lock_timeout repo=o/r reason=busy"))
+	if len(events) != 1 || events[0].Event != "run/lock_timeout" {
+		t.Fatalf("events=%+v", events)
+	}
+}

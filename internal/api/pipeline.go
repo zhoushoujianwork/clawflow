@@ -8,6 +8,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
 // pipelineTTL is how long a computed board is reused. The board is computed on
@@ -72,6 +73,32 @@ func pipelineRuntime() pipeline.Runtime {
 			Paused:          rs.Paused,
 			NextFireUnixMs:  rs.NextFireUnixMs,
 		},
+	}
+	runMu.Lock()
+	var started time.Time
+	for repo, at := range activeRunStarts {
+		if activeRuns[repo] && (started.IsZero() || at.Before(started)) {
+			started = at
+		}
+	}
+	if !started.IsZero() {
+		rt.Scheduler.StartedAt = started.UTC().Format(time.RFC3339)
+	}
+	rt.Scheduler.LastResult = lastPassResult
+	if !lastPassAt.IsZero() {
+		rt.Scheduler.LastEndedAt = lastPassAt.UTC().Format(time.RFC3339)
+	}
+	runMu.Unlock()
+	if cfg, err := execution.LoadConfig(); err == nil {
+		rt.Execution.Profile = cfg.Profile
+	}
+	var latest time.Time
+	for _, run := range snapshot.ReadRunsIndex() {
+		session := run.DevelopmentSession
+		if session.Profile == rt.Execution.Profile && session.Backend != "" && run.StartedAt.After(latest) {
+			rt.Execution.Backend = session.Backend
+			latest = run.StartedAt
+		}
 	}
 	if err := execution.Ready(); err != nil {
 		rt.Execution.Error = err.Error()

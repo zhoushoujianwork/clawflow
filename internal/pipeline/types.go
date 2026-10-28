@@ -62,6 +62,9 @@ type Runtime struct {
 
 // Scheduler mirrors the existing /api/run/status payload.
 type Scheduler struct {
+	StartedAt       string `json:"started_at,omitempty"`
+	LastResult      string `json:"last_result,omitempty"`
+	LastEndedAt     string `json:"last_ended_at,omitempty"`
 	Status          string `json:"status"` // "running" | "idle"
 	IntervalMinutes int    `json:"interval_minutes"`
 	Paused          bool   `json:"paused"`
@@ -70,8 +73,10 @@ type Scheduler struct {
 
 // Execution reports whether the Offload execution profile is usable.
 type Execution struct {
-	Ready bool   `json:"ready"`
-	Error string `json:"error,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	Ready   bool   `json:"ready"`
+	Error   string `json:"error,omitempty"`
 }
 
 // RepoBoard is the board for one repository.
@@ -82,6 +87,8 @@ type RepoBoard struct {
 	AutoMerge          bool   `json:"auto_merge"`
 	CIRequired         bool   `json:"ci_required"`
 	AcceptanceRequired bool   `json:"acceptance_required"`
+	QueueScope         string `json:"queue_scope"`
+	MaxInFlight        int    `json:"max_in_flight"`
 	QueueIssue         int    `json:"queue_issue,omitempty"`
 	Queue              *Queue `json:"queue,omitempty"`
 	Items              []Item `json:"items"`
@@ -119,6 +126,8 @@ type QueueDecision struct {
 
 // Item is one issue travelling through the delivery pipeline.
 type Item struct {
+	State         string   `json:"state,omitempty"`
+	Attention     []string `json:"attention,omitempty"`
 	Issue         int      `json:"issue"`
 	Title         string   `json:"title"`
 	Stage         Stage    `json:"stage"`

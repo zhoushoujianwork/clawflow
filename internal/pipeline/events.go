@@ -16,7 +16,7 @@ const maxFieldLen = 300
 // run.log (per-lock, per-scan chatter) is noise for a delivery view.
 var eventPrefixes = []string{
 	"run/harvest", "run/automerge", "run/queue", "queue/", "run/self_upgrade",
-	"run/target_skip", "run/exit", "run/ci_repair", "run/end",
+	"run/lock_timeout", "run/target_skip", "run/exit", "run/ci_repair", "run/end",
 }
 
 // IsBoardEvent reports whether a run.log area belongs on the board.

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,7 +26,7 @@ import (
 const (
 	pipelineMaxPRDetails   = sweepMaxCandidates // PRs that get CI/mergeability/acceptance reads
 	pipelineRecentRunDays  = 7
-	pipelineRecentMerged   = 10
+	pipelineRecentMerged   = 100
 	pipelineMergedWindow   = 14 * 24 * time.Hour
 	pipelineSummaryLimit   = 600
 	pipelineLogTailBytes   = 4 << 20
@@ -111,6 +112,11 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	}
 	slices.Sort(names)
 
+	var queueRows []queue.ListEntry
+	if d.globalQueue != nil {
+		queueRows = d.globalQueue()
+	}
+	d.globalQueue = func() []queue.ListEntry { return queueRows }
 	runs := d.runs()
 	tracked := map[string]bool{}
 	for _, name := range names {
@@ -131,6 +137,19 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 				Position: len(snap.GlobalQueue) + 1, Key: r.Key, Repo: r.Repo, Number: r.Number,
 				Title: pipelineClip(r.Title, 200), Tier: r.Tier, Rank: r.Rank, State: r.State,
 			})
+		}
+	}
+	for i := range snap.GlobalQueue {
+		q := &snap.GlobalQueue[i]
+		for _, repo := range snap.Repos {
+			if repo.Repo != q.Repo {
+				continue
+			}
+			for _, item := range repo.Items {
+				if item.Issue == q.Number && (item.Run != nil && item.Run.Live || item.Acceptance != nil && item.Acceptance.Running) {
+					q.State = "in_flight"
+				}
+			}
 		}
 	}
 	return snap
@@ -155,7 +174,13 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 	board := pipeline.RepoBoard{
 		Repo: repo, Enabled: rc.Enabled, Platform: platform, AutoMerge: rc.AutoMerge,
 		CIRequired: rc.CIRequired, AcceptanceRequired: rc.AcceptanceRequired, QueueIssue: rc.QueueIssue,
-		Items: []pipeline.Item{},
+		Items: []pipeline.Item{}, QueueScope: rc.QueueScope, MaxInFlight: rc.MaxInFlight,
+	}
+	if board.QueueScope == "" {
+		board.QueueScope = "all"
+	}
+	if board.MaxInFlight <= 0 {
+		board.MaxInFlight = 1
 	}
 	client, err := d.newClient(rc)
 	if err != nil {
@@ -249,6 +274,18 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 			cands = append(cands, c)
 		}
 	}
+	if d.globalQueue != nil {
+		for pos, q := range d.globalQueue() {
+			if q.Repo != repo {
+				continue
+			}
+			it, ok := issueByNum[q.Number]
+			if !ok {
+				it = vcs.Issue{Number: q.Number, Title: q.Title, State: "open"}
+			}
+			add(cand{number: it.Number, queuePos: pos + 1, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
+		}
+	}
 	for _, e := range queueIssues {
 		// Closed queue entries only matter when they delivered something.
 		if e.State != "open" {
@@ -293,7 +330,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 
 	detailed := 0
 	for _, c := range cands {
-		item := pipeline.Item{Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
+		item := pipeline.Item{State: c.state, Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
 		ev := pipeline.Evidence{IssueState: c.state, Labels: c.labels, AutoMerge: rc.AutoMerge, CIRequired: rc.CIRequired,
 			AcceptanceRequired: rc.AcceptanceRequired, InQueue: c.queuePos > 0, Now: now}
 		if decision != nil && decision.Issue == c.number {
@@ -332,6 +369,30 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 
 		item.Stage, item.Why, item.Evidence = pipeline.Derive(ev)
+		if item.Stage != pipeline.StageMerged {
+			if item.Stage == pipeline.StageBlocked || item.Stage == pipeline.StageFailed || item.Stage == pipeline.StageRejected {
+				item.Attention = append(item.Attention, item.Why)
+			}
+			if slices.Contains(c.labels, "agent-failed") && item.Stage != pipeline.StageFailed {
+				item.Attention = append(item.Attention, "agent-failed")
+			}
+			if item.PR != nil && item.PR.State == "open" {
+				if !rc.AutoMerge {
+					item.Attention = append(item.Attention, "waiting for review (manual merge)")
+				}
+				if err := checkRepairBudget(snapshot.DataDir(), repo, item.PR.Number, now); errors.Is(err, errRepairExhausted) || errors.Is(err, errRepairBlocked) {
+					item.Attention = append(item.Attention, err.Error())
+				}
+			}
+			if d.globalQueue != nil && (item.Run == nil || !item.Run.Live) {
+				for _, q := range d.globalQueue() {
+					if q.Repo == repo && q.Number == c.number && strings.HasPrefix(q.State, "blocked:") && item.Stage == pipeline.StageQueued {
+						item.Stage, item.Why = pipeline.StageBlocked, q.State
+						item.Attention = append(item.Attention, q.State)
+					}
+				}
+			}
+		}
 		if item.Stage == pipeline.StageMerged && item.Delivery == nil && item.PR != nil {
 			item.Delivery = &pipeline.Delivery{PR: item.PR.Number, PRURL: item.PR.URL}
 		}
