@@ -31,18 +31,14 @@ type EntryRecord struct {
 // RepoState is the small per-repo file under data/queue-state/. Only the pass
 // holding the repo's run lock writes it.
 type RepoState struct {
-	NotEnrolled      int               `json:"not_enrolled"` // open issues without the enrollment label
-	Version          int               `json:"version"`
-	Repo             string            `json:"repo"`
-	UpdatedAt        time.Time         `json:"updated_at"`
-	BlockedSince     map[int]time.Time `json:"blocked_since,omitempty"`
-	Parked           []int             `json:"parked,omitempty"`
-	Warned           map[string]bool   `json:"warned,omitempty"` // "<number>|<warning>" already reported
-	Imported         bool              `json:"imported,omitempty"`
-	ScopeSet         bool              `json:"scope_set,omitempty"` // migration persisted queue_scope
-	Scope            string            `json:"scope,omitempty"`     // effective scope at the last pass
-	DeprecationShown bool              `json:"deprecation_shown,omitempty"`
-	Entries          []EntryRecord     `json:"entries,omitempty"`
+	NotEnrolled  int               `json:"not_enrolled"` // open issues without the enrollment label
+	Version      int               `json:"version"`
+	Repo         string            `json:"repo"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+	BlockedSince map[int]time.Time `json:"blocked_since,omitempty"`
+	Parked       []int             `json:"parked,omitempty"`
+	Warned       map[string]bool   `json:"warned,omitempty"` // "<number>|<warning>" already reported
+	Entries      []EntryRecord     `json:"entries,omitempty"`
 }
 
 // StateDir returns ~/.clawflow/data/queue-state.

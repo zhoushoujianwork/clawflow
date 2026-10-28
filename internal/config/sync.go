@@ -41,9 +41,7 @@ type syncableRepo struct {
 	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
 	SelfUpgrade       bool              `yaml:"self_upgrade,omitempty"`
 	BoundMachine      string            `yaml:"bound_machine,omitempty"`
-	QueueIssue        int               `yaml:"queue_issue,omitempty"`
 	MaxInFlight       int               `yaml:"max_in_flight,omitempty"`
-	QueueScope        string            `yaml:"queue_scope,omitempty"`
 	UpdatedAt         time.Time         `yaml:"updated_at,omitempty"`
 	UpdatedBy         string            `yaml:"updated_by,omitempty"`
 	// local_path is intentionally absent — genuinely machine-local
@@ -68,9 +66,7 @@ func toSyncable(r Repo) syncableRepo {
 		AutoMerge:         r.AutoMerge,
 		SelfUpgrade:       r.SelfUpgrade,
 		BoundMachine:      r.BoundMachine,
-		QueueIssue:        r.QueueIssue,
 		MaxInFlight:       r.MaxInFlight,
-		QueueScope:        r.QueueScope,
 		UpdatedAt:         r.UpdatedAt,
 		UpdatedBy:         r.UpdatedBy,
 	}
@@ -96,9 +92,7 @@ func fromSyncable(s syncableRepo, localPath string) Repo {
 		AutoMerge:         s.AutoMerge,
 		SelfUpgrade:       s.SelfUpgrade,
 		BoundMachine:      s.BoundMachine,
-		QueueIssue:        s.QueueIssue,
 		MaxInFlight:       s.MaxInFlight,
-		QueueScope:        s.QueueScope,
 		UpdatedAt:         s.UpdatedAt,
 		UpdatedBy:         s.UpdatedBy,
 	}

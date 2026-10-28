@@ -20,7 +20,7 @@ func NewQueueCmd() *cobra.Command {
 		Use:   "queue",
 		Short: "Show and reorder the unified work queue across all repositories",
 	}
-	cmd.AddCommand(newQueueListCmd(), newQueueMoveCmd(), newQueueAddCmd(), newQueueRemoveCmd(), newQueueImportCmd())
+	cmd.AddCommand(newQueueListCmd(), newQueueMoveCmd(), newQueueAddCmd(), newQueueRemoveCmd())
 	return cmd
 }
 
@@ -40,13 +40,11 @@ func newQueueListCmd() *cobra.Command {
 				return err
 			}
 			if !asJSON {
-				count := 0
 				for _, st := range queue.ListStates() {
 					if repo == "" || st.Repo == repo {
-						count += st.NotEnrolled
+						fmt.Fprintf(cmd.OutOrStdout(), "%s: not enrolled: %d open issue(s) without the clawflow label (last pass)\n", st.Repo, st.NotEnrolled)
 					}
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "not enrolled: %d open issue(s) without the clawflow label (last pass)\n", count)
 			}
 			return nil
 		},
@@ -61,19 +59,7 @@ func queueListRows(repo string) ([]queue.ListEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	var cfg *config.Config
-	if c, cErr := config.Load(); cErr == nil {
-		cfg = c
-	}
-	scopeOf := func(st queue.RepoState) string {
-		if cfg == nil {
-			return st.Scope
-		}
-		rc := cfg.Repos[st.Repo]
-		s, _ := queue.EffectiveScope(rc.QueueScope, cfg.Settings.Queue.Scope, rc.QueueIssue > 0 || st.Imported)
-		return s
-	}
-	return queue.BuildList(queue.ListStates(), order, repo, scopeOf), nil
+	return queue.BuildList(queue.ListStates(), order, repo), nil
 }
 
 func writeQueueList(w io.Writer, rows []queue.ListEntry, asJSON bool) error {
@@ -90,9 +76,9 @@ func writeQueueList(w io.Writer, rows []queue.ListEntry, asJSON bool) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "#\tKEY\tTIER\tRANK\tSCOPE\tSTATE\tTITLE")
+	fmt.Fprintln(tw, "#\tKEY\tTIER\tRANK\tSTATE\tTITLE")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Position, r.Key, r.Tier, queue.RankLabel(r.Rank), r.Scope, r.State, r.Title)
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", r.Position, r.Key, r.Tier, queue.RankLabel(r.Rank), r.State, r.Title)
 	}
 	return tw.Flush()
 }
@@ -162,37 +148,6 @@ func moveQueueItem(cfg *config.Config, key string, p queue.Placement) ([]queue.K
 		_, ok := cfg.Repos[k.Repo]
 		return ok
 	})
-}
-
-func newQueueImportCmd() *cobra.Command {
-	var repo string
-	var from int
-	cmd := &cobra.Command{
-		Use:   "import --repo <owner/repo> --from-issue <N>",
-		Short: "Append the open sub-issues of a legacy queue issue to the rank, in their current order",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if repo == "" || from < 1 {
-				return fmt.Errorf("--repo and --from-issue (>= 1) are required")
-			}
-			client, _, _, err := newVCSClientForRepo(repo)
-			if err != nil {
-				return err
-			}
-			added, err := importQueueIssue(client, repo, from)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "imported %d item(s) from %s#%d\n", len(added), repo, from)
-			for _, k := range added {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", k)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&repo, "repo", "", "repository of the queue issue")
-	cmd.Flags().IntVar(&from, "from-issue", 0, "queue issue number whose sub-issues are imported")
-	return cmd
 }
 
 func newQueueAddCmd() *cobra.Command {

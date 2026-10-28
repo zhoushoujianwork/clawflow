@@ -14,7 +14,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
-	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -92,12 +91,6 @@ func newRepoShowCmd() *cobra.Command {
 			fmt.Printf("ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("acceptance_required: %v\n", r.AcceptanceRequired)
 			fmt.Printf("self_upgrade: %v\n", r.SelfUpgrade)
-			if r.QueueIssue > 0 {
-				fmt.Printf("queue_issue:  #%d\n", r.QueueIssue)
-			} else {
-				fmt.Printf("queue_issue:  (none)\n")
-			}
-			fmt.Printf("queue_scope:  %s\n", firstNonEmpty(r.QueueScope, "(default)"))
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
 			fmt.Printf("local_path:   %s\n", r.LocalPath)
 			if r.Description != "" {
@@ -330,14 +323,13 @@ func newRepoSetCmd() *cobra.Command {
 	var selfUpgrade string
 	var primaryProject string
 	var boundMachine string
-	var queueIssue, maxInFlight int
-	var queueScope string
+	var maxInFlight int
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
 		Short:   "Set configuration flags for a repository",
 		Args:    cobra.ExactArgs(1),
-		Example: "  clawflow repo set owner/repo --auto-merge on\n  clawflow repo set owner/repo --primary-project myproj\n  clawflow repo set owner/repo --queue-issue 42",
+		Example: "  clawflow repo set owner/repo --auto-merge on\n  clawflow repo set owner/repo --primary-project myproj",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ownerRepo := args[0]
 			cfg, err := config.Load()
@@ -382,19 +374,9 @@ func newRepoSetCmd() *cobra.Command {
 			if cmd.Flags().Changed("self-upgrade") && selfUpgrade != "on" && selfUpgrade != "off" {
 				return fmt.Errorf("--self-upgrade must be on or off")
 			}
-			queueIssueSet := cmd.Flags().Changed("queue-issue")
-			if queueIssueSet {
-				if err := validateQueueIssue(cfg.Repos[ownerRepo], queueIssue); err != nil {
-					return err
-				}
-			}
 			maxInFlightSet := cmd.Flags().Changed("max-in-flight")
 			if maxInFlightSet && maxInFlight < 1 {
 				return fmt.Errorf("--max-in-flight must be >= 1")
-			}
-			queueScopeSet := cmd.Flags().Changed("queue-scope")
-			if queueScopeSet && queueScope != "" && !queue.ValidScope(queueScope) {
-				return fmt.Errorf("--queue-scope must be all, labeled or ranked (empty clears it)")
 			}
 			boundMachineSet := cmd.Flags().Changed("bound-machine")
 			if boundMachineSet && strings.ContainsFunc(boundMachine, func(r rune) bool {
@@ -432,14 +414,8 @@ func newRepoSetCmd() *cobra.Command {
 				if boundMachineSet {
 					r.BoundMachine = boundMachine
 				}
-				if queueIssueSet {
-					r.QueueIssue = queueIssue
-				}
 				if maxInFlightSet {
 					r.MaxInFlight = maxInFlight
-				}
-				if queueScopeSet {
-					r.QueueScope = queueScope
 				}
 				return r
 			})
@@ -463,18 +439,8 @@ func newRepoSetCmd() *cobra.Command {
 					fmt.Printf("  bound_machine: %s\n", r.BoundMachine)
 				}
 			}
-			if queueIssueSet {
-				if r.QueueIssue == 0 {
-					fmt.Printf("  queue_issue: (cleared)\n")
-				} else {
-					fmt.Printf("  queue_issue: #%d\n", r.QueueIssue)
-				}
-			}
 			if maxInFlightSet {
 				fmt.Printf("  max_in_flight: %d\n", r.MaxInFlight)
-			}
-			if queueScopeSet {
-				fmt.Printf("  queue_scope: %s\n", firstNonEmpty(r.QueueScope, "(default)"))
 			}
 			if primaryProjectSet {
 				if r.PrimaryProject == "" {
@@ -492,23 +458,9 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&selfUpgrade, "self-upgrade", "", "rebuild and replace the installed binary after a confirmed merge into this repo (only for the repo containing clawflow's source): on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
-	cmd.Flags().IntVar(&queueIssue, "queue-issue", 0, "DEPRECATED: parent issue whose open sub-issues are imported once into the unified queue rank (0 clears it)")
-	cmd.Flags().StringVar(&queueScope, "queue-scope", "", "which open issues the unified queue may pick up: all, labeled (label clawflow) or ranked (in the rank file or labeled clawflow); empty clears it")
 	cmd.Flags().IntVar(&maxInFlight, "max-in-flight", 0, "max issues of this repo running or awaiting review at once in the unified queue (>=1, default 2)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
 	return cmd
-}
-
-// validateQueueIssue rejects values the queue cannot honor: negative numbers
-// and platforms without native sub-issues. 0 (clear) is always valid.
-func validateQueueIssue(r config.Repo, n int) error {
-	if n < 0 {
-		return fmt.Errorf("--queue-issue must be a positive issue number, or 0 to clear")
-	}
-	if n > 0 && r.Platform == "gitlab" {
-		return fmt.Errorf("--queue-issue is not supported on GitLab repositories (no native sub-issues)")
-	}
-	return nil
 }
 
 // loadOrNewConfig loads existing config or creates an empty one.

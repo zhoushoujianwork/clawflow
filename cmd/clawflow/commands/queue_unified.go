@@ -48,7 +48,6 @@ type repoQueueInput struct {
 	// progressing (CI red without repair, no acceptance verdict, ...). pr is
 	// nil while the issue is merely locked.
 	FlightBlocked func(issue vcs.Issue, pr *vcs.PR) string
-	Scope         string // queue.ScopeAll | ScopeLabeled | ScopeRanked
 	MaxInFlight   int
 	ParkAfter     time.Duration
 	Rank          []queue.Key
@@ -63,7 +62,6 @@ type repoQueuePlan struct {
 	Result   queue.SelectResult
 	State    queue.RepoState // updated; persist after applying
 	Warnings []string        // newly seen format warnings, "#N: message"
-	Enroll   []queue.Key     // labeled issues to append to the rank (scope ranked)
 	Err      string          // non-empty: fail closed, no implement job runs
 	Previous map[int]queue.EntryRecord
 }
@@ -101,8 +99,6 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		return nil
 	}
 
-	rankPos := queue.Positions(in.Rank)
-	var enroll []queue.Key
 	var cands []queue.Candidate
 	meta := map[queue.Key]vcs.Issue{}
 	for _, is := range in.Issues {
@@ -143,19 +139,8 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 			c.FlightBlocked = in.FlightBlocked(is, flightPR)
 		}
 		if !c.InFlight {
-			labeled := hasLabel(is.Labels, queue.ScopeLabel)
-			switch in.Scope {
-			case queue.ScopeLabeled:
-				if !labeled {
-					continue
-				}
-			case queue.ScopeRanked:
-				if _, ranked := rankPos[key]; !ranked {
-					if !labeled {
-						continue
-					}
-					enroll = append(enroll, key)
-				}
+			if !hasLabel(is.Labels, queue.ScopeLabel) {
+				continue
 			}
 			switch {
 			case !scanned:
@@ -178,8 +163,6 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		}
 	}
 	plan.State.PruneWarned(open)
-	plan.Enroll = enroll
-	plan.State.Scope = in.Scope
 
 	depOpen := func(d queue.Key) bool {
 		if d.Repo == in.Repo {
@@ -243,23 +226,6 @@ func queueReasonSlug(reason string) string {
 // decisions and persists the repo's queue state. Jobs of other operators are
 // returned untouched. A plan error fails closed: no implement job survives.
 func applyUnifiedQueue(repo string, jobs []*runJob, plan repoQueuePlan) []*runJob {
-	if plan.Err == "" && len(plan.Enroll) > 0 {
-		// Enrollment must be durable before dispatch; on failure the enrolled
-		// items are not dispatched this pass (retried next pass).
-		_, err := queue.UpdateRank(func(order []queue.Key) ([]queue.Key, error) {
-			return append(order, plan.Enroll...), nil
-		}, nil)
-		if err != nil {
-			runLog.Warn("queue/enroll", "repo", repo, "err", err.Error(), "result", "retry")
-			for _, k := range plan.Enroll {
-				delete(plan.Picks, k.Number)
-			}
-		} else {
-			for _, k := range plan.Enroll {
-				runLog.Info("queue/enroll", "repo", repo, "issue", k.Number, "label", queue.ScopeLabel)
-			}
-		}
-	}
 	if plan.Err != "" {
 		runLog.Warn("queue/skip", "repo", repo, "reason", plan.Err, "scope", "repo")
 	} else {
@@ -305,9 +271,8 @@ func entryIndex(r queue.SelectResult, k queue.Key) int {
 	return 0
 }
 
-// queueRepoParams extracts the per-repo caps and scope from config with
-// defaults. Unknown scopes fall back to labeled.
-func queueRepoParams(repoCfg config.Repo, qs config.QueueSettings) (maxInFlight int, parkAfter time.Duration, scope string) {
+// queueRepoParams extracts concurrency and parking settings with defaults.
+func queueRepoParams(repoCfg config.Repo, qs config.QueueSettings) (maxInFlight int, parkAfter time.Duration) {
 	maxInFlight = repoCfg.MaxInFlight
 	if maxInFlight < 1 {
 		maxInFlight = queue.DefaultMaxInFlight
@@ -315,11 +280,6 @@ func queueRepoParams(repoCfg config.Repo, qs config.QueueSettings) (maxInFlight 
 	parkAfter = queue.DefaultParkAfter
 	if d, err := time.ParseDuration(qs.ParkAfter); err == nil && d > 0 {
 		parkAfter = d
-	}
-	var fellBack bool
-	scope, fellBack = queue.EffectiveScope(repoCfg.QueueScope, qs.Scope, repoCfg.QueueIssue > 0)
-	if fellBack {
-		runLog.Warn("queue/scope", "value", firstNonEmpty(repoCfg.QueueScope, qs.Scope), "using", scope, "reason", "unknown_scope")
 	}
 	return
 }
