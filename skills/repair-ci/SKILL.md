@@ -1,6 +1,6 @@
 ---
 name: repair-ci
-description: "Repair failing CI or a failed independent acceptance verdict on an existing managed GitHub PR using local headless reproduction. Dispatched only by the runner."
+description: "Repair failing CI or a failed independent acceptance verdict on an existing managed GitHub PR or same-project GitLab MR using local headless reproduction. Dispatched only by the runner."
 operator:
   trigger:
     target: "issue"
