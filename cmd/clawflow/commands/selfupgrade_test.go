@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
@@ -505,7 +506,7 @@ func TestSelfUpgradePhaseIgnoresReposWithoutOptIn(t *testing.T) {
 func TestSelfUpgradePhaseFailureCountsTowardExitStatus(t *testing.T) {
 	h := newUpgradeHarness(t)
 	phaseUpgrader(t, h)
-	h.failOn = "go build"
+	h.failOn = "db migrate"
 	confirmedMerges.reset()
 	t.Cleanup(confirmedMerges.reset)
 	confirmedMerges.note("o/r")
@@ -518,7 +519,7 @@ func TestSelfUpgradePhaseFailureCountsTowardExitStatus(t *testing.T) {
 		t.Fatalf("exit error = %v", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".clawflow", "logs", "run.log"))
-	if !strings.Contains(string(data), "WARN  run/self_upgrade") || !strings.Contains(string(data), "result=failed") {
+	if !strings.Contains(string(data), "WARN  run/self_upgrade") || !strings.Contains(string(data), "result=failed") || !strings.Contains(string(data), "reason=migrate") || !strings.Contains(string(data), "boom") {
 		t.Errorf("run.log lacks WARN run/self_upgrade: %q", data)
 	}
 	if h.installed() != "OLD" {
@@ -591,5 +592,68 @@ func TestSelfUpgradeSkipsWithoutLocalPath(t *testing.T) {
 	out := h.u.Upgrade(context.Background(), config.Repo{SelfUpgrade: true, BaseBranch: "main"})
 	if out.Result != selfUpgradeSkipped || len(h.calls) != 0 {
 		t.Fatalf("outcome = %+v calls=%v", out, h.calls)
+	}
+}
+
+func TestSelfUpgradeMigrationBeforeSwap(t *testing.T) {
+	for _, state := range []string{"pending", "current", "failed", "cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			h := newUpgradeHarness(t)
+			h.web = true
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pending := state == "pending"
+			calls := 0
+			h.u.Run = func(c context.Context, dir, name string, args ...string) ([]byte, error) {
+				if strings.Join(args, " ") == "db migrate" {
+					calls++
+					if name == h.dest || h.installed() != "OLD" {
+						t.Fatal("migration must precede replacement and use candidate")
+					}
+					deadline, ok := c.Deadline()
+					if !ok || time.Until(deadline) > upgradeMigrationTimeout {
+						t.Fatal("missing migration timeout")
+					}
+					if state == "failed" {
+						return nil, errors.New("migration failed")
+					}
+					if state == "cancelled" {
+						cancel()
+						return nil, c.Err()
+					}
+					pending = false
+					return []byte("database is up to date"), nil
+				}
+				return h.run(c, dir, name, args...)
+			}
+			out := h.u.Upgrade(ctx, selfUpgradeRepo(t))
+			if calls != 1 || pending {
+				t.Fatalf("calls=%d pending=%v", calls, pending)
+			}
+			if state == "failed" || state == "cancelled" {
+				if out.Result != selfUpgradeFailed || out.Reason != "migrate" || out.Detail == "" || h.installed() != "OLD" || len(h.restarts) != 0 {
+					t.Fatalf("outcome=%+v restarts=%v", out, h.restarts)
+				}
+				if _, err := os.Stat(h.dest + ".prev"); !os.IsNotExist(err) {
+					t.Fatal("backup changed before migration succeeded")
+				}
+			} else if out.Result != selfUpgradeUpgraded || h.installed() != "NEW" || len(h.restarts) != 1 {
+				t.Fatalf("outcome=%+v restarts=%v", out, h.restarts)
+			}
+		})
+	}
+}
+
+func TestCandidateMigrationDeadline(t *testing.T) {
+	u := newSelfUpgrader()
+	u.Run = func(ctx context.Context, _, _ string, _ ...string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	err := u.migrateCandidate(ctx, "/candidate")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v", err)
 	}
 }

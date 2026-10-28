@@ -706,3 +706,20 @@ func TestSelfUpgradeSurvivesGistRoundTrip(t *testing.T) {
 		t.Fatalf("self_upgrade missing from payload: %s", data)
 	}
 }
+
+// TestMarshalForGist_OmitsDatabaseDSN verifies the PostgreSQL DSN secret is
+// never written to the synced payload.
+func TestMarshalForGist_OmitsDatabaseDSN(t *testing.T) {
+	cfg := &config.Config{Repos: map[string]config.Repo{}}
+	cfg.Settings.Database.DSN = "postgres://u:topsecret@h/db"
+	data, err := config.MarshalForGist(cfg)
+	if err != nil {
+		t.Fatalf("MarshalForGist error: %v", err)
+	}
+	if s := string(data); strings.Contains(s, "topsecret") || strings.Contains(s, "dsn") {
+		t.Errorf("gist payload must not contain the DSN:\n%s", s)
+	}
+	if cfg.Settings.Database.DSN == "" {
+		t.Error("MarshalForGist must not mutate the caller's config")
+	}
+}

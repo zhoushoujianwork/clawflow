@@ -145,7 +145,7 @@ interface Board {
   events: PipelineEvent[]
   runtime: {
     version: string
-    scheduler: { status: string; interval_minutes: number; paused: boolean; next_fire_unix_ms?: number }
+    scheduler: { status: string; interval_minutes: number; paused: boolean; next_fire_unix_ms?: number; agent_slots_used: number; agent_slots_total: number }
     execution: { ready: boolean; error?: string }
   }
 }
@@ -320,8 +320,9 @@ function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
   const next = s.next_fire_unix_ms ? new Date(s.next_fire_unix_ms).toISOString() : undefined
   const schedulerText = s.status === 'running' ? 'run in progress' : s.paused ? 'paused' : s.interval_minutes > 0 ? `every ${s.interval_minutes}m` : 'manual only'
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-5" aria-label="Runtime">
+    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-5" aria-label="Runtime">
       <Stat label="Version" value={runtime.version || '—'} mono />
+      <Stat label="Agent slots" value={`${s.agent_slots_used} / ${s.agent_slots_total}`} />
       <Stat
         label="Scheduler"
         value={schedulerText}

@@ -631,15 +631,9 @@ func HandleProjectPilotRuns(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "project is required"})
 		return
 	}
-	entries, _ := snapshot.WritePilotRunsIndex(20)
-	var filtered []snapshot.PilotRunIndexEntry
-	for _, e := range entries {
-		if e.Project == name {
-			filtered = append(filtered, e)
-		}
-	}
-	if filtered == nil {
-		filtered = []snapshot.PilotRunIndexEntry{}
-	}
-	writeJSON(w, 200, filtered)
+	q := r.URL.Query()
+	q.Set("kind", "pilot")
+	q.Set("limit", "20")
+	r.URL.RawQuery = q.Encode()
+	HandleRuns(w, r)
 }

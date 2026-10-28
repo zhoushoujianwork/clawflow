@@ -30,7 +30,7 @@ Support tens to hundreds of projects, with a target of 10,000 concurrent workers
 
 Evolve the existing Go application as a modular monolith, reusing project management, VCS and operator modules and the integrated Offload execution adapter. The durable, deterministic control plane owns tasks, transitions, evidence and external-effect authorization. GitHub Issues, labels and comments mirror coordination; the durable store is authoritative. Prompts and worker conversations cannot advance state themselves.
 
-Start with one scheduler and SQLite as a reference implementation. Production scale requires a transactional distributed store such as PostgreSQL, leased and fenced workers, durable outbox/inbox delivery and fair project, provider and resource quotas. SQLite's single writer is not the proposed basis for 10,000 workers. Extract services only for measured bottlenecks or an independent security, failure-isolation or scaling need.
+Start with one scheduler. PostgreSQL via GORM is the single required store (decision: [storage-design.md](storage-design.md)); there is no SQLite reference implementation. Production scale also requires leased and fenced workers, durable outbox/inbox delivery and fair project, provider and resource quotas. Extract services only for measured bottlenecks or an independent security, failure-isolation or scaling need.
 
 Versioned skill packages describe activities, tests, policy and bounded execution steps. Project bindings pin their resources. The engine validates results, owns transitions and enforces permissions; a prompt cannot waive checks. This does not introduce a repository workflow-mode selector or a second legacy pipeline.
 

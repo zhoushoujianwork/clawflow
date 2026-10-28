@@ -43,9 +43,9 @@ export interface PilotRun {
   usage?: {
     duration_ms: number
     num_turns: number
-    total_cost_usd: number
-    input_tokens: number
-    output_tokens: number
+    total_cost_usd: number | null
+    input_tokens: number | null
+    output_tokens: number | null
     // Set when the wake was killed before claude emitted its terminal
     // result event: tokens were summed from per-message usage and cost is
     // unavailable, so the UI must not present $0.000 as the real spend.
@@ -160,24 +160,25 @@ export function PilotRunDetailModal({ run, onClose }: { run: PilotRun; onClose: 
                 Duration: {duration}s
               </span>
             )}
-            {run.usage && (
+            {!run.usage && <span>Cost: Not reported · Tokens: Not reported</span>}
+ {run.usage && (
               <>
                 <span
                   className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums"
                   title={run.usage.estimated ? run.usage.estimated_reason : undefined}
                 >
-                  {run.usage.estimated
-                    ? 'Cost: n/a (killed mid-run)'
+                  {(run.usage.estimated || run.usage.total_cost_usd == null)
+                    ? 'Cost: Not reported'
                     : `Cost: $${run.usage.total_cost_usd.toFixed(3)}`}
                 </span>
                 <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
                   Turns: {run.usage.num_turns}
                 </span>
                 <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
-                  Input: {(run.usage.input_tokens / 1000).toFixed(1)}k tokens
+                  Input: {run.usage.input_tokens == null ? "Not reported" : `${(run.usage.input_tokens / 1000).toFixed(1)}k tokens`}
                 </span>
                 <span className="inline-flex items-center gap-1 px-2 py-1 bg-secondary rounded-md tabular-nums">
-                  Output: {(run.usage.output_tokens / 1000).toFixed(1)}k tokens
+                  Output: {run.usage.output_tokens == null ? "Not reported" : `${(run.usage.output_tokens / 1000).toFixed(1)}k tokens`}
                 </span>
               </>
             )}

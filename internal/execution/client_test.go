@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 )
@@ -19,6 +20,9 @@ import (
 func TestOffloadHelper(t *testing.T) {
 	if os.Getenv("CLAWFLOW_OFFLOAD_TEST_HELPER") != "1" {
 		return
+	}
+	if os.Getenv("CLAWFLOW_EXPECT_SLOT") == "1" && agentcapacity.Used() != 1 {
+		os.Exit(3)
 	}
 	args := offloadtest.Args()
 	if args["-w"] != "" {
@@ -299,6 +303,48 @@ func TestPilotExecutionProfile(t *testing.T) {
 			}
 			if call.Args["-p"] != tc.want {
 				t.Fatalf("args=%v, want %s", call.Args, tc.want)
+			}
+		})
+	}
+}
+
+// All operator roles and the direct acceptance runner share Run's launch gate.
+func TestOffloadSharedCapacity(t *testing.T) {
+	for _, mode := range []string{"implement", "repair-ci", "acceptance"} {
+		t.Run(mode, func(t *testing.T) {
+			c, req := fixture(t)
+			if mode == "acceptance" {
+				req.PermissionMode = "default"
+			}
+			cfg := &config.Config{Settings: config.Settings{MaxConcurrentAgents: 1}}
+			if err := cfg.Save(); err != nil {
+				t.Fatal(err)
+			}
+			release, err := agentcapacity.Acquire(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			capture := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if _, err := Run(ctx, c, req, nil, nil, nil); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("full capacity: %v", err)
+			}
+			if _, err := os.Stat(capture); !os.IsNotExist(err) {
+				t.Fatal("Offload started without a slot")
+			}
+			release()
+			if agentcapacity.Used() != 0 {
+				t.Fatal("cancelled waiter leaked a slot")
+			}
+			t.Setenv("CLAWFLOW_EXPECT_SLOT", "1")
+			if _, err := Run(context.Background(), c, req, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if agentcapacity.Used() != 0 {
+				t.Fatal("execution leaked a slot")
 			}
 		})
 	}
