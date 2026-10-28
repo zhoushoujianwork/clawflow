@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -98,5 +99,64 @@ func TestLockWaitTimeoutAndRelease(t *testing.T) {
 			Release(h)
 		}
 		t.Fatalf("second owner: %v", err)
+	}
+}
+
+func TestLockRepeatedTimeoutsBoundResources(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	f, err := Try(path, map[string]any{"pid": os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Release(f)
+	countFDs := func() int {
+		dir := "/dev/fd"
+		if runtime.GOOS == "linux" {
+			dir = "/proc/self/fd"
+		}
+		d, err := os.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+		entries, err := d.Readdirnames(-1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(entries)
+	}
+	beforeG, beforeFD := runtime.NumGoroutine(), countFDs()
+	for i := 0; i < 32; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		g, err := Wait(ctx, path, map[string]any{"pid": os.Getpid()})
+		cancel()
+		if g != nil {
+			Release(g)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("wait %d: %v", i, err)
+		}
+	}
+	if delta := runtime.NumGoroutine() - beforeG; delta > 1 {
+		t.Errorf("retained goroutines = %d, want <= 1", delta)
+	}
+	if delta := countFDs() - beforeFD; delta > 1 {
+		t.Errorf("retained descriptors = %d, want <= 1", delta)
+	}
+	// A stuck path must not delay an independent lock.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	other, err := Wait(ctx, filepath.Join(t.TempDir(), "other"), map[string]any{"pid": os.Getpid()})
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	Release(other)
+	Release(f)
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > beforeG || countFDs() > beforeFD {
+		if time.Now().After(deadline) {
+			t.Fatal("resources not released after holder exit")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
