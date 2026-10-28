@@ -92,7 +92,7 @@ func Emit(args map[string]string, text, kind, mode string) {
 	event := func(seq int, typ string) {
 		e := map[string]any{"schema_version": 1, "type": typ, "run_id": "run-actual", "caller_run_id": caller, "seq": seq, "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "session": session, "backend": "claude", "model": result["model"]}
 		if typ == "final" {
-			if mode == "final-model-empty" {
+			if mode == "final-model-empty" || mode == "result-model-final-empty" {
 				e["model"] = ""
 			}
 			e["status"] = status
@@ -133,7 +133,7 @@ func Emit(args map[string]string, text, kind, mode string) {
 		fmt.Print(`{"status":`)
 		os.Exit(code)
 	}
-	if mode == "result-model" {
+	if mode == "result-model" || mode == "result-model-different" || mode == "result-model-final-empty" {
 		result["model"] = "gpt-test"
 		result["cost_basis"] = "subscription"
 		result["cost_usd"] = nil

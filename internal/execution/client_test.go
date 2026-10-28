@@ -351,7 +351,7 @@ func TestOffloadSharedCapacity(t *testing.T) {
 }
 
 func TestResultModelAndUsage(t *testing.T) {
-	for _, mode := range []string{"result-model", "event-model", "final-model-empty"} {
+	for _, mode := range []string{"result-model", "result-model-different", "result-model-final-empty", "event-model", "final-model-empty"} {
 		t.Run(mode, func(t *testing.T) {
 			c, req := fixture(t)
 			t.Setenv("OFFLOAD_TEST_MODE", mode)
@@ -359,7 +359,7 @@ func TestResultModelAndUsage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mode == "result-model" {
+			if strings.HasPrefix(mode, "result-model") {
 				var usage TokenUsage
 				if err := json.Unmarshal(r.Usage, &usage); err != nil {
 					t.Fatal(err)

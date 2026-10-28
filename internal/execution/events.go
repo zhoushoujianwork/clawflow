@@ -196,10 +196,12 @@ func (t *eventTail) finish(result Result) error {
 		return &Error{Kind: "protocol_missing_final"}
 	}
 	e := t.final
-	if t.runID != result.RunID || e.CallerRunID != result.CallerRunID || e.Session != result.NativeSessionID || e.Backend != result.Backend || (e.Model != "" && e.Model != result.Model) || e.Status != result.Status || e.ExitCode != result.ExitCode || e.ErrorKind != result.ErrorKind {
+	// The result record carries the resolved model and takes precedence over
+	// event models. Validate run identity and outcome independently of it.
+	if t.runID != result.RunID || e.CallerRunID != result.CallerRunID || e.Session != result.NativeSessionID || e.Backend != result.Backend || e.Status != result.Status || e.ExitCode != result.ExitCode || e.ErrorKind != result.ErrorKind {
 		return &Error{Kind: "protocol_final_mismatch"}
 	}
-	if (t.session != "" && t.session != result.NativeSessionID) || (t.backend != "" && t.backend != result.Backend) || (t.model != "" && t.model != result.Model) {
+	if (t.session != "" && t.session != result.NativeSessionID) || (t.backend != "" && t.backend != result.Backend) {
 		return &Error{Kind: "protocol_identity_mismatch"}
 	}
 	return nil
