@@ -357,7 +357,6 @@ func HandleRunCancel(w http.ResponseWriter, r *http.Request) {
 		// failed too so the dashboard doesn't keep showing a phantom
 		// running run after we ack the cancel.
 		snapshot.MarkRunningAsCancelled(req.Repo, req.Issue, "runner exited without finalizing; cleared by cancel")
-		_, _ = snapshot.WriteRunsIndex(50)
 		writeJSON(w, http.StatusOK, cancelResponse{Status: "already_dead", PID: info.PID})
 		return
 	}
@@ -371,11 +370,6 @@ func HandleRunCancel(w http.ResponseWriter, r *http.Request) {
 	// reconciler fires (10 min for `implement`), which feels like the
 	// cancel button did nothing.
 	snapshot.MarkRunningAsCancelled(req.Repo, req.Issue, "cancelled by user via dashboard")
-	if _, werr := snapshot.WriteRunsIndex(50); werr != nil {
-		// Non-fatal: cancellation succeeded; index will catch up on the
-		// next reconciler tick (~1 min).
-		_ = werr
-	}
 
 	writeJSON(w, http.StatusOK, cancelResponse{
 		Status: "cancelled",

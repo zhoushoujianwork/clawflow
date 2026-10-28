@@ -151,3 +151,19 @@ func TestDevelopmentResumeProgressBeforeTransportFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestExecutionAttributionObserver(t *testing.T) {
+	for _, model := range []string{"", "reported-model"} {
+		t.Run("model="+model, func(t *testing.T) {
+			var observed execution.Result
+			calls := 0
+			ctx := WithExecutionResultObserver(context.Background(), func(r execution.Result) { observed = r; calls++ })
+			_, err := runDevelopment(ctx, "task", RunOptions{ExecuteFunc: func(context.Context, string, execution.Options) (execution.Result, error) {
+				return execution.Result{Profile: "subscription", Backend: "codex", Model: model}, nil
+			}})
+			if err != nil || calls != 1 || observed.Profile != "subscription" || observed.Backend != "codex" || observed.Model != model || observed.Usage != nil {
+				t.Fatalf("calls=%d result=%+v err=%v", calls, observed, err)
+			}
+		})
+	}
+}

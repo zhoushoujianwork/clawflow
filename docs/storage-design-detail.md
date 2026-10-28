@@ -28,3 +28,12 @@ Local run:
 export CLAWFLOW_TEST_DATABASE_DSN='postgres://clawflow@127.0.0.1:5432/clawflow_test?sslmode=disable'
 go test -race ./...
 ```
+
+## 运行与用量（迁移 002）
+
+- `runs` 和 `pilot_runs` 以绝对 `run_dir` 为主键；开始时间、仓库与开始时间、machine、profile 有索引。Pilot 另有项目与开始时间索引。
+- 查询列包括执行归属、状态、起止时间、耗时、摘要、错误、原始日志路径及 nullable 费用/token。`payload` 保留 UI 与会话恢复需要的其他元数据。
+- `run_model_usage` 以 `(run_dir, kind, model)` 为主键；一次 upsert 在同一事务内替换主行和全部模型明细。重复导入根据规范化元数据判断 skipped，事务级 advisory lock 序列化同一运行的写入。
+- API：`GET /api/runs?kind=run|pilot&repo=...&project=...&from=...&until=...&limit=...`；`GET /api/usage?repo=...&period=current|all|YYYY-MM-DD`。时间区间为 `[from, until)`，可传 RFC3339 或日期。账期使用 UTC 和配置中的 `billingCycleDay`（1–28）；返回的 `period_end` 是最后一天。
+- 用量只读取 SQL 中的终态记录；没有 usage 的记录参与所有维度的次数统计，缺失费用/token 不进入求和。结果中的 nullable 总量区分“未报告”和实测零值。没有模型明细时归入记录的 model（历史缺失则为 `unknown`）。
+- 本机 `meta.json` 写入后同步 upsert。跨文件与数据库没有分布式事务；失败会返回错误，重新运行 `db import-runs` 可修复缺失行。原始日志不导入数据库。

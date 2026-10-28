@@ -53,8 +53,10 @@ func TestPrunePending_StaleAfterTerminalRun(t *testing.T) {
 		{RunMeta: RunMeta{Repo: "owner/repo", IssueNumber: 2, Operator: "implement", Status: "failed", StartedAt: runStartedAfter}},
 		{RunMeta: RunMeta{Repo: "owner/repo", IssueNumber: 3, Operator: "implement", Status: "success", StartedAt: runStartedBefore}},
 	}
-	if err := writeJSON(filepath.Join(DataDir(), "runs.json"), runs); err != nil {
-		t.Fatalf("write runs.json: %v", err)
+	for _, r := range runs {
+		if err := WriteRunMeta(RunDir(r.Repo, r.IssueNumber, r.StartedAt), r.RunMeta); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	removed := PrunePending()

@@ -22,6 +22,17 @@ var ErrCostLimit = errors.New("execution cost limit")
 var ErrBudgetExceeded = errors.New("execution budget exceeded")
 
 type budgetKey struct{}
+type resultObserverKey struct{}
+
+// WithExecutionResultObserver records authoritative execution attribution.
+func WithExecutionResultObserver(ctx context.Context, fn func(execution.Result)) context.Context {
+	return context.WithValue(ctx, resultObserverKey{}, fn)
+}
+func observeExecutionResult(ctx context.Context, r execution.Result) {
+	if fn, ok := ctx.Value(resultObserverKey{}).(func(execution.Result)); ok {
+		fn(r)
+	}
+}
 
 // WithMaxBudgetUSD forwards the caller's budget unchanged; Offload rejects unsupported caps.
 func WithMaxBudgetUSD(ctx context.Context, usd float64) context.Context {
@@ -51,6 +62,7 @@ func RunOffload(ctx context.Context, prompt, workdir string, timeout time.Durati
 	}
 	opts.MaxBudgetUSD, _ = ctx.Value(budgetKey{}).(float64)
 	result, err := execution.Execute(ctx, prompt, opts)
+	observeExecutionResult(ctx, result)
 	return result.Text, classifyExecutionError(err)
 }
 
@@ -107,6 +119,7 @@ func runDevelopment(ctx context.Context, prompt string, opts RunOptions, instruc
 	if opts.OnExecutionResult != nil {
 		opts.OnExecutionResult(result, err, resumed)
 	}
+	observeExecutionResult(ctx, result)
 	return result.Text, classifyExecutionError(err)
 }
 

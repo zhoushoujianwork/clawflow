@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 )
 
@@ -37,8 +38,10 @@ func gateStore(ctx context.Context) (release func(), err error) {
 		return func() {}, err
 	}
 	activeStore = s
+	snapshot.BindRunStore(s)
 	return func() {
 		activeStore = nil
+		snapshot.BindRunStore(nil)
 		_ = s.Close()
 	}, nil
 }
@@ -52,7 +55,7 @@ func NewDBCmd() *cobra.Command {
 settings.database.dsn or the CLAWFLOW_DATABASE_DSN environment variable.
 See docs/storage-design.md.`,
 	}
-	cmd.AddCommand(newDBMigrateCmd(), newDBStatusCmd())
+	cmd.AddCommand(newDBMigrateCmd(), newDBStatusCmd(), newDBImportRunsCmd())
 	return cmd
 }
 
@@ -145,4 +148,17 @@ func newDBStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newDBImportRunsCmd() *cobra.Command {
+	return &cobra.Command{Use: "import-runs", Short: "Import existing run metadata into PostgreSQL", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		release, err := gateStore(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer release()
+		counts, err := activeStore.ImportRuns(cmd.Context(), snapshot.DataDir())
+		fmt.Fprintf(cmd.OutOrStdout(), "imported=%d updated=%d skipped=%d invalid=%d\n", counts.Imported, counts.Updated, counts.Skipped, counts.Invalid)
+		return err
+	}}
 }

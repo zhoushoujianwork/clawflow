@@ -7,31 +7,33 @@ import { VcsIcon } from '../components/VcsIcon'
 
 interface UsageAggregate {
   runs: number
-  total_cost_usd: number
-  input_tokens: number
-  output_tokens: number
-  cache_read_input_tokens: number
-  cache_creation_input_tokens: number
+  total_cost_usd: number | null
+  input_tokens: number | null
+  output_tokens: number | null
+  cache_read_input_tokens: number | null | null
+  cache_creation_input_tokens: number | null | null
   duration_ms: number
 }
 
 interface ModelAggregate {
-  cost_usd: number
-  input_tokens: number
-  output_tokens: number
-  cache_read_input_tokens: number
-  cache_creation_input_tokens: number
+  cost_usd: number | null
+  input_tokens: number | null
+  output_tokens: number | null
+  cache_read_input_tokens: number | null | null
+  cache_creation_input_tokens: number | null | null
 }
 
-interface DailyPoint {
+interface DailyPoint extends UsageAggregate {
   date: string
   runs: number
-  total_cost_usd: number
-  input_tokens: number
-  output_tokens: number
+  total_cost_usd: number | null
+  input_tokens: number | null
+  output_tokens: number | null
   by_operator?: Record<string, UsageAggregate>
   by_repo?: Record<string, UsageAggregate>
   by_model?: Record<string, ModelAggregate>
+ by_executor?: Record<string, UsageAggregate>
+ by_machine?: Record<string, UsageAggregate>
 }
 
 interface PeriodSummary {
@@ -41,6 +43,8 @@ interface PeriodSummary {
   by_operator: Record<string, UsageAggregate>
   by_repo: Record<string, UsageAggregate>
   by_model: Record<string, ModelAggregate>
+ by_executor: Record<string, UsageAggregate>
+ by_machine: Record<string, UsageAggregate>
   daily_trend: DailyPoint[]
 }
 
@@ -50,6 +54,8 @@ interface UsageSummary {
   by_operator: Record<string, UsageAggregate>
   by_repo: Record<string, UsageAggregate>
   by_model: Record<string, ModelAggregate>
+ by_executor: Record<string, UsageAggregate>
+ by_machine: Record<string, UsageAggregate>
   periods?: PeriodSummary[]
 }
 
@@ -86,12 +92,18 @@ function durationStr(ms: number): string {
   return `${h}h${m % 60}m`
 }
 
-function fmtCost(usd: number): string {
+function fmtCost(usd: number | null): string {
+ if (usd == null) return "Not reported"
   return `$${usd.toFixed(4)}`
 }
 
-function fmtNum(n: number): string {
+function fmtNum(n: number | null): string {
+ if (n == null) return "Not reported"
   return n.toLocaleString()
+}
+
+function tokenTotal(a: number | null, b: number | null): number | null {
+ return a == null && b == null ? null : (a ?? 0) + (b ?? 0)
 }
 
 function fmtPeriodLabel(start: string, end: string): string {
@@ -116,7 +128,7 @@ function UsagePage() {
     const refetch = async (initial: boolean) => {
       if (initial) setLoading(true)
       const [u, rp] = await Promise.all([
-        fetch('/data/usage.json', { cache: 'no-store' })
+        fetch('/api/usage', { cache: 'no-store' })
           .then(r => (r.ok ? r.json() : null))
           .catch(() => null),
         fetch('/data/repos.json', { cache: 'no-store' })
@@ -168,7 +180,7 @@ function UsagePage() {
   useEffect(() => { setSelectedDay(null) }, [selectedPeriod])
 
   const viewTotals = activeDay
-    ? { runs: activeDay.runs, total_cost_usd: activeDay.total_cost_usd, input_tokens: activeDay.input_tokens, output_tokens: activeDay.output_tokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, duration_ms: 0 } as UsageAggregate
+    ? activeDay
     : activePeriod?.totals ?? summary?.totals
   const viewByOperator = activeDay?.by_operator ?? activePeriod?.by_operator ?? summary?.by_operator ?? {}
   const viewByRepo = activeDay?.by_repo ?? activePeriod?.by_repo ?? summary?.by_repo ?? {}
@@ -180,13 +192,13 @@ function UsagePage() {
   const operatorRows = useMemo(() => {
     return Object.entries(viewByOperator)
       .map(([name, v]) => ({ name, isPilot: name.startsWith('pilot:'), ...v }))
-      .sort((a, b) => b.total_cost_usd - a.total_cost_usd)
+      .sort((a, b) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0))
   }, [viewByOperator])
 
   const modelRows = useMemo(() => {
     return Object.entries(viewByModel)
       .map(([name, v]) => ({ name, ...v }))
-      .sort((a, b) => b.cost_usd - a.cost_usd)
+      .sort((a, b) => (b.cost_usd ?? 0) - (a.cost_usd ?? 0))
   }, [viewByModel])
 
   // Drop nameless buckets: a Pilot wake spans every repo in its project so
@@ -196,10 +208,14 @@ function UsagePage() {
     return Object.entries(viewByRepo)
       .filter(([name]) => name !== '')
       .map(([name, v]) => ({ name, ...v }))
-      .sort((a, b) => b.total_cost_usd - a.total_cost_usd)
+      .sort((a, b) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0))
   }, [viewByRepo])
 
-  const empty = !summary || summary.totals.runs === 0
+  const attribution = [
+ {title:'By executor (profile/backend)',rows:activeDay?.by_executor ?? activePeriod?.by_executor ?? summary?.by_executor ?? {}},
+ {title:'By machine',rows:activeDay?.by_machine ?? activePeriod?.by_machine ?? summary?.by_machine ?? {}},
+ ]
+ const empty = !summary || summary.totals.runs === 0
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
@@ -231,6 +247,14 @@ function UsagePage() {
         )}
       </div>
 
+      {!loading && !empty && attribution.map(group => (
+        <section key={group.title} className="bg-card border border-border rounded-xl p-4 mb-4">
+          <h2 className="font-semibold mb-2">{group.title}</h2>
+          <table className="w-full text-sm"><thead><tr><th className="text-left">Name</th><th>Runs</th><th>Cost</th><th>Tokens</th></tr></thead>
+            <tbody>{Object.entries(group.rows).map(([name, row]) => <tr key={name}><td>{name}</td><td className="text-center">{row.runs}</td><td className="text-center">{fmtCost(row.total_cost_usd)}</td><td className="text-center">{fmtNum(tokenTotal(row.input_tokens,row.output_tokens))}</td></tr>)}</tbody>
+          </table>
+        </section>
+      ))}
       {loading ? (
         <p className="text-sm text-muted-foreground text-center py-8">Loading…</p>
       ) : empty ? (
@@ -256,7 +280,7 @@ function UsagePage() {
               />
               <StatCard
                 label="Total tokens (in + out)"
-                value={fmtNum(viewTotals.input_tokens + viewTotals.output_tokens)}
+                value={fmtNum(tokenTotal(viewTotals.input_tokens, viewTotals.output_tokens))}
               />
             </div>
           )}
@@ -380,7 +404,7 @@ function UsagePage() {
 }
 
 function DailyChart({ data, selectedDay, onSelectDay }: { data: DailyPoint[]; selectedDay: string | null; onSelectDay: (day: string) => void }) {
-  const maxCost = Math.max(...data.map(d => d.total_cost_usd), 0.0001)
+  const maxCost = Math.max(...data.map(d => d.total_cost_usd ?? 0), 0.0001)
   const barWidth = Math.max(4, Math.floor(600 / data.length) - 2)
   const chartWidth = data.length * (barWidth + 2)
   const chartHeight = 120
@@ -396,7 +420,7 @@ function DailyChart({ data, selectedDay, onSelectDay }: { data: DailyPoint[]; se
           viewBox={`0 0 ${Math.max(chartWidth, 200)} ${chartHeight + 32}`}
         >
           {data.map((d, i) => {
-            const h = (d.total_cost_usd / maxCost) * chartHeight
+            const h = ((d.total_cost_usd ?? 0) / maxCost) * chartHeight
             const x = i * (barWidth + 2)
             const y = chartHeight - h
             const isHovered = hovered === i
@@ -464,7 +488,7 @@ function DailyChart({ data, selectedDay, onSelectDay }: { data: DailyPoint[]; se
               <>
                 {d.date} — {d.runs} run{d.runs !== 1 ? 's' : ''},{' '}
                 {fmtCost(d.total_cost_usd)},{' '}
-                {fmtNum(d.input_tokens + d.output_tokens)} tokens
+                {fmtNum(tokenTotal(d.input_tokens, d.output_tokens))} tokens
                 {selectedDay && <span className="ml-2 text-muted-foreground/60">(click again to deselect)</span>}
               </>
             )
