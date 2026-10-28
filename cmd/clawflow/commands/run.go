@@ -1059,6 +1059,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 				firstMatch = op
 			}
 		}
+		if reason := implementState[sub.Number]; reason != "" {
+			debugf("  ✗ implement #%d: %s", sub.Number, reason)
+		} else {
+			debugf("  ✓ implement #%d: eligible", sub.Number)
+		}
 		if firstMatch == nil {
 			debugf("  → no eligible operator matched #%d (check terminal labels, issue structure and custom triggers)", sub.Number)
 		}
