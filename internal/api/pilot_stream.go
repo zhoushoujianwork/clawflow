@@ -2,10 +2,10 @@ package api
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
+	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -18,17 +18,7 @@ import (
 // the top "Pilot" badge reflects the live `running / done / error` state
 // without manual refresh (issue #240).
 //
-// Design mirrors HandleRunStream exactly: `clawflow pilot wake` runs in a
-// SEPARATE process (inside `clawflow run` or cron) and communicates wake
-// state only through files under `~/.clawflow/data/pilot-runs/<project>/`.
-// The web process therefore observes progress by polling the latest run's
-// meta.json on the server side and fanning each change out over one
-// long-lived SSE stream — no new dependency (no fsnotify) needed.
-//
-// Only the coarse-grained meta.json is streamed (status / started_at /
-// ended_at / error); this MVP deliberately does NOT introduce per-stage
-// events. The browser keeps its existing pilot-runs JSON polling as a
-// graceful fallback, so a dropped stream never blanks the badge.
+// Polls PostgreSQL so standalone wakes and the dashboard share state.
 func HandlePilotStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -37,6 +27,10 @@ func HandlePilotStream(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	if project == "" {
 		http.Error(w, "project is required", http.StatusBadRequest)
+		return
+	}
+	if snapshot.RunStore() == nil {
+		http.Error(w, "database unavailable", 503)
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -99,22 +93,18 @@ func HandlePilotStream(w http.ResponseWriter, r *http.Request) {
 // literal `null` so the stream still emits a valid initial frame and the
 // client can distinguish "no runs" from a parse failure.
 func readLatestPilotMetaCompact(project string) ([]byte, error) {
-	path := snapshot.LatestPilotRunMetaPath(project)
-	if path == "" {
-		return []byte("null"), nil
+	s := snapshot.RunStore()
+	if s == nil {
+		return nil, fmt.Errorf("database unavailable")
 	}
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return []byte("null"), nil
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.Runs(ctx, "pilot", store.RunFilter{Project: project, Limit: 1})
 	if err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, raw); err != nil {
-		// Malformed/partial read (e.g. mid-write) — skip this tick rather
-		// than push a broken frame; the next poll picks up clean bytes.
-		return nil, err
+	if len(rows) == 0 {
+		return []byte("null"), nil
 	}
-	return buf.Bytes(), nil
+	return []byte(rows[0].Payload), nil
 }

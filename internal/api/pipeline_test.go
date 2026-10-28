@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 )
 
@@ -110,6 +112,55 @@ func TestHandlePipelineEmptyRepoListIsArray(t *testing.T) {
 	body := getPipeline(t, http.MethodGet).Body.String()
 	if !strings.Contains(body, `"repos":[]`) || !strings.Contains(body, `"events":[]`) {
 		t.Fatalf("body = %s", body)
+	}
+}
+
+func TestHandlePipelineAgentSlotsStayFresh(t *testing.T) {
+	calls := 0
+	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) {
+		calls++
+		return fakeSnapshot(), nil
+	})
+	cfg := &config.Config{Settings: config.Settings{MaxConcurrentAgents: 2}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	check := func(used int) {
+		t.Helper()
+		rec := getPipeline(t, http.MethodGet)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+		}
+		var board struct {
+			Runtime struct {
+				Scheduler map[string]json.RawMessage `json:"scheduler"`
+			} `json:"runtime"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &board); err != nil {
+			t.Fatal(err)
+		}
+		for key, want := range map[string]int{"agent_slots_used": used, "agent_slots_total": 2} {
+			value, ok := board.Runtime.Scheduler[key]
+			if !ok {
+				t.Fatalf("missing %s: %s", key, rec.Body)
+			}
+			var got int
+			if err := json.Unmarshal(value, &got); err != nil || got != want {
+				t.Fatalf("%s=%s, want %d (decode error: %v)", key, value, want, err)
+			}
+		}
+	}
+	check(0)
+	release, err := agentcapacity.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	check(1)
+	release()
+	check(0)
+	if calls != 1 {
+		t.Fatalf("snapshot calls=%d, want cached snapshot", calls)
 	}
 }
 

@@ -37,15 +37,22 @@ issue requirements demand. If a finding cannot be reproduced or is not required 
 the issue, say so and do not change code for it. Never try to influence the next
 review; a fresh reviewer will judge the new head independently.
 
-For merge-conflict repair, CI may not exist yet. Fetch the named base branch into
-its origin remote-tracking ref and verify its SHA against the supplied base SHA.
-If the base changed, stop and report the mismatch; the next attempt will refresh it.
+For acceptance and merge-conflict repair, fetch the named base branch into its
+origin remote-tracking ref. The supplied base SHA is information only: if it
+differs, log both SHAs and continue using the fetched base, never a recorded
+acceptance-contract base. Base movement alone is not a reason to stop.
+For acceptance repair, first check mergeability locally with
+`git merge-tree --write-tree HEAD origin/<base>`: exit 0 means clean and requires
+no merge commit; exit 1 means conflicts and requires the merge below before
+addressing findings. Other errors are investigation failures, not clean results.
+For merge-conflict repair, CI may not exist yet; merge the fetched base directly.
 Run `git merge --no-ff origin/<base>` in this checkout, never rebase. Resolve each
 conflict preserving both changes' intent according to the issue requirements.
 If this cannot be done safely, stop BLOCKED, list the conflicting files from
 `git diff --name-only --diff-filter=U`, preserve the checkout and emit agent-failed.
-Otherwise run the configured headless tests, complete the merge commit, and use
-the same head check and normal push below. Never create a new PR or force-push.
+Otherwise complete the merge commit, address acceptance findings if supplied,
+run the configured headless tests, and use the same head check and normal push
+below. Never create a new PR or force-push.
 
 Make the smallest code correction. Preserve test strength. Never skip, delete,
 weaken, or change assertions merely to pass. Do not modify CI configuration,
@@ -72,8 +79,9 @@ with exactly `<!-- clawflow:outcome=agent-implemented -->` so the runner waits
 for CI and reuses auto-merge. Otherwise finish with exactly
 `<!-- clawflow:outcome=agent-failed -->`. Never claim success without the push.
 
-For acceptance repair only, if all findings are unnecessary under the current issue
-body or cannot be reproduced, and the relevant headless tests pass, leave the
+For acceptance repair only, if no base merge was needed, all findings are either
+unnecessary under the current issue body or cannot be reproduced, and the relevant
+headless tests pass, leave the
 working tree clean and make no commit or push. Explain why no change is required,
 report the passing commands, and explicitly describe any conflict between the
 review findings and the issue body for the supervisor to resolve by editing the

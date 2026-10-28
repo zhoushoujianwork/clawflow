@@ -67,6 +67,8 @@ func pipelineRuntime() pipeline.Runtime {
 	rt := pipeline.Runtime{
 		Version: VersionInfo.Current,
 		Scheduler: pipeline.Scheduler{
+			AgentSlotsUsed:  rs.AgentSlotsUsed,
+			AgentSlotsTotal: rs.AgentSlotsTotal,
 			Status:          rs.Status,
 			IntervalMinutes: rs.IntervalMinutes,
 			Paused:          rs.Paused,

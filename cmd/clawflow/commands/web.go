@@ -52,9 +52,17 @@ func NewWebCmd() *cobra.Command {
 		Long: `Starts a tiny static file server at http://<host>:<port>/ backed by
 ~/.clawflow/dashboard/. The dashboard renders snapshots written by
 previous 'clawflow run' invocations (repos.json, operators.json,
-runs.json, plus per-run events.jsonl for replay). No VCS calls happen
+PostgreSQL run history, plus per-run events.jsonl for replay). No VCS calls happen
 here — run 'clawflow run' first if you want fresh data.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// PostgreSQL is required: fail fast before touching any state
+			// or binding the port.
+			release, err := gateStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer release()
+
 			// Migrate legacy ~/.clawflow/dashboard/data/ → ~/.clawflow/data/
 			// for installs upgrading from the pre-split layout. No-op for
 			// fresh installs.
@@ -148,7 +156,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 
 			// Reconcile any "running" entries left over from an
 			// interrupted `clawflow run` (Ctrl-C, SIGTERM, machine
-			// sleep), then regenerate runs.json from the cleaned tree.
+			// sleep), updating their PostgreSQL rows.
 			// Without this, restarting the dashboard would still show a
 			// frozen "running" row pointing at a long-dead process —
 			// and any deleted run dirs would linger in the index until
@@ -186,27 +194,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 				fmt.Fprintf(os.Stderr, "✓ pruned %d stale pending entr(ies)\n", n)
 				lg.Info("web/prune_pending", "removed", n)
 			}
-			if _, err := snapshot.WriteRunsIndex(50); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠ snapshot runs index on startup: %v\n", err)
-			}
-			// Regenerate usage.json with period data on startup so the
-			// dashboard has fresh billing breakdowns without waiting for
-			// the next `clawflow run`.
-			if allEntries, err := snapshot.WriteRunsIndex(0); err == nil {
-				billingDay := 1
-				if cfg, err := config.Load(); err == nil {
-					billingDay = cfg.Settings.BillingCycleDay
-				}
-				// Merge Pilot wakes in — they are the priciest runs and
-				// were absent from usage.json entirely (issue #321).
-				if err := snapshot.WriteUsageSummary(snapshot.UsageEntriesWithPilot(allEntries), billingDay); err != nil {
-					fmt.Fprintf(os.Stderr, "⚠ snapshot usage summary on startup: %v\n", err)
-				}
-			}
 
 			// Background reconcile: every minute, sweep for orphaned
 			// running entries (events.jsonl gone quiet for >2 min) and
-			// regenerate runs.json so the dashboard's poll picks up the
+			// persist changed rows so the dashboard's poll picks up the
 			// flip. Without this loop, an interrupt taken AFTER web
 			// starts wouldn't be reflected until the next `clawflow run`
 			// or web restart.
@@ -221,7 +212,6 @@ here — run 'clawflow run' first if you want fresh data.`,
 					}
 					if n > 0 {
 						fmt.Fprintf(os.Stderr, "✓ reconciled %d orphaned run(s)\n", n)
-						_, _ = snapshot.WriteRunsIndex(50)
 					}
 					// Logged unconditionally (n=0 is the steady state) so
 					// the user can confirm the ticker is alive at all.
@@ -291,6 +281,8 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/ws/pty", ptyserver.HandlePTY)
 			mux.HandleFunc("/api/labels/add", api.HandleAddLabel)
 			mux.HandleFunc("/api/labels/remove", api.HandleRemoveLabel)
+			mux.HandleFunc("/api/runs", api.HandleRuns)
+			mux.HandleFunc("/api/usage", api.HandleUsage)
 			mux.HandleFunc("/api/run", api.HandleRun)
 			mux.HandleFunc("/api/run/status", api.HandleRunStatus)
 			mux.HandleFunc("/api/run/stream", api.HandleRunStream)

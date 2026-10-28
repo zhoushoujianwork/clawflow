@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
 
@@ -279,6 +280,11 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, err
 	}
 	req.Workspace = canonical
+	releaseSlot, err := agentcapacity.Acquire(ctx)
+	if err != nil {
+		return result, fmt.Errorf("acquire agent capacity: %w", err)
+	}
+	defer releaseSlot()
 	release, err := acquireOwnership(req.Workspace, c.Profile, req.SessionKey, req.Resume)
 	if err != nil {
 		return result, err

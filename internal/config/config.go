@@ -106,6 +106,13 @@ type ExecutionSettings struct {
 	CodexSandbox string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
 }
 
+// DatabaseSettings configures the required PostgreSQL store. The DSN is a
+// secret: it is never synced (see MarshalForGist) and must be masked when
+// printed. CLAWFLOW_DATABASE_DSN overrides it.
+type DatabaseSettings struct {
+	DSN string `yaml:"dsn,omitempty"`
+}
+
 // QueueSettings tunes the unified work queue.
 type QueueSettings struct {
 	// Scope is the default candidate scope for repos without queue_scope:
@@ -120,6 +127,9 @@ type QueueSettings struct {
 // Settings holds global ClawFlow settings.
 type Settings struct {
 	Execution ExecutionSettings `yaml:"execution,omitempty"`
+
+	// Database holds the PostgreSQL connection settings (machine-local secret).
+	Database DatabaseSettings `yaml:"database,omitempty"`
 
 	PollInterval int `yaml:"poll_interval"`
 

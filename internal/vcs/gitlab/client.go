@@ -512,6 +512,14 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 		TargetBranch    string `json:"target_branch"`
 		SourceProjectID int    `json:"source_project_id"`
 		TargetProjectID int    `json:"target_project_id"`
+		SHA             string `json:"sha"`
+		MergeCommitSHA  string `json:"merge_commit_sha"`
+		SquashCommitSHA string `json:"squash_commit_sha"`
+		Draft           bool   `json:"draft"`
+		WorkInProgress  bool   `json:"work_in_progress"`
+		DiffRefs        struct {
+			BaseSHA string `json:"base_sha"`
+		} `json:"diff_refs"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.PR{}, err
@@ -524,7 +532,11 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 	if raw.SourceProjectID > 0 && raw.SourceProjectID == raw.TargetProjectID {
 		headRepo = repo
 	}
-	return vcs.PR{HeadRepo: headRepo, Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, BaseBranch: raw.TargetBranch, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.WebURL}, nil
+	mergeSHA := raw.MergeCommitSHA
+	if mergeSHA == "" {
+		mergeSHA = raw.SquashCommitSHA
+	}
+	return vcs.PR{HeadSHA: raw.SHA, BaseSHA: raw.DiffRefs.BaseSHA, MergeCommitSHA: mergeSHA, Draft: raw.Draft || raw.WorkInProgress, HeadRepo: headRepo, Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, BaseBranch: raw.TargetBranch, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.WebURL}, nil
 }
 
 func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
