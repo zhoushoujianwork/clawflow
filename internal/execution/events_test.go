@@ -70,6 +70,9 @@ func TestExecutionEventsHelper(t *testing.T) {
 		event(3, "final", status, code, kind)
 	}
 	_ = f.Close()
+	if mode == "final-then-timeout" {
+		time.Sleep(time.Minute)
+	}
 	if mode == "invalid-stdout" {
 		fmt.Fprintln(os.Stdout, "invalid stdout")
 		os.Exit(0)
@@ -391,5 +394,29 @@ func TestOffloadEventTailPartialRecordsAndBounds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTimeoutRetainsValidatedFinalIdentity(t *testing.T) {
+	c, req, gate := streamingFixture(t)
+	t.Setenv("CLAWFLOW_EVENTS_MODE", "final-then-timeout")
+	if err := os.WriteFile(gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	req.TimeoutMS = 1000
+	result, err := Run(context.Background(), c, req, nil, nil, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || result.NativeSessionID != "native-actual" || result.Profile != c.Profile || result.Backend != "claude" || result.Text != "" {
+		t.Fatalf("identity=%+v err=%v", result, err)
+	}
+}
+
+func TestResumeErrorKindsPreserved(t *testing.T) {
+	for _, kind := range []string{"unknown_session", "session_expired", "session_not_found", "ownership_mismatch", "backend_mismatch", "profile_mismatch", "resume_rejected", "context_exhausted", "context_limit"} {
+		if safeKind(kind) != kind {
+			t.Fatalf("lost kind %s", kind)
+		}
+	}
+	if safeKind("untrusted error with secret") != "execution" {
+		t.Fatal("raw error leaked")
 	}
 }

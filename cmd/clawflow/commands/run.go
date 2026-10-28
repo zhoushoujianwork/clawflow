@@ -1543,15 +1543,33 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		fmt.Fprintf(os.Stderr, "%s → base-branch override: %q (from %s)\n", prefix, overrideBranch, overrideSource)
 	}
 
+	var previousRun snapshot.RunMeta
+	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
+		previousRun = previousDevelopmentRun(j.repo, j.sub.Number, startedAt)
+	}
 	var wtResult worktreeResult
 	var cleanup func()
 	var err error
 	if j.repair != nil {
-		wtResult, cleanup, err = setupCIRepairWorkdir(ctx, j.repoCfg, j.repo, j.repair.PR)
+		var reused bool
+		wtResult, reused = reusableRepairWorktree(ctx, previousRun, j.repo, j.repair.PR)
+		if reused {
+			cleanup = resumedWorktreeCleanup(j.repoCfg.LocalPath, wtResult.Path)
+		} else {
+			wtResult, cleanup, err = setupCIRepairWorkdir(ctx, j.repoCfg, j.repo, j.repair.PR)
+		}
 	} else if j.reopen != nil {
 		wtResult, cleanup, err = setupReopenWorktree(j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch, j.reopen)
 	} else {
-		wtResult, cleanup, err = resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch)
+		reused := false
+		if j.op.Name == "implement" {
+			wtResult, reused = reusableDevelopmentWorktree(ctx, previousRun, j.repo)
+		}
+		if reused {
+			cleanup = resumedWorktreeCleanup(j.repoCfg.LocalPath, wtResult.Path)
+		} else {
+			wtResult, cleanup, err = resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch)
+		}
 	}
 	if err != nil {
 		// Failure path: do NOT post a comment to the issue. The full
@@ -1623,7 +1641,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		resumeCtx = buildResumeContext(wtResult)
 	}
 	if j.repair != nil {
-		resumeCtx = j.repair.prompt(j.repoCfg.TestCommand)
+		resumeCtx += j.repair.prompt(j.repoCfg.TestCommand)
 	}
 
 	// Rebind the VCS client's request context before execution + write-back.
@@ -1650,8 +1668,17 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 	}
 
+	var sessionOpts operator.RunOptions
+	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
+		sessionOpts = developmentResumeOptions(ctx, j, previousRun, wtResult, detailComments, resumeCtx, &runningMeta, func() { _ = snapshot.WriteRunMeta(runDir, runningMeta) })
+	}
 	confirmedHead := ""
 	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
+		SessionKey:          sessionOpts.SessionKey,
+		ResumePrompt:        sessionOpts.ResumePrompt,
+		OnExecutionResult:   sessionOpts.OnExecutionResult,
+		OnSessionResume:     sessionOpts.OnSessionResume,
+		PrepareFreshSession: func() error { return archiveRejectedResume(runDir, eventsFile) },
 		ValidateOutcome: func(outcome, body string) error {
 			var err error
 			confirmedHead, err = validateRepairOutcome(ctx, workdir, j, outcome, body)
@@ -1696,18 +1723,19 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
 		finalizingMeta := snapshot.RunMeta{
-			HeadSHA:     confirmedHead,
-			Outcome:     outcome,
-			Operator:    j.op.Name,
-			Repo:        j.repo,
-			IssueNumber: j.sub.Number,
-			IssueTitle:  j.sub.Title,
-			IssueBody:   j.sub.Body,
-			IssueState:  j.sub.State,
-			StartedAt:   startedAt.UTC(),
-			Status:      "finalizing",
-			Stage:       "finalizing",
-			Summary:     output,
+			DevelopmentSession: runningMeta.DevelopmentSession,
+			HeadSHA:            confirmedHead,
+			Outcome:            outcome,
+			Operator:           j.op.Name,
+			Repo:               j.repo,
+			IssueNumber:        j.sub.Number,
+			IssueTitle:         j.sub.Title,
+			IssueBody:          j.sub.Body,
+			IssueState:         j.sub.State,
+			StartedAt:          startedAt.UTC(),
+			Status:             "finalizing",
+			Stage:              "finalizing",
+			Summary:            output,
 		}
 		if outcome == "no-change" {
 			finalizingMeta.OutcomeReason = output
@@ -1809,14 +1837,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	endedAt := time.Now().UTC()
 	rm := snapshot.RunMeta{
-		Operator:    j.op.Name,
-		Repo:        j.repo,
-		IssueNumber: j.sub.Number,
-		IssueTitle:  j.sub.Title,
-		IssueBody:   j.sub.Body,
-		StartedAt:   startedAt.UTC(),
-		EndedAt:     &endedAt,
-		Summary:     output,
+		DevelopmentSession: runningMeta.DevelopmentSession,
+		Operator:           j.op.Name,
+		Repo:               j.repo,
+		IssueNumber:        j.sub.Number,
+		IssueTitle:         j.sub.Title,
+		IssueBody:          j.sub.Body,
+		StartedAt:          startedAt.UTC(),
+		EndedAt:            &endedAt,
+		Summary:            output,
 	}
 	switch {
 	case isCostLimit:
@@ -1934,7 +1963,11 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 		hasPartialWork, _, _ = detectPartialWork(workdir, base)
 	}
-	if repairInfra || ((j.repair == nil || (rm.Status == "success" && (outcome == "agent-implemented" || outcome == "no-change"))) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork))) {
+	// Completed work only needs native retention when repair is enabled or
+	// delivery is incomplete. Other successful runs retain normal cleanup.
+	pendingDevelopment := rm.Status != "success" || rm.WritebackError != "" || outcome == "agent-failed" || ciRepairEnabled(j.repoCfg) || acceptanceRepairEnabled(j.repoCfg)
+	keepSessionWorktree := pendingDevelopment && rm.DevelopmentSession.SessionID != "" && rm.DevelopmentSession.ErrorKind != "output_limit" && rm.Status != "auth-error" && rm.Status != "cost-limit" && rm.Status != "output-limit"
+	if !keepSessionWorktree && (repairInfra || ((j.repair == nil || (rm.Status == "success" && (outcome == "agent-implemented" || outcome == "no-change"))) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork)))) {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree evidence: %s\n", prefix, workdir)
@@ -2438,6 +2471,10 @@ func pruneEmptyIssueWorktrees(cfg *config.Config) int {
 			candidate := filepath.Join(slugDir, e.Name())
 			if _, err := os.Stat(filepath.Join(candidate, ".git")); err != nil {
 				continue
+			}
+			previous := previousDevelopmentRun(fullName, issueNum, time.Now())
+			if sessionResumeReason(previous, config.RoleOperator, configuredDevelopmentProfile(config.RoleOperator), candidate, 0, false) == "" {
+				continue // Native context is useful even before the first edit.
 			}
 			if hasWork, _, _ := detectPartialWork(candidate, base); hasWork {
 				continue // real WIP — leave it for resume

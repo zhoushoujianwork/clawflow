@@ -188,6 +188,15 @@ type VCS interface {
 
 // RunOptions configures a single operator invocation.
 type RunOptions struct {
+	// Native resume is restricted to development operators.
+	SessionKey        string
+	ResumePrompt      string
+	OnExecutionResult func(execution.Result, error, bool)
+	OnSessionResume   func(outcome, reason string)
+	ExecuteFunc       func(context.Context, string, execution.Options) (execution.Result, error)
+
+	PrepareFreshSession func() error
+
 	// ValidateOutcome checks runner-owned repair invariants before write-back.
 	ValidateOutcome func(outcome, body string) error
 
@@ -272,7 +281,9 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 	}
 	runFunc := opts.RunFunc
 	if runFunc == nil {
-		runFunc = RunOffload
+		runFunc = func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, instructions ...string) (string, error) {
+			return runDevelopment(ctx, prompt, opts, instructions...)
+		}
 		if op.Name != "implement" && op.Name != "repair-ci" {
 			runFunc = func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, instructions ...string) (string, error) {
 				options := execution.Options{Workspace: workdir, Role: role, Timeout: timeout, Events: events}
