@@ -349,9 +349,9 @@ func HandleRunCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Owner already exited but never released the lock (Ctrl+C, SIGKILL,
-	// crash). Just clean the lock file so the next run isn't blocked.
-	if !processAlive(info.PID) {
+	// A persistent owner record is not evidence that the operation is active.
+	// Never signal a live process merely because it last owned this inode.
+	if !snapshot.IsLocked(req.Repo, req.Issue) || !processAlive(info.PID) {
 		snapshot.ReleaseLock(req.Repo, req.Issue)
 		// Owner died without finalizing meta — flip running rows to
 		// failed too so the dashboard doesn't keep showing a phantom

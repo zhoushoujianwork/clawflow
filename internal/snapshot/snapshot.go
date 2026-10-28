@@ -1416,7 +1416,7 @@ var runnerStillAlive = func(repo string, issueNum int, metaStart time.Time) bool
 	if err != nil {
 		return false
 	}
-	if !processAlive(info.PID) {
+	if !IsLocked(repo, issueNum) {
 		return false
 	}
 	// AcquireLock and the meta.json write happen back-to-back at runner

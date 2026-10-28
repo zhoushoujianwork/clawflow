@@ -122,13 +122,13 @@ func TestCleanStaleLocks(t *testing.T) {
 	}
 
 	cleaned := CleanStaleLocks()
-	if cleaned != 1 {
-		t.Errorf("CleanStaleLocks cleaned %d, want 1", cleaned)
+	if cleaned != 0 {
+		t.Errorf("CleanStaleLocks cleaned %d, want 0", cleaned)
 	}
 
-	// Stale lock should be gone.
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("stale lockfile should have been removed")
+	// Persistent inodes must survive cleanup.
+	if _, err := os.Stat(path); err != nil {
+		t.Error("persistent lockfile was removed")
 	}
 
 	// Live lock should still exist.

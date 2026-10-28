@@ -30,7 +30,7 @@ func SnapshotLockPath() string {
 }
 
 // AcquireSnapshotLock takes the cross-process snapshot lock, waiting up to
-// 30s. Locks of dead owners are reclaimed. Callers inside this package should
+// 30s. The kernel releases locks on process exit. Callers inside this package should
 // use withSnapshotLock, which also serializes goroutines of this process.
 func AcquireSnapshotLock() error {
 	return acquireWaiting(SnapshotLockPath(), snapshotLockWait)
