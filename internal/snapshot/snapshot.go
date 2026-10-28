@@ -259,10 +259,12 @@ type DevelopmentSession struct {
 }
 
 type RunMeta struct {
-	Profile            string             `json:"profile,omitempty"`
-	Backend            string             `json:"backend,omitempty"`
-	Model              string             `json:"model,omitempty"`
-	Machine            string             `json:"machine,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Machine string `json:"machine,omitempty"`
+	// Optional execution metadata is preserved when present; never infer a tier.
+	ServiceTier        string             `json:"service_tier,omitempty"`
 	RepairReason       string             `json:"repair_reason,omitempty"`
 	DevelopmentSession DevelopmentSession `json:"development_session,omitempty"`
 	HeadSHA            string             `json:"head_sha,omitempty"`

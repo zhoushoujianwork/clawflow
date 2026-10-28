@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -258,5 +260,120 @@ func TestHandlePipelineAgentSlotsStayFresh(t *testing.T) {
 	check(0)
 	if calls != 1 {
 		t.Fatalf("snapshot calls=%d, want cached snapshot", calls)
+	}
+}
+
+func TestPipelineRuntimePassTiming(t *testing.T) {
+	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+	runMu.Lock()
+	oldStarts, oldActive, oldResult, oldAt := activeRunStarts, activeRuns, lastPassResult, lastPassAt
+	started := time.Date(2026, 10, 28, 6, 0, 0, 0, time.UTC)
+	activeRunStarts = map[string]time.Time{"o/r": started}
+	activeRuns = map[string]bool{"o/r": true}
+	lastPassResult, lastPassAt = "error", started.Add(-time.Minute)
+	runMu.Unlock()
+	t.Cleanup(func() {
+		runMu.Lock()
+		activeRunStarts, activeRuns, lastPassResult, lastPassAt = oldStarts, oldActive, oldResult, oldAt
+		runMu.Unlock()
+	})
+	rt := pipelineRuntime()
+	if rt.Scheduler.Status != "running" || rt.Scheduler.StartedAt != started.Format(time.RFC3339) || rt.Scheduler.LastResult != "error" || rt.Scheduler.LastEndedAt == "" {
+		t.Fatalf("runtime=%+v", rt)
+	}
+}
+
+// executionFixtures are run metadata records shared by the selection, file and
+// PostgreSQL tests; each is the meta.json a run would persist.
+var executionFixtures = []struct {
+	name                          string
+	records                       []string
+	profile, backend, model, tier string
+}{
+	{"latest result", []string{
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T10:00:00Z","ended_at":"2026-10-28T10:01:00Z","status":"success","development_session":{"profile":"configured-other","backend":"old"}}`,
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T09:00:00Z","ended_at":"2026-10-28T11:00:00Z","status":"success","development_session":{"profile":"actual","backend":"codex"},"model":"recorded-model","service_tier":"priority"}`,
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T12:00:00Z","status":"running","development_session":{"profile":"running","backend":"claude"}}`,
+	}, "actual", "codex", "recorded-model", "priority"},
+	{"missing optional fields do not inherit", []string{
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T10:00:00Z","ended_at":"2026-10-28T10:30:00Z","status":"success","development_session":{"profile":"old","backend":"old"},"model":"old-model","service_tier":"priority"}`,
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T11:00:00Z","ended_at":"2026-10-28T11:30:00Z","status":"success","development_session":{"profile":"new","backend":"claude"}}`,
+	}, "new", "claude", "", ""},
+	{"recorded model usage", []string{
+		`{"repo":"o/r","operator":"implement","started_at":"2026-10-28T11:00:00Z","ended_at":"2026-10-28T11:10:00Z","status":"success","development_session":{"profile":"actual","backend":"codex"},"usage":{"model_usage":{"model-z":{},"model-a":{}}}}`,
+	}, "actual", "codex", "model-a, model-z", ""},
+	{"empty history", nil, "", "", "", ""},
+}
+
+func assertExecution(t *testing.T, ex pipeline.Execution, profile, backend, model, tier string) {
+	t.Helper()
+	raw, _ := json.Marshal(ex)
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"profile": profile, "backend": backend, "model": model, "service_tier": tier} {
+		if want == "" {
+			if _, ok := got[key]; ok {
+				t.Errorf("%s should be omitted: %s", key, raw)
+			}
+		} else if got[key] != want {
+			t.Errorf("%s = %v, want %s", key, got[key], want)
+		}
+	}
+}
+
+func TestLatestExecutionSelection(t *testing.T) {
+	for _, tc := range executionFixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			var runs []snapshot.RunIndexEntry
+			for _, rec := range tc.records {
+				var e snapshot.RunIndexEntry
+				if err := json.Unmarshal([]byte(rec), &e); err != nil {
+					t.Fatal(err)
+				}
+				runs = append(runs, e)
+			}
+			assertExecution(t, latestExecution(runs), tc.profile, tc.backend, tc.model, tc.tier)
+		})
+	}
+}
+
+// Without a bound run store ReadRunsIndex reads data/runs/*/meta.json.
+func TestPipelineRuntimeUsesLatestRecordedExecutionFromFiles(t *testing.T) {
+	for _, tc := range executionFixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "configured-other")
+			snapshot.BindRunStore(nil)
+			for i, rec := range tc.records {
+				dir := filepath.Join(snapshot.DataDir(), "runs", "o__r", "issue-1", "run-"+string(rune('a'+i)))
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(rec), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertExecution(t, pipelineRuntime().Execution, tc.profile, tc.backend, tc.model, tc.tier)
+		})
+	}
+}
+
+// Same fixtures through the PostgreSQL runs table (skipped without a test DSN).
+func TestPipelineRuntimeUsesLatestRecordedExecutionFromDB(t *testing.T) {
+	for _, tc := range executionFixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			s := historyDB(t)
+			resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) { return fakeSnapshot(), nil })
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "configured-other")
+			for i, rec := range tc.records {
+				dir := filepath.Join(snapshot.DataDir(), "runs", "o__r", "issue-1", "run-"+string(rune('a'+i)))
+				if _, err := s.UpsertRun(context.Background(), dir, "run", []byte(rec)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertExecution(t, pipelineRuntime().Execution, tc.profile, tc.backend, tc.model, tc.tier)
+		})
 	}
 }

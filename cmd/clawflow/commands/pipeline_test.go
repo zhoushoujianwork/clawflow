@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -323,6 +325,122 @@ func TestBuildPipelineGlobalQueue(t *testing.T) {
 	d.globalQueue = nil
 	if snap = buildPipeline(context.Background(), d); snap.GlobalQueue == nil || len(snap.GlobalQueue) != 0 {
 		t.Fatalf("empty queue must serialize as [], got %#v", snap.GlobalQueue)
+	}
+}
+
+func TestUnifiedQueueItemsUseLiveStateAndAttention(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 1, Title: "live", State: "open", Labels: []string{"clawflow"}}, {Number: 2, Title: "blocked", State: "open", Labels: []string{"clawflow"}}, {Number: 3, Title: "review", State: "open"}}
+	f.open = []vcs.PR{{Number: 30, State: "open", HeadBranch: "fix/issue-3"}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, MaxInFlight: 2}})
+	calls := 0
+	d.globalQueue = func() []queue.ListEntry {
+		calls++
+		return []queue.ListEntry{{Key: "o/r#2", Repo: "o/r", Number: 2, State: "blocked:dependency"}, {Key: "o/r#1", Repo: "o/r", Number: 1, State: "eligible"}}
+	}
+	d.locked = func(_ string, n int) bool { return n == 1 }
+	snap := buildPipeline(context.Background(), d)
+	b := snap.Repos[0]
+	if calls != 1 || len(b.Items) != 3 || b.MaxInFlight != 2 {
+		t.Fatalf("calls=%d board=%+v", calls, b)
+	}
+	if b.Items[0].Issue != 2 || b.Items[1].Issue != 1 {
+		t.Fatalf("queue order: %+v", b.Items)
+	}
+	live := itemFor(t, b, 1)
+	if live.Stage != pipeline.StageImplementing || snap.GlobalQueue[1].State != "in_flight" {
+		t.Fatalf("stale live state: %+v %+v", live, snap.GlobalQueue)
+	}
+	blocked := itemFor(t, b, 2)
+	if blocked.Stage != pipeline.StageBlocked || len(blocked.Attention) == 0 {
+		t.Fatalf("missing blocked attention: %+v", blocked)
+	}
+	review := itemFor(t, b, 3)
+	if !slices.Contains(review.Attention, "waiting for review (manual merge)") {
+		t.Fatalf("missing manual review: %+v", review)
+	}
+	raw, _ := json.Marshal(b)
+	for _, field := range []string{`"max_in_flight":2`, `"attention":`, `"state":"open"`} {
+		if !strings.Contains(string(raw), field) {
+			t.Fatalf("missing %s: %s", field, raw)
+		}
+	}
+}
+
+func TestHarvestStartDoesNotOverrideFailedLatestAttempt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 381, State: "open"}}
+	f.open = []vcs.PR{{Number: 400, State: "open", HeadBranch: "fix/issue-381"}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, AcceptanceRequired: true}})
+	d.events = func() ([]pipeline.Event, error) {
+		return []pipeline.Event{
+			{Time: pipelineT0.Add(-time.Minute).Format(time.RFC3339), Event: "run/harvest_start", Fields: map[string]string{"repo": "o/r", "pr": "400"}},
+			{Time: pipelineT0.Format(time.RFC3339), Event: "run/harvest_end", Fields: map[string]string{"repo": "o/r", "pr": "400", "status": "error"}},
+		}, nil
+	}
+	for _, tc := range []struct {
+		a    pipeline.AcceptanceInfo
+		want pipeline.Stage
+	}{
+		{pipeline.AcceptanceInfo{Attempts: 1, LatestIsInfra: true, InfraAttempts: 1, MaxInfraRetries: 3}, pipeline.StageInfraRetry},
+		{pipeline.AcceptanceInfo{Attempts: 3, LatestIsInfra: true, InfraAttempts: 3, MaxInfraRetries: 3}, pipeline.StageBlocked},
+		{pipeline.AcceptanceInfo{Attempts: 1, Verdict: "failed"}, pipeline.StageRejected},
+		{pipeline.AcceptanceInfo{Attempts: 1, Verdict: "blocked"}, pipeline.StageBlocked},
+	} {
+		d.acceptance = func(context.Context, vcs.Client, string, config.Repo, vcs.PR, time.Time) (*pipeline.AcceptanceInfo, error) {
+			return &tc.a, nil
+		}
+		item := itemFor(t, buildPipeline(context.Background(), d).Repos[0], 381)
+		if item.Stage != tc.want {
+			t.Fatalf("got %s want %s", item.Stage, tc.want)
+		}
+	}
+}
+
+func TestPipelineRepairBudgetAttention(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 1, State: "open"}}
+	f.open = []vcs.PR{{Number: 2, State: "open", HeadBranch: "fix/issue-1"}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, AutoMerge: true}})
+	dir, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", 2)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ledger := ciRepairLedger{Attempts: make([]ciRepairAttempt, ciRepairMaxAttempts)}
+	if err := saveCIRepairLedger(dir, path, ledger); err != nil {
+		t.Fatal(err)
+	}
+	item := itemFor(t, buildPipeline(context.Background(), d).Repos[0], 1)
+	if len(item.Attention) != 1 || !strings.Contains(item.Attention[0], "attempts") {
+		t.Fatalf("missing budget attention: %+v", item)
+	}
+}
+
+func TestPipelineIncludesStandaloneFailedIssues(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 91, Title: "unresolved", State: "open", Labels: []string{"agent-failed"}, UpdatedAt: pipelineT0.Add(-30 * 24 * time.Hour).Format(time.RFC3339)}, {Number: 92, State: "open"}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.runs = func() []snapshot.RunIndexEntry {
+		return []snapshot.RunIndexEntry{{RunMeta: snapshot.RunMeta{Repo: "o/r", IssueNumber: 91, Operator: "implement", Status: "failed", StartedAt: pipelineT0.Add(-30 * 24 * time.Hour)}}}
+	}
+	b := buildPipeline(context.Background(), d).Repos[0]
+	if len(b.Items) != 1 {
+		t.Fatalf("want only unresolved failed issue, got %+v", b.Items)
+	}
+	it := itemFor(t, b, 91)
+	if it.Stage != pipeline.StageFailed || it.InQueue || !strings.Contains(strings.Join(it.Attention, " "), "agent-failed") {
+		t.Fatalf("missing standalone failure: %+v", it)
+	}
+	// Inclusion from both the queue and labels must still produce one row.
+	d.globalQueue = func() []queue.ListEntry {
+		return []queue.ListEntry{{Repo: "o/r", Number: 91, Key: "o/r#91", State: "blocked:label_agent-failed"}}
+	}
+	if got := buildPipeline(context.Background(), d).Repos[0].Items; len(got) != 1 || !got[0].InQueue {
+		t.Fatalf("duplicate or lost queue membership: %+v", got)
 	}
 }
 

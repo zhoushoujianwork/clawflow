@@ -27,7 +27,7 @@ import (
 const (
 	pipelineMaxPRDetails   = sweepMaxCandidates // PRs that get CI/mergeability/acceptance reads
 	pipelineRecentRunDays  = 7
-	pipelineRecentMerged   = 10
+	pipelineRecentMerged   = 100
 	pipelineMergedWindow   = 14 * 24 * time.Hour
 	pipelineSummaryLimit   = 600
 	pipelineLogTailBytes   = 4 << 20
@@ -122,6 +122,11 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	}
 	slices.Sort(names)
 
+	var queueRows []queue.ListEntry
+	if d.globalQueue != nil {
+		queueRows = d.globalQueue()
+	}
+	d.globalQueue = func() []queue.ListEntry { return queueRows }
 	runs := d.runs()
 	tracked := map[string]bool{}
 	snap.Repos = make([]pipeline.RepoBoard, len(names))
@@ -170,8 +175,10 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 			})
 		}
 	}
-	// Queue candidates must remain visible before their first run or PR.
-	for _, q := range snap.GlobalQueue {
+	// Queue candidates must remain visible before their first run or PR, and a
+	// queue row whose issue is running right now reports in_flight.
+	for i := range snap.GlobalQueue {
+		q := &snap.GlobalQueue[i]
 		for bi := range snap.Repos {
 			b := &snap.Repos[bi]
 			if b.Repo != q.Repo {
@@ -179,16 +186,27 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 			}
 			found := false
 			for ii := range b.Items {
-				if b.Items[ii].Issue == q.Number {
-					b.Items[ii].InQueue = true
-					b.Items[ii].QueuePosition = q.Position
-					found = true
-					break
+				item := &b.Items[ii]
+				if item.Issue != q.Number {
+					continue
 				}
+				found = true
+				if item.Run != nil && item.Run.Live || item.Acceptance != nil && item.Acceptance.Running {
+					q.State = "in_flight"
+				}
+				item.InQueue = true
+				item.QueuePosition = q.Position
+				break
 			}
 			if !found {
-				b.Items = append(b.Items, pipeline.Item{Issue: q.Number, Title: q.Title, InQueue: true, QueuePosition: q.Position, Stage: pipeline.StageQueued, Why: q.State, Evidence: []string{"scheduler queue snapshot"}})
+				item := pipeline.Item{State: "open", Issue: q.Number, Title: q.Title, InQueue: true, QueuePosition: q.Position, Stage: pipeline.StageQueued, Why: q.State, Evidence: []string{"scheduler queue snapshot"}}
+				if strings.HasPrefix(q.State, "blocked:") {
+					item.Stage = pipeline.StageBlocked
+					item.Attention = []string{q.State}
+				}
+				b.Items = append(b.Items, item)
 			}
+			sortBoardItems(b.Items)
 		}
 	}
 	return snap
@@ -213,7 +231,10 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 	board := pipeline.RepoBoard{
 		Repo: repo, Enabled: rc.Enabled, Platform: platform, AutoMerge: rc.AutoMerge,
 		CIRequired: rc.CIRequired, AcceptanceRequired: rc.AcceptanceRequired,
-		Items: []pipeline.Item{},
+		Items: []pipeline.Item{}, MaxInFlight: rc.MaxInFlight,
+	}
+	if board.MaxInFlight <= 0 {
+		board.MaxInFlight = 1
 	}
 	client, err := d.newClient(rc)
 	if err != nil {
@@ -294,10 +315,19 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 				continue
 			}
 			it, ok := issueByNum[row.Number]
-			if !ok || !hasLabel(it.Labels, queue.ScopeLabel) {
+			if !ok {
+				// Queue rows stay visible before their issue is readable.
+				it = vcs.Issue{Number: row.Number, Title: row.Title, State: "open"}
+			} else if !hasLabel(it.Labels, queue.ScopeLabel) {
 				continue
 			}
 			add(cand{number: it.Number, queuePos: row.Position, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
+		}
+	}
+	// Unresolved failures need attention regardless of queue enrolment or run retention.
+	for _, it := range openIssues {
+		if it.State == "open" && slices.Contains(it.Labels, "agent-failed") {
+			add(cand{number: it.Number, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
 		}
 	}
 	missingIssueReads := 0
@@ -355,7 +385,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 
 	detailed := 0
 	for _, c := range cands {
-		item := pipeline.Item{Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
+		item := pipeline.Item{State: c.state, Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
 		ev := pipeline.Evidence{IssueState: c.state, Labels: c.labels, AutoMerge: rc.AutoMerge, CIRequired: rc.CIRequired,
 			AcceptanceRequired: rc.AcceptanceRequired, InQueue: c.queuePos > 0, Now: now}
 		if r, ok := latestRun[c.number]; ok {
@@ -397,6 +427,30 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 
 		item.Stage, item.Why, item.Evidence = pipeline.Derive(ev)
+		if item.Stage != pipeline.StageMerged {
+			if item.Stage == pipeline.StageBlocked || item.Stage == pipeline.StageFailed || item.Stage == pipeline.StageRejected {
+				item.Attention = append(item.Attention, item.Why)
+			}
+			if slices.Contains(c.labels, "agent-failed") && item.Stage != pipeline.StageFailed {
+				item.Attention = append(item.Attention, "agent-failed")
+			}
+			if item.PR != nil && item.PR.State == "open" {
+				if !rc.AutoMerge {
+					item.Attention = append(item.Attention, "waiting for review (manual merge)")
+				}
+				if err := checkRepairBudget(snapshot.DataDir(), repo, item.PR.Number, now); errors.Is(err, errRepairExhausted) || errors.Is(err, errRepairBlocked) {
+					item.Attention = append(item.Attention, err.Error())
+				}
+			}
+			if d.globalQueue != nil && (item.Run == nil || !item.Run.Live) {
+				for _, q := range d.globalQueue() {
+					if q.Repo == repo && q.Number == c.number && strings.HasPrefix(q.State, "blocked:") && item.Stage == pipeline.StageQueued {
+						item.Stage, item.Why = pipeline.StageBlocked, q.State
+						item.Attention = append(item.Attention, q.State)
+					}
+				}
+			}
+		}
 		if local, ok := client.(*pipelineLocalClient); ok && local.offline && item.Stage == pipeline.StageAcceptancePending && item.Acceptance != nil && item.Acceptance.Verdict == "passed" {
 			item.Why = "the last stored acceptance passed; current contract verification is pending"
 		}
@@ -421,9 +475,14 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		board.Items = append(board.Items, item)
 	}
 
-	// Queue items first in queue order, then the rest by recency.
-	sort.SliceStable(board.Items, func(i, j int) bool {
-		a, b := board.Items[i], board.Items[j]
+	sortBoardItems(board.Items)
+	return board
+}
+
+// sortBoardItems puts queue items first in queue order, then the rest by recency.
+func sortBoardItems(items []pipeline.Item) {
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
 		if a.InQueue != b.InQueue {
 			return a.InQueue
 		}
@@ -432,7 +491,6 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 		return pipeline.ParseTime(a.UpdatedAt).After(pipeline.ParseTime(b.UpdatedAt))
 	})
-	return board
 }
 
 // pipelinePRs returns open PRs and recently merged PRs, using one cheap page

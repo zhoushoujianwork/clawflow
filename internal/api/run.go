@@ -22,8 +22,11 @@ import (
 var (
 	// runMu guards activeRuns. Keys are repo names of in-flight repo-scoped
 	// `clawflow run --repo R` passes; unscopedKey marks an unscoped pass.
-	runMu      sync.Mutex
-	activeRuns = map[string]bool{}
+	runMu           sync.Mutex
+	activeRuns      = map[string]bool{}
+	activeRunStarts = map[string]time.Time{}
+	lastPassResult  string
+	lastPassAt      time.Time
 
 	schedMu       sync.Mutex
 	schedNextFire time.Time // zero when no scheduler is running or interval=0
@@ -88,6 +91,7 @@ func TriggerRun(repo string, issue int) bool {
 		return false
 	}
 	activeRuns[repo] = true
+	activeRunStarts[repo] = time.Now()
 	runMu.Unlock()
 	spawnRun(repo, issue)
 	return true
@@ -126,6 +130,7 @@ func TriggerScheduledRuns(cfg *config.Config, hostname string, only map[string]b
 	chosen := PlanScheduledRuns(cfg, hostname, activeRuns, only)
 	for _, repo := range chosen {
 		activeRuns[repo] = true
+		activeRunStarts[repo] = time.Now()
 	}
 	active = make(map[string]bool, len(activeRuns))
 	for k := range activeRuns {
@@ -197,9 +202,17 @@ func spawnRun(repo string, issue int) {
 			cancel()
 			runMu.Lock()
 			delete(activeRuns, repo)
+			delete(activeRunStarts, repo)
 			runMu.Unlock()
 		}()
-		_ = cmd.Run()
+		err := cmd.Run()
+		runMu.Lock()
+		lastPassResult = "success"
+		if err != nil {
+			lastPassResult = "error"
+		}
+		lastPassAt = time.Now()
+		runMu.Unlock()
 		if ctx.Err() == context.DeadlineExceeded {
 			fmt.Fprintf(os.Stderr,
 				"[run-watchdog] clawflow run exceeded %s and was force-killed (issue #216 safeguard); auto-run scheduler unblocked\n",
