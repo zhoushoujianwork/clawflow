@@ -902,3 +902,47 @@ func TestAcceptanceWritebackFailurePreservesContract(t *testing.T) {
 		})
 	}
 }
+
+func TestAcceptanceGitLabOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		origin string
+		want   bool
+	}{
+		{"https://gitlab.example:8443/ns/group/repo.git", true},
+		{"git@gitlab.example:ns/group/repo.git", true},
+		{"https://other.example:8443/ns/group/repo.git", false},
+		{"https://gitlab.example/ns/group/repo.git", false},
+		{"https://gitlab.example:8443/ns/repo.git", false},
+		{"https://gitlab.example:8443/ns/group/repo.git?x=1", false},
+		{"https://user@gitlab.example:8443/ns/group/repo.git", false},
+		{"git@other.example:ns/group/repo.git", false},
+		{"/tmp/ns/group/repo", false},
+	} {
+		rc := config.Repo{Platform: "gitlab", BaseURL: "https://gitlab.example:8443"}
+		if got := acceptanceOriginMatches(tc.origin, rc, "ns/group/repo"); got != tc.want {
+			t.Errorf("origin=%s got=%v want=%v", tc.origin, got, tc.want)
+		}
+	}
+}
+
+func TestAcceptanceGitLabSubgroupConfiguration(t *testing.T) {
+	acceptanceFixture(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.Repos["o/r"]
+	rc.Platform = "gitlab"
+	for _, repo := range []string{"ns/group/repo", "ns//repo", "ns/../repo"} {
+		cfg.Repos[repo] = rc
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range []string{"ns/group/repo", "ns//repo", "ns/../repo"} {
+		_, _, err := acceptanceConfiguration(repo)
+		if (err == nil) != (repo == "ns/group/repo") {
+			t.Errorf("repo=%s err=%v", repo, err)
+		}
+	}
+}

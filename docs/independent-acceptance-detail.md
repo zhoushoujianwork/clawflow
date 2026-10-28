@@ -22,7 +22,7 @@ The model returns exactly `status`, `summary` and `evidence`. Exact schema keys 
 
 Private local storage under the ClawFlow data directory retains per-attempt plans and records, with size bounds, digests and atomic publication. Lookup selects the latest complete outcome for the exact contract, including failure/cancellation. Corruption or ambiguous timestamp ordering blocks. This is a reference scan, not a transactional distributed authority. Local PID-owned locks exclude review and enrolled merge for the same repository/PR.
 
-`acceptance_required` defaults false. Explicit enrollment protects the shared automatic merge entry point and explicit CLI merge. Required evidence and CI are rechecked at merge attempts. GitHub conditional merge receives the original accepted head SHA; only a confirmed merge with a valid resulting SHA counts as success. Unsupported conditional providers block enrolled merges. Provider branch protections remain authoritative.
+`acceptance_required` 默认为 false。启用后，共享的自动合并入口和显式 CLI 合并都会受验收门禁保护，并在尝试合并时重新检查验收证据和 CI。GitHub 与 GitLab 的条件合并均传入原始验收 head SHA；只有服务端确认已合并且返回有效合并提交 SHA 才算成功。GitLab 支持自托管实例及子组路径，验收 checkout 的 origin 必须匹配配置的实例和仓库；head 移动或 MR 不可合并时返回失败。不支持条件合并的提供方会阻止已启用验收的仓库合并。提供方的分支保护规则仍然有效。
 
 Head conditional merge does not atomically pin the target base. Integration candidates, merge queues and post-merge verification require subsequent work. Read-only execution uses the configured backend's permission enforcement; it is not a new container or project credential-isolation layer. Same-host file ownership remains a trust boundary until the durable authority/effect gateway work is complete.
 
