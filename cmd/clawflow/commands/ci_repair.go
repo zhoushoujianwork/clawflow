@@ -611,6 +611,15 @@ func confirmedDevelopmentHead(ctx context.Context, workdir string, j *runJob) (s
 }
 
 func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outcome, body string) (string, error) {
+	// Validate conflict repair before operator write-back, not during the later
+	// best-effort provenance lookup. A success marker alone cannot prove a merge.
+	if j.repair != nil && j.repair.MergeConflict && outcome == "agent-implemented" {
+		head, err := confirmedDevelopmentHead(ctx, workdir, j)
+		if err != nil {
+			return "", fmt.Errorf("conflict repair verification: %w", err)
+		}
+		return head, nil
+	}
 	if outcome != "no-change" {
 		return "", nil
 	}

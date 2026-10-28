@@ -136,7 +136,13 @@ func TestConflictRepairConfirmedHeadPreservesHistory(t *testing.T) {
 
 // Exercise the runner's confirmed-head persistence with a fake successful agent.
 func TestConflictRepairRecordsDevelopmentProvenance(t *testing.T) {
-	f, _, reg, cfg := repairAcceptanceFixture(t, "passed")
+	for _, mode := range []string{"merged", "unchanged", "unpublished", "missing-base", "missing-head", "dirty"} {
+		t.Run(mode, func(t *testing.T) { checkConflictRepairRun(t, mode) })
+	}
+}
+
+func checkConflictRepairRun(t *testing.T, mode string) {
+	f, readLog, reg, cfg := repairAcceptanceFixture(t, "passed")
 	source := newIssue329Repo(t)
 	git := func(args ...string) string {
 		t.Helper()
@@ -162,9 +168,13 @@ func TestConflictRepairRecordsDevelopmentProvenance(t *testing.T) {
 	if len(jobs) != 1 {
 		t.Fatalf("jobs=%v", jobs)
 	}
-	jobs[0].client = &setupRepairFake{acceptanceFake: f}
+	client := &setupRepairFake{acceptanceFake: f}
+	jobs[0].client = client
 	jobs[0].repoCfg.LocalPath = source
 	newHead := strings.Repeat("c", 40)
+	if mode == "unchanged" {
+		newHead = f.pr.HeadSHA
+	}
 	oldGit := acceptanceGit
 	t.Cleanup(func() { acceptanceGit = oldGit })
 	acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
@@ -174,16 +184,25 @@ func TestConflictRepairRecordsDevelopmentProvenance(t *testing.T) {
 				return newHead, nil
 			}
 		case "ls-remote":
+			if mode == "unpublished" {
+				return f.pr.HeadSHA + "\trefs/heads/" + f.pr.HeadBranch, nil
+			}
 			return newHead + "\trefs/heads/" + f.pr.HeadBranch, nil
 		case "merge-base":
+			if (mode == "missing-base" && args[2] == f.pr.BaseSHA) || (mode == "missing-head" && args[2] == f.pr.HeadSHA) {
+				return "", errors.New("not ancestor")
+			}
 			return "", nil
 		case "status":
+			if mode == "dirty" {
+				return "UU file.go", nil
+			}
 			return "", nil
 		}
 		return oldGit(ctx, dir, args...)
 	}
 	fired, limited, failed := runOneOperator(context.Background(), jobs[0], time.Minute)
-	if !fired || limited || failed {
+	if (mode == "merged" && (!fired || limited || failed)) || (mode != "merged" && (fired || limited || !failed)) {
 		t.Fatalf("fired=%v limited=%v failed=%v", fired, limited, failed)
 	}
 	parent := filepath.Dir(snapshot.RunDir("o/r", 42, time.Now()))
@@ -199,12 +218,32 @@ func TestConflictRepairRecordsDevelopmentProvenance(t *testing.T) {
 			continue
 		}
 		found = true
+		if mode != "merged" {
+			if meta.Status != "failed" || meta.HeadSHA != "" || meta.Error == "" {
+				t.Fatalf("invalid failure meta=%+v", meta)
+			}
+			continue
+		}
 		if meta.Status != "success" || meta.HeadSHA != newHead || meta.RepairReason != "merge_conflict" {
 			t.Fatalf("meta=%+v", meta)
 		}
 	}
 	if !found {
 		t.Fatal("missing repair run")
+	}
+	if mode != "merged" {
+		if len(client.labels) != 0 || len(f.comments) != 0 || len(f.merged) != 0 || strings.Contains(readLog(), "run/automerge") {
+			t.Fatalf("validation failure caused writeback/automation: labels=%v comments=%v log=%s", client.labels, f.comments, readLog())
+		}
+		_, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", f.pr.Number)
+		ledger, err := loadCIRepairLedger(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if consumed, infra := ledger.counts(); consumed != 1 || infra != 0 {
+			t.Fatalf("consumed=%d infra=%d", consumed, infra)
+		}
+		return
 	}
 	if _, err := acceptanceDevelopment("o/r", 42, newHead, f.pr.Number); err != nil {
 		t.Fatal(err)
