@@ -30,7 +30,9 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // DashboardRoot is ~/.clawflow/dashboard — strictly the SPA bundle
@@ -2011,4 +2013,46 @@ func writeJSON(path string, v any) error {
 		return fmt.Errorf("close temp: %w", err)
 	}
 	return os.Rename(tmpName, path)
+}
+
+// ReadPipeline reads the last complete board without contacting a provider.
+func ReadPipeline() (pipeline.Snapshot, error) {
+	var s pipeline.Snapshot
+	b, err := os.ReadFile(filepath.Join(DataDir(), "pipeline.json"))
+	if err == nil {
+		err = json.Unmarshal(b, &s)
+	}
+	return s, err
+}
+
+// WritePipeline atomically publishes a board, rejecting older concurrent writers.
+func WritePipeline(s pipeline.Snapshot) error {
+	return withSnapshotLock(func() error {
+		old, err := ReadPipeline()
+		if err == nil && pipeline.ParseTime(old.GeneratedAt).After(pipeline.ParseTime(s.GeneratedAt)) {
+			return nil
+		}
+		return writeJSON(filepath.Join(DataDir(), "pipeline.json"), s)
+	})
+}
+
+// PipelinePRs is the last successful scheduler PR listing for a repository.
+type PipelinePRs struct {
+	CapturedAt time.Time `json:"captured_at"`
+	PRs        []vcs.PR  `json:"prs"`
+}
+
+// ReadPipelinePRs reads a scheduler listing without contacting the provider.
+func ReadPipelinePRs(repo string) (PipelinePRs, error) {
+	var s PipelinePRs
+	b, err := os.ReadFile(filepath.Join(DataDir(), "pipeline-prs", strings.ReplaceAll(repo, "/", "__")+".json"))
+	if err == nil {
+		err = json.Unmarshal(b, &s)
+	}
+	return s, err
+}
+
+// WritePipelinePRs atomically records an already completed scheduler read.
+func WritePipelinePRs(repo string, prs []vcs.PR) error {
+	return writeJSON(filepath.Join(DataDir(), "pipeline-prs", strings.ReplaceAll(repo, "/", "__")+".json"), PipelinePRs{CapturedAt: time.Now().UTC(), PRs: prs})
 }

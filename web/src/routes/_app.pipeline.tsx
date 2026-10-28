@@ -111,6 +111,9 @@ interface GlobalQueueEntry {
 }
 
 interface Board {
+  stale: boolean
+  refreshing: boolean
+  error?: string
   generated_at: string
   repos: RepoBoard[]
   global_queue?: GlobalQueueEntry[]
@@ -214,8 +217,9 @@ function PipelinePage() {
         const body = await r.json().catch(() => null)
         throw new Error(body?.error || `HTTP ${r.status}`)
       }
-      setBoard((await r.json()) as Board)
-      setError(null)
+      const next = (await r.json()) as Board
+      setBoard(next)
+      setError(next.error ?? null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -240,7 +244,7 @@ function PipelinePage() {
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground tabular-nums">
-          {board && <span>updated {timeAgo(board.generated_at)}</span>}
+          {board && <span>{board.generated_at ? `updated ${timeAgo(board.generated_at)}` : 'Waiting for first snapshot'}{board.refreshing ? ' · refreshing…' : board.stale ? ' · stale' : ''}</span>}
           <button
             onClick={() => void load()}
             disabled={refreshing}
@@ -269,10 +273,10 @@ function PipelinePage() {
           <GlobalQueuePanel entries={board.global_queue ?? []} />
           {board.repos.length === 0 ? (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
-              <p className="text-base font-semibold text-foreground mb-1">No repository is tracked yet</p>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-base font-semibold text-foreground mb-1">{board.generated_at ? 'No repository is tracked yet' : 'Preparing pipeline snapshot…'}</p>
+              {board.generated_at && <p className="text-sm text-muted-foreground">
                 Enable a repository with <code>clawflow repo enable</code> and enroll issues using the clawflow label.
-              </p>
+              </p>}
             </div>
           ) : (
             board.repos.map(r => <RepoSection key={r.repo} board={r} repoInfo={repoInfo} />)

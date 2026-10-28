@@ -6,9 +6,11 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
@@ -62,8 +64,8 @@ func pipelineTestDeps(f *pipelineFake, repos map[string]config.Repo) pipelineDep
 		runs:      func() []snapshot.RunIndexEntry { return nil },
 		events:    func() ([]pipeline.Event, error) { return nil, nil },
 		locked:    func(string, int) bool { return false },
-		acceptance: func(context.Context, vcs.Client, string, config.Repo, vcs.PR, time.Time) *pipeline.AcceptanceInfo {
-			return nil
+		acceptance: func(context.Context, vcs.Client, string, config.Repo, vcs.PR, time.Time) (*pipeline.AcceptanceInfo, error) {
+			return nil, nil
 		},
 	}
 }
@@ -251,14 +253,14 @@ func TestPipelineAcceptanceReadsRecordedAttempts(t *testing.T) {
 	rc := config.Repo{Enabled: true, AutoMerge: true, AcceptanceRequired: true}
 	ctx := context.Background()
 
-	if got := pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now()); got == nil || got.Attempts != 0 || got.Error != "" || !got.Required {
+	if got, err := pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now()); err != nil || got == nil || got.Attempts != 0 || got.Error != "" || !got.Required {
 		t.Fatalf("before any attempt: %+v", got)
 	}
 
 	restore := failProvider()
 	harvest(t, "", 0)
 	restore()
-	got := pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now())
+	got, _ := pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now())
 	if got == nil || got.Attempts != 1 || got.InfraAttempts != 1 || !got.LatestIsInfra || got.NextRetryAt == "" || got.Verdict != "" || got.MaxInfraRetries != harvestMaxInfra {
 		t.Fatalf("after infra attempt: %+v", got)
 	}
@@ -269,7 +271,7 @@ func TestPipelineAcceptanceReadsRecordedAttempts(t *testing.T) {
 
 	offset = 16 * time.Minute
 	harvest(t, "", 0)
-	got = pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now())
+	got, _ = pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now())
 	if got == nil || got.Attempts != 2 || got.InfraAttempts != 1 || got.LatestIsInfra || got.Verdict != "passed" || !got.Valid {
 		t.Fatalf("after pass: %+v", got)
 	}
@@ -280,7 +282,7 @@ func TestPipelineAcceptanceReadsRecordedAttempts(t *testing.T) {
 
 func TestPipelineAcceptanceNilWhenNotRequiredAndNoStore(t *testing.T) {
 	f, _, _ := harvestFixture(t)
-	if got := pipelineAcceptance(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, f.pr, time.Now()); got != nil {
+	if got, err := pipelineAcceptance(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, f.pr, time.Now()); err != nil || got != nil {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -321,5 +323,384 @@ func TestBuildPipelineGlobalQueue(t *testing.T) {
 	d.globalQueue = nil
 	if snap = buildPipeline(context.Background(), d); snap.GlobalQueue == nil || len(snap.GlobalQueue) != 0 {
 		t.Fatalf("empty queue must serialize as [], got %#v", snap.GlobalQueue)
+	}
+}
+
+// A provider that observes the same request context as the real adapters.
+type pipelineSlowFake struct {
+	*pipelineFake
+	ctx context.Context
+}
+
+func (f *pipelineSlowFake) SetRequestContext(ctx context.Context) { f.ctx = ctx }
+func (f *pipelineSlowFake) ListOpenIssues(string) ([]vcs.Issue, error) {
+	<-f.ctx.Done()
+	return nil, f.ctx.Err()
+}
+
+func TestPipelineTimeoutRetainsRepoSnapshot(t *testing.T) {
+	f := newPipelineFake()
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineSlowFake{pipelineFake: newPipelineFake()}, nil }
+	d.previous = map[string]pipeline.RepoBoard{"o/r": {Repo: "o/r", Items: []pipeline.Item{{Issue: 7, Title: "retained"}}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	s := buildPipeline(ctx, d)
+	if len(s.Repos) != 1 || !s.Repos[0].Stale || s.Repos[0].Error == "" || s.Repos[0].Items[0].Issue != 7 {
+		t.Fatalf("snapshot=%+v", s)
+	}
+}
+
+func TestPipelinePassSnapshotUsesLocalEvidence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {Enabled: true}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WriteIssues([]snapshot.IssueEntry{{Repo: "o/r", IssueNumber: 7, IssueTitle: "local issue", State: "open", CapturedAt: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WritePipelinePRs("o/r", []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", HeadSHA: "new-head", State: "open"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := snapshot.ReadPipeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Repos) != 1 || len(s.Repos[0].Items) != 1 || s.Repos[0].Items[0].PR.Number != 8 || s.GeneratedAt == "" {
+		t.Fatalf("snapshot=%+v", s)
+	}
+}
+
+func TestRunPassWritesPipelineOnEarlyExit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// No enabled repositories: the end-of-pass publication still runs.
+	_ = runOnce(context.Background(), "", 0, time.Second)
+	if _, err := snapshot.ReadPipeline(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type pipelineCountingFake struct {
+	*pipelineFake
+	active, maximum *atomic.Int32
+}
+
+func (f *pipelineCountingFake) ListOpenIssues(string) ([]vcs.Issue, error) {
+	n := f.active.Add(1)
+	for old := f.maximum.Load(); n > old; old = f.maximum.Load() {
+		if f.maximum.CompareAndSwap(old, n) {
+			break
+		}
+	}
+	defer f.active.Add(-1)
+	time.Sleep(20 * time.Millisecond)
+	return nil, nil
+}
+func TestPipelineRefreshConcurrencyBound(t *testing.T) {
+	repos := map[string]config.Repo{}
+	for i := 0; i < 12; i++ {
+		repos["o/r"+strconv.Itoa(i)] = config.Repo{Enabled: true}
+	}
+	d := pipelineTestDeps(newPipelineFake(), repos)
+	var active, maximum atomic.Int32
+	d.parallel = 4
+	d.newClient = func(config.Repo) (vcs.Client, error) {
+		return &pipelineCountingFake{pipelineFake: newPipelineFake(), active: &active, maximum: &maximum}, nil
+	}
+	s := buildPipeline(context.Background(), d)
+	if len(s.Repos) != 12 || maximum.Load() > 4 || maximum.Load() < 2 {
+		t.Fatalf("repos=%d concurrency=%d", len(s.Repos), maximum.Load())
+	}
+}
+
+func TestPipelineSnapshotDoesNotReuseCIAtChangedHead(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := snapshot.WritePipelinePRs("o/r", []vcs.PR{{Number: 8, HeadSHA: "new"}}); err != nil {
+		t.Fatal(err)
+	}
+	c := &pipelineLocalClient{offline: true, board: pipeline.RepoBoard{Items: []pipeline.Item{{PR: &pipeline.PRInfo{Number: 8, HeadSHA: "old", CI: "success", Mergeable: "clean"}}}}}
+	ci, err := c.GetCIStatus("o/r", 8)
+	if err != nil || ci != "unknown" {
+		t.Fatalf("ci=%s err=%v", ci, err)
+	}
+	merge, err := c.GetPRMergeability("o/r", 8)
+	if err != nil || merge != "unknown" {
+		t.Fatalf("merge=%s err=%v", merge, err)
+	}
+}
+
+func TestPipelinePassMissingIssuesKeepsSnapshot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {Enabled: true}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	old := pipeline.Snapshot{GeneratedAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano), Repos: []pipeline.RepoBoard{{Repo: "o/r", Items: []pipeline.Item{{Issue: 7, Title: "retained"}}}}}
+	if err := snapshot.WritePipeline(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := snapshot.ReadPipeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh.Repos) != 1 || !fresh.Repos[0].Stale || fresh.Repos[0].Error == "" || len(fresh.Repos[0].Items) != 1 {
+		t.Fatalf("snapshot=%+v", fresh)
+	}
+	// A delayed older writer must not replace the more recent pass.
+	if err := snapshot.WritePipeline(old); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := snapshot.ReadPipeline()
+	if err != nil || latest.GeneratedAt != fresh.GeneratedAt {
+		t.Fatalf("latest=%+v err=%v", latest, err)
+	}
+}
+
+type pipelineMergeErrorFake struct{ *pipelineFake }
+
+func (f *pipelineMergeErrorFake) GetPRMergeability(string, int) (vcs.MergeStatus, error) {
+	return vcs.MergeStatus("unknown"), errors.New("provider unavailable")
+}
+func TestPipelineMergeabilityFailureMarksRepoStale(t *testing.T) {
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 7, State: "open"}}
+	f.open = []vcs.PR{{Number: 8, State: "open", HeadBranch: "fix/issue-7"}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineMergeErrorFake{f}, nil }
+	s := buildPipeline(context.Background(), d)
+	if !s.Repos[0].Stale || s.Repos[0].Error == "" {
+		t.Fatalf("repo=%+v", s.Repos[0])
+	}
+}
+
+func TestPipelinePassReadsNewAcceptanceRecord(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {Enabled: true, AcceptanceRequired: true}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WriteIssues([]snapshot.IssueEntry{{Repo: "o/r", IssueNumber: 7, State: "open", CapturedAt: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WritePipelinePRs("o/r", []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", HeadSHA: "head", State: "open"}}); err != nil {
+		t.Fatal(err)
+	}
+	// First publish before any acceptance attempt exists.
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	c := acceptance.Contract{Version: acceptance.Version, TaskID: "o/r:issue:7", Generation: 1, Repository: "o/r", PRNumber: 8, HeadSHA: "head", BaseSHA: "base", PolicyDigest: "policy", Requirements: "requirement", Development: acceptance.Identity{SessionID: "dev", RunID: "run"}}
+	digest, err := c.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := acceptance.OpenStore(acceptanceStorePath("o/r", 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	record := acceptance.Record{Version: acceptance.Version, Contract: c, ContractDigest: digest, AttemptID: "review-1", Role: "acceptance", Verdict: acceptance.Failed, Report: "new result", Evidence: []string{"test failed"}, Completed: true, StartedAt: now.Add(-time.Minute), CompletedAt: now}
+	if err := store.SaveRecord(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := snapshot.ReadPipeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := s.Repos[0].Items[0].Acceptance
+	if info == nil || info.Verdict != "failed" || info.Attempts != 1 || info.Summary != "new result" {
+		t.Fatalf("pass did not read new acceptance record: %+v", info)
+	}
+	if info.Valid {
+		t.Fatal("offline evidence must not claim current contract validation")
+	}
+	// A subsequent infrastructure attempt supersedes the displayed verdict.
+	record.AttemptID = "review-2"
+	record.StartedAt = now.Add(time.Minute)
+	record.CompletedAt = now.Add(2 * time.Minute)
+	record.Evidence = nil
+	record.Verdict = acceptance.Blocked
+	record.Report = "reviewer unavailable"
+	if err := store.SaveRecord(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePassPipeline(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = snapshot.ReadPipeline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info = s.Repos[0].Items[0].Acceptance
+	if info == nil || info.Verdict != "" || info.Attempts != 2 || info.InfraAttempts != 1 || !info.LatestIsInfra || info.NextRetryAt == "" {
+		t.Fatalf("new infrastructure result absent: %+v", info)
+	}
+}
+
+type pipelineMissingIssueFake struct {
+	*pipelineFake
+	issue      *vcs.Issue
+	issueErr   error
+	issueReads int
+}
+
+func (f *pipelineMissingIssueFake) GetIssue(string, int) (*vcs.Issue, error) {
+	f.issueReads++
+	return f.issue, f.issueErr
+}
+
+func TestPipelinePartialIssueSnapshotKeepsActivePR(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := &pipelineMissingIssueFake{pipelineFake: newPipelineFake(), issue: &vcs.Issue{Number: 7, Title: "older open issue", State: "open"}}
+	f.open = []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", State: "open"}}
+	var issues []snapshot.IssueEntry
+	for n := 100; n < 200; n++ {
+		issues = append(issues, snapshot.IssueEntry{Repo: "o/r", IssueNumber: n, State: "closed"})
+	}
+	d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineLocalClient{Client: f, issues: issues}, nil }
+	s := buildPipeline(context.Background(), d)
+	if len(s.Repos[0].Items) != 1 || s.Repos[0].Items[0].Issue != 7 || s.Repos[0].Items[0].PR.Number != 8 {
+		t.Fatalf("active PR lost: %+v", s.Repos[0])
+	}
+	if f.issueReads != 1 {
+		t.Fatalf("missing issue reads=%d", f.issueReads)
+	}
+	if err := snapshot.WriteIssues(issues); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WritePipeline(s); err != nil {
+		t.Fatal(err)
+	}
+	offline := buildPipeline(context.Background(), pipelineSnapshotDeps(d, true))
+	if len(offline.Repos[0].Items) != 1 || offline.Repos[0].Items[0].PR.Number != 8 || f.issueReads != 1 {
+		t.Fatalf("offline pass lost recovered PR or read VCS: %+v reads=%d", offline, f.issueReads)
+	}
+}
+
+func TestPipelineMissingPRIssueReadResults(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		issue *vcs.Issue
+		err   error
+		stale bool
+	}{
+		{name: "closed", issue: &vcs.Issue{Number: 7, State: "closed"}},
+		{name: "not found"},
+		{name: "provider error", err: errors.New("provider unavailable"), stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			f := &pipelineMissingIssueFake{pipelineFake: newPipelineFake(), issue: tc.issue, issueErr: tc.err}
+			f.open = []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", State: "open"}}
+			d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+			d.previous = map[string]pipeline.RepoBoard{"o/r": {Repo: "o/r", Items: []pipeline.Item{{Issue: 7, Title: "retained"}}}}
+			d.newClient = func(config.Repo) (vcs.Client, error) {
+				return &pipelineLocalClient{Client: f, issues: []snapshot.IssueEntry{{Repo: "o/r", IssueNumber: 100, State: "closed"}}}, nil
+			}
+			s := buildPipeline(context.Background(), d)
+			b := s.Repos[0]
+			if b.Stale != tc.stale || (tc.stale && (b.Error == "" || len(b.Items) != 1)) || (!tc.stale && len(b.Items) != 0) {
+				t.Fatalf("repo=%+v", b)
+			}
+		})
+	}
+}
+
+func TestPipelineMissingPRIssueReadBudget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := &pipelineMissingIssueFake{pipelineFake: newPipelineFake(), issueErr: errors.New("unavailable")}
+	for n := 1; n <= pipelineMaxPRDetails+5; n++ {
+		f.open = append(f.open, vcs.PR{Number: n, HeadBranch: "fix/issue-" + strconv.Itoa(n), State: "open"})
+	}
+	d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineLocalClient{Client: f}, nil }
+	s := buildPipeline(context.Background(), d)
+	if f.issueReads != pipelineMaxPRDetails || !s.Repos[0].Stale || s.Repos[0].Error == "" {
+		t.Fatalf("reads=%d repo=%+v", f.issueReads, s.Repos[0])
+	}
+}
+
+func TestPipelineKnownClosedSnapshotDoesNotFetchIssue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := &pipelineMissingIssueFake{pipelineFake: newPipelineFake()}
+	f.open = []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", State: "open"}}
+	d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.newClient = func(config.Repo) (vcs.Client, error) {
+		return &pipelineLocalClient{Client: f, issues: []snapshot.IssueEntry{{Repo: "o/r", IssueNumber: 7, State: "closed"}}}, nil
+	}
+	s := buildPipeline(context.Background(), d)
+	if f.issueReads != 0 || len(s.Repos[0].Items) != 0 {
+		t.Fatalf("reads=%d repo=%+v", f.issueReads, s.Repos[0])
+	}
+}
+
+type pipelineMissingIssueSlowFake struct {
+	*pipelineMissingIssueFake
+	ctx context.Context
+}
+
+func (f *pipelineMissingIssueSlowFake) SetRequestContext(ctx context.Context) { f.ctx = ctx }
+func (f *pipelineMissingIssueSlowFake) GetIssue(string, int) (*vcs.Issue, error) {
+	<-f.ctx.Done()
+	return nil, f.ctx.Err()
+}
+func TestPipelineMissingPRIssueTimeout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := &pipelineMissingIssueSlowFake{pipelineMissingIssueFake: &pipelineMissingIssueFake{pipelineFake: newPipelineFake()}}
+	f.open = []vcs.PR{{Number: 8, HeadBranch: "fix/issue-7", State: "open"}}
+	d := pipelineTestDeps(f.pipelineFake, map[string]config.Repo{"o/r": {Enabled: true}})
+	d.previous = map[string]pipeline.RepoBoard{"o/r": {Repo: "o/r", Items: []pipeline.Item{{Issue: 7, Title: "retained"}}}}
+	d.newClient = func(config.Repo) (vcs.Client, error) { return &pipelineLocalClient{Client: f}, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	s := buildPipeline(ctx, d)
+	if !s.Repos[0].Stale || s.Repos[0].Error == "" || len(s.Repos[0].Items) != 1 {
+		t.Fatalf("repo=%+v", s.Repos[0])
+	}
+}
+
+// A failed acceptance read for one repository keeps that repository's previous
+// entry as stale; other repositories update normally.
+func TestPipelineAcceptanceReadFailureKeepsPreviousRepoEntry(t *testing.T) {
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 7, Title: "fresh", State: "open"}}
+	f.open = []vcs.PR{{Number: 8, State: "open", HeadBranch: "fix/issue-7"}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/a": {Enabled: true}, "o/b": {Enabled: true}})
+	d.acceptance = func(_ context.Context, _ vcs.Client, repo string, _ config.Repo, _ vcs.PR, _ time.Time) (*pipeline.AcceptanceInfo, error) {
+		if repo == "o/a" {
+			return &pipeline.AcceptanceInfo{Error: "acceptance PR unavailable"}, acceptanceReadError{"acceptance PR unavailable"}
+		}
+		return nil, nil
+	}
+	d.previous = map[string]pipeline.RepoBoard{
+		"o/a": {Repo: "o/a", Items: []pipeline.Item{{Issue: 99, Title: "previous"}}},
+		"o/b": {Repo: "o/b", Items: []pipeline.Item{{Issue: 99, Title: "previous"}}},
+	}
+	s := buildPipeline(context.Background(), d)
+	if len(s.Repos) != 2 {
+		t.Fatalf("repos=%+v", s.Repos)
+	}
+	a, b := s.Repos[0], s.Repos[1]
+	if a.Repo != "o/a" || !a.Stale || !strings.Contains(a.Error, "acceptance") || len(a.Items) != 1 || a.Items[0].Issue != 99 {
+		t.Fatalf("a=%+v", a)
+	}
+	if b.Stale || b.Error != "" || b.Items[0].Issue != 7 {
+		t.Fatalf("b=%+v", b)
 	}
 }
