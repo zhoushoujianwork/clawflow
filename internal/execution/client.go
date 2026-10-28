@@ -59,6 +59,18 @@ func WithEnvironment(c Config) Config {
 	return c
 }
 
+// ProfileForRole resolves a role override with the same environment precedence as execution.
+func ProfileForRole(c Config, role string) string {
+	profile := c.Profile
+	if override := c.RoleProfiles[role]; override != "" {
+		profile = override
+	}
+	if override, ok := os.LookupEnv("CLAWFLOW_OFFLOAD_PROFILE"); ok {
+		profile = override
+	}
+	return profile
+}
+
 func ValidateConfig(c Config) error {
 	command := c.Command
 	if command == "" {
@@ -520,13 +532,7 @@ func execute(ctx context.Context, prompt string, opts Options, observe func(Obse
 	if err != nil {
 		return Result{}, err
 	}
-	if profile := c.RoleProfiles[opts.Role]; profile != "" {
-		c.Profile = profile
-	}
-	// An explicit environment profile overrides role selection too.
-	if profile, ok := os.LookupEnv("CLAWFLOW_OFFLOAD_PROFILE"); ok {
-		c.Profile = profile
-	}
+	c.Profile = ProfileForRole(c, opts.Role)
 	if opts.Profile != "" {
 		c.Profile = opts.Profile
 	} // Pin returned profile on resume.

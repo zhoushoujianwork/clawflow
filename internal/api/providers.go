@@ -1,8 +1,10 @@
 package api
 
 import (
-	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"net/http"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 )
 
 const retiredProviderMessage = "ClawFlow provider configuration is retired; use offload config to configure credentials/models, then set settings.execution.profile or CLAWFLOW_OFFLOAD_PROFILE"
@@ -23,7 +25,7 @@ func HandleListProviders(w http.ResponseWriter, r *http.Request) {
 		readiness = "blocked"
 		message = err.Error()
 	}
-	writeJSON(w, 200, map[string]any{"engine": "offload", "profile": c.Profile, "role_profiles": c.RoleProfiles, "codex_sandbox": c.CodexSandbox, "readiness": readiness, "message": message})
+	writeJSON(w, 200, map[string]any{"engine": "offload", "profile": c.Profile, "role_profiles": c.RoleProfiles, "pilot_profile": execution.ProfileForRole(c, config.RolePilot), "codex_sandbox": c.CodexSandbox, "readiness": readiness, "message": message})
 }
 
 // HandleAddProvider rejects the retired ClawFlow provider operation.

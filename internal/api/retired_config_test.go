@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,5 +43,36 @@ func TestRetiredRepoApprovalDoesNotEnableAutomation(t *testing.T) {
 	}
 	if strings.Contains(string(data), "auto_approve") {
 		t.Fatalf("retired snapshot field: %s", data)
+	}
+}
+
+func TestProvidersPilotProfile(t *testing.T) {
+	for _, override := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fallback", true: "override"}[override], func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "")
+			os.Unsetenv("CLAWFLOW_OFFLOAD_PROFILE")
+			cfg := &config.Config{Settings: config.Settings{Execution: config.ExecutionSettings{Profile: "base"}}}
+			want := "base"
+			if override {
+				cfg.Settings.Execution.RoleProfiles = map[string]string{config.RolePilot: "supervisor"}
+				want = "supervisor"
+			}
+			if err := cfg.Save(); err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			HandleListProviders(w, httptest.NewRequest(http.MethodGet, "/api/providers", nil))
+			var response struct {
+				PilotProfile string            `json:"pilot_profile"`
+				RoleProfiles map[string]string `json:"role_profiles"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.PilotProfile != want || (override && response.RoleProfiles[config.RolePilot] != want) {
+				t.Fatalf("%s", w.Body)
+			}
+		})
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 )
 
@@ -257,5 +258,48 @@ func TestOffloadExplicitModelToolsAndInstructions(t *testing.T) {
 	_ = json.Unmarshal(raw, &call)
 	if call.Args["-m"] != "explicit-model" || call.Args["-allowed-tools"] != "Read,Grep" || !strings.Contains(call.Instructions, "Project-specific rule") || len(call.Instructions) < 16000 {
 		t.Fatal("explicit execution input lost")
+	}
+}
+
+func TestPilotExecutionProfile(t *testing.T) {
+	for _, tc := range []struct{ name, env, want string }{
+		{"mapped", "", "supervisor"},
+		{"fallback", "", "base"},
+		{"environment", "explicit", "explicit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, req := fixture(t)
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "")
+			os.Unsetenv("CLAWFLOW_OFFLOAD_PROFILE")
+			if tc.env != "" {
+				t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", tc.env)
+			}
+			cfg := &config.Config{Settings: config.Settings{Execution: config.ExecutionSettings{Profile: "base", RoleProfiles: map[string]string{}}}}
+			if tc.name == "fallback" {
+				cfg.Settings.Execution.RoleProfiles[config.RoleOperator] = "implementer"
+			} else {
+				cfg.Settings.Execution.RoleProfiles[config.RolePilot] = "supervisor"
+			}
+			if err := cfg.Save(); err != nil {
+				t.Fatal(err)
+			}
+			capture := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+			_, err := Execute(context.Background(), "task", Options{Workspace: req.Workspace, Role: config.RolePilot})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var call struct{ Args map[string]string }
+			if err := json.Unmarshal(raw, &call); err != nil {
+				t.Fatal(err)
+			}
+			if call.Args["-p"] != tc.want {
+				t.Fatalf("args=%v, want %s", call.Args, tc.want)
+			}
+		})
 	}
 }

@@ -303,3 +303,37 @@ func TestExecutionCheckMissingEverythingIsBlockedWithoutWrites(t *testing.T) {
 	}
 	assertSnapshotEqual(t, before, snapshotDir(t, home))
 }
+
+func TestPilotProfileCheckAndConfigShow(t *testing.T) {
+	for _, override := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fallback", true: "override"}[override], func(t *testing.T) {
+			settings, want := "    profile: base\n", "base"
+			if override {
+				settings += "    role_profiles:\n      pilot: supervisor\n"
+				want = "supervisor"
+			}
+			executionFixture(t, executionHelp(), "2", settings)
+			out, _, err := runExecutionCheckCLI(t, "--role", "pilot")
+			if err != nil || !strings.Contains(out, "Profile: "+want) {
+				t.Fatalf("%v: %s", err, out)
+			}
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := os.Stdout
+			os.Stdout = w
+			cmd := NewConfigCmd()
+			cmd.SetArgs([]string{"show"})
+			err = cmd.Execute()
+			os.Stdout = old
+			w.Close()
+			var buf bytes.Buffer
+			buf.ReadFrom(r)
+			r.Close()
+			if err != nil || !strings.Contains(buf.String(), "Pilot:        Offload profile="+want) {
+				t.Fatalf("%v: %s", err, &buf)
+			}
+		})
+	}
+}
