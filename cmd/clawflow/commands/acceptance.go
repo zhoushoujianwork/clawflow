@@ -267,6 +267,9 @@ func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prN
 		return c, rc, ec, pr, errors.New("acceptance requirements exceed size limit")
 	}
 	dev, err := acceptanceDevelopment(repo, issueNum, pr.HeadSHA, pr.Number)
+	if errors.Is(err, errDevelopmentHeadMissing) {
+		dev, err = acceptanceInheritedDevelopment(ctx, rc, repo, issueNum, pr)
+	}
 	if err != nil {
 		return c, rc, ec, pr, err
 	}
@@ -337,8 +340,10 @@ func acceptanceEvent(raw []byte) (execution.Event, error) {
 	return e, nil
 }
 
+var errDevelopmentHeadMissing = errors.New("latest development run is absent, incomplete or unsuccessful")
+
 // Only ClawFlow's completed local run metadata and sanitized native event
-// sequence supply developer identity for the current published head.
+// sequence supply developer identity for the requested head.
 func acceptanceDevelopment(repo string, issue int, head string, prNumbers ...int) (acceptance.Identity, error) {
 	parent := filepath.Dir(snapshot.RunDir(repo, issue, time.Now()))
 	entries, err := os.ReadDir(parent)
@@ -398,8 +403,11 @@ func acceptanceDevelopment(repo string, issue int, head string, prNumbers ...int
 			latest, latestDir = m, filepath.Join(parent, entry.Name())
 		}
 	}
-	if latestDir == "" || latest.Status != "success" || latest.EndedAt == nil || latest.EndedAt.Before(latest.StartedAt) {
-		return acceptance.Identity{}, errors.New("latest development run is absent, incomplete or unsuccessful")
+	if latestDir == "" {
+		return acceptance.Identity{}, errDevelopmentHeadMissing
+	}
+	if latest.Status != "success" || latest.EndedAt == nil || latest.EndedAt.Before(latest.StartedAt) {
+		return acceptance.Identity{}, errors.New("latest development run is incomplete or unsuccessful")
 	}
 	return developmentIdentity(latestDir)
 }
