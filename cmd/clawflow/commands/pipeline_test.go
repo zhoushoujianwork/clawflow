@@ -83,7 +83,7 @@ func itemFor(t *testing.T, b pipeline.RepoBoard, issue int) pipeline.Item {
 	return pipeline.Item{}
 }
 
-func TestBuildPipelineOnlyAutoMergeOrQueueRepos(t *testing.T) {
+func TestBuildPipelineEnabledAutoMergeOrQueueRepos(t *testing.T) {
 	f := newPipelineFake()
 	d := pipelineTestDeps(f, map[string]config.Repo{
 		"o/plain":    {Enabled: true},
@@ -97,7 +97,7 @@ func TestBuildPipelineOnlyAutoMergeOrQueueRepos(t *testing.T) {
 	for _, r := range snap.Repos {
 		names = append(names, r.Repo)
 	}
-	if strings.Join(names, ",") != "o/both,o/merge,o/queue" {
+	if strings.Join(names, ",") != "o/both,o/merge,o/plain,o/queue" {
 		t.Fatalf("repos = %v", names)
 	}
 	if snap.Repos[1].Enabled {
