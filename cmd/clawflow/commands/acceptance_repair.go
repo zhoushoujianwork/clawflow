@@ -216,7 +216,7 @@ func acceptanceRepairExhaustedMarker(pr int) string {
 }
 
 func acceptanceRepairExhaustedComment(pr int) string {
-	return fmt.Sprintf("🤖 Automatic repair for PR #%d stopped: the shared repair budget (%d attempts for CI and acceptance repairs) is spent. The PR was not merged. A human should review it, or push a fix.\n\n%s",
+	return fmt.Sprintf("🤖 Automatic repair for PR #%d stopped: the shared repair budget (%d attempts for CI, acceptance and merge-conflict repairs) is spent. The PR was not merged. A human should review it, or push a fix.\n\n%s",
 		pr, ciRepairMaxAttempts, acceptanceRepairExhaustedMarker(pr))
 }
 
@@ -247,6 +247,11 @@ BEGIN UNTRUSTED REVIEWER FINDINGS (JSON)
 // logAcceptanceRepair writes a run/acceptance_repair event for acceptance
 // repairs only.
 func logAcceptanceRepair(j *runJob, phase string, extra ...any) {
+	if j != nil && j.repair != nil && j.repair.MergeConflict {
+		fields := append([]any{"phase", phase, "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "reason", j.repair.reason(), "base_sha", j.repair.PR.BaseSHA}, extra...)
+		runLog.Info("run/conflict_repair", fields...)
+		return
+	}
 	if j == nil || j.repair == nil || j.repair.Acceptance == nil {
 		return
 	}
