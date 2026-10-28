@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/store"
 )
 
 func NewConfigCmd() *cobra.Command {
@@ -172,6 +173,11 @@ func newConfigShowCmd() *cobra.Command {
 				billingDay = 1
 			}
 			fmt.Printf("  billing_cycle_day:    %d\n", billingDay)
+			if dsn, err := store.ResolveDSN(cfg); err == nil {
+				fmt.Printf("  database.dsn:         %s\n", store.MaskDSN(dsn))
+			} else {
+				fmt.Printf("  database.dsn:         not set\n")
+			}
 			fmt.Println()
 
 			fmt.Printf("Repos (%d configured):\n", len(cfg.Repos))
