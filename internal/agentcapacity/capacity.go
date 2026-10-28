@@ -1,4 +1,4 @@
-// Package agentcapacity shares agent slots across all local ClawFlow processes.
+// Package agentcapacity shares agent slots across ClawFlow processes in one state directory.
 package agentcapacity
 
 import (
@@ -28,8 +28,7 @@ func Total() (int, error) {
 }
 
 func slotPath(slot int) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "locks", "agents", fmt.Sprintf("slot-%d.lock", slot))
+	return filepath.Join(config.StateDir(), "locks", "agents", fmt.Sprintf("slot-%d.lock", slot))
 }
 
 // Acquire waits cancellably for any slot. Persistent inodes are never removed;

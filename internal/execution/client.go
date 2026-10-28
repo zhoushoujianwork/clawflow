@@ -236,11 +236,7 @@ func acquireOwnership(workspace, profile, session string, resume bool) (func(), 
 		return nil, err
 	}
 	workspace = canonical
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	dir := filepath.Join(home, ".clawflow", "execution-locks")
+	dir := filepath.Join(config.StateDir(), "execution-locks")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}

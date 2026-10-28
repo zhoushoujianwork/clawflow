@@ -45,14 +45,14 @@ func DashboardRoot() string {
 	return filepath.Join(home, ".clawflow", "dashboard")
 }
 
+// StateDir leaves configuration and credentials in the normal home directory.
+func StateDir() string { return config.StateDir() }
+
 // DataDir is the JSON snapshot root — append-only run history, Pilot
 // activity, and aggregate views the dashboard reads. Lives at
 // ~/.clawflow/data/, deliberately OUTSIDE DashboardRoot so the SPA's
 // "delete and re-extract" cycle can never touch it.
-func DataDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "data")
-}
+func DataDir() string { return filepath.Join(StateDir(), "data") }
 
 // LegacyDataDir is the pre-split location (~/.clawflow/dashboard/data).
 // Only consulted by MigrateLegacyDataDir during startup.

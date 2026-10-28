@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -115,5 +116,53 @@ func TestCapacityCancellationAndConfigErrors(t *testing.T) {
 	}
 	if _, err := Acquire(context.Background()); err == nil {
 		t.Fatal("invalid config must fail closed")
+	}
+}
+
+func TestCapacityStateDirIsolation(t *testing.T) {
+	home, state := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAWFLOW_STATE_DIR", "")
+	cfg := &config.Config{Settings: config.Settings{MaxConcurrentAgents: 1}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	releaseDefault, err := Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseDefault()
+	t.Setenv("CLAWFLOW_STATE_DIR", state)
+	if used := Used(); used != 0 {
+		t.Fatalf("worker counts default-state slots: %d", used)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	release, err := Acquire(ctx)
+	if err != nil {
+		t.Fatalf("worker blocked by default-state capacity: %v", err)
+	}
+	defer release()
+	if _, err := os.Stat(filepath.Join(state, "locks", "agents", "slot-0.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if Used() != 1 {
+		t.Fatal("worker slot not counted")
+	}
+	blocked, stop := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer stop()
+	if extra, err := Acquire(blocked); !errors.Is(err, context.DeadlineExceeded) {
+		if extra != nil {
+			extra()
+		}
+		t.Fatalf("same-state capacity not enforced: %v", err)
+	}
+	release()
+	if Used() != 0 {
+		t.Fatal("worker slot not released")
+	}
+	t.Setenv("CLAWFLOW_STATE_DIR", "")
+	if Used() != 1 {
+		t.Fatal("worker changed default-state ownership")
 	}
 }
