@@ -95,6 +95,12 @@ bound_machine / require_binding apply as usual.`,
 			if onlyIssue != 0 && onlyRepo == "" {
 				return fmt.Errorf("--issue requires --repo")
 			}
+			// PostgreSQL is required: fail fast before any work.
+			release, err := gateStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer release()
 			return runOnce(cmd.Context(), onlyRepo, onlyIssue, timeout)
 		},
 	}

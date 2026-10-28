@@ -55,6 +55,14 @@ previous 'clawflow run' invocations (repos.json, operators.json,
 runs.json, plus per-run events.jsonl for replay). No VCS calls happen
 here — run 'clawflow run' first if you want fresh data.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// PostgreSQL is required: fail fast before touching any state
+			// or binding the port.
+			release, err := gateStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer release()
+
 			// Migrate legacy ~/.clawflow/dashboard/data/ → ~/.clawflow/data/
 			// for installs upgrading from the pre-split layout. No-op for
 			// fresh installs.
