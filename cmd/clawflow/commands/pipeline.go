@@ -103,7 +103,9 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 
 	names := make([]string, 0, len(d.cfg.Repos))
 	for name, rc := range d.cfg.Repos {
-		if rc.AutoMerge || rc.QueueIssue > 0 {
+		// Every enabled repo dispatches work through the unified queue, so it
+		// belongs on the board even without auto-merge (e.g. MRs merged by hand).
+		if rc.Enabled || rc.AutoMerge || rc.QueueIssue > 0 {
 			names = append(names, name)
 		}
 	}
