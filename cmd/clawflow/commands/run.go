@@ -603,15 +603,15 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	//     git clone (worktree add + fetch are not safe in parallel).
 	//     Read-only operators (custom assessments, reply-comment) skip
 	//     the per-repo lock and run freely.
-	fired, failed := runJobsParallel(ctx, jobs, workers, timeout)
-
-	// Phase 2b (sequential): automatic acceptance harvest. Independent
-	// acceptance can take ~30 minutes, so it cannot live in the scan sweep
-	// (scanCtx is 5-15 min). Failures join the exit-status accounting below.
-	// Only repos this pass holds the run lock for are harvested.
+	// Harvest shares the worker budget and is queued first so long operator
+	// jobs cannot occupy every worker before acceptance gets a turn.
+	// Only repos whose run locks this pass holds are included.
 	harvestCfg := *cfg
 	harvestCfg.Repos = allRepos
-	failed = append(failed, runHarvestPhase(ctx, &harvestCfg, onlyRepo, onlyIssue, timeout, watchdogDeadline)...)
+	jobs = append([]*runJob{{harvest: func(ctx context.Context) []firedKey {
+		return runHarvestPhase(ctx, &harvestCfg, onlyRepo, onlyIssue, timeout, watchdogDeadline)
+	}}}, jobs...)
+	fired, failed := runJobsParallel(ctx, jobs, workers, timeout)
 
 	// Phase 3 (sequential): drop pending entries that fired, then write
 	// the snapshots so the dashboard reflects the post-run state.
@@ -750,6 +750,7 @@ func failedRunsError(failed []firedKey) error {
 // runJob is one (issue, operator) pair that scanRepoOnce decided is
 // eligible to fire. The worker pool in runJobsParallel consumes these.
 type runJob struct {
+	harvest  func(context.Context) []firedKey // acceptance phase, using one pool worker
 	repair   *ciRepairContext
 	reopen   *reopenContext
 	comments []vcs.IssueComment
@@ -1322,6 +1323,20 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 		go func() {
 			defer wg.Done()
 			for j := range jobCh {
+				if ctx.Err() != nil {
+					continue
+				}
+				if j.harvest != nil {
+					if rateLimited.Load() {
+						runLog.Info("run/harvest_skip", "reason", "provider_limit")
+						continue
+					}
+					failures := j.harvest(ctx)
+					firedMu.Lock()
+					failed = append(failed, failures...)
+					firedMu.Unlock()
+					continue
+				}
 				// If a previous worker hit a rate limit, skip remaining
 				// jobs so they aren't permanently marked as failed. They
 				// keep their trigger labels and will be retried next pass.
