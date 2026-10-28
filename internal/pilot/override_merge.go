@@ -108,11 +108,14 @@ func (e ActionExecutor) overrideMerge(a Action, run string, prior map[string]Act
 	verdicts := 0
 	for _, r := range records {
 		if !acceptance.IsInfrastructure(r) {
+			// Unchanged-line locations do not prove that reviewer defects are fixed.
+			if r.Completed && !r.Cancelled && r.Verdict == acceptance.Failed {
+				return refuseOverride("reviewer_verdict_present")
+			}
 			verdicts++
 		}
 	}
 	gate := "no_verdict"
-	var findings []acceptance.Finding
 	if verdicts == 0 {
 		// No record is necessary but not sufficient: ClawFlow itself must show
 		// that provenance or the infrastructure budget explains the absence.
@@ -124,31 +127,9 @@ func (e ActionExecutor) overrideMerge(a Action, run string, prior map[string]Act
 		}
 		gate = "no_verdict:" + reason
 	} else {
-		r := records[len(records)-1]
-		if !r.Completed || r.Cancelled || r.Verdict != acceptance.Failed {
-			return refuseOverride("verdict_present_or_unreadable")
-		}
-		if r.Contract.BaseSHA != pr.BaseSHA {
-			return refuseOverride("acceptance_stale")
-		}
-		for _, f := range r.Findings {
-			if f.Failing() {
-				findings = append(findings, f)
-			}
-		}
-		if len(findings) == 0 {
-			return refuseOverride("findings_without_locations")
-		}
-		if err := outsideDiff(rc.LocalPath, pr.BaseSHA, a.Head, findings); err != nil {
-			return err
-		}
-		gate = "failed_outside_diff"
+		return refuseOverride("verdict_present_or_unreadable")
 	}
-	required := len(findings)
-	if required == 0 {
-		required = 1
-	}
-	if len(a.Followups) != required {
+	if len(a.Followups) != 1 {
 		return refuseOverride("followups_required")
 	}
 	seen := map[int]bool{}
@@ -162,12 +143,8 @@ func (e ActionExecutor) overrideMerge(a Action, run string, prior map[string]Act
 		links = append(links, r.CreatedIssue)
 	}
 	audit := fmt.Sprintf("Pilot override_merge\n\nHead: `%s`\nBase: `%s`\nBypassed gate: `%s`\nActor: %s\nRun: %s\n", a.Head, pr.BaseSHA, gate, e.Actor, run)
-	for i, n := range links {
+	for _, n := range links {
 		audit += fmt.Sprintf("\nFollow-up: #%d", n)
-		if len(findings) > 0 {
-			loc, _ := json.Marshal(findings[i].Locations)
-			audit += fmt.Sprintf("; finding %d: all locations outside changed head hunks: `%s`", i+1, loc)
-		}
 	}
 	current, err := c.GetPR(a.Repo, a.PR)
 	if err != nil {
