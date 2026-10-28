@@ -1013,14 +1013,22 @@ func RepoSlugFS(ownerRepo string) string {
 	return strings.ReplaceAll(ownerRepo, "/", "__")
 }
 
+// StateDir resolves runtime state independently of config and credentials.
+func StateDir() string {
+	if dir := os.Getenv("CLAWFLOW_STATE_DIR"); dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".clawflow")
+}
+
 // WorktreePath returns the standard worktree path for an issue.
 // All worktrees live under ~/.clawflow/worktrees/<owner__repo>/issue-<N>
 // so they are user-scoped, survive reboots, and match the path the
 // automated runner (setupWorktree in run.go) uses — enabling
 // clawflow worktree remove to clean up what the runner created.
 func WorktreePath(ownerRepo string, issueNumber int) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "worktrees", RepoSlugFS(ownerRepo), fmt.Sprintf("issue-%d", issueNumber))
+	return filepath.Join(StateDir(), "worktrees", RepoSlugFS(ownerRepo), fmt.Sprintf("issue-%d", issueNumber))
 }
 
 // BranchName returns the standard branch name for an issue.

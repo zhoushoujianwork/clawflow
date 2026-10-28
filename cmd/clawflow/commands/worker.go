@@ -10,7 +10,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
-// NewWorkerCmd currently exposes local token administration only.
+// NewWorkerCmd runs workers and administers coordinator tokens.
 func NewWorkerCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "worker", Short: "管理 worker"}
 	token := &cobra.Command{Use: "token", Short: "管理 coordinator worker token"}
@@ -64,6 +64,7 @@ func NewWorkerCmd() *cobra.Command {
 		}
 		token.AddCommand(sub)
 	}
+	configureWorker(cmd)
 	cmd.AddCommand(token)
 	return cmd
 }

@@ -27,8 +27,7 @@ type LockInfo struct {
 
 // LockDir returns ~/.clawflow/locks/.
 func LockDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "locks")
+	return filepath.Join(StateDir(), "locks")
 }
 
 // LockPath returns the lockfile path for a (repo, issue) pair.

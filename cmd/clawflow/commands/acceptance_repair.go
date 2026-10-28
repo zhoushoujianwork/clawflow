@@ -184,6 +184,16 @@ func scanAcceptanceRepair(ctx context.Context, client vcs.Client, repo string, c
 // recheckAcceptanceRepair runs under the issue lock just before reservation:
 // the latest verdict must still be the same failed attempt for the same head.
 func recheckAcceptanceRepair(parent context.Context, j *runJob, pr vcs.PR) error {
+	if j.hooks != nil {
+		// The coordinator owns verdict storage and sealed this snapshot at enqueue.
+		// checkCIRepair has already refreshed the PR and checked its exact head.
+		r := j.repair.Acceptance
+		if r == nil || r.Verdict != "failed" || r.AttemptID == "" || r.ContractDigest == "" || pr.HeadSHA != j.repair.PR.HeadSHA {
+			return errors.New("invalid coordinator acceptance repair snapshot")
+		}
+		return parent.Err()
+	}
+
 	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	decision, rec, c, err := classifyAcceptanceForRepair(ctx, j.client, j.repo, pr.Number)

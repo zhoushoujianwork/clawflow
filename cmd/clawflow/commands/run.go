@@ -2506,11 +2506,7 @@ func extractOwnerRepo(rawURL string) string {
 //
 // Returns the number of worktrees removed.
 func pruneOrphanedAnalysisWorktrees(cfg *config.Config) int {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return 0
-	}
-	wtRoot := filepath.Join(home, ".clawflow", "worktrees")
+	wtRoot := filepath.Join(snapshot.StateDir(), "worktrees")
 
 	// Build set of active slug directories from current config.
 	activeSlugs := make(map[string]struct{}, len(cfg.Repos))
@@ -2575,11 +2571,7 @@ var issueWorktreeDirRE = regexp.MustCompile(`^issue-(\d+)-`)
 //
 // Returns the number of worktrees removed.
 func pruneEmptyIssueWorktrees(cfg *config.Config) int {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return 0
-	}
-	wtRoot := filepath.Join(home, ".clawflow", "worktrees")
+	wtRoot := filepath.Join(snapshot.StateDir(), "worktrees")
 
 	removed := 0
 	for fullName, repoCfg := range cfg.Repos {
@@ -2701,10 +2693,6 @@ func ensureAnalysisWorktreeContext(ctx context.Context, repoCfg config.Repo, ful
 	if err := ctx.Err(); err != nil {
 		return worktreeResult{}, func() {}, err
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return worktreeResult{}, func() {}, fmt.Errorf("home dir: %w", err)
-	}
 
 	base := repoCfg.BaseBranch
 	if base == "" {
@@ -2712,7 +2700,7 @@ func ensureAnalysisWorktreeContext(ctx context.Context, repoCfg config.Repo, ful
 	}
 	slug := strings.ReplaceAll(fullName, "/", "__")
 	localPath := repoCfg.LocalPath
-	wtPath := filepath.Join(home, ".clawflow", "worktrees", slug, "analysis-"+base)
+	wtPath := filepath.Join(snapshot.StateDir(), "worktrees", slug, "analysis-"+base)
 
 	// Validate that localPath's git origin matches fullName before we
 	// register any worktree against it. A misconfigured local_path (e.g.
@@ -3236,12 +3224,8 @@ func setupWorktree(ctx context.Context, repoCfg config.Repo, fullName string, is
 	if err := ctx.Err(); err != nil {
 		return worktreeResult{}, func() {}, err
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return worktreeResult{}, func() {}, fmt.Errorf("home dir: %w", err)
-	}
 	slug := strings.ReplaceAll(fullName, "/", "__")
-	parent := filepath.Join(home, ".clawflow", "worktrees", slug)
+	parent := filepath.Join(snapshot.StateDir(), "worktrees", slug)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return worktreeResult{}, func() {}, fmt.Errorf("mkdir worktree parent: %w", err)
 	}
