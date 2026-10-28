@@ -26,26 +26,27 @@ const GistDescription = "clawflow-config"
 // every machine in the fleet would have to be re-bound by hand, which
 // defeats the purpose of the binding.
 type syncableRepo struct {
-	Enabled           bool              `yaml:"enabled"`
-	Platform          string            `yaml:"platform,omitempty"`
-	BaseURL           string            `yaml:"base_url,omitempty"`
-	BaseBranch        string            `yaml:"base_branch"`
-	Owner             string            `yaml:"owner"`
-	Description       string            `yaml:"description"`
-	AddedAt           string            `yaml:"added_at"`
-	WebhookConfigured bool              `yaml:"webhook_configured"`
-	Labels            map[string]string `yaml:"labels"`
-	TestCommand       string            `yaml:"test_command,omitempty"`
-	CIRequired        bool              `yaml:"ci_required,omitempty"`
-	CITimeout         int               `yaml:"ci_timeout,omitempty"`
-	AutoMerge         bool              `yaml:"auto_merge,omitempty"`
-	SelfUpgrade       bool              `yaml:"self_upgrade,omitempty"`
-	BoundMachine      string            `yaml:"bound_machine,omitempty"`
-	QueueIssue        int               `yaml:"queue_issue,omitempty"`
-	MaxInFlight       int               `yaml:"max_in_flight,omitempty"`
-	QueueScope        string            `yaml:"queue_scope,omitempty"`
-	UpdatedAt         time.Time         `yaml:"updated_at,omitempty"`
-	UpdatedBy         string            `yaml:"updated_by,omitempty"`
+	Enabled            bool              `yaml:"enabled"`
+	Platform           string            `yaml:"platform,omitempty"`
+	BaseURL            string            `yaml:"base_url,omitempty"`
+	BaseBranch         string            `yaml:"base_branch"`
+	Owner              string            `yaml:"owner"`
+	Description        string            `yaml:"description"`
+	AddedAt            string            `yaml:"added_at"`
+	WebhookConfigured  bool              `yaml:"webhook_configured"`
+	Labels             map[string]string `yaml:"labels"`
+	TestCommand        string            `yaml:"test_command,omitempty"`
+	CIRequired         bool              `yaml:"ci_required,omitempty"`
+	CITimeout          int               `yaml:"ci_timeout,omitempty"`
+	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
+	PilotOverrideMerge bool              `yaml:"pilot_override_merge,omitempty"`
+	SelfUpgrade        bool              `yaml:"self_upgrade,omitempty"`
+	BoundMachine       string            `yaml:"bound_machine,omitempty"`
+	QueueIssue         int               `yaml:"queue_issue,omitempty"`
+	MaxInFlight        int               `yaml:"max_in_flight,omitempty"`
+	QueueScope         string            `yaml:"queue_scope,omitempty"`
+	UpdatedAt          time.Time         `yaml:"updated_at,omitempty"`
+	UpdatedBy          string            `yaml:"updated_by,omitempty"`
 	// local_path is intentionally absent — genuinely machine-local
 	// (paths differ across OSes and home dirs).
 }
@@ -53,26 +54,27 @@ type syncableRepo struct {
 // toSyncable converts a Repo to its syncable representation (strips local_path).
 func toSyncable(r Repo) syncableRepo {
 	return syncableRepo{
-		Enabled:           r.Enabled,
-		Platform:          r.Platform,
-		BaseURL:           r.BaseURL,
-		BaseBranch:        r.BaseBranch,
-		Owner:             r.Owner,
-		Description:       r.Description,
-		AddedAt:           r.AddedAt,
-		WebhookConfigured: r.WebhookConfigured,
-		Labels:            r.Labels,
-		TestCommand:       r.TestCommand,
-		CIRequired:        r.CIRequired,
-		CITimeout:         r.CITimeout,
-		AutoMerge:         r.AutoMerge,
-		SelfUpgrade:       r.SelfUpgrade,
-		BoundMachine:      r.BoundMachine,
-		QueueIssue:        r.QueueIssue,
-		MaxInFlight:       r.MaxInFlight,
-		QueueScope:        r.QueueScope,
-		UpdatedAt:         r.UpdatedAt,
-		UpdatedBy:         r.UpdatedBy,
+		Enabled:            r.Enabled,
+		Platform:           r.Platform,
+		BaseURL:            r.BaseURL,
+		BaseBranch:         r.BaseBranch,
+		Owner:              r.Owner,
+		Description:        r.Description,
+		AddedAt:            r.AddedAt,
+		WebhookConfigured:  r.WebhookConfigured,
+		Labels:             r.Labels,
+		TestCommand:        r.TestCommand,
+		CIRequired:         r.CIRequired,
+		CITimeout:          r.CITimeout,
+		AutoMerge:          r.AutoMerge,
+		PilotOverrideMerge: r.PilotOverrideMerge,
+		SelfUpgrade:        r.SelfUpgrade,
+		BoundMachine:       r.BoundMachine,
+		QueueIssue:         r.QueueIssue,
+		MaxInFlight:        r.MaxInFlight,
+		QueueScope:         r.QueueScope,
+		UpdatedAt:          r.UpdatedAt,
+		UpdatedBy:          r.UpdatedBy,
 	}
 }
 
@@ -80,27 +82,28 @@ func toSyncable(r Repo) syncableRepo {
 // local_path (the only genuinely machine-local field).
 func fromSyncable(s syncableRepo, localPath string) Repo {
 	return Repo{
-		Enabled:           s.Enabled,
-		Platform:          s.Platform,
-		BaseURL:           s.BaseURL,
-		BaseBranch:        s.BaseBranch,
-		LocalPath:         localPath,
-		Owner:             s.Owner,
-		Description:       s.Description,
-		AddedAt:           s.AddedAt,
-		WebhookConfigured: s.WebhookConfigured,
-		Labels:            s.Labels,
-		TestCommand:       s.TestCommand,
-		CIRequired:        s.CIRequired,
-		CITimeout:         s.CITimeout,
-		AutoMerge:         s.AutoMerge,
-		SelfUpgrade:       s.SelfUpgrade,
-		BoundMachine:      s.BoundMachine,
-		QueueIssue:        s.QueueIssue,
-		MaxInFlight:       s.MaxInFlight,
-		QueueScope:        s.QueueScope,
-		UpdatedAt:         s.UpdatedAt,
-		UpdatedBy:         s.UpdatedBy,
+		Enabled:            s.Enabled,
+		Platform:           s.Platform,
+		BaseURL:            s.BaseURL,
+		BaseBranch:         s.BaseBranch,
+		LocalPath:          localPath,
+		Owner:              s.Owner,
+		Description:        s.Description,
+		AddedAt:            s.AddedAt,
+		WebhookConfigured:  s.WebhookConfigured,
+		Labels:             s.Labels,
+		TestCommand:        s.TestCommand,
+		CIRequired:         s.CIRequired,
+		CITimeout:          s.CITimeout,
+		AutoMerge:          s.AutoMerge,
+		PilotOverrideMerge: s.PilotOverrideMerge,
+		SelfUpgrade:        s.SelfUpgrade,
+		BoundMachine:       s.BoundMachine,
+		QueueIssue:         s.QueueIssue,
+		MaxInFlight:        s.MaxInFlight,
+		QueueScope:         s.QueueScope,
+		UpdatedAt:          s.UpdatedAt,
+		UpdatedBy:          s.UpdatedBy,
 	}
 }
 

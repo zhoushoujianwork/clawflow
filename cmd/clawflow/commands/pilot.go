@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,25 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"gopkg.in/yaml.v3"
 )
+
+func init() { pilot.OverrideMerged = confirmedMerges.note }
+
+var pilotUpgrade = func(ctx context.Context, cfg *config.Config) error {
+	return failedRunsError(runSelfUpgradePhase(ctx, cfg, newSelfUpgrader()))
+}
+
+func upgradePilotMerges(ctx context.Context, cfg *config.Config, results []pilot.ActionRecord) error {
+	selected := &config.Config{Settings: cfg.Settings, Repos: map[string]config.Repo{}}
+	for _, r := range results {
+		if r.Action.Type == "override_merge" && r.Outcome == "applied" && cfg.Repos[r.Action.Repo].SelfUpgrade {
+			selected.Repos[r.Action.Repo] = cfg.Repos[r.Action.Repo]
+		}
+	}
+	if len(selected.Repos) == 0 {
+		return nil
+	}
+	return pilotUpgrade(ctx, selected)
+}
 
 // NewPilotCmd returns the `clawflow pilot` parent command. Subcommands
 // expose Pilot operations that don't naturally belong on `project`
@@ -106,6 +126,11 @@ func newPilotApplyCmd() *cobra.Command {
 			}
 			if err = json.NewEncoder(cmd.OutOrStdout()).Encode(results); err != nil {
 				return err
+			}
+			if !dry {
+				if err := upgradePilotMerges(cmd.Context(), cfg, results); err != nil {
+					return err
+				}
 			}
 			for _, r := range results {
 				if r.Outcome != "applied" && r.Outcome != "already_applied" && r.Outcome != "valid" {

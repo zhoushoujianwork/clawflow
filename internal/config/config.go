@@ -22,6 +22,7 @@ func envOrFile(envKey, fileVal string) string {
 
 // Repo holds per-repository settings.
 type Repo struct {
+	PilotOverrideMerge bool              `yaml:"pilot_override_merge,omitempty" json:"pilot_override_merge,omitempty"`
 	Enabled            bool              `yaml:"enabled"`
 	Platform           string            `yaml:"platform,omitempty"` // "github" (default) or "gitlab"
 	BaseURL            string            `yaml:"base_url,omitempty"` // GitLab self-hosted instance URL

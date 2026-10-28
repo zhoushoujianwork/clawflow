@@ -570,3 +570,50 @@ func (s *Store) DevelopmentAtHead(repo string, pr int, task, head string) (map[I
 	}
 	return identities, nil
 }
+
+// RecordsAtHead reads evidence independently of development provenance. Any
+// unreadable record prevents proving absence, even when its head is unknown.
+func (s *Store) RecordsAtHead(repo string, pr int, head string) ([]Record, error) {
+	dir, err := s.root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(10001)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if len(entries) > 10000 {
+		return nil, errors.New("too many acceptance records")
+	}
+	var records []Record
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".record") {
+			continue
+		}
+		var r Record
+		if err := s.read(entry.Name(), &r); err != nil {
+			return nil, err
+		}
+		if r.Contract.Repository != repo || r.Contract.PRNumber != pr || r.Contract.HeadSHA != head {
+			continue
+		}
+		r, err = s.loadRecord(r.Contract, entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		if r.Completed {
+			if err := completeRecord(r); err != nil {
+				return nil, err
+			}
+		}
+		records = append(records, r)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].StartedAt.Before(records[j].StartedAt) })
+	for i := 1; i < len(records); i++ {
+		if !records[i-1].StartedAt.Before(records[i].StartedAt) || (records[i-1].Completed && records[i].Completed && !records[i-1].CompletedAt.Before(records[i].CompletedAt)) {
+			return nil, errors.New("ambiguous acceptance records")
+		}
+	}
+	return records, nil
+}

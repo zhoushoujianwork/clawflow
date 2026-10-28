@@ -279,7 +279,7 @@ func TestBuildPilotContext_RecentHistory(t *testing.T) {
 
 func TestBuildPilotContext_StructuredActions(t *testing.T) {
 	prompt := BuildPilotContext("p", "", "", nil, nil, "")
-	for _, want := range []string{"pilot-actions", "edit_spec", "not_implemented", "read-only", "five actions per wake"} {
+	for _, want := range []string{"pilot-actions", "edit_spec", "pilot_override_merge", "read-only", "five actions per wake"} {
 		if !containsStr(prompt, want) {
 			t.Errorf("missing %s", want)
 		}

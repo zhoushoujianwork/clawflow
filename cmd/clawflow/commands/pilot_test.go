@@ -2,12 +2,14 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -56,7 +58,30 @@ func TestPilotApplyCLI(t *testing.T) {
 	if err := os.WriteFile(file, []byte(`{"run_id":"manual2","actions":[{"id":"merge","type":"override_merge"}]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = run(true); err == nil || !strings.Contains(err.Error(), "not_implemented") {
+	if _, err = run(true); err == nil || !strings.Contains(err.Error(), "pr_and_head_required") {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestPilotMergeUpgrade(t *testing.T) {
+	old := pilotUpgrade
+	defer func() { pilotUpgrade = old }()
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {SelfUpgrade: true}, "o/other": {SelfUpgrade: true}}}
+	called := 0
+	pilotUpgrade = func(_ context.Context, selected *config.Config) error {
+		called++
+		if len(selected.Repos) != 1 || !selected.Repos["o/r"].SelfUpgrade {
+			t.Fatalf("wrong repos: %+v", selected.Repos)
+		}
+		return nil
+	}
+	for _, outcome := range []string{"failed", "valid", "already_applied", "applied"} {
+		err := upgradePilotMerges(context.Background(), cfg, []pilot.ActionRecord{{Action: pilot.Action{Type: "override_merge", Repo: "o/r"}, Outcome: outcome}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if called != 1 {
+		t.Fatalf("upgrade calls %d", called)
 	}
 }
