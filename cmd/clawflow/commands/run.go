@@ -1616,6 +1616,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		} else {
 			wtResult, cleanup, err = setupCIRepairWorkdir(ctx, j.repoCfg, j.repo, j.repair.PR)
 		}
+		if err == nil && (j.repair.MergeConflict || j.repair.Acceptance != nil) {
+			err = refreshRepairBase(ctx, wtResult.Path, j)
+		}
 	} else if j.reopen != nil {
 		wtResult, cleanup, err = setupReopenWorktreeContext(ctx, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch, j.reopen)
 	} else {
