@@ -103,7 +103,11 @@ func TestOverrideMergeGuards(t *testing.T) {
 	for _, mode := range []string{"absent", "absent_infra_exhausted", "no_positive_reason", "no_reason_error", "infra_records_no_reason", "failed_outside", "failed_inside", "failed_then_infra", "legacy", "blocked", "passed", "incomplete", "corrupt", "missing_store", "disabled", "ci_failed", "ci_stale", "head_changed", "missing_followup", "audit_failed", "day_limit", "dry_run"} {
 		t.Run(mode, func(t *testing.T) {
 			e, ac := testExecutor(t)
-			e.Config = &config.Config{Repos: map[string]config.Repo{"o/r": {PilotOverrideMerge: true, LocalPath: dir, SelfUpgrade: true}}}
+			rc := config.Repo{LocalPath: dir, SelfUpgrade: true}
+			if err := yaml.Unmarshal([]byte("pilot:\n  override_merge: on\n"), &rc); err != nil {
+				t.Fatal(err)
+			}
+			e.Config = &config.Config{Repos: map[string]config.Repo{"o/r": rc}}
 			c := &overrideClient{actionClient: *ac, pr: vcs.PR{Number: 11, State: "open", HeadRepo: "o/r", HeadSHA: head, BaseSHA: base, BaseBranch: "main"}, ci: vcs.CIEvidence{HeadSHA: head, Status: vcs.CIStatusSuccess, CheckIDs: []int64{1}}}
 			e.Client = func(string) (vcs.Client, error) { return c, nil }
 			store, err := acceptance.OpenStore(overrideStorePath("o/r", 11))
