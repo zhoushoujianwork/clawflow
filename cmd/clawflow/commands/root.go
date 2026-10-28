@@ -58,6 +58,10 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 		Short: "Print version",
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(Version)
+			fmt.Printf("channel=%s commit=%s branch=%s\n", buildChannel(), BuildCommit, trackedBranch())
+			if buildChannel() == "source" {
+				return
+			}
 			latest := FetchLatestTag()
 			// Only announce an update when the remote tag is strictly newer.
 			// Guards against two otherwise-noisy cases:

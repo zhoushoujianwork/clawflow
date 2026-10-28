@@ -1,5 +1,5 @@
 import { createFileRoute, Outlet, Link } from '@tanstack/react-router'
-import { Loader2 } from 'lucide-react'
+import { VersionBadge } from '../components/VersionBadge'
 import { useCallback, useEffect, useState } from 'react'
 import { useTheme } from '../lib/useTheme'
 import { ChatProvider, useChatDrawer } from '../lib/chatContext'
@@ -14,6 +14,8 @@ function AppLayout() {
   const { theme, toggle } = useTheme()
   const [currentVersion, setCurrentVersion] = useState<string | null>(null)
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
+  const [channel, setChannel] = useState('')
+  const [versionDetail, setVersionDetail] = useState('')
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const [updating, setUpdating] = useState(false)
   const [restarting, setRestarting] = useState(false)
@@ -27,7 +29,9 @@ function AppLayout() {
         if (d) {
           setCurrentVersion(d.current || null)
           setLatestVersion(d.latest || null)
-          setUpdateAvailable(!!d.update_available)
+          setUpdateAvailable(d.update_available === true && d.can_upgrade === true)
+          setChannel(d.channel || '')
+          setVersionDetail(d.warning || (d.channel === 'source' && d.behind > 0 ? `${d.behind} commits behind ${d.branch || 'main'}` : ''))
         }
       })
       .catch(() => {})
@@ -162,49 +166,7 @@ function AppLayout() {
                 /api/version fetch never shifts the left-side nav — regardless
                 of how long the version string is. See issue #284. */}
             {currentVersion && (
-              <div className="relative">
-                <button
-                  onClick={updateAvailable ? triggerUpdate : undefined}
-                  onMouseEnter={() => setShowTooltip(true)}
-                  onMouseLeave={() => setShowTooltip(false)}
-                  disabled={!updateAvailable || updating || restarting}
-                  className={`relative inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono tabular-nums whitespace-nowrap transition-colors ${
-                    updateAvailable && !updating && !restarting
-                      ? 'cursor-pointer hover:bg-[hsl(var(--brand)/0.1)] text-[hsl(var(--text-mid,var(--text-low)))]'
-                      : 'cursor-default text-[hsl(var(--text-low))]'
-                  }`}
-                  style={{ color: 'hsl(var(--text-low))' }}
-                  aria-label={updateAvailable ? `Upgrade to ${latestVersion}` : `Version ${currentVersion}`}
-                >
-                  {restarting ? (
-                    <><Loader2 className="w-3 h-3 animate-spin" /> Restarting…</>
-                  ) : updating ? (
-                    <><Loader2 className="w-3 h-3 animate-spin" /> Updating…</>
-                  ) : (
-                    <>
-                      {currentVersion}
-                      {updateAvailable && (
-                        <svg className="w-2 h-2 shrink-0" viewBox="0 0 8 8" aria-hidden="true">
-                          <circle cx="4" cy="4" r="4" fill="#ef4444" />
-                        </svg>
-                      )}
-                    </>
-                  )}
-                </button>
-                {/* Tooltip */}
-                {showTooltip && updateAvailable && !updating && !restarting && (
-                  <div
-                    className="absolute top-full right-0 mt-1.5 px-2.5 py-1.5 rounded-md text-[11px] whitespace-nowrap shadow-lg z-50 border"
-                    style={{
-                      background: 'hsl(var(--bg-panel))',
-                      borderColor: 'hsl(var(--border))',
-                      color: 'hsl(var(--text-high))',
-                    }}
-                  >
-                    Click to upgrade to <span className="font-semibold">{latestVersion}</span>
-                  </div>
-                )}
-              </div>
+              <VersionBadge currentVersion={currentVersion} latestVersion={latestVersion} channel={channel} versionDetail={versionDetail} updateAvailable={updateAvailable} updating={updating} restarting={restarting} showTooltip={showTooltip} triggerUpdate={triggerUpdate} setShowTooltip={setShowTooltip} />
             )}
             <ReportIssueButton />
             <a

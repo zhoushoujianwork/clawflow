@@ -75,13 +75,13 @@ fi
 VERSION="dev"
 if command -v git &>/dev/null; then
   # `git describe --tags` gives us a meaningful Version on source builds.
-  TAG="$(git -C "$REPO_ROOT" describe --tags --dirty --always 2>/dev/null || true)"
+  TAG="$(git -C "$REPO_ROOT" describe --tags --always 2>/dev/null || true)"
   [[ -n "$TAG" ]] && VERSION="$TAG"
 fi
 
 echo ""
 echo "Building clawflow (version=$VERSION)..."
-LDFLAGS="-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$VERSION"
+LDFLAGS="-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$VERSION -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildCommit=$(git -C "$REPO_ROOT" rev-parse HEAD) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildChannel=source -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.SourceBranch=$(git -C "$REPO_ROOT" symbolic-ref --short -q HEAD || echo main)"
 if go build -ldflags "$LDFLAGS" -o "$CLAWFLOW_HOME/bin/clawflow" "$REPO_ROOT/cmd/clawflow/"; then
   echo "  [ok]   binary installed → $CLAWFLOW_HOME/bin/clawflow"
 else

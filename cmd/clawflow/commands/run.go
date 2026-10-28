@@ -529,6 +529,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 
 	var pending []snapshot.PendingEntry
 	var jobs []*runJob
+	upgradeRepos := make(map[string]config.Repo)
 	depOpen := queueDepResolver(cfg)
 	for fullName, repoCfg := range allRepos {
 		// Skip repos bound to a different machine. A repo with no BoundMachine
@@ -554,6 +555,9 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		baseCheck := checkBaseBranch(lg, fullName, repoCfg)
 
 		executeHere := onlyRepo == "" || onlyRepo == fullName
+		if executeHere {
+			upgradeRepos[fullName] = repoCfg
+		}
 		// A disabled repo reached through a targeted run stays out of the
 		// dashboard snapshots: it is not part of the enabled set.
 		issueSink := &globalIssues
@@ -716,9 +720,10 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		fmt.Fprintf(os.Stderr, "✓ auto-pushed config to Gist\n")
 	}
 
-	// Final step (issue #369): when this pass confirmed a merge into a
-	// self_upgrade repository's base, rebuild and replace the installed binary.
-	failed = append(failed, runSelfUpgradePhase(ctx, cfg, newSelfUpgrader())...)
+	// Final step: only poll repositories selected for execution on this machine.
+	upgradeCfg := *cfg
+	upgradeCfg.Repos = upgradeRepos
+	failed = append(failed, runSelfUpgradePhase(ctx, &upgradeCfg, newSelfUpgrader())...)
 
 	// Exit non-zero when any dispatched operator job ended in a terminal
 	// non-success state (issue #354). Reported last so Phases 3/4 and

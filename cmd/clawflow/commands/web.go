@@ -73,6 +73,24 @@ here — run 'clawflow run' first if you want fresh data.`,
 
 			// Wire version info for the API
 			api.VersionInfo.Current = Version
+			api.VersionInfo.Status = currentVersionStatus
+			if buildChannel() == "source" {
+				api.VersionInfo.Update = func(ctx context.Context) ([]byte, error) {
+					repo, err := sourceRepository()
+					if err != nil {
+						return nil, err
+					}
+					ctx, cancel := context.WithTimeout(ctx, selfUpgradeTimeout)
+					defer cancel()
+					u := newSelfUpgrader()
+					u.WebRunning = func() bool { return false }
+					result := u.Upgrade(ctx, repo)
+					if result.Result != selfUpgradeUpgraded {
+						return []byte(result.Reason), fmt.Errorf("%s", result.Reason)
+					}
+					return []byte(result.To), nil
+				}
+			}
 			api.VersionInfo.Fetch = FetchLatestTag
 			api.VersionInfo.IsNewer = IsNewerVersion
 			api.PipelineSource = PipelineSnapshot
@@ -408,6 +426,12 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// Helper failures must NOT take down the running web —
 			// fall through silently and let the user restart manually.
 			api.VersionInfo.Respawn = func() {
+				if buildChannel() == "source" {
+					if err := startDetached(binaryPath(), "web", "restart"); err != nil {
+						fmt.Fprintf(os.Stderr, "restart: %v\n", err)
+					}
+					return
+				}
 				self, err := os.Executable()
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "respawn: locate self: %v\n", err)

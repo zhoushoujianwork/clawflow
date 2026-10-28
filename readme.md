@@ -187,7 +187,7 @@ clawflow repo enable owner/repo
 clawflow run --repo owner/repo
 ```
 
-Self-upgrade (optional, off by default) is meant only for the repository that contains ClawFlow's own source: `clawflow repo set owner/repo --self-upgrade on`. After a `clawflow run` pass that confirmed a merge into that repository's base branch (acceptance harvest, inline or sweep auto-merge), the last step of the pass fetches `origin/<base>` in `local_path`, builds the web bundle and the binary in a temporary detached worktree (your checkout is never touched), checks that the candidate reports the new short SHA and that `execution check --json` is `ready`, then atomically replaces the running executable and keeps the old one as `<path>.prev`. A running local `clawflow web` is restarted in a detached session. Any failure leaves the installed binary unchanged (or restores `.prev`), logs a WARN `run/self_upgrade` line and makes the run exit non-zero. It is skipped when the installed version already equals the target or another upgrade holds the local lock. Requires `git`, `pnpm` and `go` on the machine.
+源码渠道可启用自动升级：`clawflow repo set zhoushoujianwork/clawflow --self-upgrade on`。每轮 run 通过 `ls-remote` 检查构建时记录的分支（默认 main），包括在 ClawFlow 之外合并的提交。仅当已安装提交是目标的祖先时，才在临时 detached worktree 构建前端和二进制，验证版本和 `execution check --json`，原子替换并保留 `<path>.prev`。沿用 `web restart` 的 launchd/独立进程重启路径；替换后验证失败会回滚。未知或分叉提交只记录警告，不升级。需要本地源码路径、git、pnpm 和 Go。
 
 Failed CI repair is limited to supported same-repository GitHub managed PRs. It reproduces failures locally, updates the existing branch without force, reserves at most three attempts per PR and waits five minutes between attempts. It does not ingest CI logs or repair forks or GitLab MRs. Other GitLab issue, MR and CI commands remain available.
 
@@ -400,7 +400,7 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 | **Config** | `clawflow config set-token / set-gitlab-token / show` |
 | **Sync** | `clawflow sync` — preview diff · `clawflow sync push` — upload to Gist · `clawflow sync pull` — merge from Gist |
 | **Dashboard** | `clawflow web` — serve the local dashboard at http://127.0.0.1:8080 |
-| **Update** | `clawflow update` — fetch the latest binary |
+| **Update** | `clawflow update` — 按安装渠道安全升级 |
 | **Operator helpers** *(invoked from SKILL.md bodies)* | `clawflow worktree` — create/remove per-issue git worktrees · `clawflow pr-check` — has an open PR for this issue? · `clawflow lang` — detect build/test commands for changed files · `clawflow status` — per-repo health summary |
 
 > **Tool discipline:** return comments and outcome markers through stdout for runner write-back. Implementation has its documented Git/PR exception. Use `clawflow` for permitted VCS actions, never `gh`; see `CLAUDE.md`.
@@ -466,8 +466,10 @@ Skip the flag if you just want the CLI without AI tool integration.
 ## Updating
 
 ```bash
-clawflow update                    # fetch the latest binary
-clawflow update --from-source      # rebuild from cloned repo (dev)
+clawflow update                    # 按当前渠道更新：源码跟踪分支，发布版下载 release
+clawflow update --from-source      # 显式切换到源码渠道（需本地源码路径）
+clawflow update --release          # 显式切换到发布渠道，仍拒绝降级
+clawflow update --release --allow-downgrade  # 显式允许较旧或无法比较的发布版
 ```
 
 ---
