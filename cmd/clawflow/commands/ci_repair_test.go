@@ -13,6 +13,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -467,5 +468,54 @@ func TestPrepareCIRepairEvidenceDoesNotReplaceStatus(t *testing.T) {
 	}
 	if f.queriedSHA != pr.HeadSHA || !strings.Contains(j.repair.prompt("test"), "no evidence (expired)") {
 		t.Fatal("missing exact-revision evidence")
+	}
+}
+
+func TestGitTimeoutReleasesRepairBudget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	git := filepath.Join(dir, "git")
+	if err := os.WriteFile(git, []byte("#!/bin/sh\nfor arg in \"$@\"; do\n case \"$arg\" in\n config) echo git@github.com:o/r.git; exit 0;;\n fetch) sleep 30 & wait; exit 0;;\n esac\ndone\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Settings: config.Settings{GitTimeout: 1}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	pr, _ := repairFixture()
+	_, _, err := setupCIRepairWorkdir(ctx, config.Repo{LocalPath: t.TempDir()}, "o/r", pr)
+	kind, infra := classifyRepairInfra(err, "")
+	if !infra || kind != "git_timeout" {
+		t.Fatalf("%s %v: %v", kind, infra, err)
+	}
+	root := t.TempDir()
+	now := time.Now()
+	attempt, err := reserveCIRepair(root, "o/r", pr, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := releaseCIRepair(root, "o/r", pr, attempt, kind, now); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := reserveCIRepair(root, "o/r", pr, now.Add(11*time.Minute)); err != nil || n != 1 {
+		t.Fatalf("timeout consumed budget: %d %v", n, err)
+	}
+}
+
+func TestPublishedHeadPreservesGitTimeout(t *testing.T) {
+	old := acceptanceGit
+	defer func() { acceptanceGit = old }()
+	pr, _ := repairFixture()
+	acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+		if args[0] == "ls-remote" {
+			return "", gitexec.ErrTimeout
+		}
+		return strings.Repeat("a", 40), nil
+	}
+	_, err := confirmedDevelopmentHead(context.Background(), t.TempDir(), &runJob{repo: "o/r", repair: &ciRepairContext{PR: pr}})
+	if !errors.Is(err, gitexec.ErrTimeout) {
+		t.Fatalf("timeout lost: %v", err)
 	}
 }

@@ -120,6 +120,9 @@ type Settings struct {
 
 	PollInterval int `yaml:"poll_interval"`
 
+	// GitTimeout bounds each Git network operation in seconds; zero uses 300.
+	GitTimeout int `yaml:"git_timeout,omitempty"`
+
 	AgentTimeout        int      `yaml:"agent_timeout"`
 	MaxConcurrentAgents int      `yaml:"max_concurrent_agents"`
 	NotificationChannel string   `yaml:"notification_channel"`

@@ -23,6 +23,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -36,9 +37,9 @@ var acceptanceClientFactory = newVCSClient
 var acceptanceNativeRun = execution.Run
 var acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "core.fsmonitor=false"}, args...)...)
-	out, err := cmd.Output()
+	out, err := gitexec.Output(ctx, cmd)
 	if err != nil {
-		return "", fmt.Errorf("acceptance git %s failed", args[0])
+		return "", fmt.Errorf("acceptance git %s failed: %w", args[0], err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -612,6 +613,7 @@ func acceptanceReviewerEnv(env []string) []string {
 }
 
 func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Record, error) {
+	ctx = gitexec.WithRepo(ctx, repo)
 	unlock, err := acceptanceLock(repo, prNumber)
 	if err != nil {
 		return acceptance.Record{}, err

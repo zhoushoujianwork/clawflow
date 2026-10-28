@@ -488,3 +488,17 @@ Go CLI work goes under `cmd/clawflow/commands/` and `internal/`. The tight spot 
 ## License
 
 MIT
+
+Git 网络操作（fetch、push、pull、clone、ls-remote）默认在 5 分钟后超时，
+并终止 Git 及其 SSH 等子进程。可在本机配置中按秒调整：
+
+```yaml
+settings:
+  git_timeout: 300
+```
+
+未设置或非正数使用默认值。调用方更短的截止时间仍然生效；本地 Git
+操作不增加网络超时。传输会保留已有 `GIT_SSH_COMMAND` 并追加 SSH
+保活参数，同时设置 HTTPS 低速保护。超时记录在 `run/git_timeout`，
+仅记录操作名、仓库标识（无标识时为本地目录）和耗时，不记录远程 URL
+或凭据；修复中的此类基础设施失败不消耗修复次数，仍受基础设施退避和预算限制。
