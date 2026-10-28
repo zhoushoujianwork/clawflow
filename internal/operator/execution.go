@@ -132,8 +132,9 @@ func resumeSpecificError(err error) bool {
 	return strings.Contains(kind, "session") || strings.Contains(kind, "resume") || strings.Contains(kind, "ownership") || strings.Contains(kind, "backend") || strings.Contains(kind, "profile")
 }
 
-// Execution supplies validated sanitized event records. Any native tool activity
-// is conservatively treated as work; do not replay a partially executed turn.
+// Execution supplies validated sanitized event records. Startup notifications
+// do not indicate work. Treat all other progress conservatively as work so a
+// partially executed turn is not replayed, including unknown native event types.
 type developmentActivity struct {
 	dst      io.Writer
 	progress bool
@@ -142,7 +143,12 @@ type developmentActivity struct {
 func (w *developmentActivity) Write(p []byte) (int, error) {
 	var event execution.Event
 	if json.Unmarshal(p, &event) == nil && event.Type == "progress" {
-		w.progress = true
+		switch event.NativeType {
+		case "thread.started", "turn.started":
+			// A session or turn can start before any work is produced.
+		default:
+			w.progress = true
+		}
 	}
 	if w.dst != nil {
 		return w.dst.Write(p)

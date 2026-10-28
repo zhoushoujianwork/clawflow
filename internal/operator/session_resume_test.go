@@ -101,3 +101,53 @@ func TestFreshDevelopmentRecordsIdentity(t *testing.T) {
 		t.Fatal("timeout identity lost")
 	}
 }
+
+func TestDevelopmentResumeProgressBeforeTransportFailure(t *testing.T) {
+	for _, tc := range []struct {
+		nativeType string
+		wantCalls  int
+	}{
+		{"thread.started", 2},
+		{"turn.started", 2},
+		{"item.started", 1},
+		{"item.completed", 1},
+		{"unknown", 1},
+		{"", 1},
+	} {
+		t.Run(tc.nativeType, func(t *testing.T) {
+			calls, resets := 0, 0
+			var logged string
+			var forwarded strings.Builder
+			opts := RunOptions{
+				SessionKey: "old", ResumePrompt: "delta", EventWriter: &forwarded,
+				PrepareFreshSession: func() error { resets++; return nil },
+				OnSessionResume:     func(outcome, reason string) { logged = outcome + ":" + reason },
+				ExecuteFunc: func(_ context.Context, prompt string, o execution.Options) (execution.Result, error) {
+					calls++
+					if calls == 1 {
+						if !o.Resume || o.SessionKey != "old" || prompt != "delta" {
+							t.Fatal("invalid resume request")
+						}
+						if err := json.NewEncoder(o.Events).Encode(execution.Event{Type: "progress", NativeType: tc.nativeType}); err != nil {
+							t.Fatal(err)
+						}
+					} else if calls != 2 || o.Resume || o.SessionKey != "" || prompt != "full prompt and worktree context" {
+						t.Fatal("invalid fresh fallback request")
+					}
+					return execution.Result{}, &execution.Error{Kind: "transport"}
+				},
+			}
+			_, err := runDevelopment(context.Background(), "full prompt and worktree context", opts)
+			if !execution.IsKind(err, "transport") || calls != tc.wantCalls || resets != tc.wantCalls-1 {
+				t.Fatalf("calls=%d resets=%d err=%v", calls, resets, err)
+			}
+			wantLog := "resumed:eligible"
+			if tc.wantCalls == 2 {
+				wantLog = "fresh:transport"
+			}
+			if logged != wantLog || !strings.Contains(forwarded.String(), `"type":"progress"`) {
+				t.Fatalf("log=%q forwarded=%q", logged, forwarded.String())
+			}
+		})
+	}
+}
