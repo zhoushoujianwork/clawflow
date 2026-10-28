@@ -312,6 +312,8 @@ func WakeOne(ctx context.Context, projectName string, timeout time.Duration) err
 //
 // Each wake is persisted to ~/.clawflow/data/pilot-runs/<project>/<ts>/
 // with meta.json + events.jsonl so the dashboard can show Pilot activity.
+var runWakeOffload = operator.RunOffload
+
 func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *config.Credentials, timeout time.Duration) error {
 	// Bound the ENTIRE wake — including pre-claude digest fetches and
 	// post-claude finalization — to the configured timeout. Without this,
@@ -352,7 +354,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		Status:    "running",
 	}
 	_ = snapshot.WritePilotRunMeta(runDir, meta)
-	lg.Info("pilot/start", "project", p.Name, "role", config.RoleOperator, "timeout", timeout)
+	lg.Info("pilot/start", "project", p.Name, "role", config.RolePilot, "timeout", timeout)
 
 	// Refresh CLAUDE.md from current project.yaml + cfg.Repos before
 	// every wake. `claude -p` will auto-load it from the workdir, giving
@@ -368,7 +370,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 	recent := pilotRecentSummaries(p.Name, 3)
 
 	prompt := chat.BuildPilotContext(p.Name, contextMD, deploymentMD, recent, digests, cfg.Settings.Language)
-	role := config.RoleOperator
+	role := config.RolePilot
 	workdir := project.ProjectDir(p.Name)
 
 	eventsFile, _ := os.Create(filepath.Join(runDir, "events.jsonl"))
@@ -390,7 +392,7 @@ func wake(ctx context.Context, p *project.Project, cfg *config.Config, creds *co
 		defer os.Unsetenv(budget.EnvPath)
 	}
 
-	output, err := operator.RunOffload(ctx, prompt, workdir, timeout, eventsFile, role)
+	output, err := runWakeOffload(ctx, prompt, workdir, timeout, eventsFile, role)
 	if eventsFile != nil {
 		_ = eventsFile.Close()
 	}
