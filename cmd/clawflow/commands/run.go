@@ -28,6 +28,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
@@ -1575,9 +1576,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		if j.repair != nil {
 			// No agent was invoked: release the reservation under the existing
 			// infrastructure budget/backoff instead of terminally blocking repair.
-			if rerr := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, "setup", now); rerr == nil {
-				runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "kind", "setup")
-				logAcceptanceRepair(j, "end", "status", "failed", "kind", "setup", "attempt_consumed", false)
+			kind := "setup"
+			if errors.Is(err, gitexec.ErrTimeout) {
+				kind = "git_timeout"
+			}
+			if rerr := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, kind, now); rerr == nil {
+				runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "kind", kind)
+				logAcceptanceRepair(j, "end", "status", "failed", "kind", kind, "attempt_consumed", false)
 				return false, false, true
 			} else {
 				runLog.Warn("run/ci_repair_release_failed", "repo", j.repo, "issue", j.sub.Number, "err", rerr.Error())
@@ -1681,10 +1686,15 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// the reconciler will see "finalizing" (not "running") and know that
 	// VCS side-effects already completed — it will promote to "success"
 	// without re-queuing the issue for a duplicate run.
-	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
-		if confirmedHead == "" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
-			confirmedHead, _ = confirmedDevelopmentHead(ctx, workdir, j)
+	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") &&
+		confirmedHead == "" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
+		var headErr error
+		confirmedHead, headErr = confirmedDevelopmentHead(ctx, workdir, j)
+		if errors.Is(headErr, gitexec.ErrTimeout) {
+			runErr = headErr
 		}
+	}
+	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
 		finalizingMeta := snapshot.RunMeta{
 			HeadSHA:     confirmedHead,
 			Outcome:     outcome,
@@ -1879,9 +1889,6 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 
 	if rm.Status == "success" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
-		if confirmedHead == "" {
-			confirmedHead, _ = confirmedDevelopmentHead(ctx, workdir, j)
-		}
 		rm.HeadSHA = confirmedHead
 	}
 	rm.Outcome = outcome
@@ -2858,10 +2865,6 @@ func dumpGoroutineStacks(lg *clog.Logger) {
 	}
 }
 
-// gitAttemptTimeout bounds a single git subprocess invocation inside
-// runGitWithRetry. A package var (not const) so tests can shrink it.
-var gitAttemptTimeout = 3 * time.Minute
-
 // hardenedGitEnv augments a git command's environment so it can never
 // block on interactive input. GIT_TERMINAL_PROMPT=0 makes git fail
 // instead of prompting for HTTP credentials; the BatchMode/ConnectTimeout
@@ -2870,14 +2873,12 @@ var gitAttemptTimeout = 3 * time.Minute
 // used. See issue #216 — the run hung as an `S+` foreground process with
 // ~0 CPU, the classic signature of git waiting on a credential prompt.
 func hardenedGitEnv(base []string) []string {
-	if base == nil {
-		base = os.Environ()
-	}
-	return append(base,
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10",
-	)
+	return gitexec.Env(base)
 }
+
+// Local operations retain their pre-existing watchdog. Network operations
+// use the configurable shared transport deadline instead.
+var gitAttemptTimeout = 3 * time.Minute
 
 // runBoundedGit runs a git command with a hard wall-clock ceiling. The
 // command is started in its own process group so that on timeout we can
@@ -2937,23 +2938,19 @@ func runGitWithRetryOutput(makeCmd func() *exec.Cmd) (string, error) {
 		mw := io.MultiWriter(os.Stderr, &buf)
 		cmd.Stdout = mw
 		cmd.Stderr = mw
-		// Never let a git subprocess block forever. Two complementary
-		// guards (issue #216):
-		//   1. hardenedGitEnv disables interactive credential/SSH prompts
-		//      so git fails fast instead of waiting on a TTY that will
-		//      never answer (the most likely cause of the 8h hang).
-		//   2. runBoundedGit kills the whole git process group if the
-		//      attempt overruns gitAttemptTimeout, so a black-holed
-		//      network read can't wedge the run indefinitely.
-		cmd.Env = hardenedGitEnv(cmd.Env)
-
-		err := runBoundedGit(cmd, gitAttemptTimeout)
+		var err error
+		if gitexec.IsNetwork(cmd.Args[1:]...) {
+			err = gitexec.Run(context.Background(), cmd)
+		} else {
+			cmd.Env = hardenedGitEnv(cmd.Env)
+			err = runBoundedGit(cmd, gitAttemptTimeout)
+		}
 		if err == nil {
 			return buf.String(), nil
 		}
 
 		output := buf.String()
-		if !isGitLockError(output) {
+		if errors.Is(err, gitexec.ErrTimeout) || !isGitLockError(output) {
 			// Permanent error (incl. attempt timeout) — return
 			// immediately, no retry. A timeout won't fix itself by
 			// retrying and would only delay surfacing the failure.

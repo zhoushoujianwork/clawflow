@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 )
 
 // lsRemoteTimeout bounds the single network probe ValidateBase may make. A var
@@ -113,7 +115,7 @@ func ValidateBaseWithin(localPath, base string, probeTimeout time.Duration) Base
 	c := exec.CommandContext(ctx, "git", "ls-remote", "--heads", "origin", base)
 	c.Dir = localPath
 	c.Env = headlessEnv()
-	out, err := c.Output()
+	out, err := gitexec.Output(ctx, c)
 	if err != nil {
 		// Offline / no credentials / timed out / not a git dir — unproven,
 		// not invalid.

@@ -13,13 +13,15 @@
 package branch
 
 import (
+	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 )
 
 // Branch describes a single branch and its merge/age status.
@@ -106,10 +108,7 @@ func gitOut(dir string, args ...string) (string, error) {
 // class of failure as issue #216. (clone.cloneRepo already sets these; the
 // background sync path must match.)
 func headlessEnv() []string {
-	return append(os.Environ(),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10",
-	)
+	return gitexec.Env(nil)
 }
 
 // Fetch updates remote-tracking refs and prunes deleted ones so the
@@ -119,7 +118,7 @@ func Fetch(localPath string) error {
 	c := exec.Command("git", "fetch", "--prune", "origin")
 	c.Dir = localPath
 	c.Env = headlessEnv()
-	if out, err := c.CombinedOutput(); err != nil {
+	if out, err := gitexec.CombinedOutput(context.Background(), c); err != nil {
 		return fmt.Errorf("git fetch --prune origin: %w\n%s", err, out)
 	}
 	return nil
@@ -187,7 +186,7 @@ func runGitCombined(localPath string, args ...string) (string, error) {
 	c := exec.Command("git", args...)
 	c.Dir = localPath
 	c.Env = headlessEnv()
-	out, err := c.CombinedOutput()
+	out, err := gitexec.CombinedOutput(context.Background(), c)
 	text := strings.TrimSpace(string(out))
 	if err != nil {
 		if text != "" {

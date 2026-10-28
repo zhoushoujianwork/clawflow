@@ -4,6 +4,7 @@
 package clone
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 )
 
 // Token holds the VCS credentials used for clone authentication.
@@ -140,11 +142,8 @@ func cloneRepo(ownerRepo, dest string, repoCfg config.Repo, progress io.Writer, 
 	// options block passphrase prompts and bound the TCP connect for
 	// git-over-SSH. Without the SSH guard a clone over SSH can hang
 	// indefinitely on a key passphrase prompt (same class as issue #216).
-	c.Env = append(os.Environ(),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10",
-	)
-	return c.Run()
+	c.Env = gitexec.Env(nil)
+	return gitexec.Run(gitexec.WithRepo(context.Background(), ownerRepo), c)
 }
 
 // buildCloneURL constructs the clone URL for the given transport.

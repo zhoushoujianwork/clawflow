@@ -17,6 +17,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -414,10 +415,14 @@ func releaseCIRepair(root, repo string, pr vcs.PR, attempt int, kind string, now
 // outcome (provider rate limit/capacity, launch failure, transport or timeout)
 // that happened before any tool activity, so no repair work was evaluated.
 // Classification uses Offload's structured error kinds, never free text. If tool
-// activity cannot be ruled out the run is treated as real repair work.
+// activity cannot be ruled out the run is treated as real repair work. Typed
+// runner Git timeouts are infrastructure failures even during head verification.
 func classifyRepairInfra(err error, eventsPath string) (string, bool) {
 	if err == nil {
 		return "", false
+	}
+	if errors.Is(err, gitexec.ErrTimeout) {
+		return "git_timeout", true
 	}
 	kind := ""
 	switch {
@@ -475,8 +480,9 @@ func (r *ciRepairContext) prompt(testCommand string) string {
 }
 
 func setupCIRepairWorkdir(ctx context.Context, cfg config.Repo, repo string, pr vcs.PR) (worktreeResult, func(), error) {
+	ctx = gitexec.WithRepo(ctx, repo)
 	run := func(dir string, args ...string) (string, error) {
-		out, err := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...).Output()
+		out, err := gitexec.Output(ctx, exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...))
 		if err != nil {
 			return "", fmt.Errorf("repair git %s: %w", args[0], err)
 		}
@@ -533,6 +539,7 @@ func setupCIRepairWorkdir(ctx context.Context, cfg config.Repo, repo string, pr 
 // confirmedDevelopmentHead binds local execution to the published branch. Never
 // infer ownership from a PR head observed without matching the agent checkout.
 func confirmedDevelopmentHead(ctx context.Context, workdir string, j *runJob) (string, error) {
+	ctx = gitexec.WithRepo(ctx, j.repo)
 	head, err := acceptanceGit(ctx, workdir, "rev-parse", "HEAD")
 	if err != nil || !acceptanceSHA(head) {
 		return "", fmt.Errorf("development head unavailable")
@@ -547,8 +554,11 @@ func confirmedDevelopmentHead(ctx context.Context, workdir string, j *runJob) (s
 		}
 	}
 	remote, err := acceptanceGit(ctx, workdir, "ls-remote", "--exit-code", "origin", "refs/heads/"+branch)
+	if err != nil {
+		return "", fmt.Errorf("development head verification: %w", err)
+	}
 	fields := strings.Fields(remote)
-	if err != nil || len(fields) != 2 || fields[0] != head || fields[1] != "refs/heads/"+branch {
+	if len(fields) != 2 || fields[0] != head || fields[1] != "refs/heads/"+branch {
 		return "", fmt.Errorf("development head is not published")
 	}
 	return head, nil
@@ -562,7 +572,10 @@ func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outco
 		return "", fmt.Errorf("no-change requires acceptance repair and a reason")
 	}
 	head, err := confirmedDevelopmentHead(ctx, workdir, j)
-	if err != nil || head != j.repair.PR.HeadSHA {
+	if err != nil {
+		return "", fmt.Errorf("no-change repair verification: %w", err)
+	}
+	if head != j.repair.PR.HeadSHA {
 		return "", fmt.Errorf("no-change repair did not confirm unchanged published head")
 	}
 	clean, err := acceptanceGit(ctx, workdir, "status", "--porcelain")
