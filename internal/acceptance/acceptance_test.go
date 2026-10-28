@@ -314,6 +314,7 @@ func TestStoreBoundsAndContentDigests(t *testing.T) {
 
 func setupRunner(t *testing.T) (Runner, string, string) {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 	s := openTestStore(t)
 	scratch := t.TempDir()
 	workspace := t.TempDir()
