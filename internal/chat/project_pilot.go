@@ -204,8 +204,9 @@ Allowed fields by type, in addition to id/type/repo:
 - queue_move: issue, position (top or bottom), within unified queue rank.
 - label_add, label_remove: issue, label (bug, feature, P0, P1, P2, P3 only).
 - note: body, persisted for the board.
-Unknown fields/actions are rejected. rerun_ci and override_merge return
-not_implemented. restart_service is not allowed in this slice.
+- rerun_ci: pr (positive PR number). GitHub managed PRs only; reruns failed
+  Actions jobs selected by exact-head CI checks once per head. Infrastructure limits apply.
+Unknown fields/actions are rejected. override_merge returns not_implemented. restart_service is not allowed in this slice.
 Limits: five actions per wake, two new issues per wake, twenty actions per UTC
  day across repositories. Pending or failed attempts consume budget. Reapplication
 of the same run_id/id never repeats an effect; uncertain attempts need inspection.
