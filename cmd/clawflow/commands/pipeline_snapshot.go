@@ -137,7 +137,7 @@ func pipelineSnapshotDeps(d pipelineDeps, offline bool) pipelineDeps {
 	}
 	if !offline {
 		readAcceptance := d.acceptance
-		d.acceptance = func(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) *pipeline.AcceptanceInfo {
+		d.acceptance = func(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) (*pipeline.AcceptanceInfo, error) {
 			if local, ok := client.(*pipelineLocalClient); ok {
 				client = local.Client
 			}
@@ -175,32 +175,32 @@ func (c *pipelineLocalClient) sameHead(repo string, p *pipeline.PRInfo) bool {
 
 // pipelineLocalAcceptance reads newly completed records without reconstructing
 // the live contract (which requires VCS calls). Valid remains false offline.
-func pipelineLocalAcceptance(_ context.Context, _ vcs.Client, repo string, rc config.Repo, pr vcs.PR, _ time.Time) *pipeline.AcceptanceInfo {
+func pipelineLocalAcceptance(_ context.Context, _ vcs.Client, repo string, rc config.Repo, pr vcs.PR, _ time.Time) (*pipeline.AcceptanceInfo, error) {
 	path := acceptanceStorePath(repo, pr.Number)
 	st, err := os.Lstat(path)
 	if os.IsNotExist(err) && !rc.AcceptanceRequired {
-		return nil
+		return nil, nil
 	}
 	info := &pipeline.AcceptanceInfo{Required: rc.AcceptanceRequired, MaxInfraRetries: harvestMaxInfra, Running: snapshot.IsLocked("acceptance-"+acceptanceHash(repo), pr.Number)}
 	if os.IsNotExist(err) {
-		return info
+		return info, nil
 	}
 	if err != nil || !st.IsDir() || st.Mode().Perm()&0077 != 0 {
 		info.Error = "acceptance evidence unavailable"
-		return info
+		return info, errors.New(info.Error)
 	}
 	store, err := acceptance.OpenStore(path)
 	if err != nil {
 		info.Error = "acceptance evidence unavailable"
-		return info
+		return info, errors.New(info.Error)
 	}
 	defer store.Close()
 	records, err := store.CompleteRecordsAtHead(repo, pr.Number, pr.HeadSHA)
 	if err != nil {
 		info.Error = "acceptance evidence unreadable"
-		return info
+		return info, errors.New(info.Error)
 	}
-	return pipelineAcceptanceRecords(info, acceptance.Contract{}, records, false)
+	return pipelineAcceptanceRecords(info, acceptance.Contract{}, records, false), nil
 }
 
 // The scheduler's all-issues snapshot is capped and cannot prove absence.

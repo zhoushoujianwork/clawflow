@@ -64,8 +64,8 @@ func pipelineTestDeps(f *pipelineFake, repos map[string]config.Repo) pipelineDep
 		runs:      func() []snapshot.RunIndexEntry { return nil },
 		events:    func() ([]pipeline.Event, error) { return nil, nil },
 		locked:    func(string, int) bool { return false },
-		acceptance: func(context.Context, vcs.Client, string, config.Repo, vcs.PR, time.Time) *pipeline.AcceptanceInfo {
-			return nil
+		acceptance: func(context.Context, vcs.Client, string, config.Repo, vcs.PR, time.Time) (*pipeline.AcceptanceInfo, error) {
+			return nil, nil
 		},
 	}
 }
@@ -253,14 +253,14 @@ func TestPipelineAcceptanceReadsRecordedAttempts(t *testing.T) {
 	rc := config.Repo{Enabled: true, AutoMerge: true, AcceptanceRequired: true}
 	ctx := context.Background()
 
-	if got := pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now()); got == nil || got.Attempts != 0 || got.Error != "" || !got.Required {
+	if got, err := pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now()); err != nil || got == nil || got.Attempts != 0 || got.Error != "" || !got.Required {
 		t.Fatalf("before any attempt: %+v", got)
 	}
 
 	restore := failProvider()
 	harvest(t, "", 0)
 	restore()
-	got := pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now())
+	got, _ := pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now())
 	if got == nil || got.Attempts != 1 || got.InfraAttempts != 1 || !got.LatestIsInfra || got.NextRetryAt == "" || got.Verdict != "" || got.MaxInfraRetries != harvestMaxInfra {
 		t.Fatalf("after infra attempt: %+v", got)
 	}
@@ -271,7 +271,7 @@ func TestPipelineAcceptanceReadsRecordedAttempts(t *testing.T) {
 
 	offset = 16 * time.Minute
 	harvest(t, "", 0)
-	got = pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now())
+	got, _ = pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now())
 	if got == nil || got.Attempts != 2 || got.InfraAttempts != 1 || got.LatestIsInfra || got.Verdict != "passed" || !got.Valid {
 		t.Fatalf("after pass: %+v", got)
 	}
@@ -282,7 +282,7 @@ func TestPipelineAcceptanceReadsRecordedAttempts(t *testing.T) {
 
 func TestPipelineAcceptanceNilWhenNotRequiredAndNoStore(t *testing.T) {
 	f, _, _ := harvestFixture(t)
-	if got := pipelineAcceptance(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, f.pr, time.Now()); got != nil {
+	if got, err := pipelineAcceptance(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, f.pr, time.Now()); err != nil || got != nil {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -672,5 +672,35 @@ func TestPipelineMissingPRIssueTimeout(t *testing.T) {
 	s := buildPipeline(ctx, d)
 	if !s.Repos[0].Stale || s.Repos[0].Error == "" || len(s.Repos[0].Items) != 1 {
 		t.Fatalf("repo=%+v", s.Repos[0])
+	}
+}
+
+// A failed acceptance read for one repository keeps that repository's previous
+// entry as stale; other repositories update normally.
+func TestPipelineAcceptanceReadFailureKeepsPreviousRepoEntry(t *testing.T) {
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 7, Title: "fresh", State: "open"}}
+	f.open = []vcs.PR{{Number: 8, State: "open", HeadBranch: "fix/issue-7"}}
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/a": {Enabled: true}, "o/b": {Enabled: true}})
+	d.acceptance = func(_ context.Context, _ vcs.Client, repo string, _ config.Repo, _ vcs.PR, _ time.Time) (*pipeline.AcceptanceInfo, error) {
+		if repo == "o/a" {
+			return &pipeline.AcceptanceInfo{Error: "acceptance PR unavailable"}, acceptanceReadError{"acceptance PR unavailable"}
+		}
+		return nil, nil
+	}
+	d.previous = map[string]pipeline.RepoBoard{
+		"o/a": {Repo: "o/a", Items: []pipeline.Item{{Issue: 99, Title: "previous"}}},
+		"o/b": {Repo: "o/b", Items: []pipeline.Item{{Issue: 99, Title: "previous"}}},
+	}
+	s := buildPipeline(context.Background(), d)
+	if len(s.Repos) != 2 {
+		t.Fatalf("repos=%+v", s.Repos)
+	}
+	a, b := s.Repos[0], s.Repos[1]
+	if a.Repo != "o/a" || !a.Stale || !strings.Contains(a.Error, "acceptance") || len(a.Items) != 1 || a.Items[0].Issue != 99 {
+		t.Fatalf("a=%+v", a)
+	}
+	if b.Stale || b.Error != "" || b.Items[0].Issue != 7 {
+		t.Fatalf("b=%+v", b)
 	}
 }

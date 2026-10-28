@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -56,7 +57,9 @@ type pipelineDeps struct {
 	// globalQueue returns the unified queue in dispatch order; nil = none.
 	globalQueue func() []queue.ListEntry
 	// acceptance returns nil when the repo has no acceptance evidence to show.
-	acceptance func(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) *pipeline.AcceptanceInfo
+	// A non-nil error means a VCS or evidence read failed; the caller must treat
+	// the repository entry as failed so the previous snapshot is kept as stale.
+	acceptance func(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) (*pipeline.AcceptanceInfo, error)
 }
 
 func defaultPipelineDeps() (pipelineDeps, error) {
@@ -375,7 +378,11 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 				if err := fillPRDetail(client, repo, pi); err != nil {
 					board.Error = pipelineClip(err.Error(), pipelineErrLimit)
 				}
-				if a := d.acceptance(ctx, client, repo, rc, pr, now); a != nil {
+				a, accErr := d.acceptance(ctx, client, repo, rc, pr, now)
+				if accErr != nil {
+					board.Error = pipelineClip("acceptance: "+accErr.Error(), pipelineErrLimit)
+				}
+				if a != nil {
 					item.Acceptance, ev.Acceptance = a, a
 				}
 			} else {
@@ -485,12 +492,12 @@ func fillPRDetail(client vcs.Client, repo string, pi *pipeline.PRInfo) error {
 // pipelineAcceptance reads the latest acceptance evidence for the PR's current
 // contract. It is read-only: it never creates a store, runs a reviewer or
 // takes the acceptance lock. nil means there is nothing to show.
-func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) *pipeline.AcceptanceInfo {
+func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, now time.Time) (*pipeline.AcceptanceInfo, error) {
 	path := acceptanceStorePath(repo, pr.Number)
 	st, statErr := os.Lstat(path)
 	haveStore := statErr == nil && st.IsDir() && st.Mode().Perm()&0077 == 0
 	if !rc.AcceptanceRequired && !haveStore {
-		return nil
+		return nil, nil
 	}
 	info := &pipeline.AcceptanceInfo{Required: rc.AcceptanceRequired, MaxInfraRetries: harvestMaxInfra}
 	info.Running = snapshot.IsLocked("acceptance-"+acceptanceHash(repo), pr.Number)
@@ -498,23 +505,27 @@ func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc 
 	c, _, _, _, err := acceptanceContract(ctx, client, repo, pr.Number)
 	if err != nil {
 		info.Error = pipelineClip(err.Error(), pipelineErrLimit)
-		return info
+		var readErr acceptanceReadError
+		if errors.As(err, &readErr) {
+			return info, err
+		}
+		return info, nil
 	}
 	if !haveStore {
-		return info // contract is buildable; no attempt has been recorded yet
+		return info, nil // contract is buildable; no attempt has been recorded yet
 	}
 	store, err := acceptance.OpenStore(path)
 	if err != nil {
 		info.Error = "acceptance evidence unavailable"
-		return info
+		return info, errors.New(info.Error)
 	}
 	defer store.Close()
 	records, err := store.CompleteRecords(c)
 	if err != nil {
 		info.Error = "acceptance evidence unreadable"
-		return info
+		return info, errors.New(info.Error)
 	}
-	return pipelineAcceptanceRecords(info, c, records, true)
+	return pipelineAcceptanceRecords(info, c, records, true), nil
 }
 
 // pipelineAcceptanceRecords shares presentation while keeping offline history
