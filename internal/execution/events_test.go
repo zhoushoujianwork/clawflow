@@ -70,6 +70,9 @@ func TestExecutionEventsHelper(t *testing.T) {
 		event(3, "final", status, code, kind)
 	}
 	_ = f.Close()
+	if mode == "final-then-timeout" {
+		time.Sleep(time.Minute)
+	}
 	if mode == "invalid-stdout" {
 		fmt.Fprintln(os.Stdout, "invalid stdout")
 		os.Exit(0)
@@ -391,5 +394,60 @@ func TestOffloadEventTailPartialRecordsAndBounds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestInterruptedRunRetainsValidatedProgressIdentity(t *testing.T) {
+	for _, mode := range []string{"timeout", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			c, req, _ := streamingFixture(t)
+			req.TimeoutMS = 1500
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			observed := false
+			result, err := Run(ctx, c, req, nil, nil, func(Observation) {
+				observed = true
+				if mode == "canceled" {
+					cancel()
+				}
+			})
+			wantErr := context.DeadlineExceeded
+			if mode == "canceled" {
+				wantErr = context.Canceled
+			}
+			if !observed || !errors.Is(err, wantErr) {
+				t.Fatalf("progress=%v err=%v", observed, err)
+			}
+			if result.NativeSessionID != "native-actual" || result.SessionKey != "native-actual" || result.Profile != c.Profile || result.Backend != "claude" || result.Model != "profile-model" || result.RunID != "stream-run" || result.CallerRunID != req.RequestID {
+				t.Fatalf("lost validated identity: %+v", result)
+			}
+			if result.Text != "" || result.Status != "" || result.ErrorKind != "" {
+				t.Fatalf("progress became a terminal result: %+v", result)
+			}
+		})
+	}
+}
+
+func TestTimeoutRetainsValidatedFinalIdentity(t *testing.T) {
+	c, req, gate := streamingFixture(t)
+	t.Setenv("CLAWFLOW_EVENTS_MODE", "final-then-timeout")
+	if err := os.WriteFile(gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	req.TimeoutMS = 1000
+	result, err := Run(context.Background(), c, req, nil, nil, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || result.NativeSessionID != "native-actual" || result.Profile != c.Profile || result.Backend != "claude" || result.Text != "" {
+		t.Fatalf("identity=%+v err=%v", result, err)
+	}
+}
+
+func TestResumeErrorKindsPreserved(t *testing.T) {
+	for _, kind := range []string{"unknown_session", "session_expired", "session_not_found", "ownership_mismatch", "backend_mismatch", "profile_mismatch", "resume_rejected", "context_exhausted", "context_limit"} {
+		if safeKind(kind) != kind {
+			t.Fatalf("lost kind %s", kind)
+		}
+	}
+	if safeKind("untrusted error with secret") != "execution" {
+		t.Fatal("raw error leaked")
 	}
 }

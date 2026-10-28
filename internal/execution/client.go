@@ -403,6 +403,15 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if eventErr != nil {
 		return result, eventErr
 	}
+	// Preserve validated stream identity even if interruption prevents a final
+	// event or stdout. Never recover answer text/outcomes from events.
+	if tail.session != "" {
+		result = Result{NativeSessionID: tail.session, SessionKey: tail.session, Profile: c.Profile, Backend: tail.backend, Model: tail.model, RunID: tail.runID, CallerRunID: req.RequestID}
+	}
+	if tail.final != nil {
+		e := tail.final
+		result = Result{NativeSessionID: e.Session, SessionKey: e.Session, Profile: c.Profile, Backend: e.Backend, Model: e.Model, RunID: e.RunID, CallerRunID: e.CallerRunID, Status: e.Status, ErrorKind: e.ErrorKind, ExitCode: e.ExitCode}
+	}
 	if exceeded {
 		return result, &Error{Kind: "protocol_output_limit"}
 	}
@@ -432,12 +441,14 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, &Error{Kind: "transport"}
 	}
 	raw := bytes.TrimSpace(output)
-	if !validJSON(raw) || json.Unmarshal(raw, &result) != nil || !hasFields(raw, "status", "exit_code", "profile", "run_id", "caller_run_id", "execution_policy") {
+	var decoded Result
+	if !validJSON(raw) || json.Unmarshal(raw, &decoded) != nil || !hasFields(raw, "status", "exit_code", "profile", "run_id", "caller_run_id", "execution_policy") {
 		if runCtx.Err() != nil {
 			return result, runCtx.Err()
 		}
-		return Result{}, &Error{Kind: "protocol_invalid_result"}
+		return result, &Error{Kind: "protocol_invalid_result"}
 	}
+	result = decoded
 	result.Text = redact(result.Text, env)
 	result.Error = redact(result.Error, env)
 	result.SessionKey = result.NativeSessionID
@@ -475,7 +486,7 @@ var capacityMessage = regexp.MustCompile(`(?i)\bat capacity\b|\boverloaded\b|\bc
 
 func safeKind(s string) string {
 	switch s {
-	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "timeout", "canceled", "execution", "launch", "events_io":
+	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "unknown_session", "session_expired", "session_not_found", "ownership_mismatch", "backend_mismatch", "profile_mismatch", "resume_rejected", "context_exhausted", "context_limit", "context_length_exceeded", "timeout", "canceled", "execution", "launch", "events_io":
 		return s
 	}
 	return "execution"
