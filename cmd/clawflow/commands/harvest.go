@@ -32,15 +32,13 @@ var harvestNow = time.Now
 
 // runHarvestPhase is the automatic acceptance phase of `clawflow run`. The
 // implementation agent opens the PR; a separate acceptance agent judges it here;
-// deterministic code (attemptAutoMerge's conditional path) merges. It runs after
-// the operator phase and outside the scan sweep because acceptance can take
-// ~30 minutes, far beyond the sweep's scan budget.
+// deterministic code (attemptAutoMerge's conditional path) merges. This phase
+// occupies one worker alongside operators, outside the scan sweep's budget.
 //
-// Per repo it launches at most one acceptance run per pass, for the first open
-// PR that passes the sweep's candidate filters, has green required CI (or pending CI with overlap enabled) and has no
-// acceptance evidence for its current contract. Repos are processed
-// sequentially. Failures (setup/provider errors, not recorded verdicts) are
-// returned so the run exits non-zero (issue #354).
+// Per repo it launches at most one acceptance run per pass. Eligible PRs use
+// queue ordering and persisted fairness history; all waiting candidates are
+// logged. Repos are processed sequentially. Infrastructure failures are returned
+// so the run exits non-zero (issue #354).
 //
 // A targeted run (onlyRepo and onlyIssue both set) processes only that repo,
 // which may be disabled, and only PRs whose closing keyword names the issue.
@@ -142,18 +140,30 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, only
 		return nil
 	}
 
-	candidates := 0
+	state, err := loadHarvestSchedule(fullName)
+	if err != nil {
+		skip("schedule_unreadable", "err", err.Error())
+		return nil
+	}
+	// Keep only open PR identities; closed PRs need no fairness history.
+	open := map[int]bool{}
 	for _, pr := range prs {
-		if ctx.Err() != nil || candidates >= sweepMaxCandidates {
+		open[pr.Number] = true
+	}
+	for pr := range state.Heads {
+		if !open[pr] {
+			delete(state.Heads, pr)
+		}
+	}
+	var eligible []vcs.PR
+	for _, pr := range prs {
+		if ctx.Err() != nil {
 			break
 		}
 		if onlyIssue != 0 && extractClosesIssue(pr.Body) != onlyIssue {
 			continue
 		}
-		issueNum, isCandidate, prSkipped := autoMergeCandidate(client, fullName, pr)
-		if isCandidate {
-			candidates++
-		}
+		issueNum, _, prSkipped := autoMergeCandidate(client, fullName, pr)
 		if prSkipped != nil {
 			prSkipped.log("run/harvest_skip", fullName, pr.Number)
 			continue
@@ -191,7 +201,40 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, only
 			}
 			runLog.Info("run/harvest_retry", "repo", fullName, "pr", pr.Number, "issue", issueNum, "attempts", info.attempts)
 		}
-		return harvestRun(ctx, client, setCtx, fullName, repoCfg, pr, issueNum, runTimeout)
+		eligible = append(eligible, pr)
+	}
+	eligible, err = orderHarvest(client, fullName, eligible)
+	if err != nil {
+		skip("order_unreadable", "err", err.Error())
+		return nil
+	}
+	selected := selectHarvest(eligible, state)
+	for i, pr := range eligible {
+		if i == selected {
+			continue
+		}
+		reason := "harvest_slot_busy"
+		if pr.Number == state.Previous && selected > 0 {
+			reason = "deferred_fairness"
+		}
+		skip(reason, "pr", pr.Number, "issue", extractClosesIssue(pr.Body))
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	state.Previous = 0
+	if selected >= 0 {
+		pr := eligible[selected]
+		state.Previous = pr.Number
+		state.Heads[pr.Number] = pr.HeadSHA
+	}
+	if err := saveHarvestSchedule(fullName, state); err != nil {
+		skip("schedule_write_error", "err", err.Error())
+		return nil
+	}
+	if selected >= 0 {
+		pr := eligible[selected]
+		return harvestRun(ctx, client, setCtx, fullName, repoCfg, pr, extractClosesIssue(pr.Body), runTimeout)
 	}
 	return nil
 }
