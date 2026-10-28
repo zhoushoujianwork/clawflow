@@ -32,6 +32,7 @@ type MigrationStatus struct {
 var Migrations = []Migration{
 	{Version: 1, Name: "baseline", Up: func(tx *gorm.DB) error { return nil }},
 	{Version: 2, Name: "runs_and_usage", Up: migrateRuns},
+	{Version: 3, Name: "coordinator", Up: migrateCoordinator},
 }
 
 type schemaMigration struct {

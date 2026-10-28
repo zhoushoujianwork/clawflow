@@ -71,3 +71,14 @@ func TestParseRepoInput(t *testing.T) {
 		})
 	}
 }
+
+func TestCoordinatorDefaults(t *testing.T) {
+	var settings config.Settings
+	if settings.Coordinator.Enabled || settings.Coordinator.ListenAddress() != ":8093" {
+		t.Fatalf("unexpected coordinator defaults: %+v", settings.Coordinator)
+	}
+	settings.Coordinator.Listen = "127.0.0.1:9999"
+	if settings.Coordinator.ListenAddress() != "127.0.0.1:9999" {
+		t.Fatal("explicit listener ignored")
+	}
+}
