@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"strconv"
@@ -30,19 +31,32 @@ func TestLegacyProjectAutomationNoop(t *testing.T) {
 	}
 }
 
-// Removing the invocation dependency from both automatic entry points prevents
-// a repository pass or web scheduler tick from launching the steward.
-func TestAutomaticEntryPointsDoNotImportPilot(t *testing.T) {
+// Repository passes cannot invoke Pilot. Web ticks may only dispatch explicit
+// user-defined checks; direct Ask/Wake calls would restore built-in patrols.
+func TestAutomaticEntryPointsOnlyInvokeUserChecks(t *testing.T) {
 	for _, name := range []string{"run.go", "web.go"} {
-		file, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.ImportsOnly)
+		file, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, imp := range file.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
-			if strings.HasSuffix(path, "/pilot") {
-				t.Fatalf("%s must not invoke Pilot", name)
+			if strings.HasSuffix(path, "/pilot") && name == "run.go" {
+				t.Fatal("repository passes must not invoke Pilot")
 			}
+		}
+		if name == "web.go" {
+			ast.Inspect(file, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if ok && pkg.Name == "pilot" && sel.Sel.Name != "OpenCheckStore" && sel.Sel.Name != "TickChecks" {
+					t.Fatalf("web scheduler cannot directly invoke pilot.%s", sel.Sel.Name)
+				}
+				return true
+			})
 		}
 	}
 }
