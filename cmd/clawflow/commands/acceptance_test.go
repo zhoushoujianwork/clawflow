@@ -979,6 +979,57 @@ func TestAcceptanceGitLabSubgroupConfiguration(t *testing.T) {
 	}
 }
 
+func TestAcceptanceCheckoutBorrowsLocalObjects(t *testing.T) {
+	// The local clone already has head and base, so no remote is contacted:
+	// origin points nowhere and must never be used.
+	ctx := context.Background()
+	local, workspace := t.TempDir(), t.TempDir()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := acceptanceGit(ctx, dir, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	commit := func(name string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(local, name), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+		git(local, "add", ".")
+		git(local, "commit", "-qm", name)
+		return git(local, "rev-parse", "HEAD")
+	}
+	git(local, "init", "--quiet")
+	git(local, "config", "user.name", "Test")
+	git(local, "config", "user.email", "test@example.com")
+	common := commit("common.txt")
+	git(local, "checkout", "-qb", "feature")
+	head := commit("changed.txt")
+	git(local, "checkout", "--detach", common)
+	base := commit("base.txt")
+	missing := filepath.Join(t.TempDir(), "no-such-remote")
+	if err := acceptancePrepareCheckout(ctx, workspace, local, missing, "feature", head, base); err != nil {
+		t.Fatal(err)
+	}
+	if got := git(workspace, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("head = %s, want %s", got, head)
+	}
+	if got := git(workspace, "diff", "--name-only", base+"...HEAD"); got != "changed.txt" {
+		t.Fatalf("unexpected PR diff: %s", got)
+	}
+	if got, _ := acceptanceGit(ctx, workspace, "remote"); got != "" {
+		t.Fatalf("review checkout has remotes: %q", got)
+	}
+	// A head the local clone does not have falls back to the remote, which
+	// fails here, proving the local path is only used when complete.
+	other := t.TempDir()
+	if err := acceptancePrepareCheckout(ctx, other, local, missing, "feature", strings.Repeat("a", 40), base); err == nil {
+		t.Fatal("missing local head did not fall back to the remote")
+	}
+}
+
 func TestAcceptanceCheckoutOfflineBaseComparison(t *testing.T) {
 	// Use real Git with diverged histories: fetching head alone cannot supply base.
 	ctx := context.Background()
@@ -1016,7 +1067,7 @@ func TestAcceptanceCheckoutOfflineBaseComparison(t *testing.T) {
 	base := git(source, "rev-parse", "HEAD")
 	c := acceptance.Contract{HeadSHA: head, BaseSHA: base}
 
-	if err := acceptancePrepareCheckout(ctx, workspace, source, "feature", c.HeadSHA, c.BaseSHA); err != nil {
+	if err := acceptancePrepareCheckout(ctx, workspace, "", source, "feature", c.HeadSHA, c.BaseSHA); err != nil {
 		t.Fatal(err)
 	}
 	// Remove the source to prove subsequent comparisons need no provider or remote.
