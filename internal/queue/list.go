@@ -43,6 +43,9 @@ func BuildList(states []RepoState, order []Key, repo string) []ListEntry {
 		if e.Reason != "" {
 			row.State += ":" + e.Reason
 		}
+		if e.BlockingPR > 0 {
+			row.State += ":PR #" + strconv.Itoa(e.BlockingPR)
+		}
 		if p, ok := pos[it.Key]; ok {
 			row.Rank = p + 1
 		}

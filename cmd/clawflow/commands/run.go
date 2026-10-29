@@ -1138,6 +1138,12 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			}
 		}
 		plan := planRepoQueue(repoQueueInput{
+			PRFiles: func(n int) ([]string, error) {
+				if p, ok := client.(vcs.PRFileProvider); ok {
+					return p.ListPRFiles(fullName, n)
+				}
+				return nil, vcs.ErrNotSupported
+			},
 			Repo:           fullName,
 			ImplementJobs:  implementJobs,
 			Issues:         issues,

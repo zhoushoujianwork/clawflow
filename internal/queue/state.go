@@ -18,13 +18,15 @@ const StateVersion = 1
 // EntryRecord is the last scheduling verdict for one issue, kept for
 // `queue list` and the board.
 type EntryRecord struct {
-	Number   int    `json:"number"`
-	Title    string `json:"title,omitempty"`
-	Priority string `json:"priority"`
-	Rank     int    `json:"rank"` // -1 = unranked
-	State    string `json:"state"`
-	Reason   string `json:"reason,omitempty"`
-	Created  string `json:"created_at,omitempty"`
+	BlockingPR int    `json:"blocking_pr,omitempty"`
+	AreaPasses int    `json:"area_passes,omitempty"`
+	Number     int    `json:"number"`
+	Title      string `json:"title,omitempty"`
+	Priority   string `json:"priority"`
+	Rank       int    `json:"rank"` // -1 = unranked
+	State      string `json:"state"`
+	Reason     string `json:"reason,omitempty"`
+	Created    string `json:"created_at,omitempty"`
 }
 
 // RepoState is the small per-repo file under data/queue-state/. Only the pass

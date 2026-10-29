@@ -202,6 +202,9 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 				}
 				item.InQueue = true
 				item.QueuePosition = q.Position
+				if strings.HasPrefix(q.State, "parked:area_busy") {
+					item.Why = q.State
+				}
 				break
 			}
 			if !found {
