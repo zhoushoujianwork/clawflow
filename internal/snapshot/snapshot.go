@@ -276,6 +276,7 @@ type DevelopmentSession struct {
 }
 
 type RunMeta struct {
+	ExecutionMetadata
 	Profile string `json:"profile,omitempty"`
 	Backend string `json:"backend,omitempty"`
 	Model   string `json:"model,omitempty"`
@@ -1799,6 +1800,7 @@ func WriteProjects() error {
 // of Pilot's stdout. Absent on legacy / failed-to-parse runs, in which
 // case the UI falls back to the free-form Summary.
 type PilotRunMeta struct {
+	ExecutionMetadata
 	Profile   string     `json:"profile,omitempty"`
 	Backend   string     `json:"backend,omitempty"`
 	Model     string     `json:"model,omitempty"`

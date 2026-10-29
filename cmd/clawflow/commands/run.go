@@ -1795,6 +1795,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		runningMeta.Backend = r.Backend
 		runningMeta.Model = r.Model
 		runningMeta.Usage = snapshot.UsageFromResult(r)
+		runningMeta.ExecutionMetadata = snapshot.ExecutionFromResult(r)
+		if r.Machine != "" {
+			runningMeta.Machine = r.Machine
+		}
 	})
 	confirmedHead := ""
 	output, outcome, runErr := runJobOperator(ctx, j.op, j.sub, j.client, operator.RunOptions{
@@ -1847,6 +1851,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
 		finalizingMeta := snapshot.RunMeta{
+			ExecutionMetadata:  runningMeta.ExecutionMetadata,
 			DevelopmentSession: runningMeta.DevelopmentSession,
 			Usage:              runningMeta.Usage,
 			Profile:            runningMeta.Profile, Backend: runningMeta.Backend, Model: runningMeta.Model, Machine: runningMeta.Machine,
@@ -1969,6 +1974,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	endedAt := time.Now().UTC()
 	rm := snapshot.RunMeta{
+		ExecutionMetadata:  runningMeta.ExecutionMetadata,
 		DevelopmentSession: runningMeta.DevelopmentSession,
 		Usage:              runningMeta.Usage,
 		Profile:            runningMeta.Profile, Backend: runningMeta.Backend, Model: runningMeta.Model, Machine: runningMeta.Machine,

@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,7 +123,7 @@ func TestImportRunsCountsAndLegacy(t *testing.T) {
 	if err != nil || len(rows) != 1 {
 		t.Fatal(rows, err)
 	}
-	if r := rows[0]; r.Profile != "unknown" || r.Backend != "unknown" || r.Model != "unknown" || r.Machine != "unknown" || r.UsageReported || r.CostUSD != nil {
+	if r := rows[0]; r.Profile != "unknown" || r.Backend != "unknown" || r.Model != "unknown" || r.Machine != "unknown" || r.UsageReported || r.CostUSD != nil || r.ExitCode != nil || r.ElapsedMs != nil {
 		t.Fatalf("legacy %+v", r)
 	}
 }
@@ -217,6 +218,64 @@ func TestImportInvalidFilesAndOrphanedDirectories(t *testing.T) {
 	for _, d := range diagnostics {
 		if d.Status != "invalid" {
 			t.Fatalf("status: %+v", d)
+		}
+	}
+}
+
+// A resumed session has distinct attempts, each with replacement (not additive)
+// usage. Replaying its final metadata must leave both counts and evidence stable.
+func TestSameSessionAttemptReplay(t *testing.T) {
+	s := historyStore(t)
+	root := t.TempDir()
+	for _, kind := range []string{"run", "pilot"} {
+		for i := 1; i <= 3; i++ {
+			m := fixture("o/r", "failed", "2026-10-29T00:00:00Z", map[string]any{"input_tokens": 10, "output_tokens": 3})
+			m["project"] = "platform"
+			m["session_id"] = "shared-session"
+			m["offload_run_id"] = fmt.Sprintf("attempt-%d", i)
+			m["caller_run_id"] = fmt.Sprintf("caller-%d", i)
+			m["exit_code"] = i
+			m["elapsed_ms"] = int64(1200)
+			m["error_kind"] = "execution"
+			m["execution_status"] = "error"
+			m["cumulative_usage"] = map[string]any{"input_tokens": 999999}
+			dir := filepath.Join(root, kind, fmt.Sprint(i))
+			if got := putRun(t, s, dir, kind, m); got != "imported" {
+				t.Fatal(got)
+			}
+			if got := putRun(t, s, dir, kind, m); got != "skipped" {
+				t.Fatal(got)
+			}
+			if got := putRun(t, s, dir+"-replayed", kind, m); got != "skipped" {
+				t.Fatal(got)
+			}
+		}
+		rows, err := s.Runs(context.Background(), kind, store.RunFilter{})
+		if err != nil || len(rows) != 3 {
+			t.Fatalf("rows=%+v err=%v", rows, err)
+		}
+		total := int64(0)
+		for _, r := range rows {
+			if r.ExitCode == nil || *r.ExitCode == 0 || r.ElapsedMs == nil || *r.ElapsedMs != 1200 || r.SessionID != "shared-session" || r.OffloadRunID == "" || r.CallerRunID == "" || r.InputTokens == nil {
+				t.Fatalf("row: %+v", r)
+			}
+			total += *r.InputTokens
+		}
+		if total != 30 {
+			t.Fatalf("accumulated usage: %d", total)
+		}
+		// The same Offload ID from another machine is a different attempt.
+		remote := fixture("o/r", "failed", "2026-10-29T00:00:00Z", nil)
+		remote["project"] = "platform"
+		remote["machine"] = "remote-machine"
+		remote["session_id"] = "shared-session"
+		remote["offload_run_id"] = "attempt-1"
+		if got := putRun(t, s, filepath.Join(root, kind, "remote"), kind, remote); got != "imported" {
+			t.Fatal(got)
+		}
+		rows, err = s.Runs(context.Background(), kind, store.RunFilter{})
+		if err != nil || len(rows) != 4 {
+			t.Fatalf("remote attempt lost: rows=%+v err=%v", rows, err)
 		}
 	}
 }

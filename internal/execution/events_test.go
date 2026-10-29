@@ -421,7 +421,14 @@ func TestInterruptedRunRetainsValidatedProgressIdentity(t *testing.T) {
 			if result.NativeSessionID != "native-actual" || result.SessionKey != "native-actual" || result.Profile != c.Profile || result.Backend != "claude" || result.Model != "profile-model" || result.RunID != "stream-run" || result.CallerRunID != req.RequestID {
 				t.Fatalf("lost validated identity: %+v", result)
 			}
-			if result.Text != "" || result.Status != "" || result.ErrorKind != "" {
+			wantKind := "timeout"
+			if mode == "canceled" {
+				wantKind = "canceled"
+			}
+			if result.ReportedExitCode != nil || result.ElapsedMs != nil || result.Machine == "" || result.ErrorKind != wantKind {
+				t.Fatalf("interruption evidence: %+v", result)
+			}
+			if result.Text != "" || result.Status != "" {
 				t.Fatalf("progress became a terminal result: %+v", result)
 			}
 		})

@@ -39,6 +39,7 @@ var Migrations = []Migration{
 	}},
 	{Version: 6, Name: "actions_evidence", Up: migrateActions},
 	{Version: 7, Name: "scheduled_checks", Up: migrateSchedules},
+	{Version: 8, Name: "offload_execution_evidence", Up: migrateExecutionEvidence},
 }
 
 type schemaMigration struct {
