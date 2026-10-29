@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -305,32 +308,28 @@ func TestCoordinatorRateLimitedResultRemainsPendingThenApplies(t *testing.T) {
 	if err := tasks.AcceptResult(ctx, task.ID, "w", task.FencingToken, json.RawMessage(`{"status":"success"}`)); err != nil {
 		t.Fatal(err)
 	}
+
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if calls == 1 {
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, "secondary rate limit", 403)
-			return
-		}
 		fmt.Fprint(w, `[]`)
 	}))
 	defer server.Close()
-	client := github.New("fixture", server.URL)
-	old := retry.DefaultConfig
-	retry.DefaultConfig = retry.Config{MaxAttempts: 1}
-	defer func() { retry.DefaultConfig = old }()
+	budget := github.Budget{Limit: 5000, Remaining: 0, Reset: time.Now().Add(10 * time.Minute)}
+	client := resultBudgetClient(t, server.URL, budget)
 	applied := 0
 	service := &coordinatorResults{tasks: tasks, loadJob: func(ctx context.Context, _ *coordinator.Task) (*runJob, error) {
 		client.SetRequestContext(ctx)
 		_, err := client.ListIssueEvents("o/r", 1)
 		return &runJob{client: client}, err
 	}, apply: func(context.Context, *coordinator.Task, *runJob, *coordinatorReport) error { applied++; return nil }}
-	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
-	if err := service.recoverResults(short, tasks); err != nil {
+
+	if err := service.recoverResults(ctx, tasks); err != nil {
 		t.Fatal(err)
 	}
-	cancel()
+	if calls != 0 {
+		t.Fatalf("exhausted budget started %d HTTP requests", calls)
+	}
 	current, err := tasks.Task(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -338,7 +337,10 @@ func TestCoordinatorRateLimitedResultRemainsPendingThenApplies(t *testing.T) {
 	if current.ApplicationAttempts != 0 || current.State == "failed" || current.State == "done" || applied != 0 {
 		t.Fatalf("result lost during rate limit: %+v applied=%d", current, applied)
 	}
-	time.Sleep(1100 * time.Millisecond)
+
+	// Simulate recovery after reset from an expired persisted budget snapshot.
+	budget.Reset = time.Now().Add(-time.Second)
+	client = resultBudgetClient(t, server.URL, budget)
 	if err := service.recoverResults(ctx, tasks); err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +348,82 @@ func TestCoordinatorRateLimitedResultRemainsPendingThenApplies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.State != "done" || current.ApplicationAttempts != 0 || calls != 2 || applied != 1 {
+	if current.State != "done" || current.ApplicationAttempts != 0 || calls != 1 || applied != 1 {
 		t.Fatalf("result=%+v calls=%d applied=%d", current, calls, applied)
 	}
+}
+
+// deferredResultStore fails the test if recovery spends an application attempt.
+type deferredResultStore struct {
+	coordinator.EffectStore
+	failures int
+}
+
+func (s *deferredResultStore) PendingResults(context.Context) ([]coordinator.Task, error) {
+	return []coordinator.Task{{ID: "limited", Result: json.RawMessage(`{"status":"success"}`)}}, nil
+}
+func (s *deferredResultStore) RecordApplicationFailure(context.Context, string, int64, string) error {
+	s.failures++
+	return nil
+}
+
+func TestCoordinatorExhaustedBudgetDoesNotConsumeAttempts(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deadline=%v", deadline), func(t *testing.T) {
+			withRunLog(t)
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("X-RateLimit-Limit", "5000")
+				w.Header().Set("X-RateLimit-Remaining", "0")
+				w.Header().Set("X-RateLimit-Reset", fmt.Sprint(time.Now().Add(10*time.Minute).Unix()))
+				fmt.Fprint(w, "[]")
+			}))
+			defer server.Close()
+			client := github.New("fixture", server.URL)
+			if _, err := client.ListIssueEvents("o/r", 1); err != nil {
+				t.Fatal(err)
+			}
+			durable := &deferredResultStore{}
+			service := &coordinatorResults{loadJob: func(ctx context.Context, _ *coordinator.Task) (*runJob, error) {
+				if deadline {
+					expired, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+					defer cancel()
+					ctx = expired
+				}
+				client.SetRequestContext(ctx)
+				_, err := client.ListIssueEvents("o/r", 1)
+				return nil, err
+			}}
+			for i := 0; i < 4; i++ {
+				if err := service.recoverResults(context.Background(), durable); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if durable.failures != 0 || calls != 1 {
+				t.Fatalf("failures=%d HTTP calls=%d", durable.failures, calls)
+			}
+		})
+	}
+}
+
+// resultBudgetClient restores the same credential's tracked budget as a restarted
+// applier would, with a separate private cache directory for each time snapshot.
+func resultBudgetClient(t *testing.T, base string, budget github.Budget) *github.Client {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, fmt.Sprintf("%x", sha256.Sum256([]byte(base+"\x00fixture"))))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "budget.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := github.New("fixture", base)
+	client.UseCacheDir(root)
+	return client
 }

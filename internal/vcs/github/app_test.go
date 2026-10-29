@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -34,7 +36,9 @@ func TestAppRequestsAndIdentityBudget(t *testing.T) {
 	}
 	var comment string
 	posts, updates := 0, 0
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
 		switch r.URL.Path {
 		case "/repos/o/r/installation":
 			fmt.Fprint(w, `{"id":31,"app_slug":"clawflow-test","repository_selection":"selected","permissions":{"issues":"write"}}`)
@@ -124,5 +128,23 @@ func TestAppRequestsAndIdentityBudget(t *testing.T) {
 	}
 	if _, _, err := outside.doOnce("GET", "/repos/o/outside/issues", nil); err != nil {
 		t.Fatal(err)
+	}
+	// Apply delivery limits after selecting the installation, without blocking
+	// the unrelated personal-token fallback identity.
+	selected, err := client.authenticated("/repos/o/r/issues")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected.state.Lock()
+	selected.state.budget = Budget{Limit: 5000, Remaining: 0, Reset: time.Now().Add(10 * time.Minute)}
+	selected.state.Unlock()
+	before := requests
+	_, status, err := client.doOnce("POST", "/repos/o/r/issues", nil)
+	var limited *retry.HTTPError
+	if status != http.StatusTooManyRequests || !errors.As(err, &limited) || !limited.RateLimited || limited.After < 9*time.Minute || requests != before {
+		t.Fatalf("installation delivery limit not enforced: status=%d err=%v requests=%d", status, err, requests-before)
+	}
+	if _, _, err := outside.doOnce("GET", "/repos/o/outside/issues", nil); err != nil || requests != before+1 {
+		t.Fatalf("installation limit affected personal fallback: err=%v", err)
 	}
 }
