@@ -21,6 +21,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -208,7 +209,8 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 					return repairPreparationErr
 				}
 				reserved = true
-				p.Repair.Attempt = j.repair.Attempt
+				_, refreshed := coordinatorTask(j, timeout)
+				p.Repair = refreshed.Repair
 			}
 			p.TaskID = t.ID
 			var err error
@@ -396,11 +398,11 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 	if r.Status == "lease-lost" {
 		status = "cancelled"
 	}
-	if j.repair != nil && r.InfraKind != "" {
-		if err := j.releaseRepair(r.InfraKind, now); err != nil {
+	if j.repair != nil {
+		if err := repairledger.ApplyResult(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, t.ID, j.repair.reason(), r.InfraKind, now); err != nil {
 			return err
 		}
-		if status == "failed" {
+		if r.InfraKind != "" && status == "failed" {
 			status = "skipped"
 		}
 	}

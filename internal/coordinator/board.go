@@ -32,20 +32,22 @@ type BoardWorker struct {
 	RunningTasks  []string   `json:"running_tasks"`
 }
 type BoardTask struct {
-	WaitingReason  string     `json:"waiting_reason,omitempty" gorm:"-"`
-	ID             string     `json:"id"`
-	Repo           string     `json:"repo"`
-	Issue          int        `json:"issue"`
-	PR             int        `json:"pr"`
-	Kind           string     `json:"kind"`
-	State          string     `json:"state"`
-	Stage          string     `json:"stage" gorm:"-"`
-	Tags           []string   `json:"tags" gorm:"serializer:json"`
-	Priority       int        `json:"priority"`
-	Worker         string     `json:"worker" gorm:"column:lease_owner"`
-	LeaseExpiresAt *time.Time `json:"lease_expires_at"`
-	Attempt        int        `json:"attempt"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ApplicationAttempts int        `json:"application_attempts"`
+	ApplicationError    string     `json:"application_error,omitempty"`
+	WaitingReason       string     `json:"waiting_reason,omitempty" gorm:"-"`
+	ID                  string     `json:"id"`
+	Repo                string     `json:"repo"`
+	Issue               int        `json:"issue"`
+	PR                  int        `json:"pr"`
+	Kind                string     `json:"kind"`
+	State               string     `json:"state"`
+	Stage               string     `json:"stage" gorm:"-"`
+	Tags                []string   `json:"tags" gorm:"serializer:json"`
+	Priority            int        `json:"priority"`
+	Worker              string     `json:"worker" gorm:"column:lease_owner"`
+	LeaseExpiresAt      *time.Time `json:"lease_expires_at"`
+	Attempt             int        `json:"attempt"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 // Board reads a consistent snapshot without renewing or expiring any lease.
@@ -76,7 +78,7 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			heartbeats[beat.Worker] = beat.At
 		}
 		tasks := []BoardTask{}
-		if err := tx.Model(&Task{}).Select("id, repo, issue, pr, kind, state, tags, priority, lease_owner, lease_expires_at, attempt, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
+		if err := tx.Model(&Task{}).Select("id, repo, issue, pr, kind, state, tags, priority, lease_owner, lease_expires_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
 			return err
 		}
 		out = deriveBoard(now, workers, tokens, heartbeats, tasks)

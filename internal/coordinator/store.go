@@ -22,26 +22,28 @@ var (
 )
 
 type Task struct {
-	EventSource    string          `gorm:"-" json:"-"`
-	ExternalID     string          `gorm:"-" json:"-"`
-	ID             string          `gorm:"primaryKey" json:"id"`
-	Kind           string          `json:"kind"`
-	Repo           string          `json:"repo"`
-	Issue          int             `json:"issue"`
-	PR             int             `json:"pr"`
-	Operator       string          `json:"operator"`
-	Payload        json.RawMessage `gorm:"type:jsonb" json:"payload"`
-	Tags           []string        `gorm:"serializer:json;type:jsonb" json:"tags"`
-	Priority       int             `json:"priority"`
-	QueuePosition  int64           `json:"queue_position"`
-	State          string          `json:"state"`
-	Attempt        int             `json:"attempt"`
-	LeaseOwner     string          `json:"lease_owner"`
-	LeaseExpiresAt *time.Time      `json:"lease_expires_at"`
-	FencingToken   int64           `json:"fencing_token"`
-	Result         json.RawMessage `gorm:"type:jsonb" json:"result"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	ApplicationAttempts int             `json:"application_attempts"`
+	ApplicationError    string          `json:"application_error,omitempty"`
+	EventSource         string          `gorm:"-" json:"-"`
+	ExternalID          string          `gorm:"-" json:"-"`
+	ID                  string          `gorm:"primaryKey" json:"id"`
+	Kind                string          `json:"kind"`
+	Repo                string          `json:"repo"`
+	Issue               int             `json:"issue"`
+	PR                  int             `json:"pr"`
+	Operator            string          `json:"operator"`
+	Payload             json.RawMessage `gorm:"type:jsonb" json:"payload"`
+	Tags                []string        `gorm:"serializer:json;type:jsonb" json:"tags"`
+	Priority            int             `json:"priority"`
+	QueuePosition       int64           `json:"queue_position"`
+	State               string          `json:"state"`
+	Attempt             int             `json:"attempt"`
+	LeaseOwner          string          `json:"lease_owner"`
+	LeaseExpiresAt      *time.Time      `json:"lease_expires_at"`
+	FencingToken        int64           `json:"fencing_token"`
+	Result              json.RawMessage `gorm:"type:jsonb" json:"result"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
 func (Task) TableName() string { return "coordinator_tasks" }

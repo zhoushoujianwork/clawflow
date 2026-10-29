@@ -492,3 +492,40 @@ func TestWorkerAcceptanceRepairUsesCoordinatorSnapshot(t *testing.T) {
 		t.Fatal("changed head accepted")
 	}
 }
+
+func TestWorkerRetriesOutageAndReregisters(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var registrations, claims atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/worker/v1/register":
+			registrations.Add(1)
+		case "/worker/v1/claim":
+			n := claims.Add(1)
+			if n == 1 {
+				w.WriteHeader(503)
+				return
+			}
+			_, _ = w.Write([]byte(`{"task":null}`))
+			cancel()
+		}
+	}))
+	defer server.Close()
+	api := &workerAPI{base: server.URL, client: server.Client()}
+	if err := runWorker(ctx, api, workerOptions{MaxParallel: 1}, time.Second, time.Millisecond, nil); err != nil {
+		t.Fatal(err)
+	}
+	if claims.Load() != 2 || registrations.Load() < 2 {
+		t.Fatalf("claims=%d registrations=%d", claims.Load(), registrations.Load())
+	}
+}
+
+func TestWorkerAuthenticationFailureIsFatal(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }))
+	defer server.Close()
+	api := &workerAPI{base: server.URL, client: server.Client()}
+	if err := runWorker(context.Background(), api, workerOptions{MaxParallel: 1}, time.Second, time.Millisecond, nil); !errors.Is(err, errWorkerAuth) {
+		t.Fatalf("auth: %v", err)
+	}
+}

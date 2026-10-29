@@ -162,7 +162,7 @@ func runWorkerAcceptanceTask(ctx, parent context.Context, api *workerAPI, o work
 	if report.Acceptance != nil {
 		action = "complete"
 	}
-	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
+	reportCtx, cancel := context.WithCancel(parent)
 	defer cancel()
 	return api.post(reportCtx, "tasks/"+url.PathEscape(t.ID)+"/"+action, map[string]any{"fencing_token": t.FencingToken, "result": report}, nil)
 }

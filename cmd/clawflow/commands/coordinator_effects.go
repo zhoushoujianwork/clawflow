@@ -136,8 +136,12 @@ func (s *coordinatorResults) recoverResults(ctx context.Context, store coordinat
 			}
 		}
 		cancel()
-		if err != nil && first == nil {
-			first = err
+		if err != nil && ctx.Err() == nil {
+			message := sanitizeReviewerText(err.Error(), 4000)
+			runLog.Warn("coordinator/result-apply-failed", "task", t.ID, "err", message)
+			if recordErr := store.RecordApplicationFailure(ctx, t.ID, t.FencingToken, message); recordErr != nil && first == nil {
+				first = recordErr
+			}
 		}
 	}
 	return first

@@ -57,3 +57,45 @@ func TestRerunReservationSharedBudgetAndConcurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCoordinatorResultReplayAndLegacyReservation(t *testing.T) {
+	for _, reserved := range []bool{false, true} {
+		for _, kind := range []string{"", "launch", "no-change"} {
+			root := t.TempDir()
+			now := time.Now()
+			pr := vcs.PR{Number: 7, HeadSHA: "head"}
+			if reserved {
+				if n, err := Reserve(root, "o/r", pr, "ci", now); err != nil || n != 1 {
+					t.Fatalf("reserve: %d %v", n, err)
+				}
+			}
+			for i := 0; i < 3; i++ {
+				if err := ApplyResult(root, "o/r", pr, 1, "task", "ci", kind, now.Add(time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, path := Path(root, "o/r", 7)
+			l, err := Load(path)
+			if err != nil || len(l.Attempts) != 1 {
+				t.Fatalf("ledger: %+v %v", l, err)
+			}
+			a := l.Attempts[0]
+			if a.Released != kind || !a.Completed || a.TaskID != "task" {
+				t.Fatalf("attempt: %+v", a)
+			}
+			// The same head and attempt number can be reused after an infra release.
+			if kind == "launch" {
+				if n, err := Reserve(root, "o/r", pr, "ci", now.Add(3*time.Hour)); err != nil || n != 1 {
+					t.Fatalf("next: %d %v", n, err)
+				}
+				if err := ApplyResult(root, "o/r", pr, 1, "next-task", "ci", "", now.Add(4*time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+				l, _ = Load(path)
+				if len(l.Attempts) != 2 || !l.Attempts[1].Completed || l.Attempts[1].Released != "" {
+					t.Fatalf("next ledger: %+v", l)
+				}
+			}
+		}
+	}
+}

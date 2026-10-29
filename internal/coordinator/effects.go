@@ -62,6 +62,7 @@ type InboxEvent struct {
 // The callback MUST reconcile the remote marker before issuing any write.
 type EffectStore interface {
 	PendingResults(context.Context) ([]Task, error)
+	RecordApplicationFailure(context.Context, string, int64, string) error
 	ApplyEffects(context.Context, string, int64, func(EffectIntent) (EffectResult, error)) error
 	Cancel(context.Context, string) error
 	FinalizeApplication(context.Context, string, int64, bool, func(Task) error) error
@@ -290,11 +291,13 @@ func (s *Store) FinalizeApplication(ctx context.Context, id string, epoch int64,
 		if failed {
 			state = "failed"
 		}
-		values := map[string]any{"state": state}
+		values := map[string]any{"state": state, "application_error": ""}
 		if r.InfraKind != "" && r.InfraKind != "no-change" {
 			t.Attempt++
 			values["attempt"] = t.Attempt
-			if t.Attempt < MaxInfrastructureAttempts {
+			// Repairs must return through the scheduler so ledger cooldown and a
+			// fresh enqueue reservation govern the next attempt.
+			if t.Attempt < MaxInfrastructureAttempts && t.Kind != "repair" {
 				values["state"] = "pending"
 				values["result"] = nil
 				values["lease_owner"] = ""
@@ -314,4 +317,29 @@ func (s *Store) PRBlocked(ctx context.Context, repo string, pr int) (bool, error
 	var count int64
 	err := s.db.WithContext(ctx).Model(&Task{}).Where("repo = ? AND pr = ? AND state = 'head-mismatch' AND NOT EXISTS (SELECT 1 FROM coordinator_tasks newer WHERE newer.repo = coordinator_tasks.repo AND newer.pr = coordinator_tasks.pr AND newer.kind IN ('implement','repair') AND newer.state = 'done' AND newer.created_at > coordinator_tasks.created_at)", repo, pr).Count(&count).Error
 	return count > 0, err
+}
+
+// RecordApplicationFailure quarantines a poisoned report after three applications.
+// Its result and diagnostic remain available for inspection across restarts.
+func (s *Store) RecordApplicationFailure(ctx context.Context, id string, epoch int64, message string) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var t Task
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+			return err
+		}
+		if t.State != "leased" || t.FencingToken != epoch || t.LeaseExpiresAt != nil {
+			return ErrStaleLease
+		}
+		values := map[string]any{"application_attempts": t.ApplicationAttempts + 1, "application_error": message}
+		if t.ApplicationAttempts+1 >= 3 {
+			values["state"] = "failed"
+			if err := failIntents(tx, id); err != nil {
+				return err
+			}
+		}
+		if err := tx.Model(&t).Updates(values).Error; err != nil {
+			return err
+		}
+		return audit(tx, t.LeaseOwner, id, "result-apply-failed")
+	})
 }

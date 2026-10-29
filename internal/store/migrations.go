@@ -38,6 +38,9 @@ var Migrations = []Migration{
 		return tx.Exec("ALTER TABLE coordinator_tokens ADD COLUMN scope text NOT NULL DEFAULT 'worker' CHECK (scope IN ('worker', 'admin'))").Error
 	}},
 	{Version: 6, Name: "actions_evidence", Up: migrateActions},
+	{Version: 7, Name: "coordinator_application_errors", Up: func(tx *gorm.DB) error {
+		return tx.Exec("ALTER TABLE coordinator_tasks ADD COLUMN application_attempts integer NOT NULL DEFAULT 0, ADD COLUMN application_error text NOT NULL DEFAULT ''").Error
+	}},
 }
 
 type schemaMigration struct {

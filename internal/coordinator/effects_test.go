@@ -276,3 +276,26 @@ func TestPRIntentRechecksHeadOnInfrastructureRetry(t *testing.T) {
 		t.Fatalf("intents=%d %v", n, err)
 	}
 }
+
+func TestRepairInfrastructureResultReturnsThroughLedgerScheduler(t *testing.T) {
+	s, _, _ := setup(t)
+	register(t, s, "w", 1)
+	task, err := s.Enqueue(ctx, Task{Repo: "o/r", Issue: 1, PR: 11, Kind: "repair", Operator: "repair-ci"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leased := claim(t, s, "w")
+	if err := s.AcceptResult(ctx, task.ID, "w", leased.FencingToken, json.RawMessage(`{"status":"failed","infra_kind":"launch"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinalizeApplication(ctx, task.ID, leased.FencingToken, true, func(Task) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.Task(ctx, task.ID)
+	if err != nil || current.State != "failed" {
+		t.Fatalf("repair bypassed ledger scheduler: %+v %v", current, err)
+	}
+	if _, err := s.Claim(ctx, "w"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("repair immediately reclaimed: %v", err)
+	}
+}
