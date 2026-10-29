@@ -12,6 +12,12 @@ This is a local reference implementation for [platform issue #349](https://githu
 
 `isolated-readonly` 仍有残余风险：只读 sandbox 可以读取其他本地文件，无法由后端强制保证不看源码。隔离依赖空工作目录、延迟创建 checkout，以及禁止读取工作目录外文件或任何仓库的 planner 提示词；它不是完整的文件读取隔离边界。
 
+## 报告格式纠正
+
+reviewer 执行成功且源码检查通过后，若报告解析或校验失败，同一验收 attempt 最多续接原生 reviewer 会话一次。纠正提示包含原始校验错误与报告结构，仅要求返回完整修正 JSON，禁止重新审查或补跑检查。纠正使用相同工作区、profile 和 session，记录新的 native run；源码在纠正前后重新核对。执行失败和 `infrastructure_error` 不进入纠正，第二份报告仍无效则按原有错误路径保存，不产生有效 verdict。
+
+验收记录的可选 `correction` 保存 `validation_error` 和纠正轮的 `reviewer` 原生身份，原始 `reviewer` 字段保留首次审查身份。纠正轮用量通过 `acceptance-review-correction` 执行记录单独保存，不另建验收 attempt；未提供的用量仍为未知。
+
 ## Usage
 
 After building this revision, enroll a registered repository:
@@ -31,7 +37,7 @@ Enrollment preserves monitoring and automatic-merge settings. The scan sweep nev
 - Per repo and pass, at most one acceptance runs, for the first open PR that passes the sweep's filters, has successful required CI and has no evidence for its current contract.
 - A passing result goes straight to the conditional merge path with the accepted head SHA.
 - 每次完成审查后更新 PR 上由当前认证账号拥有的一条验收评论，包含提交、结论、逐项证据、未解决问题与下一步负责人；旧 attempt 保留在私有审计记录中。发布失败可由后续 harvest 重试。
-- Setup or provider errors post nothing, are logged, and make `clawflow run` exit non-zero. They are retried after 15 minutes, up to 3 attempts per head. After that one comment points to `clawflow acceptance run`.
+- 基础设施错误（包括提供者失败和无效评审报告）会记录日志并使 `clawflow run` 非零退出，15 分钟后可重试。同一 PR head 最多连续失败 2 次，随后以一条评论和看板原因 `acceptance-infra` 暂停。新 head、issue 正文变化或新 ClawFlow 二进制会重置计数；手动验收命令也遵守此上限。这些错误不消耗产品修复次数。
 - A `failed` verdict is repaired on the same PR, see [Repair after a failed verdict](#repair-after-a-failed-verdict). A `blocked` verdict is not: the comment says a human decision is needed.
 
 The PR must be open, non-draft, from the same repository, and reference an open issue with a closing keyword. A successful managed development run must have captured that issue's requirements and trustworthy native execution events. Historical runs missing the requirements snapshot need a new managed development run. The configured acceptance profile must support the existing Offload execution protocol.

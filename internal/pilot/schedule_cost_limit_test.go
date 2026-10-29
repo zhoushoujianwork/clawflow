@@ -224,10 +224,12 @@ func TestExtractContextMDBothShapes(t *testing.T) {
 
 // The default Pilot dollar cap is unsupported by direct Offload. Admission must
 // fail before any provider process instead of silently dropping the cap.
-func TestScheduleRejectsUnsupportedBudgetBeforeLaunch(t *testing.T) {
+// A default Pilot setup (no explicit budget) must reach Offload; a dollar cap
+// would be rejected as unsupported_budget before launch.
+func TestScheduleLaunchesWithoutDollarBudget(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	stubOffloadFailure(t, "cost_limit", "PILOT-RESULT: should never launch")
+	stubOffloadFailure(t, "cost_limit", "PILOT-RESULT: launched")
 	capture := filepath.Join(t.TempDir(), "calls")
 	t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
 	dir := filepath.Join(home, ".clawflow", "config")
@@ -244,12 +246,11 @@ func TestScheduleRejectsUnsupportedBudgetBeforeLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedAttention(t, "budget-rejected")
-	woken, err := Schedule(context.Background(), 30*time.Second, time.Time{})
-	if err != nil || woken != 0 {
-		t.Fatalf("woken=%d err=%v", woken, err)
+	if _, err := Schedule(context.Background(), 30*time.Second, time.Time{}); err != nil {
+		t.Fatalf("schedule: %v", err)
 	}
-	if _, err := os.Stat(capture); !os.IsNotExist(err) {
-		t.Fatal("unsupported cap launched Offload")
+	if _, err := os.Stat(capture); err != nil {
+		t.Fatalf("Pilot wake never reached Offload: %v", err)
 	}
 }
 

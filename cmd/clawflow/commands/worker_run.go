@@ -254,11 +254,34 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 		j, timeout, err := build(ctx, t)
 		if err != nil {
 			result.Error = err.Error()
+			result.InfraKind = "launch"
 		} else {
+			spool, spoolErr := os.CreateTemp("", "clawflow-effects-"+t.ID+"-*")
+			if spoolErr != nil {
+				close(stop)
+				<-done
+				return spoolErr
+			}
+			spoolPath := spool.Name()
+			if err := spool.Close(); err != nil {
+				close(stop)
+				<-done
+				return err
+			}
+			defer os.Remove(spoolPath)
+			runCtx := workerEffectContext(ctx, spoolPath)
 			j.hooks = &jobHooks{SkipIndex: true, AfterRun: func(r *jobResult) { result = r }}
-			_, _, failed := runOneOperatorFn(ctx, j, timeout)
+			_, _, failed := runOneOperatorFn(runCtx, j, timeout)
 			if j.result != nil {
 				result = j.result
+			}
+			effects, spoolErr := readEffectSpool(spoolPath)
+			if spoolErr != nil {
+				result.Status = "failed"
+				result.Error = spoolErr.Error()
+				result.Effects = nil
+			} else {
+				result.Effects = append(effects, result.Effects...)
 			}
 			if failed && result.Status == "" {
 				result.Status = "failed"

@@ -695,9 +695,16 @@ func acceptanceReviewerEnv(env []string) []string {
 		if strings.HasPrefix(upper, "CLAWFLOW_") && strings.Contains(upper, "TOKEN") {
 			continue
 		}
+		if upper == "GOCACHE" || upper == "GOTMPDIR" {
+			continue
+		}
 		out = append(out, kv)
 	}
-	return out
+	// Sandboxed reviewers cannot write the user's Go build cache, which made
+	// `go test` fail during setup and turned reviews into infrastructure
+	// errors. Use a per-machine cache under the temp dir instead.
+	cache := filepath.Join(os.TempDir(), "clawflow-review-go")
+	return append(out, "GOCACHE="+filepath.Join(cache, "build"), "GOTMPDIR="+filepath.Join(cache, "tmp"))
 }
 
 func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Record, error) {
@@ -744,6 +751,15 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		return acceptance.Record{}, errors.New("cannot open private acceptance store")
 	}
 	defer store.Close()
+	attempts, err := store.InfrastructureAttempts(c)
+	if err != nil {
+		return acceptance.Record{}, err
+	}
+	if attempts.LatestIsInfra && attempts.Count >= harvestMaxInfra {
+		info := harvestInfraInfo{attempts: attempts.Count, digest: acceptanceInfraKey(c)}
+		autoMergeAttempt{ctx: ctx, client: client, repo: repo, repoCfg: rc, prNum: prNumber, issueNum: extractClosesIssue(pr.Body)}.notify(harvestInfraComment(repo, prNumber, info), harvestInfraMarker(info.digest))
+		return acceptance.Record{}, errors.New("acceptance-infra: infrastructure retry limit reached")
+	}
 	inspect := func(ctx context.Context, workspace string) (acceptance.Source, error) {
 		current, _, _, _, err := acceptanceContract(ctx, client, repo, prNumber)
 		if err != nil {
@@ -774,7 +790,7 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		if timeout <= 0 {
 			return execution.Result{}, context.DeadlineExceeded
 		}
-		return acceptanceNativeRun(ctx, ec, execution.Request{Version: 1, RequestID: execution.NewSessionKey(), Workspace: opts.Workspace, Prompt: prompt, Instructions: opts.Instructions, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: max(1, timeout.Milliseconds())}, acceptanceReviewerEnv(os.Environ()), opts.Events, nil)
+		return acceptanceNativeRun(ctx, ec, execution.Request{Version: 1, RequestID: execution.NewSessionKey(), Resume: opts.Resume, SessionKey: opts.SessionKey, Workspace: opts.Workspace, Prompt: prompt, Instructions: opts.Instructions, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: max(1, timeout.Milliseconds())}, acceptanceReviewerEnv(os.Environ()), opts.Events, nil)
 	}
 	var ci func() (vcs.CIEvidence, error)
 	if provider, ok := client.(vcs.CIEvidenceProvider); ok {

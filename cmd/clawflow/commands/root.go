@@ -81,5 +81,6 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 		},
 	})
 
+	installSpoolGuards(root)
 	return root
 }

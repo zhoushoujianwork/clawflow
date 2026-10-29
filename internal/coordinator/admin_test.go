@@ -116,12 +116,12 @@ func TestTokenScopesPersist(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Upgrade a pre-scope schema and preserve existing worker access.
-	if err := db.DB().Exec("DELETE FROM schema_migrations WHERE version = 4").Error; err != nil {
+	if err := db.DB().Exec("DELETE FROM schema_migrations WHERE name = ?", "coordinator_token_scope").Error; err != nil {
 		t.Fatal(err)
 	}
 	// The migration harness itself is covered by store tests; exercise its registered upgrade.
-	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
-		t.Fatal(err)
+	if applied, err := db.Migrate(ctx, store.Migrations); err != nil || len(applied) != 1 || applied[0] != 5 {
+		t.Fatalf("token scope upgrade: applied=%v err=%v", applied, err)
 	}
 	for _, secret := range secrets {
 		token, err := s.VerifyToken(ctx, secret)

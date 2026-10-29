@@ -339,6 +339,7 @@ type RunMeta struct {
 	// and omitted from the wire when empty for back-compat with older runs.
 	Stage          string `json:"stage,omitempty"`
 	PRUrl          string `json:"pr_url,omitempty"`
+	PRNumber       int    `json:"pr_number,omitempty"`
 	Error          string `json:"error,omitempty"`
 	WritebackError string `json:"writeback_error,omitempty"`
 	Summary        string `json:"summary,omitempty"` // operator's final text output

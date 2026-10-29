@@ -194,6 +194,7 @@ type RunOptions struct {
 	OnExecutionResult func(execution.Result, error, bool)
 	OnSessionResume   func(outcome, reason string)
 	ExecuteFunc       func(context.Context, string, execution.Options) (execution.Result, error)
+	PrecheckFunc      func(context.Context, string, execution.Options) (execution.Result, error)
 
 	PrepareFreshSession func() error
 
@@ -297,7 +298,14 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		}
 	}
 	emitStage(opts.StageFunc, StageOffloadStarted)
-	output, err := runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Role, systemPrompt)
+	var output string
+	var err error
+	if op.Name == "implement" && opts.ResumePrompt == "" && opts.ResumeContext == "" && (opts.RunFunc == nil || opts.PrecheckFunc != nil) {
+		output = precheck(ctx, userMessage, opts)
+	}
+	if output == "" {
+		output, err = runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Role, systemPrompt)
+	}
 	if err != nil {
 		// Failure path: do NOT pollute the issue with a comment. The
 		// failure is already recorded in events.jsonl + the dashboard
