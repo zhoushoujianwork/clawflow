@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -39,6 +40,23 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 	}
 	api.WorkerPoolSource = tasks.Board
 	fmt.Fprintf(out, "Coordinator HTTPS → %s\nSHA-256 fingerprint: %s\n", listener.Addr(), pin)
+	reconcileCtx, reconcileCancel := context.WithCancel(ctx)
+	reconcileDone := make(chan struct{})
+	go func() {
+		defer close(reconcileDone)
+		tick := time.NewTicker(30 * time.Second)
+		defer tick.Stop()
+		for {
+			if err := results.recoverResults(reconcileCtx, tasks); err != nil && reconcileCtx.Err() == nil {
+				onError(err)
+			}
+			select {
+			case <-reconcileCtx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -46,5 +64,5 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 			onError(err)
 		}
 	}()
-	return func() { _ = server.Close(); <-done; db.Close() }, nil
+	return func() { reconcileCancel(); _ = server.Close(); <-done; <-reconcileDone; db.Close() }, nil
 }

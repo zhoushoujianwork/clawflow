@@ -173,7 +173,33 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 			failed = append(failed, j.harvest(ctx)...)
 			continue
 		}
+		// Use the same queue dependency syntax, including cross-repository keys.
+		blocked := false
+		deps, _ := queue.ParseDependsOn(j.sub.Body, j.repo)
+		for _, dep := range deps {
+			client := j.client
+			if dep.Repo != j.repo {
+				var err error
+				client, _, _, err = newVCSClientForRepo(dep.Repo)
+				if err != nil {
+					blocked = true
+					break
+				}
+			}
+			issue, err := client.GetIssue(dep.Repo, dep.Number)
+			if err != nil || issue == nil || issue.State != "closed" {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			continue
+		}
 		t, p := coordinatorTask(j, timeout)
+		if p.ReopenEventID != "" {
+			t.EventSource = t.Repo + "/reopen"
+			t.ExternalID = p.ReopenEventID
+		}
 		t.QueuePosition = int64(len(rank))
 		if pos, ok := positions[queue.Key{Repo: j.repo, Number: j.sub.Number}]; ok {
 			t.QueuePosition = int64(pos)
@@ -211,9 +237,8 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 	return fired, failed, nil
 }
 
-// coordinatorResults seals a fenced result before making any remote writes.
-// Duplicate requests cannot replay effects, including after a partial VCS failure.
-// The stored report remains available for diagnosis when a write fails.
+// coordinatorResults validates reports before sealing them with durable intents.
+// The separate applier reconciles remote effects after startup and on each tick.
 type coordinatorResults struct {
 	coordinator.WorkerStore
 	tasks interface {
@@ -226,7 +251,8 @@ type coordinatorResults struct {
 }
 
 type coordinatorReport struct {
-	Acceptance *acceptance.Record `json:"acceptance,omitempty"`
+	TerminalState string             `json:"coordinator_state,omitempty"`
+	Acceptance    *acceptance.Record `json:"acceptance,omitempty"`
 	jobResult
 	Events []json.RawMessage `json:"events,omitempty"`
 }
@@ -252,7 +278,10 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	if len(wire.Usage) > 0 && json.Unmarshal(wire.Usage, &wire.Result.Usage) != nil {
 		return coordinator.ErrInvalid
 	}
-	r := coordinatorReport{jobResult: wire.Result, Acceptance: wire.Acceptance, Events: wire.Events}
+	r := coordinatorReport{jobResult: wire.Result, Acceptance: wire.Acceptance, Events: wire.Events, TerminalState: "done"}
+	if failed {
+		r.TerminalState = "failed"
+	}
 	switch r.Status {
 	case "success", "failed", "disallowed-outcome", "skipped-empty", "output-limit", "lease-lost", "skipped", "cancelled", "auth-error", "no-marker", "rate-limited", "cost-limit":
 	default:
@@ -278,10 +307,14 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 		return err
 	}
 	for _, e := range r.Effects {
-		if e.Repo != t.Repo || (e.Number != t.Issue && e.Number != t.PR) || e.Number <= 0 {
+		if e.Repo != t.Repo || (e.Kind != "pr-create" && ((e.Number != t.Issue && e.Number != t.PR) || e.Number <= 0)) {
 			return coordinator.ErrInvalid
 		}
 		switch e.Kind {
+		case "pr-create":
+			if !acceptanceSHA(r.HeadSHA) || e.Head == "" || e.Base == "" || e.Title == "" || t.Kind != "implement" {
+				return coordinator.ErrInvalid
+			}
 		case "issue-comment", "pr-comment", "add-label", "remove-label", "close-issue":
 		default:
 			return coordinator.ErrInvalid
@@ -306,6 +339,11 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 
 	if err = s.tasks.AcceptResult(ctx, id, worker, fence, bounded); err != nil {
 		return err
+	}
+	if _, ok := s.tasks.(coordinator.EffectStore); ok {
+		// The startup/periodic applier owns VCS I/O. A worker response only
+		// acknowledges the committed report, independent of remote latency.
+		return nil
 	}
 	if err = s.apply(ctx, t, j, &r); err != nil {
 		_ = s.WorkerStore.AppendAudit(ctx, worker, id, "result-apply-failed")
@@ -371,7 +409,7 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 			status = "skipped"
 		}
 	}
-	meta := snapshot.RunMeta{Repo: t.Repo, IssueNumber: t.Issue, Operator: t.Operator, StartedAt: t.CreatedAt, EndedAt: &now, Status: status, Outcome: r.Outcome, Error: r.Error, Usage: r.Usage, HeadSHA: r.HeadSHA, PRUrl: r.PRURL, Summary: r.Output}
+	meta := snapshot.RunMeta{Repo: t.Repo, IssueNumber: t.Issue, Operator: t.Operator, StartedAt: t.CreatedAt, EndedAt: &now, Status: status, Outcome: r.Outcome, Error: r.Error, Usage: r.Usage, HeadSHA: r.HeadSHA, PRUrl: r.PRURL, PRNumber: r.PRNumber, Summary: r.Output}
 	dir := snapshot.RunDir(t.Repo, t.Issue, t.CreatedAt) + "-task-" + t.ID
 	if err := persistDevelopmentEvents(ctx, t, j, r, dir); err != nil {
 		return err

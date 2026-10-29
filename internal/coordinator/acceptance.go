@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm/clause"
 	"slices"
 	"strconv"
+	"time"
 )
 
 // AcceptanceRouting is coordinator-owned task policy, never a worker assertion.
@@ -80,11 +81,17 @@ func (s *Store) CancelSupersededAcceptance(ctx context.Context, repo string, pr 
 	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var cancelled []Task
-		err := tx.Model(&cancelled).Clauses(clause.Returning{}).Where("repo = ? AND pr = ? AND kind = 'acceptance' AND state IN ? AND payload->'acceptance' IS DISTINCT FROM ?::jsonb", repo, pr, []string{"pending", "leased"}, string(contract)).Updates(map[string]any{"state": "cancelled", "lease_expires_at": nil}).Error
+		err := tx.Model(&cancelled).Clauses(clause.Returning{}).Where("repo = ? AND pr = ? AND kind = 'acceptance' AND state IN ? AND payload->'acceptance' IS DISTINCT FROM ?::jsonb", repo, pr, []string{"pending", "leased"}, string(contract)).Updates(map[string]any{"state": "cancelled", "lease_expires_at": nil, "fencing_token": gorm.Expr("fencing_token + 1")}).Error
 		if err != nil {
 			return err
 		}
 		for _, task := range cancelled {
+			if err := failIntents(tx, task.ID); err != nil {
+				return err
+			}
+			if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND ended_at IS NULL", task.ID).Updates(map[string]any{"status": "cancelled", "ended_at": time.Now().UTC()}).Error; err != nil {
+				return err
+			}
 			if err := audit(tx, "", task.ID, "acceptance-superseded"); err != nil {
 				return err
 			}

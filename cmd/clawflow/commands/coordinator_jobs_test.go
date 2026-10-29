@@ -339,6 +339,9 @@ func TestCoordinatorRepairEnqueueReservesOnce(t *testing.T) {
 }
 
 func TestCoordinatorSchedulingIgnoresLocalExecutionRequirements(t *testing.T) {
+	oldGate := coordinatorPRAllowedFn
+	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
+	t.Cleanup(func() { coordinatorPRAllowedFn = oldGate })
 	cfg := config.Repo{CoordinatorMode: true, BoundMachine: "worker", AutoMerge: true, CIRequired: true}
 	settings := config.Settings{RequireBinding: true, Coordinator: config.CoordinatorSettings{Enabled: true}}
 	if !repoRunsHere(settings, cfg, "coordinator") || deterministicSkip(&operator.Operator{Name: "implement"}, cfg) {
@@ -417,6 +420,9 @@ func TestCoordinatorRunOnceEnqueuesAndPreservesCapacity(t *testing.T) {
 }
 
 func TestCoordinatorRepairScanExcludesActiveIssue(t *testing.T) {
+	oldGate := coordinatorPRAllowedFn
+	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
+	t.Cleanup(func() { coordinatorPRAllowedFn = oldGate })
 	withRunLog(t)
 	pr, issue := repairFixture()
 	reg := repairRegistry(t)
@@ -523,5 +529,28 @@ func TestCoordinatorHostAffinitySurvivesKindOverride(t *testing.T) {
 	want := []string{"github", "heavy", "host-work-mac"}
 	if !reflect.DeepEqual(task.Tags, want) || !reflect.DeepEqual(payload.Tags, want) {
 		t.Fatalf("lost host affinity: %+v / %+v", task.Tags, payload.Tags)
+	}
+}
+
+type dependencyClient struct {
+	vcs.Client
+	state string
+}
+
+func (c *dependencyClient) GetIssue(string, int) (*vcs.Issue, error) {
+	return &vcs.Issue{State: c.state}, nil
+}
+func TestCoordinatorEnqueueHonorsDependsOn(t *testing.T) {
+	withRunLog(t)
+	for _, state := range []string{"open", "closed"} {
+		s := &resultStoreFake{}
+		j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7, Body: "Depends on: #6"}, client: &dependencyClient{state: state}}
+		fired, _, err := dispatchCoordinatorJobs(context.Background(), s, []*runJob{j}, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (len(fired) == 1) != (state == "closed") {
+			t.Fatalf("dependency %s: fired=%v", state, fired)
+		}
 	}
 }
