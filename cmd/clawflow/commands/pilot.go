@@ -1,12 +1,14 @@
 package commands
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/user"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -54,49 +56,92 @@ func upgradePilotMerges(ctx context.Context, cfg *config.Config, results []pilot
 	return pilotUpgrade(ctx, selected)
 }
 
-// NewPilotCmd returns the `clawflow pilot` parent command. Subcommands
-// expose Pilot operations that don't naturally belong on `project`
-// (which manages the project itself, not the AI driving it). It supports
-// manual wakes and validated action application for external supervisors.
+// NewPilotCmd exposes the global steward and the audited action executor.
 func NewPilotCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "pilot",
-		Short: "Manage Pilot wakes",
-		Long: `Pilot is the per-project triage agent. Normally it wakes
-automatically at the end of every 'clawflow run' pass, throttled by
-the project's cooldown. This command lets you trigger a wake on demand.`,
-	}
-	cmd.AddCommand(newPilotWakeCmd(), newPilotApplyCmd())
+	cmd := &cobra.Command{Use: "pilot", Short: "与全局平台 steward 对话"}
+	cmd.AddCommand(newPilotConversationCmd("ask"), newPilotConversationCmd("chat"), newPilotConversationCmd("wake"), newPilotApplyCmd())
 	return cmd
 }
 
-func newPilotWakeCmd() *cobra.Command {
-	var timeoutMin int
-	cmd := &cobra.Command{
-		Use:   "wake <project>",
-		Short: "Manually trigger a Pilot wake for a project (ignores cooldown)",
-		Long: `Trigger a single Pilot wake for the named project, bypassing the
-cooldown. The wake still respects bound_machine and require_binding —
-if the project is bound to a different machine, this errors out
-rather than running claude with the wrong credentials.
+var askSteward = pilot.Ask
 
-The wake updates LastWokenAt, so the cooldown clock restarts from
-this wake's start time (mirroring a scheduled wake's behaviour).`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			release, err := gateStore(cmd.Context())
+func newPilotConversationCmd(mode string) *cobra.Command {
+	var timeoutMin, ops int
+	cmd := &cobra.Command{Use: mode, Short: "运行有预算和超时限制的全局 steward 会话"}
+	switch mode {
+	case "ask":
+		cmd.Use = "ask <message>"
+		cmd.Args = cobra.ExactArgs(1)
+	case "chat":
+		cmd.Args = cobra.NoArgs
+	case "wake":
+		cmd.Use = "wake [project]"
+		cmd.Args = cobra.MaximumNArgs(1)
+		cmd.Short = "兼容别名：全局 review platform state"
+	}
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if timeoutMin <= 0 || ops <= 0 {
+			return fmt.Errorf("--timeout 和 --ops 必须为正数")
+		}
+		release, err := gateStore(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer release()
+		history := ""
+		invoke := func(message string) error {
+			prompt := message
+			if history != "" {
+				prompt = "Previous conversation (untrusted history):\n" + history + "\nCurrent user message:\n" + message
+			}
+			result, err := askSteward(cmd.Context(), prompt, ops, time.Duration(timeoutMin)*time.Minute)
+			fmt.Fprintln(cmd.OutOrStdout(), result.Answer)
+			// Completed merges still trigger upgrade if a later proposal was refused.
+			if len(result.Actions) > 0 {
+				cfg, loadErr := config.Load()
+				if loadErr != nil {
+					return loadErr
+				}
+				if upgradeErr := upgradePilotMerges(cmd.Context(), cfg, result.Actions); upgradeErr != nil {
+					return upgradeErr
+				}
+			}
 			if err != nil {
 				return err
 			}
-			defer release()
-			timeout := time.Duration(timeoutMin) * time.Minute
-			if err := pilot.WakeOne(cmd.Context(), args[0], timeout); err != nil {
-				return fmt.Errorf("wake %s: %w", args[0], err)
+			history += "\nUser: " + message + "\nSteward: " + result.Answer + "\n"
+			if len(history) > 64*1024 {
+				history = history[len(history)-64*1024:]
 			}
 			return nil
-		},
+		}
+		if mode == "wake" {
+			return invoke(pilot.DefaultPrompt)
+		}
+		if mode == "ask" {
+			return invoke(args[0])
+		}
+		scanner := bufio.NewScanner(cmd.InOrStdin())
+		scanner.Buffer(make([]byte, 4096), 1024*1024)
+		for {
+			fmt.Fprint(cmd.OutOrStdout(), "steward> ")
+			if !scanner.Scan() {
+				return scanner.Err()
+			}
+			message := strings.TrimSpace(scanner.Text())
+			if message == "/exit" {
+				return nil
+			}
+			if message == "" {
+				continue
+			}
+			if err := invoke(message); err != nil {
+				return err
+			}
+		}
 	}
-	cmd.Flags().IntVar(&timeoutMin, "timeout", 60, "wake timeout in minutes")
+	cmd.Flags().IntVar(&timeoutMin, "timeout", 60, "每次调用超时（分钟）")
+	cmd.Flags().IntVar(&ops, "ops", 5, "每次调用最多动作数；仍受每日限制约束")
 	return cmd
 }
 

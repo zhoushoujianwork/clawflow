@@ -25,7 +25,7 @@ func TestWakeUsesPilotRole(t *testing.T) {
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)
 	}
-	p, err := project.Create("role-test")
+	_, err := project.Create("role-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestWakeUsesPilotRole(t *testing.T) {
 		}
 		return "```pilot-actions\n{\"run_id\":\"" + runID + "\",\"actions\":[]}\n```\nPILOT-RESULT: no-action", nil
 	}
-	if err := wake(context.Background(), p, cfg, &config.Credentials{}, time.Second); err != nil {
+	if _, err := Ask(context.Background(), "review", 5, time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if !called {

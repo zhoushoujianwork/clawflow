@@ -182,6 +182,7 @@ function AppLayout() {
             {currentVersion && (
               <VersionBadge currentVersion={currentVersion} latestVersion={latestVersion} channel={channel} versionDetail={versionDetail} updateAvailable={updateAvailable} updating={updating} restarting={restarting} showTooltip={showTooltip} triggerUpdate={triggerUpdate} setShowTooltip={setShowTooltip} />
             )}
+            {!readonly && <StewardButton />}
             {!readonly && <ReportIssueButton />}
             <a
               href="https://github.com/zhoushoujianwork/clawflow"
@@ -256,4 +257,11 @@ function ReportIssueButton() {
       </svg>
     </button>
   )
+}
+
+function StewardButton() {
+  const { open } = useChatDrawer()
+  return <button onClick={() => { void open({ pilot: true }) }}
+    className="px-2 py-1 text-xs rounded-sm hover:opacity-80"
+    aria-label="与平台 steward 对话" title="与平台 steward 对话">Steward</button>
 }
