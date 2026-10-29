@@ -251,6 +251,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 			prompt += " Configured test command, use only as needed: " + runner.TestCommand
 		}
 	}
+	prompt += "The contract base_sha and its merge base with HEAD are available locally. Use git diff <base_sha>...HEAD and git log <base_sha>..HEAD for offline comparisons; no remote or credentials are available. "
 	reviewed, reviewErr := runner.executeRecorded(ctx, c, "acceptance-review", execute, prompt+string(input),
 		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "bypassPermissions"})
 	record.Reviewer = native(reviewed)

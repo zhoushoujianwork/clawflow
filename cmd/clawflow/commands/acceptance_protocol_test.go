@@ -386,7 +386,7 @@ func (e *acceptanceProtocolEnv) assertNoWrites(t *testing.T) {
 	if len(e.f.merged) != 0 || len(e.f.deletedBranches) != 0 || len(e.f.comments) != 0 || len(e.f.expected) != 0 {
 		t.Fatalf("unexpected VCS writes: merged=%v deleted=%v comments=%v conditional=%v", e.f.merged, e.f.deletedBranches, e.f.comments, e.f.expected)
 	}
-	allowed := []string{"config", "init", "remote", "check-ref-format", "fetch", "rev-parse", "checkout", "status", "rev-list"}
+	allowed := []string{"config", "init", "remote", "check-ref-format", "fetch", "rev-parse", "checkout", "status", "rev-list", "merge-base"}
 	for _, args := range *e.git {
 		if !slices.Contains(allowed, args[0]) {
 			t.Fatalf("unexpected git operation %v", args)
