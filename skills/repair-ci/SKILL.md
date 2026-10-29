@@ -71,6 +71,21 @@ existing base migration or alter applied database records. For example, if base 
 PR both add version 5 and base also has 6, preserve base 5/6 and assign the PR
 addition version 7. Run migration validation tests as well as the configured tests,
 and report the old/new version mapping. A numbering collision alone is not BLOCKED.
+For ClawFlow's Go registry, when `skills/repair-ci/scripts/main.go` is present,
+use the executable helper after resolving syntax conflict markers in
+`internal/store/migrations.go`, before completing the merge:
+
+    go run ./skills/repair-ci/scripts -base-ref origin/<base> -pr-ref ORIG_HEAD
+
+`ORIG_HEAD` must still identify the pre-merge PR head; if another operation moved
+it, use the recorded pre-merge SHA. The helper uses the common ancestor to identify
+PR-only additions, rebuilds the registry from the fetched base plus those additions,
+and prints the version mapping. It preserves the surrounding resolved Go source.
+Review the registry diff and update references/tests using that mapping. It refuses
+changed released entries or ambiguous duplicate names; resolve those manually without
+changing base migration identities. Run `go test ./skills/repair-ci/scripts` and
+`go test ./internal/store/...` as well as the configured checks.
+
 If other conflicts cannot be resolved safely, stop BLOCKED, list the conflicting files from
 `git diff --name-only --diff-filter=U`, preserve the checkout and emit agent-failed.
 Otherwise complete the merge commit, address acceptance findings if supplied,
