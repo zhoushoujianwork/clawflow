@@ -751,6 +751,15 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		return acceptance.Record{}, errors.New("cannot open private acceptance store")
 	}
 	defer store.Close()
+	attempts, err := store.InfrastructureAttempts(c)
+	if err != nil {
+		return acceptance.Record{}, err
+	}
+	if attempts.LatestIsInfra && attempts.Count >= harvestMaxInfra {
+		info := harvestInfraInfo{attempts: attempts.Count, digest: acceptanceInfraKey(c)}
+		autoMergeAttempt{ctx: ctx, client: client, repo: repo, repoCfg: rc, prNum: prNumber, issueNum: extractClosesIssue(pr.Body)}.notify(harvestInfraComment(repo, prNumber, info), harvestInfraMarker(info.digest))
+		return acceptance.Record{}, errors.New("acceptance-infra: infrastructure retry limit reached")
+	}
 	inspect := func(ctx context.Context, workspace string) (acceptance.Source, error) {
 		current, _, _, _, err := acceptanceContract(ctx, client, repo, prNumber)
 		if err != nil {

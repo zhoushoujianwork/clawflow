@@ -203,7 +203,7 @@ func deriveAcceptanceFailure(a *AcceptanceInfo, now time.Time, ev []string) (Sta
 	ev = append(ev, fmt.Sprintf("acceptance attempts=%d infrastructure=%d", a.Attempts, a.InfraAttempts))
 	if a.LatestIsInfra {
 		if a.MaxInfraRetries > 0 && a.InfraAttempts >= a.MaxInfraRetries {
-			return StageBlocked, fmt.Sprintf("acceptance could not run after %d infrastructure attempts; retries stopped", a.InfraAttempts), ev
+			return StageBlocked, fmt.Sprintf("acceptance-infra: acceptance could not run after %d infrastructure attempts; retries stopped", a.InfraAttempts), ev
 		}
 		attempt := fmt.Sprint(a.InfraAttempts)
 		if a.MaxInfraRetries > 0 {
