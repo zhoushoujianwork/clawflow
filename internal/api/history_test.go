@@ -137,3 +137,31 @@ func TestRunsBoundedAPIAndLegacyDetail(t *testing.T) {
 		t.Fatal(rr.Body.String())
 	}
 }
+
+func TestUsageProjectionFilters(t *testing.T) {
+	s := historyDB(t)
+	t.Setenv("HOME", t.TempDir())
+	raw := []byte(`{"repo":"o/r","project":"one","operator":"implement","role":"implement","profile":"p","model":"gpt","machine":"m","status":"success","started_at":"2026-10-16T00:00:00Z","usage":{"cost_basis":"subscription","cost_unavailable":true,"input_tokens":20,"output_tokens":5,"cache_read_input_tokens":70,"cache_creation_input_tokens":10}}`)
+	if _, err := s.UpsertRun(context.Background(), filepath.Join(t.TempDir(), "attempt"), "run", raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		query string
+		runs  int
+	}{
+		{"period=all&project=one&repo=o%2Fr&role=implement&profile=p&model=gpt&machine=m", 1},
+		{"from=2026-10-16&until=2026-10-17", 1},
+		{"from=2026-10-15&until=2026-10-16", 0},
+		{"role=other", 0}, {"profile=other", 0}, {"model=other", 0}, {"machine=other", 0},
+	} {
+		rr := httptest.NewRecorder()
+		HandleUsage(rr, httptest.NewRequest("GET", "/api/usage?"+tc.query, nil))
+		var got store.UsageSummary
+		if rr.Code != 200 || json.Unmarshal(rr.Body.Bytes(), &got) != nil || got.Totals.Runs != tc.runs {
+			t.Fatalf("%s: %d %s", tc.query, rr.Code, rr.Body.String())
+		}
+		if tc.runs == 1 && (got.Totals.SubscriptionRuns != 1 || got.Totals.TotalCostUSD != nil || got.Totals.Coverage.Cost != 0 || *got.Totals.TotalTokens != 105) {
+			t.Fatalf("coverage %+v", got.Totals)
+		}
+	}
+}

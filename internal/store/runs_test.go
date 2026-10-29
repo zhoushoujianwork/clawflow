@@ -389,3 +389,56 @@ func TestRunListReportedZeroRemainsKnown(t *testing.T) {
 		t.Fatal(usage)
 	}
 }
+
+func TestUsageFiltersCoverageAndSafeHistory(t *testing.T) {
+	s := historyStore(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	for i := 0; i < 55; i++ {
+		m := fixture("o/r", "success", fmt.Sprintf("2026-10-16T00:%02d:00Z", i), map[string]any{
+			"cost_basis": "api", "cost_is_estimate": true, "total_cost_usd": 1,
+			"input_tokens": 20, "output_tokens": 5, "cache_read_input_tokens": 70, "cache_creation_input_tokens": 10,
+		})
+		m["project"], m["role"], m["issue_number"] = "one", "implement", 545
+		m["prompt"], m["result"] = "secret-prompt", "secret-result"
+		putRun(t, s, filepath.Join(root, "runs", "o__r", "issue-545", fmt.Sprintf("attempt-%02d", i)), "run", m)
+	}
+	// An unattributed legacy attempt is never assigned to a current project.
+	putRun(t, s, filepath.Join(root, "legacy"), "run", fixture("old/r", "failed", "2026-10-16T01:00:00Z", nil))
+	from, _ := time.Parse(time.RFC3339, "2026-10-16T00:00:00Z")
+	until := from.Add(24 * time.Hour)
+	f := store.RunFilter{Project: "one", Repo: "o/r", Role: "implement", Profile: "p", From: &from, Until: &until}
+	got, err := s.Usage(ctx, f, 15, store.UsageSelection{Machine: "m", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Totals.Runs != 55 || got.Totals.Coverage.Cost != 55 || *got.Totals.TotalTokens != 55*105 || got.Totals.EstimatedCostRuns != 55 {
+		t.Fatalf("totals %+v", got.Totals)
+	}
+	if len(got.History) != 50 || got.History[0].Href != "/runs/o__r/issue-545/attempt-54" || got.RangeStart == nil || !got.RangeStart.Equal(from) || got.RangeEnd == nil || !got.RangeEnd.Equal(until) {
+		t.Fatalf("range/history %+v", got)
+	}
+	if len(got.Periods) != 1 || got.Periods[0].PeriodStart != "2026-10-15" || got.Periods[0].PeriodEnd != "2026-11-14" {
+		t.Fatalf("periods %+v", got.Periods)
+	}
+	encoded, _ := json.Marshal(got)
+	if strings.Contains(string(encoded), "secret-") || strings.Contains(string(encoded), root) {
+		t.Fatal("private body/path leaked")
+	}
+	for _, selection := range []store.UsageSelection{{Machine: "other"}, {Model: "other"}} {
+		empty, err := s.Usage(ctx, f, 15, selection)
+		if err != nil || empty.Totals.Runs != 0 || empty.Totals.TotalCostUSD != nil {
+			t.Fatalf("empty %+v %v", empty, err)
+		}
+	}
+	for _, wrong := range []store.RunFilter{{Role: "other"}, {Profile: "other"}, {Project: "other"}} {
+		empty, err := s.Usage(ctx, wrong, 15)
+		if err != nil || empty.Totals.Runs != 0 {
+			t.Fatalf("filter %+v: %+v %v", wrong, empty.Totals, err)
+		}
+	}
+	legacy, err := s.Usage(ctx, store.RunFilter{Project: "unknown"}, 15)
+	if err != nil || legacy.Totals.Runs != 1 || legacy.Totals.TotalCostUSD != nil || legacy.ByRole["unknown"].Runs != 1 {
+		t.Fatalf("legacy %+v %v", legacy, err)
+	}
+}
