@@ -32,12 +32,13 @@ Enrollment preserves monitoring and automatic-merge settings. The scan sweep nev
 
 ## Automatic harvest
 
-`clawflow run` has an acceptance phase after the operator phase. It needs `auto_merge` on and `acceptance_required` on, and it only runs for the whole pass or a [targeted run](#targeted-run).
+`clawflow run` 在 operator 执行前调度独立验收。需要开启 `auto_merge` 和 `acceptance_required`，支持整轮扫描或 [targeted run](#targeted-run)。
 
-- Per repo and pass, at most one acceptance runs, for the first open PR that passes the sweep's filters, has successful required CI and has no evidence for its current contract.
-- A passing result goes straight to the conditional merge path with the accepted head SHA.
+- 每轮按仓库轮转启动符合条件的 PR 验收，每仓库最多同时运行 `acceptance_max_parallel` 个（默认 3）。通过 `clawflow repo set owner/repo --acceptance-max-parallel 3` 设置；所有后台验收与实现共享本机 `max_concurrent_agents` 限额。
+- 本地验收在独立后台进程中运行，调度轮次启动后即返回，不在审查期间持有仓库运行锁。日志见 `~/.clawflow/logs/acceptance-background.log` 和 `run.log`。
+- 验收通过后，由后续 sweep 串行合并；每次合并前重新检查当前 head、base 和证据。一个 PR 合并导致 base 变化后，其他 PR 的旧验收不能用于合并。
 - 每次完成审查后更新 PR 上由当前认证账号拥有的一条验收评论，包含提交、结论、逐项证据、未解决问题与下一步负责人；旧 attempt 保留在私有审计记录中。发布失败可由后续 harvest 重试。
-- 基础设施错误（包括提供者失败和无效评审报告）会记录日志并使 `clawflow run` 非零退出，15 分钟后可重试。同一 PR head 最多连续失败 2 次，随后以一条评论和看板原因 `acceptance-infra` 暂停。新 head、issue 正文变化或新 ClawFlow 二进制会重置计数；手动验收命令也遵守此上限。这些错误不消耗产品修复次数。
+- 启动失败使 `clawflow run` 返回非零；后台审查中的基础设施错误（包括提供者失败和无效评审报告）记录在日志和验收记录中，不改变已经返回的调度命令退出码，15 分钟后可重试。同一 PR head 最多连续失败 2 次，随后以一条评论和看板原因 `acceptance-infra` 暂停。新 head、issue 正文变化或新 ClawFlow 二进制会重置计数；手动验收命令也遵守此上限。这些错误不消耗产品修复次数。
 - A `failed` verdict is repaired on the same PR, see [Repair after a failed verdict](#repair-after-a-failed-verdict). A `blocked` verdict is not: the comment says a human decision is needed.
 
 The PR must be open, non-draft, from the same repository, and reference an open issue with a closing keyword. A successful managed development run must have captured that issue's requirements and trustworthy native execution events. Historical runs missing the requirements snapshot need a new managed development run. The configured acceptance profile must support the existing Offload execution protocol.

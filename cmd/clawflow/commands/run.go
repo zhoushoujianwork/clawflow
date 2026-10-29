@@ -67,6 +67,7 @@ func roleForOperator(opName string) string {
 // or invoke ad-hoc; the CLI holds no long-running state.
 func NewRunCmd() *cobra.Command {
 	var (
+		localRun  bool
 		onlyRepo  string
 		onlyIssue int
 		timeout   time.Duration
@@ -96,15 +97,27 @@ Host affinity is enforced by worker task tags.`,
 			if onlyIssue != 0 && onlyRepo == "" {
 				return fmt.Errorf("--issue requires --repo")
 			}
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+			if localRun {
+				fmt.Fprintln(cmd.ErrOrStderr(), "[warn] --local：绕过平台调度，执行一次本地调试运行")
+				ctx = context.WithValue(ctx, localRunKey{}, true)
+			} else if err := cfg.Settings.SchedulingError(); err != nil {
+				return err
+			}
 			// PostgreSQL is required: fail fast before any work.
 			release, err := gateStore(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer release()
-			return runOnce(cmd.Context(), onlyRepo, onlyIssue, timeout)
+			return runOnce(ctx, onlyRepo, onlyIssue, timeout)
 		},
 	}
+	cmd.Flags().BoolVar(&localRun, "local", false, "绕过平台调度，仅用于一次本地调试运行")
 	cmd.Flags().StringVar(&onlyRepo, "repo", "", "Restrict to a single repo (owner/repo); default: all enabled repos (with --issue the repo may be disabled)")
 	cmd.Flags().IntVar(&onlyIssue, "issue", 0, "Restrict to a single issue number (requires --repo)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator Offload execution timeout")
@@ -276,6 +289,8 @@ func syncLocked(fn func() bool) bool {
 	return ok
 }
 
+type localRunKey struct{}
+
 func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.Duration) error {
 	// Global collection for all issues from all repos
 	var globalIssues []snapshot.IssueEntry
@@ -285,6 +300,17 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		ctx = context.Background()
 	}
 
+	// Reject clients before locks, sync, reconciliation or any scheduling side effects.
+	if local, _ := ctx.Value(localRunKey{}).(bool); !local {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			return err
+		}
+	}
+
 	// Open the run.log sink. nil-safe — if Open fails (read-only home,
 	// disk full) the rest of the command still runs; only the file
 	// trail is missing. Install it as the snapshot.ReconcileLog sink so
@@ -292,12 +318,15 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	lg, _ := clog.Open("run")
 	defer lg.Close()
 	runLog = lg
+	if local, _ := ctx.Value(localRunKey{}).(bool); local {
+		lg.Warn("run/local_override", "msg", "explicit --local debugging run bypasses platform scheduling")
+	}
 	if lg != nil {
 		snapshot.ReconcileLog = lg
 	}
 
 	// Per-repo run locks: a pass locks only the repositories it processes, so
-	// a long pass for repo A (operators, 7-12 min acceptance harvest) does not
+	// a long operator pass for repo A does not
 	// block repos B and C. A repo-scoped pass (--repo R) locks R here; an
 	// unscoped pass locks its candidates once the config is loaded below. On
 	// contention an untargeted pass logs run/skip and exits cleanly so
@@ -394,6 +423,12 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	if local, _ := ctx.Value(localRunKey{}).(bool); local {
+		cfg.Settings.Coordinator.Enabled = false
+	} else if err := cfg.Settings.SchedulingError(); err != nil {
+		return err
 	}
 
 	// Publish on every exit after configuration is available, including failed passes.
@@ -1386,6 +1421,12 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 // from concurrent workers stays disentangleable.
 func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool, failed bool) {
 	j.result = &jobResult{Status: "skipped"}
+	releaseSlot, slotErr := configuredAgentSlot(ctx)
+	if slotErr != nil {
+		runLog.Info("run/agent_slot_busy", "repo", j.repo, "err", slotErr.Error())
+		return false, false, false
+	}
+	defer releaseSlot()
 	originalClient, originalCfg := j.client, j.repoCfg
 	if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
 		rc.SetRequestContext(ctx)

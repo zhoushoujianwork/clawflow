@@ -46,6 +46,9 @@ type Repo struct {
 	CITimeout          int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
+	// AcceptanceMaxParallel caps simultaneous independent reviews; zero defaults to 3.
+	AcceptanceMaxParallel int `yaml:"acceptance_max_parallel,omitempty" json:"acceptance_max_parallel,omitempty"`
+
 	// AcceptanceOverlapCI defaults to CIRequired when omitted.
 	AcceptanceOverlapCI *bool `yaml:"acceptance_overlap_ci,omitempty" json:"acceptance_overlap_ci,omitempty"`
 	// SelfUpgrade, when true, makes a `clawflow run` pass that confirmed a
@@ -112,8 +115,24 @@ type PilotSettings struct {
 
 // CoordinatorSettings reserves the optional worker API listener configuration.
 type CoordinatorSettings struct {
-	Enabled bool   `yaml:"enabled,omitempty"`
-	Listen  string `yaml:"listen,omitempty"`
+	Enabled     bool                `yaml:"enabled,omitempty"`
+	Listen      string              `yaml:"listen,omitempty"`
+	LocalWorker LocalWorkerSettings `yaml:"local_worker,omitempty"`
+}
+
+// LocalWorkerSettings opts the coordinator host into the normal worker pool.
+type LocalWorkerSettings struct {
+	Enabled     bool     `yaml:"enabled,omitempty"`
+	MaxParallel int      `yaml:"max_parallel,omitempty"`
+	Tags        []string `yaml:"tags,omitempty"`
+}
+
+// SchedulingError prevents clients from mutating their local execution queue.
+func (s Settings) SchedulingError() error {
+	if s.Platform.URL != "" {
+		return fmt.Errorf("此客户端由平台 %s 调度；禁止本地调度，请在平台操作（调试可使用 clawflow run --local）", s.Platform.URL)
+	}
+	return nil
 }
 
 func (s CoordinatorSettings) ListenAddress() string {
@@ -1219,4 +1238,12 @@ func (r Repo) AcceptanceOverlapsCI() bool {
 		return *r.AcceptanceOverlapCI
 	}
 	return r.CIRequired
+}
+
+// AcceptanceParallelLimit returns the per-repository review limit (default 3).
+func (r Repo) AcceptanceParallelLimit() int {
+	if r.AcceptanceMaxParallel > 0 {
+		return r.AcceptanceMaxParallel
+	}
+	return 3
 }

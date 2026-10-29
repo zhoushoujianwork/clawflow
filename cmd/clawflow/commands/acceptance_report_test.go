@@ -99,3 +99,49 @@ func TestAcceptanceReportCannotForgeChecklist(t *testing.T) {
 		t.Fatal("reviewer forged structured checklist or marker", body)
 	}
 }
+
+func TestUnstructuredAcceptanceDispatchesRepair(t *testing.T) {
+	f, _, reg, cfg := repairAcceptanceFixture(t, "failed")
+	acceptanceEvidenceSchema = 1
+	acceptanceNativeRun = func(_ context.Context, _ execution.Config, req execution.Request, _ []string, _ io.Writer, _ func(execution.Observation)) (execution.Result, error) {
+		result := execution.Result{Status: "ok", ExecutionPolicy: acceptance.ReviewerPolicy, Profile: "fixture", Backend: "fixture", NativeSessionID: "review-session", RunID: execution.NewSessionKey()}
+		if req.ToolsDisabled {
+			result.NativeSessionID = "planner-session"
+			result.ExecutionPolicy = acceptance.PlannerPolicy
+			result.Text = `[{"id":"R1","requirement":"Meet the original goal","proof":"execution"}]`
+		} else {
+			result.Text = `{"status":"failed","summary":"defect found","evidence":["observed wrong retry"],"findings":[{"kind":"defect","summary":"retry loses data","defect":"data loss","evidence":"FAIL TestRetry"}],"checks":[],"next_action":"repair","next_owner":"implementation"}`
+			var output map[string]any
+			if err := json.Unmarshal([]byte(result.Text), &output); err != nil {
+				t.Fatal(err)
+			}
+			output["checks"] = []acceptance.RequirementCheck{{ID: "R1", Status: acceptance.Passed, Evidence: []acceptance.RequirementEvidence{{Type: "unit", Check: "TestGoal", Reference: "CI/TestGoal passed", Commit: f.pr.HeadSHA, Result: "passed"}}}}
+			encoded, err := json.Marshal(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result.Text = string(encoded)
+		}
+		return result, nil
+	}
+	r, err := runAcceptance(context.Background(), &reportFake{acceptanceFake: f}, "o/r", f.pr.Number)
+	if !errors.Is(err, errAcceptanceNonpass) {
+		t.Fatalf("expected recorded failure: %v", err)
+	}
+	if r.Verdict != acceptance.Failed || !r.Unstructured || !strings.Contains(r.ValidationError, "structured evidence") {
+		t.Fatalf("record=%+v", r)
+	}
+	if !strings.Contains(acceptanceReportBody(r), "failed (unstructured findings)") {
+		t.Fatal("missing comment annotation")
+	}
+	jobs := scanRepair(t, reg, f, cfg, 0)
+	if len(jobs) != 1 {
+		t.Fatalf("jobs=%v", jobs)
+	}
+	prompt := jobs[0].repair.prompt("go test ./...")
+	for _, want := range []string{"BEGIN UNTRUSTED REVIEWER FINDINGS", "retry loses data", "FAIL TestRetry"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("missing %q: %s", want, prompt)
+		}
+	}
+}

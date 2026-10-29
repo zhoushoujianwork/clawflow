@@ -96,6 +96,7 @@ func newRepoShowCmd() *cobra.Command {
 			fmt.Printf("status:       %s\n", status)
 			fmt.Printf("ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("acceptance_required: %v\n", r.AcceptanceRequired)
+			fmt.Printf("acceptance_max_parallel: %d\n", r.AcceptanceParallelLimit())
 			fmt.Printf("self_upgrade: %v\n", r.SelfUpgrade)
 			fmt.Printf("worker_tags:  %v\n", r.WorkerTags)
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
@@ -301,6 +302,11 @@ func setRepoEnabled(cmd *cobra.Command, ownerRepo string, enabled bool) error {
 	if err != nil {
 		return err
 	}
+	if enabled {
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			return err
+		}
+	}
 	if _, exists := cfg.Repos[ownerRepo]; !exists {
 		return fmt.Errorf("repo %q not found", ownerRepo)
 	}
@@ -331,6 +337,7 @@ func newRepoSetCmd() *cobra.Command {
 	var primaryProject string
 	var boundMachine string
 	var maxInFlight int
+	var acceptanceMaxParallel int
 	var testCommand string
 
 	cmd := &cobra.Command{
@@ -382,6 +389,9 @@ func newRepoSetCmd() *cobra.Command {
 			if cmd.Flags().Changed("self-upgrade") && selfUpgrade != "on" && selfUpgrade != "off" {
 				return fmt.Errorf("--self-upgrade must be on or off")
 			}
+			if cmd.Flags().Changed("acceptance-max-parallel") && acceptanceMaxParallel < 1 {
+				return fmt.Errorf("--acceptance-max-parallel must be at least 1")
+			}
 			maxInFlightSet := cmd.Flags().Changed("max-in-flight")
 			if maxInFlightSet && maxInFlight < 1 {
 				return fmt.Errorf("--max-in-flight must be >= 1")
@@ -422,6 +432,9 @@ func newRepoSetCmd() *cobra.Command {
 				if boundMachineSet {
 					r = r.WithHostTag(boundMachine)
 				}
+				if cmd.Flags().Changed("acceptance-max-parallel") {
+					r.AcceptanceMaxParallel = acceptanceMaxParallel
+				}
 				if cmd.Flags().Changed("test-command") {
 					r.TestCommand = testCommand
 				}
@@ -440,6 +453,7 @@ func newRepoSetCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "repo %q updated\n", ownerRepo)
 			fmt.Fprintf(cmd.OutOrStdout(), "  ci_required:  %v\n", r.CIRequired)
 			fmt.Fprintf(cmd.OutOrStdout(), "  auto_merge:   %v\n", r.AutoMerge)
+			fmt.Fprintf(cmd.OutOrStdout(), "  acceptance_max_parallel: %d\n", r.AcceptanceParallelLimit())
 			fmt.Fprintf(cmd.OutOrStdout(), "  acceptance_required: %v\n", r.AcceptanceRequired)
 			fmt.Fprintf(cmd.OutOrStdout(), "  acceptance_overlap_ci: %v\n", r.AcceptanceOverlapsCI())
 			fmt.Fprintf(cmd.OutOrStdout(), "  self_upgrade: %v\n", r.SelfUpgrade)
@@ -464,6 +478,7 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&selfUpgrade, "self-upgrade", "", "rebuild and replace the installed binary after a confirmed merge into this repo (only for the repo containing clawflow's source): on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
+	cmd.Flags().IntVar(&acceptanceMaxParallel, "acceptance-max-parallel", 3, "max concurrent independent reviews for this repository (>=1)")
 	cmd.Flags().IntVar(&maxInFlight, "max-in-flight", 0, "max issues of this repo running or awaiting review at once in the unified queue (>=1, default 2)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
 	_ = cmd.Flags().MarkDeprecated("bound-machine", "use worker_tags with host-<hostname> instead")

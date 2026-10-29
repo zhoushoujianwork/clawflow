@@ -58,6 +58,22 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 	if err := s.CancelSupersededAcceptance(ctx, repo, pr.Number, contractJSON); err != nil {
 		return err
 	}
+	active, err := s.Active(ctx)
+	if err != nil {
+		return err
+	}
+	count := 0
+	for _, task := range active {
+		if task.Repo == repo && task.Kind == "acceptance" {
+			if task.PR == pr.Number {
+				return nil
+			}
+			count++
+		}
+	}
+	if count >= rc.AcceptanceParallelLimit() {
+		return errHarvestBusy
+	}
 	t, p := coordinatorTask(&runJob{repo: repo, repoCfg: rc, op: &operator.Operator{Name: "acceptance"}, sub: &operator.Subject{Number: issue, Labels: subject.Labels}}, timeout)
 	t.PR = pr.Number
 	p.Acceptance, p.DevelopmentWorker, p.Role = &c, dev.LeaseOwner, "acceptance"

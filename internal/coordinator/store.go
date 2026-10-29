@@ -70,7 +70,11 @@ type Audit struct {
 
 func (Audit) TableName() string { return "coordinator_audit" }
 
-type Store struct{ db *gorm.DB }
+type Store struct {
+	db *gorm.DB
+	// LeaseLimits supplies current platform capacity; nil leaves standalone stores unrestricted.
+	LeaseLimits func() (int, map[string]int, error)
+}
 
 func New(db *gorm.DB) *Store { return &Store{db: db} }
 
@@ -228,6 +232,25 @@ func eligible(tags []string, w Worker) bool {
 func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 	var result Task
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var repoLimits map[string]int
+		if s.LeaseLimits != nil {
+			// Serialize platform-wide checks across all workers and API processes.
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(500387)").Error; err != nil {
+				return err
+			}
+			total, limits, err := s.LeaseLimits()
+			if err != nil {
+				return err
+			}
+			repoLimits = limits
+			var leased int64
+			if err := tx.Model(&Task{}).Where("state = 'leased'").Count(&leased).Error; err != nil {
+				return err
+			}
+			if total > 0 && leased >= int64(total) {
+				return ErrNoTask
+			}
+		}
 		var w Worker
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&w, "id = ?", worker).Error; err != nil {
 			return err
@@ -252,6 +275,16 @@ func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 					return ErrNoTask
 				}
 				return err
+			}
+			if limit := repoLimits[t.Repo]; limit > 0 {
+				var leased int64
+				if err := tx.Model(&Task{}).Where("repo = ? AND state = 'leased'", t.Repo).Count(&leased).Error; err != nil {
+					return err
+				}
+				if leased >= int64(limit) {
+					skipped = append(skipped, t.ID)
+					continue
+				}
 			}
 			if t.Kind == "acceptance" {
 				var live []Worker

@@ -655,6 +655,7 @@ func pipelineAcceptanceRecords(info *pipeline.AcceptanceInfo, c acceptance.Contr
 		return info
 	}
 	info.Verdict = string(latest.Verdict)
+	info.Unstructured = latest.Unstructured
 	info.Valid = current && acceptance.Evaluate(c, latest) == nil
 	return info
 }

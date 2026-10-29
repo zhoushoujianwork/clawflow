@@ -65,11 +65,17 @@ func acceptanceReportBody(r acceptance.Record) string {
 	}
 	var b strings.Builder
 	verdict := string(r.Verdict)
+	if r.Unstructured {
+		verdict = "failed (unstructured findings)"
+	}
 	owner, next := r.NextOwner, r.NextAction
 	if acceptance.IsInfrastructure(r) {
 		verdict, owner, next = "infrastructure_error", "runner", "Retry under the existing infrastructure retry policy; do not repair code."
 	}
 	fmt.Fprintf(&b, "## Independent acceptance: %s\n\nCommit: `%s`\nAttempt: `%s`\n\n%s\n", verdict, clean(r.Contract.HeadSHA), clean(r.AttemptID), clean(r.Report))
+	if r.ValidationError != "" {
+		fmt.Fprintf(&b, "\nReport validation error: %s\n", clean(r.ValidationError))
+	}
 	for _, criterion := range r.Plan.Criteria {
 		for _, check := range r.Checks {
 			if check.ID != criterion.ID {

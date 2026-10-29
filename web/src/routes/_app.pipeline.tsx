@@ -44,6 +44,7 @@ interface PRInfo {
 }
 
 interface AcceptanceInfo {
+  unstructured?: boolean
   required: boolean
   running?: boolean
   verdict?: string
@@ -85,6 +86,7 @@ interface Item {
 }
 
 interface RepoBoard {
+  hosting_platform?: string
   repo: string
   enabled: boolean
   platform: string
@@ -128,7 +130,7 @@ interface PilotAction {
 interface WorkerPool {
   generated_at: string
   workers: { name: string; tags: string[]; roles: string[]; live: boolean; last_seen: string | null; last_heartbeat: string | null; running_tasks: string[] }[]
-  tasks: { id: string; repo: string; issue: number; pr: number; kind: string; state: string; stage: string; tags: string[]; priority: number; worker: string; lease_expires_at: string | null; attempt: number }[]
+  tasks: { id: string; repo: string; issue: number; pr: number; kind: string; state: string; stage: string; waiting_reason?: string; tags: string[]; priority: number; worker: string; lease_expires_at: string | null; attempt: number }[]
   throughput: { since: string; done: number; failed: number }
 }
 
@@ -402,6 +404,7 @@ export function RepoSection({ board, repoInfo, queue, tab, open, toggle, pilotAc
     <button onClick={toggle} aria-expanded={open} className="w-full flex flex-wrap items-center gap-2 p-3 text-left text-xs">
       <ChevronRight className={cn('w-4 h-4 shrink-0', open && 'rotate-90')} />
       <span className="font-mono font-semibold break-all">{board.repo}</span>
+      {board.hosting_platform && <span>Platform: {board.hosting_platform}</span>}
       {flags.map(f => <span key={f} className="bg-secondary rounded px-1">{f}</span>)}
       {!board.enabled && <span>disabled</span>}
       <span>{inFlight.length}/{board.max_in_flight} in flight{inFlight.length ? ': ' + [...new Set(inFlight.map(i => STAGE_LABEL[i.stage]))].join(', ') : ''}</span>
@@ -483,6 +486,7 @@ function ItemDetail({ item }: { item: Item }) {
             <dt className="text-muted-foreground">Verdict</dt>
             <dd>
               {a.running ? 'reviewing…' : a.latest_is_infra ? 'no verdict (infrastructure error)' : a.verdict || 'none yet'}
+              {a.unstructured ? ' (unstructured findings)' : ''}
               {a.verdict === 'passed' && !a.valid ? ' (stale)' : ''}
             </dd>
             <dt className="text-muted-foreground">Attempts</dt>
@@ -609,7 +613,7 @@ function WorkerPoolPanel({ pool, error }: { pool?: WorkerPool | null; error?: st
         <thead><tr>{['Task / repository', 'Kind', 'State / stage', 'Tags', 'Priority', 'Worker', 'Lease expiry', 'Retries'].map(h => <th key={h} className="p-2">{h}</th>)}</tr></thead>
         <tbody>{pool.tasks.map(t => <tr key={t.id} className="border-t">
           <td className="p-2 break-all" title={t.id}>{t.id.slice(0, 12)} · {t.repo} {t.pr ? `PR #${t.pr}` : `#${t.issue}`}</td>
-          <td className="p-2">{t.kind}</td><td className="p-2">{t.state}{t.stage !== t.state ? ` / ${t.stage}` : ''}</td>
+          <td className="p-2">{t.kind}</td><td className="p-2">{t.state}{t.stage !== t.state ? ` / ${t.stage}` : ''}{t.waiting_reason && <p>{t.waiting_reason}</p>}</td>
           <td className="p-2">{t.tags.join(', ') || '—'}</td><td className="p-2">{t.priority}</td><td className="p-2">{t.worker || '—'}</td>
           <td className="p-2">{t.lease_expires_at ? new Date(t.lease_expires_at).toLocaleString() : '—'}</td><td className="p-2">{t.attempt}</td>
         </tr>)}</tbody>
