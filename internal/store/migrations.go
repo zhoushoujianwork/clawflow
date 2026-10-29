@@ -34,6 +34,7 @@ var Migrations = []Migration{
 	{Version: 2, Name: "runs_and_usage", Up: migrateRuns},
 	{Version: 3, Name: "coordinator", Up: migrateCoordinator},
 	{Version: 4, Name: "durable_workflow", Up: migrateWorkflow},
+	{Version: 5, Name: "actions_evidence", Up: migrateActions},
 }
 
 type schemaMigration struct {
