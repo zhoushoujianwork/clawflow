@@ -93,7 +93,7 @@ func TestWritebackCommentValidationNotRetried(t *testing.T) {
 func TestWritebackPRLostResponseReconcilesHeadAndBase(t *testing.T) {
 	fastWriteback(t)
 	posts := 0
-	pr := map[string]any{"number": 2, "state": "open", "head": map[string]any{"ref": "fix", "repo": map[string]string{"full_name": "o/r"}}, "base": map[string]string{"ref": "main"}}
+	pr := map[string]any{"number": 2, "state": "open", "html_url": "https://ghe.example.com/o/r/pull/2", "head": map[string]any{"ref": "fix", "repo": map[string]string{"full_name": "o/r"}}, "base": map[string]string{"ref": "main"}}
 	c := newTestClient(t, map[string]http.HandlerFunc{
 		"POST /repos/o/r/pulls": func(w http.ResponseWriter, r *http.Request) {
 			posts++
@@ -109,7 +109,7 @@ func TestWritebackPRLostResponseReconcilesHeadAndBase(t *testing.T) {
 		"GET /repos/o/r/pulls/2": func(w http.ResponseWriter, r *http.Request) { jsonResp(w, 200, pr) },
 	})
 	result, err := c.CreatePR("o/r", vcs.PRCreateOpts{Head: "fix", Base: "main"})
-	if err != nil || result.Number != 2 || posts != 1 {
+	if err != nil || result.Number != 2 || result.URL != "https://ghe.example.com/o/r/pull/2" || posts != 1 {
 		t.Fatalf("pr=%+v posts=%d err=%v", result, posts, err)
 	}
 }

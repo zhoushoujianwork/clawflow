@@ -23,9 +23,9 @@ type Issue struct {
 	Body   string   `json:"body"`
 	Labels []string `json:"labels"`
 	State  string   `json:"state"`
-	// URL is the web (HTML) URL of the issue. Populated by GetIssue
-	// (GitHub html_url / GitLab web_url); other list calls may leave it
-	// empty.
+	// URL is the web (HTML) URL of the issue, copied verbatim from the API
+	// response (GitHub html_url / GitLab web_url). Populated by GetIssue and
+	// CreateIssue; other list calls may leave it empty.
 	URL       string `json:"url,omitempty"`
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`

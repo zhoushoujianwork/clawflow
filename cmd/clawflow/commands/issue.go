@@ -223,7 +223,11 @@ func newIssueCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("created issue #%d: %s\n", issue.Number, issue.Title)
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "created issue #%d: %s\n", issue.Number, issue.Title)
+			if issue.URL != "" {
+				fmt.Fprintln(out, issue.URL)
+			}
 			return nil
 		},
 	}
