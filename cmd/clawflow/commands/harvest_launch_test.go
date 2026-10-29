@@ -184,6 +184,34 @@ func TestAcceptanceAgentCapPreservesPRLock(t *testing.T) {
 	}
 }
 
+func TestAutoMergeCoordinatorGateHoldsRepoLock(t *testing.T) {
+	harvestFixture(t)
+	oldGate := coordinatorPRAllowedFn
+	t.Cleanup(func() { coordinatorPRAllowedFn = oldGate })
+	gateErr := errors.New("published head differs from coordinator head")
+	coordinatorPRAllowedFn = func(_ context.Context, repo string, pr int) error {
+		if repo != "o/r" || pr != 11 {
+			t.Fatalf("unexpected merge identity: %s #%d", repo, pr)
+		}
+		if release, err := mergeRepoLock(repo); err == nil {
+			release()
+			t.Fatal("coordinator head check ran outside repository merge lock")
+		} else if !errors.Is(err, filelock.ErrHeld) {
+			t.Fatal(err)
+		}
+		return gateErr
+	}
+	result := attemptAutoMergeResult(autoMergeAttempt{repo: "o/r", prNum: 11, repoCfg: config.Repo{CoordinatorMode: true}})
+	if result.Merged || result.Reason != "coordinator_head_mismatch" || !errors.Is(result.Err, gateErr) {
+		t.Fatalf("coordinator mismatch did not block merge: %+v", result)
+	}
+	release, err := mergeRepoLock("o/r")
+	if err != nil {
+		t.Fatalf("blocked merge leaked repository lock: %v", err)
+	}
+	release()
+}
+
 func TestRepoSetAcceptanceMaxParallel(t *testing.T) {
 	for _, value := range []string{"0", "-1", "1", "5"} {
 		t.Run(value, func(t *testing.T) {

@@ -539,6 +539,12 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 	return vcs.PR{HeadSHA: raw.SHA, BaseSHA: raw.DiffRefs.BaseSHA, MergeCommitSHA: mergeSHA, Draft: raw.Draft || raw.WorkInProgress, HeadRepo: headRepo, Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, BaseBranch: raw.TargetBranch, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.WebURL}, nil
 }
 
+// PostPRCommentIdempotent reconciles the MR note marker before retrying.
+func (c *Client) PostPRCommentIdempotent(repo string, n int, body, runID string) error {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), n)
+	return c.postComment(path, body, runID, runID != "")
+}
+
 func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
 	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), prNumber)
 	return c.postComment(path, body, "", false)

@@ -396,6 +396,12 @@ func newIssueCommentCmd() *cobra.Command {
 		Short:   "Post a comment on an issue",
 		Example: "  clawflow issue comment --repo owner/repo --issue 7 --body \"looks good\"\n  clawflow issue comment --repo owner/repo --issue 7 --body \"see screenshot\" --image bug.png",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if os.Getenv(effectSpoolEnv) != "" && len(images) > 0 {
+				return fmt.Errorf("worker image upload is not supported")
+			}
+			if queued, err := queueEffect(cmd.OutOrStdout(), jobEffect{Kind: "issue-comment", Repo: repo, Number: issue, Body: body}); queued {
+				return err
+			}
 			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err

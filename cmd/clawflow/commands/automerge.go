@@ -217,6 +217,11 @@ func attemptAutoMergeResult(a autoMergeAttempt) mergeResult {
 		return blocked("repo_merge_busy", mergeErr)
 	}
 	defer releaseMerge()
+	if a.repoCfg.CoordinatorMode {
+		if err := coordinatorPRAllowedFn(a.ctx, a.repo, a.prNum); err != nil {
+			return blocked("coordinator_head_mismatch", err)
+		}
+	}
 	if a.issueNum > 0 {
 		labels, err := a.client.GetIssueLabels(a.repo, a.issueNum)
 		if err != nil || hasLabel(labels, "clawflow-skip") {

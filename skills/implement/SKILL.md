@@ -106,3 +106,5 @@ I need clarification before I can proceed: {your specific question}
 
 <!-- clawflow:outcome=agent-skipped -->
 ```
+
+在 worker 模式下，`clawflow pr create` 会将请求排队交给 coordinator；命令保持不变，结果中说明 PR 创建已排队。

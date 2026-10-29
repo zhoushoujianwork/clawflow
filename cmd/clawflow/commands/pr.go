@@ -35,6 +35,9 @@ func newPRCreateCmd() *cobra.Command {
 		Short:   "Create a pull request / merge request",
 		Example: "  clawflow pr create --repo owner/repo --title \"fix: bug\" --head fix/issue-7 --base main --body \"Fixes #7\"",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if queued, err := queueEffect(cmd.OutOrStdout(), jobEffect{Kind: "pr-create", Repo: repo, Head: head, Base: base, Title: title, Body: body}); queued {
+				return err
+			}
 			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
@@ -181,6 +184,9 @@ func newPRCommentCmd() *cobra.Command {
 		Short:   "Post a comment on a pull request",
 		Example: "  clawflow pr comment --repo owner/repo --pr 7 --body \"CI failed: ...\"",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if queued, err := queueEffect(cmd.OutOrStdout(), jobEffect{Kind: "pr-comment", Repo: repo, Number: number, Body: body}); queued {
+				return err
+			}
 			client, repo, _, err := newVCSClientForRepo(repo)
 			if err != nil {
 				return err
