@@ -28,7 +28,7 @@ func acceptanceAllowed(t Task, w Worker) bool {
 	if json.Unmarshal(t.Payload, &p) != nil || !AcceptanceEligible(t.Tags, w) {
 		return false
 	}
-	return p.AcceptanceWorker == "any" || (p.AcceptanceWorker == "different" && p.DevelopmentWorker != "" && p.DevelopmentWorker != w.ID)
+	return (p.AcceptanceWorker == "" || p.AcceptanceWorker == "any" || p.AcceptanceWorker == "different") && p.DevelopmentWorker != "" && p.DevelopmentWorker != w.ID
 }
 
 // LatestDevelopment ties the developer worker to the same PR and submitted head.
@@ -38,8 +38,8 @@ func (s *Store) LatestDevelopment(ctx context.Context, repo string, issue, pr in
 	return &task, err
 }
 
-// Resolve default independence when a worker actually claims, not when enqueued.
-func resolveAcceptancePolicy(t *Task, live []Worker) error {
+// Resolve legacy queued tasks to the same independent default as config loading.
+func resolveAcceptancePolicy(t *Task) error {
 	if t.Kind != "acceptance" {
 		return nil
 	}
@@ -57,16 +57,7 @@ func resolveAcceptancePolicy(t *Task, live []Worker) error {
 		}
 		return nil
 	}
-	count := 0
-	for _, w := range live {
-		if AcceptanceEligible(t.Tags, w) {
-			count++
-		}
-	}
-	policy = "any"
-	if count > 1 {
-		policy = "different"
-	}
+	policy = "different"
 	p["acceptance_worker"], _ = json.Marshal(policy)
 	var err error
 	t.Payload, err = json.Marshal(p)

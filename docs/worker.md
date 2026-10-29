@@ -50,10 +50,42 @@ Worker 名称来自注册身份；`live` 表示 token 未撤销且最近 120 秒
 ## 独立验收
 
 协调器沿用已有 harvest 条件，在 CI 成功且缺少验收证据或允许基础设施重试时创建验收任务。
-仓库配置 `worker_tags_by_kind.acceptance` 覆盖通用 `worker_tags`，平台标签与 issue 的
-`worker:<tag>` 标签仍须全部匹配。`acceptance_worker: different` 排除该 PR 最新开发任务的
-worker；`any` 允许同一 worker。未配置时，在领取任务时统计最近 120 秒在线且角色、标签匹配的
-验收 worker：超过一个使用 `different`，否则使用 `any`。会话独立性始终强制检查。
+仓库配置 `worker_tags_by_kind.acceptance` 覆盖通用 `worker_tags`，issue 的
+`worker:<tag>` 标签仍须全部匹配。coordinator 模式下，未配置的 `acceptance_worker`
+默认为 `different`。显式 `any` 仍可读取，但同样不能把验收租给该 PR 的开发 worker；
+会话独立性也始终强制检查。无在线且具备 `acceptance` 角色、所需标签的独立 worker 时，
+任务保持排队，看板显示 `waiting for an independent reviewer`，不启动验收模型会话，
+也不消耗重试次数。
+
+最小拓扑为进程内 `local-worker` 承担开发，加至少一个独立身份的 review worker。
+即使 `local-worker` 声明了 `acceptance` 角色，也不能验收它自己开发的 PR。
+例如 coordinator 的配置：
+
+```yaml
+settings:
+  coordinator:
+    enabled: true
+    local_worker:
+      enabled: true
+repos:
+  owner/repo:
+    acceptance_required: true
+    acceptance_worker: different
+    worker_tags_by_kind:
+      acceptance: [review]
+```
+
+为 reviewer 创建独立 token（`clawflow worker token create --name review-worker`），
+在其机器上配置仓库、凭据及 Offload profile，然后运行：
+
+```sh
+clawflow worker --coordinator https://HOST:8093 \
+  --token-file /Users/USER/.clawflow/review-worker.token \
+  --fingerprint SHA256 --roles acceptance --tags review \
+  --state-dir /Users/USER/.clawflow-review-worker
+```
+
+review worker 可与 coordinator 位于同一主机，但必须使用独立身份、token 和状态目录。
 
 成功的 implement/repair 回传原生 `development_events` JSONL（最多 32 MiB，仅元数据）。
 协调器验证租约、PR head 和原生事件身份后，将其以 `0600` 权限写入对应运行目录。
