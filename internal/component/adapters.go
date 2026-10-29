@@ -137,6 +137,6 @@ func GitHubActions(provider GitHubEvidenceSource, repo string, pr int, head stri
 		if err != nil {
 			return Observation{}, err
 		}
-		return Observation{Identity: fmt.Sprintf("github/%d/%s", repositoryID, repo), Version: digest, Protocol: Schema, Health: "available", Capabilities: d.Capabilities}, nil
+		return Observation{Resource: repo, Identity: fmt.Sprintf("github/%d/%s", repositoryID, repo), Version: digest, Protocol: Schema, Health: "available", Capabilities: d.Capabilities}, nil
 	}}
 }

@@ -30,8 +30,10 @@ clawflow components disable offload --project my-project --role implement
 清单更新使用现有 filelock 和原子替换，失败探测的禁用状态也会持久化。
 
 凭证字段只接受 `projects/<project>/credentials/<role>` 形式的槽位引用，
-不接受 token、带密码的 URL 或其他项目的槽位。这里不读取或存储凭证值，
-也不替用户创建凭证；资源字段同样只接收公开的符号引用。不得把密钥放入任何名称字段。
+不接受空引用、token、带密码的 URL 或其他项目的槽位。绑定、激活及每次授权都必须
+通过项目级凭证解析器；缺少解析器、授权条目或环境中的凭证值一律拒绝。
+凭证只在内存中传给已授权 provider，不进入组件记录。资源字段只接收公开的符号引用。
+不得把密钥放入任何名称字段。
 探测错误使用固定错误文本，不记录底层输出或错误体。
 
 ## 已知组件及验证边界
@@ -54,11 +56,58 @@ Offload 的 `execution-declarations` 仅表示已有调用参数得到声明，�
 `ReadAdapter` 可注入其他经过核实的实现，不复制现有执行或 CI 逻辑。
 `GitHubActions` 适配器复用现有 `GetRepoID` / `GetCIEvidence`，验证仓库身份和
 指定 head 的检查标识；测试失败与服务不可用分开处理。它接收调用方已经限定项目和
-请求上下文的 provider，不自行取得全局 token。CLI 默认没有项目凭证解析器，所以保留
-不可用状态，不会用现有全局凭证冒充项目授权。
+请求上下文的 provider，不自行取得全局 token。CLI 使用下面的项目凭证授权文件，
+并通过现有 GitHub 客户端进行最长 30 秒的只读探测。没有凭证授权或证据时保持不可用。
 
 这是组件管理入口，不是新调度器。现有 runner 不读取该清单，`active` 不启动工作，
 不改变现有任务、执行或合并授权。未来消费者在执行前必须调用 `Registry.Authorize`，
-并使用对应项目的凭证解析器和既有执行/证据接口；失效状态应通过 `Update` 持久化。
-没有提供通用命令执行、任意 URL 注册、远端凭证解析或自动服务接管。
+配置 `Registry.Credentials` 为项目凭证解析器并使用既有执行/证据接口；缺少解析器
+默认拒绝，失效状态应通过 `Update` 持久化。CLI 的 `check` 已消费该授权入口。
+没有提供通用命令执行、任意 URL 注册或自动服务接管。
 真实 provider smoke、独立适配器验收和 GitHub Actions 运行仍需分别验证。
+
+## 项目凭证授权与 GitHub Actions 接入
+
+由操作者显式维护本机 `~/.clawflow/config/component-access.json`。清单命令不会创建或
+迁移该文件。每项授权必须精确限定组件、项目、角色、资源、凭证引用及能力；
+`environment` 指向由外部凭证管理方式注入的环境变量，文件内不保存密钥值：
+
+```json
+{
+  "schema": 1,
+  "grants": [{
+    "component": "github-actions",
+    "project": "my-project",
+    "role": "test",
+    "resource": "owner/repo",
+    "credential_ref": "projects/my-project/credentials/test",
+    "capabilities": ["exact-revision-ci"],
+    "environment": "MY_PROJECT_GITHUB_TOKEN"
+  }]
+}
+```
+
+每次使用都重新读取授权文件和环境变量。删除条目、缩减能力、清空对应环境变量均会
+拒绝下一次激活/授权，并禁用已有绑定；其他项目不会继承这些权限。没有全局 VCS token
+回退。为其他组件绑定时同样需要独立的项目授权条目和非空凭证；这只控制本清单的
+管理授权，不改变 Offload 自行管理的执行凭证或主项目。
+
+在项目已存在且上述环境变量已由凭证管理器注入后，提供真实 PR 和完整 head SHA：
+
+```sh
+clawflow components register github-actions
+clawflow components verify github-actions --project my-project --role test \
+  --resource owner/repo --credential-ref projects/my-project/credentials/test \
+  --pr 123 --sha <full-head-sha>
+clawflow components bind github-actions --project my-project --role test \
+  --resource owner/repo --credential-ref projects/my-project/credentials/test \
+  --capability exact-revision-ci
+clawflow components activate github-actions --project my-project --role test \
+  --pr 123 --sha <full-head-sha>
+clawflow components check github-actions --project my-project --role test \
+  --pr 123 --sha <full-head-sha> --capability exact-revision-ci
+```
+
+`verify` 核实仓库身份并固定资源，不能把该验证结果绑定到另一仓库。
+`activate` 和 `check` 从已保存绑定读取资源与凭证引用，只接收本次探测的 PR/head。
+测试成功、失败或执行中都可能证明证据接口可用，但不代表独立验收通过。

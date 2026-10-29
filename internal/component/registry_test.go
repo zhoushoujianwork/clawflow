@@ -17,7 +17,7 @@ func fixture() (Registry, ReadAdapter, *Observation, *int) {
 	calls := new(int)
 	o := &Observation{Identity: "test-service", Version: "commit-123", Protocol: Schema, Health: "available", Capabilities: []string{"test"}}
 	a := ReadAdapter{Descriptor: Descriptor{ID: "test", Adapter: "fake", Version: "1", Reference: "test-command", Capabilities: []string{"test"}}, Observe: func(context.Context) (Observation, error) { *calls++; return *o, nil }}
-	return Registry{Schema: Schema, Records: map[string]Record{}}, a, o, calls
+	return Registry{Credentials: func(string, Binding) (string, error) { return "fixture-secret", nil }, Schema: Schema, Records: map[string]Record{}}, a, o, calls
 }
 func bind(project string) Binding {
 	return Binding{Project: project, Role: "test", Resource: "repo/example", CredentialRef: "projects/" + project + "/credentials/test", Capabilities: []string{"test"}}
@@ -156,7 +156,10 @@ func TestStorePersistsFailureAndRejectsUnknownSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	o.Health = "unavailable"
-	if err := Update(path, func(out *Registry) error { return out.Activate(context.Background(), "test", "one", "test", a) }); err == nil {
+	if err := Update(path, func(out *Registry) error {
+		out.Credentials = r.Credentials
+		return out.Activate(context.Background(), "test", "one", "test", a)
+	}); err == nil {
 		t.Fatal("health accepted")
 	}
 	loaded, err := Load(path)
@@ -243,5 +246,33 @@ func TestMissingSchemaIsNotMigrated(t *testing.T) {
 	data, err := os.ReadFile(path)
 	if err != nil || string(data) != string(original) {
 		t.Fatal("unsupported record rewritten")
+	}
+}
+
+func TestEmptyCredentialCannotBindSecondProject(t *testing.T) {
+	r, _, _ := prepared(t)
+	b := bind("two")
+	b.CredentialRef = ""
+	if r.Bind("test", b) == nil {
+		t.Fatal("empty credential authorized a second project")
+	}
+}
+
+func TestVerifiedResourceCannotBeSubstituted(t *testing.T) {
+	r, a, o, _ := fixture()
+	o.Resource = "repo/verified"
+	if err := r.Register(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Verify(context.Background(), "test", a); err != nil {
+		t.Fatal(err)
+	}
+	if r.Bind("test", bind("one")) == nil {
+		t.Fatal("binding escaped verified resource")
+	}
+	b := bind("one")
+	b.Resource = "repo/verified"
+	if err := r.Bind("test", b); err != nil {
+		t.Fatal(err)
 	}
 }

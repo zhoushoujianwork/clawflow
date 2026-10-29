@@ -26,6 +26,7 @@ type Descriptor struct {
 }
 
 type Observation struct {
+	Resource     string   `json:"resource,omitempty"`
 	Identity     string   `json:"identity"`
 	Version      string   `json:"version"`
 	Protocol     int      `json:"protocol"`
@@ -59,8 +60,9 @@ type Record struct {
 }
 
 type Registry struct {
-	Schema  int               `json:"schema"`
-	Records map[string]Record `json:"records"`
+	Credentials CredentialResolver `json:"-"`
+	Schema      int                `json:"schema"`
+	Records     map[string]Record  `json:"records"`
 }
 
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$`)
@@ -184,8 +186,11 @@ func (r *Registry) Bind(id string, b Binding) error {
 	if r.Schema != Schema || !ok || rec.Pin == nil || (rec.State != "verified" && rec.State != "bound" && rec.State != "active") || !validName(b.Project) || strings.Contains(b.Project, "/") || !validName(b.Role) || strings.Contains(b.Role, "/") || !validName(b.Resource) || !validCaps(b.Capabilities) || !contains(rec.Pin.Capabilities, b.Capabilities) || !contains(rec.Capabilities, b.Capabilities) {
 		return ErrRefused
 	}
+	if rec.Pin.Resource != "" && rec.Pin.Resource != b.Resource {
+		return ErrRefused
+	}
 	// Credentials are opaque project-local slots, never secret values or URLs.
-	if b.CredentialRef != "" && b.CredentialRef != "projects/"+b.Project+"/credentials/"+b.Role {
+	if r.credential(id, b) != nil {
 		return ErrRefused
 	}
 	for _, existing := range rec.Bindings {
@@ -206,12 +211,15 @@ func (r *Registry) Bind(id string, b Binding) error {
 // Activate requires an explicit call and a fresh matching observation. It grants
 // registry authorization only; it never starts work or updates legacy settings.
 func (r *Registry) Activate(ctx context.Context, id, project, role string, a Adapter) error {
+	if _, err := r.scopedBinding(id, project, role, "bound"); err != nil {
+		return err
+	}
 	rec, o, err := r.probe(ctx, id, a)
 	if err != nil {
 		r.block(id)
 		return ErrRefused
 	}
-	if rec.Pin == nil || rec.Pin.Identity != o.Identity || rec.Pin.Version != o.Version || !slices.Equal(rec.Pin.Capabilities, o.Capabilities) {
+	if rec.Pin == nil || rec.Pin.Identity != o.Identity || rec.Pin.Version != o.Version || rec.Pin.Resource != o.Resource || !slices.Equal(rec.Pin.Capabilities, o.Capabilities) {
 		r.block(id)
 		return ErrRefused
 	}
@@ -258,10 +266,14 @@ func (r *Registry) Disable(id, project, role string) error {
 }
 
 // Authorize rechecks identity and health before a future consumer may dispatch.
-// Callers still own project-local credential resolution and execution policies.
+// Credentials are re-resolved before probing; callers still own execution policies.
 func (r *Registry) Authorize(ctx context.Context, id, project, role, capability string, a Adapter) error {
+	b, err := r.scopedBinding(id, project, role, "active")
+	if err != nil || !slices.Contains(b.Capabilities, capability) {
+		return ErrRefused
+	}
 	rec, o, err := r.probe(ctx, id, a)
-	if err != nil || rec.Pin == nil || rec.Pin.Identity != o.Identity || rec.Pin.Version != o.Version || !slices.Equal(rec.Pin.Capabilities, o.Capabilities) {
+	if err != nil || rec.Pin == nil || rec.Pin.Identity != o.Identity || rec.Pin.Version != o.Version || rec.Pin.Resource != o.Resource || !slices.Equal(rec.Pin.Capabilities, o.Capabilities) {
 		r.block(id)
 		return ErrRefused
 	}
