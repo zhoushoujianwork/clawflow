@@ -1024,6 +1024,15 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			}
 			matchSub := sub
 			if op.Name == "implement" {
+				// Targeted runs bypass queue ordering, but must still leave
+				// already delivered issues to harvest/repair.
+				if onlyIssue == sub.Number {
+					exists, err := client.PRExistsForIssue(fullName, sub.Number)
+					if err != nil || exists {
+						implementState[sub.Number] = "open_pr_or_lookup_failed"
+						continue
+					}
+				}
 				if reopenErr != nil {
 					implementState[sub.Number] = "reopen_check_failed: " + reopenErr.Error()
 					continue
