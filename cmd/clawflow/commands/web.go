@@ -568,6 +568,11 @@ func runPeriodicScheduler() {
 			api.SetSchedulerNextFire(time.Time{})
 			continue
 		}
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			api.SetSchedulerNextFire(time.Time{})
+			fmt.Fprintln(os.Stderr, err)
+			continue
+		}
 		interval := cfg.Settings.RunIntervalMinutes
 		if interval <= 0 {
 			// Auto-run disabled — clear the published next-fire time

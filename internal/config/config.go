@@ -115,8 +115,24 @@ type PilotSettings struct {
 
 // CoordinatorSettings reserves the optional worker API listener configuration.
 type CoordinatorSettings struct {
-	Enabled bool   `yaml:"enabled,omitempty"`
-	Listen  string `yaml:"listen,omitempty"`
+	Enabled     bool                `yaml:"enabled,omitempty"`
+	Listen      string              `yaml:"listen,omitempty"`
+	LocalWorker LocalWorkerSettings `yaml:"local_worker,omitempty"`
+}
+
+// LocalWorkerSettings opts the coordinator host into the normal worker pool.
+type LocalWorkerSettings struct {
+	Enabled     bool     `yaml:"enabled,omitempty"`
+	MaxParallel int      `yaml:"max_parallel,omitempty"`
+	Tags        []string `yaml:"tags,omitempty"`
+}
+
+// SchedulingError prevents clients from mutating their local execution queue.
+func (s Settings) SchedulingError() error {
+	if s.Platform.URL != "" {
+		return fmt.Errorf("此客户端由平台 %s 调度；禁止本地调度，请在平台操作（调试可使用 clawflow run --local）", s.Platform.URL)
+	}
+	return nil
 }
 
 func (s CoordinatorSettings) ListenAddress() string {

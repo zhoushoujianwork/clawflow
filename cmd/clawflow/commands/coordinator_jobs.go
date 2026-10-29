@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -102,11 +101,7 @@ func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordi
 			}
 		}
 	}
-	hostTag := platform
-	if u, err := url.Parse(j.repoCfg.BaseURL); err == nil && u.Hostname() != "" {
-		hostTag = strings.ToLower(u.Hostname())
-	}
-	tags = append(tags, hostTag)
+	// Platform metadata does not imply a worker tag; routing constraints are explicit.
 	if j.repoCfg.BoundMachine != "" {
 		tags = append(tags, config.HostTag(j.repoCfg.BoundMachine))
 	}

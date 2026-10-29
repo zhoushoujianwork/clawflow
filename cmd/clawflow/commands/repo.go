@@ -302,6 +302,11 @@ func setRepoEnabled(cmd *cobra.Command, ownerRepo string, enabled bool) error {
 	if err != nil {
 		return err
 	}
+	if enabled {
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			return err
+		}
+	}
 	if _, exists := cfg.Repos[ownerRepo]; !exists {
 		return fmt.Errorf("repo %q not found", ownerRepo)
 	}
