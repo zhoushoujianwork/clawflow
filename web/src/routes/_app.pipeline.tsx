@@ -1,3 +1,4 @@
+import { WorkSummary, selectWorkItems, type WorkFilter, type WorkItem, type SourceHealth } from '../components/WorkSummary'
 import { ScheduledChecksPanel } from "../components/ScheduledChecksPanel"
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
@@ -68,7 +69,7 @@ interface Delivery {
   merged_at?: string
 }
 
-interface Item {
+interface Item extends WorkItem {
   state?: string
   attention?: string[]
   issue: number
@@ -140,6 +141,7 @@ interface APIUsage {
  budgets: Record<string, {limit: number; remaining: number; reset: string; backoff: string}>
 }
 interface Board {
+  sources?: SourceHealth[]
  vcs_usage?: APIUsage
   worker_pool?: WorkerPool | null
   worker_pool_error?: string
@@ -159,9 +161,10 @@ interface Board {
   }
 }
 
-type Preferences = { tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string }
+type Preferences = { work?: WorkFilter; tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string }
 export function preferences(s: Record<string, unknown>): Preferences {
   return {
+    work: ['running', 'waiting', 'attention', 'delivered'].includes(String(s.work)) ? s.work as WorkFilter : undefined,
     tab: s.tab === 'active' || s.tab === 'delivered' || s.tab === 'all' ? s.tab : undefined,
     expanded: typeof s.expanded === 'string' ? s.expanded : undefined,
     events: s.events === 'important' || s.events === 'all' ? s.events : undefined,
@@ -247,7 +250,7 @@ function StageChip({ stage }: { stage: Stage }) {
 }
 
 function PipelinePage() {
-  useDocumentTitle('Pipeline')
+  useDocumentTitle('Work')
   const search = Route.useSearch()
   const navigate = Route.useNavigate()
   const [restored, setRestored] = useState(false)
@@ -304,13 +307,12 @@ function PipelinePage() {
     <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">Delivery pipeline</h1>
+          <h1 className="text-2xl font-bold text-foreground">Work</h1>
           <p className="text-xs text-muted-foreground mt-1">
-            Issue → PR → CI → acceptance → merge. Read-only.
+            Execution and delivery across tracked repositories. Read-only.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground tabular-nums">
-          {board && <span>{board.generated_at ? `updated ${timeAgo(board.generated_at)}` : 'Waiting for first snapshot'}{board.refreshing ? ' · refreshing…' : board.stale ? ' · stale' : ''}</span>}
           <button
             onClick={() => void load()}
             disabled={refreshing}
@@ -323,12 +325,7 @@ function PipelinePage() {
         </div>
       </div>
 
-      {error && (
-        <div role="alert" className="mb-4 px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-sm text-red-800">
-          Could not load the pipeline: {error}
-        </div>
-      )}
-
+      <WorkSummary repos={board?.repos} sources={board?.sources} generatedAt={board?.generated_at} stale={board?.stale} refreshing={refreshing || board?.refreshing} failed={!!error} filter={search.work} onFilter={work => update({ work, tab: work === 'delivered' ? 'delivered' : 'active' })} />
       <ScheduledChecksPanel />
 
       {loading && !board ? (
@@ -337,22 +334,26 @@ function PipelinePage() {
         </p>
       ) : board ? (
         <>
-          <RuntimeHeader runtime={board.runtime} />
-          <APIUsagePanel usage={board.vcs_usage} />
+          <details className="mb-4 border rounded-lg p-3 text-sm">
+            <summary className="cursor-pointer">System status</summary>
+            {error && <p role="alert" className="text-red-800 break-words">Could not refresh work: {error}</p>}
+            <RuntimeHeader runtime={board.runtime} />
+            <APIUsagePanel usage={board.vcs_usage} />
+          </details>
           <WorkerPoolPanel pool={board.worker_pool} error={board.worker_pool_error} />
           <Attention board={board} repoInfo={repoInfo} />
           <div className="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Pipeline items">
-            {(['active', 'delivered', 'all'] as const).map(tab => <button key={tab} role="tab" aria-selected={(search.tab || 'active') === tab} onClick={() => update({ tab })} className={cn('px-3 py-1 rounded border text-sm capitalize', (search.tab || 'active') === tab && 'bg-secondary')}>{tab}</button>)}
+            {(['active', 'delivered', 'all'] as const).map(tab => <button key={tab} role="tab" aria-selected={(search.tab || 'active') === tab} onClick={() => update({ tab, work: undefined })} className={cn('px-3 py-1 rounded border text-sm capitalize', (search.tab || 'active') === tab && 'bg-secondary')}>{tab}</button>)}
           </div>
           {board.repos.length === 0 ? (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
               <p className="text-base font-semibold text-foreground mb-1">{board.generated_at ? 'No repository is tracked yet' : 'Preparing pipeline snapshot…'}</p>
               {board.generated_at && <p className="text-sm text-muted-foreground">
-                Enable a repository with <code>clawflow repo enable</code> and enroll issues using the clawflow label.
+                Enable a repository with <code>clawflow repo enable</code> to see its eligible work.
               </p>}
             </div>
           ) : (
-            board.repos.map(r => <RepoSection key={r.repo} board={r} pilotActions={board.pilot_actions} repoInfo={repoInfo} queue={board.global_queue || []} tab={search.tab || 'active'} open={expanded.includes(r.repo)} toggle={() => update({ expanded: expanded.includes(r.repo) ? expanded.filter(n => n !== r.repo).join(',') : [...expanded, r.repo].join(',') })} />)
+            board.repos.map(r => <RepoSection key={r.repo} board={r} pilotActions={board.pilot_actions} repoInfo={repoInfo} queue={board.global_queue || []} tab={search.tab || 'active'} work={search.work} open={!!search.work || expanded.includes(r.repo)} toggle={() => update({ expanded: expanded.includes(r.repo) ? expanded.filter(n => n !== r.repo).join(',') : [...expanded, r.repo].join(',') })} />)
           )}
           <EventTimeline events={board.events || []} filter={search.events || 'important'} repo={search.repo || ''} repos={board.repos.map(r => r.repo)} update={update} />
         </>
@@ -365,8 +366,8 @@ export function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
   const s = runtime.scheduler
   return <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs border rounded-lg px-3 py-2 mb-4" aria-label="Runtime">
     <span>{runtime.version || 'Version unavailable'}</span>
-    <span>Executor: {runtime.execution.profile || 'unavailable'} · backend: {runtime.execution.backend ? runtime.execution.backend + ' (last observed)' : 'unavailable'}{runtime.execution.model && <> · model: {runtime.execution.model}</>}{runtime.execution.service_tier && <> · tier: {runtime.execution.service_tier}</>}</span>
-    <span>Agent slots: {s.agent_slots_used} / {s.agent_slots_total}</span>
+    <span>Latest recorded executor (one execution only): profile {runtime.execution.profile || 'unavailable'} · backend: {runtime.execution.backend || 'unavailable'}{runtime.execution.model && <> · model: {runtime.execution.model}</>}{runtime.execution.service_tier && <> · tier: {runtime.execution.service_tier}</>}</span>
+    <span>Agent slots: {s.agent_slots_used ?? 'unknown'} / {s.agent_slots_total ?? 'unknown'}</span>
     <span>{s.paused ? 'paused' : s.status} {s.status === 'running' ? (s.started_at ? '· started ' + timeAgo(s.started_at) : '· age unavailable') : ''}</span>
     <span>Last pass: {s.last_result || 'unavailable'} {s.last_ended_at && timeAgo(s.last_ended_at)}</span>
     <span className="rounded bg-secondary px-1">Read-only</span>
@@ -394,7 +395,7 @@ export function Attention({ board, repoInfo }: { board: Board; repoInfo: RepoInf
   </section>
 }
 
-export function RepoSection({ board, repoInfo, queue, tab, open, toggle, pilotActions = [] }: { pilotActions?: PilotAction[]; board: RepoBoard; repoInfo: RepoInfoMap; queue: GlobalQueueEntry[]; tab: NonNullable<Preferences['tab']>; open: boolean; toggle: () => void }) {
+export function RepoSection({ board, repoInfo, queue, tab, open, toggle, work, pilotActions = [] }: { work?: WorkFilter; pilotActions?: PilotAction[]; board: RepoBoard; repoInfo: RepoInfoMap; queue: GlobalQueueEntry[]; tab: NonNullable<Preferences['tab']>; open: boolean; toggle: () => void }) {
   const [showAll, setShowAll] = useState(false)
   const positions = new Map(queue.filter(q => q.repo === board.repo).map(q => [q.number, q.position]))
   const items = board.items.map(item => ({ ...item, in_queue: positions.has(item.issue), queue_position: positions.get(item.issue) }))
@@ -402,9 +403,9 @@ export function RepoSection({ board, repoInfo, queue, tab, open, toggle, pilotAc
   const active = items.filter(i => i.stage !== 'merged' && i.state !== 'closed')
   const inFlight = active.filter(i => i.run?.live || i.acceptance?.running || i.pr?.state === 'open')
   const lastMerge = items.map(i => i.delivery?.merged_at || '').sort().slice(-1)[0]
-  const filtered = tab === 'active' ? active : tab === 'delivered' ? items.filter(i => i.stage === 'merged' && i.delivery?.merged_at && Date.now() - Date.parse(i.delivery.merged_at) <= 7 * 86400000) : items
+  const filtered = selectWorkItems(items, work || tab)
   let queued = 0
-  const visible = filtered.filter(i => !i.in_queue || ++queued <= 6 || showAll)
+  const visible = filtered.filter(i => !!work || !i.in_queue || ++queued <= 6 || showAll)
   const hidden = filtered.length - visible.length
   const flags = [board.auto_merge ? 'auto-merge' : 'manual merge', board.ci_required ? 'CI' : 'CI off', board.acceptance_required ? 'acceptance' : 'acceptance off']
   return <section className="border rounded-xl mb-3 overflow-hidden">
@@ -417,7 +418,6 @@ export function RepoSection({ board, repoInfo, queue, tab, open, toggle, pilotAc
       <span>{inFlight.length}/{board.max_in_flight} in flight{inFlight.length ? ': ' + [...new Set(inFlight.map(i => STAGE_LABEL[i.stage]))].join(', ') : ''}</span>
       <span>{active.filter(i => i.in_queue).length} queued</span>
       <span className="text-muted-foreground">last merge {timeAgo(lastMerge)}</span>
-      {board.stale && <span className="rounded border border-amber-200 bg-amber-50 px-1 text-amber-900">stale</span>}
     </button>
     {board.error && <div role="alert" className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 break-words">{board.stale ? 'Showing the last snapshot. Refresh failed: ' : ''}{board.error}</div>}
     {open && <div className="border-t">
