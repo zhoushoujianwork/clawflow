@@ -12,6 +12,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // Harvest timing. A run needs room for planning plus review, so a repo is
@@ -163,7 +164,11 @@ func harvestCandidates(ctx context.Context, fullName string, repoCfg config.Repo
 			rc.SetRequestContext(c)
 		}
 	}
+	ctx = github.WithStage(ctx, "harvest")
 	setCtx(ctx)
+	if !pollingAllowed(client) {
+		return nil
+	}
 
 	prs, err := client.ListOpenPRs(fullName)
 	if err != nil {

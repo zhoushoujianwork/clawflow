@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -135,21 +137,29 @@ func (s *coordinatorResults) recoverResults(ctx context.Context, store coordinat
 		taskCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 
 		var r coordinatorReport
-		err = json.Unmarshal(t.Result, &r)
-		if err == nil && t.Kind == "acceptance" {
-			err = s.recoverAcceptance(taskCtx, store, t, &r)
-		} else if err == nil {
-			var j *runJob
-			j, err = s.loadJob(taskCtx, t)
-			if err == nil {
-				failed := r.TerminalState == "failed"
-				if r.TerminalState == "" {
-					failed = r.Status != "success" && r.Status != "skipped"
+		err = retryRateLimited(taskCtx, func() error {
+			err := json.Unmarshal(t.Result, &r)
+			if err == nil && t.Kind == "acceptance" {
+				err = s.recoverAcceptance(taskCtx, store, t, &r)
+			} else if err == nil {
+				var j *runJob
+				j, err = s.loadJob(taskCtx, t)
+				if err == nil {
+					failed := r.TerminalState == "failed"
+					if r.TerminalState == "" {
+						failed = r.Status != "success" && r.Status != "skipped"
+					}
+					err = s.reconcile(taskCtx, store, t, j, &r, failed)
 				}
-				err = s.reconcile(taskCtx, store, t, j, &r, failed)
 			}
-		}
+			return err
+		})
 		cancel()
+		var limited *retry.HTTPError
+		if errors.As(err, &limited) && limited.RateLimited {
+			runLog.Warn("coordinator/result-apply-deferred", "task", t.ID, "retry_after", limited.After)
+			continue
+		}
 		if err != nil && ctx.Err() == nil {
 			message := sanitizeReviewerText(err.Error(), 4000)
 			runLog.Warn("coordinator/result-apply-failed", "task", t.ID, "err", message)
@@ -236,4 +246,30 @@ func (s *coordinatorResults) recoverAcceptance(ctx context.Context, durable coor
 	}
 	// Reports sealed before the outbox migration retain their existing marker.
 	return durable.FinalizeApplication(ctx, t.ID, t.FencingToken, false, func(coordinator.Task) error { return saveAndPublish() })
+}
+
+// retryRateLimited leaves durable results pending if the caller cannot wait for
+// reset. Only genuine application failures consume the three-attempt ledger.
+func retryRateLimited(ctx context.Context, apply func() error) error {
+	for {
+		err := apply()
+		var limited *retry.HTTPError
+		if !errors.As(err, &limited) || !limited.RateLimited {
+			return err
+		}
+		wait := limited.After
+		if wait <= 0 {
+			wait = time.Minute
+		}
+		if deadline, ok := ctx.Deadline(); ok && time.Now().Add(wait).After(deadline) {
+			return err
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(ctx.Err(), err)
+		case <-timer.C:
+		}
+	}
 }

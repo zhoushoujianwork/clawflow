@@ -27,6 +27,8 @@ type pipelineLocalClient struct {
 	missingIssues bool
 }
 
+func (c *pipelineLocalClient) PollingAllowed() bool { return c.offline || pollingAllowed(c.Client) }
+
 func (c *pipelineLocalClient) SetRequestContext(ctx context.Context) {
 	if x, ok := c.Client.(interface{ SetRequestContext(context.Context) }); ok {
 		x.SetRequestContext(ctx)
