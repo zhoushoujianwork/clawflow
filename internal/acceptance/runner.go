@@ -59,7 +59,8 @@ func directory(path string) (string, error) {
 // Run executes fresh planning (with at most one isolation fallback) and review calls. The
 // caller supplies a deferred workspace preparer (or an existing workspace) and
 // authoritative inspection;
-// this core never fetches Git state, falls back to another provider, or resumes.
+// this core never fetches Git state or falls back to another provider. A malformed
+// reviewer report permits one correction in the same native session.
 func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace string) (record Record, err error) {
 	d, err := c.Digest()
 	if err != nil {
@@ -271,6 +272,48 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if record.Reviewer.SessionID == plan.Planner.SessionID || record.Reviewer.RunID == plan.Planner.RunID {
 		return record, errors.New("review requires a fresh native session and run")
 	}
+	parsed := record
+	err = applyReviewReport(c, &parsed, reviewed.Text)
+	if err == nil {
+		return parsed, nil
+	}
+	if errors.Is(err, errReviewInfrastructure) {
+		return record, err
+	}
+	// A correction is part of this review: pin the actual native session and
+	// profile, keep the same checkout, and never start a fresh review fallback.
+	record.Correction = &ReportCorrection{ValidationError: err.Error()}
+	beforeCorrection, inspectErr := runner.Inspect(ctx, workspace)
+	if inspectErr != nil || !beforeCorrection.matches(c) {
+		return record, errors.Join(inspectErr, errors.New("acceptance source changed before correction"))
+	}
+	if err = ctx.Err(); err != nil {
+		return record, err
+	}
+	corrected, correctionErr := runner.executeRecorded(ctx, c, "acceptance-review-correction", execute, correctionPrompt(c, record.Correction.ValidationError),
+		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "bypassPermissions", Resume: true, SessionKey: reviewed.NativeSessionID, Profile: reviewed.Profile})
+	record.Correction.Reviewer = native(corrected)
+	record.After, inspectErr = runner.Inspect(ctx, workspace)
+	if err = errors.Join(correctionErr, inspectErr, ctx.Err()); err != nil {
+		return record, err
+	}
+	if !record.After.matches(c) {
+		return record, errors.New("acceptance source changed during correction")
+	}
+	if err = record.validateCorrection(c); err != nil {
+		return record, err
+	}
+	parsed = record
+	if err = applyReviewReport(c, &parsed, corrected.Text); err != nil {
+		return record, err
+	}
+	return parsed, nil
+}
+
+var errReviewInfrastructure = errors.New("review infrastructure failure")
+
+// applyReviewReport applies only validated model fields to a candidate record.
+func applyReviewReport(c Contract, record *Record, text string) error {
 	var output struct {
 		Checks     []RequirementCheck `json:"checks"`
 		NextAction string             `json:"next_action"`
@@ -280,29 +323,37 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		Summary    string             `json:"summary"`
 		Evidence   []string           `json:"evidence"`
 	}
-	if len(reviewed.Text) > maxFileBytes {
-		return record, errors.New("acceptance report exceeds size limit")
+	if len(text) > maxFileBytes {
+		return errors.New("acceptance report exceeds size limit")
 	}
-	if err = decodeStrict([]byte(unfenceReport(reviewed.Text)), &output); err != nil {
-		return record, fmt.Errorf("invalid acceptance report: %w", err)
+	// Infrastructure status is not a report-shape failure, even if another
+	// field has the wrong schema. Never spend a correction turn on it.
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal([]byte(unfenceReport(text)), &envelope) == nil {
+		var status Verdict
+		if json.Unmarshal(envelope["status"], &status) == nil && status == "infrastructure_error" {
+			var summary string
+			_ = json.Unmarshal(envelope["summary"], &summary)
+			return fmt.Errorf("%w: %s", errReviewInfrastructure, summary)
+		}
 	}
-	if output.Status == "infrastructure_error" {
-		return record, errors.New("review infrastructure failure: " + output.Summary)
+	if err := decodeStrict([]byte(unfenceReport(text)), &output); err != nil {
+		return fmt.Errorf("invalid acceptance report: %w", err)
 	}
 	if (output.Status != Passed && output.Status != Failed && output.Status != Blocked) || !nonempty(output.Summary) || len(output.Evidence) == 0 {
-		return record, errors.New("acceptance report requires typed verdict, summary and evidence")
+		return errors.New("acceptance report requires typed verdict, summary and evidence")
 	}
 	for _, e := range output.Evidence {
 		if !nonempty(e) {
-			return record, errors.New("acceptance report contains empty evidence")
+			return errors.New("acceptance report contains empty evidence")
 		}
 	}
 	failing, findingErr := validateFindings(output.Findings)
 	if findingErr != nil {
-		return record, findingErr
+		return findingErr
 	}
 	if output.Status == Failed && len(output.Findings) == 0 {
-		return record, errors.New("failed verdict requires requirement or defect findings")
+		return errors.New("failed verdict requires requirement or defect findings")
 	}
 	if c.EvidenceSchema != 1 && output.Status != Blocked {
 		if failing {
@@ -311,16 +362,19 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 			output.Status = Passed
 		}
 	}
+	if c.EvidenceSchema != 1 && output.Status == Passed && !hasExecutedCommand(output.Evidence) {
+		return errors.New("acceptance evidence lists no executed command")
+	}
 	record.Findings = output.Findings
 	record.Checks, record.NextAction, record.NextOwner = output.Checks, output.NextAction, output.NextOwner
 	record.Verdict = output.Status
 	record.Report = output.Summary
-	if err = ValidateChecks(c, record); err != nil {
-		return record, err
+	if err := ValidateChecks(c, *record); err != nil {
+		return err
 	}
 	record.Findings = DeduplicateFindings(record.Findings)
 	record.Evidence = output.Evidence
-	return record, nil
+	return nil
 }
 
 func (runner Runner) fullSuiteInstruction() string {

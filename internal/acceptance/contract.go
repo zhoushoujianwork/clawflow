@@ -231,8 +231,31 @@ const (
 	CIVerified = "ci-verified"
 )
 
+// ReportCorrection records the one permitted formatting correction and its native run.
+type ReportCorrection struct {
+	ValidationError string `json:"validation_error"`
+	Reviewer        Native `json:"reviewer"`
+}
+
+func (r Record) validateCorrection(c Contract) error {
+	if r.Correction == nil {
+		return nil
+	}
+	n := r.Correction.Reviewer
+	if err := n.validate(c.Development, ReviewerPolicy); err != nil {
+		return err
+	}
+	if !nonempty(r.Correction.ValidationError) || n.SessionID != r.Reviewer.SessionID ||
+		n.RunID == r.Reviewer.RunID || n.RunID == r.Plan.Planner.RunID ||
+		n.Profile != r.Reviewer.Profile || n.Backend != r.Reviewer.Backend {
+		return errors.New("report correction requires the same reviewer session and a fresh run")
+	}
+	return nil
+}
+
 type Record struct {
 	BinaryID   string             `json:"binary_id,omitempty"`
+	Correction *ReportCorrection  `json:"correction,omitempty"`
 	Checks     []RequirementCheck `json:"checks,omitempty"`
 	NextAction string             `json:"next_action,omitempty"`
 	NextOwner  string             `json:"next_owner,omitempty"`
@@ -327,6 +350,9 @@ func evaluate(expected Contract, r Record, checkRequirements bool) error {
 		return errors.New("acceptance plan belongs to another attempt")
 	}
 	if err := r.Reviewer.validate(expected.Development, ReviewerPolicy); err != nil {
+		return err
+	}
+	if err := r.validateCorrection(expected); err != nil {
 		return err
 	}
 	if r.Reviewer.SessionID == r.Plan.Planner.SessionID || r.Reviewer.RunID == r.Plan.Planner.RunID {
