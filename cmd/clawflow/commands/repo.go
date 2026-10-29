@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/githubauth"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -87,6 +88,17 @@ func newRepoShowCmd() *cobra.Command {
 			r, exists := cfg.Repos[ownerRepo]
 			if !exists {
 				return fmt.Errorf("repo %q not found", ownerRepo)
+			}
+			if r.Platform == "" || r.Platform == "github" {
+				creds, err := config.LoadCredentials()
+				if err != nil {
+					return err
+				}
+				identity, err := githubauth.Resolve(cmd.Context(), ownerRepo, creds.GHToken, r.BaseURL)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("github_identity: %s\npermissions: %v\nrepository_selection: %s\n", identity.Name, identity.Permissions, identity.Selection)
 			}
 			status := "disabled"
 			if r.Enabled {

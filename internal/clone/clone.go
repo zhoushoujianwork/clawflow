@@ -19,6 +19,7 @@ import (
 // Token holds the VCS credentials used for clone authentication.
 // Passed in by the caller so clone doesn't need to load credentials itself.
 type Token struct {
+	githubApp   bool
 	GHToken     string
 	GitLabToken string
 }
@@ -54,6 +55,10 @@ func EnsureLocalCloneContext(ctx context.Context, cfg *config.Config, ownerRepo 
 		progress = io.Discard
 	}
 	protocol := cfg.Settings.ResolveCloneProtocol()
+	if cfg.Settings.GitHubApp.Enabled() && repoCfg.Platform != "gitlab" {
+		protocol = "https"
+		token = &Token{githubApp: true}
+	}
 
 	if repoCfg.LocalPath != "" {
 		expanded := ExpandHome(repoCfg.LocalPath)
@@ -211,6 +216,9 @@ func buildCloneURL(ownerRepo string, repoCfg config.Repo, token *Token, protocol
 	}
 
 	// GitHub
+	if token != nil && token.githubApp {
+		return "https://github.com/" + ownerRepo + ".git"
+	}
 	if effectiveToken != "" {
 		// https://x-access-token:<token>@github.com/owner/repo.git
 		return "https://x-access-token:" + effectiveToken + "@github.com/" + ownerRepo + ".git"

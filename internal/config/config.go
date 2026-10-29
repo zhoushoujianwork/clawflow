@@ -153,6 +153,7 @@ type PlatformSettings struct {
 
 // Settings holds global ClawFlow settings.
 type Settings struct {
+	GitHubApp   GitHubAppSettings   `yaml:"github_app,omitempty" json:"-"`
 	Platform    PlatformSettings    `yaml:"platform,omitempty"`
 	Pilot       PilotSettings       `yaml:"pilot,omitempty"`
 	Coordinator CoordinatorSettings `yaml:"coordinator,omitempty"`
@@ -965,6 +966,9 @@ func Load() (*Config, error) {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("cannot parse config: %w", err)
 		}
+		if err := cfg.Settings.GitHubApp.Validate(); err != nil {
+			return nil, err
+		}
 		if err := cfg.Save(); err != nil {
 			return nil, fmt.Errorf("cannot migrate config to %s: %w", path, err)
 		}
@@ -977,6 +981,9 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("cannot parse config: %w", err)
+	}
+	if err := cfg.Settings.GitHubApp.Validate(); err != nil {
+		return nil, err
 	}
 	return &cfg, nil
 }

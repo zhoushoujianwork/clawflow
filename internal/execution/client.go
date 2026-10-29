@@ -23,6 +23,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 )
 
 const MaxRequestBytes = 4 << 20
@@ -403,6 +404,12 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	}
 	cmd := exec.Command(command, args...)
 	cmd.Dir = req.Workspace
+	if req.PermissionMode == "bypassPermissions" {
+		env, err = gitexec.AppEnvironment(env)
+		if err != nil {
+			return result, err
+		}
+	}
 	cmd.Env = env
 	// File descriptors avoid os/exec copy goroutines whose pipes can be held
 	// open by native descendants after Offload has already returned a result.

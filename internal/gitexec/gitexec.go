@@ -115,8 +115,12 @@ func execute(ctx context.Context, original *exec.Cmd, mode string) ([]byte, erro
 	}
 	ctx, cancel := context.WithTimeout(ctx, Timeout())
 	defer cancel()
-	c := exec.CommandContext(ctx, original.Path, append([]string{"-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"}, original.Args[1:]...)...)
-	c.Dir, c.Env = original.Dir, Env(original.Env)
+	args, env, authErr := githubCredentials(ctx, original, original.Args[1:], Env(original.Env))
+	if authErr != nil {
+		return nil, authErr
+	}
+	c := exec.CommandContext(ctx, original.Path, append([]string{"-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"}, args...)...)
+	c.Dir, c.Env = original.Dir, env
 	c.Stdin, c.Stdout, c.Stderr = original.Stdin, original.Stdout, original.Stderr
 	c.ExtraFiles = original.ExtraFiles
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
