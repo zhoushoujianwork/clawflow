@@ -2,6 +2,70 @@
 
 返回 [主设计](worker-pool-design.md)。
 
+## 平台主机与客户端初始化
+
+平台管理员先按 [PostgreSQL 设置](storage-design.md) 配置数据库并运行 `clawflow db migrate`。
+在平台主机配置（不要在客户端设置 coordinator 来绕过平台连接）：
+
+```yaml
+settings:
+  coordinator:
+    enabled: true
+    listen: ":8093"
+    local_worker:
+      enabled: true
+      max_parallel: 1
+      tags: [github]
+```
+
+平台主机的 `clawflow web` 提供已有调度器和独立 HTTPS API；这是管理员配置平台的步骤，
+不是客户端注册仓库的步骤。平台需配置扫描与写回使用的 VCS 凭据，worker 需独立配置执行凭据。
+GitHub 使用 `clawflow config set-token <token>`（repo、read:org），GitLab 使用
+`clawflow config set-gitlab-token <token>`（api）；让用户私下输入实际 secret。凭据保存在
+权限 0600 的 `~/.clawflow/config/credentials.yaml`，`GH_TOKEN` / `GITLAB_TOKEN` 优先。
+VCS token 与平台 admin/worker token 是不同凭据。平台执行份额由同机 worker 通过正常 worker API 领取；
+没有匹配标签的任务保持 pending。已有启用仓库无需重新注册。
+
+在平台主机分别创建客户端管理 token 和每台机器的执行 token：
+
+```sh
+umask 077
+clawflow worker token create --name client-admin --scope admin > client-admin.token
+clawflow worker token create --name laptop --scope worker > laptop.token
+clawflow worker token list
+clawflow worker token revoke --name laptop
+```
+
+create 仅在 stdout 输出一次 secret，证书 SHA-256 指纹输出到 stderr；list 不显示 secret/hash。
+通过私有渠道分发对应 token 文件和可信指纹，禁止提交或写进 issue/日志。同名 token 不覆盖，
+撤销后需使用新名称创建替代 token。admin 访问 `/admin/v1`，worker 访问 `/worker/v1`，权限不互通。
+客户端执行主文档的 `platform login`；登录验证成功后保存 URL、token 文件路径和可选指纹，
+后续 `repo add/list/set/enable/disable` 访问平台，不修改客户端仓库配置。其他本地命令不要
+当作远程管理接口；例如本地 `repo show` 不能验证平台注册。平台拒绝 `--local-path`。
+
+## 添加 worker 与凭据亲和性
+
+worker 机器配置自己的 `settings.execution.profile`（由 Offload 管理凭据和模型），
+并配置执行所需的 GitHub/GitLab 凭据；不要复制平台的 admin token 来执行任务。
+使用主文档的 worker 命令；`--fingerprint` 对 worker 必填，`--roles operator,acceptance`
+可声明执行角色。默认角色为 operator；验收容量需要声明 acceptance。
+`--tags` 应包含任务要求的平台标签：GitHub 为 `github`，GitLab 为 `gitlab`，自定义实例
+为其小写 hostname。worker 也自动携带 `host-<hostname>` 标签。
+
+只有某机器具备的凭据可通过附加标签约束，例如：
+
+```sh
+clawflow worker --coordinator https://platform.example.com:8093 \
+  --token-file /private/path/laptop.token --fingerprint <SHA-256> \
+  --tags github,creds-laptop --run-untagged=false --roles operator,acceptance
+```
+
+仓库 `worker_tags`、`worker_tags_by_kind` 或 issue `worker:creds-laptop` 标签决定匹配；
+验收任务也继承 issue 的 worker 标签。未匹配任务不会回退到平台同机 worker。
+启动后用 `clawflow platform status` 查看在线 worker 和队列摘要；成功启动进程不等于完成任务。
+新增容量不需要启动 `run`、web scheduler 或在 worker 上启用仓库。
+客户端 `run --local` 是显式调试例外，不能用作托管注册或连接失败时的回退。
+
 ## 数据与迁移
 
 复用 internal/store 的 GORM PostgreSQL 连接和版本迁移，版本 2 创建：
@@ -24,7 +88,7 @@ Claim 先锁 worker 行，并统计其 leased 任务数以保证 max_parallel。
 未清理的过期租约仍占槽位，调用方应定期执行 ExpireLeases。
 worker 注册必须显式提供 run_untagged（协议默认 true 应由 API 层设置），max_parallel 必须大于零。
 任务 tags 必须是 worker tags 的子集；空 tags 只匹配 run_untagged=true。
-roles 和 backend/model 当前仅保存元数据，后续调度策略由相应切片实现。
+roles 区分 operator 与 acceptance 容量；backend/model 保存执行元数据。
 
 候选按 priority 升序（数字越小越优先）、queue_position 升序、created_at 升序排序，
 同时间以 id 稳定排序。使用 SELECT FOR UPDATE SKIP LOCKED 逐行检查。
@@ -56,7 +120,7 @@ ListTokens 仅返回元数据。撤销不可恢复；HTTP 层复用 VerifyToken 
 
 仅在 settings.coordinator.enabled=true 时，clawflow web 启动独立 HTTPS
 listener；settings.coordinator.listen 默认为 :8093。监听失败使启动失败，
-Web 退出时关闭 worker listener。此入口不提供 dashboard、配置或 merge API。
+Web 退出时关闭 worker listener。此入口不提供 dashboard 或 merge API；另有 admin token 保护的平台注册与状态 API。
 
 首次启动或 worker token create 会在 ~/.clawflow/data/coordinator/coordinator.pem
 原子创建 ECDSA P-256 自签证书及私钥（合并 PEM，权限 0600），后续复用。
@@ -64,7 +128,7 @@ Web 退出时关闭 worker listener。此入口不提供 dashboard、配置或 m
 输出；启动时显示，token create 将指纹写 stderr、一次性 secret 写 stdout，
 便于安全重定向 token 文件。远程 worker 必须校验该指纹。
 
-所有端点均为 POST，带 Authorization: Bearer <token>，JSON 请求上限 1 MiB，
+worker 端点均为 POST，带 Authorization: Bearer <worker-token>，JSON 请求上限 1 MiB，
 请求处理限时 10 秒，并设置 header/read/write/idle 超时。
 worker 身份固定为 token 名称，不能从请求 body 指定其他身份：
 
