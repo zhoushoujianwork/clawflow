@@ -212,6 +212,11 @@ func attemptAutoMergeResult(a autoMergeAttempt) mergeResult {
 	if err := a.ctx.Err(); err != nil {
 		return blocked(mergeReasonCanceled, err)
 	}
+	releaseMerge, mergeErr := mergeRepoLock(a.repo)
+	if mergeErr != nil {
+		return blocked("repo_merge_busy", mergeErr)
+	}
+	defer releaseMerge()
 	if a.issueNum > 0 {
 		labels, err := a.client.GetIssueLabels(a.repo, a.issueNum)
 		if err != nil || hasLabel(labels, "clawflow-skip") {

@@ -36,6 +36,13 @@ func harvestFixture(t *testing.T) (*acceptanceFake, func() string, *int) {
 	}
 	runLog = lg
 	calls := 0
+	oldLaunch := launchHarvestFn
+	launchHarvestFn = func(ctx context.Context, task harvestTask, _ int) error {
+		if failure := harvestRun(ctx, task.client, func(context.Context) {}, task.repo, task.rc, task.pr, extractClosesIssue(task.pr.Body), task.timeout); failure != nil {
+			return errors.New("harvest failed")
+		}
+		return nil
+	}
 	oldFn := runAcceptanceFn
 	runAcceptanceFn = func(ctx context.Context, c vcs.Client, repo string, pr int) (acceptance.Record, error) {
 		calls++
@@ -45,6 +52,7 @@ func harvestFixture(t *testing.T) (*acceptanceFake, func() string, *int) {
 		lg.Close()
 		runLog = old
 		runAcceptanceFn = oldFn
+		launchHarvestFn = oldLaunch
 	})
 	return f, func() string {
 		b, err := os.ReadFile(filepath.Join(clog.LogsDir(), "run.log"))
@@ -183,16 +191,20 @@ func TestHarvestRunTimeoutClampedToWatchdog(t *testing.T) {
 	}
 }
 
-func TestHarvestOneRunPerRepoPerPass(t *testing.T) {
+func TestHarvestUpToRepoLimitPerPass(t *testing.T) {
 	f, _, _ := harvestFixture(t)
-	f.openPRs = []vcs.PR{f.pr, {Number: 12, Title: "Second", Body: "Fixes #43"}}
+	f.openPRs = []vcs.PR{f.pr, f.pr, f.pr}
+	for i := range f.openPRs {
+		f.openPRs[i].Number = 11 + i
+	}
+	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return harvestMultiFake{f}, nil }
 	runs := 0
 	runAcceptanceFn = func(context.Context, vcs.Client, string, int) (acceptance.Record, error) {
 		runs++
 		return acceptance.Record{}, errors.New("stop")
 	}
 	failed := harvest(t, "", 0)
-	if runs != 1 || len(failed) != 1 {
+	if runs != 3 || len(failed) != 3 {
 		t.Fatalf("runs=%d failed=%v", runs, failed)
 	}
 }

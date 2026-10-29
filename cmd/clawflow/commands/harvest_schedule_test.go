@@ -65,6 +65,7 @@ func (f harvestMultiFake) GetPR(_ string, n int) (vcs.PR, error) {
 
 func TestHarvestFairnessAndSkipLogsAcrossPasses(t *testing.T) {
 	f, readLog, _ := harvestFixture(t)
+	setHarvestRepo(t, func(r *config.Repo) { r.AcceptanceMaxParallel = 1 })
 	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return harvestMultiFake{f}, nil }
 	older := f.pr
 	older.Number = 10

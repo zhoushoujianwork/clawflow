@@ -298,7 +298,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	}
 
 	// Per-repo run locks: a pass locks only the repositories it processes, so
-	// a long pass for repo A (operators, 7-12 min acceptance harvest) does not
+	// a long operator pass for repo A does not
 	// block repos B and C. A repo-scoped pass (--repo R) locks R here; an
 	// unscoped pass locks its candidates once the config is loaded below. On
 	// contention an untargeted pass logs run/skip and exits cleanly so
@@ -1417,6 +1417,12 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 // from concurrent workers stays disentangleable.
 func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool, failed bool) {
 	j.result = &jobResult{Status: "skipped"}
+	releaseSlot, slotErr := configuredAgentSlot(ctx)
+	if slotErr != nil {
+		runLog.Info("run/agent_slot_busy", "repo", j.repo, "err", slotErr.Error())
+		return false, false, false
+	}
+	defer releaseSlot()
 	originalClient, originalCfg := j.client, j.repoCfg
 	if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
 		rc.SetRequestContext(ctx)
