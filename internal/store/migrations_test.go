@@ -16,6 +16,21 @@ import (
 
 func noop(*gorm.DB) error { return nil }
 
+func TestRegistryPreservesWorkflowBeforeTokenScope(t *testing.T) {
+	previous := 0
+	names := map[int]string{}
+	for _, migration := range store.Migrations {
+		if migration.Version <= previous || migration.Up == nil {
+			t.Fatalf("invalid migration after version %d: %+v", previous, migration)
+		}
+		names[migration.Version] = migration.Name
+		previous = migration.Version
+	}
+	if names[4] != "durable_workflow" || names[5] != "coordinator_token_scope" {
+		t.Fatalf("workflow and token scope migrations must retain distinct versions: %v", names)
+	}
+}
+
 func countRows(t *testing.T, s *store.Store) int64 {
 	t.Helper()
 	var n int64
