@@ -18,7 +18,8 @@ clawflow worker --coordinator https://HOST:8093 \
 
 `--run-untagged` 默认开启，可用 `--run-untagged=false` 禁止无标签任务。
 Worker 自动添加小写且去掉 `.local` 后缀的 `host-<hostname>` 标签。
-任务的所有标签都必须满足；平台标签（如 `github`）需通过 `--tags` 显式声明。
+任务的所有标签都必须满足；任务标签来自仓库 `worker_tags`、`worker_tags_by_kind` 和 issue 的 `worker:<tag>`。
+平台类型和 VCS 地址不会自动成为任务标签；如需按平台隔离，应在仓库和 worker 两侧显式配置相同标签（如 `github`）。
 使用 `--roles acceptance` 运行独立验收，或 `--roles operator,acceptance` 同时支持两类任务。
 
 每个空闲槽位领取一个任务，空队列每 5 秒重试。执行期间每 30 秒续租；
@@ -137,5 +138,7 @@ settings:
 token 保存在状态目录 `data/coordinator/local-worker.token`，权限为 `0600`，不要提交或同步。
 `local_worker` 默认关闭，`max_parallel` 默认 1。任务仍必须匹配全部标签，不会回退到主机直接执行。
 例如 `worker:creds-laptop` 任务及其验收，只能由带有 `creds-laptop` 标签的 worker 领取。
+仅领取凭据任务可用 `clawflow worker --tags creds-laptop --run-untagged=false`（另需提供连接参数）；
+若仓库另有显式标签要求，worker 也必须携带这些标签。
 未匹配的任务保持 pending，看板显示等待的标签；任务表显示持有租约的 worker，仓库栏显示所属平台。
 全局 `max_concurrent_agents` 和仓库 `max_in_flight` 在平台领取租约时执行，跨所有 worker 共享。

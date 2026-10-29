@@ -213,7 +213,7 @@ func TestWorkerAcceptanceUsesCoordinatorProvenance(t *testing.T) {
 func TestAcceptanceTaskTagsOverride(t *testing.T) {
 	rc := config.Repo{WorkerTags: []string{"dev"}, WorkerTagsByKind: map[string][]string{"acceptance": {"review"}}}
 	task, _ := coordinatorTask(&runJob{repo: "o/r", repoCfg: rc, op: &operator.Operator{Name: "acceptance"}, sub: &operator.Subject{Number: 42, Labels: []string{"worker:linux"}}}, time.Minute)
-	if task.Kind != "acceptance" || len(task.Tags) != 3 || task.Tags[0] != "github" || task.Tags[1] != "linux" || task.Tags[2] != "review" {
+	if task.Kind != "acceptance" || !reflect.DeepEqual(task.Tags, []string{"linux", "review"}) {
 		t.Fatalf("wrong task tags: %+v", task)
 	}
 }
@@ -348,7 +348,7 @@ func TestAcceptanceDevelopmentWorkerBaseMerge(t *testing.T) {
 func TestAcceptanceInheritsCredentialLabelWithKindOverride(t *testing.T) {
 	rc := config.Repo{WorkerTags: []string{"dev"}, WorkerTagsByKind: map[string][]string{"acceptance": {"review"}}}
 	task, payload := coordinatorTask(&runJob{repo: "o/r", repoCfg: rc, op: &operator.Operator{Name: "acceptance"}, sub: &operator.Subject{Number: 42, Labels: []string{"worker:creds-laptop"}}}, time.Minute)
-	want := []string{"creds-laptop", "github", "review"}
+	want := []string{"creds-laptop", "review"}
 	if !reflect.DeepEqual(task.Tags, want) || !reflect.DeepEqual(payload.Tags, want) {
 		t.Fatalf("credential label lost: task=%v payload=%v", task.Tags, payload.Tags)
 	}
