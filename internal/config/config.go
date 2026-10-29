@@ -87,10 +87,12 @@ type Repo struct {
 
 // ExecutionSettings selects machine-local Offload profiles. Profiles own model authentication.
 type ExecutionSettings struct {
-	Command      string            `yaml:"command,omitempty" json:"command"`
-	Profile      string            `yaml:"profile,omitempty" json:"profile"`
-	RoleProfiles map[string]string `yaml:"role_profiles,omitempty" json:"role_profiles,omitempty"`
-	CodexSandbox string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
+	// TestDatabaseDSN is a machine-local secret passed only through the agent environment.
+	TestDatabaseDSN string            `yaml:"test_database_dsn,omitempty" json:"-"`
+	Command         string            `yaml:"command,omitempty" json:"command"`
+	Profile         string            `yaml:"profile,omitempty" json:"profile"`
+	RoleProfiles    map[string]string `yaml:"role_profiles,omitempty" json:"role_profiles,omitempty"`
+	CodexSandbox    string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
 }
 
 // DatabaseSettings configures the required PostgreSQL store. The DSN is a

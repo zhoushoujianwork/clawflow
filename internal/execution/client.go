@@ -381,6 +381,15 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if env == nil {
 		env = os.Environ()
 	}
+	if c.TestDatabaseDSN != "" && req.PermissionMode == "bypassPermissions" {
+		filtered := make([]string, 0, len(env)+1)
+		for _, kv := range env {
+			if !strings.HasPrefix(kv, "CLAWFLOW_TEST_DATABASE_DSN=") {
+				filtered = append(filtered, kv)
+			}
+		}
+		env = append(filtered, "CLAWFLOW_TEST_DATABASE_DSN="+c.TestDatabaseDSN)
+	}
 	if redact(req.Prompt, env) != req.Prompt || redact(req.Instructions, env) != req.Instructions || redact(strings.Join(args, " "), env) != strings.Join(args, " ") {
 		return result, errors.New("Offload request contains an environment secret")
 	}
@@ -728,7 +737,7 @@ func redact(s string, env []string) string {
 	for _, kv := range env {
 		k, v, ok := strings.Cut(kv, "=")
 		k = strings.ToUpper(k)
-		if ok && v != "" && (strings.HasSuffix(k, "_TOKEN") || strings.HasSuffix(k, "_KEY") || strings.HasSuffix(k, "_SECRET") || strings.HasSuffix(k, "_PASSWORD")) {
+		if ok && v != "" && (strings.HasSuffix(k, "_TOKEN") || strings.HasSuffix(k, "_KEY") || strings.HasSuffix(k, "_SECRET") || strings.HasSuffix(k, "_PASSWORD") || strings.HasSuffix(k, "_DSN")) {
 			s = strings.ReplaceAll(s, v, "[redacted]")
 		}
 	}
