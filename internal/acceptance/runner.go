@@ -324,6 +324,27 @@ func applyReviewReport(c Contract, record *Record, text string) error {
 			return errors.New("unstructured findings are runner-owned")
 		}
 	}
+	normalized := normalizeProcessFindings(output.Findings)
+	if normalized {
+		output.Summary += " Historical/process-only findings are informational; the verdict follows the remaining criteria."
+	}
+	if normalized && output.Status == Failed {
+		// Only the remaining checks and concrete findings may determine failure.
+		output.Status = Passed
+		output.NextOwner, output.NextAction = "runner", "Apply CI and merge gates"
+		for _, check := range output.Checks {
+			if check.Status == Blocked {
+				output.Status = Blocked
+				output.NextOwner, output.NextAction = "owner", string(check.Missing)
+			}
+		}
+		for _, f := range output.Findings {
+			if f.Failing() {
+				output.Status = Failed
+				output.NextOwner, output.NextAction = "implementation", "Repair the demonstrated defects, then run fresh acceptance"
+			}
+		}
+	}
 	failing, findingErr := validateFindings(output.Findings)
 	if findingErr != nil {
 		return findingErr
