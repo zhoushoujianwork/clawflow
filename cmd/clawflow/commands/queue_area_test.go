@@ -83,6 +83,26 @@ func TestQueueAreaMixedRootAndNestedFiles(t *testing.T) {
 	}
 }
 
+func TestQueueAreaExplicitRootIndependentIssueStarts(t *testing.T) {
+	for _, body := range []string{"Edit `./go.mod`", "Edit `go.mod`", "Edit `internal/a.go` and `./go.mod`"} {
+		t.Run(body, func(t *testing.T) {
+			in := areaInput()
+			in.MaxInFlight = 2
+			in.Issues[0].Body = body
+			in.PRFiles = func(int) ([]string, error) { return []string{"tools/go.mod", "internal/go.mod"}, nil }
+			p := planRepoQueue(in)
+			if p.Err != "" || !p.Picks[1] || !p.Picks[2] {
+				t.Fatalf("independent root and nested files must start in parallel: %+v", p)
+			}
+			in.PRFiles = func(int) ([]string, error) { return []string{"go.mod"}, nil }
+			p = planRepoQueue(in)
+			if p.Err != "" || p.Picks[1] || !p.Picks[2] || p.State.Entries[0].Reason != "area_busy" || p.State.Entries[0].BlockingPR != 9 {
+				t.Fatalf("the same root file must still park: %+v", p)
+			}
+		})
+	}
+}
+
 func TestQueueAreaStarvationAndReset(t *testing.T) {
 	in := areaInput()
 	in.Issues = in.Issues[:1]

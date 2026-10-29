@@ -49,3 +49,22 @@ func TestEstimateMixedRootAndNestedFiles(t *testing.T) {
 		})
 	}
 }
+
+func TestExplicitRootFilesRemainIndependent(t *testing.T) {
+	for _, text := range []string{"Edit `./go.mod`", "Edit `go.mod`", "Edit `internal/a.go` and `./go.mod`"} {
+		files := EstimateFiles(text)
+		if FilesOverlap(files, []string{"tools/go.mod", "internal/go.mod"}) {
+			t.Errorf("root file must not overlap nested names: %q: %v", text, files)
+		}
+		if !FilesOverlap(files, []string{"go.mod"}) {
+			t.Errorf("root file overlap lost: %q: %v", text, files)
+		}
+	}
+	files := EstimateFiles("Edit `internal/acceptance/runner.go`, `contract.go` and `store.go`")
+	if !FilesOverlap(files, []string{"internal/acceptance/contract.go", "internal/acceptance/store.go"}) {
+		t.Fatal("sibling abbreviations must retain their directory")
+	}
+	if FilesOverlap(files, []string{"unrelated/contract.go", "unrelated/store.go"}) {
+		t.Fatal("sibling abbreviations must not match unrelated directories")
+	}
+}

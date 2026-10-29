@@ -26,10 +26,11 @@ func EstimateFiles(text string) []string {
 		if name == "" || strings.HasSuffix(name, "/") || (!strings.ContainsAny(name, "./") && !quoted && name != "Dockerfile" && name != "Makefile") {
 			continue
 		}
+		rootRelative := strings.HasPrefix(name, "./")
 		name = strings.TrimPrefix(name, "./")
 		if strings.Contains(name, "/") {
 			dir = path.Dir(name)
-		} else if dir != "" {
+		} else if dir != "" && !rootRelative {
 			// A bare name may be a root file, not a sibling abbreviation.
 			// Keep both hints so directory inheritance cannot hide it.
 			out = append(out, name)
@@ -48,7 +49,7 @@ func storeMigration(name string) bool {
 func FilesOverlap(estimated, changed []string) bool {
 	for _, a := range estimated {
 		for _, b := range changed {
-			if a == b || (!strings.Contains(a, "/") && a == path.Base(b)) || (storeMigration(a) && storeMigration(b)) {
+			if a == b || (storeMigration(a) && storeMigration(b)) {
 				return true
 			}
 		}
