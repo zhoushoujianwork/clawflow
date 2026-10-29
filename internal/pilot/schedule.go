@@ -319,16 +319,10 @@ func wakeWithEvidence(ctx context.Context, p *project.Project, cfg *config.Confi
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	// Cap the session's own dollar spend, independent of the wall-clock
-	// timeout above. Without this, a wake that wanders into a long tool-call
-	// loop is only stopped by the 60min deadline, which SIGKILLs the
-	// subprocess and discards whatever PILOT-RESULT it hadn't yet written —
-	// the entire (already paid-for) wake is wasted. --max-budget-usd instead
-	// lets claude see its remaining budget each turn and wrap up with a
-	// result before hitting the ceiling, so most of the wake's work still
-	// lands. Two outlier wakes ($34 / 119 turns, $20 / 114 turns) motivated
-	// this; typical wakes run $2-$16.
-	ctx = operator.WithMaxBudgetUSD(ctx, cfg.Settings.EffectivePilotMaxBudgetUSD())
+	// No dollar cap is forwarded: Offload executors reject positive budgets
+	// (unsupported_budget), which made every wake fail before launch. Wakes
+	// stay bounded by the ops budget, the cooldown and the timeout above;
+	// Settings.PilotMaxBudgetUSD is kept only for config compatibility.
 
 	// Pilot wakes happen inside `clawflow run` (process owns the run.log
 	// handle) but emitting them on a separate "pilot" log keeps the run
