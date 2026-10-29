@@ -249,7 +249,7 @@ Order is `(priority, rank, created_at, key)`:
 
 - Priority is the label `P0`..`P3` (exact, case-sensitive; the highest wins; none = `P2`). Look-alikes such as `p1` or `priority:1` are ignored and reported once in `queue/format_warning`.
 - Rank is the manual order in `~/.clawflow/data/queue.json` within a tier. Change it with `clawflow queue move owner/repo#12 --top | --bottom | --before K | --after K`.
-- Dependencies: one body line `Depends on: #12, owner/repo#34` (max 10). Items wait while a dependency is open; a cycle blocks all its members (`dependency_cycle`).
+- Dependencies: body lines starting with `Depends on: #12, owner/repo#34` are combined in first-seen order and deduplicated (max 10 total; invalid and excess tokens are ignored with warnings). Items wait while a dependency is open; a cycle blocks all its members (`dependency_cycle`).
 
 ```bash
 clawflow queue list [--repo R] [--json]   # global order: key, tier, rank, state

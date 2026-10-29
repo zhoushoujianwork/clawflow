@@ -44,7 +44,10 @@ handles judging and closing out; do not ask the user to mark or confirm steps.
 - **To get work done**, create or update an issue in the target repository with
   `clawflow issue create` / `clawflow issue comment`, write the requirements and
   acceptance criteria in the issue body, then report the issue link. Use a
-  `Depends on: #N` line for prerequisites. Do not implement it yourself unless
+  `Depends on: #N` line for prerequisites, or several such lines. All lines are
+  combined in first-seen order and deduplicated (max 10 dependencies); tokens
+  are comma-separated `#N` or `owner/repo#N`, with warnings for invalid or
+  excess tokens. Do not implement it yourself unless
   the user explicitly asks you to.
 - **To report progress**, read the issue and its PR: labels `agent-implemented`
   (PR opened), `agent-skipped` (blocked; the latest comment says what is

@@ -558,14 +558,17 @@ type dependencyClient struct {
 	state string
 }
 
-func (c *dependencyClient) GetIssue(string, int) (*vcs.Issue, error) {
+func (c *dependencyClient) GetIssue(_ string, number int) (*vcs.Issue, error) {
+	if number == 5 {
+		return &vcs.Issue{State: "closed"}, nil
+	}
 	return &vcs.Issue{State: c.state}, nil
 }
 func TestCoordinatorEnqueueHonorsDependsOn(t *testing.T) {
 	withRunLog(t)
 	for _, state := range []string{"open", "closed"} {
 		s := &resultStoreFake{}
-		j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7, Body: "Depends on: #6"}, client: &dependencyClient{state: state}}
+		j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7, Body: "Depends on: #5\nDepends on: #6"}, client: &dependencyClient{state: state}}
 		fired, _, err := dispatchCoordinatorJobs(context.Background(), s, []*runJob{j}, time.Minute)
 		if err != nil {
 			t.Fatal(err)

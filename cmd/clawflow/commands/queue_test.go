@@ -202,11 +202,12 @@ func TestPlanRepoQueueLabelsAndParents(t *testing.T) {
 
 func TestPlanRepoQueueDependencies(t *testing.T) {
 	a := plannerIssue(1, "2026-01-01T00:00:00Z")
-	a.Body = "Depends on: #2, other/repo#7"
-	in := plannerInput("o/r", a, plannerIssue(2, "2026-01-02T00:00:00Z"), plannerIssue(3, "2026-01-03T00:00:00Z"))
+	a.Body = "Depends on: #2\nDepends on: other/repo#7"
+	// The first-line dependency is closed; only the second line must block.
+	in := plannerInput("o/r", a, plannerIssue(3, "2026-01-03T00:00:00Z"))
 	in.DepOpen = func(k queue.Key) bool { return k.Repo == "other/repo" && k.Number == 7 }
 	p := planRepoQueue(in)
-	if got := pickedNumbers(p); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+	if got := pickedNumbers(p); len(got) != 1 || got[0] != 3 {
 		t.Fatalf("picked = %v", got)
 	}
 	if lbl := p.Result.Entries[0].Label(); lbl != "waiting:dependency" {
