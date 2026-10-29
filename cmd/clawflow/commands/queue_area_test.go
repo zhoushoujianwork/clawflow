@@ -45,6 +45,24 @@ func TestQueueAreaBusyAndIndependentWork(t *testing.T) {
 	}
 }
 
+func TestQueueAreaNamedFilesWithoutKnownExtension(t *testing.T) {
+	for _, name := range []string{"go.mod", "Dockerfile", "api/service.proto", "Buildfile", "scripts/build", ".editorconfig"} {
+		t.Run(name, func(t *testing.T) {
+			in := areaInput()
+			in.Issues[0].Body = "Update `" + name + "`"
+			in.PRFiles = func(int) ([]string, error) { return []string{name}, nil }
+			p := planRepoQueue(in)
+			if p.Err != "" || p.Picks[1] || !p.Picks[2] {
+				t.Fatalf("overlapping named file must park while independent work starts: %+v", p)
+			}
+			e := p.State.Entries[0]
+			if e.State != queue.StateParked || e.Reason != "area_busy" || e.BlockingPR != 9 {
+				t.Fatalf("missing area hold: %+v", e)
+			}
+		})
+	}
+}
+
 func TestQueueAreaStarvationAndReset(t *testing.T) {
 	in := areaInput()
 	in.Issues = in.Issues[:1]

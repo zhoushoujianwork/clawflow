@@ -14,10 +14,19 @@ func TestEstimateFiles(t *testing.T) {
 		{"No explicit files", nil},
 		{"https://example.com/foo.go /tmp/private.go ../secret.go", nil},
 		{"Update ./web/src/app.tsx", []string{"web/src/app.tsx"}},
+		{"Update go.mod", []string{"go.mod"}},
+		{"Update Dockerfile", []string{"Dockerfile"}},
+		{"Update api/service.proto", []string{"api/service.proto"}},
+		{"Update `Buildfile`", []string{"Buildfile"}},
+		{"Update scripts/build", []string{"scripts/build"}},
+		{"Update `.editorconfig`.", []string{".editorconfig"}},
+		{"No explicit files.", nil},
 	} {
-		if got := EstimateFiles(tc.text); !reflect.DeepEqual(got, tc.want) {
-			t.Fatalf("%q: %v, want %v", tc.text, got, tc.want)
-		}
+		t.Run(tc.text, func(t *testing.T) {
+			if got := EstimateFiles(tc.text); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("%q: %v, want %v", tc.text, got, tc.want)
+			}
+		})
 	}
 	if !FilesOverlap([]string{"internal/store/migrations/005.sql"}, []string{"internal/store/migrations.go"}) {
 		t.Fatal("migration namespace must overlap")
