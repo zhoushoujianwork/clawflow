@@ -506,7 +506,7 @@ func workerAcquireIssueLock(_ context.Context, j *runJob) error {
 	err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name)
 	if err != nil && j.result != nil {
 		// Another run owns this issue on this host; retry under launch bounds.
-		j.result.InfraKind = "launch"
+		j.result.Status, j.result.InfraKind = "failed", "launch"
 	}
 	return err
 }
