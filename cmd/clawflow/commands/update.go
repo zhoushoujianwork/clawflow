@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/githubauth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -227,14 +228,18 @@ func fetchLatestRelease(client *http.Client) (githubRelease, error) {
 	if err != nil {
 		return release, fmt.Errorf("load GitHub credentials: %w", err)
 	}
+	identity, err := githubauth.Resolve(context.Background(), githubRepo, creds.GHToken, "")
+	if err != nil {
+		return release, err
+	}
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return release, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if creds.GHToken != "" {
-		req.Header.Set("Authorization", "Bearer "+creds.GHToken)
+	if identity.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+identity.Token)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

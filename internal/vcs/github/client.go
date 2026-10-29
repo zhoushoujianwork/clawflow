@@ -13,19 +13,26 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/githubauth"
 	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // Client calls the GitHub REST API v3.
 type Client struct {
-	token   string
-	baseURL string // default: https://api.github.com
-	http    *http.Client
-	state   *requestState
-	ctx     context.Context // optional; bounds every request (see SetRequestContext)
+	identity   string
+	login      string
+	cacheRoot  string
+	repository *atomic.Pointer[string]
+	authorized bool
+	token      string
+	baseURL    string // default: https://api.github.com
+	http       *http.Client
+	state      *requestState
+	ctx        context.Context // optional; bounds every request (see SetRequestContext)
 }
 
 // SetRequestContext binds ctx to every subsequent request so the caller's
@@ -50,15 +57,67 @@ func New(token, baseURL string) *Client {
 		baseURL = "https://api.github.com"
 	}
 	return &Client{
-		token:   token,
-		state:   &requestState{cache: map[string]cachedResponse{}},
-		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Timeout: 30 * time.Second},
+		token:      token,
+		repository: &atomic.Pointer[string]{},
+		state:      &requestState{cache: map[string]cachedResponse{}},
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		http:       &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// SetRepository supplies scope for endpoints without a repository in their path.
+func (c *Client) SetRepository(repo string) {
+	if c.repository == nil {
+		c.repository = &atomic.Pointer[string]{}
+	}
+	c.repository.Store(&repo)
+}
+
+func (c *Client) authenticated(path string) (*Client, error) {
+	if c.authorized {
+		return c, nil
+	}
+	repo := ""
+	if c.repository != nil {
+		if value := c.repository.Load(); value != nil {
+			repo = *value
+		}
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "repos" {
+		repo = parts[1] + "/" + parts[2]
+		if c.repository != nil {
+			c.repository.CompareAndSwap(nil, &repo)
+		}
+	}
+	if repo == "" {
+		return c, nil
+	}
+	id, err := githubauth.Resolve(c.reqContext(), repo, c.token, c.baseURL)
+	if err != nil {
+		return nil, err
+	}
+	clone := *c
+	clone.token = id.Token
+	clone.login = id.Login
+	clone.identity = id.Name
+	clone.authorized = true
+	if id.Name != "personal" {
+		clone.state = accountState(id.Name, c.baseURL+"\x00"+c.cacheRoot)
+		if c.cacheRoot != "" {
+			clone.UseCacheDir(c.cacheRoot)
+		}
+	}
+	return &clone, nil
 }
 
 // doOnce sends a single HTTP request and returns the response body and status.
 func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
+	selected, authErr := c.authenticated(path)
+	if authErr != nil {
+		return nil, 0, authErr
+	}
+	c = selected
 	if b := c.Budget(); time.Now().Before(b.Backoff) {
 		return nil, http.StatusTooManyRequests, &retry.HTTPError{Status: 429, RateLimited: true, After: time.Until(b.Backoff)}
 	}
@@ -68,7 +127,7 @@ func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
 	}
 
 	pass, _ := c.reqContext().Value(passKey{}).(*Pass)
-	key := fmt.Sprintf("%x:%s", sha256.Sum256([]byte(c.baseURL+"\x00"+c.token)), path)
+	key := fmt.Sprintf("%x:%s", sha256.Sum256([]byte(c.baseURL+"\x00"+c.accountIdentity())), path)
 	if pass != nil && method == "GET" && openList(path) {
 		pass.Lock()
 		defer pass.Unlock()
@@ -139,7 +198,7 @@ func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
 		if !locked {
 			pass.Lock()
 		}
-		pass.Budgets[c.baseURL] = c.Budget()
+		pass.Budgets[c.budgetKey()] = c.Budget()
 		if locked && err == nil && status == 200 {
 			pass.responses[key] = passResponse{data, status, err}
 		}
@@ -985,6 +1044,11 @@ func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue
 	default:
 		return nil, fmt.Errorf("invalid state %q (want open|closed|all)", state)
 	}
+	selected, authErr := c.authenticated("/repos/" + repo + "/")
+	if authErr != nil {
+		return nil, authErr
+	}
+	c = selected
 	path := fmt.Sprintf("/search/issues?q=%s&per_page=%d", url.QueryEscape(q), limit)
 	data, status, err := c.do("GET", path, nil)
 	if err != nil {
@@ -1434,15 +1498,25 @@ func (c *Client) PublishAcceptanceComment(repo string, pr int, report vcs.Accept
 	if err != nil {
 		return err
 	}
-	data, _, err := c.do("GET", "/user", nil)
+	selected, err := c.authenticated("/repos/" + repo + "/")
 	if err != nil {
 		return err
 	}
-	var actor struct {
+	c = selected
+	actor := struct {
 		Login string `json:"login"`
+	}{Login: c.login}
+	if c.identity == "personal" || c.identity == "" {
+		data, _, err := c.do("GET", "/user", nil)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &actor); err != nil {
+			return err
+		}
 	}
-	if err := json.Unmarshal(data, &actor); err != nil {
-		return err
+	if actor.Login == "" || actor.Login == "[bot]" {
+		return fmt.Errorf("github: authenticated actor unavailable")
 	}
 	return vcs.UpsertAcceptanceComment(report, actor.Login,
 		func() ([]vcs.IssueComment, error) { return c.ListIssueCommentsDetail(repo, pr) },

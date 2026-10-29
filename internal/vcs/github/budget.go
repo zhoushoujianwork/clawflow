@@ -41,15 +41,28 @@ func accountState(token, base string) *requestState {
 }
 
 // UseCacheDir enables private, credential-partitioned conditional caches across CLI passes.
+func (c *Client) budgetKey() string {
+	if c.identity != "" && c.identity != "personal" {
+		return c.baseURL + "/" + c.identity
+	}
+	return c.baseURL
+}
+func (c *Client) accountIdentity() string {
+	if c.identity != "" && c.identity != "personal" {
+		return c.identity
+	}
+	return c.token
+}
 func (c *Client) UseCacheDir(root string) {
-	c.state = accountState(c.token, c.baseURL+"\x00"+root)
+	c.cacheRoot = root
+	c.state = accountState(c.accountIdentity(), c.baseURL+"\x00"+root)
 	s := c.state
 	s.Lock()
 	defer s.Unlock()
 	if s.dir != "" {
 		return
 	}
-	s.dir = filepath.Join(root, fmt.Sprintf("%x", sha256.Sum256([]byte(c.baseURL+"\x00"+c.token))))
+	s.dir = filepath.Join(root, fmt.Sprintf("%x", sha256.Sum256([]byte(c.baseURL+"\x00"+c.accountIdentity()))))
 	var disk struct {
 		Budget
 		Logged time.Time `json:"logged_until"`
@@ -82,10 +95,22 @@ func privateJSON(path string, value any) {
 func (s *requestState) cachePath(path string) string {
 	return filepath.Join(s.dir, fmt.Sprintf("%x.json", sha256.Sum256([]byte(path))))
 }
-func (c *Client) Budget() Budget { c.state.Lock(); defer c.state.Unlock(); return c.state.budget }
+func (c *Client) Budget() Budget {
+	if selected, err := c.authenticated(""); err == nil {
+		c = selected
+	}
+	c.state.Lock()
+	defer c.state.Unlock()
+	return c.state.budget
+}
 
 // PollingAllowed reserves ten percent of the primary budget for delivery and writes.
 func (c *Client) PollingAllowed() bool {
+	selected, err := c.authenticated("")
+	if err != nil {
+		return false
+	}
+	c = selected
 	b := c.Budget()
 	if p, _ := c.reqContext().Value(passKey{}).(*Pass); p != nil {
 		p.Lock()
