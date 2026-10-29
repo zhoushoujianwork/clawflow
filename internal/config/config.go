@@ -46,6 +46,9 @@ type Repo struct {
 	CITimeout          int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
+	// AcceptanceMaxParallel caps simultaneous independent reviews; zero defaults to 3.
+	AcceptanceMaxParallel int `yaml:"acceptance_max_parallel,omitempty" json:"acceptance_max_parallel,omitempty"`
+
 	// AcceptanceOverlapCI defaults to CIRequired when omitted.
 	AcceptanceOverlapCI *bool `yaml:"acceptance_overlap_ci,omitempty" json:"acceptance_overlap_ci,omitempty"`
 	// SelfUpgrade, when true, makes a `clawflow run` pass that confirmed a
@@ -1219,4 +1222,12 @@ func (r Repo) AcceptanceOverlapsCI() bool {
 		return *r.AcceptanceOverlapCI
 	}
 	return r.CIRequired
+}
+
+// AcceptanceParallelLimit returns the per-repository review limit (default 3).
+func (r Repo) AcceptanceParallelLimit() int {
+	if r.AcceptanceMaxParallel > 0 {
+		return r.AcceptanceMaxParallel
+	}
+	return 3
 }

@@ -58,3 +58,31 @@ func TestAcceptanceOverlapDefaultsAndRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptanceParallelLimitAndSync(t *testing.T) {
+	for _, limit := range []int{0, 1, 3, 7} {
+		r := Repo{AcceptanceMaxParallel: limit}
+		want := limit
+		if want == 0 {
+			want = 3
+		}
+		if r.AcceptanceParallelLimit() != want {
+			t.Fatalf("limit %d", limit)
+		}
+		data, err := yaml.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var loaded Repo
+		if err := yaml.Unmarshal(data, &loaded); err != nil {
+			t.Fatal(err)
+		}
+		if loaded.AcceptanceMaxParallel != limit || loaded.AcceptanceParallelLimit() != want {
+			t.Fatalf("round trip: %+v", loaded)
+		}
+		synced := fromSyncable(toSyncable(r), "")
+		if synced.AcceptanceMaxParallel != limit {
+			t.Fatalf("sync lost acceptance limit: %+v", synced)
+		}
+	}
+}

@@ -125,6 +125,7 @@ func newAcceptanceCmd() *cobra.Command {
 		}
 		root.AddCommand(cmd)
 	}
+	root.AddCommand(newHarvestReviewCmd())
 	return root
 }
 
@@ -575,6 +576,11 @@ func conditionalAcceptedMerge(ctx context.Context, client vcs.Client, repo strin
 var acceptanceMergeClient = newVCSClientForRepo
 
 func explicitAcceptanceMerge(ctx context.Context, client vcs.Client, repo string, pr int) error {
+	releaseMerge, err := mergeRepoLock(repo)
+	if err != nil {
+		return err
+	}
+	defer releaseMerge()
 	required, err := acceptanceEnrollment(repo)
 	if err != nil {
 		return err
@@ -709,6 +715,11 @@ func acceptanceReviewerEnv(env []string) []string {
 
 func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Record, error) {
 	ctx = gitexec.WithRepo(ctx, repo)
+	releaseSlot, err := configuredAgentSlot(ctx)
+	if err != nil {
+		return acceptance.Record{}, err
+	}
+	defer releaseSlot()
 	unlock, err := acceptanceLock(repo, prNumber)
 	if err != nil {
 		return acceptance.Record{}, err
