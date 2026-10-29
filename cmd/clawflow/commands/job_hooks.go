@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -39,14 +40,7 @@ type jobResult struct {
 	Effects           []jobEffect     `json:"effects,omitempty"`
 }
 
-type jobEffect struct {
-	Kind   string   `json:"kind"`
-	Repo   string   `json:"repo"`
-	Number int      `json:"number"`
-	Body   string   `json:"body,omitempty"`
-	RunID  string   `json:"run_id,omitempty"`
-	Labels []string `json:"labels,omitempty"`
-}
+type jobEffect = coordinator.EffectRequest
 
 // fencedClient only buffers coordination writes. A cancelled lease cannot
 // append effects; merging is exclusively a coordinator responsibility.
@@ -83,6 +77,9 @@ func (c *fencedClient) RemoveLabel(repo string, n int, labels ...string) error {
 }
 func (c *fencedClient) CloseIssue(repo string, n int) error {
 	return c.record(jobEffect{Kind: "close-issue", Repo: repo, Number: n})
+}
+func (c *fencedClient) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
+	return vcs.PR{}, c.record(jobEffect{Kind: "pr-create", Repo: repo, Head: opts.Head, Base: opts.Base, Title: opts.Title, Body: opts.Body})
 }
 func (c *fencedClient) MergePR(string, int) error { return errors.New("worker cannot merge") }
 func (c *fencedClient) MergePRAtHead(string, int, string) (string, error) {
@@ -140,4 +137,28 @@ func (c *fencedClient) GetCIEvidence(repo string, n int) (vcs.CIEvidence, error)
 		return reader.GetCIEvidence(repo, n)
 	}
 	return vcs.CIEvidence{}, vcs.ErrNotSupported
+}
+
+// Unsupported writes never fall through to the embedded worker VCS client.
+func (c *fencedClient) CreateIssue(string, string, string) (vcs.Issue, error) {
+	return vcs.Issue{}, errors.New("worker cannot create issues")
+}
+func (c *fencedClient) UpdateIssue(string, int, vcs.IssueUpdate) (vcs.Issue, error) {
+	return vcs.Issue{}, errors.New("worker cannot edit issues")
+}
+func (c *fencedClient) DeleteIssueComment(string, int, int64) error {
+	return errors.New("worker cannot delete comments")
+}
+func (c *fencedClient) AddSubIssue(string, int, int64) error {
+	return errors.New("worker cannot change issue hierarchy")
+}
+func (c *fencedClient) UploadAttachment(string, string) (string, error) {
+	return "", errors.New("worker cannot upload attachments")
+}
+func (c *fencedClient) InitLabels(string, []vcs.Label) error {
+	return errors.New("worker cannot initialize labels")
+}
+func (c *fencedClient) ClosePR(string, int) error { return errors.New("worker cannot close PRs") }
+func (c *fencedClient) DeleteBranch(string, string) error {
+	return errors.New("worker cannot delete remote branches")
 }

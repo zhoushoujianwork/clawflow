@@ -129,6 +129,12 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 		if n == 0 || seen[n] || (onlyIssue != 0 && onlyIssue != n) || snapshot.IsLocked(repo, n) || cfg.CoordinatorActive[n] {
 			continue
 		}
+		if cfg.CoordinatorMode {
+			if err := coordinatorPRAllowedFn(ctx, repo, listed.Number); err != nil {
+				skip(listed.Number, err)
+				continue
+			}
+		}
 		pr, err := client.GetPR(repo, listed.Number)
 		if err != nil {
 			skip(listed.Number, err)
