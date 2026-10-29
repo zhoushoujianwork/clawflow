@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +24,7 @@ type Client struct {
 	token   string
 	baseURL string // default: https://api.github.com
 	http    *http.Client
+	state   *requestState
 	ctx     context.Context // optional; bounds every request (see SetRequestContext)
 }
 
@@ -48,6 +51,7 @@ func New(token, baseURL string) *Client {
 	}
 	return &Client{
 		token:   token,
+		state:   &requestState{cache: map[string]cachedResponse{}},
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    &http.Client{Timeout: 30 * time.Second},
 	}
@@ -55,6 +59,23 @@ func New(token, baseURL string) *Client {
 
 // doOnce sends a single HTTP request and returns the response body and status.
 func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
+	if b := c.Budget(); time.Now().Before(b.Backoff) {
+		return nil, http.StatusTooManyRequests, &retry.HTTPError{Status: 429, RateLimited: true, After: time.Until(b.Backoff)}
+	}
+	stage, _ := c.reqContext().Value(stageKey{}).(string)
+	if method == http.MethodGet && (stage == "scan" || stage == "harvest" || stage == "automerge" || stage == "board" || stage == "snapshot") && !c.PollingAllowed() {
+		return nil, 0, vcs.ErrPollingDeferred
+	}
+
+	pass, _ := c.reqContext().Value(passKey{}).(*Pass)
+	key := fmt.Sprintf("%x:%s", sha256.Sum256([]byte(c.baseURL+"\x00"+c.token)), path)
+	if pass != nil && method == "GET" && openList(path) {
+		pass.Lock()
+		defer pass.Unlock()
+		if v, ok := pass.responses[key]; ok {
+			return v.data, v.status, v.err
+		}
+	}
 	var bodyBytes []byte
 	if body != nil {
 		var err error
@@ -77,16 +98,56 @@ func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
 	if bodyBytes != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	entry := cachedResponse{}
+	if method == "GET" {
+		entry = c.cached(path)
+		if entry.ETag != "" {
+			req.Header.Set("If-None-Match", entry.ETag)
+		} else if entry.Modified != "" {
+			req.Header.Set("If-Modified-Since", entry.Modified)
+		}
+	}
+	if pass != nil {
+		locked := method == "GET" && openList(path)
+		if !locked {
+			pass.Lock()
+		}
+		stage, _ := c.reqContext().Value(stageKey{}).(string)
+		if stage == "" {
+			stage = "other"
+		}
+		pass.Calls[stage]++
+		if !locked {
+			pass.Unlock()
+		}
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
+	status := resp.StatusCode
 	if err == nil {
-		err = retry.ResponseError(resp.StatusCode, resp.Header, data)
+		data, status, err = c.observe(path, method, resp, data)
+		if status == http.StatusNotModified && entry.Body != nil {
+			data, status = entry.Body, http.StatusOK
+		}
 	}
-	return data, resp.StatusCode, err
+	if pass != nil {
+		locked := method == "GET" && openList(path)
+		if !locked {
+			pass.Lock()
+		}
+		pass.Budgets[c.baseURL] = c.Budget()
+		if locked && err == nil && status == 200 {
+			pass.responses[key] = passResponse{data, status, err}
+		}
+		if !locked {
+			pass.Unlock()
+		}
+	}
+	return data, status, err
 }
 
 // isRetryableStatus reports whether an HTTP status code is worth retrying.
@@ -120,6 +181,9 @@ func (c *Client) do(method, path string, body any) ([]byte, int, error) {
 		var e error
 		data, status, e = c.doOnce(method, path, body)
 		if e != nil {
+			if errors.Is(e, vcs.ErrPollingDeferred) {
+				return retry.Permanent(e)
+			}
 			return e // network error — retryable
 		}
 		if isRetryableStatus(status) {

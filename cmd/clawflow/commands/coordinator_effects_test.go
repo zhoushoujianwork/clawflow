@@ -4,8 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
@@ -254,5 +260,93 @@ func TestCoordinatorEffectWithoutClientReturnsError(t *testing.T) {
 	}
 	if _, err := applyCoordinatorEffect(&coordinator.Task{}, &runJob{}, &coordinatorReport{}, coordinator.EffectIntent{Payload: payload}); err == nil {
 		t.Fatal("missing client must return an error")
+	}
+}
+
+func TestRateLimitedApplicationRetriesWithoutConsumingFailures(t *testing.T) {
+	calls := 0
+	err := retryRateLimited(context.Background(), func() error {
+		calls++
+		if calls == 1 {
+			return fmt.Errorf("history: %w", &retry.HTTPError{Status: 403, RateLimited: true, After: time.Millisecond})
+		}
+		return nil
+	})
+	if err != nil || calls != 2 {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	err = retryRateLimited(ctx, func() error { return &retry.HTTPError{Status: 429, RateLimited: true, After: time.Hour} })
+	var limited *retry.HTTPError
+	if !errors.As(err, &limited) || !limited.RateLimited {
+		t.Fatalf("deferred error lost identity: %v", err)
+	}
+}
+
+func TestCoordinatorRateLimitedResultRemainsPendingThenApplies(t *testing.T) {
+	db := storetest.New(t)
+	withRunLog(t)
+	ctx := context.Background()
+	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	tasks := coordinator.New(db.DB())
+	if err := tasks.RegisterWorker(ctx, coordinator.Worker{ID: "w", MaxParallel: 1, RunUntagged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tasks.Enqueue(ctx, coordinator.Task{Repo: "o/r", Issue: 1, Kind: "implement", Operator: "implement"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := tasks.Claim(ctx, "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tasks.AcceptResult(ctx, task.ID, "w", task.FencingToken, json.RawMessage(`{"status":"success"}`)); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "secondary rate limit", 403)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer server.Close()
+	client := github.New("fixture", server.URL)
+	old := retry.DefaultConfig
+	retry.DefaultConfig = retry.Config{MaxAttempts: 1}
+	defer func() { retry.DefaultConfig = old }()
+	applied := 0
+	service := &coordinatorResults{tasks: tasks, loadJob: func(ctx context.Context, _ *coordinator.Task) (*runJob, error) {
+		client.SetRequestContext(ctx)
+		_, err := client.ListIssueEvents("o/r", 1)
+		return &runJob{client: client}, err
+	}, apply: func(context.Context, *coordinator.Task, *runJob, *coordinatorReport) error { applied++; return nil }}
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	if err := service.recoverResults(short, tasks); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	current, err := tasks.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ApplicationAttempts != 0 || current.State == "failed" || current.State == "done" || applied != 0 {
+		t.Fatalf("result lost during rate limit: %+v applied=%d", current, applied)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := service.recoverResults(ctx, tasks); err != nil {
+		t.Fatal(err)
+	}
+	current, err = tasks.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.State != "done" || current.ApplicationAttempts != 0 || calls != 2 || applied != 1 {
+		t.Fatalf("result=%+v calls=%d applied=%d", current, calls, applied)
 	}
 }

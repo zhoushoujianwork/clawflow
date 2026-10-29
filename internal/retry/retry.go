@@ -52,7 +52,7 @@ func Do(ctx context.Context, cfg Config, fn func() error) error {
 	for attempt := 0; attempt < cfg.MaxAttempts; attempt++ {
 		// Honour cancellation before each attempt, including retries.
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return errors.Join(ctx.Err(), err)
 		}
 		err = fn()
 		if err == nil {
@@ -86,7 +86,7 @@ func Do(ctx context.Context, cfg Config, fn func() error) error {
 		lg.Close()
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return errors.Join(ctx.Err(), err)
 		case <-time.After(sleep):
 		}
 	}
@@ -100,22 +100,37 @@ func Permanent(err error) error { return &permanentError{err} }
 
 // HTTPError carries retry timing without exposing response bodies or credentials.
 type HTTPError struct {
-	Status int
-	After  time.Duration
+	Status      int
+	RateLimited bool
+	After       time.Duration
 }
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("transient HTTP %d", e.Status) }
 func ResponseError(status int, header http.Header, body []byte) error {
-	if status != 429 && !(status >= 500 && status != 501) && !(status == 403 && (header.Get("Retry-After") != "" || strings.Contains(strings.ToLower(string(body)), "secondary rate limit"))) {
+	if status != 429 && !(status >= 500 && status != 501) && !(status == 403 && (header.Get("X-RateLimit-Remaining") == "0" || strings.Contains(strings.ToLower(string(body)), "rate limit exceeded") || header.Get("Retry-After") != "" || strings.Contains(strings.ToLower(string(body)), "secondary rate limit"))) {
 		return nil
 	}
 	after := time.Duration(0)
-	if n, err := strconv.Atoi(header.Get("Retry-After")); err == nil && n > 0 {
+	retryAfterSet := false
+	if n, err := strconv.Atoi(header.Get("Retry-After")); err == nil && n >= 0 {
+		retryAfterSet = true
 		after = time.Duration(n) * time.Second
 	} else if date, err := http.ParseTime(header.Get("Retry-After")); err == nil {
+		retryAfterSet = true
 		after = time.Until(date)
 	}
-	return &HTTPError{Status: status, After: after}
+	limited := status == 403 || status == 429
+	if limited {
+		if reset, err := strconv.ParseInt(header.Get("X-RateLimit-Reset"), 10, 64); err == nil && header.Get("X-RateLimit-Remaining") == "0" {
+			if wait := time.Until(time.Unix(reset, 0)); wait > after {
+				after = wait
+			}
+		}
+		if after <= 0 && !retryAfterSet {
+			after = time.Minute
+		}
+	}
+	return &HTTPError{Status: status, After: after, RateLimited: limited}
 }
 
 // RequestError keeps transport failures retryable and stops on validation or

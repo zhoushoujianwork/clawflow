@@ -15,7 +15,7 @@ const maxFieldLen = 300
 // eventPrefixes are the run/* areas the board shows; everything else in
 // run.log (per-lock, per-scan chatter) is noise for a delivery view.
 var eventPrefixes = []string{
-	"run/harvest", "run/automerge", "queue/", "run/self_upgrade",
+	"vcs/rate_limited", "coordinator/result-apply-deferred", "run/harvest", "run/automerge", "queue/", "run/self_upgrade",
 	"run/lock_timeout", "run/target_skip", "run/exit", "run/ci_repair", "run/end",
 }
 

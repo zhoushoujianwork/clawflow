@@ -40,6 +40,9 @@ func TestWritebackLabelsRetryTransientOnly(t *testing.T) {
 						http.Error(w, "secondary rate limit", status)
 						return
 					}
+					if status == 429 {
+						w.Header().Set("Retry-After", "0")
+					}
 					http.Error(w, "error", status)
 				},
 			})
