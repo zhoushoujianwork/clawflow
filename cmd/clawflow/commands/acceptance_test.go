@@ -810,6 +810,23 @@ func TestAcceptanceReviewerEnvStripsTokens(t *testing.T) {
 	}
 }
 
+func TestAcceptanceReviewerEnvUsesWritableGoCache(t *testing.T) {
+	out := acceptanceReviewerEnv([]string{"PATH=/bin", "GOCACHE=/home/u/Library/Caches/go-build", "GOTMPDIR=/x"})
+	var cache, tmp []string
+	for _, kv := range out {
+		switch {
+		case strings.HasPrefix(kv, "GOCACHE="):
+			cache = append(cache, kv)
+		case strings.HasPrefix(kv, "GOTMPDIR="):
+			tmp = append(tmp, kv)
+		}
+	}
+	root := filepath.Join(os.TempDir(), "clawflow-review-go")
+	if len(cache) != 1 || !strings.HasPrefix(cache[0], "GOCACHE="+root) || len(tmp) != 1 || !strings.HasPrefix(tmp[0], "GOTMPDIR="+root) {
+		t.Fatalf("go cache env = %v %v", cache, tmp)
+	}
+}
+
 func TestAcceptanceCheckoutAfterPersistedPlan(t *testing.T) {
 	f, _ := acceptanceFixture(t)
 	git, nativeRun := acceptanceGit, acceptanceNativeRun
