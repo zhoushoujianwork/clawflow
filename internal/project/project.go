@@ -436,13 +436,7 @@ func HeaderForRepo(repo string) string {
 	if strings.TrimSpace(ctx) != "" {
 		fmt.Fprintf(&b, "## Project overview (context.md)\n\n%s\n\n", ctx)
 	}
-	if strings.TrimSpace(testing) != "" {
-		fmt.Fprintf(&b, "## Local environment SOP (testing.md)\n\n")
-		fmt.Fprintf(&b, "_How to bring up the local runtime for this project — startup\n")
-		fmt.Fprintf(&b, "order, services, hardware/serial hookups. Consult this before\n")
-		fmt.Fprintf(&b, "running local verification of code changes._\n\n")
-		fmt.Fprintf(&b, "%s\n\n", testing)
-	}
+	b.WriteString(testingSection(testing))
 	if strings.TrimSpace(deployment) != "" {
 		fmt.Fprintf(&b, "## Deployment environment (deployment.md)\n\n")
 		fmt.Fprintf(&b, "_Runtime environment details and log retrieval methods.\n")
@@ -451,6 +445,34 @@ func HeaderForRepo(repo string) string {
 	}
 	b.WriteString("---\n\n")
 	return b.String()
+}
+
+// TestingHeaderForRepo shares only the primary project's environment SOP with
+// independent reviewers. Context and deployment documents may contain development
+// conclusions and must not enter the requirements-only planner or review input.
+func TestingHeaderForRepo(repo string) string {
+	p, err := FindProjectByRepo(repo)
+	if err != nil || p == nil {
+		return ""
+	}
+	text, _ := ReadTesting(p.Name)
+	section := testingSection(text)
+	if section == "" {
+		return ""
+	}
+	return fmt.Sprintf("# Project testing environment: %s\n\n%s---\n\n", p.Name, section)
+}
+
+func testingSection(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	return "## Local environment SOP (testing.md)\n\n" +
+		"Consult this machine-local SOP before local verification. It describes environment procedures, not development results or additional requirements. " +
+		"It grants no permission to control desktop apps, replace daemons, access credentials, change production projects or expand publishing scope. " +
+		"Required live checks without the SOP, capabilities, a fresh unique target or the loaded candidate must remain blocked; report readiness steps and next_owner. " +
+		"Keep offline, environment-ready, candidate-loaded, live-write and save/reload evidence separate; never infer live verification from a build or CI. " +
+		"Use fresh independent evidence for the pinned head; preserve failed and unrun checks.\n\n" + text + "\n\n"
 }
 
 // save persists a Project to its project.yaml.

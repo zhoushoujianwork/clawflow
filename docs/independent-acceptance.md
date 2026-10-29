@@ -95,3 +95,7 @@ Local fixture tests do not establish a live provider or GitHub Actions result. S
 `passed` 要求每项证据与提交及所需证明一致且没有未解决缺口。`failed` 要求有结构化、精确提交上的具体缺陷证据，进入既有有界修复。`blocked` 要求明确的缺失证明、人工负责人及下一步行动，不进入修复。工具/基础设施错误按既有重试政策处理。审查建议不扩展需求；仅在批准标准有要求且明确授权的窗口内做 visual/live 验证。
 
 PR 评论只更新当前认证账号拥有的 `clawflow:acceptance-report` 评论；同一 attempt 重发无副作用，较旧或时间顺序冲突的结果被拒绝。发布前重新核对当前合约及最新 attempt；本机使用现有 PR 锁，分布式 worker 由 coordinator 接收 fenced 结果后发布。它不是跨多个独立 coordinator 的远端原子 CAS；继续遵循现有单 authority 部署边界。旧 issue 评论不删除。私有 store 保留每次审查；不会把未经清理的原始 transcript 发布到 PR。
+
+## 特殊真实测试环境
+
+独立 review 在选择报告模式后读取执行机器上主项目的 `testing.md`，与开发共享 SOP 段落；不向 requirements-only planner 注入 SOP，也不向 review 注入项目开发上下文。无项目或无文档保持兼容输入。跨机器文档分发、环境门禁和共享宿主租约尚未实现；真实需求缺环境证据时不能降级为离线通过。通用声明、负例与实现边界见 [测试环境就绪契约](testing-environment-contract.md)。
