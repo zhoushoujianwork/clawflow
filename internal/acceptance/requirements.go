@@ -145,6 +145,24 @@ func ValidateChecks(c Contract, r Record) error {
 		if f.Kind == "requirement" && !strings.Contains(c.Requirements, f.Requirement) {
 			return errors.New("finding expands approved requirements")
 		}
+		// Requirement-linked findings must agree with every corresponding
+		// checklist item, not only the overall verdict. Standalone defects
+		// outside the planned requirements remain valid findings.
+		if f.Kind == "requirement" || nonempty(f.Requirement) {
+			linked := false
+			for _, check := range r.Checks {
+				if criteria[check.ID].Requirement != f.Requirement {
+					continue
+				}
+				linked = true
+				if check.Status != Failed {
+					return errors.New("failing requirement finding contradicts checklist")
+				}
+			}
+			if !linked {
+				return errors.New("failing requirement finding lacks its checklist item")
+			}
+		}
 	}
 	failing, err := validateFindings(r.Findings)
 	if err != nil {

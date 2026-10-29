@@ -164,3 +164,53 @@ func TestCriterionMinimumProofAndVerdictAgreement(t *testing.T) {
 		t.Fatal("unbound defect became repair authority")
 	}
 }
+
+func TestFailingRequirementFindingMustMatchChecklist(t *testing.T) {
+	for _, status := range []Verdict{Passed, Blocked, Failed} {
+		t.Run(string(status), func(t *testing.T) {
+			r := structuredRecord()
+			r.Verdict = Failed
+			r.Checks[0].Status = status
+			observation := r.Checks[0].Evidence[0]
+			observation.Result = "failed"
+			r.Findings = []Finding{{Kind: "requirement", Summary: "wrong behavior", Requirement: r.Plan.Criteria[0].Requirement, Evidence: "TestRequiredBehavior fails", Observation: &observation}}
+			if status == Failed {
+				r.Checks[0].Evidence[0] = observation
+			} else if status == Blocked {
+				r.Checks[0].Evidence = nil
+				r.Checks[0].Missing = "Human validation pending"
+			}
+			for name, validate := range map[string]func(Contract, Record) error{"checks": ValidateChecks, "upload": ValidateUpload} {
+				err := validate(r.Contract, r)
+				if status == Failed && err != nil {
+					t.Fatalf("%s rejected consistent failure: %v", name, err)
+				}
+				if status != Failed && err == nil {
+					t.Errorf("%s accepted failed requirement with %s checklist", name, status)
+				}
+			}
+		})
+	}
+}
+
+func TestFailingFindingRequirementLink(t *testing.T) {
+	for _, kind := range []string{"requirement", "defect"} {
+		for _, requirement := range []string{"Required behavior", "behavior", ""} {
+			t.Run(kind+"/"+requirement, func(t *testing.T) {
+				r := structuredRecord()
+				r.Verdict = Failed
+				observation := r.Checks[0].Evidence[0]
+				observation.Result = "failed"
+				r.Findings = []Finding{{Kind: kind, Summary: "wrong result", Requirement: requirement, Defect: "wrong return value", Evidence: "TestResult fails", Observation: &observation}}
+				err := ValidateUpload(r.Contract, r)
+				if kind == "defect" && requirement == "" {
+					if err != nil {
+						t.Fatalf("standalone defect rejected: %v", err)
+					}
+				} else if err == nil {
+					t.Fatal("unmatched or contradictory requirement finding accepted")
+				}
+			})
+		}
+	}
+}
