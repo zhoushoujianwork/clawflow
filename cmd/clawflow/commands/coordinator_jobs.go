@@ -27,6 +27,7 @@ import (
 )
 
 type coordinatorPayload struct {
+	AcceptancePlan    *acceptance.Plan     `json:"acceptance_plan,omitempty"`
 	Acceptance        *acceptance.Contract `json:"acceptance,omitempty"`
 	AcceptanceWorker  string               `json:"acceptance_worker,omitempty"`
 	DevelopmentWorker string               `json:"development_worker,omitempty"`
@@ -43,9 +44,10 @@ type coordinatorPayload struct {
 	TimeoutSec        int64                `json:"timeout_sec"`
 	Tags              []string             `json:"tags"`
 	RepoPolicy        struct {
-		BaseBranch  string `json:"base_branch"`
-		TestCommand string `json:"test_command"`
-		CIRequired  bool   `json:"ci_required"`
+		BaseBranch         string `json:"base_branch"`
+		TestCommand        string `json:"test_command"`
+		AcceptanceRequired bool   `json:"acceptance_required"`
+		CIRequired         bool   `json:"ci_required"`
 	} `json:"repo_policy"`
 	ReopenEventID string             `json:"reopen_event_id"`
 	Repair        *coordinatorRepair `json:"repair,omitempty"`
@@ -131,6 +133,8 @@ func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordi
 	}
 	p := coordinatorPayload{Kind: kind, Operator: j.op.Name, SkillDigest: skillDigest(j.op), Repo: j.repo, Platform: platform, BaseURL: j.repoCfg.BaseURL, Issue: j.sub.Number, Role: roleForOperator(j.op.Name), Language: j.language, TimeoutSec: int64(timeout / time.Second), Tags: unique}
 	p.RepoPolicy.BaseBranch, p.RepoPolicy.TestCommand, p.RepoPolicy.CIRequired = j.repoCfg.BaseBranch, j.repoCfg.TestCommand, j.repoCfg.CIRequired
+	p.AcceptancePlan = j.acceptancePlan
+	p.RepoPolicy.AcceptanceRequired = j.repoCfg.AcceptanceRequired
 	p.Scan.Labels, p.Scan.SubTotal, p.Scan.ObservedAt = append([]string{}, j.sub.Labels...), j.sub.SubTotal, time.Now().UTC()
 	if j.reopen != nil {
 		p.ReopenEventID = j.reopen.Event.ID
@@ -173,6 +177,11 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 			failed = append(failed, j.harvest(ctx)...)
 			continue
 		}
+		plan, err := prepareImplementationPlan(ctx, j)
+		if err != nil {
+			return fired, failed, err
+		}
+		j.acceptancePlan = plan
 		t, p := coordinatorTask(j, timeout)
 		t.QueuePosition = int64(len(rank))
 		if pos, ok := positions[queue.Key{Repo: j.repo, Number: j.sub.Number}]; ok {
@@ -180,7 +189,7 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 		}
 		reserved := false
 		var repairPreparationErr error
-		_, err := s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
+		_, err = s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
 			if j.repair != nil {
 				repairPreparationErr = prepareCIRepairContext(ctx, j, time.Now().UTC())
 				if repairPreparationErr != nil {

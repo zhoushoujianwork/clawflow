@@ -118,16 +118,18 @@ func (n Native) validate(dev Identity, policy string) error {
 }
 
 type Plan struct {
-	Criteria         []Criterion `json:"criteria,omitempty"`
-	PlannerIsolation string      `json:"planner_isolation"`
-	Version          int         `json:"version"`
-	AttemptID        string      `json:"attempt_id"`
-	ContractDigest   string      `json:"contract_digest"`
-	Text             string      `json:"text"`
-	Digest           string      `json:"digest"`
-	Planner          Native      `json:"planner"`
-	StartedAt        time.Time   `json:"started_at"`
-	CompletedAt      time.Time   `json:"completed_at"`
+	PlanningPolicyDigest string      `json:"planning_policy_digest,omitempty"`
+	RequirementsDigest   string      `json:"requirements_digest,omitempty"`
+	Criteria             []Criterion `json:"criteria,omitempty"`
+	PlannerIsolation     string      `json:"planner_isolation"`
+	Version              int         `json:"version"`
+	AttemptID            string      `json:"attempt_id"`
+	ContractDigest       string      `json:"contract_digest"`
+	Text                 string      `json:"text"`
+	Digest               string      `json:"digest"`
+	Planner              Native      `json:"planner"`
+	StartedAt            time.Time   `json:"started_at"`
+	CompletedAt          time.Time   `json:"completed_at"`
 }
 
 func (p Plan) validate(c Contract) error {
@@ -138,6 +140,9 @@ func (p Plan) validate(c Contract) error {
 	if p.Version != Version || p.ContractDigest != d || !nonempty(p.AttemptID, p.Text) || p.Digest != digest(p.Text) ||
 		p.StartedAt.IsZero() || p.CompletedAt.Before(p.StartedAt) {
 		return errors.New("invalid or stale acceptance plan")
+	}
+	if p.RequirementsDigest != "" && p.RequirementsDigest != digest(c.Requirements) {
+		return errors.New("acceptance requirements changed")
 	}
 	if p.PlannerIsolation != ToolsDisabled && p.PlannerIsolation != IsolatedReadonly {
 		return errors.New("invalid planner isolation mode")
@@ -331,7 +336,7 @@ func evaluate(expected Contract, r Record, checkRequirements bool) error {
 	if r.Reviewer.SessionID == r.Plan.Planner.SessionID || r.Reviewer.RunID == r.Plan.Planner.RunID {
 		return errors.New("acceptance review must use a fresh native session and run")
 	}
-	if r.StartedAt.IsZero() || r.Plan.StartedAt.Before(r.StartedAt) || r.ReviewStartedAt.Before(r.Plan.CompletedAt) ||
+	if r.StartedAt.IsZero() || (r.Plan.RequirementsDigest == "" && r.Plan.StartedAt.Before(r.StartedAt)) || r.ReviewStartedAt.Before(r.Plan.CompletedAt) ||
 		r.CompletedAt.Before(r.ReviewStartedAt) || r.CompletedAt.IsZero() {
 		return errors.New("incoherent acceptance timestamps")
 	}
