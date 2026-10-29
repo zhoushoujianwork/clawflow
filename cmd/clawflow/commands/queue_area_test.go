@@ -3,10 +3,12 @@ package commands
 import (
 	"context"
 	"errors"
-	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"io"
 	"strings"
 	"testing"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -171,5 +173,41 @@ func TestQueueAreaParkVisibleOnBoard(t *testing.T) {
 	item := itemFor(t, snap.Repos[0], 1)
 	if !strings.Contains(item.Why, "area_busy:PR #9") {
 		t.Fatalf("board issue: %+v", item)
+	}
+}
+
+func TestQueueAreaSavedAcceptancePlan(t *testing.T) {
+	for _, body := range []string{"Meet the original goal", "Edit `internal/c.go`"} {
+		t.Run(body, func(t *testing.T) {
+			f, _ := acceptanceFixture(t)
+			f.issue.Body = body
+			baseRun := acceptanceNativeRun
+			acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, out io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+				r, err := baseRun(ctx, c, req, env, out, observe)
+				if req.ToolsDisabled {
+					r.Text = "Verify `internal/a.go`"
+				}
+				return r, err
+			}
+			produceAcceptance(t, f)
+			in := areaInput()
+			in.Issues[0] = *f.issue
+			in.Issues[0].CreatedAt = "2026-01-01T00:00:00Z"
+			in.ImplementState = map[int]string{42: "", 2: ""}
+			in.ImplementJobs = map[int]bool{42: true, 2: true}
+			p := planRepoQueue(in)
+			if p.Err != "" || p.Picks[42] || !p.Picks[2] {
+				t.Fatalf("plan-only overlap must park and pick independent work: %+v", p)
+			}
+			if e := p.State.Entries[0]; e.Reason != "area_busy" || e.BlockingPR != 9 {
+				t.Fatalf("missing plan-only area hold: %+v", e)
+			}
+			// An edited requirement must not inherit stale plan hints.
+			in.Issues[0].Body += " changed"
+			p = planRepoQueue(in)
+			if p.Err != "" || !p.Picks[42] {
+				t.Fatalf("stale plan used: %+v", p)
+			}
+		})
 	}
 }

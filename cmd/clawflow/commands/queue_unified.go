@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -158,7 +161,12 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 			}
 		}
 		if !c.InFlight && c.Ineligible == "" && in.PRFiles != nil {
-			estimate := queue.EstimateFiles(is.Body)
+			savedPlan, err := queueAcceptancePlan(in.Repo, is)
+			if err != nil {
+				plan.Err = "acceptance_plan_unreadable: " + err.Error()
+				return plan
+			}
+			estimate := append(queue.EstimateFiles(is.Body), queue.EstimateFiles(savedPlan)...)
 			if len(estimate) > 0 {
 				if err := loadPRs(); err != nil {
 					plan.Err = "open_prs_unreadable: " + err.Error()
@@ -403,4 +411,37 @@ func pruneRepoRank(repo string, issues []vcs.Issue) {
 	if _, err := queue.UpdateRank(nil, func(k queue.Key) bool { return k.Repo != repo || open[k.Number] }); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] ⚠ queue rank prune: %v\n", repo, err)
 	}
+}
+
+// queueAcceptancePlan finds historical plans for this issue, including plans
+// from closed PRs. Only unchanged requirements are applicable to a new attempt.
+func queueAcceptancePlan(repo string, issue vcs.Issue) (string, error) {
+	root := filepath.Dir(acceptanceStorePath(repo, 1))
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var latest acceptance.Plan
+	for _, entry := range entries {
+		pr, err := strconv.Atoi(entry.Name())
+		if err != nil || pr <= 0 {
+			continue
+		}
+		store, err := acceptance.OpenStore(filepath.Join(root, entry.Name()))
+		if err != nil {
+			return "", err
+		}
+		p, readErr := store.LatestPlanForTask(repo, repo+":issue:"+strconv.Itoa(issue.Number), issue.Title+"\n\n"+issue.Body)
+		closeErr := store.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return "", err
+		}
+		if p.CompletedAt.After(latest.CompletedAt) {
+			latest = p
+		}
+	}
+	return latest.Text, nil
 }
