@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -765,18 +766,19 @@ func failedRunsError(failed []firedKey) error {
 // runJob is one (issue, operator) pair that scanRepoOnce decided is
 // eligible to fire. The worker pool in runJobsParallel consumes these.
 type runJob struct {
-	hooks    *jobHooks
-	result   *jobResult
-	harvest  func(context.Context) []firedKey // acceptance phase, using one pool worker
-	repair   *ciRepairContext
-	reopen   *reopenContext
-	comments []vcs.IssueComment
-	op       *operator.Operator
-	sub      *operator.Subject
-	repo     string
-	repoCfg  config.Repo
-	client   vcs.Client
-	language string // Settings.Language propagated from cfg at job creation time
+	acceptancePlan *acceptance.Plan
+	hooks          *jobHooks
+	result         *jobResult
+	harvest        func(context.Context) []firedKey // acceptance phase, using one pool worker
+	repair         *ciRepairContext
+	reopen         *reopenContext
+	comments       []vcs.IssueComment
+	op             *operator.Operator
+	sub            *operator.Subject
+	repo           string
+	repoCfg        config.Repo
+	client         vcs.Client
+	language       string // Settings.Language propagated from cfg at job creation time
 }
 
 // firedKey identifies a (repo, issue, operator) triple that ran to a
@@ -1634,6 +1636,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		fmt.Fprintf(os.Stderr, "%s → base-branch override: %q (from %s)\n", prefix, overrideBranch, overrideSource)
 	}
 
+	plan, planErr := prepareImplementationPlan(ctx, j)
+	if planErr != nil {
+		runningMeta.Status, runningMeta.Error = "failed", planErr.Error()
+		_ = snapshot.WriteRunMeta(runDir, runningMeta)
+		fmt.Fprintf(os.Stderr, "%s acceptance planning failed: %v\n", prefix, planErr)
+		if j.repair != nil {
+			_ = j.releaseRepair("setup", time.Now().UTC())
+		}
+		return false, false, true
+	}
+	j.acceptancePlan = plan
+
 	var previousRun snapshot.RunMeta
 	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
 		previousRun = previousDevelopmentRun(j.repo, j.sub.Number, startedAt)
@@ -1739,13 +1753,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	runStart := time.Now()
 
 	// Build resume context for the operator prompt when reusing a worktree.
-	var resumeCtx string
+	resumeCtx := implementationChecklist(j.acceptancePlan)
 	if wtResult.Resumed && j.repair == nil {
-		resumeCtx = buildResumeContext(wtResult)
+		resumeCtx += buildResumeContext(wtResult)
 	}
 	if j.repair != nil {
 		comments = nil
-		resumeCtx = repairInput
+		resumeCtx += repairInput
 	}
 
 	// Rebind the VCS client's request context before execution + write-back.

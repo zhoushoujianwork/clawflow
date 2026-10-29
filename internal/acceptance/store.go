@@ -407,7 +407,7 @@ func completeRecord(r Record) error {
 		(r.Verdict != Passed && r.Verdict != Failed && r.Verdict != Blocked) {
 		return errors.New("incoherent complete acceptance record")
 	}
-	if r.Plan.Text != "" && (r.Plan.StartedAt.Before(r.StartedAt) || r.Plan.CompletedAt.After(r.CompletedAt)) {
+	if r.Plan.Text != "" && ((r.Plan.RequirementsDigest == "" && r.Plan.StartedAt.Before(r.StartedAt)) || r.Plan.CompletedAt.After(r.CompletedAt)) {
 		return errors.New("incoherent acceptance plan timestamps")
 	}
 	if !r.ReviewStartedAt.IsZero() && (r.Plan.Text == "" || r.ReviewStartedAt.Before(r.Plan.CompletedAt) || r.ReviewStartedAt.After(r.CompletedAt)) {

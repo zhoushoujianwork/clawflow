@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"os"
 	"slices"
 	"time"
 
@@ -76,6 +77,25 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 	}
 	t, p := coordinatorTask(&runJob{repo: repo, repoCfg: rc, op: &operator.Operator{Name: "acceptance"}, sub: &operator.Subject{Number: issue, Labels: subject.Labels}}, timeout)
 	t.PR = pr.Number
+	planStore, err := acceptance.OpenStore(acceptancePlanStorePath(repo))
+	if err != nil {
+		return err
+	}
+	defer planStore.Close()
+	scratch, err := os.MkdirTemp("", "clawflow-acceptance-plan-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(scratch)
+	_, ec, err := acceptanceConfiguration(repo)
+	if err != nil {
+		return err
+	}
+	plan, err := (acceptance.Runner{PlanStore: planStore, PlanPolicy: acceptancePlanningPolicy(repo, rc, ec), Execute: acceptanceExecutor(ec)}).RequirementsPlan(ctx, c, scratch)
+	if err != nil {
+		return err
+	}
+	p.AcceptancePlan = &plan
 	p.Acceptance, p.DevelopmentWorker, p.Role = &c, dev.LeaseOwner, "acceptance"
 	p.AcceptanceWorker = rc.AcceptanceWorker
 	if p.AcceptanceWorker != "" && p.AcceptanceWorker != "any" && p.AcceptanceWorker != "different" {
