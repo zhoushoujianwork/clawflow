@@ -43,6 +43,7 @@ interface PRInfo {
 }
 
 interface AcceptanceInfo {
+  unstructured?: boolean
   required: boolean
   running?: boolean
   verdict?: string
@@ -480,6 +481,7 @@ function ItemDetail({ item }: { item: Item }) {
             <dt className="text-muted-foreground">Verdict</dt>
             <dd>
               {a.running ? 'reviewing…' : a.latest_is_infra ? 'no verdict (infrastructure error)' : a.verdict || 'none yet'}
+              {a.unstructured ? ' (unstructured findings)' : ''}
               {a.verdict === 'passed' && !a.valid ? ' (stale)' : ''}
             </dd>
             <dt className="text-muted-foreground">Attempts</dt>
