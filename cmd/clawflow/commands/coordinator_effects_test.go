@@ -225,3 +225,34 @@ func TestCoordinatorRecoversLegacyRepairWithoutReservation(t *testing.T) {
 		t.Fatalf("legacy ledger: %+v %v", ledger, err)
 	}
 }
+
+func TestCoordinatorResultPRRestoration(t *testing.T) {
+	pr := vcs.PR{Number: 11, URL: "https://example.test/pull/11", HeadBranch: "fix/1"}
+	current := coordinator.Task{Repo: "o/r", PR: 11}
+	for _, client := range []vcs.Client{nil, &intentVCS{}} {
+		// An empty intentVCS would panic on GetPR; the repair snapshot must win.
+		got, err := coordinatorResultPR(current, &runJob{client: client, repair: &ciRepairContext{PR: pr}})
+		if err != nil || got.Number != pr.Number || got.URL != pr.URL || got.HeadBranch != pr.HeadBranch {
+			t.Fatalf("repair identity: %+v %v", got, err)
+		}
+	}
+	client := &intentVCS{prs: []vcs.PR{pr}}
+	if got, err := coordinatorResultPR(current, &runJob{client: client}); err != nil || got.Number != 11 {
+		t.Fatalf("client fallback: %+v %v", got, err)
+	}
+	for _, j := range []*runJob{{}, {repair: &ciRepairContext{PR: vcs.PR{Number: 12}}}} {
+		if _, err := coordinatorResultPR(current, j); err == nil {
+			t.Fatal("missing PR identity must return an error")
+		}
+	}
+}
+
+func TestCoordinatorEffectWithoutClientReturnsError(t *testing.T) {
+	payload, err := json.Marshal(jobEffect{Kind: "issue-comment", Repo: "o/r", Number: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyCoordinatorEffect(&coordinator.Task{}, &runJob{}, &coordinatorReport{}, coordinator.EffectIntent{Payload: payload}); err == nil {
+		t.Fatal("missing client must return an error")
+	}
+}

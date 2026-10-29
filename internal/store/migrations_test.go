@@ -31,6 +31,18 @@ func TestRegistryPreservesWorkflowBeforeTokenScope(t *testing.T) {
 	}
 }
 
+func TestRegistryAppendsScheduledChecksAfterActionsEvidence(t *testing.T) {
+	if len(store.Migrations) < 7 {
+		t.Fatal("scheduled checks migration missing")
+	}
+	for i, name := range []string{"coordinator_token_scope", "actions_evidence", "scheduled_checks"} {
+		migration := store.Migrations[4+i]
+		if migration.Version != 5+i || migration.Name != name {
+			t.Fatalf("migration %d must be %s: %+v", 5+i, name, migration)
+		}
+	}
+}
+
 func countRows(t *testing.T, s *store.Store) int64 {
 	t.Helper()
 	var n int64
@@ -208,7 +220,7 @@ func TestActionsMigrationAfterTokenScope(t *testing.T) {
 	if _, err := s.Migrate(ctx, store.Migrations[:5]); err != nil {
 		t.Fatal(err)
 	}
-	applied, err := s.Migrate(ctx, store.Migrations)
+	applied, err := s.Migrate(ctx, store.Migrations[:6])
 	if err != nil || len(applied) != 1 || applied[0] != 6 {
 		t.Fatalf("Actions upgrade: applied=%v err=%v", applied, err)
 	}
@@ -221,5 +233,39 @@ func TestActionsMigrationAfterTokenScope(t *testing.T) {
 	var scope string
 	if err := s.DB().Raw("SELECT column_default FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tokens' AND column_name = 'scope'").Scan(&scope).Error; err != nil || !strings.Contains(scope, "worker") {
 		t.Fatalf("token scope migration lost: default=%q err=%v", scope, err)
+	}
+}
+
+func TestScheduledChecksMigrationAfterActionsEvidence(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:6]); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations[:7])
+	if err != nil || len(applied) != 1 || applied[0] != 7 {
+		t.Fatalf("scheduled checks upgrade: applied=%v err=%v", applied, err)
+	}
+	for _, table := range []string{"actions_attachments", "actions_evidence", "scheduled_checks", "scheduled_check_runs"} {
+		var exists bool
+		if err := s.DB().Raw("SELECT to_regclass(?) IS NOT NULL", table).Scan(&exists).Error; err != nil || !exists {
+			t.Fatalf("missing %s: exists=%v err=%v", table, exists, err)
+		}
+	}
+}
+
+func TestCoordinatorApplicationErrorsMigrationAfterScheduledChecks(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:7]); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations)
+	if err != nil || len(applied) != 1 || applied[0] != 8 {
+		t.Fatalf("application errors upgrade: applied=%v err=%v", applied, err)
+	}
+	var columns int64
+	if err := s.DB().Raw("SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tasks' AND column_name IN ('application_attempts', 'application_error')").Scan(&columns).Error; err != nil || columns != 2 {
+		t.Fatalf("application error columns: count=%d err=%v", columns, err)
 	}
 }

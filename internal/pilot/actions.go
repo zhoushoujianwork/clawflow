@@ -29,18 +29,20 @@ type ActionSet struct {
 	Actions []json.RawMessage `json:"actions"`
 }
 type Action struct {
-	Head      string   `json:"head,omitempty"`
-	Followups []string `json:"followups,omitempty"`
-	ID        string   `json:"id"`
-	Type      string   `json:"type"`
-	Repo      string   `json:"repo,omitempty"`
-	Issue     int      `json:"issue,omitempty"`
-	PR        int      `json:"pr,omitempty"`
-	Body      string   `json:"body,omitempty"`
-	Title     string   `json:"title,omitempty"`
-	Label     string   `json:"label,omitempty"`
-	Section   string   `json:"section,omitempty"`
-	Position  string   `json:"position,omitempty"`
+	ScheduleID string              `json:"schedule_id,omitempty"`
+	Schedule   *ScheduleDefinition `json:"schedule,omitempty"`
+	Head       string              `json:"head,omitempty"`
+	Followups  []string            `json:"followups,omitempty"`
+	ID         string              `json:"id"`
+	Type       string              `json:"type"`
+	Repo       string              `json:"repo,omitempty"`
+	Issue      int                 `json:"issue,omitempty"`
+	PR         int                 `json:"pr,omitempty"`
+	Body       string              `json:"body,omitempty"`
+	Title      string              `json:"title,omitempty"`
+	Label      string              `json:"label,omitempty"`
+	Section    string              `json:"section,omitempty"`
+	Position   string              `json:"position,omitempty"`
 }
 
 // ActionRecord is the persisted board/audit representation. Pending records
@@ -116,6 +118,21 @@ func validateAction(raw json.RawMessage) (Action, error) {
 	}
 	fields := "id type repo"
 	switch a.Type {
+	case "schedule_add", "schedule_update", "schedule_remove":
+		fields = "id type schedule_id"
+		if !actionID.MatchString(a.ScheduleID) {
+			return a, errors.New("schedule_id_required")
+		}
+		if a.Type != "schedule_remove" {
+			fields += " schedule"
+			if a.Schedule == nil {
+				return a, errors.New("schedule_required")
+			}
+			j := a.Schedule.check(a.ScheduleID, "steward")
+			if err := j.Validate(); err != nil {
+				return a, errors.New("invalid_schedule")
+			}
+		}
 	case "rerun_ci":
 		fields += " pr"
 		if a.PR < 1 {
@@ -313,7 +330,7 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 			r.Outcome = validation.Error()
 		case a.Type == "override_merge" && (e.Config == nil || !e.Config.Repos[a.Repo].PilotOverrideMerge):
 			r.Outcome = "override_merge_disabled"
-		case !slices.Contains(e.Repos, a.Repo):
+		case !strings.HasPrefix(a.Type, "schedule_") && !slices.Contains(e.Repos, a.Repo):
 			r.Outcome = "repo_not_allowed"
 		default:
 			if prev, ok := previous[key(r)]; ok {
@@ -402,6 +419,9 @@ func replaceSpec(body, section, text string) (string, error) {
 	return body[:i] + replacement + body[j+len(end):], nil
 }
 func (e ActionExecutor) execute(a Action, run string) (int, error) {
+	if strings.HasPrefix(a.Type, "schedule_") {
+		return 0, e.executeSchedule(a)
+	}
 	if a.Type == "note" || a.Type == "ask_human" {
 		return 0, nil
 	}

@@ -36,13 +36,15 @@ func TestHarvestQueueOrder(t *testing.T) {
 		1: {Labels: []string{"P2"}, CreatedAt: "2020-01-01T00:00:00Z"},
 		2: {Labels: []string{"P2"}, CreatedAt: "2021-01-01T00:00:00Z"},
 		3: {Labels: []string{"P0"}},
+		4: {CreatedAt: "2022-01-01T00:00:00Z"},
+		5: {Labels: []string{"P2"}, CreatedAt: "2023-01-01T00:00:00Z"},
 	}}
 	prs := []vcs.PR{
 		{Number: 50, Body: "Fixes #5"}, {Number: 30, Body: "Fixes #3"},
 		{Number: 10, Body: "Fixes #1"}, {Number: 40, Body: "Fixes #4"},
 		{Number: 20, Body: "Fixes #2"},
 	}
-	ordered, err := orderHarvest(client, "o/r", prs)
+	ordered, _, err := orderHarvest(client, "o/r", prs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +54,57 @@ func TestHarvestQueueOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []int{30, 20, 10, 40, 50}) {
 		t.Fatalf("order = %v", got)
+	}
+}
+
+func TestHarvestUnrankedPriorityAndFairness(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	client := harvestOrderFake{issues: map[int]*vcs.Issue{
+		1: {Labels: []string{"P0"}, CreatedAt: "2024-01-01T00:00:00Z"},
+		2: {Labels: []string{"P2"}, CreatedAt: "2020-01-01T00:00:00Z"},
+		3: {CreatedAt: "2021-01-01T00:00:00Z"},
+		4: {CreatedAt: "2021-01-01T00:00:00Z"},
+		5: {Labels: []string{"P1"}, CreatedAt: "2025-01-01T00:00:00Z"},
+		6: {Labels: []string{"P3"}, CreatedAt: "2019-01-01T00:00:00Z"},
+	}}
+	prs := []vcs.PR{
+		{Number: 10, Body: "Fixes #4", HeadSHA: "d"},
+		{Number: 20, Body: "Fixes #3", HeadSHA: "c"},
+		{Number: 30, Body: "Fixes #2", HeadSHA: "b"},
+		{Number: 40, Body: "Fixes #1", HeadSHA: "a"},
+		{Number: 50, Body: "No closing issue"},
+		{Number: 60, Body: "Fixes #6", HeadSHA: "f"},
+		{Number: 70, Body: "Fixes #5", HeadSHA: "e"},
+	}
+	ordered, priorities, err := orderHarvest(client, "o/r", prs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []int
+	for _, pr := range ordered {
+		got = append(got, pr.Number)
+	}
+	if !reflect.DeepEqual(got, []int{40, 70, 30, 20, 10, 60, 50}) {
+		t.Fatalf("order = %v", got)
+	}
+	st := harvestSchedule{Previous: 40, Heads: map[int]string{40: "a"}}
+	if selected := selectHarvest(ordered, st, priorities); selected != 0 {
+		t.Fatalf("P0 yielded to a lower priority: index %d", selected)
+	}
+	// An unchanged P0 yields to a waiting P0, even though it has no rank.
+	client.issues[3].Labels = []string{"P0"}
+	ordered, priorities, err = orderHarvest(client, "o/r", prs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st = harvestSchedule{Previous: 20, Heads: map[int]string{20: "c"}}
+	if selected := selectHarvest(ordered, st, priorities); selected != 1 || ordered[selected].Number != 40 {
+		t.Fatalf("same-tier fairness: index %d", selected)
+	}
+	// A new head on the previous PR restores its normal queue position.
+	st.Heads[20] = "old"
+	if selected := selectHarvest(ordered, st, priorities); selected != 0 {
+		t.Fatalf("new leading head yielded: index %d", selected)
 	}
 }
 
@@ -98,11 +151,11 @@ func TestHarvestFairnessAndSkipLogsAcrossPasses(t *testing.T) {
 func TestHarvestNewHeadGetsFairTurn(t *testing.T) {
 	prs := []vcs.PR{{Number: 10, HeadSHA: "a"}, {Number: 11, HeadSHA: "b"}}
 	st := harvestSchedule{Previous: 10, Heads: map[int]string{10: "a", 11: "b"}}
-	if got := selectHarvest(prs, st); got != 0 {
+	if got := selectHarvest(prs, st, nil); got != 0 {
 		t.Fatalf("unchanged heads: %d", got)
 	}
 	prs[1].HeadSHA = "c"
-	if got := selectHarvest(prs, st); got != 1 {
+	if got := selectHarvest(prs, st, nil); got != 1 {
 		t.Fatalf("new waiting head: %d", got)
 	}
 }
