@@ -42,7 +42,7 @@ type repoQueueInput struct {
 	// pickable candidate without a job is not a queue candidate.
 	ImplementJobs map[int]bool
 	Locked        func(number int) bool
-	// OpenPRs is only called when some open issue carries agent-implemented.
+	// OpenPRs is loaded once to detect delivery even before label writeback.
 	OpenPRs func() ([]vcs.PR, error)
 	// FlightBlocked names why delivery of an in-flight issue is not
 	// progressing (CI red without repair, no acceptance verdict, ...). pr is
@@ -122,10 +122,7 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		key := queue.Key{Repo: in.Repo, Number: is.Number}
 		c := queue.Candidate{}
 		var flightPR *vcs.PR
-		switch {
-		case locked:
-			c.InFlight = true
-		case hasLabel(is.Labels, "agent-implemented"):
+		if !locked {
 			if err := loadPRs(); err != nil {
 				plan.Err = "open_prs_unreadable: " + err.Error()
 				return plan
@@ -136,10 +133,14 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 					break
 				}
 			}
-			if !c.InFlight {
-				continue // delivered; nothing left for the queue to do
-			}
-		case hasLabel(is.Labels, "agent-skipped"):
+		}
+		switch {
+		case locked:
+			c.InFlight = true
+		case c.InFlight:
+			// A delivered branch stays in harvest/repair even if its
+			// agent-implemented label has not been written yet.
+		case hasLabel(is.Labels, "agent-implemented"), hasLabel(is.Labels, "agent-skipped"):
 			continue
 		}
 		if c.InFlight && !skipped && in.FlightBlocked != nil {

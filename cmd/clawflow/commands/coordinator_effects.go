@@ -47,25 +47,24 @@ func applyCoordinatorEffect(t *coordinator.Task, j *runJob, r *coordinatorReport
 	case "close-issue":
 		err = j.client.CloseIssue(e.Repo, e.Number)
 	case "pr-create":
-		// Include closed PRs: an external close between a successful write and
-		// recovery must not create a second logical PR for this intent.
-		prs, listErr := j.client.ListPRs(e.Repo, "all")
-		if listErr != nil {
-			return out, listErr
-		}
-		var pr vcs.PR
-		for _, p := range prs {
-			if p.HeadBranch == e.Head && p.HeadRepo == e.Repo && p.BaseBranch == e.Base && (p.State == "open" || strings.Contains(p.Body, "<!-- clawflow:run-id="+e.RunID+" -->")) {
-				pr = p
-				break
-			}
+		pr, lookupErr := findCoordinatorPR(j.client, e)
+		if lookupErr != nil {
+			return out, lookupErr
 		}
 		if pr.Number == 0 {
 			pr, err = j.client.CreatePR(e.Repo, vcs.PRCreateOpts{Head: e.Head, Base: e.Base, Title: e.Title, Body: e.Body + "\n\n<!-- clawflow:run-id=" + e.RunID + " -->"})
 			if err != nil {
-				return out, err
+				// A competing create (422 on GitHub, 409 on GitLab) or a
+				// lost response may have delivered the PR. Reconcile before
+				// charging an application failure; never issue another create.
+				var lookupErr error
+				pr, lookupErr = findCoordinatorPR(j.client, e)
+				if lookupErr != nil || pr.Number == 0 {
+					return out, err
+				}
 			}
 		}
+		// Adoption preserves the existing title/body, including human edits.
 		pr, err = j.client.GetPR(e.Repo, pr.Number)
 		if err != nil {
 			return out, err
@@ -78,6 +77,39 @@ func applyCoordinatorEffect(t *coordinator.Task, j *runJob, r *coordinatorReport
 		err = coordinator.ErrInvalid
 	}
 	return out, err
+}
+
+// findCoordinatorPR prefers an open same-repository PR. Closed PRs are only
+// recovered for this exact intent, so replay cannot duplicate a completed write.
+func findCoordinatorPR(client vcs.Client, e jobEffect) (vcs.PR, error) {
+	prs, err := client.ListPRs(e.Repo, "all")
+	if err != nil {
+		return vcs.PR{}, err
+	}
+	var closed vcs.PR
+	for _, pr := range prs {
+		if pr.HeadBranch != e.Head {
+			continue
+		}
+		// GitLab list responses may omit source project and target branch.
+		// Resolve details before deciding identity; never adopt a fork MR.
+		if pr.HeadRepo == "" || pr.BaseBranch == "" {
+			pr, err = client.GetPR(e.Repo, pr.Number)
+			if err != nil {
+				return vcs.PR{}, err
+			}
+		}
+		if pr.HeadRepo != e.Repo || pr.BaseBranch != e.Base || pr.HeadBranch != e.Head {
+			continue
+		}
+		if pr.State == "open" {
+			return pr, nil
+		}
+		if strings.Contains(pr.Body, "<!-- clawflow:run-id="+e.RunID+" -->") {
+			closed = pr
+		}
+	}
+	return closed, nil
 }
 
 func (s *coordinatorResults) reconcile(ctx context.Context, store coordinator.EffectStore, t *coordinator.Task, j *runJob, r *coordinatorReport, failed bool) error {

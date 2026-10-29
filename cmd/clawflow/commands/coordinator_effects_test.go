@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/zhoushoujianwork/clawflow/internal/retry"
-	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +13,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
@@ -31,19 +32,41 @@ type intentVCS struct {
 	comments      map[string]bool
 	commentWrites int
 	head          string
+	createErr     error
+	racePR        *vcs.PR
+	listSummary   bool
 }
 
-func (c *intentVCS) ListPRs(string, string) ([]vcs.PR, error) { return c.prs, nil }
+func (c *intentVCS) ListPRs(string, string) ([]vcs.PR, error) {
+	if c.listSummary {
+		var prs []vcs.PR
+		for _, p := range c.prs {
+			prs = append(prs, vcs.PR{Number: p.Number, HeadBranch: p.HeadBranch, State: p.State})
+		}
+		return prs, nil
+	}
+	return c.prs, nil
+}
 func (c *intentVCS) CreatePR(repo string, o vcs.PRCreateOpts) (vcs.PR, error) {
 	c.creates++
+	if c.createErr != nil {
+		if c.racePR != nil {
+			c.prs = append(c.prs, *c.racePR)
+		}
+		return vcs.PR{}, c.createErr
+	}
 	p := vcs.PR{Number: 11, HeadRepo: repo, HeadBranch: o.Head, BaseBranch: o.Base, Body: o.Body, State: "open", HeadSHA: c.head, URL: "https://example.test/pull/11"}
 	c.prs = append(c.prs, p)
 	return p, nil
 }
-func (c *intentVCS) GetPR(string, int) (vcs.PR, error) {
-	p := c.prs[0]
-	p.HeadSHA = c.head
-	return p, nil
+func (c *intentVCS) GetPR(_ string, number int) (vcs.PR, error) {
+	for _, p := range c.prs {
+		if p.Number == number {
+			p.HeadSHA = c.head
+			return p, nil
+		}
+	}
+	return vcs.PR{}, errors.New("PR not found")
 }
 func (c *intentVCS) PostIssueCommentIdempotent(_ string, _ int, _ string, marker string) error {
 	if !c.comments[marker] {
@@ -89,6 +112,13 @@ func TestCommentIntentReconcilesStableMarker(t *testing.T) {
 }
 
 func TestCoordinatorDurableReportRecovery(t *testing.T) {
+	for _, mode := range []string{"create", "adopt", "race"} {
+		t.Run(mode, func(t *testing.T) { testCoordinatorDurableReportRecovery(t, mode) })
+	}
+}
+
+func testCoordinatorDurableReportRecovery(t *testing.T, mode string) {
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
 	db := storetest.New(t)
 	ctx := context.Background()
 	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
@@ -106,14 +136,23 @@ func TestCoordinatorDurableReportRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &intentVCS{head: strings.Repeat("a", 40), comments: map[string]bool{}}
-	j := &runJob{client: c}
+	pr := vcs.PR{Number: 11, HeadRepo: "o/r", HeadBranch: "fix", BaseBranch: "main", State: "open", URL: "https://example.test/pull/11"}
+	wantCreates := 1
+	switch mode {
+	case "adopt":
+		c.prs, wantCreates = []vcs.PR{pr}, 0
+	case "race":
+		c.racePR = &pr
+		c.createErr = errors.New("HTTP 422: A pull request already exists")
+	}
+	j := &runJob{client: c, repo: "o/r", sub: &operator.Subject{Number: 1}, op: &operator.Operator{Name: "implement"}}
 	finalized := 0
-	service := &coordinatorResults{WorkerStore: tasks, tasks: tasks, loadJob: func(context.Context, *coordinator.Task) (*runJob, error) { return j, nil }, apply: func(_ context.Context, _ *coordinator.Task, _ *runJob, r *coordinatorReport) error {
-		if r.PRNumber != 11 || r.PRURL == "" || len(r.Effects) != 0 {
+	service := &coordinatorResults{WorkerStore: tasks, tasks: tasks, loadJob: func(context.Context, *coordinator.Task) (*runJob, error) { return j, nil }, apply: func(ctx context.Context, task *coordinator.Task, job *runJob, r *coordinatorReport) error {
+		if r.PRNumber != 11 || r.PRURL == "" || r.Status != "success" || len(r.Effects) != 0 {
 			t.Fatalf("recovered report: %+v", r)
 		}
 		finalized++
-		return nil
+		return applyCoordinatorReport(ctx, task, job, r)
 	}}
 	raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "success", HeadSHA: c.head, Effects: []jobEffect{{Kind: "pr-create", Repo: "o/r", Head: "fix", Base: "main", Title: "fix"}, {Kind: "issue-comment", Repo: "o/r", Number: 1, Body: "done"}}}})
 	if err := service.Complete(ctx, task.ID, "w", task.FencingToken, raw); err != nil {
@@ -130,11 +169,23 @@ func TestCoordinatorDurableReportRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if c.creates != 1 || c.commentWrites != 1 || finalized != 1 {
+	if c.creates != wantCreates || c.commentWrites != 1 || finalized != 1 {
 		t.Fatalf("creates=%d comments=%d finalized=%d", c.creates, c.commentWrites, finalized)
 	}
+	dir := snapshot.RunDir(task.Repo, task.Issue, task.CreatedAt) + "-task-" + task.ID
+	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta snapshot.RunMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Status != "success" || meta.PRNumber != 11 || meta.PRUrl != pr.URL {
+		t.Fatalf("run identity not persisted: %+v", meta)
+	}
 	current, _ := tasks.Task(ctx, task.ID)
-	if current.State != "done" || current.PR != 11 {
+	if current.State != "done" || current.PR != 11 || current.ApplicationAttempts != 0 {
 		t.Fatalf("%+v", current)
 	}
 }
@@ -263,6 +314,73 @@ func TestCoordinatorEffectWithoutClientReturnsError(t *testing.T) {
 	}
 	if _, err := applyCoordinatorEffect(&coordinator.Task{}, &runJob{}, &coordinatorReport{}, coordinator.EffectIntent{Payload: payload}); err == nil {
 		t.Fatal("missing client must return an error")
+	}
+}
+
+func TestCoordinatorAdoptsExistingPR(t *testing.T) {
+	for _, platform := range []string{"github", "gitlab"} {
+		for _, race := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/race=%v", platform, race), func(t *testing.T) {
+				pr := vcs.PR{Number: 42, HeadRepo: "o/r", HeadBranch: "fix/1", BaseBranch: "main", State: "open", URL: "https://example.test/pr/42", Title: "Human title", Body: "Human body"}
+				c := &intentVCS{head: strings.Repeat("a", 40), listSummary: platform == "gitlab"}
+				wantCreates := 0
+				if race {
+					c.racePR = &pr
+					c.createErr = errors.New("HTTP 422: A pull request already exists")
+					if platform == "gitlab" {
+						c.createErr = errors.New("HTTP 409: Another open merge request already exists for this source branch")
+					}
+					wantCreates = 1
+				} else {
+					c.prs = []vcs.PR{pr}
+				}
+				r := &coordinatorReport{jobResult: jobResult{Status: "success", HeadSHA: c.head}}
+				payload, _ := json.Marshal(jobEffect{Kind: "pr-create", Repo: "o/r", Head: "fix/1", Base: "main", Title: "Generated title", Body: "Generated body", RunID: "new-run"})
+				for i := 0; i < 2; i++ {
+					out, err := applyCoordinatorEffect(&coordinator.Task{}, &runJob{client: c}, r, coordinator.EffectIntent{Payload: payload})
+					if err != nil || out.PR != 42 || out.HeadMismatch || r.PRNumber != 42 || r.PRURL != pr.URL || r.Status != "success" {
+						t.Fatalf("out=%+v report=%+v err=%v", out, r, err)
+					}
+				}
+				if c.creates != wantCreates || c.prs[0].Title != pr.Title || c.prs[0].Body != pr.Body {
+					t.Fatalf("creates=%d PRs=%+v", c.creates, c.prs)
+				}
+			})
+		}
+	}
+}
+
+func TestCoordinatorPRLookupIdentity(t *testing.T) {
+	for _, field := range []string{"repo", "base", "head", "closed", "closed-intent", "closed-before-open"} {
+		t.Run(field, func(t *testing.T) {
+			pr := vcs.PR{Number: 42, HeadRepo: "o/r", HeadBranch: "fix/1", BaseBranch: "main", State: "open"}
+			switch field {
+			case "repo":
+				pr.HeadRepo = "fork/r"
+			case "base":
+				pr.BaseBranch = "release"
+			case "head":
+				pr.HeadBranch = "other"
+			case "closed":
+				pr.State = "closed"
+			case "closed-intent", "closed-before-open":
+				pr.State, pr.Body = "closed", "<!-- clawflow:run-id=stable -->"
+			}
+			c := &intentVCS{prs: []vcs.PR{pr}}
+			want := 0
+			if field == "closed-intent" {
+				want = 42
+			}
+			if field == "closed-before-open" {
+				pr.Number, pr.State = 43, "open"
+				c.prs = append(c.prs, pr)
+				want = 43
+			}
+			got, err := findCoordinatorPR(c, jobEffect{Repo: "o/r", Head: "fix/1", Base: "main", RunID: "stable"})
+			if err != nil || got.Number != want {
+				t.Fatalf("PR=%+v err=%v", got, err)
+			}
+		})
 	}
 }
 

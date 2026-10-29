@@ -354,7 +354,7 @@ func TestCoordinatorSchedulingIgnoresLocalExecutionRequirements(t *testing.T) {
 		t.Fatal("repair requires coordinator clone or worker hostname")
 	}
 	cfg.CoordinatorActive = map[int]bool{7: true}
-	plan := planRepoQueue(repoQueueInput{Repo: "o/r", Issues: []vcs.Issue{{Number: 7, State: "open", Labels: []string{"clawflow"}}, {Number: 8, State: "open", Labels: []string{"clawflow"}}}, ImplementState: map[int]string{7: "", 8: ""}, ImplementJobs: map[int]bool{8: true}, Locked: func(n int) bool { return cfg.CoordinatorActive[n] }, MaxInFlight: 1, Now: time.Now()})
+	plan := planRepoQueue(repoQueueInput{Repo: "o/r", Issues: []vcs.Issue{{Number: 7, State: "open", Labels: []string{"clawflow"}}, {Number: 8, State: "open", Labels: []string{"clawflow"}}}, ImplementState: map[int]string{7: "", 8: ""}, ImplementJobs: map[int]bool{8: true}, OpenPRs: func() ([]vcs.PR, error) { return nil, nil }, Locked: func(n int) bool { return cfg.CoordinatorActive[n] }, MaxInFlight: 1, Now: time.Now()})
 	if len(plan.Picks) != 0 {
 		t.Fatal("active coordinator task did not occupy queue slot")
 	}
