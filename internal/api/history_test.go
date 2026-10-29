@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -59,5 +60,80 @@ func TestHistoryEndpointsUseSQL(t *testing.T) {
 	var rows []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil || len(rows) != 1 || rows[0]["profile"] != "unknown" {
 		t.Fatalf("runs %s %v", rr.Body.String(), err)
+	}
+}
+
+func TestRunsInvalidQueryWithoutDatabase(t *testing.T) {
+	for _, query := range []string{"limit=0", "limit=10001", "limit=no", "from=bad", "from=2026-10-29&until=2026-10-28", "kind=other", "attempt_id=bad", "cursor=bad", "cursor=", "attempt_id=", "role=", "profile=", "execution_status="} {
+		rr := httptest.NewRecorder()
+		HandleRuns(rr, httptest.NewRequest("GET", "/api/runs?"+query, nil))
+		if rr.Code != 400 {
+			t.Fatalf("%s: %d %s", query, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestRunsBoundedAPIAndLegacyDetail(t *testing.T) {
+	s := historyDB(t)
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	for _, name := range []string{"a", "b", "c"} {
+		raw := []byte(`{"repo":"o/r","project":"p","operator":"implement","status":"success","started_at":"2026-10-29T00:00:00Z","summary":"private result","profile":"p","development_session":{"role":"operator"}}`)
+		if _, err := s.UpsertRun(ctx, filepath.Join(snapshot.DataDir(), "runs", name), "run", raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := ""
+	seen := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		url := "/api/runs?limit=1&repo=o%2Fr&project=p&profile=p&role=operator&execution_status=unknown" + next
+		rr := httptest.NewRecorder()
+		HandleRuns(rr, httptest.NewRequest("GET", url, nil))
+		var rows []map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil || len(rows) != 1 {
+			t.Fatalf("%s %v", rr.Body.String(), err)
+		}
+		id := rows[0]["attempt_id"].(string)
+		if seen[id] || rows[0]["summary"] != nil {
+			t.Fatal(rows)
+		}
+		seen[id] = true
+		if rows[0]["exit_code"] != nil || rows[0]["elapsed_ms"] != nil {
+			t.Fatal(rows)
+		}
+		cursor := rr.Header().Get("X-Next-Cursor")
+		if i < 2 && cursor == "" || i == 2 && cursor != "" {
+			t.Fatal("cursor", cursor)
+		}
+		next = "&cursor=" + cursor
+		detail := httptest.NewRecorder()
+		HandleRuns(detail, httptest.NewRequest("GET", "/api/runs?attempt_id="+id, nil))
+		if !strings.Contains(detail.Body.String(), "private result") {
+			t.Fatal(detail.Body.String())
+		}
+	}
+	for _, query := range []string{"", "?path=runs/a"} {
+		rr := httptest.NewRecorder()
+		HandleRuns(rr, httptest.NewRequest("GET", "/api/runs"+query, nil))
+		var rows []map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
+			t.Fatal(err)
+		}
+		want := 3
+		if query != "" {
+			want = 1
+		}
+		if len(rows) != want {
+			t.Fatal(rows)
+		}
+	}
+	raw := []byte(`{"project":"p","status":"success","started_at":"2026-10-29T00:00:00Z"}`)
+	if _, err := s.UpsertRun(ctx, filepath.Join(snapshot.DataDir(), "pilot-runs", "p"), "pilot", raw); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	HandleRuns(rr, httptest.NewRequest("GET", "/api/runs?kind=pilot&project=p&limit=1", nil))
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"kind":"pilot"`) {
+		t.Fatal(rr.Body.String())
 	}
 }

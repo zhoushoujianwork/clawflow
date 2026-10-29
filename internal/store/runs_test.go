@@ -279,3 +279,113 @@ func TestSameSessionAttemptReplay(t *testing.T) {
 		}
 	}
 }
+
+func TestRunHistoryPaginationAndFilters(t *testing.T) {
+	s := historyStore(t)
+	root := t.TempDir()
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		m := fixture("o/r", "success", "2026-10-29T00:00:00Z", nil)
+		m["project"], m["execution_status"], m["role"] = "platform", "ok", "operator"
+		m["offload_run_id"] = fmt.Sprint(i)
+		putRun(t, s, filepath.Join(root, fmt.Sprint(i)), "run", m)
+	}
+	from := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	until := from.Add(time.Hour)
+	f := store.RunFilter{Repo: "o/r", Project: "platform", ExecutionStatus: "ok", Role: "operator", Profile: "p", From: &from, Until: &until, Limit: 2}
+	seen := map[string]bool{}
+	for {
+		rows, err := s.Runs(ctx, "run", f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, r := range rows {
+			if seen[r.RunDir] {
+				t.Fatal("duplicate", r.RunDir)
+			}
+			seen[r.RunDir] = true
+			found, err := s.Runs(ctx, "run", store.RunFilter{AttemptID: store.AttemptID(r, "run")})
+			if err != nil || len(found) != 1 || found[0].RunDir != r.RunDir {
+				t.Fatalf("lookup: %+v %v", found, err)
+			}
+		}
+		f.Cursor = store.RunsCursor(rows[len(rows)-1], "run")
+	}
+	if len(seen) != 5 {
+		t.Fatal(seen)
+	}
+	f.Cursor = ""
+	f.Profile = "other"
+	rows, err := s.Runs(ctx, "run", f)
+	if err != nil || len(rows) != 0 {
+		t.Fatal(rows, err)
+	}
+}
+
+func TestRunListProjectionLegacyAndPrivacy(t *testing.T) {
+	raw := []byte(`{"repo":"o/r","operator":"implement","status":"success","started_at":"2026-10-29T00:00:00Z","prompt":"SECRET","summary":"SECRET","result":"SECRET","issue_body":"SECRET","development_session":{"workdir":"SECRET"},"usage":{"input_tokens":3,"result":"SECRET"}}`)
+	r, _, err := store.DecodeRun(filepath.Join(t.TempDir(), "run"), "run", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.RunListPayloads([]store.Run{r}, filepath.Dir(r.RunDir), "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(rows)
+	if strings.Contains(string(b), "SECRET") {
+		t.Fatal(string(b))
+	}
+	if rows[0]["exit_code"] != nil {
+		t.Fatal(rows)
+	}
+	a := rows[0]["availability"].(store.RunAvailability)
+	if a.Attempt || a.Cost || a.Elapsed || a.ExitCode || a.ExecutionStatus || !a.Tokens {
+		t.Fatal(a)
+	}
+	if rows[0]["attribution"].(store.RunAttribution).Role != "unknown" {
+		t.Fatal(rows)
+	}
+	id := store.AttemptID(r, "run")
+	if err := store.ValidateHistoryKeys("run", id, store.RunsCursor(r, "run")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ValidateHistoryKeys("pilot", id, ""); err == nil {
+		t.Fatal("cross-kind lookup")
+	}
+	r.OffloadRunID = "attempt"
+	r.Machine = "m"
+	id = store.AttemptID(r, "run")
+	r.RunDir += "-replay"
+	if store.AttemptID(r, "run") != id {
+		t.Fatal("attributed ID changed on replay")
+	}
+	for _, key := range []string{"garbage", "e30", "", strings.Repeat("a", 9000)} {
+		if key != "" && store.ValidateHistoryKeys("run", key, "") == nil {
+			t.Fatal("accepted", key)
+		}
+	}
+}
+
+func TestRunListReportedZeroRemainsKnown(t *testing.T) {
+	raw := []byte(`{"repo":"o/r","operator":"implement","status":"success","started_at":"2026-10-29T00:00:00Z","usage":{"total_cost_usd":0,"input_tokens":0},"exit_code":0,"elapsed_ms":0,"execution_status":"ok"}`)
+	r, _, err := store.DecodeRun(filepath.Join(t.TempDir(), "zero"), "run", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.RunListPayloads([]store.Run{r}, filepath.Dir(r.RunDir), "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := rows[0]["availability"].(store.RunAvailability)
+	if !a.Cost || !a.Tokens || !a.Elapsed || !a.ExitCode || !a.ExecutionStatus {
+		t.Fatal(a)
+	}
+	usage := rows[0]["usage"].(map[string]any)
+	if usage["total_cost_usd"] != float64(0) || usage["input_tokens"] != float64(0) {
+		t.Fatal(usage)
+	}
+}
