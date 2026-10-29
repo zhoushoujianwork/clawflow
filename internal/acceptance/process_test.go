@@ -217,3 +217,61 @@ func TestProcessFindingRequiresExplicitNoDefectAndOnlyProcessEvidence(t *testing
 		t.Fatal("diff-checkable violation was downgraded")
 	}
 }
+
+func TestUnverifiedProcessObservationIsInformational(t *testing.T) {
+	for _, status := range []Verdict{Passed, Blocked, Failed} {
+		t.Run(string(status), func(t *testing.T) {
+			r := structuredRecord()
+			r.Checks[0].Status = status
+			f := processGap()
+			f.Observation = &RequirementEvidence{
+				Type: "source", Check: "Inspect current main before editing",
+				Reference: "Missing historical inspection evidence", Commit: r.Contract.HeadSHA, Result: "unverified",
+			}
+			findings := []Finding{f}
+			if status == Blocked {
+				r.Checks[0].Evidence = nil
+				r.Checks[0].Missing = "Human validation window required"
+			}
+			if status == Failed {
+				r.Checks[0].Evidence[0].Result = "failed"
+				e := r.Checks[0].Evidence[0]
+				findings = append(findings, Finding{Kind: "requirement", Summary: "wrong result", Requirement: r.Plan.Criteria[0].Requirement, Evidence: "TestRequiredBehavior failed", Observation: &e})
+			}
+			b, _ := json.Marshal(map[string]any{"status": Failed, "summary": "review complete", "evidence": r.Evidence, "findings": findings, "checks": r.Checks, "next_action": "repair", "next_owner": "implementation"})
+			if err := applyReviewReport(r.Contract, &r, string(b)); err != nil {
+				t.Fatal(err)
+			}
+			if r.Verdict != status || r.Findings[0].Kind != "advisory" {
+				t.Fatalf("process-only observation determined verdict: %+v", r)
+			}
+			if err := ValidateUpload(r.Contract, r); err != nil {
+				t.Fatal(err)
+			}
+			b, _ = json.Marshal(map[string]any{"status": Failed, "findings": []Finding{f}})
+			if applyUnstructuredReport(&r, string(b), errors.New("missing checks")) {
+				t.Fatal("unverified process observation resurrected as a defect")
+			}
+		})
+	}
+}
+
+func TestUnverifiedObservationPreservesConcreteEvidence(t *testing.T) {
+	for _, field := range []string{"check", "reference", "result"} {
+		t.Run(field, func(t *testing.T) {
+			f := processGap()
+			f.Observation = &RequirementEvidence{Type: "source", Check: "Inspect current main before editing", Reference: "Missing historical inspection evidence", Result: "unverified"}
+			switch field {
+			case "check":
+				f.Observation.Check = "TestRequiredBehavior returns wrong result"
+			case "reference":
+				f.Observation.Reference += "; the PR changes deployment files"
+			case "result":
+				f.Observation.Result = "failed"
+			}
+			if processOnlyFinding(f) {
+				t.Fatal("concrete observation was downgraded")
+			}
+		})
+	}
+}

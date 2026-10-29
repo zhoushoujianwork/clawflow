@@ -15,7 +15,7 @@ func processOnlyRequirement(text string) bool {
 }
 
 func processOnlyFinding(f Finding) bool {
-	if !f.Failing() || len(f.Locations) != 0 || f.Observation != nil {
+	if !f.Failing() || len(f.Locations) != 0 {
 		return false
 	}
 	noDefect := func(s string) bool {
@@ -23,6 +23,17 @@ func processOnlyFinding(f Finding) bool {
 		return s == "no demonstrated defect"
 	}
 	content := f.Summary + ";" + f.Defect + ";" + string(f.Evidence)
+	if e := f.Observation; e != nil {
+		// An unverified observation can describe the same process-only gap.
+		// Inspect its text too, so mixed or concrete evidence is never hidden.
+		if e.Result != "unverified" {
+			return false
+		}
+		if !processOnlyRequirement(e.Check) {
+			content += ";" + e.Check
+		}
+		content += ";" + e.Reference
+	}
 	if !strings.Contains(strings.ToLower(content), "no demonstrated defect") {
 		return false
 	}
