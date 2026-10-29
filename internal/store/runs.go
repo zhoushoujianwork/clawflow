@@ -19,6 +19,13 @@ import (
 // Run stores queryable metadata; raw events and transcripts remain on disk.
 // Payload preserves presentation and resume fields without duplicating their schema.
 type Run struct {
+	OffloadRunID             string
+	CallerRunID              string
+	SessionID                string
+	ExitCode                 *int
+	ErrorKind                string
+	ElapsedMs                *int64
+	ExecutionStatus          string
 	RunDir                   string `gorm:"primaryKey"`
 	Repo                     string `gorm:"index:idx_runs_repo_started,priority:1"`
 	Project                  string
@@ -88,6 +95,13 @@ func unknown(s string) string {
 // DecodeRun accepts legacy metadata. Missing usage remains SQL NULL, never zero.
 func DecodeRun(dir, kind string, raw []byte) (Run, []RunModelUsage, error) {
 	var m struct {
+		OffloadRunID       string     `json:"offload_run_id"`
+		CallerRunID        string     `json:"caller_run_id"`
+		SessionID          string     `json:"session_id"`
+		ExitCode           *int       `json:"exit_code"`
+		ErrorKind          string     `json:"error_kind"`
+		ElapsedMs          *int64     `json:"elapsed_ms"`
+		ExecutionStatus    string     `json:"execution_status"`
 		Repo               string     `json:"repo"`
 		Project            string     `json:"project"`
 		IssueNumber        int        `json:"issue_number"`
@@ -146,6 +160,8 @@ func DecodeRun(dir, kind string, raw []byte) (Run, []RunModelUsage, error) {
 		return Run{}, nil, err
 	}
 	r := Run{RunDir: dir, Repo: m.Repo, Project: m.Project, IssueNumber: m.IssueNumber, PRURL: m.PRURL, Operator: m.Operator, Status: m.Status, StartedAt: m.StartedAt, EndedAt: m.EndedAt, Summary: m.Summary, Error: m.Error, Profile: unknown(m.Profile), Backend: unknown(m.Backend), Model: unknown(m.Model), Machine: unknown(m.Machine), EventsPath: filepath.Join(dir, "events.jsonl"), LogPath: filepath.Join(dir, "events.jsonl")}
+	r.OffloadRunID, r.CallerRunID, r.SessionID = m.OffloadRunID, m.CallerRunID, m.SessionID
+	r.ExitCode, r.ErrorKind, r.ElapsedMs, r.ExecutionStatus = m.ExitCode, m.ErrorKind, m.ElapsedMs, m.ExecutionStatus
 	if kind == "pilot" {
 		r.Operator = "pilot:" + m.Project
 	}
@@ -189,6 +205,8 @@ func DecodeRun(dir, kind string, raw []byte) (Run, []RunModelUsage, error) {
 	payload["model"] = r.Model
 	payload["machine"] = r.Machine
 	payload["usage_reported"] = r.UsageReported
+	payload["exit_code"] = r.ExitCode
+	payload["elapsed_ms"] = r.ElapsedMs
 	if u, ok := payload["usage"].(map[string]any); ok {
 		u["total_cost_usd"] = r.CostUSD
 		u["input_tokens"] = r.InputTokens
@@ -225,6 +243,25 @@ func (s *Store) UpsertRun(ctx context.Context, dir, kind string, raw []byte) (st
 	}
 	result := "imported"
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Serialize attributed replays across import paths, never by session.
+		attributed := r.OffloadRunID != "" && r.Machine != "unknown"
+		if attributed {
+			key := kind + ":attempt:" + r.Machine + ":" + r.OffloadRunID
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", key).Error; err != nil {
+				return err
+			}
+			var existing Run
+			err := tx.Table(table).Where("machine = ? AND offload_run_id = ?", r.Machine, r.OffloadRunID).Take(&existing).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			if err == nil {
+				r.RunDir, r.EventsPath, r.LogPath = existing.RunDir, existing.EventsPath, existing.LogPath
+				for i := range models {
+					models[i].RunDir = r.RunDir
+				}
+			}
+		}
 		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", kind+":"+r.RunDir).Error; err != nil {
 			return err
 		}
@@ -374,4 +411,24 @@ func RunPayloads(rows []Run, root string) ([]map[string]any, error) {
 		out = append(out, m)
 	}
 	return out, nil
+}
+
+// migrateExecutionEvidence adds nullable evidence without backfilling success.
+func migrateExecutionEvidence(tx *gorm.DB) error {
+	for _, table := range []string{"runs", "pilot_runs"} {
+		if err := tx.Exec("ALTER TABLE " + table + `
+ ADD COLUMN IF NOT EXISTS offload_run_id text,
+ ADD COLUMN IF NOT EXISTS caller_run_id text,
+ ADD COLUMN IF NOT EXISTS session_id text,
+ ADD COLUMN IF NOT EXISTS exit_code bigint,
+ ADD COLUMN IF NOT EXISTS error_kind text,
+ ADD COLUMN IF NOT EXISTS elapsed_ms bigint,
+ ADD COLUMN IF NOT EXISTS execution_status text`).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + table + "_offload_attempt ON " + table + " (machine, offload_run_id) WHERE offload_run_id <> '' AND machine <> '' AND machine <> 'unknown'").Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

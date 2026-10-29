@@ -25,6 +25,10 @@ func (runner Runner) executeRecorded(ctx context.Context, c Contract, operator s
 		Profile: result.Profile, Backend: result.Backend, Model: result.Model,
 		HeadSHA: c.HeadSHA, Status: "success", Usage: runUsage(result.Usage),
 	}
+	meta.ExecutionMetadata = snapshot.ExecutionFromResult(result)
+	if result.Machine != "" {
+		meta.Machine = result.Machine
+	}
 	switch {
 	case result.Status == "timeout" || execution.IsKind(err, "timeout") || errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
 		meta.Status = "timeout"
