@@ -1,3 +1,4 @@
+import { ScheduledChecksPanel } from "../components/ScheduledChecksPanel"
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
 import { ChevronRight, ExternalLink, Loader2, RefreshCw } from 'lucide-react'
@@ -321,6 +322,8 @@ function PipelinePage() {
           Could not load the pipeline: {error}
         </div>
       )}
+
+      <ScheduledChecksPanel />
 
       {loading && !board ? (
         <p className="text-sm text-muted-foreground text-center py-8 flex items-center justify-center gap-2">

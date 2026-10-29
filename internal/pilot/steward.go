@@ -17,6 +17,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
+	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -29,6 +30,7 @@ var runWakeOffload = operator.RunOffload
 type StewardResult struct {
 	Answer  string
 	Actions []ActionRecord
+	Usage   *snapshot.Usage
 }
 
 func CharterPath() string {
@@ -82,6 +84,12 @@ func EnsureCharter() (string, error) {
 // BuildPlatformContext uses cached evidence, so starting a conversation does not
 // depend on every provider being reachable. Missing evidence is stated explicitly.
 func BuildPlatformContext(cfg *config.Config, charter, message string) (string, []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return buildPlatformContext(ctx, cfg, charter, message)
+}
+
+func buildPlatformContext(ctx context.Context, cfg *config.Config, charter, message string) (string, []string) {
 	repos := make([]string, 0, len(cfg.EnabledRepos()))
 	for name := range cfg.EnabledRepos() {
 		repos = append(repos, name)
@@ -116,13 +124,26 @@ func BuildPlatformContext(cfg *config.Config, charter, message string) (string, 
 			}
 		}
 	}
+	checks := []store.ScheduledCheck{}
+	checksError := ""
+	if s, err := store.EnsureReady(ctx, cfg); err != nil {
+		checksError = err.Error()
+	} else {
+		checks, err = s.ScheduledChecks(ctx)
+		if err != nil {
+			checksError = "scheduled checks unavailable"
+		}
+		s.Close()
+	}
 	evidence := struct {
-		Repos      []string                `json:"enabled_repos"`
-		Board      pipeline.Snapshot       `json:"board"`
-		BoardError string                  `json:"board_error,omitempty"`
-		Runs       []snapshot.RunMeta      `json:"recent_runs_and_usage"`
-		Recent     []chat.PilotWakeSummary `json:"recent_steward_results"`
-	}{Repos: repos, Board: filtered, Runs: runs, Recent: pilotRecentSummaries(Platform, 5)}
+		ChecksError string                  `json:"scheduled_checks_error,omitempty"`
+		Checks      []store.ScheduledCheck  `json:"scheduled_checks"`
+		Repos       []string                `json:"enabled_repos"`
+		Board       pipeline.Snapshot       `json:"board"`
+		BoardError  string                  `json:"board_error,omitempty"`
+		Runs        []snapshot.RunMeta      `json:"recent_runs_and_usage"`
+		Recent      []chat.PilotWakeSummary `json:"recent_steward_results"`
+	}{ChecksError: checksError, Checks: checks, Repos: repos, Board: filtered, Runs: runs, Recent: pilotRecentSummaries(Platform, 5)}
 	if boardErr != nil {
 		evidence.BoardError = boardErr.Error()
 	}
@@ -151,7 +172,7 @@ func Ask(ctx context.Context, message string, ops int, timeout time.Duration) (S
 	if err != nil {
 		return result, err
 	}
-	prompt, repos := BuildPlatformContext(cfg, charter, message)
+	prompt, repos := buildPlatformContext(ctx, cfg, charter, message)
 	start := time.Now().UTC()
 	id := fmt.Sprintf("%x", start.UnixNano())
 	prompt += fmt.Sprintf("\nOps budget: %d actions (existing daily/creation limits also apply).\nWake run_id: %s\n", ops, id)
@@ -175,6 +196,7 @@ func Ask(ctx context.Context, message string, ops int, timeout time.Duration) (S
 		if r.Machine != "" {
 			meta.Machine = r.Machine
 		}
+		result.Usage = meta.Usage
 	})
 	result.Answer, err = runWakeOffload(ctx, prompt, filepath.Dir(CharterPath()), timeout, events, config.RolePilot)
 	if err == nil {
