@@ -36,7 +36,7 @@ func TestSessionResumeEligibility(t *testing.T) {
 			m.Outcome = "agent-failed"
 			m.Summary = "BLOCKED pending decision"
 		}, 0, false},
-		{"acceptance repair", "", func(m *snapshot.RunMeta) { m.Status = "success" }, 0, true},
+		{"acceptance repair", "fresh_repair", func(m *snapshot.RunMeta) { m.Status = "success" }, 0, true},
 		{"missing session", "no_session", func(m *snapshot.RunMeta) { m.DevelopmentSession.SessionID = "" }, 0, false},
 		{"role", "role_changed", func(m *snapshot.RunMeta) { m.DevelopmentSession.Role = "acceptance" }, 0, false},
 		{"profile", "profile_changed", func(m *snapshot.RunMeta) { m.DevelopmentSession.Profile = "old" }, 0, false},
@@ -122,14 +122,21 @@ func TestDevelopmentDeltaAndPersistence(t *testing.T) {
 					t.Fatal(err)
 				}
 			})
-			if opts.SessionKey != "native" || !strings.Contains(opts.ResumePrompt, "timeout") || !strings.Contains(opts.ResumePrompt, "released decision") || strings.Contains(opts.ResumePrompt, "old decision") {
+			if !repair && (opts.SessionKey != "native" || !strings.Contains(opts.ResumePrompt, "timeout") || !strings.Contains(opts.ResumePrompt, "released decision") || strings.Contains(opts.ResumePrompt, "old decision")) {
 				t.Fatalf("bad delta: %s", opts.ResumePrompt)
 			}
-			if repair && (!strings.Contains(opts.ResumePrompt, "missing boundary check") || !strings.Contains(opts.ResumePrompt, "UNTRUSTED")) {
-				t.Fatal("findings missing")
+			if repair && (opts.SessionKey != "" || opts.ResumePrompt != "") {
+				t.Fatal("repair inherited the development session")
 			}
 			opts.Workdir, opts.Role = dir, config.RoleOperator
+			opts.ResumeContext = repairContext
 			opts.ExecuteFunc = func(_ context.Context, prompt string, request execution.Options) (execution.Result, error) {
+				if repair {
+					if request.Resume || request.SessionKey != "" || !strings.Contains(prompt, "missing boundary check") || !strings.Contains(prompt, "UNTRUSTED") {
+						t.Fatal("repair was not delivered to a fresh session with findings")
+					}
+					return execution.Result{NativeSessionID: "fresh-repair", Profile: "dev", Backend: "new-backend", Text: "partial work"}, context.DeadlineExceeded
+				}
 				if !request.Resume || request.SessionKey != "native" || prompt != opts.ResumePrompt {
 					t.Fatal("delta was not delivered to the native session")
 				}
@@ -147,10 +154,14 @@ func TestDevelopmentDeltaAndPersistence(t *testing.T) {
 				t.Fatal(err)
 			}
 			s := saved.DevelopmentSession
-			if s.SessionID != "native" || s.Profile != "dev" || s.Backend != "new-backend" || !s.BackendChanged || s.ResumeCount != 1 {
+			wantSession, wantCount := "native", 1
+			if repair {
+				wantSession, wantCount = "fresh-repair", 0
+			}
+			if s.SessionID != wantSession || s.Profile != "dev" || s.Backend != "new-backend" || !s.BackendChanged || s.ResumeCount != wantCount {
 				t.Fatalf("identity lost: %+v", s)
 			}
-			if got := sessionResumeReason(saved, config.RoleOperator, "dev", dir, 0, true); got != "backend_changed" {
+			if got := sessionResumeReason(saved, config.RoleOperator, "dev", dir, 0, false); got != "backend_changed" {
 				t.Fatal(got)
 			}
 			opts.OnExecutionResult(execution.Result{NativeSessionID: "fresh", Profile: "dev", Backend: "codex"}, nil, false)

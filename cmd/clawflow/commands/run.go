@@ -1628,6 +1628,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
 		previousRun = previousDevelopmentRun(j.repo, j.sub.Number, startedAt)
 	}
+	var repairInput string
 	var wtResult worktreeResult
 	var cleanup func()
 	var err error
@@ -1639,8 +1640,11 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		} else {
 			wtResult, cleanup, err = setupCIRepairWorkdir(ctx, j.repoCfg, j.repo, j.repair.PR)
 		}
-		if err == nil && (j.repair.MergeConflict || j.repair.Acceptance != nil) {
+		if err == nil {
 			err = refreshRepairBase(ctx, wtResult.Path, j)
+		}
+		if err == nil {
+			repairInput, err = buildRepairInput(ctx, wtResult.Path, j)
 		}
 	} else if j.reopen != nil {
 		wtResult, cleanup, err = setupReopenWorktreeContext(ctx, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch, j.reopen)
@@ -1726,11 +1730,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	// Build resume context for the operator prompt when reusing a worktree.
 	var resumeCtx string
-	if wtResult.Resumed {
+	if wtResult.Resumed && j.repair == nil {
 		resumeCtx = buildResumeContext(wtResult)
 	}
 	if j.repair != nil {
-		resumeCtx += j.repair.prompt(j.repoCfg.TestCommand)
+		comments = nil
+		resumeCtx = repairInput
 	}
 
 	// Rebind the VCS client's request context before execution + write-back.

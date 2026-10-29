@@ -65,6 +65,9 @@ func configuredDevelopmentProfile(role string) string {
 
 func sessionResumeReason(prev snapshot.RunMeta, role, profile, workdir string, baseCommits int, repair bool) string {
 	s := prev.DevelopmentSession
+	if repair {
+		return "fresh_repair"
+	}
 	switch {
 	case s.SessionID == "":
 		return "no_session"
@@ -92,7 +95,7 @@ func sessionResumeReason(prev snapshot.RunMeta, role, profile, workdir string, b
 	if _, err := os.Stat(filepath.Join(workdir, ".git")); err != nil {
 		return "worktree_missing"
 	}
-	if repair || prev.WritebackError != "" || prev.Status == "failed" || prev.Status == "rate-limited" || prev.Status == "no-marker" || prev.Status == "disallowed-outcome" || (prev.Outcome == "agent-failed" && strings.Contains(strings.ToUpper(prev.Summary), "BLOCKED")) {
+	if prev.WritebackError != "" || prev.Status == "failed" || prev.Status == "rate-limited" || prev.Status == "no-marker" || prev.Status == "disallowed-outcome" || (prev.Outcome == "agent-failed" && strings.Contains(strings.ToUpper(prev.Summary), "BLOCKED")) {
 		return ""
 	}
 	return "not_resumable"
