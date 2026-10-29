@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,6 +252,7 @@ func TestLatestRecordExactContractAndNoComplete(t *testing.T) {
 	}
 	other := passing()
 	other.Contract.Generation++
+	other.Contract.HeadSHA = strings.Repeat("d", 40)
 	other.ContractDigest, _ = other.Contract.Digest()
 	other.Plan.ContractDigest = other.ContractDigest
 	if err := s.SaveRecord(other); err != nil {
@@ -321,6 +323,7 @@ func TestInfrastructureAttempts(t *testing.T) {
 	incomplete.Completed = false
 	other := infraRecord(first, "other", 60*time.Second)
 	other.Contract.Generation++
+	other.Contract.HeadSHA = strings.Repeat("d", 40)
 	other.ContractDigest, _ = other.Contract.Digest()
 	other.Plan.ContractDigest = other.ContractDigest
 	for _, r := range []Record{first, failed, gated, infra1, infra2, incomplete, other} {
@@ -346,7 +349,7 @@ func TestInfrastructureAttempts(t *testing.T) {
 		}
 	}
 	got, err = s.InfrastructureAttempts(c)
-	if err != nil || got.Count != 2 || got.LatestIsInfra {
+	if err != nil || got.Count != 0 || got.LatestIsInfra {
 		t.Fatalf("verdict after infra: %+v %v", got, err)
 	}
 }
@@ -440,5 +443,44 @@ func TestCompleteRecordsAtHeadRejectsCorruptRecord(t *testing.T) {
 	}
 	if _, err := s.CompleteRecordsAtHead(r.Contract.Repository, r.Contract.PRNumber, r.Contract.HeadSHA); err == nil {
 		t.Fatal("corrupt record accepted")
+	}
+}
+
+func TestInfrastructureBinaryReset(t *testing.T) {
+	first := passing()
+	a := infraRecord(first, "a", 10*time.Second)
+	b := infraRecord(first, "b", 20*time.Second)
+	a.BinaryID, b.BinaryID = "previous-binary", "previous-binary"
+	if got := ConsecutiveInfrastructure([]Record{a, b}); got.Count != 0 || !got.LatestIsInfra {
+		t.Fatalf("binary reset: %+v", got)
+	}
+	b.BinaryID = BinaryID()
+	if got := ConsecutiveInfrastructure([]Record{a, b}); got.Count != 1 {
+		t.Fatalf("new binary attempt: %+v", got)
+	}
+}
+
+func TestInfrastructureBudgetSurvivesBaseChange(t *testing.T) {
+	s := openTestStore(t)
+	first := passing()
+	a := infraRecord(first, "base-a", 10*time.Second)
+	b := infraRecord(first, "base-b", 20*time.Second)
+	b.Contract.BaseSHA = strings.Repeat("e", 40)
+	b.ContractDigest, _ = b.Contract.Digest()
+	b.Plan.ContractDigest = b.ContractDigest
+	for _, r := range []Record{a, b} {
+		if err := s.SaveRecord(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.InfrastructureAttempts(b.Contract)
+	if err != nil || got.Count != 2 {
+		t.Fatalf("base reset budget: %+v %v", got, err)
+	}
+	changed := b.Contract
+	changed.Requirements += " changed"
+	got, err = s.InfrastructureAttempts(changed)
+	if err != nil || got.Count != 0 {
+		t.Fatalf("body did not reset: %+v %v", got, err)
 	}
 }

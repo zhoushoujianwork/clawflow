@@ -232,6 +232,7 @@ const (
 )
 
 type Record struct {
+	BinaryID   string             `json:"binary_id,omitempty"`
 	Checks     []RequirementCheck `json:"checks,omitempty"`
 	NextAction string             `json:"next_action,omitempty"`
 	NextOwner  string             `json:"next_owner,omitempty"`
