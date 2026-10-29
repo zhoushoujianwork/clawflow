@@ -305,6 +305,9 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	}
 	parsed = record
 	if err = applyReviewReport(c, &parsed, corrected.Text); err != nil {
+		if !errors.Is(err, errReviewInfrastructure) && applyUnstructuredReport(&record, corrected.Text, err) {
+			return record, nil
+		}
 		return record, err
 	}
 	return parsed, nil
@@ -346,6 +349,11 @@ func applyReviewReport(c Contract, record *Record, text string) error {
 	for _, e := range output.Evidence {
 		if !nonempty(e) {
 			return errors.New("acceptance report contains empty evidence")
+		}
+	}
+	for _, f := range output.Findings {
+		if f.Kind == "unstructured" {
+			return errors.New("unstructured findings are runner-owned")
 		}
 	}
 	failing, findingErr := validateFindings(output.Findings)

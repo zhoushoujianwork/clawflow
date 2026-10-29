@@ -390,6 +390,9 @@ func (s *Store) completeRecords(c Contract) ([]Record, error) {
 }
 
 func completeRecord(r Record) error {
+	if err := validateUnstructured(r); err != nil {
+		return err
+	}
 	if len(r.Findings) > 0 {
 		failing, err := validateFindings(r.Findings)
 		if err != nil {
