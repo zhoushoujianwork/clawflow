@@ -85,7 +85,7 @@ func warnRetiredQueue(node *yaml.Node) {
 	}
 	if found {
 		retiredQueueNotice.Do(func() {
-			fmt.Fprintln(os.Stderr, "clawflow: retired queue selectors are ignored; only the clawflow label enrolls issues; obsolete keys will be dropped on save")
+			fmt.Fprintln(os.Stderr, "clawflow: retired queue selectors are ignored; open leaf issues are selected unless labeled clawflow-skip; obsolete keys will be dropped on save")
 		})
 	}
 }

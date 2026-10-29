@@ -279,3 +279,9 @@ func TestSubject_HasLabel(t *testing.T) {
 		t.Error("HasLabel on nil Labels should be false")
 	}
 }
+
+func TestOwnerSkipExcludesCustomOperator(t *testing.T) {
+	if Matches(&Subject{Labels: []string{"clawflow-skip"}}, &Operator{}) {
+		t.Fatal("owner-skipped subject matched")
+	}
+}

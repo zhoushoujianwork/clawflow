@@ -74,10 +74,10 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		plan.Previous[e.Number] = e
 	}
 	plan.State.Repo = in.Repo
-	plan.State.NotEnrolled = 0
+	plan.State.Skipped = 0
 	for _, is := range in.Issues {
-		if (is.State == "" || is.State == "open") && !hasLabel(is.Labels, queue.ScopeLabel) {
-			plan.State.NotEnrolled++
+		if (is.State == "" || is.State == "open") && hasLabel(is.Labels, queue.SkipLabel) {
+			plan.State.Skipped++
 		}
 	}
 
@@ -103,6 +103,9 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 	meta := map[queue.Key]vcs.Issue{}
 	for _, is := range in.Issues {
 		if is.State != "" && is.State != "open" {
+			continue
+		}
+		if hasLabel(is.Labels, queue.SkipLabel) {
 			continue
 		}
 		if in.HasChildren[is.Number] || is.SubIssuesTotal > 0 {
@@ -139,9 +142,6 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 			c.FlightBlocked = in.FlightBlocked(is, flightPR)
 		}
 		if !c.InFlight {
-			if !hasLabel(is.Labels, queue.ScopeLabel) {
-				continue
-			}
 			switch {
 			case !scanned:
 				c.Ineligible = "not_in_open_issue_scan"
@@ -202,7 +202,6 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		plan.State.Entries = append(plan.State.Entries, queue.EntryRecord{
 			Number: e.Key.Number, Title: is.Title, Priority: e.Priority.String(), Rank: e.Rank,
 			State: e.State, Reason: e.Reason, Created: is.CreatedAt,
-			Labeled: hasLabel(is.Labels, queue.ScopeLabel),
 		})
 	}
 	return plan

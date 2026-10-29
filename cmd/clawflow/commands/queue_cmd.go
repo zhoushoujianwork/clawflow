@@ -12,8 +12,6 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 )
 
-var queueEnrollmentClient = newVCSClientForRepo
-
 // NewQueueCmd wires `clawflow queue`: the unified cross-repo work queue.
 func NewQueueCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -42,7 +40,7 @@ func newQueueListCmd() *cobra.Command {
 			if !asJSON {
 				for _, st := range queue.ListStates() {
 					if repo == "" || st.Repo == repo {
-						fmt.Fprintf(cmd.OutOrStdout(), "%s: not enrolled: %d open issue(s) without the clawflow label (last pass)\n", st.Repo, st.NotEnrolled)
+						fmt.Fprintf(cmd.OutOrStdout(), "%s: skipped: %d open issue(s) with clawflow-skip (last pass)\n", st.Repo, st.Skipped)
 					}
 				}
 			}
@@ -155,7 +153,7 @@ func newQueueAddCmd() *cobra.Command {
 	var before, after string
 	cmd := &cobra.Command{
 		Use:   "add <key> [--top | --before <key> | --after <key>]",
-		Short: "Add the clawflow label and manual rank (bottom by default)",
+		Short: "Add manual rank (does not change eligibility) (bottom by default)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
@@ -184,7 +182,7 @@ func newQueueAddCmd() *cobra.Command {
 			if _, ok := cfg.Repos[k.Repo]; !ok {
 				return fmt.Errorf("repository %q is not configured", k.Repo)
 			}
-			// Validate placement before changing remote enrollment.
+			// Validate placement before changing the rank.
 			current, err := queue.LoadRank()
 			if err != nil {
 				return err
@@ -198,13 +196,6 @@ func newQueueAddCmd() *cobra.Command {
 						return fmt.Errorf("repository %q is not configured", anchor.Repo)
 					}
 				}
-			}
-			client, _, _, err := queueEnrollmentClient(k.Repo)
-			if err != nil {
-				return err
-			}
-			if err := client.AddLabel(k.Repo, k.Number, queue.ScopeLabel); err != nil {
-				return err
 			}
 			order, err := moveQueueItem(cfg, args[0], p)
 			if err != nil {
@@ -223,18 +214,11 @@ func newQueueAddCmd() *cobra.Command {
 func newQueueRemoveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove <key>",
-		Short: "Remove the clawflow label and manual rank",
+		Short: "Remove manual rank (does not exclude the issue)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			k, err := queue.ParseKey(args[0])
 			if err != nil {
-				return err
-			}
-			client, _, _, err := queueEnrollmentClient(k.Repo)
-			if err != nil {
-				return err
-			}
-			if err := client.RemoveLabel(k.Repo, k.Number, queue.ScopeLabel); err != nil {
 				return err
 			}
 			if _, err := queue.UpdateRank(func(order []queue.Key) ([]queue.Key, error) {

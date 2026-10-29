@@ -678,6 +678,9 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 	if err != nil {
 		return acceptance.Record{}, err
 	}
+	if err := issueWorkAllowed(client, repo, extractClosesIssue(pr.Body)); err != nil {
+		return acceptance.Record{}, err
+	}
 	origin, err := acceptanceOrigin(ctx, rc, repo)
 	if err != nil {
 		return acceptance.Record{}, err

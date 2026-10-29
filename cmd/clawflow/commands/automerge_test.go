@@ -175,7 +175,7 @@ func (f *sweepFake) UploadAttachment(repo string, filePath string) (string, erro
 	return "", vcs.ErrNotSupported
 }
 func (f *sweepFake) GetIssueLabels(repo string, issueNumber int) ([]string, error) {
-	return nil, vcs.ErrNotSupported
+	return nil, nil
 }
 func (f *sweepFake) AddLabel(repo string, issueNumber int, labels ...string) error {
 	return vcs.ErrNotSupported

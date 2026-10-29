@@ -846,12 +846,19 @@ func TestPipelineDecidedSnapshotEvidence(t *testing.T) {
 	}
 }
 
-func TestPipelineIncludesUnqueuedEvidence(t *testing.T) {
+func TestPipelineIncludesSkippedIssues(t *testing.T) {
 	f := newPipelineFake()
-	f.issues = []vcs.Issue{{Number: 20, State: "open", UpdatedAt: pipelineT0.Format(time.RFC3339)}}
+	f.issues = []vcs.Issue{{Number: 20, State: "open", Labels: []string{"clawflow-skip"}, UpdatedAt: pipelineT0.Format(time.RFC3339)}}
 	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
-	b := buildPipeline(context.Background(), d).Repos[0]
-	if len(b.Items) != 0 || len(b.UnqueuedIssues) != 1 || b.UnqueuedIssues[0].Issue != 20 {
-		t.Fatalf("missing unqueued evidence: %+v", b)
+	d.globalQueue = func() []queue.ListEntry {
+		return []queue.ListEntry{{Repo: "o/r", Number: 20, State: "blocked:agent-failed"}}
+	}
+	snap := buildPipeline(context.Background(), d)
+	if len(snap.GlobalQueue) != 0 {
+		t.Fatal("stale queue retained skipped issue")
+	}
+	b := snap.Repos[0]
+	if len(b.Items) != 0 || len(b.SkippedIssues) != 1 || b.SkippedIssues[0].Issue != 20 {
+		t.Fatalf("missing skipped issue: %+v", b)
 	}
 }

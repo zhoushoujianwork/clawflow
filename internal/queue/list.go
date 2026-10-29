@@ -28,11 +28,6 @@ func BuildList(states []RepoState, order []Key, repo string) []ListEntry {
 		}
 		for _, e := range st.Entries {
 			k := Key{Repo: st.Repo, Number: e.Number}
-			if e.State != StateInFlight && e.State != StateParked {
-				if !e.Labeled {
-					continue
-				}
-			}
 			prio, _ := PriorityFromLabels([]string{e.Priority})
 			items = append(items, Item{Key: k, Priority: prio, CreatedAt: e.Created})
 			meta[k] = e

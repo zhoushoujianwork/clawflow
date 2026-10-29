@@ -326,7 +326,6 @@ func TestBoardWakeTriggers(t *testing.T) {
 		created    time.Time
 	}{
 		{"head-2", "missing-decided", pipeline.Item{Issue: 3, State: "open", InQueue: true, QueuePosition: 3, HasDecided: pipeline.DecidedSection("## Plan"), UpdatedAt: old}, now.Add(-time.Hour)},
-		{"unqueued", "unqueued-issue", pipeline.Item{Issue: 4, State: "open", UpdatedAt: old}, now.Add(-time.Hour)},
 		{"stuck PR", "stuck-pr", pipeline.Item{Issue: 5, State: "open", InQueue: true, PR: &pipeline.PRInfo{State: "open", UpdatedAt: old}}, now.Add(-time.Hour)},
 		{"attention", "attention:ci failed", pipeline.Item{Issue: 7, State: "open", InQueue: true, QueuePosition: 9, Attention: []string{"ci failed"}, UpdatedAt: old}, now.Add(-time.Hour)},
 		{"digest", "daily-digest", pipeline.Item{Issue: 6, State: "closed"}, now.Add(-25 * time.Hour)},
@@ -341,11 +340,7 @@ func TestBoardWakeTriggers(t *testing.T) {
 			p.CreatedAt = tc.created.Format(time.RFC3339)
 			p.Automation.LastWokenAt = now.Add(-time.Minute).Format(time.RFC3339)
 			board := pipeline.Snapshot{GeneratedAt: now.Format(time.RFC3339), Repos: []pipeline.RepoBoard{{Repo: "o/r", Items: []pipeline.Item{tc.item}}}}
-			if tc.kind == "unqueued-issue" {
-				board.Repos[0].Items = nil
-				board.Repos[0].UnqueuedIssues = []pipeline.Item{tc.item}
-			}
-			board.Repos = append(board.Repos, pipeline.RepoBoard{Repo: "other/r", UnqueuedIssues: []pipeline.Item{{Issue: 99, State: "open"}}})
+			board.Repos = append(board.Repos, pipeline.RepoBoard{Repo: "other/r", SkippedIssues: []pipeline.Item{{Issue: 99, State: "open"}}})
 			if err := snapshot.WritePipeline(board); err != nil {
 				t.Fatal(err)
 			}
@@ -403,5 +398,41 @@ func TestBoardWakeNegativeConditions(t *testing.T) {
 	board.Repos[0].Stale = true
 	if got := boardAttention(board, wakeState{}, now, now); len(got) != 0 {
 		t.Fatalf("stale evidence: %+v", got)
+	}
+}
+
+func TestSkippedIssuesDoNotWakePilot(t *testing.T) {
+	now := time.Now().UTC()
+	item := pipeline.Item{Issue: 4, State: "open", PR: &pipeline.PRInfo{Number: 11}, Attention: []string{"ci failed"}, UpdatedAt: now.Add(-time.Hour).Format(time.RFC3339)}
+	board := pipeline.Snapshot{Repos: []pipeline.RepoBoard{{Repo: "o/r", SkippedIssues: []pipeline.Item{item}}}}
+	if got := boardAttention(board, wakeState{}, now.Add(-time.Hour), now); len(got) != 0 {
+		t.Fatalf("skipped wake: %+v", got)
+	}
+	before := boardFingerprint(board)
+	board.Repos[0].SkippedIssues[0].Title = "owner edit"
+	if boardFingerprint(board) != before {
+		t.Fatal("skipped edits change digest fingerprint")
+	}
+	t.Setenv("HOME", t.TempDir())
+	p, err := project.Create("skip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Repos = []string{"o/r"}
+	p.CreatedAt = now.Format(time.RFC3339)
+	if err := snapshot.WritePipeline(board); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(clog.LogsDir(), 0755); err != nil {
+		t.Fatal(err)
+	}
+	line := now.Format(time.RFC3339) + " INFO run/end repo=o/r issue=4 applied_label=agent-failed\n"
+	line += now.Format(time.RFC3339) + ` WARN run/ci_repair_skip repo=o/r pr=11 err="repair exhausted"` + "\n"
+	if err := os.WriteFile(filepath.Join(clog.LogsDir(), "run.log"), []byte(line), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ev, _, err := collectWakeEvidence(p, &config.Config{}, now)
+	if err != nil || len(ev.Attention) != 0 {
+		t.Fatalf("skipped log wake: %+v %v", ev.Attention, err)
 	}
 }

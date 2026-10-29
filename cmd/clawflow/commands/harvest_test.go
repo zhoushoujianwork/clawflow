@@ -625,3 +625,24 @@ func TestHarvestIgnoresRetiredBinding(t *testing.T) {
 		t.Fatalf("legacy binding prevented enqueue or ran local acceptance: failed=%v enqueued=%d local=%d", failed, enqueued, *calls)
 	}
 }
+
+func TestOwnerSkipBlocksPRWork(t *testing.T) {
+	f, _, calls := harvestFixture(t)
+	f.issue.Labels = []string{"agent-implemented", "clawflow-skip"}
+	if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 0 {
+		t.Fatalf("harvest started: %v calls=%d", failed, *calls)
+	}
+	if _, err := runAcceptance(context.Background(), f, "o/r", 11); err == nil {
+		t.Fatal("acceptance started")
+	}
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
+	if len(f.merged) != 0 || len(f.expected) != 0 {
+		t.Fatal("skipped PR merged")
+	}
+	if ciRepairCandidate("o/r", f.pr, f.issue) == nil {
+		t.Fatal("skipped PR repair accepted")
+	}
+	if attemptAutoMerge(autoMergeAttempt{ctx: context.Background(), client: f, repo: "o/r", prNum: 11, issueNum: 42}) {
+		t.Fatal("inline merge accepted")
+	}
+}

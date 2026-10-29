@@ -31,7 +31,7 @@ func implementationSubjectAllowed(sub *operator.Subject) bool {
 	if sub.IsPR || sub.State != "open" || sub.SubTotal > 0 {
 		return false
 	}
-	for _, label := range []string{"question", "tracking", "agent-running", "agent-failed", "agent-skipped"} {
+	for _, label := range []string{"clawflow-skip", "question", "tracking", "agent-running", "agent-failed", "agent-skipped"} {
 		if sub.HasLabel(label) {
 			return false
 		}

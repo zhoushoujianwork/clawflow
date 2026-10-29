@@ -212,6 +212,12 @@ func attemptAutoMergeResult(a autoMergeAttempt) mergeResult {
 	if err := a.ctx.Err(); err != nil {
 		return blocked(mergeReasonCanceled, err)
 	}
+	if a.issueNum > 0 {
+		labels, err := a.client.GetIssueLabels(a.repo, a.issueNum)
+		if err != nil || hasLabel(labels, "clawflow-skip") {
+			return blocked("issue_skipped_or_unreadable", err)
+		}
+	}
 	required, err := acceptanceEnrollment(a.repo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s merge blocked: %v\n", a.prefix, err)
@@ -268,6 +274,11 @@ func attemptAutoMergeResult(a autoMergeAttempt) mergeResult {
 		return blocked(mergeReasonNotMergeable, fmt.Errorf("status: %s", mergeStatus))
 	}
 
+	if a.issueNum > 0 {
+		if err := issueWorkAllowed(a.client, a.repo, a.issueNum); err != nil {
+			return blocked("issue_skipped_or_unreadable", err)
+		}
+	}
 	if err := mergeWithRetry(a.prefix,
 		merge,
 		func() (vcs.MergeStatus, error) { return a.client.GetPRMergeability(a.repo, a.prNum) },
@@ -358,6 +369,10 @@ func autoMergeCandidate(client vcs.Client, fullName string, pr vcs.PR) (issueNum
 	issueNum = extractClosesIssue(pr.Body)
 	if issueNum == 0 {
 		return 0, false, &prSkip{reason: "no_closing_keyword", fields: []any{"reason", "no_closing_keyword"}}
+	}
+	labels, err := client.GetIssueLabels(fullName, issueNum)
+	if err != nil || hasLabel(labels, "clawflow-skip") {
+		return issueNum, true, &prSkip{reason: "issue_skipped_or_unreadable"}
 	}
 	status, mErr := client.GetPRMergeability(fullName, pr.Number)
 	if mErr != nil {

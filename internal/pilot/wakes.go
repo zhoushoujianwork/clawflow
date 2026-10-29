@@ -194,8 +194,17 @@ func collectWakeEvidence(p *project.Project, cfg *config.Config, now time.Time) 
 	for _, a := range boardAttention(ev.Board, state, created, now) {
 		candidates[a.key()] = a
 	}
+	skipped := map[string]bool{}
+	for _, repo := range ev.Board.Repos {
+		for _, item := range repo.SkippedIssues {
+			skipped[repo.Repo+"#"+strconv.Itoa(item.Issue)] = true
+			if item.PR != nil {
+				skipped[repo.Repo+"#pr-"+strconv.Itoa(item.PR.Number)] = true
+			}
+		}
+	}
 	for _, a := range candidates {
-		if eligibleAttention(a, state, now) {
+		if !skipped[a.Repo+"#"+a.Issue] && eligibleAttention(a, state, now) {
 			ev.Attention = append(ev.Attention, a)
 		}
 	}
@@ -233,6 +242,10 @@ func evidencePrompt(ev wakeEvidence) string {
 func boardFingerprint(board pipeline.Snapshot) string {
 	board.GeneratedAt = ""
 	board.Events = nil
+	board.Repos = append([]pipeline.RepoBoard(nil), board.Repos...)
+	for i := range board.Repos {
+		board.Repos[i].SkippedIssues = nil
+	}
 	b, _ := json.Marshal(board)
 	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
@@ -243,7 +256,7 @@ func boardAttention(board pipeline.Snapshot, state wakeState, created, now time.
 		if repo.Stale || repo.Error != "" {
 			continue
 		}
-		items := append(append([]pipeline.Item(nil), repo.Items...), repo.UnqueuedIssues...)
+		items := repo.Items
 		for _, item := range items {
 			if item.State != "open" {
 				continue
@@ -264,9 +277,6 @@ func boardAttention(board pipeline.Snapshot, state wakeState, created, now time.
 				if reason != "" {
 					add("attention:"+reason, at)
 				}
-			}
-			if !item.InQueue && item.PR == nil {
-				add("unqueued-issue", at)
 			}
 			// Queue positions are global and one-based; head-2 is the third item.
 			if item.InQueue && item.QueuePosition > 0 && item.QueuePosition <= 3 && item.HasDecided != nil && !*item.HasDecided {

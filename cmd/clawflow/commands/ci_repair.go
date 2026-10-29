@@ -77,7 +77,7 @@ func ciRepairCandidate(repo string, pr vcs.PR, issue *vcs.Issue) error {
 	if !vcs.ManagedIssueBranch(pr.HeadBranch, n) {
 		return fmt.Errorf("unmanaged branch")
 	}
-	for _, l := range []string{"agent-failed", "agent-skipped", "agent-running", "tracking", "question"} {
+	for _, l := range []string{"clawflow-skip", "agent-failed", "agent-skipped", "agent-running", "tracking", "question"} {
 		if issue.HasLabel(l) {
 			return fmt.Errorf("issue excluded by %s", l)
 		}

@@ -3,36 +3,13 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
-	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
-type queueLabelFake struct {
-	vcs.Client
-	calls []string
-	err   error
-}
-
-func (f *queueLabelFake) AddLabel(repo string, n int, labels ...string) error {
-	f.calls = append(f.calls, fmt.Sprintf("add %s#%d %s", repo, n, strings.Join(labels, ",")))
-	return f.err
-}
-func (f *queueLabelFake) RemoveLabel(repo string, n int, labels ...string) error {
-	f.calls = append(f.calls, fmt.Sprintf("remove %s#%d %s", repo, n, strings.Join(labels, ",")))
-	return f.err
-}
-func mockQueueLabels(t *testing.T) *queueLabelFake {
-	f := &queueLabelFake{}
-	old := queueEnrollmentClient
-	queueEnrollmentClient = func(repo string) (vcs.Client, string, config.Repo, error) { return f, repo, config.Repo{}, nil }
-	t.Cleanup(func() { queueEnrollmentClient = old })
-	return f
-}
 func queueCmdSetup(t *testing.T) {
 	t.Helper()
 	writeTestConfig(t, &config.Config{Repos: map[string]config.Repo{
@@ -111,12 +88,12 @@ func TestQueueListCommand(t *testing.T) {
 		}
 	}
 	must(queue.SaveState(queue.RepoState{Repo: "o/r", Entries: []queue.EntryRecord{
-		{Number: 1, Title: "old", Labeled: true, Priority: "P2", Rank: -1, State: "eligible", Created: "2026-01-01T00:00:00Z"},
-		{Number: 2, Title: "urgent", Labeled: true, Priority: "P0", Rank: -1, State: "in_flight", Created: "2026-01-02T00:00:00Z"},
-		{Number: 3, Title: "stuck", Labeled: true, Priority: "P2", Rank: -1, State: "blocked", Reason: "label_agent-failed", Created: "2026-01-03T00:00:00Z"},
+		{Number: 1, Title: "old", Priority: "P2", Rank: -1, State: "eligible", Created: "2026-01-01T00:00:00Z"},
+		{Number: 2, Title: "urgent", Priority: "P0", Rank: -1, State: "in_flight", Created: "2026-01-02T00:00:00Z"},
+		{Number: 3, Title: "stuck", Priority: "P2", Rank: -1, State: "blocked", Reason: "label_agent-failed", Created: "2026-01-03T00:00:00Z"},
 	}}))
 	must(queue.SaveState(queue.RepoState{Repo: "g/sub/p", Entries: []queue.EntryRecord{
-		{Number: 4, Title: "gl", Labeled: true, Priority: "P2", Rank: -1, State: "waiting", Reason: "dependency", Created: "2025-12-01T00:00:00Z"},
+		{Number: 4, Title: "gl", Priority: "P2", Rank: -1, State: "waiting", Reason: "dependency", Created: "2025-12-01T00:00:00Z"},
 	}}))
 	_, err := runQueueCmd(t, "move", "o/r#3", "--top")
 	must(err)
@@ -147,7 +124,6 @@ func TestQueueListCommand(t *testing.T) {
 }
 
 func TestQueueAddAndRemoveCommands(t *testing.T) {
-	f := mockQueueLabels(t)
 	queueCmdSetup(t)
 	steps := []struct {
 		args []string
@@ -167,9 +143,6 @@ func TestQueueAddAndRemoveCommands(t *testing.T) {
 		if got := rankStrings(t); got != s.want {
 			t.Fatalf("%v: rank = %s, want %s", s.args, got, s.want)
 		}
-	}
-	if len(f.calls) != len(steps) || f.calls[0] != "add o/r#1 clawflow" || f.calls[5] != "remove o/r#5 clawflow" {
-		t.Fatalf("label calls: %v", f.calls)
 	}
 	if _, err := runQueueCmd(t, "remove", "o/r#99"); err != nil {
 		t.Fatal(err)
@@ -195,33 +168,16 @@ func TestQueueAddAndRemoveCommands(t *testing.T) {
 	}
 }
 
-func TestQueueLabelFailurePreservesRank(t *testing.T) {
-	queueCmdSetup(t)
-	f := mockQueueLabels(t)
-	if _, err := runQueueCmd(t, "move", "o/r#1", "--top"); err != nil {
-		t.Fatal(err)
-	}
-	f.err = fmt.Errorf("provider unavailable")
-	for _, args := range [][]string{{"add", "o/r#2"}, {"remove", "o/r#1"}} {
-		if _, err := runQueueCmd(t, args...); err == nil {
-			t.Fatal("expected label error")
-		}
-		if got := rankStrings(t); got != "o/r#1" {
-			t.Fatalf("rank changed: %s", got)
-		}
-	}
-}
-
-func TestQueueListNotEnrolledCount(t *testing.T) {
+func TestQueueListSkippedCount(t *testing.T) {
 	queueCmdSetup(t)
 	for repo, count := range map[string]int{"o/r": 2, "g/sub/p": 3} {
-		if err := queue.SaveState(queue.RepoState{Repo: repo, NotEnrolled: count}); err != nil {
+		if err := queue.SaveState(queue.RepoState{Repo: repo, Skipped: count}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, tc := range []struct{ repo, want string }{{"", "o/r: not enrolled: 2"}, {"o/r", "o/r: not enrolled: 2"}} {
+	for _, tc := range []struct{ repo, want string }{{"", "o/r: skipped: 2"}, {"o/r", "o/r: skipped: 2"}} {
 		out, err := runQueueCmd(t, "list", "--repo", tc.repo)
-		if tc.repo == "" && !strings.Contains(out, "g/sub/p: not enrolled: 3") {
+		if tc.repo == "" && !strings.Contains(out, "g/sub/p: skipped: 3") {
 			t.Fatalf("missing per-repo count: %s", out)
 		}
 		if tc.repo != "" && strings.Contains(out, "g/sub/p") {
@@ -233,11 +189,11 @@ func TestQueueListNotEnrolledCount(t *testing.T) {
 	}
 }
 
-func TestQueueListOnlyEnrolledCandidates(t *testing.T) {
+func TestQueueListAllCandidates(t *testing.T) {
 	queueCmdSetup(t)
 	if err := queue.SaveState(queue.RepoState{Repo: "o/r", Entries: []queue.EntryRecord{
 		{Number: 1, Priority: "P0", State: "eligible"},
-		{Number: 2, Priority: "P2", State: "eligible", Labeled: true},
+		{Number: 2, Priority: "P2", State: "eligible"},
 		{Number: 3, Priority: "P2", State: "in_flight"},
 	}}); err != nil {
 		t.Fatal(err)
@@ -253,7 +209,7 @@ func TestQueueListOnlyEnrolledCandidates(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0].Number != 2 || rows[1].Number != 3 {
+	if len(rows) != 3 || rows[0].Number != 1 || rows[1].Number != 2 || rows[2].Number != 3 {
 		t.Fatalf("rows=%+v", rows)
 	}
 	table, err := runQueueCmd(t, "list")

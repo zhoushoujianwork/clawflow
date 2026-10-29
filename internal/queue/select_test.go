@@ -167,14 +167,14 @@ func TestStateRoundTripAndWarnings(t *testing.T) {
 	if !st.Warn(3, "bad label") || st.Warn(3, "bad label") || !st.Warn(3, "other") {
 		t.Fatal("Warn must report each (issue, message) once")
 	}
-	st.NotEnrolled = 3
+	st.Skipped = 3
 	st.BlockedSince = map[int]time.Time{7: t0}
 	st.Parked = []int{7}
 	if err := SaveState(st); err != nil {
 		t.Fatal(err)
 	}
 	got, err := LoadState("group/sub/p")
-	if err != nil || got.NotEnrolled != 3 || !got.ParkedKeys()[k("group/sub/p#7")] || !got.BlockedSinceKeys()[k("group/sub/p#7")].Equal(t0) || got.Warn(3, "bad label") {
+	if err != nil || got.Skipped != 3 || !got.ParkedKeys()[k("group/sub/p#7")] || !got.BlockedSinceKeys()[k("group/sub/p#7")].Equal(t0) || got.Warn(3, "bad label") {
 		t.Fatalf("round trip: %+v %v", got, err)
 	}
 	got.PruneWarned(map[int]bool{})

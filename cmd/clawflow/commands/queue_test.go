@@ -88,7 +88,7 @@ func runQueueOnce(t *testing.T, onlyIssue int) []int {
 }
 
 func plannerIssue(n int, created string, labels ...string) vcs.Issue {
-	return vcs.Issue{Number: n, State: "open", Labels: append(labels, "clawflow"), CreatedAt: created, Title: fmt.Sprintf("Issue %d", n)}
+	return vcs.Issue{Number: n, State: "open", Labels: labels, CreatedAt: created, Title: fmt.Sprintf("Issue %d", n)}
 }
 
 func plannerInput(repo string, issues ...vcs.Issue) repoQueueInput {
@@ -195,8 +195,8 @@ func TestPlanRepoQueueLabelsAndParents(t *testing.T) {
 	in := plannerInput("o/r", plannerIssue(1, "2026-01-01T00:00:00Z"), plannerIssue(2, "2026-01-02T00:00:00Z", "clawflow"), plannerIssue(3, "2026-01-03T00:00:00Z", "clawflow"))
 	in.Issues[0].Labels = nil
 	in.HasChildren = map[int]bool{3: true}
-	if got := pickedNumbers(planRepoQueue(in)); len(got) != 1 || got[0] != 2 {
-		t.Fatalf("picked = %v, want [2]", got)
+	if got := pickedNumbers(planRepoQueue(in)); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("picked = %v, want [1 2]", got)
 	}
 }
 
@@ -289,11 +289,11 @@ func TestPlanRepoQueueFormatWarningsOnce(t *testing.T) {
 	}
 }
 
-func TestRunOnceUnifiedLabelQueue(t *testing.T) {
+func TestRunOnceUnifiedOptOutQueue(t *testing.T) {
 	logs := withRunLog(t)
 	queueConfig(t)
 	queueVCS(t,
-		[]map[string]any{targetedIssue(9, "clawflow"), targetedIssue(7, "clawflow"), targetedIssue(5, "clawflow", "P0"), targetedIssue(3, "clawflow", "agent-failed"), targetedIssue(1, "P0")},
+		[]map[string]any{targetedIssue(9, "clawflow"), targetedIssue(7, "clawflow"), targetedIssue(5, "clawflow", "P0"), targetedIssue(3, "clawflow", "agent-failed"), targetedIssue(1, "P0", "clawflow-skip")},
 		nil, nil, nil)
 	if _, err := queue.UpdateRank(func(order []queue.Key) ([]queue.Key, error) {
 		return append(order, queue.Key{Repo: "o/r", Number: 1}), nil
@@ -303,11 +303,11 @@ func TestRunOnceUnifiedLabelQueue(t *testing.T) {
 	got := runQueueOnce(t, 0)
 	for _, n := range got {
 		if n == 1 {
-			t.Fatal("unlabeled ranked issue dispatched")
+			t.Fatal("owner-skipped ranked issue dispatched")
 		}
 	}
 	st, err := queue.LoadState("o/r")
-	if err != nil || st.NotEnrolled != 1 {
+	if err != nil || st.Skipped != 1 {
 		t.Fatalf("state=%+v err=%v", st, err)
 	}
 	if len(got) != 2 {
@@ -352,13 +352,40 @@ func TestQueueRepoParamsDefaults(t *testing.T) {
 	}
 }
 
-func TestLabelEnrollmentCountsWithoutDispatch(t *testing.T) {
+func TestSkipCountsWithoutDispatch(t *testing.T) {
 	in := plannerInput("o/r", plannerIssue(1, "", "clawflow"), plannerIssue(2, ""), plannerIssue(3, ""))
-	in.Issues[1].Labels = nil
+	in.Issues[1].Labels = []string{"clawflow-skip"}
 	in.Issues[2].State = "closed"
 	in.Rank = []queue.Key{{Repo: "o/r", Number: 2}}
 	p := planRepoQueue(in)
-	if len(p.Picks) != 1 || !p.Picks[1] || p.State.NotEnrolled != 1 {
-		t.Fatalf("picks=%v not enrolled=%d", p.Picks, p.State.NotEnrolled)
+	if len(p.Picks) != 1 || !p.Picks[1] || p.State.Skipped != 1 {
+		t.Fatalf("picks=%v skipped=%d", p.Picks, p.State.Skipped)
+	}
+}
+
+func TestOptOutQueueSelection(t *testing.T) {
+	for _, labels := range [][]string{nil, {"clawflow"}} {
+		p := planRepoQueue(plannerInput("o/r", plannerIssue(1, "", labels...)))
+		if !p.Picks[1] {
+			t.Fatalf("labels %v excluded: %+v", labels, p)
+		}
+	}
+	in := plannerInput("o/r", plannerIssue(1, "", "clawflow-skip"), plannerIssue(2, ""), plannerIssue(3, "", "P0"))
+	in.Issues[1].SubIssuesTotal = 1
+	p := planRepoQueue(in)
+	if len(p.Picks) != 1 || !p.Picks[3] || p.State.Skipped != 1 {
+		t.Fatalf("unexpected picks: %+v", p)
+	}
+}
+
+func TestRunOptOutPreservesExclusions(t *testing.T) {
+	withRunLog(t)
+	queueConfig(t)
+	queueVCS(t, []map[string]any{
+		targetedIssue(1), targetedIssue(2, "clawflow-skip"), targetedIssue(3, "agent-skipped"), targetedIssue(4, "agent-failed"), targetedIssue(5, "agent-running"), targetedIssue(6, "tracking"), targetedIssue(7, "agent-implemented"),
+	}, nil, nil, nil)
+	got := runQueueOnce(t, 0)
+	if len(got) != 1 || got[0] != 1 {
+		t.Fatalf("dispatched %v", got)
 	}
 }

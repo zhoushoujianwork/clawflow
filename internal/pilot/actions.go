@@ -414,6 +414,9 @@ func (e ActionExecutor) execute(a Action, run string) (int, error) {
 		if issue == nil {
 			return 0, errors.New("issue_not_found")
 		}
+		if issue.HasLabel("clawflow-skip") {
+			return 0, errors.New("issue_skipped")
+		}
 		if issue.HasLabel("agent-running") {
 			return 0, errors.New("issue_running")
 		}
