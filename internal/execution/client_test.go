@@ -3,8 +3,10 @@ package execution
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,6 +27,16 @@ func TestOffloadHelper(t *testing.T) {
 		os.Exit(3)
 	}
 	args := offloadtest.Args()
+	if expected := os.Getenv("OFFLOAD_TEST_DSN_HASH"); expected != "" {
+		dsn := os.Getenv("CLAWFLOW_TEST_DATABASE_DSN")
+		if fmt.Sprintf("%x", sha256.Sum256([]byte(dsn))) != expected {
+			os.Exit(4)
+		}
+		raw, _ := json.Marshal(args)
+		_ = os.WriteFile(os.Getenv("OFFLOAD_TEST_CAPTURE"), raw, 0600)
+		offloadtest.Emit(args, "database environment verified: "+dsn, "", "")
+		return
+	}
 	if args["-w"] != "" {
 		offloadtest.Helper(t)
 		return
@@ -369,6 +381,49 @@ func TestResultModelAndUsage(t *testing.T) {
 				}
 			} else if r.Model != "profile-model" {
 				t.Fatalf("%+v", r)
+			}
+		})
+	}
+}
+
+func TestConfiguredTestDatabaseReachesManagedAgentAndIsRedacted(t *testing.T) {
+	for _, role := range []string{"operator", "repair-ci"} {
+		t.Run(role, func(t *testing.T) {
+			_, req := fixture(t)
+			const dsn = "postgres://tester:private-password@localhost/tests?sslmode=disable"
+			cfg := &config.Config{Settings: config.Settings{Execution: Config{Profile: "test-profile", TestDatabaseDSN: dsn}}}
+			if err := cfg.Save(); err != nil {
+				t.Fatal(err)
+			}
+			// The configured setting wins over an inherited value, without mutating the parent.
+			t.Setenv("CLAWFLOW_TEST_DATABASE_DSN", "inherited")
+			t.Setenv("OFFLOAD_TEST_DSN_HASH", fmt.Sprintf("%x", sha256.Sum256([]byte(dsn))))
+			capture := filepath.Join(t.TempDir(), "command.json")
+			t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+			var logs bytes.Buffer
+			result, err := Execute(context.Background(), "task", Options{Workspace: req.Workspace, Role: role, PermissionMode: "bypassPermissions", Events: &logs})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Text != "database environment verified: [redacted]" {
+				t.Fatal("missing redacted agent response")
+			}
+			command, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persisted, _ := json.Marshal(result)
+			for _, output := range []string{string(command), logs.String(), string(persisted), redactEvidence([]byte(`{"command":"echo `+dsn+`"}`), []string{"CLAWFLOW_TEST_DATABASE_DSN=" + dsn})} {
+				if strings.Contains(output, dsn) || strings.Contains(output, "private-password") {
+					t.Fatal("DSN leaked")
+				}
+			}
+			public, _ := json.Marshal(cfg.Settings.Execution)
+			if strings.Contains(string(public), dsn) {
+				t.Fatal("DSN leaked in public config")
+			}
+			if os.Getenv("CLAWFLOW_TEST_DATABASE_DSN") != "inherited" {
+				t.Fatal("parent environment mutated")
 			}
 		})
 	}

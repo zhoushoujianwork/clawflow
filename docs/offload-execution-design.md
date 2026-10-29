@@ -17,6 +17,8 @@ settings:
   execution:
     command: offload
     profile: engineering
+    # Optional machine-local test server secret; never commit a real DSN.
+    test_database_dsn: postgres://tester:password@localhost/clawflow_test?sslmode=disable
     role_profiles:
       chat: research
     codex_sandbox: workspace-write
@@ -27,3 +29,19 @@ The profile is required and owns credentials and default models. Configure it wi
 Implement, CI repair, Pilot and explicit issue edit conversations use managed delivery. Auxiliary operators and document generation use read-only execution; tools-disabled and narrower tool restrictions remain explicit. Positive dollar budgets fail before launch with `unsupported_budget`; no budget is silently dropped. Existing budgeted Pilot settings therefore remain blocked until the execution contract supports those caps.
 
 The dashboard shows profile configuration without launching a provider. Headless fixtures and two live local Git delivery checks passed, including ClawFlow's production execution adapter. Real remote PR/CI/merge acceptance and installed-runtime rollout remain separate. See the [acceptance record](offload-live-acceptance-2026-10-26.md).
+
+`settings.execution.test_database_dsn` optionally supplies `CLAWFLOW_TEST_DATABASE_DSN`
+to managed agent subprocesses, including implement and repair runs. It overrides an
+inherited test DSN without changing the host process environment. Each repository
+test creates its own schema, so runs can share a PostgreSQL server. This secret is
+excluded from public JSON configuration and sync, never added to command arguments
+or prompts, and redacted from execution results and persisted event metadata. Keep
+the local configuration private and do not echo the environment in tests.
+
+Repair log excerpts prioritize Go `--- FAIL:` and `panic:` markers and nearby
+assertions/stack frames over the tail, after redaction, within the existing per-job
+4 KiB budget (plus truncation notice). If diagnostics themselves exceed the budget,
+the excerpt remains explicitly truncated; retrieval and job-count limits still apply.
+When a local database or full logs are unavailable, agents use the available failure
+lines and source, report local skips honestly, and identify exact-head CI as the
+proof for PostgreSQL tests. A local skip does not establish CI success.
