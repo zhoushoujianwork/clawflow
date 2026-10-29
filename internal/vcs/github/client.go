@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -59,8 +60,8 @@ func New(token, baseURL string) *Client {
 
 // doOnce sends a single HTTP request and returns the response body and status.
 func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
-	if b := c.Budget(); time.Now().Before(b.Backoff) {
-		return nil, http.StatusTooManyRequests, &retry.HTTPError{Status: 429, RateLimited: true, After: time.Until(b.Backoff)}
+	if err := c.deliveryLimit(); err != nil {
+		return nil, http.StatusTooManyRequests, err
 	}
 	stage, _ := c.reqContext().Value(stageKey{}).(string)
 	if method == http.MethodGet && (stage == "scan" || stage == "harvest" || stage == "automerge" || stage == "board" || stage == "snapshot") && !c.PollingAllowed() {
@@ -123,7 +124,7 @@ func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, c.rateLimitedTimeout(err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
@@ -147,7 +148,17 @@ func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
 			pass.Unlock()
 		}
 	}
-	return data, status, err
+	return data, status, c.rateLimitedTimeout(err)
+}
+
+func (c *Client) rateLimitedTimeout(err error) error {
+	var timeout net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()) {
+		if limited := c.deliveryLimit(); limited != nil {
+			return errors.Join(err, limited)
+		}
+	}
+	return err
 }
 
 // isRetryableStatus reports whether an HTTP status code is worth retrying.
@@ -162,7 +173,12 @@ func isRetryableStatus(status int) bool {
 // are NOT retried here because they are not idempotent; callers that need
 // retry semantics on POST must handle idempotency themselves (see
 // PostIssueCommentIdempotent).
-func (c *Client) do(method, path string, body any) ([]byte, int, error) {
+func (c *Client) do(method, path string, body any) (data []byte, status int, err error) {
+	// The budget can become exhausted while a request is in flight, or the
+	// context can expire before retry.Do calls doOnce. Preserve both causes.
+	defer func() {
+		err = c.rateLimitedTimeout(err)
+	}()
 	// Retry idempotent methods and additive label POSTs automatically.
 	ctx, cancel := context.WithTimeout(c.reqContext(), 60*time.Second)
 	defer cancel()
@@ -173,11 +189,7 @@ func (c *Client) do(method, path string, body any) ([]byte, int, error) {
 		return c.doOnce(method, path, body)
 	}
 	cfg := retry.DefaultConfig
-	var (
-		data   []byte
-		status int
-	)
-	err := retry.Do(c.reqContext(), cfg, func() error {
+	err = retry.Do(c.reqContext(), cfg, func() error {
 		var e error
 		data, status, e = c.doOnce(method, path, body)
 		if e != nil {

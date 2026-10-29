@@ -2,7 +2,9 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -197,5 +199,96 @@ func TestSecondaryBackoffAvoidsRequestsUntilRetryAfter(t *testing.T) {
 	c.state.Unlock()
 	if _, _, err := c.doOnce("POST", "/write", nil); err != nil || calls != 2 {
 		t.Fatalf("reset failed: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestExhaustedBudgetDefersUntilReset(t *testing.T) {
+	for _, backoff := range []bool{false, true} {
+		t.Run(fmt.Sprintf("backoff=%v", backoff), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				fmt.Fprint(w, "[]")
+			}))
+			defer server.Close()
+			c := New("fixture", server.URL)
+			until := time.Now().Add(10 * time.Minute)
+			c.state.budget = Budget{Limit: 5000, Remaining: 0, Reset: until}
+			if backoff {
+				c.state.budget = Budget{Remaining: 4000, Backoff: until}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			c.SetRequestContext(ctx)
+			_, err := c.ListIssueEvents("o/r", 1)
+			var limited *retry.HTTPError
+			if !errors.As(err, &limited) || !limited.RateLimited || limited.After < 9*time.Minute || calls != 0 {
+				t.Fatalf("calls=%d err=%v", calls, err)
+			}
+			// Advance the tracked window without waiting ten minutes.
+			c.state.budget.Reset = time.Now().Add(-time.Second)
+			c.state.budget.Backoff = time.Now().Add(-time.Second)
+			if _, err := c.ListIssueEvents("o/r", 1); err != nil || calls != 1 {
+				t.Fatalf("after reset: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
+type timeoutTransport func(*http.Request) (*http.Response, error)
+
+func (f timeoutTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestDeadlineWithExhaustedBudgetKeepsRateLimitIdentity(t *testing.T) {
+	for _, inFlight := range []bool{false, true} {
+		t.Run(fmt.Sprintf("inflight=%v", inFlight), func(t *testing.T) {
+			c := New("fixture", "https://example.test")
+			exhaust := func() {
+				c.state.Lock()
+				c.state.budget = Budget{Limit: 5000, Remaining: 0, Reset: time.Now().Add(10 * time.Minute)}
+				c.state.Unlock()
+			}
+			if inFlight {
+				c.http.Transport = timeoutTransport(func(*http.Request) (*http.Response, error) {
+					exhaust()
+					return nil, context.DeadlineExceeded
+				})
+			} else {
+				exhaust()
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				defer cancel()
+				c.SetRequestContext(ctx)
+			}
+			_, err := c.ListIssueEvents("o/r", 1)
+			var limited *retry.HTTPError
+			if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &limited) || !limited.RateLimited {
+				t.Fatalf("lost deadline or rate limit: %v", err)
+			}
+		})
+	}
+}
+
+func TestApplicationErrorsWithoutActiveLimitRemainFailures(t *testing.T) {
+	for _, budget := range []Budget{
+		{},
+		{Limit: 5000, Remaining: 1, Reset: time.Now().Add(time.Hour)},
+		{Limit: 5000, Remaining: 0, Reset: time.Now().Add(-time.Second)},
+	} {
+		c := New("fixture", "https://example.test")
+		c.state.budget = budget
+		for _, original := range []error{context.DeadlineExceeded, os.ErrDeadlineExceeded, errors.New("application failed")} {
+			err := c.rateLimitedTimeout(original)
+			var limited *retry.HTTPError
+			if !errors.Is(err, original) || errors.As(err, &limited) {
+				t.Fatalf("budget=%+v changed ordinary failure: %v", budget, err)
+			}
+		}
+	}
+	c := New("fixture", "https://example.test")
+	c.state.budget = Budget{Remaining: 0, Reset: time.Now().Add(10 * time.Minute)}
+	err := c.rateLimitedTimeout(os.ErrDeadlineExceeded)
+	var limited *retry.HTTPError
+	if !errors.Is(err, os.ErrDeadlineExceeded) || !errors.As(err, &limited) || !limited.RateLimited {
+		t.Fatalf("network timeout lost rate limit: %v", err)
 	}
 }
