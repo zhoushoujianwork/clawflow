@@ -29,6 +29,7 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewResetCmd())
 	root.AddCommand(NewDBCmd())
 	root.AddCommand(NewWorkerCmd())
+	root.AddCommand(NewPlatformCmd())
 	root.AddCommand(NewRunCmd())
 	root.AddCommand(NewWebCmd())
 	root.AddCommand(NewChatCmd())
@@ -80,5 +81,6 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 		},
 	})
 
+	installSpoolGuards(root)
 	return root
 }

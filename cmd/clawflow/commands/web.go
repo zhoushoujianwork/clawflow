@@ -24,7 +24,6 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/gitsync"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
-	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	ptyserver "github.com/zhoushoujianwork/clawflow/internal/pty"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/webguard"
@@ -569,7 +568,11 @@ func runPeriodicScheduler() {
 			api.SetSchedulerNextFire(time.Time{})
 			continue
 		}
-		triggerPilotTick(cfg)
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			api.SetSchedulerNextFire(time.Time{})
+			fmt.Fprintln(os.Stderr, err)
+			continue
+		}
 		interval := cfg.Settings.RunIntervalMinutes
 		if interval <= 0 {
 			// Auto-run disabled — clear the published next-fire time
@@ -609,22 +612,6 @@ func runPeriodicScheduler() {
 			webLog.Info("web/auto_run", "repo", repo, "fired_at", now.UTC().Format(time.RFC3339), "next_in", intervalDur)
 		}
 	}
-}
-
-// The shared try-lock is acquired before spawning, so a slow wake never blocks
-// the tick or accumulates goroutines. End-of-pass calls use this same lock.
-var schedulePilotTick = pilot.Schedule
-
-func triggerPilotTick(cfg *config.Config) {
-	if cfg.Settings.RunPaused || !snapshot.TryAcquirePilotScheduleLock() {
-		return
-	}
-	go func() {
-		defer snapshot.ReleasePilotScheduleLock()
-		if _, err := schedulePilotTick(context.Background(), time.Hour, time.Time{}); err != nil {
-			webLog.Warn("web/pilot", "err", err)
-		}
-	}()
 }
 
 // dueScheduledRepos returns the repos whose auto-run interval has elapsed and

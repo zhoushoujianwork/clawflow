@@ -138,7 +138,7 @@ func TestCoordinatorPayloadAndDispatch(t *testing.T) {
 	if p.TaskID != "task" || p.Repo != "o/r" || p.Issue != 7 || p.Role != "operator" || p.Language != "zh" || p.TimeoutSec != 60 || p.Platform != "github" || p.RepoPolicy.BaseBranch != "main" || !p.RepoPolicy.CIRequired || p.RepoPolicy.TestCommand != "go test ./..." || p.Scan.ObservedAt.IsZero() {
 		t.Fatalf("payload: %+v", p)
 	}
-	if !reflect.DeepEqual(p.Tags, []string{"codex", "github", "heavy"}) || len(p.SkillDigest) != 64 {
+	if !reflect.DeepEqual(p.Tags, []string{"codex", "heavy"}) || len(p.SkillDigest) != 64 {
 		t.Fatal(p)
 	}
 	copy := *j.op
@@ -339,6 +339,9 @@ func TestCoordinatorRepairEnqueueReservesOnce(t *testing.T) {
 }
 
 func TestCoordinatorSchedulingIgnoresLocalExecutionRequirements(t *testing.T) {
+	oldGate := coordinatorPRAllowedFn
+	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
+	t.Cleanup(func() { coordinatorPRAllowedFn = oldGate })
 	cfg := config.Repo{CoordinatorMode: true, BoundMachine: "worker", AutoMerge: true, CIRequired: true}
 	settings := config.Settings{RequireBinding: true, Coordinator: config.CoordinatorSettings{Enabled: true}}
 	if !repoRunsHere(settings, cfg, "coordinator") || deterministicSkip(&operator.Operator{Name: "implement"}, cfg) {
@@ -417,6 +420,9 @@ func TestCoordinatorRunOnceEnqueuesAndPreservesCapacity(t *testing.T) {
 }
 
 func TestCoordinatorRepairScanExcludesActiveIssue(t *testing.T) {
+	oldGate := coordinatorPRAllowedFn
+	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
+	t.Cleanup(func() { coordinatorPRAllowedFn = oldGate })
 	withRunLog(t)
 	pr, issue := repairFixture()
 	reg := repairRegistry(t)
@@ -520,8 +526,52 @@ func TestCoordinatorHostAffinitySurvivesKindOverride(t *testing.T) {
 		WorkerTags: []string{"codex", "host-work-mac"}, WorkerTagsByKind: map[string][]string{"implement": {"heavy"}},
 	}}
 	task, payload := coordinatorTask(j, time.Minute)
-	want := []string{"github", "heavy", "host-work-mac"}
+	want := []string{"heavy", "host-work-mac"}
 	if !reflect.DeepEqual(task.Tags, want) || !reflect.DeepEqual(payload.Tags, want) {
 		t.Fatalf("lost host affinity: %+v / %+v", task.Tags, payload.Tags)
+	}
+}
+
+func TestCoordinatorPlatformDoesNotAddRoutingTags(t *testing.T) {
+	for _, rc := range []config.Repo{
+		{},
+		{Platform: "gitlab"},
+		{Platform: "github", BaseURL: "https://github.example/api/v3"},
+		{Platform: "gitlab", BaseURL: "https://gitlab.example"},
+	} {
+		j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7}, repoCfg: rc}
+		task, payload := coordinatorTask(j, time.Minute)
+		if len(task.Tags) != 0 || len(payload.Tags) != 0 {
+			t.Fatalf("platform metadata added routing tags: %+v / %v / %v", rc, task.Tags, payload.Tags)
+		}
+		j.repoCfg.WorkerTags = []string{"github", "creds-laptop"}
+		task, payload = coordinatorTask(j, time.Minute)
+		want := []string{"creds-laptop", "github"}
+		if !reflect.DeepEqual(task.Tags, want) || !reflect.DeepEqual(payload.Tags, want) {
+			t.Fatalf("explicit routing tags lost: %v / %v", task.Tags, payload.Tags)
+		}
+	}
+}
+
+type dependencyClient struct {
+	vcs.Client
+	state string
+}
+
+func (c *dependencyClient) GetIssue(string, int) (*vcs.Issue, error) {
+	return &vcs.Issue{State: c.state}, nil
+}
+func TestCoordinatorEnqueueHonorsDependsOn(t *testing.T) {
+	withRunLog(t)
+	for _, state := range []string{"open", "closed"} {
+		s := &resultStoreFake{}
+		j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7, Body: "Depends on: #6"}, client: &dependencyClient{state: state}}
+		fired, _, err := dispatchCoordinatorJobs(context.Background(), s, []*runJob{j}, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (len(fired) == 1) != (state == "closed") {
+			t.Fatalf("dependency %s: fired=%v", state, fired)
+		}
 	}
 }

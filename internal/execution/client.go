@@ -600,7 +600,7 @@ func execute(ctx context.Context, prompt string, opts Options, observe func(Obse
 	}
 	req := Request{Version: 1, RequestID: NewSessionKey(), SessionKey: opts.SessionKey, Resume: opts.Resume, Workspace: opts.Workspace, Model: opts.Model, Instructions: opts.Instructions, Prompt: prompt, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: opts.Timeout.Milliseconds(), MaxBudgetUSD: opts.MaxBudgetUSD}
 	// Credentials and models come only from Offload profiles or explicit model input.
-	return Run(ctx, c, req, os.Environ(), opts.Events, observe)
+	return Run(ctx, c, req, effectEnvironment(ctx, os.Environ()), opts.Events, observe)
 }
 
 func Chat(ctx context.Context, in io.Reader, out io.Writer, opts Options) error {

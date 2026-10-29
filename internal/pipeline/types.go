@@ -87,6 +87,7 @@ type Execution struct {
 
 // RepoBoard is the board for one repository.
 type RepoBoard struct {
+	HostingPlatform    string `json:"hosting_platform,omitempty"`
 	Stale              bool   `json:"stale"`
 	Repo               string `json:"repo"`
 	Enabled            bool   `json:"enabled"`
@@ -148,6 +149,7 @@ type PRInfo struct {
 
 // AcceptanceInfo is the latest acceptance record for the PR's current contract.
 type AcceptanceInfo struct {
+	Unstructured    bool   `json:"unstructured,omitempty"`
 	Required        bool   `json:"required"`
 	Running         bool   `json:"running,omitempty"`
 	Verdict         string `json:"verdict,omitempty"` // passed | failed | blocked

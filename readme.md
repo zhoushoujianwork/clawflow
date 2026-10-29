@@ -85,61 +85,65 @@ You also need Agent-Host with the execution CLI and explicitly configured execut
 
 ## Setup
 
-### 1. Store tokens
+### 1. Connect to the hosting platform
 
-**GitHub:**
-```bash
-clawflow config set-token ghp_xxxxxxxxxxxx
-```
-Required scopes: `repo` (full), `read:org`.
+One **platform** owns repository registration, scheduling, leases and merge policy.
+A **client** submits repositories and inspects platform status; it does not schedule
+work locally. A **worker** contributes execution capacity using its own Offload
+profile and VCS credentials, and reports results to the platform.
 
-**GitLab:**
-```bash
-clawflow config set-gitlab-token glpat-xxxxxxxxxxxx
-```
-Required scopes: `api`.
-
-Tokens are saved to `~/.clawflow/config/credentials.yaml` (mode 0600). Environment variables take priority: `GH_TOKEN`, `GITLAB_TOKEN`.
-
-### 2. Add repositories to monitor
-
-`repo add` auto-detects the platform from the input — no flags needed in most cases:
+Ask the platform administrator for its HTTPS URL and a private **admin token file**:
 
 ```bash
-# GitHub — URL, SSH, or short form
-clawflow repo add https://github.com/owner/repo
-clawflow repo add git@github.com:owner/repo.git
-clawflow repo add owner/repo
-
-# GitLab self-hosted — full URL (nested namespaces supported)
-clawflow repo add https://gitlab.company.com/ns/group/repo
-
-# Local directory — reads .git/config origin automatically
-clawflow repo add .
-clawflow repo add ~/github/my-repo
+clawflow platform login --url https://platform.example.com:8093 \
+  --token-file /private/path/admin.token --fingerprint <SHA-256>
+clawflow platform status
 ```
 
-Override platform or instance URL manually:
-```bash
-clawflow repo add ns/repo --platform gitlab --base-url https://gitlab.company.com
-```
+Login verifies the connection before saving it. The fingerprint is optional for
+platform login when system CA trust is used. Admin tokens manage registrations;
+worker tokens only register, claim and report work. Keep both private and separate.
+See [platform and worker setup](docs/worker-pool-design.md) for host setup and tokens.
 
-Manage repos:
+### 2. Enroll repositories on the platform
+
+Before any enrollment, run `clawflow platform status`. If no platform is configured,
+stop: this machine is not connected to a platform. If status fails, resolve the
+connection error; do not fall back to local enablement or start `clawflow run` or
+the web scheduler.
+
 ```bash
+clawflow platform status
 clawflow repo list
-clawflow repo set owner/repo --auto-merge on --ci-required on
-clawflow repo enable  owner/repo
-clawflow repo disable owner/repo
-clawflow repo remove  owner/repo
+clawflow repo add https://github.com/owner/repo --disabled
+clawflow repo set owner/repo --auto-merge off --ci-required on
+clawflow repo enable owner/repo
+# GitLab supports full URLs with nested namespaces:
+# clawflow repo add https://gitlab.company.com/ns/group/repo --disabled
 ```
 
-### 3. Initialize labels
+Client `repo add/list/set/enable/disable` commands route to the connected platform.
+Report the platform URL printed by the successful add/enable response. Do not send
+local directories or `--local-path`; platform enrollment requires no client checkout.
+Platform registration skips label initialization; it does not create remote labels.
+Only enable auto-merge when separately authorized.
 
-Labels are created automatically on `repo add`. To (re)create them manually:
+### 3. Add a worker machine (only when requested)
+
+Install ClawFlow and configure an explicit Offload profile plus the worker's VCS
+credentials. Obtain a dedicated worker token file and the platform certificate
+fingerprint from the administrator, then start:
 
 ```bash
-clawflow label init owner/repo
+clawflow worker --coordinator https://platform.example.com:8093 \
+  --token-file /private/path/worker.token --fingerprint <SHA-256> \
+  --tags github --max-parallel 1
 ```
+
+Choose tags matching the platform's tasks (`gitlab` or a self-hosted hostname when
+applicable). A worker does not require admin login or locally enabled repositories.
+Do not start a second scheduler to add capacity. Detailed host configuration,
+credential tags and token revocation are in the [worker setup details](docs/worker-pool-design-detail.md).
 
 Eligible open leaf issues enter implementation automatically. Questions retain their reply path; `agent-mentioned` triggers comment replies, and `progress-check` is the operational trigger for parent tracking.
 
@@ -158,13 +162,9 @@ Reopened issues can start another implementation cycle when lifecycle history pr
 clawflow issue history 7 --repo owner/repo --json
 ```
 
-### 4. Run
-
-```bash
-clawflow run
-```
-
-Scans every enabled repo once, runs any matching operators, exits. Schedule it with cron, launchd, or your editor's agent; local history persists between invocations.
+The existing platform scheduler dispatches enrolled work. Clients must not start
+`clawflow run` or `clawflow web` to get it processed. Legacy single-machine operation
+remains available for existing installations, but is not the hosted enrollment path.
 
 ---
 
@@ -172,19 +172,19 @@ Scans every enabled repo once, runs any matching operators, exits. Schedule it w
 
 ![ClawFlow architecture](docs/images/architecture.jpg)
 
-A single CLI binary scans enabled, machine-bound repositories and runs eligible work through `agent-host execute`:
+The platform scans enabled repositories and dispatches execution through workers using Offload:
 
 1. Route ordinary open leaf issues directly to `implement`; keep question/comment replies and parent tracking on their own paths.
 2. Acquire a local execution lock and prepare an isolated implementation worktree.
 3. Analyze, plan, implement, run focused tests and repair inside the implementation attempt.
 4. Publish the result and PR, then release the lock. Required CI must succeed before configured auto-merge; missing, pending, failed or unreadable checks block merging.
 
-For unattended delivery:
+For authorized unattended delivery on the connected platform:
 
 ```bash
+clawflow platform status
 clawflow repo set owner/repo --auto-merge on --ci-required on
 clawflow repo enable owner/repo
-clawflow run --repo owner/repo
 ```
 
 源码渠道可启用自动升级：`clawflow repo set zhoushoujianwork/clawflow --self-upgrade on`。每轮 run 通过 `ls-remote` 检查构建时记录的分支（默认 main），包括在 ClawFlow 之外合并的提交。仅当已安装提交是目标的祖先时，才在临时 detached worktree 构建前端和二进制，验证版本和 `execution check --json`，原子替换并保留 `<path>.prev`。沿用 `web restart` 的 launchd/独立进程重启路径；替换后验证失败会回滚。未知或分叉提交只记录警告，不升级。需要本地源码路径、git、pnpm 和 Go。

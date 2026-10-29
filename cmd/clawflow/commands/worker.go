@@ -17,6 +17,7 @@ func NewWorkerCmd() *cobra.Command {
 	for _, action := range []string{"create", "list", "revoke"} {
 		action := action
 		var name string
+		var scope string
 		sub := &cobra.Command{Use: action, Args: cobra.NoArgs, SilenceUsage: true, RunE: func(cmd *cobra.Command, args []string) error {
 			db, err := requireStore(cmd.Context())
 			if err != nil {
@@ -30,7 +31,7 @@ func NewWorkerCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				secret, err := s.CreateToken(cmd.Context(), name)
+				secret, err := s.CreateToken(cmd.Context(), name, scope)
 				if err != nil {
 					return err
 				}
@@ -59,6 +60,9 @@ func NewWorkerCmd() *cobra.Command {
 			}
 		}}
 		sub.Flags().StringVar(&name, "name", "", "Token 名称（create/revoke 必填）")
+		if action == "create" {
+			sub.Flags().StringVar(&scope, "scope", "worker", "Token 权限：admin 或 worker")
+		}
 		if action != "list" {
 			_ = sub.MarkFlagRequired("name")
 		}

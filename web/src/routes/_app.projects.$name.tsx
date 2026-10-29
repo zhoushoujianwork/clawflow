@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, FolderOpen, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw, Settings2, Zap } from 'lucide-react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, FolderOpen, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
@@ -81,22 +81,6 @@ function previewMD(md: string): string {
   return (lines[0] ?? '').slice(0, 80)
 }
 
-// fmtDur renders a second count as a compact human duration: "17s",
-// "3m 2s", "1h 4m". Used by the live Pilot badge for both the elapsed
-// "running" timer and the "next wake in …" idle countdown (issue #240).
-function fmtDur(totalSec: number): string {
-  const s = Math.max(0, Math.floor(totalSec))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) {
-    const rem = s % 60
-    return rem ? `${m}m ${rem}s` : `${m}m`
-  }
-  const h = Math.floor(m / 60)
-  const remM = m % 60
-  return remM ? `${h}h ${remM}m` : `${h}h`
-}
-
 export const Route = createFileRoute('/_app/projects/$name')({
   component: ProjectDetail,
 })
@@ -143,27 +127,6 @@ function ProjectDetail() {
   const [pilotRuns, setPilotRuns] = useState<PilotRun[]>([])
   const [pilotRunDetail, setPilotRunDetail] = useState<PilotRun | null>(null)
 
-  // Live Pilot wake state (issue #240). Fed by the /api/project/pilot/stream
-  // SSE endpoint, which pushes the latest wake's meta.json (status /
-  // started_at / ended_at / error) as it changes — letting the top badge show
-  // a live "running" spinner + elapsed timer without a full refresh. null =
-  // no wake observed yet; falls back to pilotRuns[0] when the stream is
-  // unavailable so a dropped connection never blanks the badge.
-  const [livePilot, setLivePilot] = useState<PilotRun | null>(null)
-
-  // Ticks every second so the running elapsed timer and the idle "next wake
-  // in …" countdown stay live without re-fetching.
-  const [nowMs, setNowMs] = useState(() => Date.now())
-
-  // Automation popover
-  const [automationPopoverOpen, setAutomationPopoverOpen] = useState(false)
-
-  // Hostname the dashboard is running on. Used by the bind-to-this-machine
-  // button so the label reads "Bind to <hostname>" rather than a generic
-  // "Bind here". Comes from /api/settings.global.hostname — same source
-  // the per-repo page uses, so the UX feels uniform.
-  const [hostname, setHostname] = useState<string>('')
-
   // IDE deep-link scheme for the per-repo "open in IDE" shortcut. Resolved
   // from /api/settings.global.default_ide — same logic as the repo list page
   // (_app.repos.index.tsx) so both surfaces honour the user's IDE choice.
@@ -176,14 +139,6 @@ function ProjectDetail() {
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
   const pollTimerRef = useRef<number | null>(null)
-
-  // Automation state. The cooldown input is held locally so the user
-  // can edit it freely without each keystroke firing a save — the
-  // server only learns the new value on toggle change or explicit Save.
-  // Defaults to 30 min to match the CLI's `--cooldown` default.
-  const [cooldownDraft, setCooldownDraft] = useState<string>('30')
-  const [automationSaving, setAutomationSaving] = useState(false)
-  const [automationError, setAutomationError] = useState<string | null>(null)
 
   // Collapsed-by-default state for the two docs. Both can be long
   // (especially context.md), so the page would otherwise scroll past
@@ -229,89 +184,8 @@ function ProjectDetail() {
       .catch(() => null)
       .then(data => {
         setProject(data)
-        // Seed the cooldown input from the persisted value. Only do this
-        // on initial load (or when the field comes back empty) so a user
-        // mid-edit doesn't have their typing wiped by a refetch.
-        if (data?.automation && (cooldownDraft === '30' || !cooldownDraft)) {
-          setCooldownDraft(String(data.automation.cooldown_minutes ?? 30))
-        }
         setLoading(false)
       })
-  }
-
-  async function saveAutomation(enabled: boolean, cooldownMinutes: number) {
-    setAutomationSaving(true)
-    setAutomationError(null)
-    try {
-      const r = await fetch('/api/project/automation', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project: name, enabled, cooldown_minutes: cooldownMinutes }),
-      })
-      const d = await r.json().catch(() => ({}))
-      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
-      fetchProject()
-    } catch (e) {
-      setAutomationError(e instanceof Error ? e.message : 'Unknown error')
-    } finally {
-      setAutomationSaving(false)
-    }
-  }
-
-  // Manual-wake state. wakeStarting covers the click → 200 round-trip
-  // only — once the subprocess is spawned the button switches to a
-  // "Waking…" affordance backed by pilot-runs polling so the user sees
-  // when the wake actually completes (minutes later).
-  const [wakeStarting, setWakeStarting] = useState(false)
-  const [wakeError, setWakeError] = useState<string | null>(null)
-  const [wakeMessage, setWakeMessage] = useState<string | null>(null)
-
-  async function triggerWake() {
-    setWakeStarting(true)
-    setWakeError(null)
-    setWakeMessage(null)
-    try {
-      const r = await fetch('/api/project/pilot/wake', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project: name }),
-      })
-      const d = await r.json().catch(() => ({}))
-      if (!r.ok || d.error) throw new Error(d.error || d.message || `HTTP ${r.status}`)
-      setWakeMessage('Wake started — refreshing pilot activity…')
-      // Light refresh so the popover's "Last woken" timestamp jumps
-      // immediately; the heavy pilot-runs activity stream below the
-      // header keeps polling on its own and will show the run when it
-      // completes.
-      fetchProject()
-      fetchPilotRuns()
-    } catch (e) {
-      setWakeError(e instanceof Error ? e.message : 'Unknown error')
-    } finally {
-      setWakeStarting(false)
-    }
-  }
-
-  // saveBoundMachine binds the project Pilot to a specific hostname (or
-  // unbinds when machine is empty). Server resolves "this machine" when
-  // bind=true and machine is omitted — matches /api/repo/bind ergonomics.
-  async function saveBoundMachine(bind: boolean, machine?: string) {
-    setAutomationSaving(true)
-    setAutomationError(null)
-    try {
-      const r = await fetch('/api/project/bind', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project: name, bind, ...(machine ? { machine } : {}) }),
-      })
-      const d = await r.json().catch(() => ({}))
-      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`)
-      fetchProject()
-    } catch (e) {
-      setAutomationError(e instanceof Error ? e.message : 'Unknown error')
-    } finally {
-      setAutomationSaving(false)
-    }
   }
 
   useEffect(() => {
@@ -330,7 +204,6 @@ function ProjectDetail() {
       .then(r => (r.ok ? r.json() : null))
       .catch(() => null)
       .then(settings => {
-        if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
         if (settings?.global?.default_ide) {
           const ide = settings.global.default_ide as string
           const schemeMap: Record<string, string> = {
@@ -366,49 +239,6 @@ function ProjectDetail() {
     return () => { stopPolling(); stopDeploymentPolling() }
   }, [name])
 
-  // Live Pilot status stream (issue #240). The server pushes the latest
-  // wake's meta.json over SSE whenever it changes — including the start of a
-  // wake (status="running") and its completion — so the top badge reflects
-  // the live state at ~1s latency. Mirrors the dashboard's run-stream pattern
-  // (_app.dashboard.tsx): EventSource auto-reconnects on drop, and the
-  // pilot-runs poll below is KEPT as a graceful fallback so a dropped or
-  // unavailable stream never freezes the badge.
-  useEffect(() => {
-    if (typeof EventSource === 'undefined') return
-    let es: EventSource | null = null
-    try {
-      es = new EventSource(`/api/project/pilot/stream?project=${encodeURIComponent(name)}`)
-      es.onmessage = e => {
-        try {
-          const parsed = JSON.parse(e.data)
-          if (parsed && typeof parsed === 'object') {
-            setLivePilot(parsed as PilotRun)
-            // When a wake just finished, refresh the history so the "Latest
-            // Pilot wake" summary card below the header catches up too.
-            // Every terminal wake status must be listed here; anything missing
-            // leaves the badge stuck on "running" until the poll below catches
-            // up. 'cost-limit' was added with issue #320; 'budget-capped' is
-            // the per-wake --max-budget-usd ceiling, a clean stop rather than
-            // a failure.
-            if (parsed.status === 'success' || parsed.status === 'failed' ||
-                parsed.status === 'auth-error' || parsed.status === 'cost-limit' ||
-                parsed.status === 'budget-capped') {
-              fetchPilotRuns()
-            }
-          } else {
-            setLivePilot(null) // "null" frame = no wake has happened yet
-          }
-        } catch {
-          /* ignore a malformed frame; the next frame or the poll recovers */
-        }
-      }
-      es.onerror = () => {} // EventSource reconnects on its own; poll covers the gap
-    } catch {
-      /* SSE construction failed; the pilot-runs poll fallback covers updates */
-    }
-    return () => es?.close()
-  }, [name])
-
   // Polling fallback for the live badge: re-fetch pilot-runs every 5s so the
   // running/idle state surfaces even when SSE is unavailable. Cheap and
   // unobtrusive; mirrors the dashboard's 5s refetch cadence.
@@ -416,12 +246,6 @@ function ProjectDetail() {
     const id = setInterval(() => fetchPilotRuns(), 5000)
     return () => clearInterval(id)
   }, [name])
-
-  // 1s ticker driving the running elapsed timer + idle countdown.
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [])
 
   useConfigChanged(() => {
     fetchProject()
@@ -695,27 +519,6 @@ function ProjectDetail() {
     .filter(r => !project?.repos?.includes(r))
     .filter(r => !repoSearch || r.toLowerCase().includes(repoSearch.toLowerCase()))
 
-  // Aggregate bound_machine across this project's member repos. Shown
-  // inside the Pilot popover so the user can see where the *execution*
-  // half of automation lives (repos) alongside where the *triage* half
-  // lives (Pilot). Repos with no bound_machine are bucketed as "unbound".
-  // The two layers are independent on purpose, but seeing them
-  // side-by-side is the easiest way to spot misconfigurations.
-  const repoBoundSummary = useMemo(() => {
-    const counts = new Map<string, number>()
-    let unbound = 0
-    for (const repo of project?.repos ?? []) {
-      const meta = repoMeta[repo]
-      const bm = meta?.bound_machine?.trim() || ''
-      if (!bm) {
-        unbound++
-      } else {
-        counts.set(bm, (counts.get(bm) ?? 0) + 1)
-      }
-    }
-    return { counts, unbound }
-  }, [project?.repos, repoMeta])
-
   // latestWakeWithDuties = the most recent Pilot wake whose output had
   // a parseable duties block. Used to render the project-page digest
   // card (Layer 1) and the duty-status chips strip (Layer 2). When no
@@ -729,31 +532,6 @@ function ProjectDetail() {
     return null
   }, [pilotRuns])
 
-  // pilotBound = whether this project has any project-level binding.
-  // pilotBoundHere = bound to the dashboard's own machine.
-  const pilotBound = !!project?.automation?.bound_machine
-  const pilotBoundHere = pilotBound && !!hostname && project?.automation?.bound_machine === hostname
-  // Skip-reason is set by the runner whenever Schedule refuses to wake.
-  // When automation is on AND a skip reason exists, the popover surfaces
-  // an amber banner so the user sees the obstacle without grepping logs.
-  const pilotSkipReason = (project?.automation?.last_skip_reason ?? '').trim()
-
-  // Live badge derivation (issue #240). Prefer the SSE-fed livePilot; fall
-  // back to the newest polled wake so the badge still animates when SSE is
-  // down. A wake counts as "running" only while its meta.json says so.
-  const effectivePilot = livePilot ?? (pilotRuns.length > 0 ? pilotRuns[0] : null)
-  const pilotRunning = effectivePilot?.status === 'running'
-  const pilotElapsedSec = pilotRunning && effectivePilot?.started_at
-    ? (nowMs - new Date(effectivePilot.started_at).getTime()) / 1000
-    : 0
-  // next wake = last_woken_at + cooldown_minutes (already exposed by
-  // /api/project/get). Only meaningful when automation is on with a cooldown.
-  const cooldownMin = project?.automation?.cooldown_minutes ?? 0
-  const lastWokenAt = project?.automation?.last_woken_at
-  const nextWakeMs = lastWokenAt && cooldownMin > 0
-    ? new Date(lastWokenAt).getTime() + cooldownMin * 60_000
-    : 0
-  const nextWakeInSec = nextWakeMs ? (nextWakeMs - nowMs) / 1000 : 0
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
@@ -797,241 +575,9 @@ function ProjectDetail() {
                 >
                   <MessageSquare className="w-3 h-3" /> chat
                 </button>
-                {/* At-a-glance Pilot scheduling pill — a quick read on
-                    whether automation is on without scrolling down. */}
                 <span>·</span>
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => setAutomationPopoverOpen(o => !o)}
-                    className={cn(
-                      'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium transition-colors',
-                      // Running takes top precedence — a live wake is the most
-                      // informative state, so render it distinctly (indigo +
-                      // spinner) regardless of skip/enabled colouring.
-                      pilotRunning
-                        ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-950/60'
-                        // Amber state: automation is on but Schedule recorded
-                        // a skip last pass — clearest signal that the pill's
-                        // "on" claim is currently a lie. Take precedence over
-                        // the green "enabled" colouring.
-                        : project.automation?.enabled && pilotSkipReason
-                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-950/60'
-                          : project.automation?.enabled
-                            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-950/60'
-                            : 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700/60',
-                    )}
-                    title={
-                      pilotRunning
-                        ? `Pilot is running — ${fmtDur(pilotElapsedSec)} elapsed`
-                        : pilotSkipReason
-                          ? `Pilot enabled but last pass skipped: ${pilotSkipReason}`
-                          : 'Automation settings'
-                    }
-                  >
-                    {pilotRunning ? (
-                      <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                    ) : (
-                      <span
-                        className={cn(
-                          'inline-block w-1.5 h-1.5 rounded-full',
-                          project.automation?.enabled && pilotSkipReason
-                            ? 'bg-amber-500'
-                            : project.automation?.enabled
-                              ? 'bg-emerald-500 animate-pulse'
-                              : 'bg-slate-400',
-                        )}
-                      />
-                    )}
-                    {pilotRunning
-                      ? <>Pilot running · <span className="tabular-nums">{fmtDur(pilotElapsedSec)}</span></>
-                      : <>Pilot {project.automation?.enabled ? (pilotSkipReason ? 'skipped' : 'on') : 'off'}</>}
-                    {/* Idle countdown: only when on, not skipped, and a next
-                        wake is actually scheduled in the future. */}
-                    {!pilotRunning && project.automation?.enabled && !pilotSkipReason && nextWakeInSec > 0 && (
-                      <span className="opacity-70 tabular-nums">· next in {fmtDur(nextWakeInSec)}</span>
-                    )}
-                    <Settings2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
-                  </button>
-                  {automationPopoverOpen && (
-                    <>
-                      <div className="fixed inset-0 z-10" onClick={() => setAutomationPopoverOpen(false)} />
-                      <div className="absolute left-0 top-full mt-2 z-20 w-72 bg-card border border-border rounded-xl shadow-lg p-4">
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="text-sm font-semibold text-foreground">Automation</span>
-                          <button type="button" onClick={() => setAutomationPopoverOpen(false)} className="text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5" /></button>
-                        </div>
-                        <div className="flex items-center gap-3 mb-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const cd = parseInt(cooldownDraft, 10)
-                              saveAutomation(!project.automation?.enabled, isNaN(cd) ? 30 : cd)
-                            }}
-                            disabled={automationSaving}
-                            role="switch"
-                            aria-checked={project.automation?.enabled ?? false}
-                            className={cn(
-                              'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
-                              project.automation?.enabled ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700',
-                              automationSaving && 'opacity-50 cursor-not-allowed',
-                            )}
-                          >
-                            <span className={cn('inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform', project.automation?.enabled ? 'translate-x-5' : 'translate-x-0.5')} />
-                          </button>
-                          <span className={cn('text-sm font-medium', project.automation?.enabled ? 'text-emerald-700 dark:text-emerald-400' : 'text-slate-600 dark:text-slate-400')}>
-                            {project.automation?.enabled ? 'Enabled' : 'Disabled'}
-                          </span>
-                        </div>
-                        <p className="text-xs text-muted-foreground mb-3">
-                          When on, every <code className="px-1 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code> pass wakes the Pilot. It triages the backlog: files new work, fixes missing labels, closes stale/duplicate issues, and resolves merge conflicts on existing PRs.
-                        </p>
-                        {project.automation?.last_woken_at && (
-                          <p className="text-[11px] text-muted-foreground mb-3 tabular-nums">
-                            Last woken {new Date(project.automation.last_woken_at).toLocaleString()}
-                          </p>
-                        )}
-
-                        {/* Pilot skip banner — only when Schedule recorded a
-                            reason on the last pass. This is the "Pilot on
-                            but nothing happening" signal made visible. The
-                            most common cases (bound_machine mismatch /
-                            require_binding=true with no binding) point the
-                            user at the bind row immediately below. */}
-                        {pilotSkipReason && (
-                          <div className="mb-3 px-2 py-1.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800 dark:bg-amber-950/30 dark:border-amber-900 dark:text-amber-300 text-[11px] leading-snug">
-                            <div className="font-medium">Last pass skipped</div>
-                            <div className="opacity-90">{pilotSkipReason}</div>
-                            {project.automation?.last_skip_at && (
-                              <div className="opacity-70 tabular-nums mt-0.5">
-                                {new Date(project.automation.last_skip_at).toLocaleString()}
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Triage binding — which machine wakes the Pilot.
-                            Independent from repo bindings shown below;
-                            useful in multi-machine deployments to prevent
-                            duplicate Pilot wakes on cron. */}
-                        <div className="mb-3">
-                          <div className="text-xs text-muted-foreground mb-1.5">Triage on</div>
-                          <div className="flex items-center gap-2 flex-wrap">
-                            {pilotBound ? (
-                              <span
-                                className={cn(
-                                  'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono border',
-                                  pilotBoundHere
-                                    ? 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-950/30 dark:border-blue-900 dark:text-blue-300'
-                                    : 'bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-950/30 dark:border-amber-900 dark:text-amber-300',
-                                )}
-                              >
-                                {project.automation?.bound_machine}
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono border border-border text-muted-foreground">
-                                unbound — any machine
-                              </span>
-                            )}
-                            {pilotBoundHere ? (
-                              <button
-                                type="button"
-                                onClick={() => saveBoundMachine(false)}
-                                disabled={automationSaving}
-                                className="text-[11px] px-1.5 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 disabled:opacity-50"
-                              >
-                                Unbind
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => saveBoundMachine(true)}
-                                disabled={automationSaving}
-                                className="text-[11px] px-1.5 py-0.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 disabled:opacity-50"
-                                title={pilotBound ? `Take over from ${project.automation?.bound_machine}` : 'Bind Pilot to this machine'}
-                              >
-                                {pilotBound ? `Take over (bind ${hostname || 'here'})` : `Bind to ${hostname || 'this machine'}`}
-                              </button>
-                            )}
-                          </div>
-                          {/* Aggregate view of repo-level bindings so the
-                              user can see the relationship between where
-                              Pilot triages and where operators execute. */}
-                          {(project.repos?.length ?? 0) > 0 && (
-                            <div className="mt-2 text-[11px] text-muted-foreground">
-                              Repos run on:{' '}
-                              {Array.from(repoBoundSummary.counts.entries()).map(([m, n], i) => (
-                                <span key={m}>
-                                  {i > 0 && ', '}
-                                  <span className="font-mono">{m}</span> ({n})
-                                </span>
-                              ))}
-                              {repoBoundSummary.unbound > 0 && (
-                                <span>
-                                  {repoBoundSummary.counts.size > 0 && ', '}
-                                  unbound ({repoBoundSummary.unbound})
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <label className="text-xs text-muted-foreground shrink-0">Cooldown (min)</label>
-                          <input
-                            type="number"
-                            min={0}
-                            step={1}
-                            value={cooldownDraft}
-                            onChange={e => setCooldownDraft(e.target.value)}
-                            className="w-16 px-2 py-1 bg-background border border-border rounded-lg text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-primary"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const cd = parseInt(cooldownDraft, 10)
-                              saveAutomation(project.automation?.enabled ?? false, isNaN(cd) ? 30 : cd)
-                            }}
-                            disabled={automationSaving || parseInt(cooldownDraft, 10) === (project.automation?.cooldown_minutes ?? 30)}
-                            className="px-2 py-1 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            Save
-                          </button>
-                        </div>
-
-                        {/* Manual wake. Click resets the cooldown clock
-                            (LastWokenAt = now) so the next auto-wake is
-                            cooldown_minutes from this click — matches
-                            the scheduled-wake semantics, no special
-                            case to learn. Disabled while automation is
-                            off; the server also enforces, so this is
-                            just a UX hint. */}
-                        <div className="mt-3 pt-3 border-t border-border flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={triggerWake}
-                            disabled={wakeStarting || !project.automation?.enabled || automationSaving}
-                            className={cn(
-                              'inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
-                              'border-emerald-300 text-emerald-700 hover:bg-emerald-50 dark:border-emerald-900 dark:text-emerald-300 dark:hover:bg-emerald-950/40',
-                            )}
-                            title="Trigger a Pilot wake now, ignoring cooldown. The cooldown clock restarts from this wake."
-                          >
-                            {wakeStarting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
-                            Wake now
-                          </button>
-                          <span className="text-[11px] text-muted-foreground">
-                            Triggers immediately, resets the cooldown clock
-                          </span>
-                        </div>
-                        {wakeMessage && <p className="mt-2 text-xs text-emerald-700 dark:text-emerald-400">{wakeMessage}</p>}
-                        {wakeError && <p className="mt-2 text-xs text-red-600">{wakeError}</p>}
-
-                        {automationError && <p className="mt-2 text-xs text-red-600">{automationError}</p>}
-                      </div>
-                    </>
-                  )}
-                </div>
+                <button onClick={() => chatDrawer.open({ pilot: true })}
+                  className="hover:text-foreground hover:underline">平台 steward</button>
               </div>
             </div>
             {/* Delete button */}

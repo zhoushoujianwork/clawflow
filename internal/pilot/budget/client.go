@@ -101,6 +101,19 @@ func (b *budgetClient) PostPRComment(repo string, n int, body string) error {
 	return b.Client.PostPRComment(repo, n, body)
 }
 
+// Preserve idempotent MR comments through the budget decorator.
+func (b *budgetClient) PostPRCommentIdempotent(repo string, n int, body, runID string) error {
+	if err := Reserve("PostPRComment"); err != nil {
+		return err
+	}
+	if c, ok := b.Client.(interface {
+		PostPRCommentIdempotent(string, int, string, string) error
+	}); ok {
+		return c.PostPRCommentIdempotent(repo, n, body, runID)
+	}
+	return vcs.ErrNotSupported
+}
+
 // --- Merge / Branch (destructive) ---
 
 func (b *budgetClient) MergePR(repo string, n int) error {

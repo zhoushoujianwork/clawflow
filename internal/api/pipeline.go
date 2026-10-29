@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"path/filepath"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
@@ -85,6 +87,23 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	board := pipeline.Board{Snapshot: snap, Stale: stale, Refreshing: pipelineCache.refreshing, Error: pipelineCache.err}
 	pipelineCache.mu.Unlock()
+	board.Repos = append([]pipeline.RepoBoard{}, board.Repos...)
+	if cfg, err := config.Load(); err == nil {
+		platform := cfg.Settings.Platform.URL
+		if platform == "" && cfg.Settings.Coordinator.Enabled {
+			host, _, err := net.SplitHostPort(r.Host)
+			if err != nil {
+				host = r.Host
+			}
+			_, port, err := net.SplitHostPort(cfg.Settings.Coordinator.ListenAddress())
+			if err == nil {
+				platform = "https://" + net.JoinHostPort(host, port)
+			}
+		}
+		for i := range board.Repos {
+			board.Repos[i].HostingPlatform = platform
+		}
+	}
 	board.Runtime = pipelineRuntime()
 	records, err := pilot.ReadActionRecords(filepath.Join(snapshot.DataDir(), "pilot-actions.jsonl"))
 	actions := []pilot.ActionRecord{}

@@ -22,6 +22,8 @@ var (
 )
 
 type Task struct {
+	EventSource    string          `gorm:"-" json:"-"`
+	ExternalID     string          `gorm:"-" json:"-"`
 	ID             string          `gorm:"primaryKey" json:"id"`
 	Kind           string          `json:"kind"`
 	Repo           string          `json:"repo"`
@@ -68,7 +70,11 @@ type Audit struct {
 
 func (Audit) TableName() string { return "coordinator_audit" }
 
-type Store struct{ db *gorm.DB }
+type Store struct {
+	db *gorm.DB
+	// LeaseLimits supplies current platform capacity; nil leaves standalone stores unrestricted.
+	LeaseLimits func() (int, map[string]int, error)
+}
 
 func New(db *gorm.DB) *Store { return &Store{db: db} }
 
@@ -135,6 +141,28 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 		t.Tags = []string{}
 	}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if input.ExternalID != "" {
+			if input.EventSource == "" {
+				return ErrInvalid
+			}
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", input.EventSource+"/"+input.ExternalID).Error; err != nil {
+				return err
+			}
+			var event InboxEvent
+			if err := tx.First(&event, "source = ? AND external_id = ?", input.EventSource, input.ExternalID).Error; err == nil {
+				t = Task{}
+				return tx.First(&t, "id = ?", event.TaskID).Error
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
+		remember := func() error {
+			if input.ExternalID == "" {
+				return nil
+			}
+			now := time.Now().UTC()
+			return tx.Create(&InboxEvent{Source: input.EventSource, ExternalID: input.ExternalID, TaskID: t.ID, ReceivedAt: now, ProcessedAt: now}).Error
+		}
 		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", t.Repo).Error; err != nil {
 			return err
 		}
@@ -142,12 +170,12 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 		if t.PR > 0 {
 			q = q.Where("pr = ?", t.PR)
 		} else {
-			q = q.Where("pr = 0 AND issue = ?", t.Issue)
+			q = q.Where("(pr = 0 OR kind = 'implement') AND issue = ?", t.Issue)
 		}
 		var existing Task
 		if err := q.First(&existing).Error; err == nil {
 			t = existing
-			return nil
+			return remember()
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
@@ -164,16 +192,22 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 			return r.Error
 		}
 		if r.RowsAffected == 1 {
+			if err := remember(); err != nil {
+				return err
+			}
 			return audit(tx, "", t.ID, "enqueue")
 		}
 		q = tx.Where("repo = ? AND kind = ? AND state IN ?", t.Repo, t.Kind, []string{"pending", "leased"})
 		if t.PR > 0 {
 			q = q.Where("pr = ?", t.PR)
 		} else {
-			q = q.Where("pr = 0 AND issue = ?", t.Issue)
+			q = q.Where("(pr = 0 OR kind = 'implement') AND issue = ?", t.Issue)
 		}
 		t = Task{}
-		return q.First(&t).Error
+		if err := q.First(&t).Error; err != nil {
+			return err
+		}
+		return remember()
 	})
 	return &t, err
 }
@@ -198,6 +232,25 @@ func eligible(tags []string, w Worker) bool {
 func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 	var result Task
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var repoLimits map[string]int
+		if s.LeaseLimits != nil {
+			// Serialize platform-wide checks across all workers and API processes.
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(500387)").Error; err != nil {
+				return err
+			}
+			total, limits, err := s.LeaseLimits()
+			if err != nil {
+				return err
+			}
+			repoLimits = limits
+			var leased int64
+			if err := tx.Model(&Task{}).Where("state = 'leased'").Count(&leased).Error; err != nil {
+				return err
+			}
+			if total > 0 && leased >= int64(total) {
+				return ErrNoTask
+			}
+		}
 		var w Worker
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&w, "id = ?", worker).Error; err != nil {
 			return err
@@ -223,6 +276,16 @@ func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 				}
 				return err
 			}
+			if limit := repoLimits[t.Repo]; limit > 0 {
+				var leased int64
+				if err := tx.Model(&Task{}).Where("repo = ? AND state = 'leased'", t.Repo).Count(&leased).Error; err != nil {
+					return err
+				}
+				if leased >= int64(limit) {
+					skipped = append(skipped, t.ID)
+					continue
+				}
+			}
 			if t.Kind == "acceptance" {
 				var live []Worker
 				if err := tx.Table("coordinator_workers").Select("coordinator_workers.*").Joins("JOIN coordinator_tokens ON coordinator_tokens.name = coordinator_workers.id").Where("coordinator_tokens.revoked = false AND coordinator_tokens.last_seen > clock_timestamp() - interval '120 seconds'").Find(&live).Error; err != nil {
@@ -246,6 +309,9 @@ func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 			t.LeaseExpiresAt = &expires
 			t.FencingToken++
 			if err := tx.Save(&t).Error; err != nil {
+				return err
+			}
+			if err := tx.Create(&TaskAttempt{TaskID: t.ID, AttemptNumber: int64(t.Attempt + 1), LeaseEpoch: t.FencingToken, WorkerID: worker, Kind: "product", Status: "running", StartedAt: now}).Error; err != nil {
 				return err
 			}
 			result = t
@@ -273,6 +339,16 @@ func (s *Store) leaseUpdate(ctx context.Context, id, worker string, fence int64,
 		if r.RowsAffected != 1 {
 			return ErrStaleLease
 		}
+		if action == "done" || action == "failed" {
+			if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND lease_epoch = ?", id, fence).Updates(map[string]any{"status": action, "ended_at": time.Now().UTC()}).Error; err != nil {
+				return err
+			}
+		}
+		if action == "result-accepted" {
+			if err := acceptIntents(tx, current, values["result"].(json.RawMessage)); err != nil {
+				return err
+			}
+		}
 		return audit(tx, worker, id, action)
 	})
 }
@@ -294,14 +370,34 @@ func (s *Store) Complete(ctx context.Context, id, worker string, fence int64, re
 func (s *Store) Fail(ctx context.Context, id, worker string, fence int64, result json.RawMessage) error {
 	return s.finish(ctx, id, worker, fence, "failed", result)
 }
+
+// MaxInfrastructureAttempts bounds retries independently of product repairs.
+const MaxInfrastructureAttempts = 3
+
 func (s *Store) ExpireLeases(ctx context.Context, now time.Time) ([]Task, error) {
 	var tasks []Task
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		r := tx.Model(&tasks).Clauses(clause.Returning{}).Where("state = 'leased' AND lease_expires_at <= ?", now).Updates(map[string]interface{}{"state": "pending", "attempt": gorm.Expr("attempt + 1"), "lease_owner": "", "lease_expires_at": nil})
-		if r.Error != nil {
-			return r.Error
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("state = 'leased' AND lease_expires_at <= ?", now).Find(&tasks).Error; err != nil {
+			return err
 		}
-		for _, t := range tasks {
+		for i := range tasks {
+			t := &tasks[i]
+			if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND lease_epoch = ?", t.ID, t.FencingToken).Updates(map[string]any{"kind": "infra", "status": "expired", "error_kind": "lease-expired", "ended_at": now}).Error; err != nil {
+				return err
+			}
+			t.Attempt++
+			t.State = "pending"
+			t.LeaseOwner = ""
+			t.LeaseExpiresAt = nil
+			if t.Attempt >= MaxInfrastructureAttempts {
+				t.State = "failed"
+			}
+			if err := tx.Save(t).Error; err != nil {
+				return err
+			}
+			if err := failIntents(tx, t.ID); err != nil {
+				return err
+			}
 			if err := audit(tx, "", t.ID, "expire"); err != nil {
 				return err
 			}
@@ -329,7 +425,7 @@ func (s *Store) Active(ctx context.Context) ([]Task, error) {
 
 // AcceptResult atomically fences out further reports and lease expiry while
 // coordinator effects are in flight. The task remains active until FinishResult.
-// A failed external write is retained for diagnosis, never blindly replayed.
+// Effect intents are committed with the report and reconciled before replay.
 func (s *Store) AcceptResult(ctx context.Context, id, worker string, fence int64, result json.RawMessage) error {
 	if !json.Valid(result) {
 		return ErrInvalid

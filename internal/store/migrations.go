@@ -33,6 +33,11 @@ var Migrations = []Migration{
 	{Version: 1, Name: "baseline", Up: func(tx *gorm.DB) error { return nil }},
 	{Version: 2, Name: "runs_and_usage", Up: migrateRuns},
 	{Version: 3, Name: "coordinator", Up: migrateCoordinator},
+	{Version: 4, Name: "durable_workflow", Up: migrateWorkflow},
+	{Version: 5, Name: "coordinator_token_scope", Up: func(tx *gorm.DB) error {
+		return tx.Exec("ALTER TABLE coordinator_tokens ADD COLUMN scope text NOT NULL DEFAULT 'worker' CHECK (scope IN ('worker', 'admin'))").Error
+	}},
+	{Version: 6, Name: "actions_evidence", Up: migrateActions},
 }
 
 type schemaMigration struct {

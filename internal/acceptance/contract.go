@@ -198,7 +198,7 @@ type Finding struct {
 }
 
 func (f Finding) Failing() bool {
-	return f.Kind == "requirement" || f.Kind == "defect"
+	return f.Kind == "requirement" || f.Kind == "defect" || f.Kind == "unstructured"
 }
 
 func validateFindings(findings []Finding) (bool, error) {
@@ -213,6 +213,11 @@ func validateFindings(findings []Finding) (bool, error) {
 			return false, errors.New("finding requires summary")
 		}
 		switch f.Kind {
+		case "unstructured":
+			if !nonempty(string(f.Evidence)) {
+				return false, errors.New("unstructured finding requires text")
+			}
+			failing = true
 		case "advisory":
 		case "requirement":
 			if !nonempty(f.Requirement, string(f.Evidence)) {
@@ -259,12 +264,15 @@ func (r Record) validateCorrection(c Contract) error {
 }
 
 type Record struct {
-	Correction *ReportCorrection  `json:"correction,omitempty"`
-	Checks     []RequirementCheck `json:"checks,omitempty"`
-	NextAction string             `json:"next_action,omitempty"`
-	NextOwner  string             `json:"next_owner,omitempty"`
-	ReviewMode string             `json:"review_mode,omitempty"`
-	CI         *vcs.CIEvidence    `json:"ci,omitempty"`
+	Unstructured    bool               `json:"unstructured,omitempty"`
+	ValidationError string             `json:"validation_error,omitempty"`
+	BinaryID        string             `json:"binary_id,omitempty"`
+	Correction      *ReportCorrection  `json:"correction,omitempty"`
+	Checks          []RequirementCheck `json:"checks,omitempty"`
+	NextAction      string             `json:"next_action,omitempty"`
+	NextOwner       string             `json:"next_owner,omitempty"`
+	ReviewMode      string             `json:"review_mode,omitempty"`
+	CI              *vcs.CIEvidence    `json:"ci,omitempty"`
 
 	Version         int       `json:"version"`
 	Contract        Contract  `json:"contract"`
@@ -304,10 +312,13 @@ func hasExecutedCommand(evidence []string) bool {
 // Evaluate returns nil only for a complete passing record for exactly expected.
 // Callers must obtain expected from their current authoritative inputs.
 func Evaluate(expected Contract, r Record) error {
-	return evaluate(expected, r, true)
+	return evaluate(expected, r, true, true)
 }
 
-func evaluate(expected Contract, r Record, checkRequirements bool) error {
+func evaluate(expected Contract, r Record, checkRequirements, requireExecution bool) error {
+	if r.Unstructured || r.ValidationError != "" {
+		return errors.New("unstructured report cannot authorize acceptance")
+	}
 	d, err := expected.Digest()
 	if err != nil {
 		return err
@@ -344,7 +355,7 @@ func evaluate(expected Contract, r Record, checkRequirements bool) error {
 			return err
 		}
 	}
-	if expected.EvidenceSchema != 1 && !hasExecutedCommand(r.Evidence) {
+	if requireExecution && expected.EvidenceSchema != 1 && !hasExecutedCommand(r.Evidence) {
 		return errors.New("acceptance evidence lists no executed command")
 	}
 	if err := r.Plan.validate(expected); err != nil {

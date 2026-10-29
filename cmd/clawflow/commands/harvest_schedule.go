@@ -64,24 +64,24 @@ func saveHarvestSchedule(repo string, st harvestSchedule) error {
 	return os.Rename(f.Name(), path)
 }
 
-// Ranked issues use the unified queue comparator; unranked PRs follow in
-// ascending PR-number order. Multiple PRs for one issue also sort oldest first.
-func orderHarvest(client vcs.Client, repo string, prs []vcs.PR) ([]vcs.PR, error) {
+// All linked issues use the unified queue comparator. PRs without a closing
+// issue follow in ascending PR-number order, as do PRs for the same issue.
+func orderHarvest(client vcs.Client, repo string, prs []vcs.PR) ([]vcs.PR, map[int]queue.Priority, error) {
 	rank, err := queue.LoadRank()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	positions := queue.Positions(rank)
 	var items []queue.Item
 	seen := map[queue.Key]bool{}
 	for _, pr := range prs {
 		key := queue.Key{Repo: repo, Number: extractClosesIssue(pr.Body)}
-		if _, ranked := positions[key]; !ranked || seen[key] {
+		if key.Number == 0 || seen[key] {
 			continue
 		}
 		issue, err := client.GetIssue(repo, key.Number)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		priority, _ := queue.PriorityFromLabels(issue.Labels)
 		items = append(items, queue.Item{Key: key, Priority: priority, CreatedAt: issue.CreatedAt})
@@ -89,8 +89,10 @@ func orderHarvest(client vcs.Client, repo string, prs []vcs.PR) ([]vcs.PR, error
 	}
 	ordered := queue.Order(items, positions)
 	order := map[int]int{}
+	priorities := map[int]queue.Priority{}
 	for i, item := range ordered {
 		order[item.Key.Number] = i
+		priorities[item.Key.Number] = item.Priority
 	}
 	out := slices.Clone(prs)
 	slices.SortStableFunc(out, func(a, b vcs.PR) int {
@@ -107,15 +109,26 @@ func orderHarvest(client vcs.Client, repo string, prs []vcs.PR) ([]vcs.PR, error
 			return a.Number - b.Number
 		}
 	})
-	return out, nil
+	prPriorities := make(map[int]queue.Priority, len(prs))
+	for _, pr := range prs {
+		priority, ok := priorities[extractClosesIssue(pr.Body)]
+		if !ok {
+			priority = queue.DefaultPriority
+		}
+		prPriorities[pr.Number] = priority
+	}
+	return out, prPriorities, nil
 }
 
-func selectHarvest(prs []vcs.PR, st harvestSchedule) int {
+func selectHarvest(prs []vcs.PR, st harvestSchedule, priorities map[int]queue.Priority) int {
 	if len(prs) == 0 {
 		return -1
 	}
-	if prs[0].Number == st.Previous {
+	if prs[0].Number == st.Previous && st.Heads[prs[0].Number] == prs[0].HeadSHA {
 		for i, pr := range prs[1:] {
+			if priorities[pr.Number] != priorities[prs[0].Number] {
+				continue
+			}
 			head, seen := st.Heads[pr.Number]
 			if !seen || head != pr.HeadSHA {
 				return i + 1

@@ -700,8 +700,8 @@ func TestReviewerFindingPolicy(t *testing.T) {
 		{"requirement", Failed, []Finding{{Kind: "requirement", Summary: "retry absent", Requirement: "retry on transient failure", Evidence: "TestRetry fails: got one attempt"}}, Failed, false},
 		{"unplanned-defect", Passed, []Finding{{Kind: "defect", Summary: "race outside plan", Defect: "concurrent map writes in changed handler", Evidence: "race detector points to handler.go:42"}}, Failed, false},
 		{"no-findings", Failed, nil, Blocked, true},
-		{"no-requirement", Failed, []Finding{{Kind: "requirement", Summary: "more tests", Evidence: "plan gap"}}, Blocked, true},
-		{"no-defect-evidence", Failed, []Finding{{Kind: "defect", Summary: "possible race", Defect: "race"}}, Blocked, true},
+		{"no-requirement", Failed, []Finding{{Kind: "requirement", Summary: "more tests", Evidence: "plan gap"}}, Failed, false},
+		{"no-defect-evidence", Failed, []Finding{{Kind: "defect", Summary: "possible race", Defect: "race"}}, Failed, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, scratch, workspace := setupRunner(t)

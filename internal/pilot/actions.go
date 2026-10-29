@@ -2,6 +2,7 @@ package pilot
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -181,6 +182,7 @@ func validateAction(raw json.RawMessage) (Action, error) {
 // ActionExecutor serializes all local callers using a dedicated audit lock.
 // Defaults are five actions/wake, two creations/wake and twenty actions/UTC day.
 type ActionExecutor struct {
+	Context         context.Context
 	Config          *config.Config
 	Path            string
 	Actor           string
@@ -232,7 +234,7 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 			return nil, err
 		}
 		defer lock.Close()
-		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		if err = e.lockAudit(lock); err != nil {
 			return nil, err
 		}
 		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
@@ -305,6 +307,8 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 		digest := fmt.Sprintf("%x", sha256.Sum256(b))
 		r := ActionRecord{RunID: s.RunID, Actor: e.Actor, Action: a, Digest: digest, At: now}
 		switch {
+		case e.Context != nil && e.Context.Err() != nil:
+			r.Outcome = "invocation_timeout"
 		case validation != nil:
 			r.Outcome = validation.Error()
 		case a.Type == "override_merge" && (e.Config == nil || !e.Config.Repos[a.Repo].PilotOverrideMerge):
@@ -468,4 +472,26 @@ func (e ActionExecutor) execute(a Action, run string) (int, error) {
 		return 0, err
 	}
 	return 0, errors.New("action_not_allowed")
+}
+
+// lockAudit bounds contention by the invocation deadline. Manual apply callers
+// without a context retain the existing blocking behavior.
+func (e ActionExecutor) lockAudit(lock *os.File) error {
+	if e.Context == nil {
+		return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX)
+	}
+	for {
+		if err := e.Context.Err(); err != nil {
+			return err
+		}
+		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			return err
+		}
+		select {
+		case <-e.Context.Done():
+			return e.Context.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }

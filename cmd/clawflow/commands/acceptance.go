@@ -125,6 +125,7 @@ func newAcceptanceCmd() *cobra.Command {
 		}
 		root.AddCommand(cmd)
 	}
+	root.AddCommand(newHarvestReviewCmd())
 	return root
 }
 
@@ -197,19 +198,32 @@ func acceptanceSHA(s string) bool {
 	return true
 }
 
+// acceptanceLocalDir resolves the repository's configured local clone, or "".
+func acceptanceLocalDir(rc config.Repo) string {
+	path := rc.LocalPath
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		path = filepath.Join(home, path[2:])
+	}
+	dir, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
 func acceptanceOrigin(ctx context.Context, rc config.Repo, repo string) (string, error) {
 	if rc.LocalPath == "" {
 		return "", errors.New("acceptance requires a configured local checkout")
 	}
-	if strings.HasPrefix(rc.LocalPath, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", errors.New("acceptance local checkout unavailable")
-		}
-		rc.LocalPath = filepath.Join(home, rc.LocalPath[2:])
-	}
-	dir, err := filepath.Abs(rc.LocalPath)
-	if err != nil {
+	dir := acceptanceLocalDir(rc)
+	if dir == "" {
 		return "", errors.New("acceptance local checkout unavailable")
 	}
 	origin, err := acceptanceGit(ctx, dir, "config", "--get", "remote.origin.url")
@@ -575,6 +589,11 @@ func conditionalAcceptedMerge(ctx context.Context, client vcs.Client, repo strin
 var acceptanceMergeClient = newVCSClientForRepo
 
 func explicitAcceptanceMerge(ctx context.Context, client vcs.Client, repo string, pr int) error {
+	releaseMerge, err := mergeRepoLock(repo)
+	if err != nil {
+		return err
+	}
+	defer releaseMerge()
 	required, err := acceptanceEnrollment(repo)
 	if err != nil {
 		return err
@@ -652,10 +671,23 @@ func acceptanceRemoveRemotes(ctx context.Context, dir string) error {
 
 // acceptancePrepareCheckout makes the pinned comparison history available offline.
 // Planning still runs in an empty scratch directory before this checkout exists.
-func acceptancePrepareCheckout(ctx context.Context, workspace, origin, headBranch, headSHA, baseSHA string) error {
+func acceptancePrepareCheckout(ctx context.Context, workspace, local, origin, headBranch, headSHA, baseSHA string) error {
 	// An independent detached Git workspace avoids mutating the user's checkout
 	// or sharing FETCH_HEAD with implement/repair. Only these temp dirs are removed.
-	for _, args := range [][]string{{"init", "--quiet"}, {"remote", "add", "origin", origin}, {"check-ref-format", "refs/heads/" + headBranch}, {"fetch", "--no-tags", "origin", "refs/heads/" + headBranch}} {
+	if _, err := acceptanceGit(ctx, workspace, "init", "--quiet"); err != nil {
+		return err
+	}
+	// Implement and repair worktrees live in the local clone, so the pinned
+	// head and base are normally already there: borrow those objects read-only
+	// instead of downloading the history again (concurrent reviews timed out).
+	if local != "" && acceptanceBorrowLocalObjects(ctx, workspace, local, headSHA, baseSHA) {
+		if _, err := acceptanceGit(ctx, workspace, "merge-base", baseSHA, headSHA); err != nil {
+			return err
+		}
+		_, err := acceptanceGit(ctx, workspace, "checkout", "--detach", headSHA)
+		return err
+	}
+	for _, args := range [][]string{{"remote", "add", "origin", origin}, {"check-ref-format", "refs/heads/" + headBranch}, {"fetch", "--no-tags", "origin", "refs/heads/" + headBranch}} {
 		if _, err := acceptanceGit(ctx, workspace, args...); err != nil {
 			return err
 		}
@@ -680,6 +712,37 @@ func acceptancePrepareCheckout(ctx context.Context, workspace, origin, headBranc
 		return err
 	}
 	return nil
+}
+
+// acceptanceBorrowLocalObjects points the review repository at the local
+// clone's object store when it already holds both pinned commits. It reports
+// false (leaving no alternates behind) when anything is missing.
+func acceptanceBorrowLocalObjects(ctx context.Context, workspace, local, headSHA, baseSHA string) bool {
+	// Only a real repository created by init can take alternates.
+	if info, err := os.Stat(filepath.Join(workspace, ".git", "objects")); err != nil || !info.IsDir() {
+		return false
+	}
+	common, err := acceptanceGit(ctx, local, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return false
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(local, common)
+	}
+	alternates := filepath.Join(workspace, ".git", "objects", "info", "alternates")
+	if err := os.MkdirAll(filepath.Dir(alternates), 0o755); err != nil {
+		return false
+	}
+	if err := os.WriteFile(alternates, []byte(filepath.Join(common, "objects")+"\n"), 0o644); err != nil {
+		return false
+	}
+	for _, sha := range []string{headSHA, baseSHA} {
+		if _, err := acceptanceGit(ctx, workspace, "cat-file", "-e", sha+"^{commit}"); err != nil {
+			os.Remove(alternates)
+			return false
+		}
+	}
+	return true
 }
 
 // acceptanceReviewerEnv returns env without VCS or ClawFlow token variables.
@@ -709,6 +772,11 @@ func acceptanceReviewerEnv(env []string) []string {
 
 func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Record, error) {
 	ctx = gitexec.WithRepo(ctx, repo)
+	releaseSlot, err := configuredAgentSlot(ctx)
+	if err != nil {
+		return acceptance.Record{}, err
+	}
+	defer releaseSlot()
 	unlock, err := acceptanceLock(repo, prNumber)
 	if err != nil {
 		return acceptance.Record{}, err
@@ -741,7 +809,7 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		if err != nil {
 			return "", err
 		}
-		if err := acceptancePrepareCheckout(ctx, workspace, origin, pr.HeadBranch, c.HeadSHA, c.BaseSHA); err != nil {
+		if err := acceptancePrepareCheckout(ctx, workspace, acceptanceLocalDir(rc), origin, pr.HeadBranch, c.HeadSHA, c.BaseSHA); err != nil {
 			return "", err
 		}
 		return workspace, nil
@@ -751,6 +819,15 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		return acceptance.Record{}, errors.New("cannot open private acceptance store")
 	}
 	defer store.Close()
+	attempts, err := store.InfrastructureAttempts(c)
+	if err != nil {
+		return acceptance.Record{}, err
+	}
+	if attempts.LatestIsInfra && attempts.Count >= harvestMaxInfra {
+		info := harvestInfraInfo{attempts: attempts.Count, digest: acceptanceInfraKey(c)}
+		autoMergeAttempt{ctx: ctx, client: client, repo: repo, repoCfg: rc, prNum: prNumber, issueNum: extractClosesIssue(pr.Body)}.notify(harvestInfraComment(repo, prNumber, info), harvestInfraMarker(info.digest))
+		return acceptance.Record{}, errors.New("acceptance-infra: infrastructure retry limit reached")
+	}
 	inspect := func(ctx context.Context, workspace string) (acceptance.Source, error) {
 		current, _, _, _, err := acceptanceContract(ctx, client, repo, prNumber)
 		if err != nil {

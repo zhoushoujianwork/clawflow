@@ -71,7 +71,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if err != nil {
 		return record, err
 	}
-	record = Record{ReviewMode: FullSuite, Version: Version, Contract: c, ContractDigest: d, AttemptID: randomID(), Role: "acceptance", Verdict: Blocked, StartedAt: time.Now().UTC()}
+	record = Record{BinaryID: BinaryID(), ReviewMode: FullSuite, Version: Version, Contract: c, ContractDigest: d, AttemptID: randomID(), Role: "acceptance", Verdict: Blocked, StartedAt: time.Now().UTC()}
 	if runner.Store == nil {
 		return record, errors.New("acceptance store required")
 	}
@@ -273,6 +273,9 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	}
 	parsed = record
 	if err = applyReviewReport(c, &parsed, corrected.Text); err != nil {
+		if !errors.Is(err, errReviewInfrastructure) && applyUnstructuredReport(&record, corrected.Text, err) {
+			return record, nil
+		}
 		return record, err
 	}
 	return parsed, nil
@@ -314,6 +317,11 @@ func applyReviewReport(c Contract, record *Record, text string) error {
 	for _, e := range output.Evidence {
 		if !nonempty(e) {
 			return errors.New("acceptance report contains empty evidence")
+		}
+	}
+	for _, f := range output.Findings {
+		if f.Kind == "unstructured" {
+			return errors.New("unstructured findings are runner-owned")
 		}
 	}
 	failing, findingErr := validateFindings(output.Findings)

@@ -24,6 +24,9 @@ type workerAcceptanceKey struct{}
 var enqueueWorkerAcceptanceFn = enqueueWorkerAcceptance
 
 func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, timeout time.Duration) error {
+	if err := coordinatorPRAllowedFn(ctx, repo, pr.Number); err != nil {
+		return err
+	}
 	if err := issueWorkAllowed(client, repo, extractClosesIssue(pr.Body)); err != nil {
 		return err
 	}
@@ -55,6 +58,22 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 	}
 	if err := s.CancelSupersededAcceptance(ctx, repo, pr.Number, contractJSON); err != nil {
 		return err
+	}
+	active, err := s.Active(ctx)
+	if err != nil {
+		return err
+	}
+	count := 0
+	for _, task := range active {
+		if task.Repo == repo && task.Kind == "acceptance" {
+			if task.PR == pr.Number {
+				return nil
+			}
+			count++
+		}
+	}
+	if count >= rc.AcceptanceParallelLimit() {
+		return errHarvestBusy
 	}
 	t, p := coordinatorTask(&runJob{repo: repo, repoCfg: rc, op: &operator.Operator{Name: "acceptance"}, sub: &operator.Subject{Number: issue, Labels: subject.Labels}}, timeout)
 	t.PR = pr.Number
@@ -218,6 +237,14 @@ func (s *coordinatorResults) finishAcceptance(ctx context.Context, t *coordinato
 		return err
 	}
 	defer unlock()
+	if _, ok := s.tasks.(coordinator.EffectStore); ok {
+		r.Effects = []jobEffect{{Kind: "pr-comment", Repo: t.Repo, Number: t.PR, Body: acceptanceReportBody(*r.Acceptance)}}
+		sealed, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		return s.tasks.AcceptResult(ctx, t.ID, worker, fence, sealed)
+	}
 	if err := s.tasks.AcceptResult(ctx, t.ID, worker, fence, raw); err != nil {
 		return err
 	}

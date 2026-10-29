@@ -66,6 +66,19 @@ func TestWorkerTokenCLI(t *testing.T) {
 	if strings.Contains(listing, secret) {
 		t.Fatal("secret leaked")
 	}
+
+	adminSecret := run("token", "create", "--name", "admin-cli", "--scope", "admin")
+	adminToken, err := coordinator.New(db.DB()).VerifyToken(context.Background(), adminSecret)
+	if err != nil || adminToken == nil || !adminToken.HasScope(coordinator.ScopeAdmin) {
+		t.Fatalf("admin token: %+v %v", adminToken, err)
+	}
+	invalid := NewWorkerCmd()
+	invalid.SetArgs([]string{"token", "create", "--name", "invalid", "--scope", "root"})
+	invalid.SetOut(io.Discard)
+	invalid.SetErr(io.Discard)
+	if err := invalid.Execute(); err == nil {
+		t.Fatal("invalid token scope accepted")
+	}
 	run("token", "revoke", "--name", "cli")
 	if _, err := coordinator.New(db.DB()).VerifyToken(context.Background(), secret); err == nil {
 		t.Fatal("revoked token valid")
@@ -403,6 +416,65 @@ func TestWorkerCommandRegistration(t *testing.T) {
 	}
 	if snapshot.StateDir() != envState {
 		t.Fatal("state env not restored")
+	}
+}
+
+func TestCredentialWorkerCommandMatchesGeneratedTasks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var registered atomic.Bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "register") {
+			var input coordinator.Worker
+			// The registration protocol uses snake_case field names.
+			var registration struct {
+				Tags        []string `json:"tags"`
+				RunUntagged bool     `json:"run_untagged"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&registration); err != nil {
+				t.Error(err)
+			}
+			if registration.RunUntagged || !slices.Contains(registration.Tags, "creds-laptop") {
+				t.Errorf("unexpected credential-only registration: %+v", registration)
+			}
+			input.Tags, input.RunUntagged, input.Roles = registration.Tags, registration.RunUntagged, []string{"acceptance"}
+			for _, kind := range []string{"implement", "acceptance"} {
+				task, payload := coordinatorTask(&runJob{repo: "o/r", op: &operator.Operator{Name: kind}, sub: &operator.Subject{Number: 7, Labels: []string{"worker:creds-laptop"}}}, time.Minute)
+				// AcceptanceEligible shares the coordinator's all-tags eligibility check.
+				if !coordinator.AcceptanceEligible(task.Tags, input) || !slices.Equal(task.Tags, payload.Tags) {
+					t.Errorf("%s task tags %v cannot be leased by CLI tags %v", kind, task.Tags, input.Tags)
+				}
+				if coordinator.AcceptanceEligible(task.Tags, coordinator.Worker{Tags: []string{"github"}, Roles: []string{"acceptance"}, RunUntagged: true}) {
+					t.Errorf("%s credential task eligible for worker without credential tag", kind)
+				}
+			}
+			untagged, _ := coordinatorTask(&runJob{repo: "o/r", op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 8}}, time.Minute)
+			if coordinator.AcceptanceEligible(untagged.Tags, input) {
+				t.Error("credential-only worker eligible for task without configured tags")
+			}
+			registered.Store(true)
+			_, _ = io.WriteString(w, `{}`)
+		} else {
+			_, _ = io.WriteString(w, `{"task":null}`)
+			cancel()
+		}
+	}))
+	defer server.Close()
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(server.Certificate().Raw)
+	cmd := NewWorkerCmd()
+	cmd.SetContext(ctx)
+	cmd.SetArgs([]string{"--coordinator", server.URL, "--token-file", token, "--fingerprint", hex.EncodeToString(sum[:]), "--tags", "creds-laptop", "--run-untagged=false"})
+	if err := cmd.Execute(); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if !registered.Load() {
+		t.Fatal("did not register")
 	}
 }
 

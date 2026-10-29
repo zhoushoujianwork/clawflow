@@ -235,6 +235,9 @@ func (s *Store) LoadPlan(c Contract, attempt string) (Plan, error) {
 }
 
 func (s *Store) SaveRecord(r Record) error {
+	if r.BinaryID == "" {
+		r.BinaryID = BinaryID()
+	}
 	d, err := r.Contract.Digest()
 	if err != nil {
 		return err
@@ -303,8 +306,8 @@ func (s *Store) LatestRecord(c Contract) (Record, error) {
 func IsInfrastructure(r Record) bool { return r.Completed && len(r.Evidence) == 0 }
 
 // InfrastructureAttempts is a read-only summary of the completed infrastructure
-// attempts for exactly one contract.
-// Count is how many completed attempts ended without a reviewer verdict, LastAt
+// attempts for one head and requirements, independent of base or policy changes.
+// Count is the consecutive failures from the current binary, LastAt
 // is the latest of their CompletedAt times, and LatestIsInfra reports whether
 // the newest completed record of any kind is one of them. Corruption and
 // ambiguous ordering fail closed with an error, exactly as in LatestRecord.
@@ -316,23 +319,20 @@ type InfrastructureAttempts struct {
 
 // InfrastructureAttempts scans the contract's records without writing.
 func (s *Store) InfrastructureAttempts(c Contract) (InfrastructureAttempts, error) {
-	var out InfrastructureAttempts
-	complete, err := s.completeRecords(c)
+	records, err := s.RecordsAtHead(c.Repository, c.PRNumber, c.HeadSHA)
 	if err != nil {
-		return out, err
+		return InfrastructureAttempts{}, err
 	}
-	for _, r := range complete {
-		if IsInfrastructure(r) {
-			out.Count++
-			if r.CompletedAt.After(out.LastAt) {
-				out.LastAt = r.CompletedAt
-			}
+	var complete []Record
+	for _, r := range records {
+		if r.Completed {
+			complete = append(complete, r)
 		}
 	}
-	if len(complete) > 0 {
-		out.LatestIsInfra = IsInfrastructure(complete[len(complete)-1])
+	if len(complete) > 0 && complete[len(complete)-1].Contract.Requirements != c.Requirements {
+		return InfrastructureAttempts{}, nil
 	}
-	return out, nil
+	return ConsecutiveInfrastructure(complete), nil
 }
 
 // CompleteRecords returns every completed record for exactly c, oldest first,
@@ -390,6 +390,9 @@ func (s *Store) completeRecords(c Contract) ([]Record, error) {
 }
 
 func completeRecord(r Record) error {
+	if err := validateUnstructured(r); err != nil {
+		return err
+	}
 	if len(r.Findings) > 0 {
 		failing, err := validateFindings(r.Findings)
 		if err != nil {
