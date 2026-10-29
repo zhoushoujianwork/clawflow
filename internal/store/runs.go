@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -355,10 +356,12 @@ func (s *Store) ImportRuns(ctx context.Context, root string, report ...func(Impo
 }
 
 type RunFilter struct {
-	Repo, Project, RunDir string
-	From, Until           *time.Time
-	Limit                 int
-	Finished              bool
+	Repo, Project, RunDir          string
+	ExecutionStatus, Role, Profile string
+	AttemptID, Cursor              string
+	From, Until                    *time.Time
+	Limit                          int
+	Finished                       bool
 }
 
 func (s *Store) Runs(ctx context.Context, kind string, f RunFilter) ([]Run, error) {
@@ -368,7 +371,33 @@ func (s *Store) Runs(ctx context.Context, kind string, f RunFilter) ([]Run, erro
 	} else if kind != "run" {
 		return nil, errors.New("invalid run kind")
 	}
+	if err := ValidateHistoryKeys(kind, f.AttemptID, f.Cursor); err != nil {
+		return nil, err
+	}
 	q := s.db.WithContext(ctx).Table(table)
+	if f.AttemptID != "" {
+		var id attemptKey
+		_ = decodeHistoryKey(f.AttemptID, &id)
+		if id.Dir != "" {
+			q = q.Where("run_dir = ?", id.Dir)
+		} else {
+			q = q.Where("machine = ? AND offload_run_id = ?", id.Machine, id.RunID)
+		}
+	}
+	if f.Cursor != "" {
+		var c runCursor
+		_ = decodeHistoryKey(f.Cursor, &c)
+		q = q.Where("started_at < ? OR (started_at = ? AND run_dir > ?)", c.StartedAt, c.StartedAt, c.Dir)
+	}
+	if f.ExecutionStatus != "" {
+		q = q.Where("COALESCE(NULLIF(execution_status, ''), 'unknown') = ?", f.ExecutionStatus)
+	}
+	if f.Profile != "" {
+		q = q.Where("profile = ?", f.Profile)
+	}
+	if f.Role != "" {
+		q = q.Where("COALESCE(NULLIF(payload->>'role', ''), NULLIF(payload->'development_session'->>'role', ''), 'unknown') = ?", f.Role)
+	}
 	if f.RunDir != "" {
 		q = q.Where("run_dir = ?", f.RunDir)
 	}
@@ -431,4 +460,135 @@ func migrateExecutionEvidence(tx *gorm.DB) error {
 		}
 	}
 	return nil
+}
+
+// Attempt IDs use the persisted machine/Offload identity when available. Legacy
+// records retain their path identity; a session never identifies an attempt.
+type attemptKey struct {
+	Kind    string `json:"k"`
+	Machine string `json:"m,omitempty"`
+	RunID   string `json:"r,omitempty"`
+	Dir     string `json:"d,omitempty"`
+}
+type runCursor struct {
+	Kind      string    `json:"k"`
+	StartedAt time.Time `json:"t"`
+	Dir       string    `json:"d"`
+}
+
+func encodeHistoryKey(v any) string {
+	b, _ := json.Marshal(v)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+func decodeHistoryKey(s string, v any) error {
+	if len(s) > 8192 {
+		return errors.New("history key too long")
+	}
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
+}
+func AttemptID(r Run, kind string) string {
+	k := attemptKey{Kind: kind}
+	if r.OffloadRunID != "" && r.Machine != "" && r.Machine != "unknown" {
+		k.Machine, k.RunID = r.Machine, r.OffloadRunID
+	} else {
+		k.Dir = r.RunDir
+	}
+	return encodeHistoryKey(k)
+}
+func RunsCursor(r Run, kind string) string {
+	return encodeHistoryKey(runCursor{kind, r.StartedAt, r.RunDir})
+}
+func ValidateHistoryKeys(kind, attempt, cursor string) error {
+	if attempt != "" {
+		var k attemptKey
+		if err := decodeHistoryKey(attempt, &k); err != nil || k.Kind != kind || !((k.Dir != "" && k.Machine == "" && k.RunID == "") || (k.Dir == "" && k.Machine != "" && k.Machine != "unknown" && k.RunID != "")) {
+			return errors.New("invalid attempt_id")
+		}
+	}
+	if cursor != "" {
+		var c runCursor
+		if err := decodeHistoryKey(cursor, &c); err != nil || c.Kind != kind || c.StartedAt.IsZero() || c.Dir == "" {
+			return errors.New("invalid cursor")
+		}
+	}
+	return nil
+}
+
+type RunAttribution struct {
+	Source   string `json:"source"`
+	Kind     string `json:"kind"`
+	Repo     string `json:"repo"`
+	Project  string `json:"project"`
+	Operator string `json:"operator"`
+	Role     string `json:"role"`
+	Profile  string `json:"profile"`
+	Machine  string `json:"machine"`
+}
+type RunAvailability struct {
+	Attempt         bool `json:"attempt"`
+	ExecutionStatus bool `json:"execution_status"`
+	ExitCode        bool `json:"exit_code"`
+	Elapsed         bool `json:"elapsed"`
+	Cost            bool `json:"cost"`
+	Tokens          bool `json:"tokens"`
+}
+
+// RunListPayloads projects only presentation metadata. Neither arbitrary payload
+// extensions nor prompts, results, summaries or transcripts enter a list response.
+func RunListPayloads(rows []Run, root, kind string) ([]map[string]any, error) {
+	payloads, err := RunPayloads(rows, root)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for i, r := range rows {
+		raw := payloads[i]
+		m := map[string]any{}
+		for _, key := range strings.Fields("path repo project operator issue_number issue_title issue_state started_at ended_at status stage pr_url pr_number profile backend model machine service_tier offload_run_id caller_run_id session_id exit_code error_kind elapsed_ms execution_status usage_reported") {
+			if v, ok := raw[key]; ok {
+				m[key] = v
+			}
+		}
+		if u, ok := raw["usage"].(map[string]any); ok {
+			clean := map[string]any{}
+			for _, key := range strings.Fields("duration_ms num_turns total_cost_usd input_tokens output_tokens cache_read_input_tokens cache_creation_input_tokens cost_basis cost_is_estimate cost_unavailable tokens_unavailable estimated") {
+				if v, ok := u[key]; ok {
+					clean[key] = v
+				}
+			}
+			if models, ok := u["model_usage"].(map[string]any); ok {
+				breakdown := map[string]any{}
+				for model, value := range models {
+					if values, ok := value.(map[string]any); ok {
+						metrics := map[string]any{}
+						for _, key := range strings.Fields("cost_usd input_tokens output_tokens cache_read_input_tokens cache_creation_input_tokens cost_unavailable") {
+							if v, ok := values[key]; ok {
+								metrics[key] = v
+							}
+						}
+						breakdown[model] = metrics
+					}
+				}
+				clean["model_usage"] = breakdown
+			}
+			m["usage"] = clean
+		}
+		role, _ := raw["role"].(string)
+		if role == "" {
+			if d, ok := raw["development_session"].(map[string]any); ok {
+				role, _ = d["role"].(string)
+			}
+		}
+		m["operator"], m["repo"] = r.Operator, r.Repo
+		m["profile"], m["backend"], m["model"], m["machine"] = r.Profile, r.Backend, r.Model, r.Machine
+		m["attempt_id"] = AttemptID(r, kind)
+		m["attribution"] = RunAttribution{"clawflow", kind, r.Repo, r.Project, r.Operator, unknown(role), r.Profile, r.Machine}
+		m["availability"] = RunAvailability{r.OffloadRunID != "" && r.Machine != "" && r.Machine != "unknown", r.ExecutionStatus != "", r.ExitCode != nil, r.ElapsedMs != nil, r.CostUSD != nil, r.InputTokens != nil || r.OutputTokens != nil || r.CacheReadInputTokens != nil || r.CacheCreationInputTokens != nil}
+		out = append(out, m)
+	}
+	return out, nil
 }
