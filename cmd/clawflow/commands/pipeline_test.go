@@ -862,3 +862,67 @@ func TestPipelineIncludesSkippedIssues(t *testing.T) {
 		t.Fatalf("missing skipped issue: %+v", b)
 	}
 }
+
+func TestPipelineExecutionProjection(t *testing.T) {
+	f := newPipelineFake()
+	f.issues = []vcs.Issue{{Number: 1, Title: "implementation", State: "open"}, {Number: 10, Title: "number collision", State: "open"}, {Number: 2, Title: "stale lock", State: "open"}}
+	f.open = []vcs.PR{{Number: 10, HeadBranch: "fix/issue-1", State: "open"}}
+	f.ci = map[int]vcs.CIStatus{10: vcs.CIStatusPending}
+	end := pipelineT0.Add(-time.Minute)
+	zero := 0
+	elapsed := int64(42)
+	run := snapshot.RunIndexEntry{Path: "./data/runs/implement/", RunMeta: snapshot.RunMeta{
+		Repo: "o/r", IssueNumber: 1, Operator: "implement", Machine: "local", Profile: "build", Model: "model-a",
+		StartedAt: pipelineT0.Add(-time.Hour), EndedAt: &end, Status: "success",
+		DevelopmentSession: snapshot.DevelopmentSession{Role: "operator"},
+		ExecutionMetadata:  snapshot.ExecutionMetadata{OffloadRunID: "attempt-1", SessionID: "shared", ExecutionStatus: "ok", ExitCode: &zero, ElapsedMs: &elapsed},
+		IssueBody:          "PRIVATE PROMPT", Summary: "PRIVATE RESULT",
+	}}
+	review := run
+	review.Path, review.IssueNumber, review.Operator, review.OffloadRunID = "./data/runs/review/", 10, "acceptance-review", "attempt-2"
+	review.DevelopmentSession.Role = "acceptance"
+	review.EndedAt, review.ExecutionStatus, review.ExitCode, review.ElapsedMs = nil, "", nil, nil
+	remote := review
+	remote.Path, remote.Machine = "./data/runs/remote/", "remote"
+	legacy := run
+	legacy.Path, legacy.OffloadRunID, legacy.ExecutionStatus = "./data/runs/legacy/", "", ""
+	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {AutoMerge: true, CIRequired: true}})
+	d.globalQueue = func() []queue.ListEntry {
+		return []queue.ListEntry{{Repo: "o/r", Number: 1}, {Repo: "o/r", Number: 2}, {Repo: "o/r", Number: 10}}
+	}
+	replay := run
+	replay.Path, replay.ExecutionStatus, replay.EndedAt = "./data/runs/replayed/", "", nil
+	d.runs = func() []snapshot.RunIndexEntry {
+		return []snapshot.RunIndexEntry{run, replay, run, review, remote, legacy}
+	}
+	d.locked = func(_ string, n int) bool { return n == 2 }
+	board := buildPipeline(context.Background(), d).Repos[0]
+	item := itemFor(t, board, 1)
+	if item.Stage != pipeline.StageCIPending || item.Delivery != nil || len(item.Executions) != 4 {
+		t.Fatalf("item = %+v", item)
+	}
+	var finals, unknown int
+	for _, e := range item.Executions {
+		if e.Status == "ok" {
+			finals++
+			if e.ExitCode == nil || *e.ExitCode != 0 || e.ElapsedMs == nil || *e.ElapsedMs != 42 || e.Provenance.Source != "offload_final" || e.Role != "operator" || e.Model != "model-a" {
+				t.Fatalf("final = %+v", e)
+			}
+		} else if e.Status == "unknown" {
+			unknown++
+		}
+	}
+	if finals != 1 || unknown != 3 {
+		t.Fatalf("finals=%d unknown=%d", finals, unknown)
+	}
+	if got := itemFor(t, board, 10); len(got.Executions) != 0 {
+		t.Fatalf("PR run attached to issue with same number: %+v", got)
+	}
+	if got := itemFor(t, board, 2); len(got.Executions) != 0 {
+		t.Fatalf("lock invented execution: %+v", got)
+	}
+	raw, err := json.Marshal(item.Executions)
+	if err != nil || strings.Contains(string(raw), "PRIVATE") {
+		t.Fatalf("projection exposed private payload: %s %v", raw, err)
+	}
+}
