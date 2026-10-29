@@ -75,7 +75,7 @@ func TestRequirementOutcomeRouting(t *testing.T) {
 				fixture.Checks[0].Evidence[0].Result = "unverified"
 				fixture.Checks[0].Missing = "Owner must authorize the required live validation window"
 				fixture.NextOwner = "owner"
-				fixture.NextAction = fixture.Checks[0].Missing
+				fixture.NextAction = string(fixture.Checks[0].Missing)
 			}
 			runner, scratch, workspace := setupRunner(t)
 			runner.Execute = func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {

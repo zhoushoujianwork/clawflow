@@ -426,7 +426,7 @@ func decodeStrict(b []byte, value any) error {
 		for typ != nil && typ.Kind() == reflect.Pointer {
 			typ = typ.Elem()
 		}
-		if typ == reflect.TypeOf(json.RawMessage{}) {
+		if typ == reflect.TypeOf(json.RawMessage{}) || typ == reflect.TypeOf(Text("")) {
 			typ = nil
 		}
 		t, err := d.Token()

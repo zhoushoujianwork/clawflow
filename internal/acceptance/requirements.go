@@ -26,7 +26,7 @@ type RequirementCheck struct {
 	ID       string                `json:"id"`
 	Status   Verdict               `json:"status"`
 	Evidence []RequirementEvidence `json:"evidence"`
-	Missing  string                `json:"missing"`
+	Missing  Text                  `json:"missing"`
 }
 
 func validateCriteria(c Contract, p Plan) error {
@@ -123,7 +123,7 @@ func ValidateChecks(c Contract, r Record) error {
 			}
 			failed = true
 		case Blocked:
-			if !nonempty(check.Missing) {
+			if !nonempty(string(check.Missing)) {
 				return errors.New("blocked requirement must identify missing proof")
 			}
 			blocked = true
@@ -198,7 +198,7 @@ func DeduplicateFindings(in []Finding) []Finding {
 			key += strings.TrimSpace(f.Summary)
 		}
 		if i, ok := seen[key]; ok {
-			if f.Evidence != "" && !strings.Contains(out[i].Evidence, f.Evidence) {
+			if f.Evidence != "" && !strings.Contains(string(out[i].Evidence), string(f.Evidence)) {
 				out[i].Evidence += "\n" + f.Evidence
 			}
 			for _, loc := range f.Locations {
@@ -221,4 +221,4 @@ func DeduplicateFindings(in []Finding) []Finding {
 }
 
 const criteriaInstruction = " Return raw JSON only: a nonempty array of {id, requirement, proof}. Cover every approved acceptance requirement; requirement must be an exact quote from the supplied requirements. Use stable unique IDs. proof is source, execution, or live, choosing the minimum evidence justified by the requirement. Do not add reviewer preferences or new requirements. Recorded decisions remain authoritative within their accepted scope. Live/visual validation is required only where approved criteria justify it. "
-const checksInstruction = " Return checks (one per saved criterion): {id, status: passed|failed|blocked, evidence: [{type: source|unit|integration|live, check, reference, commit, result: inspected|exists|passed|failed|unverified}], missing}. Reference an observed execution result, command output or CI job/test result, not just a test file. Reuse relevant successful existing tests and trustworthy CI on the exact submitted commit when coverage is established; do not rerun or add tests without a meaningful gap. Unrelated successful tests cannot cover a requirement. Source-only conclusions and test existence are not execution proof. Checks and verdict must agree. Failed requires a demonstrated code defect, never merely missing evidence. Blocked identifies human-only validation or an unresolved scope decision, with missing proof and a specific next action. Infrastructure/tool failures are execution errors, never code defects; report status infrastructure_error so existing retries handle them. Each failed checklist item must have a finding naming its exact requirement. Each failing finding also includes observation with the same typed evidence fields and result failed on the exact head. Include next_action and next_owner. Do not perform live/visual validation without an explicitly authorized testing window. Do not turn reviewer advice into requirements. "
+const checksInstruction = " Return checks (one per saved criterion): {id, status: passed|failed|blocked, evidence: [{type: source|unit|integration|live, check, reference, commit, result: inspected|exists|passed|failed|unverified}], missing: string}. Reference an observed execution result, command output or CI job/test result, not just a test file. Reuse relevant successful existing tests and trustworthy CI on the exact submitted commit when coverage is established; do not rerun or add tests without a meaningful gap. Unrelated successful tests cannot cover a requirement. Source-only conclusions and test existence are not execution proof. Checks and verdict must agree. Failed requires a demonstrated code defect, never merely missing evidence. Blocked identifies human-only validation or an unresolved scope decision, with missing proof and a specific next action. Infrastructure/tool failures are execution errors, never code defects; report status infrastructure_error so existing retries handle them. Each failed checklist item must have a finding naming its exact requirement. Each failing finding also includes observation with the same typed evidence fields and result failed on the exact head. Include next_action and next_owner. Do not perform live/visual validation without an explicitly authorized testing window. Do not turn reviewer advice into requirements. "

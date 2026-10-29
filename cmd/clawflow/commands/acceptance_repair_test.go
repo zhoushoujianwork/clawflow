@@ -399,7 +399,7 @@ func TestSanitizeReviewerText(t *testing.T) {
 	}
 	r := acceptance.Record{AttemptID: "a", Verdict: acceptance.Failed, Report: "r"}
 	for i := 0; i < 50; i++ {
-		r.Findings = append(r.Findings, acceptance.Finding{Kind: "requirement", Requirement: "retry", Summary: "missing retry", Evidence: strings.Repeat("e", 2000)})
+		r.Findings = append(r.Findings, acceptance.Finding{Kind: "requirement", Requirement: "retry", Summary: "missing retry", Evidence: acceptance.Text(strings.Repeat("e", 2000))})
 	}
 	f := findingsFromRecord(r)
 	if len(f.Evidence) != acceptanceFindingEvidenceLimit || len([]rune(f.Evidence[0])) > acceptanceFindingEntryLimit+1 {
