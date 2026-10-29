@@ -695,9 +695,16 @@ func acceptanceReviewerEnv(env []string) []string {
 		if strings.HasPrefix(upper, "CLAWFLOW_") && strings.Contains(upper, "TOKEN") {
 			continue
 		}
+		if upper == "GOCACHE" || upper == "GOTMPDIR" {
+			continue
+		}
 		out = append(out, kv)
 	}
-	return out
+	// Sandboxed reviewers cannot write the user's Go build cache, which made
+	// `go test` fail during setup and turned reviews into infrastructure
+	// errors. Use a per-machine cache under the temp dir instead.
+	cache := filepath.Join(os.TempDir(), "clawflow-review-go")
+	return append(out, "GOCACHE="+filepath.Join(cache, "build"), "GOTMPDIR="+filepath.Join(cache, "tmp"))
 }
 
 func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Record, error) {
