@@ -112,6 +112,7 @@ func TestCoordinatorDisabled(t *testing.T) {
 func TestWorkerClaimExecuteReport(t *testing.T) {
 	for _, mode := range []string{"success", "lease-lost", "heartbeat-error", "tags", "untagged", "digest"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			task := coordinator.Task{ID: "task", Repo: "o/r", Issue: 1, Operator: "implement", Kind: "implement", FencingToken: 42, Tags: []string{"github"}}
@@ -215,6 +216,18 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 				if j.hooks == nil || !j.hooks.SkipIndex {
 					t.Error("worker hooks missing")
 				}
+				// The worker run holds the host issue lock, so worktree pruning skips it.
+				if err := j.acquireLock(ctx); err != nil {
+					t.Errorf("acquire worker issue lock: %v", err)
+				} else {
+					if !snapshot.IsLocked(j.repo, j.sub.Number) {
+						t.Error("worker run does not hold the host issue lock")
+					}
+					j.releaseLock()
+					if snapshot.IsLocked(j.repo, j.sub.Number) {
+						t.Error("worker issue lock not released")
+					}
+				}
 				if mode == "lease-lost" || mode == "heartbeat-error" {
 					<-ctx.Done()
 				}
@@ -225,7 +238,7 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 				if mode == "digest" {
 					return buildWorkerJob(ctx, task, operator.NewRegistry())
 				}
-				return &runJob{}, time.Minute, nil
+				return &runJob{repo: "o/r", sub: &operator.Subject{Number: 1}, op: &operator.Operator{Name: "implement"}}, time.Minute, nil
 			}
 			deadline, stop := context.WithTimeout(ctx, 3*time.Second)
 			defer stop()
