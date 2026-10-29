@@ -1,8 +1,9 @@
-import { WorkSummary, selectWorkItems, type WorkFilter, type WorkItem, type SourceHealth } from '../components/WorkSummary'
+import { WorkSummary, type WorkFilter, type WorkItem, type SourceHealth } from '../components/WorkSummary'
+import { WorkList } from '../components/WorkList'
 import { ScheduledChecksPanel } from "../components/ScheduledChecksPanel"
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
-import { ChevronRight, ExternalLink, Loader2, RefreshCw } from 'lucide-react'
+import { ExternalLink, Loader2, RefreshCw } from 'lucide-react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { cn } from '../lib/utils'
 import { issueUrl, repoUrl, useRepoInfoMap, type RepoInfoMap } from '../lib/vcsUrls'
@@ -179,44 +180,6 @@ export const Route = createFileRoute('/_app/pipeline')({
 
 const REFRESH_MS = 30_000
 
-const STAGE_LABEL: Record<Stage, string> = {
-  queued: 'Queued',
-  implementing: 'Implementing',
-  pr_open: 'PR open',
-  ci_pending: 'CI pending',
-  ci_failed: 'CI failed',
-  acceptance_pending: 'Acceptance pending',
-  acceptance_running: 'Acceptance running',
-  accepted: 'Accepted',
-  rejected: 'Acceptance failed',
-  infra_retry: 'Infra retry',
-  merged: 'Merged',
-  failed: 'Failed',
-  blocked: 'Blocked',
-}
-
-const GREEN = 'bg-green-100 text-green-800 border-green-200'
-const RED = 'bg-red-100 text-red-800 border-red-200'
-const AMBER = 'bg-amber-100 text-amber-800 border-amber-200'
-const BLUE = 'bg-blue-100 text-blue-800 border-blue-200'
-const GREY = 'bg-secondary text-muted-foreground border-border'
-
-const STAGE_TONE: Record<Stage, string> = {
-  queued: GREY,
-  implementing: BLUE,
-  pr_open: BLUE,
-  ci_pending: AMBER,
-  ci_failed: RED,
-  acceptance_pending: AMBER,
-  acceptance_running: BLUE,
-  accepted: GREEN,
-  rejected: RED,
-  infra_retry: AMBER,
-  merged: GREEN,
-  failed: RED,
-  blocked: RED,
-}
-
 function timeAgo(iso?: string): string {
   if (!iso) return '—'
   const t = new Date(iso).getTime()
@@ -236,17 +199,6 @@ function humanSeconds(s: number): string {
 
 function shortSha(sha?: string): string {
   return sha ? sha.slice(0, 7) : '—'
-}
-
-function StageChip({ stage }: { stage: Stage }) {
-  return (
-    <span
-      data-stage={stage}
-      className={cn('inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-medium whitespace-nowrap', STAGE_TONE[stage] ?? GREY)}
-    >
-      {STAGE_LABEL[stage] ?? stage}
-    </span>
-  )
 }
 
 function PipelinePage() {
@@ -270,7 +222,6 @@ function PipelinePage() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...value, tab: value.tab === 'all' ? 'active' : value.tab, events: value.events === 'all' ? 'important' : value.events })) } catch { /* URL still persists. */ }
     void navigate({ search: value })
   }
-  const expanded = (search.expanded || '').split(',').filter(Boolean)
 
   const repoInfo = useRepoInfoMap()
   const [board, setBoard] = useState<Board | null>(null)
@@ -343,7 +294,10 @@ function PipelinePage() {
           <WorkerPoolPanel pool={board.worker_pool} error={board.worker_pool_error} />
           <Attention board={board} repoInfo={repoInfo} />
           <div className="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Pipeline items">
-            {(['active', 'delivered', 'all'] as const).map(tab => <button key={tab} role="tab" aria-selected={(search.tab || 'active') === tab} onClick={() => update({ tab, work: undefined })} className={cn('px-3 py-1 rounded border text-sm capitalize', (search.tab || 'active') === tab && 'bg-secondary')}>{tab}</button>)}
+            {(['active', 'running', 'waiting', 'delivered'] as const).map(tab => {
+              const selected = search.work || (search.tab === 'delivered' ? 'delivered' : 'active')
+              return <button key={tab} role="tab" aria-selected={selected === tab} onClick={() => update({ tab: tab === 'delivered' ? 'delivered' : 'active', work: tab === 'active' ? undefined : tab })} className={cn('px-3 py-1 rounded border text-sm capitalize', selected === tab && 'bg-secondary')}>{tab}</button>
+            })}
           </div>
           {board.repos.length === 0 ? (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
@@ -353,7 +307,9 @@ function PipelinePage() {
               </p>}
             </div>
           ) : (
-            board.repos.map(r => <RepoSection key={r.repo} board={r} pilotActions={board.pilot_actions} repoInfo={repoInfo} queue={board.global_queue || []} tab={search.tab || 'active'} work={search.work} open={!!search.work || expanded.includes(r.repo)} toggle={() => update({ expanded: expanded.includes(r.repo) ? expanded.filter(n => n !== r.repo).join(',') : [...expanded, r.repo].join(',') })} />)
+            <WorkList repos={board.repos} queue={board.global_queue || []} repoInfo={repoInfo}
+              filter={search.work || (search.tab === 'delivered' ? 'delivered' : 'active')}
+              renderDetails={(item, repo) => <><ItemDetail item={item} /><PilotTimeline actions={itemPilotActions(board.pilot_actions || [], repo, item)} /></>} />
           )}
           <EventTimeline events={board.events || []} filter={search.events || 'important'} repo={search.repo || ''} repos={board.repos.map(r => r.repo)} update={update} />
         </>
@@ -393,57 +349,6 @@ export function Attention({ board, repoInfo }: { board: Board; repoInfo: RepoInf
       {rows.map((row, i) => <li key={i} className="p-2 text-xs flex flex-wrap gap-2 break-words"><span className="font-mono break-all">{row.repo}{row.issue ? ' #' + row.issue : ''}</span><span>{row.reason}</span><span className="text-muted-foreground">{timeAgo(row.time)}</span>{row.url && <a className="text-brand underline" href={row.url} target="_blank" rel="noreferrer">Open</a>}</li>)}
     </ul></> : <p className="text-sm text-muted-foreground">Nothing needs you</p>}
   </section>
-}
-
-export function RepoSection({ board, repoInfo, queue, tab, open, toggle, work, pilotActions = [] }: { work?: WorkFilter; pilotActions?: PilotAction[]; board: RepoBoard; repoInfo: RepoInfoMap; queue: GlobalQueueEntry[]; tab: NonNullable<Preferences['tab']>; open: boolean; toggle: () => void }) {
-  const [showAll, setShowAll] = useState(false)
-  const positions = new Map(queue.filter(q => q.repo === board.repo).map(q => [q.number, q.position]))
-  const items = board.items.map(item => ({ ...item, in_queue: positions.has(item.issue), queue_position: positions.get(item.issue) }))
-    .sort((a, b) => (a.queue_position || Infinity) - (b.queue_position || Infinity))
-  const active = items.filter(i => i.stage !== 'merged' && i.state !== 'closed')
-  const inFlight = active.filter(i => i.run?.live || i.acceptance?.running || i.pr?.state === 'open')
-  const lastMerge = items.map(i => i.delivery?.merged_at || '').sort().slice(-1)[0]
-  const filtered = selectWorkItems(items, work || tab)
-  let queued = 0
-  const visible = filtered.filter(i => !!work || !i.in_queue || ++queued <= 6 || showAll)
-  const hidden = filtered.length - visible.length
-  const flags = [board.auto_merge ? 'auto-merge' : 'manual merge', board.ci_required ? 'CI' : 'CI off', board.acceptance_required ? 'acceptance' : 'acceptance off']
-  return <section className="border rounded-xl mb-3 overflow-hidden">
-    <button onClick={toggle} aria-expanded={open} className="w-full flex flex-wrap items-center gap-2 p-3 text-left text-xs">
-      <ChevronRight className={cn('w-4 h-4 shrink-0', open && 'rotate-90')} />
-      <span className="font-mono font-semibold break-all">{board.repo}</span>
-      {board.hosting_platform && <span>Platform: {board.hosting_platform}</span>}
-      {flags.map(f => <span key={f} className="bg-secondary rounded px-1">{f}</span>)}
-      {!board.enabled && <span>disabled</span>}
-      <span>{inFlight.length}/{board.max_in_flight} in flight{inFlight.length ? ': ' + [...new Set(inFlight.map(i => STAGE_LABEL[i.stage]))].join(', ') : ''}</span>
-      <span>{active.filter(i => i.in_queue).length} queued</span>
-      <span className="text-muted-foreground">last merge {timeAgo(lastMerge)}</span>
-    </button>
-    {board.error && <div role="alert" className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 break-words">{board.stale ? 'Showing the last snapshot. Refresh failed: ' : ''}{board.error}</div>}
-    {open && <div className="border-t">
-      {visible.length ? visible.map(item => <ItemRows key={item.issue} item={item} pilotActions={itemPilotActions(pilotActions, board.repo, item)} repo={board.repo} repoInfo={repoInfo} />) : <p className="p-3 text-sm text-muted-foreground">No items in this view.</p>}
-      {hidden > 0 && <button className="p-3 text-sm text-brand" onClick={() => setShowAll(true)}>+{hidden} more</button>}
-      {showAll && queued > 6 && <button className="p-3 text-sm text-brand" onClick={() => setShowAll(false)}>Show head + next 5</button>}
-    </div>}
-  </section>
-}
-
-function ItemRows({ item, repo, repoInfo, pilotActions }: { pilotActions: PilotAction[]; item: Item; repo: string; repoInfo: RepoInfoMap }) {
-  const [open, setOpen] = useState(false)
-  const panelId = `pipeline-${repo.replace(/\W+/g, '-')}-${item.issue}`
-  return <div className="border-b last:border-b-0 p-3 text-xs">
-    <div className="flex flex-wrap items-center gap-2 min-w-0">
-      <button onClick={() => setOpen(o => !o)} aria-expanded={open} aria-controls={panelId} aria-label={`Details for issue ${item.issue}`} className="p-1 rounded hover:bg-secondary"><ChevronRight className={cn('w-4 h-4', open && 'rotate-90')} /></button>
-      {item.queue_position && <span className="text-muted-foreground">{item.queue_position}.</span>}
-      <a href={issueUrl(repo, item.issue, repoInfo)} className="text-brand font-mono" target="_blank" rel="noreferrer">#{item.issue}</a>
-      <span className="flex-1 min-w-0 truncate" title={item.title}>{item.title}</span>
-      <StageChip stage={item.stage} />
-      <span className="text-muted-foreground">{timeAgo(item.updated_at)}</span>
-    </div>
-    <p className="mt-1 truncate text-muted-foreground" title={item.why}>{item.why}</p>
-    {item.delivery && <p className="mt-1 break-all"><a href={item.delivery.pr_url} className="text-brand">PR #{item.delivery.pr}</a> · {shortSha(item.delivery.merge_commit_sha)} · {item.delivery.merged_at || 'time unavailable'}</p>}
-    {open && <div id={panelId} className="mt-3"><ItemDetail item={item} /><PilotTimeline actions={pilotActions} /></div>}
-  </div>
 }
 
 function ItemDetail({ item }: { item: Item }) {

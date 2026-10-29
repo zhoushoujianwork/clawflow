@@ -59,7 +59,7 @@ try {
       }
       await page.goto(new URL('/pipeline', origin).href)
       await page.getByRole('heading', { name: 'Work' }).waitFor()
-      await page.getByRole('button', { name: new RegExp('long-repository-name') }).waitFor()
+      await page.getByRole('region', { name: 'Work list', exact: true }).getByRole('link', { name: title }).waitFor()
       if (!readonly) await page.getByRole('button', { name: '与平台 steward 对话' }).waitFor()
       const nav = page.getByRole('navigation', { name: 'Primary' })
       const work = nav.getByRole('link', { name: 'Work', exact: true })
@@ -79,8 +79,7 @@ try {
       }))
       assert.ok(metrics.width >= width - 2, JSON.stringify(metrics))
       assert.ok(metrics.title >= 24 && metrics.body >= 13, JSON.stringify(metrics))
-      await page.getByRole('button', { name: new RegExp('long-repository-name') }).click()
-      const label = page.getByTitle(title)
+      const label = page.getByRole('region', { name: 'Work list', exact: true }).getByRole('link', { name: title })
       assert.equal(await label.evaluate(el => getComputedStyle(el).whiteSpace), 'normal')
       assert.ok(await label.evaluate(el => el.getBoundingClientRect().height > parseFloat(getComputedStyle(el).lineHeight)))
       await noOverflow()
@@ -121,7 +120,6 @@ try {
         }
       }
       await page.goto(new URL('/pipeline', origin).href)
-      await page.getByRole('button', { name: new RegExp('long-repository-name') }).click()
       if (!readonly) await page.getByRole('button', { name: '与平台 steward 对话' }).waitFor()
       await noOverflow()
       if (screenshots) await page.screenshot({ path: join(screenshots, `shell-${width}-${readonly ? 'lan' : 'local'}.png`), fullPage: true })

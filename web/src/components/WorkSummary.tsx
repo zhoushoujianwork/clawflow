@@ -30,7 +30,7 @@ const attention = (item: WorkItem) => !!item.attention?.length || live(item, 'st
 export const unknownExecution = (item: WorkItem) => active(item) && !live(item, 'running') && !live(item, 'stalled') && (
   !!item.run?.live || !!item.acceptance?.running || ['implementing', 'acceptance_running'].includes(item.stage) || !!item.executions?.some(e => !e.ended_at && (e.status === 'unknown' || e.provenance.stale)))
 
-// Both the summary and repository rows use this selector. Counts are items, not attempts.
+// Both the summary and work list use this selector. Counts are items, not attempts.
 export function selectWorkItems<T extends WorkItem>(items: T[], filter: WorkFilter | 'active' | 'all', now = Date.now()): T[] {
   return items.filter(item => {
     switch (filter) {
@@ -76,7 +76,7 @@ export function WorkSummary({ repos, sources, generatedAt, stale, refreshing, fa
         <span className="block text-2xl font-semibold tabular-nums">{ready ? selectWorkItems(items, key).length : '—'}</span>
       </button>)}
     </div>
-    <p className="text-xs text-muted-foreground mt-3">All tracked repositories · items, not attempts. Running: observed Offload activity. Waiting: active items without running, attention or unknown execution. Attention counts items, not incidents, and may overlap running. Delivered: merges in the last 7 days. Select a count to show every matching row.</p>
+    <p className="text-xs text-muted-foreground mt-3">All tracked repositories · items, not attempts. Running: observed Offload activity. Waiting: active items without running, attention or unknown execution. Attention counts items, not incidents, and may overlap running. Delivered: merges in the last 7 days. Select a count to browse matching items, up to 50 per page.</p>
     <p role="status" className="text-xs text-muted-foreground mt-2 h-24 sm:h-16 overflow-y-auto">
       {!ready ? failed ? 'Work unavailable. Retry Refresh to load a snapshot.' : 'Loading work… Counts will appear with the first snapshot.' : <>
         {sources?.length ? freshness : 'Source freshness unknown'}
