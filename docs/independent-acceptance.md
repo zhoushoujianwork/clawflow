@@ -12,6 +12,12 @@ This is a local reference implementation for [platform issue #349](https://githu
 
 `isolated-readonly` 仍有残余风险：只读 sandbox 可以读取其他本地文件，无法由后端强制保证不看源码。隔离依赖空工作目录、延迟创建 checkout，以及禁止读取工作目录外文件或任何仓库的 planner 提示词；它不是完整的文件读取隔离边界。
 
+## 报告格式纠正
+
+reviewer 执行成功且源码检查通过后，若报告解析或校验失败，同一验收 attempt 最多续接原生 reviewer 会话一次。纠正提示包含原始校验错误与报告结构，仅要求返回完整修正 JSON，禁止重新审查或补跑检查。纠正使用相同工作区、profile 和 session，记录新的 native run；源码在纠正前后重新核对。执行失败和 `infrastructure_error` 不进入纠正，第二份报告仍无效则按原有错误路径保存，不产生有效 verdict。
+
+验收记录的可选 `correction` 保存 `validation_error` 和纠正轮的 `reviewer` 原生身份，原始 `reviewer` 字段保留首次审查身份。纠正轮用量通过 `acceptance-review-correction` 执行记录单独保存，不另建验收 attempt；未提供的用量仍为未知。
+
 ## Usage
 
 After building this revision, enroll a registered repository:

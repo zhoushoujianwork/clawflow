@@ -325,7 +325,7 @@ func setupRunner(t *testing.T) (Runner, string, string) {
 		return Source{c.HeadSHA, c.BaseSHA, c.IntegrationSHA, true}, nil
 	}}
 	r.Execute = func(_ context.Context, prompt string, o execution.Options) (execution.Result, error) {
-		if o.Role != "acceptance" || o.Resume || o.SessionKey != "" {
+		if o.Role != "acceptance" || (o.Resume && o.SessionKey != "reviewer") || (!o.Resume && o.SessionKey != "") {
 			t.Fatal("unsafe execution options")
 		}
 		if o.Workspace == scratch {
@@ -345,10 +345,13 @@ func setupRunner(t *testing.T) (Runner, string, string) {
 			t.Fatal("reviewer workspace/tools/policy mismatch")
 		}
 		p := savedTestPlan(t, s, c)
-		if !strings.Contains(prompt, p.Text) || !strings.Contains(prompt, c.HeadSHA) || strings.Contains(prompt, c.Development.SessionID) {
+		if !o.Resume && (!strings.Contains(prompt, p.Text) || !strings.Contains(prompt, c.HeadSHA) || strings.Contains(prompt, c.Development.SessionID)) {
 			t.Fatal("review input mismatch")
 		}
 		result := reviewerResult("reviewer", "review-run")
+		if o.Resume {
+			result.RunID = "correction-run"
+		}
 		result.Text = `{"status":"passed","summary":"verified","evidence":["behavior check passed","` + testCommandEvidence + `"]}`
 		return result, nil
 	}
@@ -707,7 +710,7 @@ func TestReviewerFindingPolicy(t *testing.T) {
 				result, err := base(ctx, prompt, opts)
 				if !opts.ToolsDisabled {
 					for _, rule := range []string{"review aid, not a requirement source", "advisory only", "Each failing finding", "limitation, not grounds for blocked"} {
-						if !strings.Contains(prompt, rule) {
+						if !opts.Resume && !strings.Contains(prompt, rule) {
 							t.Fatalf("missing prompt rule %q", rule)
 						}
 					}
