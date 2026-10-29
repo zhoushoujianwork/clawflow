@@ -16,6 +16,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
+	"github.com/zhoushoujianwork/clawflow/internal/store"
 )
 
 const pipelineTTL = 20 * time.Second
@@ -105,6 +106,7 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	board.Runtime = pipelineRuntime()
+	projectPipelineExecutions(r.Context(), &board, now)
 	records, err := pilot.ReadActionRecords(filepath.Join(snapshot.DataDir(), "pilot-actions.jsonl"))
 	actions := []pilot.ActionRecord{}
 	if err == nil {
@@ -236,4 +238,116 @@ func latestExecution(runs []snapshot.RunIndexEntry) pipeline.Execution {
 		latest = at
 	}
 	return out
+}
+
+// The adapter has its own bounded single-flight cache. Keep one per resolved
+// command, without coupling execution liveness to the slower VCS board cache.
+var pipelineLive struct {
+	sync.Mutex
+	command string
+	reader  *execution.LiveStatsReader
+}
+
+func readPipelineLive(ctx context.Context, rows []store.Run) execution.LiveStats {
+	c, err := execution.LoadConfig()
+	if err != nil {
+		return execution.LiveStats{State: execution.LiveUnavailable}
+	}
+	pipelineLive.Lock()
+	if pipelineLive.reader == nil || pipelineLive.command != c.Command {
+		pipelineLive.command, pipelineLive.reader = c.Command, execution.NewLiveStatsReader(c)
+	}
+	reader := pipelineLive.reader
+	pipelineLive.Unlock()
+	return reader.Read(ctx, rows)
+}
+
+func projectPipelineExecutions(ctx context.Context, board *pipeline.Board, now time.Time) {
+	// Copy nested slices before enrichment: cached snapshots are shared readers.
+	var attempts []*pipeline.ItemExecution
+	var rows []store.Run
+	for i := range board.Repos {
+		repo := &board.Repos[i]
+		repo.Items = slices.Clone(repo.Items)
+		repo.SkippedIssues = slices.Clone(repo.SkippedIssues)
+		for _, items := range [][]pipeline.Item{repo.Items, repo.SkippedIssues} {
+			for j := range items {
+				items[j].Executions = slices.Clone(items[j].Executions)
+				for k := range items[j].Executions {
+					e := &items[j].Executions[k]
+					attempts = append(attempts, e)
+					rows = append(rows, store.Run{Machine: e.Machine, SessionID: e.SessionID, StartedAt: e.StartedAt, EndedAt: e.EndedAt})
+				}
+			}
+		}
+	}
+	if len(attempts) == 0 {
+		return
+	}
+	applyPipelineLive(attempts, readPipelineLive(ctx, rows), now)
+}
+
+// A session can contain retries. A host/session/time match is usable only when
+// exactly one persisted attempt owns it; never select by repo or issue alone.
+func applyPipelineLive(attempts []*pipeline.ItemExecution, live execution.LiveStats, now time.Time) {
+	fresh := func(at *time.Time) bool {
+		return at != nil && !at.IsZero() && !at.After(now.Add(5*time.Second)) && now.Sub(*at) <= 30*time.Second
+	}
+	sourceFresh := live.State == execution.LiveAvailable && !live.Stale && fresh(&live.ObservedAt) && fresh(live.GeneratedAt)
+	var observedAt *time.Time
+	if !live.ObservedAt.IsZero() {
+		observedAt = &live.ObservedAt
+	}
+	for _, e := range attempts {
+		if e.Provenance.Source == "offload_final" {
+			continue
+		}
+		e.Status, e.LastProgressAt = "unknown", nil
+		e.Provenance = pipeline.ExecutionProvenance{Source: "unknown", LiveState: live.State,
+			SourceMachine: live.SourceMachine, ObservedAt: observedAt, GeneratedAt: live.GeneratedAt, Stale: !sourceFresh}
+	}
+	// Count distinct attempt identities so replayed rows cannot create ambiguity.
+	matches := map[string][]execution.LiveActivity{}
+	for _, a := range live.Activities {
+		owners := map[string]*pipeline.ItemExecution{}
+		for _, e := range attempts {
+			if e.OffloadRunID == "" || e.Machine == "" || e.Machine == "unknown" || e.Machine != live.SourceMachine || a.Machine != e.Machine || e.SessionID == "" || a.Session != e.SessionID || a.StartedAt == nil || e.StartedAt.IsZero() || a.StartedAt.Before(e.StartedAt) || (e.EndedAt != nil && a.StartedAt.After(*e.EndedAt)) {
+				continue
+			}
+			owners[e.AttemptID] = e
+		}
+		if len(owners) == 1 {
+			for id := range owners {
+				matches[id] = append(matches[id], a)
+			}
+		}
+	}
+	for _, e := range attempts {
+		if e.Provenance.Source == "offload_final" {
+			continue
+		}
+		activities := matches[e.AttemptID]
+		if len(activities) != 1 {
+			continue
+		}
+		a := activities[0]
+		e.LastProgressAt = a.LastEventAt
+		if !sourceFresh {
+			continue
+		}
+		if a.Stalled != nil && *a.Stalled {
+			e.Status = "stalled"
+		} else if fresh(a.UpdatedAt) && a.Status != "" {
+			e.Status = "running"
+		} else {
+			continue
+		}
+		e.Provenance.Source = "offload_live"
+		if a.Profile != "" {
+			e.Profile = a.Profile
+		}
+		if a.Model != "" {
+			e.Model = a.Model
+		}
+	}
 }

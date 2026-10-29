@@ -17,6 +17,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -506,5 +507,148 @@ func TestPipelineRepositoryHostingPlatform(t *testing.T) {
 	}
 	if len(board.Repos) != 1 || board.Repos[0].HostingPlatform != "https://platform.example:8093" {
 		t.Fatalf("missing platform: %s", response.Body.String())
+	}
+}
+
+func TestPipelineLiveAttemptIdentityAndFreshness(t *testing.T) {
+	now := time.Date(2026, 10, 29, 20, 0, 0, 0, time.UTC)
+	start, old := now.Add(-time.Minute), now.Add(-time.Hour)
+	activityStart := start.Add(time.Second)
+	yes := true
+	base := pipeline.ItemExecution{AttemptID: "local/1", OffloadRunID: "1", SessionID: "session", Machine: "local", StartedAt: start, Status: "unknown"}
+	activity := execution.LiveActivity{Session: "session", Machine: "local", Status: "working", StartedAt: &activityStart, UpdatedAt: &now, LastEventAt: &now}
+	for _, tc := range []struct {
+		name string
+		edit func(*execution.LiveStats, *[]pipeline.ItemExecution)
+		want string
+	}{
+		{"fresh", func(_ *execution.LiveStats, _ *[]pipeline.ItemExecution) {}, "running"},
+		{"stalled", func(l *execution.LiveStats, _ *[]pipeline.ItemExecution) {
+			l.Activities[0].Stalled = &yes
+			l.Activities[0].LastEventAt = &old
+		}, "stalled"},
+		{"stale cache", func(l *execution.LiveStats, _ *[]pipeline.ItemExecution) { l.Stale = true }, "unknown"},
+		{"old source", func(l *execution.LiveStats, _ *[]pipeline.ItemExecution) { l.GeneratedAt = &old }, "unknown"},
+		{"old activity", func(l *execution.LiveStats, _ *[]pipeline.ItemExecution) { l.Activities[0].UpdatedAt = &old }, "unknown"},
+		{"missing Offload", func(l *execution.LiveStats, _ *[]pipeline.ItemExecution) {
+			l.State = execution.LiveUnavailable
+			l.Activities = nil
+		}, "unknown"},
+		{"unsupported Offload", func(l *execution.LiveStats, _ *[]pipeline.ItemExecution) { l.State = execution.LiveUnsupported }, "unknown"},
+		{"remote worker", func(_ *execution.LiveStats, e *[]pipeline.ItemExecution) { (*e)[0].Machine = "remote" }, "unknown"},
+		{"missing machine", func(_ *execution.LiveStats, e *[]pipeline.ItemExecution) { (*e)[0].Machine = "" }, "unknown"},
+		{"legacy session only", func(_ *execution.LiveStats, e *[]pipeline.ItemExecution) { (*e)[0].OffloadRunID = "" }, "unknown"},
+		{"same session different machines", func(_ *execution.LiveStats, e *[]pipeline.ItemExecution) {
+			r := base
+			r.Machine = "remote"
+			r.AttemptID = "remote/1"
+			*e = append(*e, r)
+		}, "running"},
+		{"concurrent roles", func(_ *execution.LiveStats, e *[]pipeline.ItemExecution) {
+			r := base
+			r.AttemptID = "local/2"
+			r.OffloadRunID = "2"
+			r.Role = "acceptance"
+			*e = append(*e, r)
+		}, "unknown"},
+		{"session resumed outside interval", func(l *execution.LiveStats, e *[]pipeline.ItemExecution) {
+			(*e)[0].EndedAt = &old
+			l.Activities[0].StartedAt = &now
+		}, "unknown"},
+		{"duplicate activity", func(l *execution.LiveStats, _ *[]pipeline.ItemExecution) {
+			l.Activities = append(l.Activities, activity)
+		}, "unknown"},
+		{"final wins", func(_ *execution.LiveStats, e *[]pipeline.ItemExecution) {
+			(*e)[0].Status = "ok"
+			(*e)[0].Provenance.Source = "offload_final"
+		}, "ok"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := execution.LiveStats{State: execution.LiveAvailable, SourceMachine: "local", ObservedAt: now, GeneratedAt: &now, Activities: []execution.LiveActivity{activity}}
+			entries := []pipeline.ItemExecution{base}
+			tc.edit(&live, &entries)
+			ptrs := make([]*pipeline.ItemExecution, len(entries))
+			for i := range entries {
+				ptrs[i] = &entries[i]
+			}
+			applyPipelineLive(ptrs, live, now)
+			if entries[0].Status != tc.want {
+				t.Fatalf("got %+v want %s", entries[0], tc.want)
+			}
+			if len(entries) > 1 && entries[1].Status != "unknown" {
+				t.Fatalf("arbitrary concurrent attempt selected: %+v", entries)
+			}
+			if entries[0].ElapsedMs != nil || entries[0].ExitCode != nil {
+				t.Fatal("invented metrics")
+			}
+		})
+	}
+}
+
+func TestPipelineLiveDistinctRoleSessions(t *testing.T) {
+	now := time.Now().UTC()
+	start := now.Add(-time.Minute)
+	activeStart := start.Add(time.Second)
+	attempts := []pipeline.ItemExecution{
+		{AttemptID: "a", OffloadRunID: "a", SessionID: "dev", Machine: "local", Role: "operator", StartedAt: start},
+		{AttemptID: "b", OffloadRunID: "b", SessionID: "review", Machine: "local", Role: "acceptance", StartedAt: start},
+	}
+	live := execution.LiveStats{State: execution.LiveAvailable, SourceMachine: "local", ObservedAt: now, GeneratedAt: &now}
+	for _, e := range attempts {
+		live.Activities = append(live.Activities, execution.LiveActivity{Machine: "local", Session: e.SessionID, Status: "working", StartedAt: &activeStart, UpdatedAt: &now})
+	}
+	applyPipelineLive([]*pipeline.ItemExecution{&attempts[0], &attempts[1]}, live, now)
+	for _, e := range attempts {
+		if e.Status != "running" || e.Provenance.Source != "offload_live" {
+			t.Fatalf("%+v", attempts)
+		}
+	}
+	// A subsequent failed read must clear live status, never reuse it as a final.
+	live.State, live.Stale = execution.LiveUnavailable, true
+	applyPipelineLive([]*pipeline.ItemExecution{&attempts[0], &attempts[1]}, live, now)
+	for _, e := range attempts {
+		if e.Status != "unknown" {
+			t.Fatalf("stale active execution: %+v", e)
+		}
+	}
+}
+
+func TestProjectPipelineExecutionsUsesAdapterWithoutMutatingCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "test")
+	now := time.Now().UTC()
+	start := now.Add(-time.Minute)
+	activeStart := start.Add(time.Second)
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"schema_version": 1, "generated_at": now, "active": []map[string]any{
+		{"phase": "working", "session": "managed", "started_at": activeStart, "updated_at": now, "last_event_at": now, "model": "model-live", "task": "PRIVATE PROMPT"},
+		{"phase": "working", "session": "personal", "started_at": activeStart, "updated_at": now, "task": "PERSONAL TASK"},
+	}}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := filepath.Join(t.TempDir(), "offload")
+	script := "#!/bin/sh\nif [ \"$1\" = -h ]; then printf 'usage:\\n  offload stats [--json]\\n'; exit 0; fi\nif [ \"$#\" = 2 ] && [ \"$1\" = stats ] && [ \"$2\" = --json ]; then cat <<'JSON'\n" + string(raw) + "\nJSON\nexit 0\nfi\nexit 91\n"
+	if err := os.WriteFile(command, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", command)
+	cached := []pipeline.Item{{Issue: 1, Stage: pipeline.StageCIPending, Executions: []pipeline.ItemExecution{{AttemptID: "a", OffloadRunID: "a", SessionID: "managed", Machine: host, StartedAt: start, Status: "unknown", Provenance: pipeline.ExecutionProvenance{Source: "unknown"}}}}}
+	board := pipeline.Board{Snapshot: pipeline.Snapshot{Repos: []pipeline.RepoBoard{{Repo: "o/r", Items: cached}}}}
+	projectPipelineExecutions(context.Background(), &board, now)
+	got := board.Repos[0].Items[0]
+	if got.Executions[0].Status != "running" || got.Executions[0].Model != "model-live" || got.Stage != pipeline.StageCIPending || got.Delivery != nil {
+		t.Fatalf("got %+v", got)
+	}
+	if cached[0].Executions[0].Status != "unknown" || cached[0].Executions[0].Model != "" {
+		t.Fatal("mutated cached snapshot")
+	}
+	encoded, err := json.Marshal(board)
+	if err != nil || strings.Contains(string(encoded), "PRIVATE") || strings.Contains(string(encoded), "PERSONAL") || strings.Contains(string(encoded), "personal") {
+		t.Fatalf("leaked task: %s %v", encoded, err)
 	}
 }
