@@ -32,6 +32,32 @@ about CI failures or job logs, including on self-hosted GitLab.
 This section covers GitLab job/pipeline diagnosis. For GitHub Actions logs, use
 `clawflow ci job log --repo owner/repo --sha <full-head-SHA> [--job <id>]`.
 
+## Where ClawFlow runs (read before any other action)
+
+Hosted repositories are worked on by one ClawFlow **hosting platform**, not by
+the machine you are running on. The user only submits issues and follows their
+progress. The platform selects every open leaf issue (except those labelled
+`clawflow-skip`; priority from `P0`-`P3`, none means `P2`), implements it, runs
+independent acceptance, and merges according to the repository's policy. AI
+handles judging and closing out; do not ask the user to mark or confirm steps.
+
+- **To get work done**, create or update an issue in the target repository with
+  `clawflow issue create` / `clawflow issue comment`, write the requirements and
+  acceptance criteria in the issue body, then report the issue link. Use a
+  `Depends on: #N` line for prerequisites. Do not implement it yourself unless
+  the user explicitly asks you to.
+- **To report progress**, read the issue and its PR: labels `agent-implemented`
+  (PR opened), `agent-skipped` (blocked; the latest comment says what is
+  missing), `agent-failed`, the PR's CI and acceptance comments, and merge state.
+- **Do not start a second scheduler.** On this machine, do not run
+  `clawflow repo add`/`repo enable`, `clawflow run`, `clawflow web`, or
+  `project automation enable` to get an issue worked on. If the repository is
+  not hosted yet, tell the user it must be registered on the hosting platform;
+  if the installed binary offers `clawflow platform` commands, use those.
+- The sections below about local reset, onboarding, enabling and running apply
+  only when the user explicitly says this machine is the hosting platform or
+  asks for local operator work.
+
 You are an external AI controlling the `clawflow` CLI. ClawFlow executes tasks
 directly through Offload. Installing this skill in Codex, Cursor or another tool
 does not replace the configured Offload runtime.
