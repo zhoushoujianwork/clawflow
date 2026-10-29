@@ -84,6 +84,21 @@ func (s *requestState) cachePath(path string) string {
 }
 func (c *Client) Budget() Budget { c.state.Lock(); defer c.state.Unlock(); return c.state.budget }
 
+// deliveryLimit returns the active account limit without waiting inside an
+// application deadline. Reserved quota remains available until it reaches zero.
+func (c *Client) deliveryLimit() error {
+	b := c.Budget()
+	now := time.Now()
+	until := b.Backoff
+	if b.Remaining == 0 && b.Reset.After(until) {
+		until = b.Reset
+	}
+	if now.Before(until) {
+		return &retry.HTTPError{Status: 429, RateLimited: true, After: until.Sub(now)}
+	}
+	return nil
+}
+
 // PollingAllowed reserves ten percent of the primary budget for delivery and writes.
 func (c *Client) PollingAllowed() bool {
 	b := c.Budget()
