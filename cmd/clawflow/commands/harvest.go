@@ -248,18 +248,18 @@ func harvestCandidates(ctx context.Context, fullName string, repoCfg config.Repo
 		}
 		eligible = append(eligible, pr)
 	}
-	eligible, err = orderHarvest(client, fullName, eligible)
+	eligible, priorities, err := orderHarvest(client, fullName, eligible)
 	if err != nil {
 		skip("order_unreadable", "err", err.Error())
 		return nil
 	}
 	deferred := 0
-	if selected := selectHarvest(eligible, state); selected > 0 {
+	if selected := selectHarvest(eligible, state, priorities); selected > 0 {
 		deferred = state.Previous
 	}
 	var tasks []harvestTask
 	for len(eligible) > 0 && len(tasks) < repoCfg.AcceptanceParallelLimit() {
-		selected := selectHarvest(eligible, state)
+		selected := selectHarvest(eligible, state, priorities)
 		pr := eligible[selected]
 		tasks = append(tasks, harvestTask{fullName, repoCfg, client, pr, runTimeout})
 		state.Previous = pr.Number
