@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-var lockKinds = []string{"issue", "run", "repo", "snapshot", "config", "pilot"}
+var lockKinds = []string{"issue", "run", "repo", "snapshot", "config"}
 
 func processLockPath(kind string) string {
 	switch kind {
@@ -29,7 +29,7 @@ func processLockPath(kind string) string {
 	case "config", "config-wait":
 		return ConfigSyncLockPath()
 	default:
-		return PilotScheduleLockPath()
+		return ConfigSyncLockPath()
 	}
 }
 func processLock(kind string) (func(), error) {

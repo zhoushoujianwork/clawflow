@@ -1,6 +1,6 @@
 ---
 name: clawflow
-description: "Inspect GitLab CI failures, job/pipeline URLs and job logs, including self-hosted GitLab; manage GitHub/GitLab issues, PRs and authorized project automation with the ClawFlow CLI."
+description: "Inspect GitLab CI failures, job/pipeline URLs and job logs, including self-hosted GitLab; manage GitHub/GitLab issues, PRs and authorized platform stewardship with the ClawFlow CLI."
 ---
 
 # ClawFlow lifecycle control
@@ -190,7 +190,6 @@ clawflow project create <project>
 clawflow project add-repo <project> <namespace/repo>
 clawflow repo set <namespace/repo> --primary-project <project>
 clawflow repo set <namespace/repo> --auto-merge off
-clawflow project automation disable <project>
 ```
 
 `--disabled` also skips label initialization by itself. `--skip-label-init`
@@ -211,21 +210,20 @@ Verify disabled state with:
 clawflow repo show <R>
 clawflow config show --repo <R> --field enabled
 clawflow config show --repo <R> --field auto_merge
-clawflow project automation show <project>
 ```
 
-Project creation defaults PM automation off. Membership does not enable it.
-Primary project selects the authoritative context when multiple projects share
-one repository. `repo disable` stops future monitoring; it does not cancel an
-operator already running. `project automation disable` stops scheduled Pilot
-wakes; manual `pilot wake` is a separate authorized action.
+Pilot is one platform-wide steward. It runs only on user conversation through
+`clawflow pilot ask "<message>"`, `clawflow pilot chat`, or the dashboard Steward
+entry. Repository passes and web ticks never wake it automatically. Project
+membership does not restrict its scope.
+Primary project continues to select implementation context; disabling a repo
+stops future monitoring and does not cancel running operators.
 
 When readiness reports a required machine binding, bind the repository and
 project to the intended execution host without enabling automation:
 
 ```bash
 clawflow repo set <R> --bound-machine <hostname>
-clawflow project automation bind <project> --machine <hostname>
 ```
 
 Use the actual execution host name. Omitted `--bound-machine` preserves the
@@ -296,8 +294,7 @@ commands; list/view redact by default and `--show-values` reveals secrets.
 ## Explicit enable and bounded execution
 
 Enabling monitoring permits future scheduler scans; only enable after the user
-authorizes automation. Keep auto-merge and PM automation off unless
-separately authorized. A disabled repo cannot be processed with `run --repo`.
+authorizes automation. Keep auto-merge off unless separately authorized. A disabled repo cannot be processed with `run --repo`.
 Label initialization is a remote write; perform it only when authorized/needed.
 
 ```bash
@@ -310,23 +307,27 @@ Inspect the issue and operator triggers before running. `run` has no dry-run
 flag and can post comments, change labels and launch implementation/PR work.
 A single-issue run still performs normal runner sync, history reconciliation,
 worktree cleanup and snapshot writes, and scans other eligible enabled repos.
-Scoped runs suppress scheduled project Pilot wakes; a nonzero `--issue` also
-suppresses the scan-level auto-merge sweep. The selected operator can still
+All runs leave the steward idle; a nonzero `--issue` also suppresses the scan-level auto-merge sweep. The selected operator can still
 perform its normal implementation, PR and post-processing writes. Keep sync
 paused and merge settings disabled when outside the authorized scope.
 
-Per-project Pilot scheduling is a separate opt-in:
+Global steward conversation:
 
 ```bash
-clawflow project automation enable <project> --cooldown 30 --bound-machine <hostname>
-clawflow project automation bind <project> --machine <hostname>
-clawflow project automation show <project>
+clawflow pilot ask "review platform state" --ops 5 --timeout 60
+clawflow pilot chat --ops 5 --timeout 60
 ```
 
-`bind --clear` removes the machine restriction. `pilot wake <project>
-[--timeout <minutes>]` manually wakes Pilot and bypasses cooldown; do not use it
-as a harmless readiness check. `clawflow web` can start a configured periodic
-scheduler and auto-sync; it is not a read-only status command.
+Every message has an ops budget and timeout in minutes, without a dollar cap.
+Structured actions use the existing executor, per-repo `pilot_override_merge`
+policy and audit. Never add or remove `clawflow-skip`.
+`~/.clawflow/pilot/charter.md` is seeded once from existing project context;
+project `context.md` remains implementation context. `pilot wake [project]`
+ignores its legacy project argument and reviews the whole platform once.
+`project automation ...` prints a migration notice and exits 0 without changes;
+legacy automation YAML is ignored and dropped on save. User-defined scheduled
+checks are a separate #511 slice. `clawflow web` can still start repository
+scheduling and sync; it is not a read-only status command.
 
 ## Inspect, disable and report
 
@@ -336,7 +337,6 @@ clawflow issue view <N> --repo <R> --json
 clawflow issue history <N> --repo <R> --json
 clawflow pr list --repo <R> --state open
 clawflow repo disable <R>
-clawflow project automation disable <project>
 ```
 
 `status` makes remote reads for enabled repos only and summarizes issue labels.

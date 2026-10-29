@@ -32,9 +32,10 @@ type chatSpawnRequest struct {
 	Repo     string `json:"repo,omitempty"`
 	Issue    int    `json:"issue,omitempty"`
 	Model    string `json:"model,omitempty"`
-	Mode     string `json:"mode,omitempty"`    // "issue" or "edit" — issue-level chat only
+	Mode     string `json:"mode,omitempty"` // "issue" or "edit" — issue-level chat only
 	Project  string `json:"project,omitempty"`
-	Action   string `json:"action,omitempty"`  // "generate" or "chat" (project-scoped)
+	Action   string `json:"action,omitempty"` // "generate" or "chat" (project-scoped)
+	Pilot    bool   `json:"pilot,omitempty"`
 	Feedback bool   `json:"feedback,omitempty"` // spawn `clawflow feedback` (report issue to upstream repo)
 }
 
@@ -47,7 +48,7 @@ type chatSpawnRequest struct {
 //   - macOS: Terminal.app via osascript (most common, works everywhere).
 //   - linux: $TERMINAL env, then a short list of common emulators.
 //   - other: 501 Not Implemented with a hint to run the printed command
-//            manually.
+//     manually.
 func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -62,8 +63,8 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 	// Require either a repo, a project, or a feedback target.
 	hasRepo := strings.TrimSpace(req.Repo) != ""
 	hasProject := strings.TrimSpace(req.Project) != ""
-	if !hasRepo && !hasProject && !req.Feedback {
-		writeJSON(w, 400, map[string]string{"error": "repo, project, or feedback is required"})
+	if !hasRepo && !hasProject && !req.Feedback && !req.Pilot {
+		writeJSON(w, 400, map[string]string{"error": "repo, project, feedback, or pilot is required"})
 		return
 	}
 
@@ -78,6 +79,8 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 
 	var parts []string
 	switch {
+	case req.Pilot:
+		parts = []string{shellEscape(self), "pilot", "chat"}
 	case req.Feedback:
 		// Feedback-scoped spawn: `clawflow feedback`. No repo/issue/model
 		// plumbing — the feedback command hardcodes its target and pulls
@@ -101,12 +104,12 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if req.Model != "" && !req.Feedback {
+	if req.Model != "" && !req.Feedback && !req.Pilot {
 		parts = append(parts, "--model", shellEscape(req.Model))
 	}
 	cmdLine := strings.Join(parts, " ")
 
-	if err := openInTerminal(cmdLine); err != nil {
+	if err := spawnChatTerminal(cmdLine); err != nil {
 		writeJSON(w, http.StatusNotImplemented, map[string]string{
 			"error":   err.Error(),
 			"command": cmdLine,
@@ -119,6 +122,8 @@ func HandleChatSpawn(w http.ResponseWriter, r *http.Request) {
 		"command": cmdLine,
 	})
 }
+
+var spawnChatTerminal = openInTerminal
 
 // openInTerminal asks the OS to open a terminal window and run cmdLine
 // inside it. The returned error names the platform-specific failure
