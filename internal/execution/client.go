@@ -140,6 +140,9 @@ type Result struct {
 	CallerRunID      string          `json:"caller_run_id"`
 	ExecutionPolicy  string          `json:"execution_policy"`
 	ExitCode         int             `json:"exit_code"`
+	ReportedExitCode *int            `json:"-"`
+	ElapsedMs        *int64          `json:"elapsed_ms"`
+	Machine          string          `json:"-"`
 	ErrorKind        string          `json:"error_kind"`
 	Error            string          `json:"error"`
 	Usage            json.RawMessage `json:"usage"`
@@ -148,6 +151,26 @@ type Result struct {
 	CostBasis        string          `json:"cost_basis"`
 	CostUnavailable  string          `json:"cost_unavailable"`
 	UsageUnavailable string          `json:"usage_unavailable"`
+}
+
+// UnmarshalJSON preserves whether Offload actually reported an exit code while
+// keeping the existing integer API used by execution and acceptance policy.
+func (r *Result) UnmarshalJSON(raw []byte) error {
+	type plain Result
+	var decoded struct {
+		*plain
+		ExitCode *int `json:"exit_code"`
+	}
+	*r = Result{}
+	decoded.plain = (*plain)(r)
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	r.ReportedExitCode = decoded.ExitCode
+	if decoded.ExitCode != nil {
+		r.ExitCode = *decoded.ExitCode
+	}
+	return nil
 }
 
 // TokenUsage contains this run's inclusive input counts, not cumulative session usage.
@@ -273,8 +296,28 @@ func acquireOwnership(workspace, profile, session string, resume bool) (func(), 
 }
 
 // Run starts exactly one Offload process. Uncertain failures never replay work.
-func Run(ctx context.Context, c Config, req Request, env []string, events io.Writer, observe func(Observation)) (Result, error) {
-	var result Result
+func Run(ctx context.Context, c Config, req Request, env []string, events io.Writer, observe func(Observation)) (result Result, runErr error) {
+	// Caller identity and local provenance survive even when no final record arrives.
+	defer func() {
+		result.CallerRunID = req.RequestID
+		result.Machine, _ = os.Hostname()
+		if result.Profile == "" {
+			result.Profile = c.Profile
+		}
+		if result.ErrorKind == "" && runErr != nil {
+			var e *Error
+			switch {
+			case errors.Is(runErr, context.DeadlineExceeded):
+				result.ErrorKind = "timeout"
+			case errors.Is(runErr, context.Canceled):
+				result.ErrorKind = "canceled"
+			case errors.As(runErr, &e):
+				result.ErrorKind = e.Kind
+			default:
+				result.ErrorKind = "execution"
+			}
+		}
+	}()
 	if err := validateRequest(req); err != nil {
 		return result, err
 	}
@@ -427,12 +470,9 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if eventErr == nil {
 		eventErr = tail.poll()
 	}
-	if eventErr != nil {
-		return result, eventErr
-	}
 	// Preserve validated stream identity even if interruption prevents a final
 	// event or stdout. Never recover answer text/outcomes from events.
-	if tail.session != "" {
+	if tail.runID != "" {
 		result = Result{NativeSessionID: tail.session, SessionKey: tail.session, Profile: c.Profile, Backend: tail.backend, Model: tail.model, RunID: tail.runID, CallerRunID: req.RequestID}
 	}
 	if tail.final != nil {
@@ -441,7 +481,10 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		if model == "" {
 			model = tail.model
 		}
-		result = Result{NativeSessionID: e.Session, SessionKey: e.Session, Profile: c.Profile, Backend: e.Backend, Model: model, RunID: e.RunID, CallerRunID: e.CallerRunID, Status: e.Status, ErrorKind: e.ErrorKind, ExitCode: e.ExitCode}
+		result = Result{NativeSessionID: e.Session, SessionKey: e.Session, Profile: c.Profile, Backend: e.Backend, Model: model, RunID: e.RunID, CallerRunID: e.CallerRunID, Status: e.Status, ErrorKind: e.ErrorKind, ExitCode: e.ExitCode, ReportedExitCode: &e.ExitCode}
+	}
+	if eventErr != nil {
+		return result, eventErr
 	}
 	if exceeded {
 		return result, &Error{Kind: "protocol_output_limit"}

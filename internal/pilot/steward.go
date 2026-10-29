@@ -192,6 +192,10 @@ func Ask(ctx context.Context, message string, ops int, timeout time.Duration) (S
 	ctx = operator.WithExecutionResultObserver(ctx, func(r execution.Result) {
 		meta.Profile, meta.Backend, meta.Model = r.Profile, r.Backend, r.Model
 		meta.Usage = snapshot.UsageFromResult(r)
+		meta.ExecutionMetadata = snapshot.ExecutionFromResult(r)
+		if r.Machine != "" {
+			meta.Machine = r.Machine
+		}
 		result.Usage = meta.Usage
 	})
 	result.Answer, err = runWakeOffload(ctx, prompt, filepath.Dir(CharterPath()), timeout, events, config.RolePilot)

@@ -54,3 +54,21 @@ func UsageFromResult(r execution.Result) *Usage {
 	}
 	return u
 }
+
+// ExecutionMetadata is optional evidence from one Offload attempt. Sessions can
+// span many run directories; neither storage nor accounting is keyed by session.
+type ExecutionMetadata struct {
+	OffloadRunID    string `json:"offload_run_id,omitempty"`
+	CallerRunID     string `json:"caller_run_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	ExitCode        *int   `json:"exit_code"`
+	ErrorKind       string `json:"error_kind,omitempty"`
+	ElapsedMs       *int64 `json:"elapsed_ms"`
+	ExecutionStatus string `json:"execution_status,omitempty"`
+}
+
+func ExecutionFromResult(r execution.Result) ExecutionMetadata {
+	return ExecutionMetadata{OffloadRunID: r.RunID, CallerRunID: r.CallerRunID,
+		SessionID: r.NativeSessionID, ExitCode: r.ReportedExitCode, ErrorKind: r.ErrorKind,
+		ElapsedMs: r.ElapsedMs, ExecutionStatus: r.Status}
+}

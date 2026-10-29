@@ -200,7 +200,7 @@ func TestCoordinatorWorkerLifecycle(t *testing.T) {
 		}
 		return active[0].ID
 	}
-	wait(enqueue(&runJob{repo: "o/r", repoCfg: rc, client: client, op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 42}}))
+	wait(enqueue(&runJob{repo: "o/r", repoCfg: rc, client: client, op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 42, Title: "Feature", Body: "Implement the feature."}}))
 	if client.creates != 1 {
 		t.Fatalf("PR creates: %d", client.creates)
 	}
@@ -230,7 +230,7 @@ func TestCoordinatorWorkerLifecycle(t *testing.T) {
 		if repair.MergeConflict {
 			f.mergeability = map[int]vcs.MergeStatus{11: vcs.MergeStatusConflict}
 		}
-		id := enqueue(&runJob{repo: "o/r", repoCfg: rc, client: client, op: &operator.Operator{Name: "repair-ci"}, sub: &operator.Subject{Number: 42}, repair: repair})
+		id := enqueue(&runJob{repo: "o/r", repoCfg: rc, client: client, op: &operator.Operator{Name: "repair-ci"}, sub: &operator.Subject{Number: 42, Title: "Feature", Body: "Implement the feature."}, repair: repair})
 		_, path = ciRepairLedgerPath(snapshot.DataDir(), "o/r", 11)
 		ledger, _ = loadCIRepairLedger(path)
 		if len(ledger.Attempts) == 0 || ledger.Attempts[len(ledger.Attempts)-1].Reason != reason {

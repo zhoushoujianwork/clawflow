@@ -43,6 +43,16 @@ func TestRegistryAppendsScheduledChecksAfterActionsEvidence(t *testing.T) {
 	}
 }
 
+func TestRegistryAppendsExecutionEvidenceAfterScheduledChecks(t *testing.T) {
+	if len(store.Migrations) < 8 {
+		t.Fatal("execution evidence migration missing")
+	}
+	migration := store.Migrations[7]
+	if migration.Version != 8 || migration.Name != "offload_execution_evidence" {
+		t.Fatalf("execution evidence must follow scheduled checks: %+v", migration)
+	}
+}
+
 func countRows(t *testing.T, s *store.Store) int64 {
 	t.Helper()
 	var n int64
@@ -254,14 +264,46 @@ func TestScheduledChecksMigrationAfterActionsEvidence(t *testing.T) {
 	}
 }
 
-func TestCoordinatorApplicationErrorsMigrationAfterScheduledChecks(t *testing.T) {
+// Simulate tables created by the released schema, before evidence columns existed.
+func TestExecutionEvidenceUpgradePreservesLegacy(t *testing.T) {
 	s := storetest.New(t)
 	ctx := context.Background()
 	if _, err := s.Migrate(ctx, store.Migrations[:7]); err != nil {
 		t.Fatal(err)
 	}
-	applied, err := s.Migrate(ctx, store.Migrations)
+	for _, table := range []string{"runs", "pilot_runs"} {
+		if err := s.DB().Exec("ALTER TABLE " + table + ` DROP COLUMN offload_run_id, DROP COLUMN caller_run_id,
+ DROP COLUMN session_id, DROP COLUMN exit_code, DROP COLUMN error_kind,
+ DROP COLUMN elapsed_ms, DROP COLUMN execution_status`).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DB().Exec("INSERT INTO "+table+" (run_dir, status, payload) VALUES (?, ?, ?)", "/legacy", "success", `{"status":"success"}`).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	applied, err := s.Migrate(ctx, store.Migrations[:8])
 	if err != nil || len(applied) != 1 || applied[0] != 8 {
+		t.Fatalf("upgrade=%v err=%v", applied, err)
+	}
+	for _, kind := range []string{"run", "pilot"} {
+		rows, err := s.Runs(ctx, kind, store.RunFilter{})
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("rows=%+v err=%v", rows, err)
+		}
+		if rows[0].ExitCode != nil || rows[0].ElapsedMs != nil || rows[0].Status != "success" {
+			t.Fatalf("legacy evidence inferred: %+v", rows[0])
+		}
+	}
+}
+
+func TestCoordinatorApplicationErrorsMigrationAfterExecutionEvidence(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:8]); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations)
+	if err != nil || len(applied) != 1 || applied[0] != 9 {
 		t.Fatalf("application errors upgrade: applied=%v err=%v", applied, err)
 	}
 	var columns int64

@@ -1,12 +1,16 @@
 # Independent acceptance
 
-ClawFlow can require an independent review before merging a managed GitHub PR. Development and acceptance use separate native sessions. Acceptance first records a plan from the requirements without source access, then reviews a disposable detached checkout of the submitted commit with command-capable permissions.
+ClawFlow can require an independent review before merging a managed GitHub PR. Development and acceptance use separate native sessions. For acceptance-enrolled repositories, ClawFlow records a plan from the requirements before implementation without source access, then independently reviews a disposable detached checkout of the submitted commit with command-capable permissions.
 
 This is a local reference implementation for [platform issue #349](https://github.com/zhoushoujianwork/clawflow/issues/349). The broader [platform design](managed-development-design.md) describes the distributed workflow target. [Technical details](independent-acceptance-detail.md) describe evidence and limits.
 
 ## Planner 隔离
 
 默认使用 `tools-disabled`：空 scratch 目录、`ToolsDisabled: true` 和 `PermissionMode: "default"`。仅当执行器返回 `unsupported_tools` 错误时，在同一次 attempt 内重试一次 `isolated-readonly`：不传工具限制，使用空 scratch 和 `default` 只读策略（Codex 为无网络只读 sandbox）。其他错误仍终止验收。
+
+实现前的计划保存在私有的 `acceptance-plans/` 数据目录，按仓库、issue、需求摘要（标题和正文）及 planner 策略区分。实现者和 CI、验收、冲突修复均收到同一份清单，须逐项自检并在 PR 正文说明覆盖方式、执行的检查及限制。自检不能作为验收证据。需求未变时，验收复用已保存的计划；正文或 planner 策略改变后重新规划。协调器将计划随任务传给 worker，跨机器执行仍使用同一份计划。未启用 `acceptance_required` 的仓库不增加规划调用。
+
+复用计划时保留 planner 的原始会话和时间，将计划副本绑定当前 PR 契约及验收 attempt。审查仍使用独立的新会话，校验其与开发者及 planner 的身份不同，并独立获取提交对应的证据。旧的逐 attempt 计划仍可读取。
 
 计划持久化后才创建、fetch 和 checkout 审查工作区。计划及记录中的 `plan.planner_isolation`（独立计划文件中为 `planner_isolation`）、status 输出和 harvest pass/non-pass 日志记录实际模式。两种模式均要求 native policy 为 `default`；缺失或未知模式的旧计划不能通过 gate，需重新验收。
 

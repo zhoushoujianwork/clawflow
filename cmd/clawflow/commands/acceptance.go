@@ -850,21 +850,25 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		}
 		return acceptance.Source{HeadSHA: head, BaseSHA: current.BaseSHA, Clean: head == c.HeadSHA && extra == ""}, nil
 	}
-	execute := func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
-		timeout := 30 * time.Minute
-		if deadline, ok := ctx.Deadline(); ok {
-			timeout = time.Until(deadline)
-		}
-		if timeout <= 0 {
-			return execution.Result{}, context.DeadlineExceeded
-		}
-		return acceptanceNativeRun(ctx, ec, execution.Request{Version: 1, RequestID: execution.NewSessionKey(), Resume: opts.Resume, SessionKey: opts.SessionKey, Workspace: opts.Workspace, Prompt: prompt, Instructions: opts.Instructions, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: max(1, timeout.Milliseconds())}, acceptanceReviewerEnv(os.Environ()), opts.Events, nil)
+	execute := acceptanceExecutor(ec)
+	planStore, err := acceptance.OpenStore(acceptancePlanStorePath(repo))
+	if err != nil {
+		return acceptance.Record{}, err
+	}
+	defer planStore.Close()
+	var savedPlan *acceptance.Plan
+	if pinned, ok := ctx.Value(workerAcceptanceKey{}).(*coordinatorPayload); ok {
+		savedPlan = pinned.AcceptancePlan
+	}
+	planPolicy := acceptancePlanningPolicy(repo, rc, ec)
+	if savedPlan != nil {
+		planPolicy = savedPlan.PlanningPolicyDigest
 	}
 	var ci func() (vcs.CIEvidence, error)
 	if provider, ok := client.(vcs.CIEvidenceProvider); ok {
 		ci = func() (vcs.CIEvidence, error) { return provider.GetCIEvidence(repo, prNumber) }
 	}
-	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
+	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, PlanStore: planStore, PlanPolicy: planPolicy, SavedPlan: savedPlan, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
 	if r.Completed {
 		if publishErr := publishAcceptanceReport(ctx, client, r); publishErr != nil {
 			return r, errors.Join(err, publishErr)
