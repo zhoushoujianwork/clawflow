@@ -66,7 +66,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if err != nil {
 		return record, err
 	}
-	record = Record{ReviewMode: FullSuite, Version: Version, Contract: c, ContractDigest: d, AttemptID: randomID(), Role: "acceptance", Verdict: Blocked, StartedAt: time.Now().UTC()}
+	record = Record{BinaryID: BinaryID(), ReviewMode: FullSuite, Version: Version, Contract: c, ContractDigest: d, AttemptID: randomID(), Role: "acceptance", Verdict: Blocked, StartedAt: time.Now().UTC()}
 	if runner.Store == nil {
 		return record, errors.New("acceptance store required")
 	}

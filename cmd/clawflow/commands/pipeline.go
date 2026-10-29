@@ -612,22 +612,34 @@ func pipelineAcceptance(ctx context.Context, client vcs.Client, repo string, rc 
 		info.Error = "acceptance evidence unreadable"
 		return info, errors.New(info.Error)
 	}
-	return pipelineAcceptanceRecords(info, c, records, true), nil
+	infra, err := store.InfrastructureAttempts(c)
+	if err != nil {
+		return info, err
+	}
+	// Base/policy changes must not hide a head's exhausted infrastructure budget.
+	if len(records) == 0 && infra.LatestIsInfra && infra.Count > 0 {
+		history, err := store.RecordsAtHead(c.Repository, c.PRNumber, c.HeadSHA)
+		if err != nil {
+			return info, err
+		}
+		for _, r := range history {
+			if r.Completed {
+				records = append(records, r)
+			}
+		}
+	}
+	info = pipelineAcceptanceRecords(info, c, records, true)
+	info.InfraAttempts = infra.Count
+	return info, nil
 }
 
 // pipelineAcceptanceRecords shares presentation while keeping offline history
 // separate from validation against the current live contract.
 func pipelineAcceptanceRecords(info *pipeline.AcceptanceInfo, c acceptance.Contract, records []acceptance.Record, current bool) *pipeline.AcceptanceInfo {
 	info.Attempts = len(records)
-	var lastInfra time.Time
-	for _, r := range records {
-		if acceptance.IsInfrastructure(r) {
-			info.InfraAttempts++
-			if r.CompletedAt.After(lastInfra) {
-				lastInfra = r.CompletedAt
-			}
-		}
-	}
+	infra := acceptance.ConsecutiveInfrastructure(records)
+	info.InfraAttempts = infra.Count
+	lastInfra := infra.LastAt
 	if len(records) == 0 {
 		return info
 	}

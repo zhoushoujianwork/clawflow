@@ -254,6 +254,7 @@ func (r Record) validateCorrection(c Contract) error {
 }
 
 type Record struct {
+	BinaryID   string             `json:"binary_id,omitempty"`
 	Correction *ReportCorrection  `json:"correction,omitempty"`
 	Checks     []RequirementCheck `json:"checks,omitempty"`
 	NextAction string             `json:"next_action,omitempty"`

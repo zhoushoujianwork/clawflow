@@ -274,7 +274,7 @@ func TestPipelineAcceptanceReadsRecordedAttempts(t *testing.T) {
 	offset = 16 * time.Minute
 	harvest(t, "", 0)
 	got, _ = pipelineAcceptance(ctx, f, "o/r", rc, f.pr, time.Now())
-	if got == nil || got.Attempts != 2 || got.InfraAttempts != 1 || got.LatestIsInfra || got.Verdict != "passed" || !got.Valid {
+	if got == nil || got.Attempts != 2 || got.InfraAttempts != 0 || got.LatestIsInfra || got.Verdict != "passed" || !got.Valid {
 		t.Fatalf("after pass: %+v", got)
 	}
 	if got.Summary != "Independent checks complete" || got.PlannerSession == "" || got.ReviewerSession == "" || got.PlannerSession == got.ReviewerSession || got.CompletedAt == "" {

@@ -19,6 +19,8 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
+	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
 )
@@ -338,12 +340,12 @@ func TestHarvestRetriesInfrastructureAttemptAfterCooldown(t *testing.T) {
 	}
 }
 
-func TestHarvestStopsAfterThreeInfrastructureAttempts(t *testing.T) {
+func TestHarvestStopsAfterTwoInfrastructureAttempts(t *testing.T) {
 	f, readLog, calls := harvestFixture(t)
 	var offset time.Duration
 	harvestClock(t, &offset)
 	failProvider()
-	for i := 1; i <= 3; i++ {
+	for i := 1; i <= 2; i++ {
 		offset = time.Duration(i) * 16 * time.Minute
 		if failed := harvest(t, "", 0); len(failed) != 1 || *calls != i {
 			t.Fatalf("attempt %d failed=%v runs=%d", i, failed, *calls)
@@ -355,7 +357,7 @@ func TestHarvestStopsAfterThreeInfrastructureAttempts(t *testing.T) {
 	// Exhaustion is reported once and is not a new run failure.
 	offset = 10 * time.Hour
 	for pass := 0; pass < 2; pass++ {
-		if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 3 {
+		if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 2 {
 			t.Fatalf("exhausted pass %d failed=%v runs=%d", pass, failed, *calls)
 		}
 		f.existingComments = append([]string(nil), f.comments...)
@@ -364,11 +366,30 @@ func TestHarvestStopsAfterThreeInfrastructureAttempts(t *testing.T) {
 		t.Fatalf("comments = %v, want exactly one", f.comments)
 	}
 	c := f.comments[0]
-	if !strings.Contains(c, "3 attempts") || !strings.Contains(c, "clawflow acceptance run --repo o/r --pr 11") || !strings.Contains(c, "<!-- clawflow:acceptance-infra=") {
+	if !strings.Contains(c, "2 attempts") || !strings.Contains(c, "clawflow acceptance run --repo o/r --pr 11") || !strings.Contains(c, "<!-- clawflow:acceptance-infra=") {
 		t.Fatalf("unexpected comment: %q", c)
 	}
 	if !strings.Contains(readLog(), "reason=infra_exhausted") {
 		t.Fatalf("missing infra_exhausted skip:\n%s", readLog())
+	}
+	info, err := pipelineAcceptance(context.Background(), f, "o/r", config.Repo{AcceptanceRequired: true}, f.pr, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, reason, _ := pipeline.Derive(pipeline.Evidence{IssueState: "open", AcceptanceRequired: true, PR: &pipeline.PRInfo{Number: 11, State: "open", CI: "success"}, Acceptance: info})
+	if stage != pipeline.StageBlocked || !strings.Contains(reason, "acceptance-infra") {
+		t.Fatalf("board did not park: %s %s", stage, reason)
+	}
+	// Even the manual/worker execution entry point must not launch a third review.
+	acceptanceNativeRun = func(context.Context, execution.Config, execution.Request, []string, io.Writer, func(execution.Observation)) (execution.Result, error) {
+		t.Fatal("third infrastructure review started")
+		return execution.Result{}, nil
+	}
+	if _, err := runAcceptance(context.Background(), f, "o/r", 11); err == nil || !strings.Contains(err.Error(), "acceptance-infra") {
+		t.Fatalf("entry point did not park: %v", err)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("duplicate exhaustion comment: %v", f.comments)
 	}
 	// The merge gate never accepts an infrastructure record.
 	if attemptAutoMerge(autoMergeAttempt{ctx: context.Background(), client: f, repo: "o/r", repoCfg: config.Repo{AutoMerge: true, AcceptanceRequired: true}, prNum: 11, quiet: true}) || len(f.expected) != 0 {
@@ -656,5 +677,51 @@ func TestOwnerSkipBlocksPRWork(t *testing.T) {
 	}
 	if attemptAutoMerge(autoMergeAttempt{ctx: context.Background(), client: f, repo: "o/r", prNum: 11, issueNum: 42}) {
 		t.Fatal("inline merge accepted")
+	}
+}
+
+func TestHarvestInfraReset(t *testing.T) {
+	for _, change := range []string{"head", "body", "binary"} {
+		t.Run(change, func(t *testing.T) {
+			f, _, calls := harvestFixture(t)
+			var offset time.Duration
+			harvestClock(t, &offset)
+			failProvider()
+			for i := 0; i < harvestMaxInfra; i++ {
+				offset = time.Duration(i) * 16 * time.Minute
+				harvest(t, "", 0)
+			}
+			offset = time.Hour
+			if failures := harvest(t, "", 0); len(failures) != 0 || *calls != 2 {
+				t.Fatalf("not parked: %v runs=%d", failures, *calls)
+			}
+			switch change {
+			case "head":
+				f.pr.HeadSHA = strings.Repeat("d", 40)
+				f.openPRs = []vcs.PR{f.pr}
+				dir := writeAcceptanceDevelopment(t, "success", time.Now(), nil)
+				var meta snapshot.RunMeta
+				data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(data, &meta); err != nil {
+					t.Fatal(err)
+				}
+				meta.HeadSHA = f.pr.HeadSHA
+				if err := snapshot.WriteRunMeta(dir, meta); err != nil {
+					t.Fatal(err)
+				}
+			case "body":
+				f.issue.Body += "\nAdditional requirement"
+			case "binary":
+				old := acceptance.BinaryID
+				acceptance.BinaryID = func() string { return "new-binary" }
+				t.Cleanup(func() { acceptance.BinaryID = old })
+			}
+			if failures := harvest(t, "", 0); len(failures) != 1 || *calls != 3 {
+				t.Fatalf("did not reset: %v runs=%d", failures, *calls)
+			}
+		})
 	}
 }
