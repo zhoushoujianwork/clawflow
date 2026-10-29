@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -37,6 +39,7 @@ var pipelineCache struct {
 	ok         bool
 	refreshing bool
 	err        string
+	observed   map[string]time.Time
 }
 
 // HandlePipeline never waits for a VCS request, including on a cold start.
@@ -49,12 +52,9 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 	now := pipelineNow()
 	pipelineCache.mu.Lock()
 	if diskErr == nil && (!pipelineCache.ok || pipeline.ParseTime(disk.GeneratedAt).After(pipeline.ParseTime(pipelineCache.snap.GeneratedAt))) {
+		rememberPipelineDelivery(disk)
 		pipelineCache.snap, pipelineCache.ok = disk, true
-	}
-	if !pipelineCache.ok && PipelineSource == nil {
-		pipelineCache.mu.Unlock()
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "pipeline board unavailable"})
-		return
+		pipelineCache.err = ""
 	}
 	stale := !pipelineCache.ok || now.Sub(pipeline.ParseTime(pipelineCache.snap.GeneratedAt)) >= pipelineTTL
 	if stale && !pipelineCache.refreshing && (pipelineCache.at.IsZero() || now.Sub(pipelineCache.at) >= pipelineTTL) && PipelineSource != nil {
@@ -70,11 +70,12 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 			defer pipelineCache.mu.Unlock()
 			pipelineCache.refreshing = false
 			if err != nil {
-				pipelineCache.err = "pipeline refresh failed: " + err.Error()
+				pipelineCache.err = pipelineErrorCategory(err)
 				return
 			}
 			pipelineCache.err = ""
 			if !pipelineCache.ok || !pipeline.ParseTime(fresh.GeneratedAt).Before(pipeline.ParseTime(pipelineCache.snap.GeneratedAt)) {
+				rememberPipelineDelivery(fresh)
 				pipelineCache.snap, pipelineCache.ok = fresh, true
 			}
 		}()
@@ -87,6 +88,31 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 		stale = stale || repo.Stale
 	}
 	board := pipeline.Board{Snapshot: snap, Stale: stale, Refreshing: pipelineCache.refreshing, Error: pipelineCache.err}
+	deliveryAt, deliveryCategory := pipeline.ParseTime(snap.GeneratedAt), pipelineCache.err
+	allObserved := true
+	sources := []pipelineSourceHealth{{}}
+	for _, repo := range snap.Repos {
+		category := pipelineCache.err
+		if repo.Error != "" {
+			category = pipelineErrorCategory(errors.New(repo.Error))
+		} else if repo.Stale && category == "" {
+			category = "stale"
+		}
+		at := pipelineCache.observed[repo.Repo]
+		if at.IsZero() {
+			allObserved = false
+		} else if at.Before(deliveryAt) {
+			deliveryAt = at
+		}
+		if deliveryCategory == "" {
+			deliveryCategory = category
+		}
+		sources = append(sources, sourceHealth("delivery", repo.Repo, at, now, pipelineTTL, pipelineCache.refreshing, category))
+	}
+	if !allObserved {
+		deliveryAt = time.Time{}
+	}
+	sources[0] = sourceHealth("delivery", "", deliveryAt, now, pipelineTTL, pipelineCache.refreshing, deliveryCategory)
 	pipelineCache.mu.Unlock()
 	board.Repos = append([]pipeline.RepoBoard{}, board.Repos...)
 	if cfg, err := config.Load(); err == nil {
@@ -106,7 +132,25 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	board.Runtime = pipelineRuntime()
-	projectPipelineExecutions(r.Context(), &board, now)
+	liveHealth := projectPipelineExecutions(r.Context(), &board, now)
+	sources = append(sources, liveHealth)
+	for _, repo := range board.Repos {
+		health := sourceHealth("execution", repo.Repo, time.Time{}, now, 30*time.Second, false, "no_data")
+		for _, items := range [][]pipeline.Item{repo.Items, repo.SkippedIssues} {
+			for _, item := range items {
+				for _, e := range item.Executions {
+					if e.Provenance.Source != "offload_final" && e.Machine != "" && e.Machine == liveHealth.machine {
+						health = liveHealth
+						health.Repo = repo.Repo
+						if health.ErrorCategory != "" {
+							health.IncidentKey = "execution/" + repo.Repo + "/" + health.ErrorCategory
+						}
+					}
+				}
+			}
+		}
+		sources = append(sources, health)
+	}
 	records, err := pilot.ReadActionRecords(filepath.Join(snapshot.DataDir(), "pilot-actions.jsonl"))
 	actions := []pilot.ActionRecord{}
 	if err == nil {
@@ -144,11 +188,74 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, struct {
 		pipeline.Board
-		PilotActions    []pilot.ActionRecord `json:"pilot_actions"`
-		PilotError      string               `json:"pilot_error,omitempty"`
-		WorkerPool      *coordinator.Board   `json:"worker_pool"`
-		WorkerPoolError string               `json:"worker_pool_error,omitempty"`
-	}{board, actions, actionError, pool, poolError})
+		Sources         []pipelineSourceHealth `json:"sources"`
+		PilotActions    []pilot.ActionRecord   `json:"pilot_actions"`
+		PilotError      string                 `json:"pilot_error,omitempty"`
+		WorkerPool      *coordinator.Board     `json:"worker_pool"`
+		WorkerPoolError string                 `json:"worker_pool_error,omitempty"`
+	}{board, sources, actions, actionError, pool, poolError})
+}
+
+// Source health describes data observation, never the time of the HTTP request.
+// A nil age/last success means no successful observation is known.
+type pipelineSourceHealth struct {
+	Source             string     `json:"source"`
+	Repo               string     `json:"repo,omitempty"`
+	LastSuccess        *time.Time `json:"last_success"`
+	ObservedAt         *time.Time `json:"observed_at"`
+	ObservedAgeSeconds *float64   `json:"observed_age_seconds"`
+	Refreshing         bool       `json:"refreshing"`
+	Stale              bool       `json:"stale"`
+	ErrorCategory      string     `json:"error_category,omitempty"`
+	IncidentKey        string     `json:"incident_key,omitempty"`
+	machine            string
+}
+
+func sourceHealth(source, repo string, at, now time.Time, ttl time.Duration, refreshing bool, category string) pipelineSourceHealth {
+	h := pipelineSourceHealth{Source: source, Repo: repo, Refreshing: refreshing, Stale: true, ErrorCategory: category}
+	if !at.IsZero() {
+		age := now.Sub(at).Seconds()
+		if age >= -5 {
+			age = max(0, age)
+			h.LastSuccess, h.ObservedAt, h.ObservedAgeSeconds = &at, &at, &age
+			h.Stale = age >= ttl.Seconds() || category != ""
+		}
+	}
+	if h.LastSuccess == nil && category == "" {
+		h.ErrorCategory = "no_data"
+	}
+	if h.ErrorCategory != "" {
+		h.IncidentKey = source + "/" + repo + "/" + h.ErrorCategory
+	}
+	return h
+}
+
+func pipelineErrorCategory(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToLower(err.Error())
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(message, "timeout") || strings.Contains(message, "deadline exceeded") {
+		return "timeout"
+	}
+	if strings.Contains(message, "deferred") {
+		return "deferred"
+	}
+	return "unavailable"
+}
+
+// Called only when installing a newer snapshot, under pipelineCache.mu. Failed
+// repositories retain their previous observation even if the envelope is newer.
+func rememberPipelineDelivery(snap pipeline.Snapshot) {
+	observed := make(map[string]time.Time, len(snap.Repos))
+	at := pipeline.ParseTime(snap.GeneratedAt)
+	for _, repo := range snap.Repos {
+		observed[repo.Repo] = pipelineCache.observed[repo.Repo]
+		if !repo.Stale && repo.Error == "" && !at.IsZero() {
+			observed[repo.Repo] = at
+		}
+	}
+	pipelineCache.observed = observed
 }
 
 // pipelineRuntime is cheap and always fresh: version, scheduler and Offload readiness.
@@ -262,7 +369,51 @@ func readPipelineLive(ctx context.Context, rows []store.Run) execution.LiveStats
 	return reader.Read(ctx, rows)
 }
 
-func projectPipelineExecutions(ctx context.Context, board *pipeline.Board, now time.Time) {
+// One bounded background read shares the adapter's existing capability/cache
+// contract. Requests never wait for Offload, including cold starts.
+var pipelineExecutionCache struct {
+	sync.Mutex
+	at         time.Time
+	refreshing bool
+	live       execution.LiveStats
+}
+
+var pipelineLiveSource = readPipelineLive
+
+func cachedPipelineLive(rows []store.Run, now time.Time) (execution.LiveStats, bool) {
+	pipelineExecutionCache.Lock()
+	defer pipelineExecutionCache.Unlock()
+	if !pipelineExecutionCache.refreshing && (pipelineExecutionCache.at.IsZero() || now.Sub(pipelineExecutionCache.at) >= 5*time.Second) {
+		pipelineExecutionCache.refreshing, pipelineExecutionCache.at = true, now
+		source := pipelineLiveSource
+		pipelineWorkers.Add(1)
+		go func() {
+			defer pipelineWorkers.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), pipelineTimeout)
+			defer cancel()
+			live := source(ctx, rows)
+			pipelineExecutionCache.Lock()
+			defer pipelineExecutionCache.Unlock()
+			// The adapter already preserves last successful data on fetch failure.
+			// Config failures happen before that adapter and need the same behavior.
+			if live.State != execution.LiveAvailable && live.GeneratedAt == nil {
+				live.GeneratedAt = pipelineExecutionCache.live.GeneratedAt
+				live.ObservedAt = pipelineExecutionCache.live.ObservedAt
+				live.Activities = pipelineExecutionCache.live.Activities
+				live.SourceMachine = pipelineExecutionCache.live.SourceMachine
+				live.Stale = live.GeneratedAt != nil
+			}
+			pipelineExecutionCache.live, pipelineExecutionCache.refreshing = live, false
+		}()
+	}
+	live := pipelineExecutionCache.live
+	if live.SourceMachine == "" {
+		live.SourceMachine, _ = os.Hostname()
+	}
+	return live, pipelineExecutionCache.refreshing
+}
+
+func projectPipelineExecutions(_ context.Context, board *pipeline.Board, now time.Time) pipelineSourceHealth {
 	// Copy nested slices before enrichment: cached snapshots are shared readers.
 	var attempts []*pipeline.ItemExecution
 	var rows []store.Run
@@ -282,9 +433,38 @@ func projectPipelineExecutions(ctx context.Context, board *pipeline.Board, now t
 		}
 	}
 	if len(attempts) == 0 {
-		return
+		return sourceHealth("execution", "", time.Time{}, now, 30*time.Second, false, "no_data")
 	}
-	applyPipelineLive(attempts, readPipelineLive(ctx, rows), now)
+	live, refreshing := cachedPipelineLive(rows, now)
+	applyPipelineLive(attempts, live, now)
+	category := ""
+	at := time.Time{}
+	if live.GeneratedAt != nil {
+		at = *live.GeneratedAt
+	}
+	switch live.State {
+	case execution.LiveAvailable:
+		if live.Stale {
+			category = "stale"
+		}
+	case execution.LiveUnsupported:
+		category = "unsupported"
+	case execution.LiveUnavailable:
+		category = "unavailable"
+	default:
+		category = "no_data"
+	}
+	health := sourceHealth("execution", "", at, now, 30*time.Second, refreshing, category)
+	if health.LastSuccess != nil && !live.ObservedAt.IsZero() {
+		health.LastSuccess = &live.ObservedAt
+	}
+	if live.State == execution.LiveAvailable && (live.ObservedAt.IsZero() || now.Sub(live.ObservedAt) > 30*time.Second || live.ObservedAt.After(now.Add(5*time.Second))) {
+		health.Stale = true
+		health.ErrorCategory = "stale"
+		health.IncidentKey = "execution//stale"
+	}
+	health.machine = live.SourceMachine
+	return health
 }
 
 // A session can contain retries. A host/session/time match is usable only when
