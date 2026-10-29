@@ -1,5 +1,7 @@
 # Pilot 监督详细设计
 
+> #510 已取代本文的自动唤醒、每项目 Pilot、冷却及唤醒状态方案。当前能力以 [平台 steward](pilot-design.md) 为准；用户定期检查由 #511 单独交付。下文保留为历史设计。
+
 本记录整理自 [#407](https://github.com/zhoushoujianwork/clawflow/issues/407) 及其补充意见。除 [概要中的 P1](pilot-design.md) 外，下述均为目标设计，不代表已经交付的能力。后续切片以各自议题的最新决策为准，尤其是 #409 对动作及 override_merge 的修订。
 
 ## 背景与执行

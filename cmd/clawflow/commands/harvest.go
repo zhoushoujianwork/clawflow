@@ -179,13 +179,13 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, only
 			// Already accepted: the sweep merges it.
 			skip("evidence_present", "pr", pr.Number, "issue", issueNum)
 			continue
-		case !errors.Is(evErr, errAcceptanceMissing):
+		case !errors.Is(evErr, errAcceptanceMissing) || acceptanceStoreExists(fullName, pr.Number):
 			// An existing record, unreadable evidence or a contract that cannot
 			// be built (e.g. no development provenance). Only a latest record
 			// that is an infrastructure attempt may be retried.
 			d, info, infraErr := harvestInfraDecision(ctx, client, fullName, pr.Number, harvestNow())
 			switch {
-			case infraErr != nil || d == harvestVerdict:
+			case infraErr != nil || (d == harvestVerdict && !errors.Is(evErr, errAcceptanceMissing)):
 				skip("evidence_not_missing", "pr", pr.Number, "issue", issueNum, "err", evErr.Error())
 				continue
 			case d == harvestInfraCoolingDown:
@@ -283,10 +283,10 @@ func harvestRun(ctx context.Context, client vcs.Client, setCtx func(context.Cont
 // Infrastructure retry policy. An attempt that ended without a reviewer verdict
 // (setup, provider, inspection, storage or cancellation error) says nothing
 // about the PR, so it is retried after a cooldown, at most harvestMaxInfra
-// attempts per contract. A new head or changed requirements is a new contract
-// and starts over. `clawflow acceptance run` is not capped.
+// consecutive attempts per head. A new head, changed requirements
+// or binary starts over. The execution entry point enforces the same cap.
 const (
-	harvestMaxInfra      = 3
+	harvestMaxInfra      = 2
 	harvestInfraCooldown = 15 * time.Minute
 )
 
@@ -316,9 +316,7 @@ func harvestInfraDecision(ctx context.Context, client vcs.Client, repo string, p
 	if err != nil {
 		return harvestVerdict, info, err
 	}
-	if info.digest, err = c.Digest(); err != nil {
-		return harvestVerdict, info, err
-	}
+	info.digest = acceptanceInfraKey(c)
 	store, err := acceptance.OpenStore(acceptanceStorePath(repo, pr))
 	if err != nil {
 		return harvestVerdict, info, err
@@ -331,6 +329,9 @@ func harvestInfraDecision(ctx context.Context, client vcs.Client, repo string, p
 	info.attempts = attempts.Count
 	if !attempts.LatestIsInfra {
 		return harvestVerdict, info, nil
+	}
+	if attempts.Count == 0 {
+		return harvestInfraRetry, info, nil
 	}
 	if attempts.Count >= harvestMaxInfra {
 		return harvestInfraExhausted, info, nil
@@ -351,7 +352,7 @@ func harvestInfraMarker(digest string) string {
 }
 
 func harvestInfraComment(repo string, pr int, info harvestInfraInfo) string {
-	return fmt.Sprintf("🤖 Independent acceptance for PR #%d could not run after %d attempts (setup or provider errors, no reviewer verdict). Automatic retries stopped. Run `clawflow acceptance run --repo %s --pr %d` after fixing the cause, or push a new commit.\n\n%s",
+	return fmt.Sprintf("🤖 Independent acceptance for PR #%d could not run after %d attempts (setup or provider errors, no reviewer verdict). Automatic retries stopped. Run `clawflow acceptance run --repo %s --pr %d` after changing the issue body or updating ClawFlow, or push a new commit.\n\n%s",
 		pr, info.attempts, repo, pr, harvestInfraMarker(info.digest))
 }
 
@@ -383,4 +384,9 @@ func harvestNonpassComment(r acceptance.Record) string {
 	}
 	return fmt.Sprintf("🤖 Independent acceptance for PR #%d: %s.\n\n%s%s\n\n%s",
 		r.Contract.PRNumber, r.Verdict, summary, next, harvestMarker(r))
+}
+
+// The retry/comment identity deliberately excludes moving base and policy state.
+func acceptanceInfraKey(c acceptance.Contract) string {
+	return acceptanceHash([]string{c.Repository, fmt.Sprint(c.PRNumber), c.HeadSHA, c.Requirements, acceptance.BinaryID()})
 }

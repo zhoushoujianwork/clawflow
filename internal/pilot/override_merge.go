@@ -126,7 +126,11 @@ func (e ActionExecutor) overrideMerge(a Action, run string, prior map[string]Act
 	if verdicts == 0 {
 		// No record is necessary but not sufficient: ClawFlow itself must show
 		// that provenance or the infrastructure budget explains the absence.
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		parent := e.Context
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 		reason, err := OverrideNoVerdictReason(ctx, c, a.Repo, a.PR)
 		cancel()
 		if err != nil || (reason != NoVerdictProvenance && reason != NoVerdictInfraBudget) {

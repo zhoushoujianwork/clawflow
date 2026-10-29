@@ -20,6 +20,9 @@ func NewStatusCmd() *cobra.Command {
 				return err
 			}
 
+			if cfg.Settings.Platform.URL != "" {
+				return printPlatformStatus(cmd, cfg.Settings.Platform)
+			}
 			repos := cfg.EnabledRepos()
 			if len(repos) == 0 {
 				fmt.Println("No repos configured. Edit ~/.clawflow/config/config.yaml")

@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -102,4 +103,34 @@ func TestPilotAndCoordinatorSettingsRoundTrip(t *testing.T) {
 	if loaded.Settings.Coordinator != original.Settings.Coordinator {
 		t.Fatalf("coordinator settings lost: %+v", loaded.Settings.Coordinator)
 	}
+}
+
+func TestPlatformSettingsRemainMachineLocal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	local := &config.Config{Repos: map[string]config.Repo{}, Settings: config.Settings{Platform: config.PlatformSettings{URL: "https://platform.example", TokenFile: "/private/admin-token", Fingerprint: "pin"}}}
+	if err := local.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Settings.Platform != local.Settings.Platform {
+		t.Fatal("platform settings did not round trip")
+	}
+	data, err := config.MarshalForGist(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("platform.example")) || bytes.Contains(data, []byte("admin-token")) || bytes.Contains(data, []byte("fingerprint")) {
+		t.Fatal("platform connection leaked into sync")
+	}
+	merged, err := config.MergeConfigs(local, []byte("settings:\n  platform:\n    url: https://untrusted.example\n    token_file: /untrusted\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Settings.Platform != local.Settings.Platform {
+		t.Fatal("sync replaced local platform trust")
+	}
+
 }

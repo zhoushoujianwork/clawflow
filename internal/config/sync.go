@@ -124,6 +124,7 @@ func MarshalForGist(cfg *Config) ([]byte, error) {
 		Repos:    make(map[string]syncableRepo, len(cfg.Repos)),
 		Settings: cfg.Settings,
 	}
+	payload.Settings.Platform = PlatformSettings{}   // platform credentials and trust are machine-local
 	payload.Settings.Execution = ExecutionSettings{} // execution runtime paths are machine-local
 	payload.Settings.Database = DatabaseSettings{}   // the DSN is a secret and never synced
 	for k, v := range cfg.Repos {
@@ -176,6 +177,7 @@ func mergeConfigsInternal(local *Config, remoteYAML []byte, conflictFatal bool) 
 		Repos:    make(map[string]Repo, len(local.Repos)),
 	}
 
+	merged.Settings.Platform = local.Settings.Platform
 	merged.Settings.Execution = local.Settings.Execution // never import remote execution paths
 	merged.Settings.Database = local.Settings.Database   // never import a remote DSN
 

@@ -16,6 +16,21 @@ import (
 
 func noop(*gorm.DB) error { return nil }
 
+func TestRegistryPreservesWorkflowBeforeTokenScope(t *testing.T) {
+	previous := 0
+	names := map[int]string{}
+	for _, migration := range store.Migrations {
+		if migration.Version <= previous || migration.Up == nil {
+			t.Fatalf("invalid migration after version %d: %+v", previous, migration)
+		}
+		names[migration.Version] = migration.Name
+		previous = migration.Version
+	}
+	if names[4] != "durable_workflow" || names[5] != "coordinator_token_scope" {
+		t.Fatalf("workflow and token scope migrations must retain distinct versions: %v", names)
+	}
+}
+
 func countRows(t *testing.T, s *store.Store) int64 {
 	t.Helper()
 	var n int64
@@ -183,5 +198,28 @@ func TestEnsureReadyWithoutDSN(t *testing.T) {
 	t.Setenv(store.DSNEnv, "")
 	if _, err := store.EnsureReady(context.Background(), &config.Config{}); !errors.Is(err, store.ErrNoDSN) {
 		t.Fatalf("want ErrNoDSN, got %v", err)
+	}
+}
+
+// TestActionsMigrationAfterTokenScope covers upgrades from the published base.
+func TestActionsMigrationAfterTokenScope(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:5]); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations)
+	if err != nil || len(applied) != 1 || applied[0] != 6 {
+		t.Fatalf("Actions upgrade: applied=%v err=%v", applied, err)
+	}
+	for _, table := range []string{"actions_attachments", "actions_evidence"} {
+		var exists bool
+		if err := s.DB().Raw("SELECT to_regclass(?) IS NOT NULL", table).Scan(&exists).Error; err != nil || !exists {
+			t.Fatalf("missing %s: exists=%v err=%v", table, exists, err)
+		}
+	}
+	var scope string
+	if err := s.DB().Raw("SELECT column_default FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tokens' AND column_name = 'scope'").Scan(&scope).Error; err != nil || !strings.Contains(scope, "worker") {
+		t.Fatalf("token scope migration lost: default=%q err=%v", scope, err)
 	}
 }

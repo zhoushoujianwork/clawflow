@@ -1,6 +1,6 @@
 # GitHub Actions 测试证据适配器
 
-`clawflow pr actions-observe --request request.json` 只观察已有 PR CI，单次查询后返回 JSON；不 dispatch、rerun 或修改 VCS。先运行 `clawflow db migrate` 应用 migration 5。每个请求固定独立验收 contract 和策略，PostgreSQL 保存当前 attachment 及各 run/attempt 的证据。重启后以相同请求调用即可重新关联；不需要保持 agent 会话，也不占用 coordinator 的 worker 租约。
+`clawflow pr actions-observe --request request.json` 只观察已有 PR CI，单次查询后返回 JSON；不 dispatch、rerun 或修改 VCS。先运行 `clawflow db migrate` 应用 migration 6。每个请求固定独立验收 contract 和策略，PostgreSQL 保存当前 attachment 及各 run/attempt 的证据。重启后以相同请求调用即可重新关联；不需要保持 agent 会话，也不占用 coordinator 的 worker 租约。
 
 这是控制面证据采集接口，不是新的调度器或独立验收 verdict。调用方在 `waiting_external` 时结束本次调用；coordinator 启动和每 30 秒自动恢复最早等待的一个 attachment（每次最多 30 秒），不分配 worker 或 agent 会话。没有 coordinator 时，重新调用同一命令继续查询。终态后的新 rerun 需要显式再次观察。当前不会自动给每个仓库绑定策略或启用新门禁；现有 required CI、provider protections 和 acceptance 门禁继续生效。worker 会话不能调用此命令来提交信任策略。观察成功不会批准策略、合并 PR 或改变仓库配置。
 

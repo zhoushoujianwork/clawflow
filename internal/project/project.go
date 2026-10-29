@@ -20,42 +20,13 @@ import (
 type Project struct {
 	Name       string     `yaml:"name"`
 	Repos      []string   `yaml:"repos"`
-	Automation Automation `yaml:"automation,omitempty"`
+	Automation Automation `yaml:"-"`
 	CreatedAt  string     `yaml:"created_at"`
 	UpdatedAt  string     `yaml:"updated_at"`
 }
 
-// Automation captures the per-project "project manager" toggle.
-//
-// When Enabled is true, every `clawflow run` pass will, after the
-// fixed-layer operators finish, wake the project manager (a
-// non-interactive `claude -p` invocation) for this project. The PM
-// is restricted to creating new issues — it does not touch existing
-// issue state. Created issues flow back into the operator pipeline
-// on the next pass, forming the closed loop.
-//
-// CooldownMinutes throttles wakeups: even if `clawflow run` is
-// invoked every few minutes, the PM only fires when at least
-// CooldownMinutes has elapsed since LastWokenAt. Zero = no cooldown
-// (fires every pass — usually too aggressive).
-//
-// LastWokenAt is the RFC3339 UTC timestamp of the last PM invocation;
-// the runner stamps it after each wake (success or failure) to anchor
-// the next cooldown window.
-//
-// BoundMachine, when non-empty, restricts Pilot wakeups to the machine
-// whose hostname matches this value. An empty BoundMachine means any
-// machine may wake the Pilot (the default, backward-compatible behaviour).
-// This mirrors the repo-level BoundMachine in RepoConfig and is the
-// recommended way to prevent duplicate Pilot wakeups in multi-machine
-// deployments.
-//
-// LastSkipReason / LastSkipAt record why the most recent Schedule pass
-// declined to wake this project's Pilot (e.g. bound to a different
-// machine, or require_binding=true with no bound_machine). Persisted so
-// the dashboard can explain a "Pilot on but no recent activity" state
-// without forcing the user to grep stderr. Cleared on a successful
-// MarkWoken so the field reflects the *current* obstacle, not history.
+// Automation is retained as a zero-valued compatibility view for old API clients.
+// Project files neither read nor persist these retired settings.
 type Automation struct {
 	Enabled         bool   `yaml:"enabled"`
 	CooldownMinutes int    `yaml:"cooldown_minutes,omitempty"`
@@ -419,143 +390,12 @@ func WriteDeployment(name, content string) error {
 	return nil
 }
 
-// SetAutomation flips the automation toggle and/or cooldown for a
-// project. Pass cooldownMinutes < 0 to leave the existing value in
-// place (use case: enable/disable without retyping the cooldown).
-func SetAutomation(name string, enabled bool, cooldownMinutes int) error {
-	p, err := Get(name)
-	if err != nil {
-		return err
-	}
-	p.Automation.Enabled = enabled
-	if cooldownMinutes >= 0 {
-		p.Automation.CooldownMinutes = cooldownMinutes
-	}
-	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return save(p)
-}
+// SetAutomation is a compatibility no-op. Pilot is a global conversation steward.
+func SetAutomation(_ string, _ bool, _ int) error { return nil }
 
-// SetAutomationBoundMachine sets or clears the BoundMachine for a project's
-// automation. Pass an empty string to clear the binding (any machine may wake
-// the Pilot). This is a separate function from SetAutomation so callers can
-// update the binding without touching the enabled/cooldown state.
-//
-// Also clears any LastSkipReason / LastSkipAt: the binding is the most
-// common reason Schedule refuses to wake (bound_machine mismatch or
-// require_binding=true with no binding), so a user explicitly changing
-// the binding is implicitly saying "the prior obstacle no longer applies
-// — reset the status display". If the next Schedule pass still skips for
-// a different reason (e.g. cooldown), MarkSkipped will repopulate the
-// field; until then, the dashboard shows a clean state instead of an
-// amber banner that's already stale.
-func SetAutomationBoundMachine(name, boundMachine string) error {
-	p, err := Get(name)
-	if err != nil {
-		return err
-	}
-	p.Automation.BoundMachine = boundMachine
-	p.Automation.LastSkipReason = ""
-	p.Automation.LastSkipAt = ""
-	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return save(p)
-}
-
-// MarkWoken stamps LastWokenAt to now. Called by the runner right
-// before invoking the PM so cooldown accounting starts immediately —
-// a PM that takes 20 minutes to think doesn't get re-fired the
-// instant it returns.
-//
-// Also clears any stale LastSkipReason / LastSkipAt — the reason this
-// wake is happening is that whatever obstacle the prior pass recorded
-// no longer applies. Leaving the field would lie to the dashboard.
-func MarkWoken(name string) error {
-	p, err := Get(name)
-	if err != nil {
-		return err
-	}
-	p.Automation.LastWokenAt = time.Now().UTC().Format(time.RFC3339)
-	p.Automation.LastSkipReason = ""
-	p.Automation.LastSkipAt = ""
-	p.UpdatedAt = p.Automation.LastWokenAt
-	return save(p)
-}
-
-// SetLastWokenAt overwrites LastWokenAt with an explicit timestamp (RFC3339,
-// or "" to clear it). Used to ROLL BACK the stamp MarkWoken laid down before a
-// wake that then died on an account-level billing cap: a 402 wake does no work
-// (often 3–4 seconds, $0) yet would otherwise burn the project's full cooldown
-// — up to two hours of silence bought with zero attempts (issue #320).
-//
-// Deliberately not folded into MarkWoken: that one also clears
-// LastSkipReason / LastSkipAt, which a rollback must leave exactly as it found
-// them.
-func SetLastWokenAt(name, ts string) error {
-	p, err := Get(name)
-	if err != nil {
-		return err
-	}
-	p.Automation.LastWokenAt = ts
-	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return save(p)
-}
-
-// MarkSkipped records why the most recent Schedule pass declined to
-// wake this project's Pilot. Persisted so the dashboard can show
-// "skipped: <reason>" instead of "no recent activity (silent)".
-//
-// Idempotent on identical reasons: if the prior skip recorded the same
-// text we skip the write to avoid yaml churn (Schedule may fire every
-// few minutes via cron and a stuck-binding project would otherwise
-// rewrite project.yaml on every pass).
-func MarkSkipped(name, reason string) error {
-	p, err := Get(name)
-	if err != nil {
-		return err
-	}
-	if p.Automation.LastSkipReason == reason {
-		return nil
-	}
-	p.Automation.LastSkipReason = reason
-	p.Automation.LastSkipAt = time.Now().UTC().Format(time.RFC3339)
-	p.UpdatedAt = p.Automation.LastSkipAt
-	return save(p)
-}
-
-// CooldownRemaining returns how long until this project's PM can
-// next be woken. Returns 0 if the project is ready (cooldown elapsed
-// or never woken). Returns 0 also when automation is disabled — the
-// caller is expected to filter on Enabled separately.
-func (p *Project) CooldownRemaining(now time.Time) time.Duration {
-	if p.Automation.CooldownMinutes <= 0 || p.Automation.LastWokenAt == "" {
-		return 0
-	}
-	last, err := time.Parse(time.RFC3339, p.Automation.LastWokenAt)
-	if err != nil {
-		return 0
-	}
-	deadline := last.Add(time.Duration(p.Automation.CooldownMinutes) * time.Minute)
-	if now.After(deadline) {
-		return 0
-	}
-	return deadline.Sub(now)
-}
-
-// ListAutomationEnabled returns all projects with Automation.Enabled
-// set, in name order. Used by the runner to decide which PMs to fan
-// out to at the end of each pass.
-func ListAutomationEnabled() ([]*Project, error) {
-	all, err := List()
-	if err != nil {
-		return nil, err
-	}
-	enabled := make([]*Project, 0, len(all))
-	for _, p := range all {
-		if p.Automation.Enabled {
-			enabled = append(enabled, p)
-		}
-	}
-	return enabled, nil
-}
+// SetAutomationBoundMachine is a compatibility no-op; steward invocations use
+// the explicit machine-local Offload profile.
+func SetAutomationBoundMachine(_, _ string) error { return nil }
 
 // HeaderForRepo returns a project-context header to prepend to any
 // prompt for an operation rooted at `repo`. Empty string if the repo

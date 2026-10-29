@@ -32,7 +32,6 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
-	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -350,21 +349,18 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// process-level watchdog.
 	overall := overallRunBudget(timeout)
 	// watchdogDeadline is the wall-clock moment the self-watchdog below force-
-	// exits the process. Threaded into pilot.Schedule (Phase 4) so it can
-	// refuse to start a wake that plainly won't fit in what's left — see the
-	// call site below and issue #325.
+	// exits the process. Harvest also uses it to bound acceptance work.
 	watchdogDeadline := time.Now().Add(overall)
 	selfWatchdog := time.AfterFunc(overall, func() {
 		lg.Warn("run/watchdog", "pid", os.Getpid(), "msg", "overall run budget exceeded — likely a hung git/network call; dumping stacks and exiting", "budget", overall.String())
 		fmt.Fprintf(os.Stderr, "\n⚠ clawflow run exceeded its overall budget %s — likely a hung git/network call.\n  Dumping goroutine stacks and exiting (issue #216 safeguard).\n", overall)
 		dumpGoroutineStacks(lg)
-		// Kill whatever claude subprocess is still in flight (operator or
-		// Pilot wake) BEFORE exiting. Without this, os.Exit orphans it: it
+		// Kill any operator subprocess still in flight BEFORE exiting. Without this, os.Exit orphans it: it
 		// keeps running, keeps spending, and keeps writing to the VCS with
 		// no meta.json ever reaching a terminal status because the parent
 		// that would write it is already gone (issue #325). The budget
-		// tripping here does not mean the child is hung — a Pilot wake is
-		// often a legitimate long-running claude call that simply didn't
+		// tripping here does not mean the child is hung — an operator is
+		// often a legitimate long-running Offload call that simply didn't
 		// fit in what was left of the overall budget; killing it is about
 		// making sure it doesn't run and write unrecorded, not about it
 		// having misbehaved.
@@ -695,33 +691,6 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	}
 	if err := snapshot.WriteIssuesMerged(globalIssues, preserveRepos); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot issues: %v\n", err)
-	}
-
-	// Phase 4 (sequential): wake the project-manager for every project
-	// with automation enabled and past its cooldown. PMs run AFTER
-	// operators so they see the post-pass state — any issue an
-	// operator just updated is visible to the PM
-	// scheduling decision. PM failures are non-fatal: the run as a
-	// whole is reported successful as long as the operator phase
-	// completed.
-	//
-	// Ad-hoc single-issue runs (--issue) shouldn't wake every project's PM.
-	// Every other pass may: the web scheduler now runs one repo-scoped pass
-	// per repository, so gating on onlyRepo would stop scheduled Pilot wakes.
-	// Passes overlap, so pilot.Schedule is guarded by a try-lock; a pass that
-	// loses the race leaves the wake to the holder, and pilot.Schedule's own
-	// per-project interval prevents repeated wakes across passes.
-	if onlyIssue == 0 {
-		if snapshot.TryAcquirePilotScheduleLock() {
-			if n, err := pilot.Schedule(ctx, timeout, watchdogDeadline); err != nil {
-				fmt.Fprintf(os.Stderr, "[pilot] schedule: %v\n", err)
-			} else if n > 0 {
-				fmt.Fprintf(os.Stderr, "[pilot] woke %d project(s)\n", n)
-			}
-			snapshot.ReleasePilotScheduleLock()
-		} else {
-			lg.Info("run/pilot_skip", "reason", "another_pass_scheduling")
-		}
 	}
 
 	// Auto-push: sync config to Gist after the run so any label/config
@@ -3002,7 +2971,7 @@ func isGitLockError(output string) bool {
 // overallRunBudget returns the wall-clock budget for a whole `clawflow
 // run` process before the self-watchdog force-exits it. The per-operator
 // timeout already bounds each claude/operator; this bounds everything
-// else (scan, git fetch/push, pilot waves, snapshot writes) as a whole.
+// else (scan, git fetch/push, snapshot writes) as a whole.
 // It is 2× the per-operator budget, floored at per-op + 30 minutes, so a
 // healthy multi-operator run never trips it. Kept strictly below
 // api.TriggerRun's watchdog so a slow run self-terminates (with a stack

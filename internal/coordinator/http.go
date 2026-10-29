@@ -68,6 +68,9 @@ func NewHandler(store WorkerStore) http.Handler {
 			if err != nil {
 				return err
 			}
+			if !token.HasScope(ScopeWorker) {
+				return ErrToken
+			}
 			worker = token.Name
 			if action == "unknown" {
 				status = http.StatusNotFound
