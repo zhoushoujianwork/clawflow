@@ -66,6 +66,19 @@ func TestWorkerTokenCLI(t *testing.T) {
 	if strings.Contains(listing, secret) {
 		t.Fatal("secret leaked")
 	}
+
+	adminSecret := run("token", "create", "--name", "admin-cli", "--scope", "admin")
+	adminToken, err := coordinator.New(db.DB()).VerifyToken(context.Background(), adminSecret)
+	if err != nil || adminToken == nil || !adminToken.HasScope(coordinator.ScopeAdmin) {
+		t.Fatalf("admin token: %+v %v", adminToken, err)
+	}
+	invalid := NewWorkerCmd()
+	invalid.SetArgs([]string{"token", "create", "--name", "invalid", "--scope", "root"})
+	invalid.SetOut(io.Discard)
+	invalid.SetErr(io.Discard)
+	if err := invalid.Execute(); err == nil {
+		t.Fatal("invalid token scope accepted")
+	}
 	run("token", "revoke", "--name", "cli")
 	if _, err := coordinator.New(db.DB()).VerifyToken(context.Background(), secret); err == nil {
 		t.Fatal("revoked token valid")

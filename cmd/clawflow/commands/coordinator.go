@@ -32,6 +32,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 	tasks := coordinator.New(db.DB())
 	results := &coordinatorResults{WorkerStore: tasks, tasks: tasks, loadJob: loadCoordinatorJob, apply: applyCoordinatorReport}
 	server := coordinator.NewServer(settings.ListenAddress(), results, cert)
+	server.Handler = coordinator.NewPlatformHandler(results, &platformAdmin{board: tasks.Board})
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		db.Close()
