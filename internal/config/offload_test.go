@@ -9,12 +9,12 @@ import (
 )
 
 func TestExecutionSettingsStayMachineLocal(t *testing.T) {
-	local := &Config{Repos: map[string]Repo{}, Settings: Settings{Execution: ExecutionSettings{Command: "/local/offload", Profile: "local", RoleProfiles: map[string]string{"chat": "chat-profile"}, CodexSandbox: "workspace-write"}}}
+	local := &Config{Repos: map[string]Repo{}, Settings: Settings{Execution: ExecutionSettings{TestDatabaseDSN: "postgres://local-secret", Command: "/local/offload", Profile: "local", RoleProfiles: map[string]string{"chat": "chat-profile"}, CodexSandbox: "workspace-write"}}}
 	raw, err := MarshalForGist(local)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "/local/") || strings.Contains(string(raw), "execution:") {
+	if strings.Contains(string(raw), "/local/") || strings.Contains(string(raw), "execution:") || strings.Contains(string(raw), "local-secret") {
 		t.Fatalf("runtime settings leaked into sync: %s", raw)
 	}
 	merged, err := MergeConfigs(local, []byte("settings:\n  execution:\n    command: /remote/agh\n"))

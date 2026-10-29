@@ -11,7 +11,7 @@ import (
 )
 
 func TestRunnerReportCorrection(t *testing.T) {
-	for _, mode := range []string{"parse", "passed", "checklist", "observation", "twice-invalid", "infrastructure", "execution", "changed-before", "changed-after", "wrong-session", "reused-run", "wrong-profile", "correction-execution"} {
+	for _, mode := range []string{"parse", "passed", "checklist", "observation", "twice-invalid", "unstructured", "malformed-pass", "infrastructure", "execution", "changed-before", "changed-after", "wrong-session", "reused-run", "wrong-profile", "correction-execution"} {
 		t.Run(mode, func(t *testing.T) {
 			r, scratch, workspace := setupRunner(t)
 			fixture := structuredRecord()
@@ -83,6 +83,10 @@ func TestRunnerReportCorrection(t *testing.T) {
 				result.RunID, result.Text = "correction-run", valid
 				result.Usage = json.RawMessage(`{"input_tokens":12,"output_tokens":7}`)
 				switch mode {
+				case "unstructured":
+					result.Text = `{"status":"passed","findings":[{"kind":"defect","summary":"wrong result","defect":"wrong value","evidence":"observed wrong result"}]}`
+				case "malformed-pass":
+					result.Text = `{"status":"passed","summary":"verified","evidence":[]}`
 				case "twice-invalid":
 					result.Text = bad
 				case "wrong-session":
@@ -97,7 +101,12 @@ func TestRunnerReportCorrection(t *testing.T) {
 				return result, nil
 			}
 			record, err := r.Run(context.Background(), fixture.Contract, scratch, workspace)
-			success := mode == "parse" || mode == "passed" || mode == "checklist" || mode == "observation"
+			success := mode == "parse" || mode == "passed" || mode == "checklist" || mode == "observation" || mode == "unstructured"
+			if mode == "unstructured" {
+				if !record.Unstructured || record.ValidationError == "" || Evaluate(fixture.Contract, record) == nil {
+					t.Fatalf("unsafe salvaged record: %+v", record)
+				}
+			}
 			if success {
 				if err != nil || record.Verdict != fixture.Verdict {
 					t.Fatalf("verdict=%s err=%v", record.Verdict, err)

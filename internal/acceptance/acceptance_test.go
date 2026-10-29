@@ -160,6 +160,10 @@ func TestStore(t *testing.T) {
 	if err != nil || p.Digest != r.Plan.Digest {
 		t.Fatalf("load plan: %v", err)
 	}
+	// A worker and the coordinator sharing one store save the same plan twice.
+	if err := s.SavePlan(c, r.Plan); err != nil {
+		t.Fatalf("identical plan resave: %v", err)
+	}
 	p.Text = "replacement"
 	p.Digest = digest(p.Text)
 	if s.SavePlan(c, p) == nil {
@@ -168,6 +172,9 @@ func TestStore(t *testing.T) {
 	if err := s.SaveRecord(r); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.SaveRecord(r); err != nil {
+		t.Fatalf("identical record resave: %v", err)
+	}
 	loaded, err := s.LoadRecord(c, r.AttemptID)
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +182,9 @@ func TestStore(t *testing.T) {
 	if err := Evaluate(c, loaded); err != nil {
 		t.Fatal(err)
 	}
-	if s.SaveRecord(r) == nil {
+	changed := r
+	changed.BinaryID = "different-binary"
+	if s.SaveRecord(changed) == nil {
 		t.Fatal("overwrote immutable record")
 	}
 	name, _ := planName(c, r.Plan.AttemptID)
@@ -700,8 +709,8 @@ func TestReviewerFindingPolicy(t *testing.T) {
 		{"requirement", Failed, []Finding{{Kind: "requirement", Summary: "retry absent", Requirement: "retry on transient failure", Evidence: "TestRetry fails: got one attempt"}}, Failed, false},
 		{"unplanned-defect", Passed, []Finding{{Kind: "defect", Summary: "race outside plan", Defect: "concurrent map writes in changed handler", Evidence: "race detector points to handler.go:42"}}, Failed, false},
 		{"no-findings", Failed, nil, Blocked, true},
-		{"no-requirement", Failed, []Finding{{Kind: "requirement", Summary: "more tests", Evidence: "plan gap"}}, Blocked, true},
-		{"no-defect-evidence", Failed, []Finding{{Kind: "defect", Summary: "possible race", Defect: "race"}}, Blocked, true},
+		{"no-requirement", Failed, []Finding{{Kind: "requirement", Summary: "more tests", Evidence: "plan gap"}}, Failed, false},
+		{"no-defect-evidence", Failed, []Finding{{Kind: "defect", Summary: "possible race", Defect: "race"}}, Failed, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, scratch, workspace := setupRunner(t)

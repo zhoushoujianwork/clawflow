@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -32,11 +33,11 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
-	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // runLog is the package-level run.log handle, set by NewRunCmd's RunE
@@ -68,6 +69,7 @@ func roleForOperator(opName string) string {
 // or invoke ad-hoc; the CLI holds no long-running state.
 func NewRunCmd() *cobra.Command {
 	var (
+		localRun  bool
 		onlyRepo  string
 		onlyIssue int
 		timeout   time.Duration
@@ -97,15 +99,27 @@ Host affinity is enforced by worker task tags.`,
 			if onlyIssue != 0 && onlyRepo == "" {
 				return fmt.Errorf("--issue requires --repo")
 			}
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+			if localRun {
+				fmt.Fprintln(cmd.ErrOrStderr(), "[warn] --local：绕过平台调度，执行一次本地调试运行")
+				ctx = context.WithValue(ctx, localRunKey{}, true)
+			} else if err := cfg.Settings.SchedulingError(); err != nil {
+				return err
+			}
 			// PostgreSQL is required: fail fast before any work.
 			release, err := gateStore(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer release()
-			return runOnce(cmd.Context(), onlyRepo, onlyIssue, timeout)
+			return runOnce(ctx, onlyRepo, onlyIssue, timeout)
 		},
 	}
+	cmd.Flags().BoolVar(&localRun, "local", false, "绕过平台调度，仅用于一次本地调试运行")
 	cmd.Flags().StringVar(&onlyRepo, "repo", "", "Restrict to a single repo (owner/repo); default: all enabled repos (with --issue the repo may be disabled)")
 	cmd.Flags().IntVar(&onlyIssue, "issue", 0, "Restrict to a single issue number (requires --repo)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator Offload execution timeout")
@@ -277,6 +291,8 @@ func syncLocked(fn func() bool) bool {
 	return ok
 }
 
+type localRunKey struct{}
+
 func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.Duration) error {
 	// Global collection for all issues from all repos
 	var globalIssues []snapshot.IssueEntry
@@ -286,6 +302,17 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		ctx = context.Background()
 	}
 
+	// Reject clients before locks, sync, reconciliation or any scheduling side effects.
+	if local, _ := ctx.Value(localRunKey{}).(bool); !local {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			return err
+		}
+	}
+
 	// Open the run.log sink. nil-safe — if Open fails (read-only home,
 	// disk full) the rest of the command still runs; only the file
 	// trail is missing. Install it as the snapshot.ReconcileLog sink so
@@ -293,12 +320,15 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	lg, _ := clog.Open("run")
 	defer lg.Close()
 	runLog = lg
+	if local, _ := ctx.Value(localRunKey{}).(bool); local {
+		lg.Warn("run/local_override", "msg", "explicit --local debugging run bypasses platform scheduling")
+	}
 	if lg != nil {
 		snapshot.ReconcileLog = lg
 	}
 
 	// Per-repo run locks: a pass locks only the repositories it processes, so
-	// a long pass for repo A (operators, 7-12 min acceptance harvest) does not
+	// a long operator pass for repo A does not
 	// block repos B and C. A repo-scoped pass (--repo R) locks R here; an
 	// unscoped pass locks its candidates once the config is loaded below. On
 	// contention an untargeted pass logs run/skip and exits cleanly so
@@ -350,21 +380,18 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// process-level watchdog.
 	overall := overallRunBudget(timeout)
 	// watchdogDeadline is the wall-clock moment the self-watchdog below force-
-	// exits the process. Threaded into pilot.Schedule (Phase 4) so it can
-	// refuse to start a wake that plainly won't fit in what's left — see the
-	// call site below and issue #325.
+	// exits the process. Harvest also uses it to bound acceptance work.
 	watchdogDeadline := time.Now().Add(overall)
 	selfWatchdog := time.AfterFunc(overall, func() {
 		lg.Warn("run/watchdog", "pid", os.Getpid(), "msg", "overall run budget exceeded — likely a hung git/network call; dumping stacks and exiting", "budget", overall.String())
 		fmt.Fprintf(os.Stderr, "\n⚠ clawflow run exceeded its overall budget %s — likely a hung git/network call.\n  Dumping goroutine stacks and exiting (issue #216 safeguard).\n", overall)
 		dumpGoroutineStacks(lg)
-		// Kill whatever claude subprocess is still in flight (operator or
-		// Pilot wake) BEFORE exiting. Without this, os.Exit orphans it: it
+		// Kill any operator subprocess still in flight BEFORE exiting. Without this, os.Exit orphans it: it
 		// keeps running, keeps spending, and keeps writing to the VCS with
 		// no meta.json ever reaching a terminal status because the parent
 		// that would write it is already gone (issue #325). The budget
-		// tripping here does not mean the child is hung — a Pilot wake is
-		// often a legitimate long-running claude call that simply didn't
+		// tripping here does not mean the child is hung — an operator is
+		// often a legitimate long-running Offload call that simply didn't
 		// fit in what was left of the overall budget; killing it is about
 		// making sure it doesn't run and write unrecorded, not about it
 		// having misbehaved.
@@ -400,8 +427,17 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	if local, _ := ctx.Value(localRunKey{}).(bool); local {
+		cfg.Settings.Coordinator.Enabled = false
+	} else if err := cfg.Settings.SchedulingError(); err != nil {
+		return err
+	}
+
+	ctx, apiPass := github.BeginPass(ctx)
+
 	// Publish on every exit after configuration is available, including failed passes.
 	defer func() {
+		apiPass.Save(filepath.Join(snapshot.DataDir(), "vcs-usage.json"))
 		if err := writePassPipeline(); err != nil {
 			fmt.Fprintf(os.Stderr, "snapshot pipeline: %v\n", err)
 		}
@@ -548,7 +584,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	}
 	var jobs []*runJob
 	upgradeRepos := make(map[string]config.Repo)
-	depOpen := queueDepResolver(cfg)
+	depOpen := queueDepResolver(github.WithStage(ctx, "scan"), cfg)
 	for fullName, repoCfg := range allRepos {
 		repoCfg.CoordinatorMode = cfg.Settings.Coordinator.Enabled
 		repoCfg.CoordinatorActive = activeTasks[fullName]
@@ -582,7 +618,11 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		}
 		repoPending, repoJobs, err := scanRepoOnceQ(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, issueSink, queueRuntime{Settings: cfg.Settings.Queue, DepOpen: depOpen})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
+			if errors.Is(err, vcs.ErrPollingDeferred) {
+				preserveRepos[fullName] = true
+			} else {
+				fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
+			}
 		}
 		// Drop the queue, keep the scan. The issue snapshot still reaches the
 		// dashboard, which already renders this repo's base_branch hint
@@ -674,6 +714,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 				delete(rerunRepos, repo)
 				continue
 			}
+			setVCSContext(client, github.WithStage(ctx, "snapshot"))
 			fresh := captureIssuesSnapshot(client, repo)
 			if fresh == nil { // ListIssues failed — fall back to scan-time data
 				delete(rerunRepos, repo)
@@ -695,33 +736,6 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	}
 	if err := snapshot.WriteIssuesMerged(globalIssues, preserveRepos); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot issues: %v\n", err)
-	}
-
-	// Phase 4 (sequential): wake the project-manager for every project
-	// with automation enabled and past its cooldown. PMs run AFTER
-	// operators so they see the post-pass state — any issue an
-	// operator just updated is visible to the PM
-	// scheduling decision. PM failures are non-fatal: the run as a
-	// whole is reported successful as long as the operator phase
-	// completed.
-	//
-	// Ad-hoc single-issue runs (--issue) shouldn't wake every project's PM.
-	// Every other pass may: the web scheduler now runs one repo-scoped pass
-	// per repository, so gating on onlyRepo would stop scheduled Pilot wakes.
-	// Passes overlap, so pilot.Schedule is guarded by a try-lock; a pass that
-	// loses the race leaves the wake to the holder, and pilot.Schedule's own
-	// per-project interval prevents repeated wakes across passes.
-	if onlyIssue == 0 {
-		if snapshot.TryAcquirePilotScheduleLock() {
-			if n, err := pilot.Schedule(ctx, timeout, watchdogDeadline); err != nil {
-				fmt.Fprintf(os.Stderr, "[pilot] schedule: %v\n", err)
-			} else if n > 0 {
-				fmt.Fprintf(os.Stderr, "[pilot] woke %d project(s)\n", n)
-			}
-			snapshot.ReleasePilotScheduleLock()
-		} else {
-			lg.Info("run/pilot_skip", "reason", "another_pass_scheduling")
-		}
 	}
 
 	// Auto-push: sync config to Gist after the run so any label/config
@@ -761,18 +775,19 @@ func failedRunsError(failed []firedKey) error {
 // runJob is one (issue, operator) pair that scanRepoOnce decided is
 // eligible to fire. The worker pool in runJobsParallel consumes these.
 type runJob struct {
-	hooks    *jobHooks
-	result   *jobResult
-	harvest  func(context.Context) []firedKey // acceptance phase, using one pool worker
-	repair   *ciRepairContext
-	reopen   *reopenContext
-	comments []vcs.IssueComment
-	op       *operator.Operator
-	sub      *operator.Subject
-	repo     string
-	repoCfg  config.Repo
-	client   vcs.Client
-	language string // Settings.Language propagated from cfg at job creation time
+	acceptancePlan *acceptance.Plan
+	hooks          *jobHooks
+	result         *jobResult
+	harvest        func(context.Context) []firedKey // acceptance phase, using one pool worker
+	repair         *ciRepairContext
+	reopen         *reopenContext
+	comments       []vcs.IssueComment
+	op             *operator.Operator
+	sub            *operator.Subject
+	repo           string
+	repoCfg        config.Repo
+	client         vcs.Client
+	language       string // Settings.Language propagated from cfg at job creation time
 }
 
 // firedKey identifies a (repo, issue, operator) triple that ran to a
@@ -894,6 +909,14 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 		}
 	}
 
+	if !pollingAllowed(client) {
+		// Only pending delivery may spend reserved quota on the identity guard.
+		paths, _ := filepath.Glob(filepath.Join(snapshot.DataDir(), "runs", strings.ReplaceAll(fullName, "/", "__"), "issue-*", "*", "writeback.json"))
+		if !executeHere || len(paths) == 0 {
+			return nil, nil, vcs.ErrPollingDeferred
+		}
+	}
+
 	// Same-name recreation guard: owner/name is reused after delete+recreate
 	// on both platforms but the numeric repo ID is not, and issue numbering
 	// restarts at #1 — so without this check the new repo's runs land in (and
@@ -914,6 +937,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	if executeHere {
 		pendingWriteBacks = replayRepoWriteBacks(client, fullName, onlyIssue)
 	}
+	if !pollingAllowed(client) {
+		return nil, nil, vcs.ErrPollingDeferred
+	}
+	setVCSContext(client, github.WithStage(ctx, "scan"))
+
 	issues, err := client.ListOpenIssues(fullName)
 	if err != nil {
 		runLog.Warn("run/scan", "repo", fullName, "phase", "list_issues_err", "elapsed", time.Since(scanStart).Round(time.Millisecond), "err", err.Error())
@@ -1018,6 +1046,15 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			}
 			matchSub := sub
 			if op.Name == "implement" {
+				// Targeted runs bypass queue ordering, but must still leave
+				// already delivered issues to harvest/repair.
+				if onlyIssue == sub.Number {
+					exists, err := client.PRExistsForIssue(fullName, sub.Number)
+					if err != nil || exists {
+						implementState[sub.Number] = "open_pr_or_lookup_failed"
+						continue
+					}
+				}
 				if reopenErr != nil {
 					implementState[sub.Number] = "reopen_check_failed: " + reopenErr.Error()
 					continue
@@ -1202,6 +1239,9 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	// Operator matching above keeps using ListOpenIssues so the
 	// per_page=100 budget for open issues is independent of any closed
 	// noise.
+	if !pollingAllowed(client) {
+		return pending, jobs, vcs.ErrPollingDeferred
+	}
 	*allIssues = append(*allIssues, captureIssuesSnapshot(client, fullName)...)
 
 	runLog.Info("run/scan", "repo", fullName, "phase", "done", "issues", len(issues), "pending", len(pending), "jobs", len(jobs), "elapsed", time.Since(scanStart).Round(time.Millisecond))
@@ -1423,6 +1463,12 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 // from concurrent workers stays disentangleable.
 func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool, failed bool) {
 	j.result = &jobResult{Status: "skipped"}
+	releaseSlot, slotErr := configuredAgentSlot(ctx)
+	if slotErr != nil {
+		runLog.Info("run/agent_slot_busy", "repo", j.repo, "err", slotErr.Error())
+		return false, false, false
+	}
+	defer releaseSlot()
 	originalClient, originalCfg := j.client, j.repoCfg
 	if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
 		rc.SetRequestContext(ctx)
@@ -1630,6 +1676,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		fmt.Fprintf(os.Stderr, "%s → base-branch override: %q (from %s)\n", prefix, overrideBranch, overrideSource)
 	}
 
+	plan, planErr := prepareImplementationPlan(ctx, j)
+	if planErr != nil {
+		runningMeta.Status, runningMeta.Error = "failed", planErr.Error()
+		_ = snapshot.WriteRunMeta(runDir, runningMeta)
+		fmt.Fprintf(os.Stderr, "%s acceptance planning failed: %v\n", prefix, planErr)
+		if j.repair != nil {
+			_ = j.releaseRepair("setup", time.Now().UTC())
+		}
+		return false, false, true
+	}
+	j.acceptancePlan = plan
+
 	var previousRun snapshot.RunMeta
 	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
 		previousRun = previousDevelopmentRun(j.repo, j.sub.Number, startedAt)
@@ -1735,13 +1793,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	runStart := time.Now()
 
 	// Build resume context for the operator prompt when reusing a worktree.
-	var resumeCtx string
+	resumeCtx := implementationChecklist(j.acceptancePlan)
 	if wtResult.Resumed && j.repair == nil {
-		resumeCtx = buildResumeContext(wtResult)
+		resumeCtx += buildResumeContext(wtResult)
 	}
 	if j.repair != nil {
 		comments = nil
-		resumeCtx = repairInput
+		resumeCtx += repairInput
 	}
 
 	// Rebind the VCS client's request context before execution + write-back.
@@ -1777,6 +1835,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		runningMeta.Backend = r.Backend
 		runningMeta.Model = r.Model
 		runningMeta.Usage = snapshot.UsageFromResult(r)
+		runningMeta.ExecutionMetadata = snapshot.ExecutionFromResult(r)
+		if r.Machine != "" {
+			runningMeta.Machine = r.Machine
+		}
 	})
 	confirmedHead := ""
 	output, outcome, runErr := runJobOperator(ctx, j.op, j.sub, j.client, operator.RunOptions{
@@ -1829,6 +1891,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
 		finalizingMeta := snapshot.RunMeta{
+			ExecutionMetadata:  runningMeta.ExecutionMetadata,
 			DevelopmentSession: runningMeta.DevelopmentSession,
 			Usage:              runningMeta.Usage,
 			Profile:            runningMeta.Profile, Backend: runningMeta.Backend, Model: runningMeta.Model, Machine: runningMeta.Machine,
@@ -1951,6 +2014,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	endedAt := time.Now().UTC()
 	rm := snapshot.RunMeta{
+		ExecutionMetadata:  runningMeta.ExecutionMetadata,
 		DevelopmentSession: runningMeta.DevelopmentSession,
 		Usage:              runningMeta.Usage,
 		Profile:            runningMeta.Profile, Backend: runningMeta.Backend, Model: runningMeta.Model, Machine: runningMeta.Machine,
@@ -3008,7 +3072,7 @@ func isGitLockError(output string) bool {
 // overallRunBudget returns the wall-clock budget for a whole `clawflow
 // run` process before the self-watchdog force-exits it. The per-operator
 // timeout already bounds each claude/operator; this bounds everything
-// else (scan, git fetch/push, pilot waves, snapshot writes) as a whole.
+// else (scan, git fetch/push, snapshot writes) as a whole.
 // It is 2× the per-operator budget, floored at per-op + 30 minutes, so a
 // healthy multi-operator run never trips it. Kept strictly below
 // api.TriggerRun's watchdog so a slow run self-terminates (with a stack

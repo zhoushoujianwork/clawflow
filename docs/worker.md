@@ -18,7 +18,8 @@ clawflow worker --coordinator https://HOST:8093 \
 
 `--run-untagged` 默认开启，可用 `--run-untagged=false` 禁止无标签任务。
 Worker 自动添加小写且去掉 `.local` 后缀的 `host-<hostname>` 标签。
-任务的所有标签都必须满足；平台标签（如 `github`）需通过 `--tags` 显式声明。
+任务的所有标签都必须满足；任务标签来自仓库 `worker_tags`、`worker_tags_by_kind` 和 issue 的 `worker:<tag>`。
+平台类型和 VCS 地址不会自动成为任务标签；如需按平台隔离，应在仓库和 worker 两侧显式配置相同标签（如 `github`）。
 使用 `--roles acceptance` 运行独立验收，或 `--roles operator,acceptance` 同时支持两类任务。
 
 每个空闲槽位领取一个任务，空队列每 5 秒重试。执行期间每 30 秒续租；
@@ -49,10 +50,42 @@ Worker 名称来自注册身份；`live` 表示 token 未撤销且最近 120 秒
 ## 独立验收
 
 协调器沿用已有 harvest 条件，在 CI 成功且缺少验收证据或允许基础设施重试时创建验收任务。
-仓库配置 `worker_tags_by_kind.acceptance` 覆盖通用 `worker_tags`，平台标签与 issue 的
-`worker:<tag>` 标签仍须全部匹配。`acceptance_worker: different` 排除该 PR 最新开发任务的
-worker；`any` 允许同一 worker。未配置时，在领取任务时统计最近 120 秒在线且角色、标签匹配的
-验收 worker：超过一个使用 `different`，否则使用 `any`。会话独立性始终强制检查。
+仓库配置 `worker_tags_by_kind.acceptance` 覆盖通用 `worker_tags`，issue 的
+`worker:<tag>` 标签仍须全部匹配。coordinator 模式下，未配置的 `acceptance_worker`
+默认为 `different`。显式 `any` 仍可读取，但同样不能把验收租给该 PR 的开发 worker；
+会话独立性也始终强制检查。无在线且具备 `acceptance` 角色、所需标签的独立 worker 时，
+任务保持排队，看板显示 `waiting for an independent reviewer`，不启动验收模型会话，
+也不消耗重试次数。
+
+最小拓扑为进程内 `local-worker` 承担开发，加至少一个独立身份的 review worker。
+即使 `local-worker` 声明了 `acceptance` 角色，也不能验收它自己开发的 PR。
+例如 coordinator 的配置：
+
+```yaml
+settings:
+  coordinator:
+    enabled: true
+    local_worker:
+      enabled: true
+repos:
+  owner/repo:
+    acceptance_required: true
+    acceptance_worker: different
+    worker_tags_by_kind:
+      acceptance: [review]
+```
+
+为 reviewer 创建独立 token（`clawflow worker token create --name review-worker`），
+在其机器上配置仓库、凭据及 Offload profile，然后运行：
+
+```sh
+clawflow worker --coordinator https://HOST:8093 \
+  --token-file /Users/USER/.clawflow/review-worker.token \
+  --fingerprint SHA256 --roles acceptance --tags review \
+  --state-dir /Users/USER/.clawflow-review-worker
+```
+
+review worker 可与 coordinator 位于同一主机，但必须使用独立身份、token 和状态目录。
 
 成功的 implement/repair 回传原生 `development_events` JSONL（最多 32 MiB，仅元数据）。
 协调器验证租约、PR head 和原生事件身份后，将其以 `0600` 权限写入对应运行目录。
@@ -113,3 +146,31 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.clawflow.worker.plist
 
 coordinator 的扫描、定向运行、harvest 不受机器绑定限制。未启用 coordinator 时保持本机运行能力，
 不会因为迁移的 host 标签跳过仓库；主机限制在 worker 领取任务时生效。
+
+## 平台主机与客户端调度
+
+设置 `settings.platform.url` 的客户端不会本地调度：`clawflow run` 和 Web 自动调度均拒绝执行并提示平台地址。
+`repo enable` 通过正常客户端命令转发给平台；本地配置的启用入口拒绝写入。
+`clawflow worker` 仍可运行。一次性调试可用 `clawflow run --local`，命令会警告并绕过平台执行本地运行。
+
+平台主机启用 coordinator 后只扫描、入队、收集结果和决定合并，算子及验收执行由 worker 领取。
+已有 enabled 仓库继续参与调度，无需重新注册。主机需要贡献执行能力时，可启用同进程 worker：
+
+```yaml
+settings:
+  coordinator:
+    enabled: true
+    local_worker:
+      enabled: true
+      max_parallel: 2
+      tags: [github]
+```
+
+随 `clawflow web` 启停的本地 worker 使用普通 HTTPS API、证书指纹和独立 worker token；
+token 保存在状态目录 `data/coordinator/local-worker.token`，权限为 `0600`，不要提交或同步。
+`local_worker` 默认关闭，`max_parallel` 默认 1。任务仍必须匹配全部标签，不会回退到主机直接执行。
+例如 `worker:creds-laptop` 任务及其验收，只能由带有 `creds-laptop` 标签的 worker 领取。
+仅领取凭据任务可用 `clawflow worker --tags creds-laptop --run-untagged=false`（另需提供连接参数）；
+若仓库另有显式标签要求，worker 也必须携带这些标签。
+未匹配的任务保持 pending，看板显示等待的标签；任务表显示持有租约的 worker，仓库栏显示所属平台。
+全局 `max_concurrent_agents` 和仓库 `max_in_flight` 在平台领取租约时执行，跨所有 worker 共享。

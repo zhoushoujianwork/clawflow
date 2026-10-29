@@ -40,3 +40,37 @@ func TestSkillDiscoveryContract(t *testing.T) {
 		t.Fatal("skill must remain English-only")
 	}
 }
+
+func TestPlatformEnrollmentContract(t *testing.T) {
+	data, err := os.ReadFile("SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	start := strings.Index(text, "## Where ClawFlow runs")
+	end := strings.Index(text, "You are an external AI")
+	if start < 0 || end <= start {
+		t.Fatal("missing platform enrollment guidance")
+	}
+	guidance := text[start:end]
+	for _, rule := range []string{
+		"Before any enrollment",
+		"clawflow platform status",
+		"This machine is not connected to a",
+		"Do not enable repositories locally",
+		"never fall back to local registration",
+		"clawflow repo add <repo-URL> --disabled",
+		"clawflow repo enable <namespace/repo>",
+		"Report the platform URL printed by the successful enrollment response",
+		"No local scheduling",
+		"clawflow run",
+		"clawflow web",
+		"run --local",
+		"Add capacity only when explicitly asked",
+		"clawflow worker --coordinator",
+	} {
+		if !strings.Contains(guidance, rule) {
+			t.Errorf("missing platform enrollment rule %q", rule)
+		}
+	}
+}

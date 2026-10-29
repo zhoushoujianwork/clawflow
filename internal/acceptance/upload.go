@@ -8,7 +8,8 @@ func DecodeUpload(raw []byte, r *Record) error { return decodeStrict(raw, r) }
 // DecodeExact rejects ambiguous schema fields in evidence transport envelopes.
 func DecodeExact(raw []byte, value any) error { return decodeStrict(raw, value) }
 
-// ValidateUpload validates failed reviewer judgements as strictly as passes.
+// ValidateUpload preserves identity checks for all reviewer judgements.
+// Only explicitly marked unstructured failures may omit report-shape evidence.
 // Infrastructure records can only consume retry budget, never open the gate.
 func ValidateUpload(c Contract, r Record) error {
 	d, err := c.Digest()
@@ -37,10 +38,13 @@ func ValidateUpload(c Contract, r Record) error {
 	if _, err := validateFindings(r.Findings); err != nil {
 		return err
 	}
-	if err := ValidateChecks(c, r); err != nil {
-		return err
+	if !r.Unstructured {
+		if err := ValidateChecks(c, r); err != nil {
+			return err
+		}
 	}
 	checked := r
 	checked.Verdict, checked.Findings = Passed, nil
-	return evaluate(c, checked, false)
+	checked.Unstructured, checked.ValidationError = false, ""
+	return evaluate(c, checked, false, !r.Unstructured)
 }

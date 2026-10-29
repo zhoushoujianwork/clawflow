@@ -18,9 +18,13 @@ type ExecuteFunc func(context.Context, string, execution.Options) (execution.Res
 type InspectFunc func(context.Context, string) (Source, error)
 
 type Runner struct {
-	Store   *Store
-	Execute ExecuteFunc
-	Inspect InspectFunc
+	Store *Store
+	// PlanStore shares requirements-only plans across implementation and review.
+	PlanStore  *Store
+	SavedPlan  *Plan
+	PlanPolicy string
+	Execute    ExecuteFunc
+	Inspect    InspectFunc
 	// Prepare creates the review checkout only after the plan is durably saved.
 	Prepare func(context.Context) (string, error)
 	// TestCommand is the repository's configured test command; the reviewer is
@@ -56,7 +60,8 @@ func directory(path string) (string, error) {
 	return p, nil
 }
 
-// Run executes fresh planning (with at most one isolation fallback) and review calls. The
+// Run reuses a requirements plan or plans with at most one isolation fallback,
+// then executes a fresh independent review. The
 // caller supplies a deferred workspace preparer (or an existing workspace) and
 // authoritative inspection;
 // this core never fetches Git state or falls back to another provider. A malformed
@@ -128,55 +133,14 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if len(entries) != 0 {
 		return record, errors.New("planner scratch must be empty and contain no source or instructions")
 	}
-	execute := runner.Execute
-	if execute == nil {
-		execute = execution.Execute
-	}
-	planInstruction := ""
-	if c.EvidenceSchema == 1 {
-		planInstruction = criteriaInstruction
-	}
-	plan := Plan{PlannerIsolation: ToolsDisabled, Version: Version, ContractDigest: d, AttemptID: record.AttemptID, StartedAt: time.Now().UTC()}
-	// Only requirements are sent in phase one: no source locations, Git inputs,
-	// developer output, contract identity, or development session identifiers.
-	planned, err := runner.executeRecorded(ctx, c, "acceptance-plan", execute, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not inspect source or use tools.\n\n"+planInstruction+c.Requirements,
-		execution.Options{Workspace: scratch, Role: "acceptance", PermissionMode: "default", ToolsDisabled: true})
-	record.Plan.PlannerIsolation = ToolsDisabled
-	if err != nil && execution.IsKind(err, "unsupported_tools") && planned.ErrorKind == "unsupported_tools" {
-		if err = ctx.Err(); err != nil {
-			return record, err
-		}
-		entries, readErr := os.ReadDir(scratch)
-		if readErr != nil || len(entries) != 0 {
-			return record, errors.New("planner scratch must remain empty before isolation fallback")
-		}
-		plan.PlannerIsolation = IsolatedReadonly
-		record.Plan.PlannerIsolation = IsolatedReadonly
-		planned, err = runner.executeRecorded(ctx, c, "acceptance-plan", execute, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not read files outside your working directory or any repository. Do not inspect source.\n\n"+planInstruction+c.Requirements,
-			execution.Options{Workspace: scratch, Role: "acceptance", PermissionMode: "default"})
-	}
+	plan, err := runner.RequirementsPlan(ctx, c, scratch)
 	if err != nil {
 		return record, err
 	}
-	if err = ctx.Err(); err != nil {
-		return record, err
-	}
-	plan.Planner = native(planned)
-	plan.Text = planned.Text
-	if c.EvidenceSchema == 1 {
-		if err = decodeStrict([]byte(unfenceReport(plan.Text)), &plan.Criteria); err != nil {
-			return record, err
-		}
-	}
-	plan.Digest = digest(plan.Text)
-	plan.CompletedAt = time.Now().UTC()
-	if err = plan.validate(c); err != nil {
-		return record, err
-	}
+	plan.ContractDigest, plan.AttemptID = d, record.AttemptID
 	if err = runner.Store.SavePlan(c, plan); err != nil {
 		return record, err
 	}
-	// Load the durable copy instead of exposing an unsaved in-memory plan.
 	plan, err = runner.Store.LoadPlan(c, record.AttemptID)
 	if err != nil {
 		return record, err
@@ -252,6 +216,10 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 			prompt += " Configured test command, use only as needed: " + runner.TestCommand
 		}
 	}
+	execute := runner.Execute
+	if execute == nil {
+		execute = execution.Execute
+	}
 	prompt += "The contract base_sha and its merge base with HEAD are available locally. Use git diff <base_sha>...HEAD and git log <base_sha>..HEAD for offline comparisons; no remote or credentials are available. "
 	reviewed, reviewErr := runner.executeRecorded(ctx, c, "acceptance-review", execute, prompt+string(input),
 		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "bypassPermissions"})
@@ -305,6 +273,9 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	}
 	parsed = record
 	if err = applyReviewReport(c, &parsed, corrected.Text); err != nil {
+		if !errors.Is(err, errReviewInfrastructure) && applyUnstructuredReport(&record, corrected.Text, err) {
+			return record, nil
+		}
 		return record, err
 	}
 	return parsed, nil
@@ -346,6 +317,32 @@ func applyReviewReport(c Contract, record *Record, text string) error {
 	for _, e := range output.Evidence {
 		if !nonempty(e) {
 			return errors.New("acceptance report contains empty evidence")
+		}
+	}
+	for _, f := range output.Findings {
+		if f.Kind == "unstructured" {
+			return errors.New("unstructured findings are runner-owned")
+		}
+	}
+	normalized := normalizeProcessFindings(output.Findings)
+	if normalized {
+		output.Summary += " Historical/process-only findings are informational; the verdict follows the remaining criteria."
+	}
+	if normalized && output.Status == Failed {
+		// Only the remaining checks and concrete findings may determine failure.
+		output.Status = Passed
+		output.NextOwner, output.NextAction = "runner", "Apply CI and merge gates"
+		for _, check := range output.Checks {
+			if check.Status == Blocked {
+				output.Status = Blocked
+				output.NextOwner, output.NextAction = "owner", string(check.Missing)
+			}
+		}
+		for _, f := range output.Findings {
+			if f.Failing() {
+				output.Status = Failed
+				output.NextOwner, output.NextAction = "implementation", "Repair the demonstrated defects, then run fresh acceptance"
+			}
 		}
 	}
 	failing, findingErr := validateFindings(output.Findings)

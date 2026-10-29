@@ -59,6 +59,10 @@ func TestRunnerRecordsExecutions(t *testing.T) {
 					opts.ToolsDisabled = true
 				}
 				result, err := original(ctx, prompt, opts)
+				code, elapsed := 0, int64(123)
+				result.ReportedExitCode, result.ElapsedMs = &code, &elapsed
+				result.CallerRunID = "acceptance-caller"
+				result.Machine = "source-machine"
 				result.Usage = json.RawMessage(`{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}`)
 				return result, err
 			}
@@ -75,6 +79,9 @@ func TestRunnerRecordsExecutions(t *testing.T) {
 				counts[row.Operator+":"+row.Status]++
 				if row.Repo != contract().Repository || row.IssueNumber != contract().PRNumber || row.EndedAt == nil || row.EndedAt.Before(row.StartedAt) || row.Machine == "unknown" {
 					t.Fatalf("identity/times: %+v", row)
+				}
+				if row.Status == "success" && (row.OffloadRunID == "" || row.CallerRunID != "acceptance-caller" || row.SessionID == "" || row.ExitCode == nil || *row.ExitCode != 0 || row.ElapsedMs == nil || *row.ElapsedMs != 123 || row.Machine != "source-machine") {
+					t.Fatalf("execution evidence: %+v", row)
 				}
 				if row.Status == "success" && (row.Profile != "test-profile" || row.Backend != "test-backend" || row.Model != "test-model" || row.InputTokens == nil || *row.InputTokens != 100 || row.CacheReadInputTokens == nil || *row.CacheReadInputTokens != 40 || row.OutputTokens == nil || *row.OutputTokens != 20 || row.CostUSD != nil) {
 					t.Fatalf("metadata/usage: %+v", row)

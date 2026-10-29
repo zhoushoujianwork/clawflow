@@ -135,3 +135,17 @@ func TestEvidenceJobFilterAndExcerptLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestEvidenceKeepsEarlyFailureAfterRedaction(t *testing.T) {
+	c := New("configured-secret", "")
+	input := "--- FAIL: TestStore (0.01s)\n    store_test.go:42: configured-secret failed\npanic: nil pointer\nexample.TestStore()\n /store_test.go:43\n" + strings.Repeat("passing output\n", 2000)
+	got := c.evidenceText(input, evidenceTailBytes)
+	for _, want := range []string{"--- FAIL: TestStore", "store_test.go:42: [redacted] failed", "panic: nil pointer", "example.TestStore()", "/store_test.go:43"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(got, "configured-secret") || len(got) > evidenceTailBytes+12 {
+		t.Fatal("unbounded or unredacted excerpt")
+	}
+}

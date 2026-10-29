@@ -65,7 +65,7 @@ func renderClaudeMD(p *Project, cfg *config.Config) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# Project: %s\n\n", p.Name)
-	fmt.Fprintf(&b, "You're the Pilot for project `%s`.\n\n", p.Name)
+	fmt.Fprintf(&b, "Implementation context for project `%s`. The platform steward runs separately through clawflow pilot ask/chat.\n\n", p.Name)
 
 	fmt.Fprintln(&b, "## Member repos")
 	fmt.Fprintln(&b)
@@ -94,10 +94,10 @@ func renderClaudeMD(p *Project, cfg *config.Config) string {
 
 	fmt.Fprintln(&b, "## Your working files (in this directory)")
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "- `context.md` — your own evolving understanding of this project. Read at wake start. Update at wake end via a fenced ```context.md``` block when something material was learned.")
+	fmt.Fprintln(&b, "- `context.md` — implementation context for this project. Steward conversations do not rewrite it.")
 	fmt.Fprintln(&b, "- `deployment.md` — runtime health / log-retrieval commands. Read on demand.")
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "_Per-wake state — backlog snapshot, recent wake history, this wake's job — arrives in the system prompt at each wake._")
+	fmt.Fprintln(&b, "_Platform stewardship uses ~/.clawflow/pilot/charter.md and the global conversation entry._")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "<!-- managed by clawflow — auto-regenerated from project.yaml -->")
 

@@ -20,7 +20,7 @@ var evidenceSecrets = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(?:gh[pousr]_[a-z0-9_]+|github_pat_[a-z0-9_]+|glpat-[a-z0-9_-]+|AKIA[A-Z0-9]{16})`),
 	regexp.MustCompile(`(?i)(?:authorization|password|passwd|secret|token|api[_-]?key|credential)[a-z0-9_-]*["']?\s*[:=]\s*[^\r\n]+`),
 	regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[a-z0-9+/=._-]+`),
-	regexp.MustCompile(`https?://[^\s/@]+:[^\s/@]+@`),
+	regexp.MustCompile(`(?i)(?:https?|postgres(?:ql)?)://[^\s/@]+:[^\s/@]+@`),
 	regexp.MustCompile(`(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)`),
 }
 
@@ -39,9 +39,7 @@ func (c *Client) evidenceText(s string, limit int) string {
 		}
 		return r
 	}, s)
-	if len(s) > limit {
-		s = "[truncated]\n" + s[len(s)-limit:]
-	}
+	s = vcs.FailureExcerpt(s, limit)
 	return strings.ToValidUTF8(s, "")
 }
 

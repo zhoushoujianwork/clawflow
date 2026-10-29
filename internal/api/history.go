@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -48,11 +49,6 @@ func HandleRuns(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	s := snapshot.RunStore()
-	if s == nil {
-		http.Error(w, "database unavailable", 503)
-		return
-	}
 	f, err := historyFilter(r)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
@@ -69,12 +65,70 @@ func HandleRuns(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid kind", 400)
 		return
 	}
+
+	q := r.URL.Query()
+	f.ExecutionStatus, f.Role, f.Profile = q.Get("execution_status"), q.Get("role"), q.Get("profile")
+	f.AttemptID, f.Cursor = q.Get("attempt_id"), q.Get("cursor")
+	if err := store.ValidateHistoryKeys(kind, f.AttemptID, f.Cursor); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if q.Has("cursor") && f.Cursor == "" {
+		http.Error(w, "invalid cursor", 400)
+		return
+	}
+	if q.Has("attempt_id") && f.AttemptID == "" {
+		http.Error(w, "invalid attempt_id", 400)
+		return
+	}
+	for _, name := range []string{"execution_status", "role", "profile"} {
+		if q.Has(name) && (strings.TrimSpace(q.Get(name)) == "" || len(q.Get(name)) > 256) {
+			http.Error(w, "invalid "+name, 400)
+			return
+		}
+	}
+	if f.Cursor != "" && f.Limit == 0 {
+		f.Limit = 100
+	}
+	if f.Cursor != "" && (f.RunDir != "" || f.AttemptID != "") {
+		http.Error(w, "cursor cannot be combined with lookup", 400)
+		return
+	}
+	limit := f.Limit
+	// One-row lookahead, no COUNT or raw-file reads.
+	if limit > 0 {
+		f.Limit++
+	}
+	s := snapshot.RunStore()
+	if s == nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
 	rows, err := s.Runs(r.Context(), kind, f)
 	if err != nil {
 		http.Error(w, "read runs failed", 500)
 		return
 	}
-	payload, err := store.RunPayloads(rows, snapshot.DataDir())
+
+	if limit > 0 && len(rows) > limit {
+		w.Header().Set("X-Next-Cursor", store.RunsCursor(rows[limit-1], kind))
+		rows = rows[:limit]
+	}
+	var payload []map[string]any
+	if f.RunDir != "" || f.AttemptID != "" {
+		payload, err = store.RunPayloads(rows, snapshot.DataDir())
+		if err == nil {
+			var metadata []map[string]any
+			metadata, err = store.RunListPayloads(rows, snapshot.DataDir(), kind)
+			for i := range metadata {
+				for _, key := range []string{"attempt_id", "attribution", "availability"} {
+					payload[i][key] = metadata[i][key]
+				}
+			}
+		}
+	} else {
+		payload, err = store.RunListPayloads(rows, snapshot.DataDir(), kind)
+	}
 	if err != nil {
 		http.Error(w, "decode runs failed", 500)
 		return
@@ -116,7 +170,8 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 		f.From = &start
 		f.Until = &end
 	}
-	sum, err := s.Usage(r.Context(), f, day)
+	f.Role, f.Profile = r.URL.Query().Get("role"), r.URL.Query().Get("profile")
+	sum, err := s.Usage(r.Context(), f, day, store.UsageSelection{Machine: r.URL.Query().Get("machine"), Model: r.URL.Query().Get("model")})
 	if err != nil {
 		http.Error(w, "read usage failed", 500)
 		return

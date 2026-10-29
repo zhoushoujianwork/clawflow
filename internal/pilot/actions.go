@@ -2,6 +2,7 @@ package pilot
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -28,18 +29,20 @@ type ActionSet struct {
 	Actions []json.RawMessage `json:"actions"`
 }
 type Action struct {
-	Head      string   `json:"head,omitempty"`
-	Followups []string `json:"followups,omitempty"`
-	ID        string   `json:"id"`
-	Type      string   `json:"type"`
-	Repo      string   `json:"repo,omitempty"`
-	Issue     int      `json:"issue,omitempty"`
-	PR        int      `json:"pr,omitempty"`
-	Body      string   `json:"body,omitempty"`
-	Title     string   `json:"title,omitempty"`
-	Label     string   `json:"label,omitempty"`
-	Section   string   `json:"section,omitempty"`
-	Position  string   `json:"position,omitempty"`
+	ScheduleID string              `json:"schedule_id,omitempty"`
+	Schedule   *ScheduleDefinition `json:"schedule,omitempty"`
+	Head       string              `json:"head,omitempty"`
+	Followups  []string            `json:"followups,omitempty"`
+	ID         string              `json:"id"`
+	Type       string              `json:"type"`
+	Repo       string              `json:"repo,omitempty"`
+	Issue      int                 `json:"issue,omitempty"`
+	PR         int                 `json:"pr,omitempty"`
+	Body       string              `json:"body,omitempty"`
+	Title      string              `json:"title,omitempty"`
+	Label      string              `json:"label,omitempty"`
+	Section    string              `json:"section,omitempty"`
+	Position   string              `json:"position,omitempty"`
 }
 
 // ActionRecord is the persisted board/audit representation. Pending records
@@ -115,6 +118,21 @@ func validateAction(raw json.RawMessage) (Action, error) {
 	}
 	fields := "id type repo"
 	switch a.Type {
+	case "schedule_add", "schedule_update", "schedule_remove":
+		fields = "id type schedule_id"
+		if !actionID.MatchString(a.ScheduleID) {
+			return a, errors.New("schedule_id_required")
+		}
+		if a.Type != "schedule_remove" {
+			fields += " schedule"
+			if a.Schedule == nil {
+				return a, errors.New("schedule_required")
+			}
+			j := a.Schedule.check(a.ScheduleID, "steward")
+			if err := j.Validate(); err != nil {
+				return a, errors.New("invalid_schedule")
+			}
+		}
 	case "rerun_ci":
 		fields += " pr"
 		if a.PR < 1 {
@@ -181,6 +199,7 @@ func validateAction(raw json.RawMessage) (Action, error) {
 // ActionExecutor serializes all local callers using a dedicated audit lock.
 // Defaults are five actions/wake, two creations/wake and twenty actions/UTC day.
 type ActionExecutor struct {
+	Context         context.Context
 	Config          *config.Config
 	Path            string
 	Actor           string
@@ -232,7 +251,7 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 			return nil, err
 		}
 		defer lock.Close()
-		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		if err = e.lockAudit(lock); err != nil {
 			return nil, err
 		}
 		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
@@ -305,11 +324,13 @@ func (e ActionExecutor) Apply(s ActionSet, dry bool) ([]ActionRecord, error) {
 		digest := fmt.Sprintf("%x", sha256.Sum256(b))
 		r := ActionRecord{RunID: s.RunID, Actor: e.Actor, Action: a, Digest: digest, At: now}
 		switch {
+		case e.Context != nil && e.Context.Err() != nil:
+			r.Outcome = "invocation_timeout"
 		case validation != nil:
 			r.Outcome = validation.Error()
 		case a.Type == "override_merge" && (e.Config == nil || !e.Config.Repos[a.Repo].PilotOverrideMerge):
 			r.Outcome = "override_merge_disabled"
-		case !slices.Contains(e.Repos, a.Repo):
+		case !strings.HasPrefix(a.Type, "schedule_") && !slices.Contains(e.Repos, a.Repo):
 			r.Outcome = "repo_not_allowed"
 		default:
 			if prev, ok := previous[key(r)]; ok {
@@ -398,6 +419,9 @@ func replaceSpec(body, section, text string) (string, error) {
 	return body[:i] + replacement + body[j+len(end):], nil
 }
 func (e ActionExecutor) execute(a Action, run string) (int, error) {
+	if strings.HasPrefix(a.Type, "schedule_") {
+		return 0, e.executeSchedule(a)
+	}
 	if a.Type == "note" || a.Type == "ask_human" {
 		return 0, nil
 	}
@@ -468,4 +492,26 @@ func (e ActionExecutor) execute(a Action, run string) (int, error) {
 		return 0, err
 	}
 	return 0, errors.New("action_not_allowed")
+}
+
+// lockAudit bounds contention by the invocation deadline. Manual apply callers
+// without a context retain the existing blocking behavior.
+func (e ActionExecutor) lockAudit(lock *os.File) error {
+	if e.Context == nil {
+		return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX)
+	}
+	for {
+		if err := e.Context.Err(); err != nil {
+			return err
+		}
+		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			return err
+		}
+		select {
+		case <-e.Context.Done():
+			return e.Context.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }

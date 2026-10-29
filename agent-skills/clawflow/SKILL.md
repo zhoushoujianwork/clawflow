@@ -1,6 +1,6 @@
 ---
 name: clawflow
-description: "Inspect GitLab CI failures, job/pipeline URLs and job logs, including self-hosted GitLab; manage GitHub/GitLab issues, PRs and authorized project automation with the ClawFlow CLI."
+description: "Inspect GitLab CI failures, job/pipeline URLs and job logs, including self-hosted GitLab; manage GitHub/GitLab issues, PRs and authorized platform stewardship with the ClawFlow CLI."
 ---
 
 # ClawFlow lifecycle control
@@ -44,19 +44,37 @@ handles judging and closing out; do not ask the user to mark or confirm steps.
 - **To get work done**, create or update an issue in the target repository with
   `clawflow issue create` / `clawflow issue comment`, write the requirements and
   acceptance criteria in the issue body, then report the issue link. Use a
-  `Depends on: #N` line for prerequisites. Do not implement it yourself unless
+  `Depends on: #N` line for prerequisites, or several such lines. All lines are
+  combined in first-seen order and deduplicated (max 10 dependencies); tokens
+  are comma-separated `#N` or `owner/repo#N`, with warnings for invalid or
+  excess tokens. Do not implement it yourself unless
   the user explicitly asks you to.
 - **To report progress**, read the issue and its PR: labels `agent-implemented`
   (PR opened), `agent-skipped` (blocked; the latest comment says what is
   missing), `agent-failed`, the PR's CI and acceptance comments, and merge state.
-- **Do not start a second scheduler.** On this machine, do not run
-  `clawflow repo add`/`repo enable`, `clawflow run`, `clawflow web`, or
-  `project automation enable` to get an issue worked on. If the repository is
-  not hosted yet, tell the user it must be registered on the hosting platform;
-  if the installed binary offers `clawflow platform` commands, use those.
-- The sections below about local reset, onboarding, enabling and running apply
-  only when the user explicitly says this machine is the hosting platform or
-  asks for local operator work.
+- **Before any enrollment**, run `clawflow platform status`. Require a successful
+  response naming the configured platform before `repo add` or `repo enable`.
+  If none is configured, stop and say: "This machine is not connected to a
+  ClawFlow platform." Do not enable repositories locally. If status fails due
+  to authentication, TLS or connectivity, report the error and stop enrollment;
+  never fall back to local registration.
+- **Enroll on the platform** with `clawflow repo add <repo-URL> --disabled`
+  and, when hosting is authorized, `clawflow repo enable <namespace/repo>`.
+  These commands route to the configured platform. Use `repo list` first to
+  avoid duplicate registration. Do not pass local paths or `--local-path`.
+  Report the platform URL printed by the successful enrollment response, the
+  repository and whether it was enabled; status alone does not prove enrollment.
+- **No local scheduling.** Do not start `clawflow run`, `clawflow web` or a web
+  scheduler, use `run --local`, or enable legacy project automation to host a
+  repository. A request to host a repo authorizes platform enrollment, not a
+  second scheduler. Do not change or clear platform settings to bypass routing.
+- **Add capacity only when explicitly asked.** Start
+  `clawflow worker --coordinator <HTTPS-URL> --token-file <worker-token-file>
+  --fingerprint <SHA-256>` using the platform's worker token and fingerprint.
+  Worker execution is separate from enrollment; platform login uses an admin
+  token, not a worker token. Let the user provision secret files privately.
+- Local reset and readiness sections below are for explicitly requested host
+  maintenance. They do not override the platform-first enrollment rule.
 
 You are an external AI controlling the `clawflow` CLI. ClawFlow executes tasks
 directly through Offload. Installing this skill in Codex, Cursor or another tool
@@ -172,60 +190,47 @@ Resume does not immediately synchronize. Later `sync pull`, `run` or `web` can
 pull old cloud state. `sync push` writes remote state and requires authorization
 for that scope. Pause does not stop an already running request or old process.
 
-## Onboard an existing checkout with automation off
+## Enroll a repository with automation off
 
-Verify the actual origin URL, full namespace, local absolute path and intended
-base branch. Do not infer the project from its display name. Use local Git
-inspection such as `git -C <path> remote get-url origin` and
-`git -C <path> branch --list`; avoid exposing credential-bearing remote URLs.
-Confirm remote/base details using authorized read operations when needed.
+Run `clawflow platform status` first as required above. If connection setup is
+requested, use `clawflow platform login --url <HTTPS-URL> --token-file
+<admin-token-file> [--fingerprint <SHA-256>]`, then recheck status. Do not read
+or print the token file. Login verifies the platform before saving the connection.
 
-For GitLab use the full project URL, including nested namespaces:
+Verify the actual origin URL, full namespace and intended base branch. Do not
+infer identity from a display name. Local Git inspection may identify the origin;
+never expose credential-bearing URLs or send a client checkout path to the platform.
+For GitLab preserve the full URL, including nested namespaces:
 
 ```bash
+clawflow platform status
+clawflow repo list
 clawflow repo add <full-project-URL> --platform gitlab \
-  --base-url <instance-URL> --local-path <absolute-checkout-path> \
-  --base <verified-base> --disabled --skip-label-init
-clawflow project create <project>
-clawflow project add-repo <project> <namespace/repo>
-clawflow repo set <namespace/repo> --primary-project <project>
+  --base-url <instance-URL> --base <verified-base> --disabled
 clawflow repo set <namespace/repo> --auto-merge off
-clawflow project automation disable <project>
 ```
 
-`--disabled` also skips label initialization by itself. `--skip-label-init`
-can independently skip label writes while preserving the old enabled default.
-Without either flag, repo add enables monitoring and initializes remote labels.
-Explicit local paths must be Git checkouts whose origin provider, host and full
-namespace match the requested repo; paths are stored as absolute paths.
+`--disabled` registers without enabling monitoring. Platform registration skips
+label initialization; do not claim it created remote labels. For an already
+registered repository, preserve its settings rather than deleting/recreating it.
+Use `repo list` to inspect platform registration; local `repo show`, `config show`
+and project readiness checks do not establish the remote enrollment state.
+Project metadata and checkout readiness below are local host maintenance, not
+client enrollment commands. Report unsupported remote operations instead of
+performing their local equivalents.
 
-Use `repo list`/`repo show <R>` and `project list`/`project show <project>` first
-when entries may already exist. Do not delete/recreate them to bypass errors.
-Existing registration updates support `repo set --ci-required`, `--auto-merge`,
-`--primary-project` and `--bound-machine`; base/local-path changes have no generic CLI setter.
-Report that limitation instead of inventing a flag.
-
-Verify disabled state with:
-
-```bash
-clawflow repo show <R>
-clawflow config show --repo <R> --field enabled
-clawflow config show --repo <R> --field auto_merge
-clawflow project automation show <project>
-```
-
-Project creation defaults PM automation off. Membership does not enable it.
-Primary project selects the authoritative context when multiple projects share
-one repository. `repo disable` stops future monitoring; it does not cancel an
-operator already running. `project automation disable` stops scheduled Pilot
-wakes; manual `pilot wake` is a separate authorized action.
+Pilot is one platform-wide steward. It runs only on user conversation through
+`clawflow pilot ask "<message>"`, `clawflow pilot chat`, or the dashboard Steward
+entry. Repository passes and web ticks never wake it automatically. Project
+membership does not restrict its scope.
+Primary project continues to select implementation context; disabling a repo
+stops future monitoring and does not cancel running operators.
 
 When readiness reports a required machine binding, bind the repository and
 project to the intended execution host without enabling automation:
 
 ```bash
 clawflow repo set <R> --bound-machine <hostname>
-clawflow project automation bind <project> --machine <hostname>
 ```
 
 Use the actual execution host name. Omitted `--bound-machine` preserves the
@@ -293,40 +298,39 @@ remote state and can deploy. Execute only the explicitly authorized job; inspect
 its final logs/status. Keep secret values redacted when using CI variable
 commands; list/view redact by default and `--show-values` reveals secrets.
 
-## Explicit enable and bounded execution
+## Enable platform monitoring
 
-Enabling monitoring permits future scheduler scans; only enable after the user
-authorizes automation. Keep auto-merge and PM automation off unless
-separately authorized. A disabled repo cannot be processed with `run --repo`.
-Label initialization is a remote write; perform it only when authorized/needed.
+A hosting request authorizes enabling the repository on the connected platform.
+Keep auto-merge off unless separately authorized. Before enabling, require a
+successful platform status; never enable a local repository as a fallback.
 
 ```bash
-clawflow label init <R>
+clawflow platform status
 clawflow repo enable <R>
-clawflow run --repo <R> --issue <N> --timeout 60m
+clawflow repo list
 ```
 
-Inspect the issue and operator triggers before running. `run` has no dry-run
-flag and can post comments, change labels and launch implementation/PR work.
-A single-issue run still performs normal runner sync, history reconciliation,
-worktree cleanup and snapshot writes, and scans other eligible enabled repos.
-Scoped runs suppress scheduled project Pilot wakes; a nonzero `--issue` also
-suppresses the scan-level auto-merge sweep. The selected operator can still
-perform its normal implementation, PR and post-processing writes. Keep sync
-paused and merge settings disabled when outside the authorized scope.
+Report the accepting platform URL and resulting enabled state. The platform's
+existing scheduler handles eligible issues; do not launch a local run or web
+scheduler as a verification step.
 
-Per-project Pilot scheduling is a separate opt-in:
+Global steward conversation:
 
 ```bash
-clawflow project automation enable <project> --cooldown 30 --bound-machine <hostname>
-clawflow project automation bind <project> --machine <hostname>
-clawflow project automation show <project>
+clawflow pilot ask "review platform state" --ops 5 --timeout 60
+clawflow pilot chat --ops 5 --timeout 60
 ```
 
-`bind --clear` removes the machine restriction. `pilot wake <project>
-[--timeout <minutes>]` manually wakes Pilot and bypasses cooldown; do not use it
-as a harmless readiness check. `clawflow web` can start a configured periodic
-scheduler and auto-sync; it is not a read-only status command.
+Every message has an ops budget and timeout in minutes, without a dollar cap.
+Structured actions use the existing executor, per-repo `pilot_override_merge`
+policy and audit. Never add or remove `clawflow-skip`.
+`~/.clawflow/pilot/charter.md` is seeded once from existing project context;
+project `context.md` remains implementation context. `pilot wake [project]`
+ignores its legacy project argument and reviews the whole platform once.
+`project automation ...` prints a migration notice and exits 0 without changes;
+legacy automation YAML is ignored and dropped on save. User-defined scheduled
+checks are a separate #511 slice. `clawflow web` can still start repository
+scheduling and sync; it is not a read-only status command.
 
 ## Inspect, disable and report
 
@@ -336,7 +340,6 @@ clawflow issue view <N> --repo <R> --json
 clawflow issue history <N> --repo <R> --json
 clawflow pr list --repo <R> --state open
 clawflow repo disable <R>
-clawflow project automation disable <project>
 ```
 
 `status` makes remote reads for enabled repos only and summarizes issue labels.
@@ -371,13 +374,13 @@ backup evidence and never claim tests or live operations that were not run.
 
 ## Autonomous issue implementation
 
-ClawFlow has one autonomous lifecycle with no workflow selector. Once project direction, repository binding and automation are
-authorized, configure the project endpoint explicitly:
+ClawFlow has one autonomous lifecycle with no workflow selector. Once project direction and hosting are
+authorized, verify the platform and configure its repository policy:
 
 ```bash
+clawflow platform status
 clawflow repo set <R> --auto-merge on --ci-required on
 clawflow repo enable <R>
-clawflow run --repo <R>
 ```
 
 Ordinary open leaf issues go directly to `implement`. Analysis, planning, focused

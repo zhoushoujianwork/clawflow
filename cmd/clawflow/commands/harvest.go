@@ -12,6 +12,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // Harvest timing. A run needs room for planning plus review, so a repo is
@@ -32,13 +33,11 @@ var harvestNow = time.Now
 
 // runHarvestPhase is the automatic acceptance phase of `clawflow run`. The
 // implementation agent opens the PR; a separate acceptance agent judges it here;
-// deterministic code (attemptAutoMerge's conditional path) merges. This phase
-// occupies one worker alongside operators, outside the scan sweep's budget.
+// deterministic code in a later sweep merges. Discovery occupies a worker
+// briefly; background reviews reserve their own machine-wide agent slots.
 //
-// Per repo it launches at most one acceptance run per pass. Eligible PRs use
-// queue ordering and persisted fairness history; all waiting candidates are
-// logged. Repos are processed sequentially. Infrastructure failures are returned
-// so the run exits non-zero (issue #354).
+// Reviews are discovered under the pass lock, then launched round-robin across
+// repositories. Launching never waits for a review; merges remain in the sweep.
 //
 // A targeted run (onlyRepo and onlyIssue both set) processes only that repo,
 // which may be disabled, and only PRs whose closing keyword names the issue.
@@ -62,27 +61,66 @@ func runHarvestPhase(ctx context.Context, cfg *config.Config, onlyRepo string, o
 	}
 	slices.Sort(names)
 
-	var failed []firedKey
+	var queues [][]harvestTask
 	for _, fullName := range names {
 		if ctx.Err() != nil {
 			break
 		}
-		repoCfg := repos[fullName]
-		repoCfg.CoordinatorMode = cfg.Settings.Coordinator.Enabled
-		// Use the same repository scope as the scan in runOnce.
 		if onlyRepo != "" && onlyRepo != fullName {
 			continue
 		}
-		if f := harvestRepo(ctx, fullName, repoCfg, onlyIssue, timeout, watchdogDeadline); f != nil {
-			failed = append(failed, *f)
+		rc := repos[fullName]
+		rc.CoordinatorMode = cfg.Settings.Coordinator.Enabled
+		queues = append(queues, harvestCandidates(ctx, fullName, rc, onlyIssue, timeout, watchdogDeadline))
+	}
+	return dispatchHarvestQueues(ctx, queues, cfg.Settings.MaxConcurrentAgents)
+}
+
+func dispatchHarvestQueues(ctx context.Context, queues [][]harvestTask, machineLimit int) []firedKey {
+	var failed []firedKey
+	for round := 0; ; round++ {
+		any := false
+		for _, tasks := range queues {
+			if round >= len(tasks) {
+				continue
+			}
+			any = true
+			task := tasks[round]
+			if ctx.Err() != nil {
+				return failed
+			}
+			var err error
+			if task.rc.CoordinatorMode {
+				err = enqueueWorkerAcceptanceFn(ctx, task.client, task.repo, task.rc, task.pr, task.timeout)
+			} else {
+				err = launchHarvestFn(ctx, task, machineLimit)
+			}
+			if err != nil {
+				if errors.Is(err, errHarvestBusy) {
+					runLog.Info("run/harvest_skip", "repo", task.repo, "pr", task.pr.Number, "reason", "acceptance_capacity_or_pr_busy")
+					continue
+				}
+				runLog.Warn("run/acceptance_launch", "repo", task.repo, "pr", task.pr.Number, "err", err.Error())
+				failed = append(failed, firedKey{Repo: task.repo, IssueNumber: extractClosesIssue(task.pr.Body), Operator: "acceptance"})
+			}
+		}
+		if !any {
+			break
 		}
 	}
 	return failed
 }
 
-// harvestRepo handles one repo and returns a failure key when the acceptance
-// run hit an infrastructure error, or nil otherwise.
-func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, onlyIssue int, timeout time.Duration, watchdogDeadline time.Time) *firedKey {
+type harvestTask struct {
+	repo    string
+	rc      config.Repo
+	client  vcs.Client
+	pr      vcs.PR
+	timeout time.Duration
+}
+
+// harvestCandidates captures eligible PRs without holding a lock across reviews.
+func harvestCandidates(ctx context.Context, fullName string, repoCfg config.Repo, onlyIssue int, timeout time.Duration, watchdogDeadline time.Time) []harvestTask {
 	skip := func(reason string, extra ...any) {
 		runLog.Info("run/harvest_skip", append([]any{"repo", fullName, "reason", reason}, extra...)...)
 	}
@@ -126,7 +164,11 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, only
 			rc.SetRequestContext(c)
 		}
 	}
+	ctx = github.WithStage(ctx, "harvest")
 	setCtx(ctx)
+	if !pollingAllowed(client) {
+		return nil
+	}
 
 	prs, err := client.ListOpenPRs(fullName)
 	if err != nil {
@@ -199,49 +241,48 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, only
 			}
 			runLog.Info("run/harvest_retry", "repo", fullName, "pr", pr.Number, "issue", issueNum, "attempts", info.attempts)
 		}
+		// Some providers list only MR summaries; pin an authoritative head
+		// before handing the candidate to a background process.
+		if pr.HeadSHA == "" {
+			current, err := client.GetPR(fullName, pr.Number)
+			if err != nil || current.HeadSHA == "" {
+				skip("head_unavailable", "pr", pr.Number)
+				continue
+			}
+			pr.HeadSHA = current.HeadSHA
+		}
 		eligible = append(eligible, pr)
 	}
-	eligible, err = orderHarvest(client, fullName, eligible)
+	eligible, priorities, err := orderHarvest(client, fullName, eligible)
 	if err != nil {
 		skip("order_unreadable", "err", err.Error())
 		return nil
 	}
-	selected := selectHarvest(eligible, state)
-	for i, pr := range eligible {
-		if i == selected {
-			continue
-		}
-		reason := "harvest_slot_busy"
-		if pr.Number == state.Previous && selected > 0 {
-			reason = "deferred_fairness"
-		}
-		skip(reason, "pr", pr.Number, "issue", extractClosesIssue(pr.Body))
+	deferred := 0
+	if selected := selectHarvest(eligible, state, priorities); selected > 0 {
+		deferred = state.Previous
 	}
-	if ctx.Err() != nil {
-		return nil
-	}
-	state.Previous = 0
-	if selected >= 0 {
+	var tasks []harvestTask
+	for len(eligible) > 0 && len(tasks) < repoCfg.AcceptanceParallelLimit() {
+		selected := selectHarvest(eligible, state, priorities)
 		pr := eligible[selected]
+		tasks = append(tasks, harvestTask{fullName, repoCfg, client, pr, runTimeout})
 		state.Previous = pr.Number
 		state.Heads[pr.Number] = pr.HeadSHA
+		eligible = append(eligible[:selected], eligible[selected+1:]...)
+	}
+	for _, pr := range eligible {
+		reason := "harvest_slot_busy"
+		if pr.Number == deferred {
+			reason = "deferred_fairness"
+		}
+		skip(reason, "pr", pr.Number)
 	}
 	if err := saveHarvestSchedule(fullName, state); err != nil {
 		skip("schedule_write_error", "err", err.Error())
 		return nil
 	}
-	if selected >= 0 {
-		pr := eligible[selected]
-		if repoCfg.CoordinatorMode {
-			if err := enqueueWorkerAcceptanceFn(ctx, client, fullName, repoCfg, pr, runTimeout); err != nil {
-				runLog.Warn("run/acceptance_enqueue", "repo", fullName, "pr", pr.Number, "err", err.Error())
-				return &firedKey{Repo: fullName, IssueNumber: extractClosesIssue(pr.Body), Operator: "acceptance"}
-			}
-			return nil
-		}
-		return harvestRun(ctx, client, setCtx, fullName, repoCfg, pr, extractClosesIssue(pr.Body), runTimeout)
-	}
-	return nil
+	return tasks
 }
 
 // harvestRun runs one acceptance and, on a pass, attempts the conditional merge.
@@ -264,7 +305,10 @@ func harvestRun(ctx context.Context, client vcs.Client, setCtx func(context.Cont
 		if record.Contract.EvidenceSchema != 1 && len(record.Findings) > 0 {
 			attempt.notify(harvestNonpassComment(record), harvestMarker(record))
 		}
-		merged := attemptAutoMerge(attempt)
+		merged := false
+		if repoCfg.AutoMerge {
+			merged = attemptAutoMerge(attempt)
+		}
 		runLog.Info("run/harvest_end", "repo", fullName, "pr", pr.Number, "issue", issueNum, "verdict", string(record.Verdict), "planner_isolation", record.Plan.PlannerIsolation, "status", "accepted", "merged", merged, "duration", elapsed)
 	case errors.Is(err, errAcceptanceNonpass):
 		if record.Contract.EvidenceSchema != 1 {

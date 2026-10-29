@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,7 +123,7 @@ func TestImportRunsCountsAndLegacy(t *testing.T) {
 	if err != nil || len(rows) != 1 {
 		t.Fatal(rows, err)
 	}
-	if r := rows[0]; r.Profile != "unknown" || r.Backend != "unknown" || r.Model != "unknown" || r.Machine != "unknown" || r.UsageReported || r.CostUSD != nil {
+	if r := rows[0]; r.Profile != "unknown" || r.Backend != "unknown" || r.Model != "unknown" || r.Machine != "unknown" || r.UsageReported || r.CostUSD != nil || r.ExitCode != nil || r.ElapsedMs != nil {
 		t.Fatalf("legacy %+v", r)
 	}
 }
@@ -218,5 +219,226 @@ func TestImportInvalidFilesAndOrphanedDirectories(t *testing.T) {
 		if d.Status != "invalid" {
 			t.Fatalf("status: %+v", d)
 		}
+	}
+}
+
+// A resumed session has distinct attempts, each with replacement (not additive)
+// usage. Replaying its final metadata must leave both counts and evidence stable.
+func TestSameSessionAttemptReplay(t *testing.T) {
+	s := historyStore(t)
+	root := t.TempDir()
+	for _, kind := range []string{"run", "pilot"} {
+		for i := 1; i <= 3; i++ {
+			m := fixture("o/r", "failed", "2026-10-29T00:00:00Z", map[string]any{"input_tokens": 10, "output_tokens": 3})
+			m["project"] = "platform"
+			m["session_id"] = "shared-session"
+			m["offload_run_id"] = fmt.Sprintf("attempt-%d", i)
+			m["caller_run_id"] = fmt.Sprintf("caller-%d", i)
+			m["exit_code"] = i
+			m["elapsed_ms"] = int64(1200)
+			m["error_kind"] = "execution"
+			m["execution_status"] = "error"
+			m["cumulative_usage"] = map[string]any{"input_tokens": 999999}
+			dir := filepath.Join(root, kind, fmt.Sprint(i))
+			if got := putRun(t, s, dir, kind, m); got != "imported" {
+				t.Fatal(got)
+			}
+			if got := putRun(t, s, dir, kind, m); got != "skipped" {
+				t.Fatal(got)
+			}
+			if got := putRun(t, s, dir+"-replayed", kind, m); got != "skipped" {
+				t.Fatal(got)
+			}
+		}
+		rows, err := s.Runs(context.Background(), kind, store.RunFilter{})
+		if err != nil || len(rows) != 3 {
+			t.Fatalf("rows=%+v err=%v", rows, err)
+		}
+		total := int64(0)
+		for _, r := range rows {
+			if r.ExitCode == nil || *r.ExitCode == 0 || r.ElapsedMs == nil || *r.ElapsedMs != 1200 || r.SessionID != "shared-session" || r.OffloadRunID == "" || r.CallerRunID == "" || r.InputTokens == nil {
+				t.Fatalf("row: %+v", r)
+			}
+			total += *r.InputTokens
+		}
+		if total != 30 {
+			t.Fatalf("accumulated usage: %d", total)
+		}
+		// The same Offload ID from another machine is a different attempt.
+		remote := fixture("o/r", "failed", "2026-10-29T00:00:00Z", nil)
+		remote["project"] = "platform"
+		remote["machine"] = "remote-machine"
+		remote["session_id"] = "shared-session"
+		remote["offload_run_id"] = "attempt-1"
+		if got := putRun(t, s, filepath.Join(root, kind, "remote"), kind, remote); got != "imported" {
+			t.Fatal(got)
+		}
+		rows, err = s.Runs(context.Background(), kind, store.RunFilter{})
+		if err != nil || len(rows) != 4 {
+			t.Fatalf("remote attempt lost: rows=%+v err=%v", rows, err)
+		}
+	}
+}
+
+func TestRunHistoryPaginationAndFilters(t *testing.T) {
+	s := historyStore(t)
+	root := t.TempDir()
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		m := fixture("o/r", "success", "2026-10-29T00:00:00Z", nil)
+		m["project"], m["execution_status"], m["role"] = "platform", "ok", "operator"
+		m["offload_run_id"] = fmt.Sprint(i)
+		putRun(t, s, filepath.Join(root, fmt.Sprint(i)), "run", m)
+	}
+	from := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	until := from.Add(time.Hour)
+	f := store.RunFilter{Repo: "o/r", Project: "platform", ExecutionStatus: "ok", Role: "operator", Profile: "p", From: &from, Until: &until, Limit: 2}
+	seen := map[string]bool{}
+	for {
+		rows, err := s.Runs(ctx, "run", f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, r := range rows {
+			if seen[r.RunDir] {
+				t.Fatal("duplicate", r.RunDir)
+			}
+			seen[r.RunDir] = true
+			found, err := s.Runs(ctx, "run", store.RunFilter{AttemptID: store.AttemptID(r, "run")})
+			if err != nil || len(found) != 1 || found[0].RunDir != r.RunDir {
+				t.Fatalf("lookup: %+v %v", found, err)
+			}
+		}
+		f.Cursor = store.RunsCursor(rows[len(rows)-1], "run")
+	}
+	if len(seen) != 5 {
+		t.Fatal(seen)
+	}
+	f.Cursor = ""
+	f.Profile = "other"
+	rows, err := s.Runs(ctx, "run", f)
+	if err != nil || len(rows) != 0 {
+		t.Fatal(rows, err)
+	}
+}
+
+func TestRunListProjectionLegacyAndPrivacy(t *testing.T) {
+	raw := []byte(`{"repo":"o/r","operator":"implement","status":"success","started_at":"2026-10-29T00:00:00Z","prompt":"SECRET","summary":"SECRET","result":"SECRET","issue_body":"SECRET","development_session":{"workdir":"SECRET"},"usage":{"input_tokens":3,"result":"SECRET"}}`)
+	r, _, err := store.DecodeRun(filepath.Join(t.TempDir(), "run"), "run", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.RunListPayloads([]store.Run{r}, filepath.Dir(r.RunDir), "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(rows)
+	if strings.Contains(string(b), "SECRET") {
+		t.Fatal(string(b))
+	}
+	if rows[0]["exit_code"] != nil {
+		t.Fatal(rows)
+	}
+	a := rows[0]["availability"].(store.RunAvailability)
+	if a.Attempt || a.Cost || a.Elapsed || a.ExitCode || a.ExecutionStatus || !a.Tokens {
+		t.Fatal(a)
+	}
+	if rows[0]["attribution"].(store.RunAttribution).Role != "unknown" {
+		t.Fatal(rows)
+	}
+	id := store.AttemptID(r, "run")
+	if err := store.ValidateHistoryKeys("run", id, store.RunsCursor(r, "run")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ValidateHistoryKeys("pilot", id, ""); err == nil {
+		t.Fatal("cross-kind lookup")
+	}
+	r.OffloadRunID = "attempt"
+	r.Machine = "m"
+	id = store.AttemptID(r, "run")
+	r.RunDir += "-replay"
+	if store.AttemptID(r, "run") != id {
+		t.Fatal("attributed ID changed on replay")
+	}
+	for _, key := range []string{"garbage", "e30", "", strings.Repeat("a", 9000)} {
+		if key != "" && store.ValidateHistoryKeys("run", key, "") == nil {
+			t.Fatal("accepted", key)
+		}
+	}
+}
+
+func TestRunListReportedZeroRemainsKnown(t *testing.T) {
+	raw := []byte(`{"repo":"o/r","operator":"implement","status":"success","started_at":"2026-10-29T00:00:00Z","usage":{"total_cost_usd":0,"input_tokens":0},"exit_code":0,"elapsed_ms":0,"execution_status":"ok"}`)
+	r, _, err := store.DecodeRun(filepath.Join(t.TempDir(), "zero"), "run", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.RunListPayloads([]store.Run{r}, filepath.Dir(r.RunDir), "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := rows[0]["availability"].(store.RunAvailability)
+	if !a.Cost || !a.Tokens || !a.Elapsed || !a.ExitCode || !a.ExecutionStatus {
+		t.Fatal(a)
+	}
+	usage := rows[0]["usage"].(map[string]any)
+	if usage["total_cost_usd"] != float64(0) || usage["input_tokens"] != float64(0) {
+		t.Fatal(usage)
+	}
+}
+
+func TestUsageFiltersCoverageAndSafeHistory(t *testing.T) {
+	s := historyStore(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	for i := 0; i < 55; i++ {
+		m := fixture("o/r", "success", fmt.Sprintf("2026-10-16T00:%02d:00Z", i), map[string]any{
+			"cost_basis": "api", "cost_is_estimate": true, "total_cost_usd": 1,
+			"input_tokens": 20, "output_tokens": 5, "cache_read_input_tokens": 70, "cache_creation_input_tokens": 10,
+		})
+		m["project"], m["role"], m["issue_number"] = "one", "implement", 545
+		m["prompt"], m["result"] = "secret-prompt", "secret-result"
+		putRun(t, s, filepath.Join(root, "runs", "o__r", "issue-545", fmt.Sprintf("attempt-%02d", i)), "run", m)
+	}
+	// An unattributed legacy attempt is never assigned to a current project.
+	putRun(t, s, filepath.Join(root, "legacy"), "run", fixture("old/r", "failed", "2026-10-16T01:00:00Z", nil))
+	from, _ := time.Parse(time.RFC3339, "2026-10-16T00:00:00Z")
+	until := from.Add(24 * time.Hour)
+	f := store.RunFilter{Project: "one", Repo: "o/r", Role: "implement", Profile: "p", From: &from, Until: &until}
+	got, err := s.Usage(ctx, f, 15, store.UsageSelection{Machine: "m", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Totals.Runs != 55 || got.Totals.Coverage.Cost != 55 || *got.Totals.TotalTokens != 55*105 || got.Totals.EstimatedCostRuns != 55 {
+		t.Fatalf("totals %+v", got.Totals)
+	}
+	if len(got.History) != 50 || got.History[0].Href != "/runs/o__r/issue-545/attempt-54" || got.RangeStart == nil || !got.RangeStart.Equal(from) || got.RangeEnd == nil || !got.RangeEnd.Equal(until) {
+		t.Fatalf("range/history %+v", got)
+	}
+	if len(got.Periods) != 1 || got.Periods[0].PeriodStart != "2026-10-15" || got.Periods[0].PeriodEnd != "2026-11-14" {
+		t.Fatalf("periods %+v", got.Periods)
+	}
+	encoded, _ := json.Marshal(got)
+	if strings.Contains(string(encoded), "secret-") || strings.Contains(string(encoded), root) {
+		t.Fatal("private body/path leaked")
+	}
+	for _, selection := range []store.UsageSelection{{Machine: "other"}, {Model: "other"}} {
+		empty, err := s.Usage(ctx, f, 15, selection)
+		if err != nil || empty.Totals.Runs != 0 || empty.Totals.TotalCostUSD != nil {
+			t.Fatalf("empty %+v %v", empty, err)
+		}
+	}
+	for _, wrong := range []store.RunFilter{{Role: "other"}, {Profile: "other"}, {Project: "other"}} {
+		empty, err := s.Usage(ctx, wrong, 15)
+		if err != nil || empty.Totals.Runs != 0 {
+			t.Fatalf("filter %+v: %+v %v", wrong, empty.Totals, err)
+		}
+	}
+	legacy, err := s.Usage(ctx, store.RunFilter{Project: "unknown"}, 15)
+	if err != nil || legacy.Totals.Runs != 1 || legacy.Totals.TotalCostUSD != nil || legacy.ByRole["unknown"].Runs != 1 {
+		t.Fatalf("legacy %+v %v", legacy, err)
 	}
 }

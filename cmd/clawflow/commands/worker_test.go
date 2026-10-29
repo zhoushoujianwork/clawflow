@@ -66,6 +66,19 @@ func TestWorkerTokenCLI(t *testing.T) {
 	if strings.Contains(listing, secret) {
 		t.Fatal("secret leaked")
 	}
+
+	adminSecret := run("token", "create", "--name", "admin-cli", "--scope", "admin")
+	adminToken, err := coordinator.New(db.DB()).VerifyToken(context.Background(), adminSecret)
+	if err != nil || adminToken == nil || !adminToken.HasScope(coordinator.ScopeAdmin) {
+		t.Fatalf("admin token: %+v %v", adminToken, err)
+	}
+	invalid := NewWorkerCmd()
+	invalid.SetArgs([]string{"token", "create", "--name", "invalid", "--scope", "root"})
+	invalid.SetOut(io.Discard)
+	invalid.SetErr(io.Discard)
+	if err := invalid.Execute(); err == nil {
+		t.Fatal("invalid token scope accepted")
+	}
 	run("token", "revoke", "--name", "cli")
 	if _, err := coordinator.New(db.DB()).VerifyToken(context.Background(), secret); err == nil {
 		t.Fatal("revoked token valid")
@@ -99,6 +112,7 @@ func TestCoordinatorDisabled(t *testing.T) {
 func TestWorkerClaimExecuteReport(t *testing.T) {
 	for _, mode := range []string{"success", "lease-lost", "heartbeat-error", "tags", "untagged", "digest"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			task := coordinator.Task{ID: "task", Repo: "o/r", Issue: 1, Operator: "implement", Kind: "implement", FencingToken: 42, Tags: []string{"github"}}
@@ -202,6 +216,18 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 				if j.hooks == nil || !j.hooks.SkipIndex {
 					t.Error("worker hooks missing")
 				}
+				// The worker run holds the host issue lock, so worktree pruning skips it.
+				if err := j.acquireLock(ctx); err != nil {
+					t.Errorf("acquire worker issue lock: %v", err)
+				} else {
+					if !snapshot.IsLocked(j.repo, j.sub.Number) {
+						t.Error("worker run does not hold the host issue lock")
+					}
+					j.releaseLock()
+					if snapshot.IsLocked(j.repo, j.sub.Number) {
+						t.Error("worker issue lock not released")
+					}
+				}
 				if mode == "lease-lost" || mode == "heartbeat-error" {
 					<-ctx.Done()
 				}
@@ -212,7 +238,7 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 				if mode == "digest" {
 					return buildWorkerJob(ctx, task, operator.NewRegistry())
 				}
-				return &runJob{}, time.Minute, nil
+				return &runJob{repo: "o/r", sub: &operator.Subject{Number: 1}, op: &operator.Operator{Name: "implement"}}, time.Minute, nil
 			}
 			deadline, stop := context.WithTimeout(ctx, 3*time.Second)
 			defer stop()
@@ -406,6 +432,65 @@ func TestWorkerCommandRegistration(t *testing.T) {
 	}
 }
 
+func TestCredentialWorkerCommandMatchesGeneratedTasks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var registered atomic.Bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "register") {
+			var input coordinator.Worker
+			// The registration protocol uses snake_case field names.
+			var registration struct {
+				Tags        []string `json:"tags"`
+				RunUntagged bool     `json:"run_untagged"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&registration); err != nil {
+				t.Error(err)
+			}
+			if registration.RunUntagged || !slices.Contains(registration.Tags, "creds-laptop") {
+				t.Errorf("unexpected credential-only registration: %+v", registration)
+			}
+			input.Tags, input.RunUntagged, input.Roles = registration.Tags, registration.RunUntagged, []string{"acceptance"}
+			for _, kind := range []string{"implement", "acceptance"} {
+				task, payload := coordinatorTask(&runJob{repo: "o/r", op: &operator.Operator{Name: kind}, sub: &operator.Subject{Number: 7, Labels: []string{"worker:creds-laptop"}}}, time.Minute)
+				// AcceptanceEligible shares the coordinator's all-tags eligibility check.
+				if !coordinator.AcceptanceEligible(task.Tags, input) || !slices.Equal(task.Tags, payload.Tags) {
+					t.Errorf("%s task tags %v cannot be leased by CLI tags %v", kind, task.Tags, input.Tags)
+				}
+				if coordinator.AcceptanceEligible(task.Tags, coordinator.Worker{Tags: []string{"github"}, Roles: []string{"acceptance"}, RunUntagged: true}) {
+					t.Errorf("%s credential task eligible for worker without credential tag", kind)
+				}
+			}
+			untagged, _ := coordinatorTask(&runJob{repo: "o/r", op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 8}}, time.Minute)
+			if coordinator.AcceptanceEligible(untagged.Tags, input) {
+				t.Error("credential-only worker eligible for task without configured tags")
+			}
+			registered.Store(true)
+			_, _ = io.WriteString(w, `{}`)
+		} else {
+			_, _ = io.WriteString(w, `{"task":null}`)
+			cancel()
+		}
+	}))
+	defer server.Close()
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(server.Certificate().Raw)
+	cmd := NewWorkerCmd()
+	cmd.SetContext(ctx)
+	cmd.SetArgs([]string{"--coordinator", server.URL, "--token-file", token, "--fingerprint", hex.EncodeToString(sum[:]), "--tags", "creds-laptop", "--run-untagged=false"})
+	if err := cmd.Execute(); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if !registered.Load() {
+		t.Fatal("did not register")
+	}
+}
+
 func TestWorkerAcceptanceRepairUsesCoordinatorSnapshot(t *testing.T) {
 	j := &runJob{hooks: &jobHooks{}, repair: &ciRepairContext{PR: vcs.PR{HeadSHA: "head"}, Acceptance: &acceptanceFindings{Verdict: "failed", AttemptID: "attempt", ContractDigest: "digest"}}}
 	if err := recheckAcceptanceRepair(context.Background(), j, j.repair.PR); err != nil {
@@ -418,5 +503,42 @@ func TestWorkerAcceptanceRepairUsesCoordinatorSnapshot(t *testing.T) {
 	j.repair.Acceptance.Verdict = "failed"
 	if err := recheckAcceptanceRepair(context.Background(), j, vcs.PR{HeadSHA: "changed"}); err == nil {
 		t.Fatal("changed head accepted")
+	}
+}
+
+func TestWorkerRetriesOutageAndReregisters(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var registrations, claims atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/worker/v1/register":
+			registrations.Add(1)
+		case "/worker/v1/claim":
+			n := claims.Add(1)
+			if n == 1 {
+				w.WriteHeader(503)
+				return
+			}
+			_, _ = w.Write([]byte(`{"task":null}`))
+			cancel()
+		}
+	}))
+	defer server.Close()
+	api := &workerAPI{base: server.URL, client: server.Client()}
+	if err := runWorker(ctx, api, workerOptions{MaxParallel: 1}, time.Second, time.Millisecond, nil); err != nil {
+		t.Fatal(err)
+	}
+	if claims.Load() != 2 || registrations.Load() < 2 {
+		t.Fatalf("claims=%d registrations=%d", claims.Load(), registrations.Load())
+	}
+}
+
+func TestWorkerAuthenticationFailureIsFatal(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }))
+	defer server.Close()
+	api := &workerAPI{base: server.URL, client: server.Client()}
+	if err := runWorker(context.Background(), api, workerOptions{MaxParallel: 1}, time.Second, time.Millisecond, nil); !errors.Is(err, errWorkerAuth) {
+		t.Fatalf("auth: %v", err)
 	}
 }

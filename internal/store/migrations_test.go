@@ -16,6 +16,43 @@ import (
 
 func noop(*gorm.DB) error { return nil }
 
+func TestRegistryPreservesWorkflowBeforeTokenScope(t *testing.T) {
+	previous := 0
+	names := map[int]string{}
+	for _, migration := range store.Migrations {
+		if migration.Version <= previous || migration.Up == nil {
+			t.Fatalf("invalid migration after version %d: %+v", previous, migration)
+		}
+		names[migration.Version] = migration.Name
+		previous = migration.Version
+	}
+	if names[4] != "durable_workflow" || names[5] != "coordinator_token_scope" {
+		t.Fatalf("workflow and token scope migrations must retain distinct versions: %v", names)
+	}
+}
+
+func TestRegistryAppendsScheduledChecksAfterActionsEvidence(t *testing.T) {
+	if len(store.Migrations) < 7 {
+		t.Fatal("scheduled checks migration missing")
+	}
+	for i, name := range []string{"coordinator_token_scope", "actions_evidence", "scheduled_checks"} {
+		migration := store.Migrations[4+i]
+		if migration.Version != 5+i || migration.Name != name {
+			t.Fatalf("migration %d must be %s: %+v", 5+i, name, migration)
+		}
+	}
+}
+
+func TestRegistryAppendsExecutionEvidenceAfterScheduledChecks(t *testing.T) {
+	if len(store.Migrations) < 8 {
+		t.Fatal("execution evidence migration missing")
+	}
+	migration := store.Migrations[7]
+	if migration.Version != 8 || migration.Name != "offload_execution_evidence" {
+		t.Fatalf("execution evidence must follow scheduled checks: %+v", migration)
+	}
+}
+
 func countRows(t *testing.T, s *store.Store) int64 {
 	t.Helper()
 	var n int64
@@ -183,5 +220,94 @@ func TestEnsureReadyWithoutDSN(t *testing.T) {
 	t.Setenv(store.DSNEnv, "")
 	if _, err := store.EnsureReady(context.Background(), &config.Config{}); !errors.Is(err, store.ErrNoDSN) {
 		t.Fatalf("want ErrNoDSN, got %v", err)
+	}
+}
+
+// TestActionsMigrationAfterTokenScope covers upgrades from the published base.
+func TestActionsMigrationAfterTokenScope(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:5]); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations[:6])
+	if err != nil || len(applied) != 1 || applied[0] != 6 {
+		t.Fatalf("Actions upgrade: applied=%v err=%v", applied, err)
+	}
+	for _, table := range []string{"actions_attachments", "actions_evidence"} {
+		var exists bool
+		if err := s.DB().Raw("SELECT to_regclass(?) IS NOT NULL", table).Scan(&exists).Error; err != nil || !exists {
+			t.Fatalf("missing %s: exists=%v err=%v", table, exists, err)
+		}
+	}
+	var scope string
+	if err := s.DB().Raw("SELECT column_default FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tokens' AND column_name = 'scope'").Scan(&scope).Error; err != nil || !strings.Contains(scope, "worker") {
+		t.Fatalf("token scope migration lost: default=%q err=%v", scope, err)
+	}
+}
+
+func TestScheduledChecksMigrationAfterActionsEvidence(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:6]); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations[:7])
+	if err != nil || len(applied) != 1 || applied[0] != 7 {
+		t.Fatalf("scheduled checks upgrade: applied=%v err=%v", applied, err)
+	}
+	for _, table := range []string{"actions_attachments", "actions_evidence", "scheduled_checks", "scheduled_check_runs"} {
+		var exists bool
+		if err := s.DB().Raw("SELECT to_regclass(?) IS NOT NULL", table).Scan(&exists).Error; err != nil || !exists {
+			t.Fatalf("missing %s: exists=%v err=%v", table, exists, err)
+		}
+	}
+}
+
+// Simulate tables created by the released schema, before evidence columns existed.
+func TestExecutionEvidenceUpgradePreservesLegacy(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:7]); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"runs", "pilot_runs"} {
+		if err := s.DB().Exec("ALTER TABLE " + table + ` DROP COLUMN offload_run_id, DROP COLUMN caller_run_id,
+ DROP COLUMN session_id, DROP COLUMN exit_code, DROP COLUMN error_kind,
+ DROP COLUMN elapsed_ms, DROP COLUMN execution_status`).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DB().Exec("INSERT INTO "+table+" (run_dir, status, payload) VALUES (?, ?, ?)", "/legacy", "success", `{"status":"success"}`).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	applied, err := s.Migrate(ctx, store.Migrations[:8])
+	if err != nil || len(applied) != 1 || applied[0] != 8 {
+		t.Fatalf("upgrade=%v err=%v", applied, err)
+	}
+	for _, kind := range []string{"run", "pilot"} {
+		rows, err := s.Runs(ctx, kind, store.RunFilter{})
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("rows=%+v err=%v", rows, err)
+		}
+		if rows[0].ExitCode != nil || rows[0].ElapsedMs != nil || rows[0].Status != "success" {
+			t.Fatalf("legacy evidence inferred: %+v", rows[0])
+		}
+	}
+}
+
+func TestCoordinatorApplicationErrorsMigrationAfterExecutionEvidence(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:8]); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations)
+	if err != nil || len(applied) != 1 || applied[0] != 9 {
+		t.Fatalf("application errors upgrade: applied=%v err=%v", applied, err)
+	}
+	var columns int64
+	if err := s.DB().Raw("SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tasks' AND column_name IN ('application_attempts', 'application_error')").Scan(&columns).Error; err != nil || columns != 2 {
+		t.Fatalf("application error columns: count=%d err=%v", columns, err)
 	}
 }

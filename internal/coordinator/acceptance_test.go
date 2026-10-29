@@ -2,75 +2,132 @@ package coordinator
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
 func TestAcceptanceRouting(t *testing.T) {
-	tsk := Task{Kind: "acceptance", Tags: []string{"github", "review"}}
-	tsk.Payload, _ = json.Marshal(AcceptanceRouting{AcceptanceWorker: "different", DevelopmentWorker: "dev"})
-	good := Worker{ID: "reviewer", Roles: []string{"acceptance"}, Tags: []string{"github", "review"}}
-	for _, tc := range []struct {
-		name   string
-		worker Worker
-		want   bool
-	}{
-		{"reviewer", good, true},
-		{"developer", Worker{ID: "dev", Roles: good.Roles, Tags: good.Tags}, false},
-		{"operator", Worker{ID: "other", Roles: []string{"operator"}, Tags: good.Tags}, false},
-		{"missing tag", Worker{ID: "other", Roles: good.Roles, Tags: []string{"github"}}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if acceptanceAllowed(tsk, tc.worker) != tc.want {
-				t.Fatal("incorrect routing")
+	for _, policy := range []string{"", "different", "any"} {
+		t.Run("policy="+policy, func(t *testing.T) {
+			task := Task{Kind: "acceptance", Tags: []string{"github", "review"}}
+			task.Payload, _ = json.Marshal(AcceptanceRouting{AcceptanceWorker: policy, DevelopmentWorker: "dev"})
+			good := Worker{ID: "reviewer", Roles: []string{"acceptance"}, Tags: []string{"github", "review"}}
+			for _, tc := range []struct {
+				name   string
+				worker Worker
+				want   bool
+			}{
+				{"reviewer", good, true},
+				{"developer", Worker{ID: "dev", Roles: good.Roles, Tags: good.Tags}, false},
+				{"operator", Worker{ID: "other", Roles: []string{"operator"}, Tags: good.Tags}, false},
+				{"missing tag", Worker{ID: "other", Roles: good.Roles, Tags: []string{"github"}}, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if acceptanceAllowed(task, tc.worker) != tc.want {
+						t.Fatal("incorrect routing")
+					}
+				})
+			}
+			task.Payload, _ = json.Marshal(AcceptanceRouting{AcceptanceWorker: policy})
+			if acceptanceAllowed(task, good) {
+				t.Fatal("missing developer identity allowed review")
 			}
 		})
-	}
-	tsk.Payload, _ = json.Marshal(AcceptanceRouting{AcceptanceWorker: "any", DevelopmentWorker: "dev"})
-	good.ID = "dev"
-	if !acceptanceAllowed(tsk, good) {
-		t.Fatal("explicit any policy rejected")
 	}
 }
 
 func TestClaimAcceptanceRoleAndIndependence(t *testing.T) {
-	s, db, _ := setup(t)
-	defer db.Close()
-	p, _ := json.Marshal(AcceptanceRouting{AcceptanceWorker: "different", DevelopmentWorker: "dev"})
-	_, err := s.Enqueue(ctx, Task{Kind: "acceptance", Repo: "o/r", PR: 1, Operator: "acceptance", Tags: []string{"review"}, Payload: p})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"dev", "reviewer"} {
-		if err := s.RegisterWorker(ctx, Worker{ID: id, MaxParallel: 1, Roles: []string{"acceptance"}, Tags: []string{"review"}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := s.Claim(ctx, "dev"); err != ErrNoTask {
-		t.Fatalf("developer claim: %v", err)
-	}
-	if task, err := s.Claim(ctx, "reviewer"); err != nil || task.Kind != "acceptance" {
-		t.Fatalf("reviewer claim: %v", err)
+	for _, policy := range []string{"", "different", "any"} {
+		t.Run("policy="+policy, func(t *testing.T) {
+			s, db, _ := setup(t)
+			defer db.Close()
+			p, _ := json.Marshal(AcceptanceRouting{AcceptanceWorker: policy, DevelopmentWorker: "dev"})
+			queued, err := s.Enqueue(ctx, Task{Kind: "acceptance", Repo: "o/r", PR: 1, Operator: "acceptance", Tags: []string{"review"}, Payload: p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RegisterWorker(ctx, Worker{ID: "dev", MaxParallel: 1, Roles: []string{"acceptance"}, Tags: []string{"review"}}); err != nil {
+				t.Fatal(err)
+			}
+			secret, err := s.CreateToken(ctx, "dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.VerifyToken(ctx, secret); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 4; i++ {
+				if _, err := s.Claim(ctx, "dev"); err != ErrNoTask {
+					t.Fatalf("developer claim: %v", err)
+				}
+			}
+			saved, err := s.Task(ctx, queued.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.State != "pending" || saved.Attempt != 0 || saved.FencingToken != 0 || saved.LeaseOwner != "" {
+				t.Fatalf("waiting task mutated: %+v", saved)
+			}
+			var attempts int64
+			if err := db.DB().Model(&TaskAttempt{}).Where("task_id = ?", queued.ID).Count(&attempts).Error; err != nil || attempts != 0 {
+				t.Fatalf("attempts=%d: %v", attempts, err)
+			}
+			board, err := s.Board(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(board.Tasks) != 1 || board.Tasks[0].WaitingReason != "waiting for an independent reviewer" {
+				t.Fatalf("board: %+v", board)
+			}
+			data, _ := json.Marshal(board)
+			if strings.Contains(string(data), "development_worker") || strings.Contains(string(data), "payload") {
+				t.Fatal("board exposed routing payload")
+			}
+			for _, w := range []Worker{
+				{ID: "operator", MaxParallel: 1, Roles: []string{"operator"}, Tags: []string{"review"}},
+				{ID: "wrong-tag", MaxParallel: 1, Roles: []string{"acceptance"}, Tags: []string{"other"}},
+				{ID: "reviewer", MaxParallel: 1, Roles: []string{"acceptance"}, Tags: []string{"review"}},
+			} {
+				if err := s.RegisterWorker(ctx, w); err != nil {
+					t.Fatal(err)
+				}
+				task, err := s.Claim(ctx, w.ID)
+				if w.ID != "reviewer" {
+					if err != ErrNoTask {
+						t.Fatalf("ineligible %s claim: %v", w.ID, err)
+					}
+				} else if err != nil || task.ID != queued.ID {
+					t.Fatalf("reviewer claim: %v", err)
+				}
+			}
+		})
 	}
 }
 
-func TestDefaultAcceptancePolicyCountsEligibleWorkers(t *testing.T) {
-	for _, count := range []int{0, 1, 2} {
-		task := Task{Kind: "acceptance", Tags: []string{"review"}, Payload: json.RawMessage(`{"development_worker":"dev"}`)}
-		live := []Worker{{ID: "wrong-role", Roles: []string{"operator"}, Tags: []string{"review"}}, {ID: "wrong-tag", Roles: []string{"acceptance"}, Tags: []string{"other"}}}
-		for i := 0; i < count; i++ {
-			live = append(live, Worker{Roles: []string{"acceptance"}, Tags: []string{"review"}})
+func TestDefaultAcceptancePolicyIsIndependent(t *testing.T) {
+	for _, policy := range []string{"", "any", "different", "invalid"} {
+		payload, _ := json.Marshal(AcceptanceRouting{AcceptanceWorker: policy, DevelopmentWorker: "dev"})
+		task := Task{Kind: "acceptance", Payload: payload}
+		err := resolveAcceptancePolicy(&task)
+		if policy == "invalid" {
+			if err != ErrInvalid {
+				t.Fatalf("invalid policy accepted: %v", err)
+			}
+			continue
 		}
-		if err := resolveAcceptancePolicy(&task, live); err != nil {
+		if err != nil {
 			t.Fatal(err)
 		}
 		var p AcceptanceRouting
-		_ = json.Unmarshal(task.Payload, &p)
-		want := "any"
-		if count > 1 {
+		if err := json.Unmarshal(task.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		want := policy
+		if want == "" {
 			want = "different"
 		}
 		if p.AcceptanceWorker != want || p.DevelopmentWorker != "dev" {
-			t.Fatalf("%d: %+v", count, p)
+			t.Fatalf("policy %q: %+v", policy, p)
 		}
 	}
 }
@@ -142,13 +199,14 @@ func TestDefaultAcceptancePolicyExcludesRevokedWorkers(t *testing.T) {
 	if err := s.RevokeToken(ctx, "reviewer"); err != nil {
 		t.Fatal(err)
 	}
-	task, err := s.Claim(ctx, "dev")
+	if _, err := s.Claim(ctx, "dev"); err != ErrNoTask {
+		t.Fatalf("revocation allowed developer to claim: %v", err)
+	}
+	board, err := s.Board(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var p AcceptanceRouting
-	_ = json.Unmarshal(task.Payload, &p)
-	if p.AcceptanceWorker != "any" {
-		t.Fatal("revoked worker counted as live")
+	if len(board.Tasks) != 1 || board.Tasks[0].WaitingReason != "waiting for an independent reviewer" {
+		t.Fatalf("board: %+v", board)
 	}
 }

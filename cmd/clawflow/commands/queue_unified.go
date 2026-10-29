@@ -127,10 +127,7 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		key := queue.Key{Repo: in.Repo, Number: is.Number}
 		c := queue.Candidate{}
 		var flightPR *vcs.PR
-		switch {
-		case locked:
-			c.InFlight = true
-		case hasLabel(is.Labels, "agent-implemented"):
+		if !locked {
 			if err := loadPRs(); err != nil {
 				plan.Err = "open_prs_unreadable: " + err.Error()
 				return plan
@@ -141,10 +138,14 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 					break
 				}
 			}
-			if !c.InFlight {
-				continue // delivered; nothing left for the queue to do
-			}
-		case hasLabel(is.Labels, "agent-skipped"):
+		}
+		switch {
+		case locked:
+			c.InFlight = true
+		case c.InFlight:
+			// A delivered branch stays in harvest/repair even if its
+			// agent-implemented label has not been written yet.
+		case hasLabel(is.Labels, "agent-implemented"), hasLabel(is.Labels, "agent-skipped"):
 			continue
 		}
 		if c.InFlight && !skipped && in.FlightBlocked != nil {
@@ -368,7 +369,7 @@ func flightBlockedReason(ctx context.Context, client vcs.Client, repo string, re
 
 // queueDepResolver answers cross-repo dependencies by reading the issue from
 // its repo's VCS (read-only). Unknown repos and read errors fail closed.
-func queueDepResolver(cfg *config.Config) func(queue.Key) bool {
+func queueDepResolver(ctx context.Context, cfg *config.Config) func(queue.Key) bool {
 	cache := map[queue.Key]bool{}
 	return func(k queue.Key) bool {
 		if v, ok := cache[k]; ok {
@@ -377,6 +378,11 @@ func queueDepResolver(cfg *config.Config) func(queue.Key) bool {
 		open := true
 		if rc, ok := cfg.Repos[k.Repo]; ok {
 			if client, err := newVCSClient(rc); err == nil {
+				setVCSContext(client, ctx)
+				if !pollingAllowed(client) {
+					cache[k] = true
+					return true
+				}
 				if is, err := client.GetIssue(k.Repo, k.Number); err == nil && is != nil {
 					open = is.State != "closed"
 				}

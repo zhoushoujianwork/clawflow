@@ -21,6 +21,7 @@ func NewPRCmd() *cobra.Command {
 	cmd.AddCommand(newPRListCmd())
 	cmd.AddCommand(newPRCommentCmd())
 	cmd.AddCommand(newPRCIWaitCmd())
+	cmd.AddCommand(newPRActionsObserveCmd())
 	cmd.AddCommand(newPRMergeCmd())
 	cmd.AddCommand(newPRCloseCmd())
 	cmd.AddCommand(newPRRebaseCmd())

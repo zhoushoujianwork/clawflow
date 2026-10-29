@@ -18,13 +18,83 @@ try {
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import assert from 'node:assert/strict'
-import { itemPilotActions, PilotTimeline, RuntimeHeader, RepoSection, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
+import { itemPilotActions, PilotTimeline, RuntimeHeader, APIUsagePanel, RepoSection, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
 const runtime = { version:'test', scheduler:{status:'idle'}, execution:{ready:true,profile:'actual',backend:'codex'} }
 const noTier = renderToStaticMarkup(<RuntimeHeader runtime={runtime}/>)
 assert.ok(!noTier.includes('tier:'))
 const withTier = renderToStaticMarkup(<RuntimeHeader runtime={{...runtime, execution:{...runtime.execution,model:'recorded-model',service_tier:'priority'}}}/>)
 assert.ok(withTier.includes('recorded-model'))
 assert.ok(withTier.includes('priority'))
+const apiUsage = renderToStaticMarkup(<APIUsagePanel usage={{captured_at:'2026-10-30T00:00:00Z', calls_by_stage:{scan:8,harvest:2}, budgets:{'https://api.github.com':{limit:5000,remaining:499,reset:'2026-10-30T01:00:00Z',backoff:'2026-10-30T01:00:00Z'}}}}/>)
+assert.ok(apiUsage.includes('499/5000'))
+assert.ok(apiUsage.includes('重置'))
+assert.ok(apiUsage.includes('scan: 8'))
+assert.ok(apiUsage.includes('harvest: 2'))
+assert.equal(renderToStaticMarkup(<APIUsagePanel/>), '')
+// Work summary fixtures share selectors with rendered repository rows.
+import { WorkSummary, selectWorkItems, unknownExecution } from './src/components/WorkSummary'
+const attempt = (profile, status = 'running', stale = false) => ({profile, status, provenance:{source:'offload_live', stale}})
+const workNow = Date.now()
+const baseItem = {state:'open', stage:'queued', evidence:[], why:'Fixture'}
+const workItems = [
+  {...baseItem, issue:1, title:'Profile alpha', executions:[attempt('alpha'), attempt('alpha')]},
+  {...baseItem, issue:2, title:'Profile beta', executions:[attempt('beta')]},
+  {...baseItem, issue:3, title:'Waiting'},
+  {...baseItem, issue:4, title:'Attention', attention:['CI failed', 'Review failed']},
+  {...baseItem, issue:5, title:'Stalled', executions:[attempt('alpha','stalled')]},
+  {...baseItem, issue:6, title:'Unknown', run:{live:true}, executions:[attempt('beta','running',true)]},
+  {...baseItem, issue:7, title:'Merged', state:'closed', stage:'merged', delivery:{pr:7, merged_at:new Date(workNow - 1000).toISOString()}},
+  {...baseItem, issue:8, title:'Old merge', state:'closed', stage:'merged', delivery:{pr:8, merged_at:new Date(workNow - 8*86400000).toISOString()}},
+  {...baseItem, issue:9, title:'Future merge', state:'closed', stage:'merged', delivery:{pr:9, merged_at:new Date(workNow + 86400000).toISOString()}},
+  {...baseItem, issue:10, title:'Succeeded attempt is not delivered', executions:[{...attempt('alpha','success'), ended_at:new Date(workNow).toISOString(), provenance:{source:'offload_final', stale:false}}]},
+]
+const workRepo = {repo:'fixture/repo', enabled:true, items:workItems, max_in_flight:2}
+const workProps = {repos:[workRepo],generatedAt:new Date(workNow).toISOString(),onFilter:()=>{}}
+for (const [filter, ids] of Object.entries({running:[1,2], waiting:[3,10], attention:[4,5], delivered:[7]})) {
+  assert.deepEqual(selectWorkItems(workItems, filter, workNow).map(i=>i.issue),ids)
+  const rows = renderToStaticMarkup(<RepoSection board={workRepo} repoInfo={{}} queue={workItems.map((i,n)=>({repo:workRepo.repo,number:i.issue,position:n+1}))} tab="active" work={filter} open toggle={()=>{}}/>)
+  assert.equal((rows.match(/data-stage=/g)||[]).length,ids.length)
+  for (const i of workItems) assert.equal(rows.includes(i.title + '</span>'),ids.includes(i.issue))
+}
+const manyWaiting = Array.from({length:8}, (_,n)=>({...baseItem,issue:n+1,title:'Waiting '+n}))
+const manyRows = renderToStaticMarkup(<RepoSection board={{...workRepo,items:manyWaiting}} repoInfo={{}} queue={manyWaiting.map((i,n)=>({repo:workRepo.repo,number:i.issue,position:n+1}))} tab="active" work="waiting" open toggle={()=>{}}/>)
+assert.equal((manyRows.match(/data-stage=/g)||[]).length,selectWorkItems(manyWaiting,'waiting').length)
+assert.ok(!manyRows.includes('+2 more'))
+assert.equal(selectWorkItems([{stage:'merged',delivery:{merged_at:new Date(workNow - 7*86400000).toISOString()}}],'delivered',workNow).length,1)
+assert.equal(selectWorkItems([{stage:'merged',delivery:{merged_at:'invalid'}}],'delivered',workNow).length,0)
+assert.equal(unknownExecution(workItems[5]),true)
+const summary = renderToStaticMarkup(<WorkSummary {...workProps}/>)
+assert.ok(summary.includes('items, not attempts'))
+assert.ok(summary.includes('1 active items have unknown execution activity'))
+assert.ok(!summary.includes('alpha'))
+assert.ok(!summary.includes('beta'))
+const retained = renderToStaticMarkup(<WorkSummary {...workProps} refreshing failed/>)
+assert.equal((retained.match(/text-2xl[^>]*>2</g)||[]).length,3)
+assert.ok(retained.includes('keeping the current snapshot'))
+assert.ok(retained.includes('Partial or stale snapshot'))
+const loadingSummary = renderToStaticMarkup(<WorkSummary onFilter={()=>{}}/>)
+assert.equal((loadingSummary.match(/>—</g)||[]).length,4)
+assert.ok(loadingSummary.includes('Loading work'))
+assert.ok(loadingSummary.includes('disabled'))
+const emptySummary = renderToStaticMarkup(<WorkSummary {...workProps} repos={[]}/>)
+assert.equal((emptySummary.match(/>0</g)||[]).length,4)
+assert.ok(emptySummary.includes('No work in the available snapshot'))
+const partialSummary = renderToStaticMarkup(<WorkSummary {...workProps} sources={[
+ {source:'delivery',last_success:workProps.generatedAt,stale:false},
+ {source:'execution',last_success:null,stale:true,error_category:'unavailable'},
+ {source:'execution',last_success:workProps.generatedAt,stale:true},
+]}/> )
+assert.ok(partialSummary.includes('execution: 0 fresh, 1 stale, 1 unknown sources'))
+assert.ok(partialSummary.includes('Partial or stale snapshot'))
+// Exercise the same callback attached to each summary control without a DOM.
+const selected = []
+const tree = WorkSummary({...workProps,onFilter:key=>selected.push(key)})
+for (const button of tree.props.children[0].props.children) button.props.onClick()
+assert.deepEqual(selected,['running','waiting','attention','delivered'])
+assert.equal(preferences({work:'running'}).work,'running')
+assert.equal(preferences({work:'invalid'}).work,undefined)
+assert.ok(noTier.includes('one execution only'))
+
 const now = new Date().toISOString()
 const repos = Array.from({length: 5}, (_, r) => ({
   repo: 'owner/repo-' + r, enabled:true, auto_merge:false, ci_required:true,
@@ -105,7 +175,7 @@ for (const separator of [
 }
 assert.equal(preferences({tab:'invalid'}).tab,undefined)
 assert.equal(preferences({tab:'all'}).tab,'all')
-console.log('PASS: 5 repos / 40 items / 50 events; collapsed, tabs, queue truncation, attention, event folding')
+console.log('PASS: Work summary selectors, mixed profiles, loading/empty/stale snapshots, complete filtered rows; 5 repos / 40 items / 50 events')
 `,
     },
     bundle: true, platform: 'node', format: 'cjs', outfile: join(dir, 'test.cjs'),

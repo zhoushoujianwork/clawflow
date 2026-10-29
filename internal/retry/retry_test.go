@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -111,5 +112,31 @@ func TestResponseRetryAfter(t *testing.T) {
 	}
 	if retry.ResponseError(422, nil, nil) != nil || retry.ResponseError(403, nil, []byte("permission denied")) != nil {
 		t.Fatal("validation or permission errors must not be transient")
+	}
+}
+
+func TestPrimaryRateLimitResetAndSecondaryFallback(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-RateLimit-Remaining", "0")
+	h.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(2*time.Minute).Unix(), 10))
+	h.Set("Retry-After", "1")
+	var e *retry.HTTPError
+	if !errors.As(retry.ResponseError(403, h, []byte("rate limit exceeded")), &e) || !e.RateLimited || e.After < 119*time.Second {
+		t.Fatalf("primary reset ignored: %+v", e)
+	}
+	if !errors.As(retry.ResponseError(403, http.Header{}, []byte("secondary rate limit")), &e) || !e.RateLimited || e.After != time.Minute {
+		t.Fatalf("secondary backoff missing: %+v", e)
+	}
+}
+
+func TestCancellationPreservesRateLimitIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	err := retry.Do(ctx, retry.Config{MaxAttempts: 2}, func() error {
+		cancel()
+		return &retry.HTTPError{Status: 403, RateLimited: true, After: time.Millisecond}
+	})
+	var limited *retry.HTTPError
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &limited) || !limited.RateLimited {
+		t.Fatalf("lost rate limit on cancellation: %v", err)
 	}
 }

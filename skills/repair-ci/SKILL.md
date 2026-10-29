@@ -10,6 +10,16 @@ operator:
   outcomes: ["agent-implemented", "agent-failed", "no-change"]
 ---
 
+PostgreSQL tests: when `CLAWFLOW_TEST_DATABASE_DSN` is available in the environment,
+use it for the repository's schema-isolated tests. Never print the DSN or include it
+in commands, comments, or logs. Do not start a temporary PostgreSQL when the sandbox
+cannot support it. If no test database is available, report explicitly that exact-head
+CI is the proof for PostgreSQL tests; local skips are not passes. Use supplied Go
+failure/assertion/panic lines and the source to establish and fix the cause, add a
+regression test, and run other available headless checks. Missing local PostgreSQL or
+full job logs alone is not a reason to block; report unavailable evidence honestly
+and never claim that CI ran or passed without exact-head results.
+
 ClawFlow runs this skill through direct Offload with explicit managed-development delivery. Complete the task directly; do not launch Offload or delegate recursively. Offload profiles own credentials and models.
 
 

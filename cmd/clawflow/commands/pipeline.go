@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -19,7 +20,9 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
+	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // Bounds that keep one board computation to a small, predictable number of
@@ -106,6 +109,11 @@ func PipelineSnapshot(ctx context.Context) (pipeline.Snapshot, error) {
 func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	now := d.now()
 	snap := pipeline.Snapshot{GeneratedAt: now.UTC().Format(time.RFC3339Nano), Repos: []pipeline.RepoBoard{}, Events: []pipeline.Event{}}
+
+	var usage vcs.APIUsage
+	if data, err := os.ReadFile(filepath.Join(snapshot.DataDir(), "vcs-usage.json")); err == nil && json.Unmarshal(data, &usage) == nil {
+		snap.VCSUsage = &usage
+	}
 
 	events, evErr := d.events()
 	if evErr != nil {
@@ -250,6 +258,10 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		board.Error = pipelineClip("VCS client unavailable: "+err.Error(), pipelineErrLimit)
 		return board
 	}
+	if !pollingAllowed(client) {
+		board.Error = vcs.ErrPollingDeferred.Error()
+		return board
+	}
 	if local, ok := client.(*pipelineLocalClient); ok {
 		local.board = d.previous[repo]
 		if local.offline && local.board.Repo != "" && local.missingIssues {
@@ -258,7 +270,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 	}
 	if rcx, ok := client.(interface{ SetRequestContext(context.Context) }); ok {
-		rcx.SetRequestContext(ctx)
+		rcx.SetRequestContext(github.WithStage(ctx, "board"))
 	}
 
 	openIssues, err := client.ListOpenIssues(repo)
@@ -399,6 +411,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 			if pr, ok := prByIssue[issue.Number]; ok {
 				item.PR = &pipeline.PRInfo{Number: pr.Number, State: pr.State}
 			}
+			item.Executions = pipelineItemExecutions(repo, item, runs)
 			board.SkippedIssues = append(board.SkippedIssues, item)
 		}
 	}
@@ -458,6 +471,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 			item.Delivery = &pipeline.Delivery{PR: pr.Number, PRURL: pr.URL, MergeCommitSHA: pr.MergeCommitSHA, MergedAt: pr.MergedAt}
 		}
 
+		item.Executions = pipelineItemExecutions(repo, item, runs)
 		item.Stage, item.Why, item.Evidence = pipeline.Derive(ev)
 		if item.Stage != pipeline.StageMerged {
 			if item.Stage == pipeline.StageBlocked || item.Stage == pipeline.StageFailed || item.Stage == pipeline.StageRejected {
@@ -658,6 +672,7 @@ func pipelineAcceptanceRecords(info *pipeline.AcceptanceInfo, c acceptance.Contr
 		return info
 	}
 	info.Verdict = string(latest.Verdict)
+	info.Unstructured = latest.Unstructured
 	info.Valid = current && acceptance.Evaluate(c, latest) == nil
 	return info
 }
@@ -676,4 +691,57 @@ func pipelineSessionID(s string) string {
 func pipelineSummary(report string) string {
 	s := strings.NewReplacer("<!--", "", "-->", "").Replace(strings.TrimSpace(report))
 	return pipelineClip(s, pipelineSummaryLimit)
+}
+
+// pipelineItemExecutions retains every attributed role and legacy attempt. PR
+// acceptance runs use PR numbers, not issue numbers, in the existing run store.
+func pipelineItemExecutions(repo string, item pipeline.Item, runs []snapshot.RunIndexEntry) []pipeline.ItemExecution {
+	out := []pipeline.ItemExecution{}
+	seen := map[string]int{}
+	for _, r := range runs {
+		if r.Repo != repo {
+			continue
+		}
+		acceptanceRun := strings.HasPrefix(r.Operator, "acceptance-")
+		if acceptanceRun {
+			if item.PR == nil || r.IssueNumber != item.PR.Number {
+				continue
+			}
+		} else if r.IssueNumber != item.Issue {
+			continue
+		}
+		runDir := filepath.Join(snapshot.DataDir(), strings.TrimPrefix(r.Path, "./data/"))
+		id := store.AttemptID(store.Run{RunDir: runDir, Machine: r.Machine, OffloadRunID: r.OffloadRunID}, "run")
+		role := r.DevelopmentSession.Role
+		if role == "" {
+			role = "unknown"
+		}
+		e := pipeline.ItemExecution{AttemptID: id, RunPath: r.Path, OffloadRunID: r.OffloadRunID,
+			CallerRunID: r.CallerRunID, SessionID: r.SessionID, Machine: r.Machine, Operator: r.Operator,
+			Role: role, Profile: r.Profile, Model: r.Model, StartedAt: r.StartedAt, EndedAt: r.EndedAt,
+			ElapsedMs: r.ElapsedMs, ExitCode: r.ExitCode, ErrorKind: r.ErrorKind, Status: "unknown",
+			Provenance: pipeline.ExecutionProvenance{Source: "unknown"}}
+		if e.Profile == "" {
+			e.Profile = r.DevelopmentSession.Profile
+		}
+		if r.OffloadRunID != "" && r.Machine != "" && r.Machine != "unknown" && r.ExecutionStatus != "" {
+			switch r.ExecutionStatus {
+			case "ok", "error", "timeout":
+				e.Status = r.ExecutionStatus
+				e.Provenance.Source = "offload_final"
+				e.Provenance.SourceMachine = r.Machine
+			}
+		}
+		if index, ok := seen[id]; ok {
+			// A replay cannot count twice; final evidence wins over an in-flight copy.
+			if e.Provenance.Source == "offload_final" || (out[index].Provenance.Source != "offload_final" && e.StartedAt.After(out[index].StartedAt)) {
+				out[index] = e
+			}
+		} else {
+			seen[id] = len(out)
+			out = append(out, e)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].StartedAt.Before(out[j].StartedAt) })
+	return out
 }

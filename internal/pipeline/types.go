@@ -5,6 +5,12 @@
 // the acceptance store and local files is done by the caller.
 package pipeline
 
+import (
+	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+)
+
 // Stage is the delivery stage of one item.
 type Stage string
 
@@ -26,9 +32,10 @@ const (
 
 // Snapshot is the cacheable, request-independent part of the board.
 type Snapshot struct {
-	GeneratedAt string      `json:"generated_at"`
-	Repos       []RepoBoard `json:"repos"`
-	Events      []Event     `json:"events"`
+	VCSUsage    *vcs.APIUsage `json:"vcs_usage,omitempty"`
+	GeneratedAt string        `json:"generated_at"`
+	Repos       []RepoBoard   `json:"repos"`
+	Events      []Event       `json:"events"`
 	// GlobalQueue is the single cross-repository work queue in dispatch
 	// order (priority tier, manual rank, age).
 	GlobalQueue []GlobalQueueEntry `json:"global_queue"`
@@ -87,6 +94,7 @@ type Execution struct {
 
 // RepoBoard is the board for one repository.
 type RepoBoard struct {
+	HostingPlatform    string `json:"hosting_platform,omitempty"`
 	Stale              bool   `json:"stale"`
 	Repo               string `json:"repo"`
 	Enabled            bool   `json:"enabled"`
@@ -115,6 +123,8 @@ type Item struct {
 	InQueue       bool     `json:"in_queue,omitempty"`
 	QueuePosition int      `json:"queue_position,omitempty"`
 
+	Executions []ItemExecution `json:"executions"`
+
 	Run        *RunInfo        `json:"run,omitempty"`
 	PR         *PRInfo         `json:"pr,omitempty"`
 	Acceptance *AcceptanceInfo `json:"acceptance,omitempty"`
@@ -128,7 +138,8 @@ type RunInfo struct {
 	Stage     string `json:"stage,omitempty"`
 	StartedAt string `json:"started_at"`
 	EndedAt   string `json:"ended_at,omitempty"`
-	Live      bool   `json:"live,omitempty"`
+	// Live is legacy runner-lock evidence, not Offload model activity.
+	Live bool `json:"live,omitempty"`
 }
 
 // PRInfo describes the item's pull request.
@@ -148,6 +159,7 @@ type PRInfo struct {
 
 // AcceptanceInfo is the latest acceptance record for the PR's current contract.
 type AcceptanceInfo struct {
+	Unstructured    bool   `json:"unstructured,omitempty"`
 	Required        bool   `json:"required"`
 	Running         bool   `json:"running,omitempty"`
 	Verdict         string `json:"verdict,omitempty"` // passed | failed | blocked
@@ -178,4 +190,37 @@ type Event struct {
 	Level  string            `json:"level"`
 	Event  string            `json:"event"`
 	Fields map[string]string `json:"fields"`
+}
+
+// ItemExecution is one attributed attempt, independent of delivery stage.
+// Nullable metrics are evidence, never inferred from locks or runner success.
+type ItemExecution struct {
+	AttemptID      string              `json:"attempt_id"`
+	RunPath        string              `json:"run_path,omitempty"`
+	OffloadRunID   string              `json:"offload_run_id,omitempty"`
+	CallerRunID    string              `json:"caller_run_id,omitempty"`
+	SessionID      string              `json:"session_id,omitempty"`
+	Machine        string              `json:"machine,omitempty"`
+	Operator       string              `json:"operator"`
+	Role           string              `json:"role"`
+	Profile        string              `json:"profile,omitempty"`
+	Model          string              `json:"model,omitempty"`
+	StartedAt      time.Time           `json:"started_at"`
+	EndedAt        *time.Time          `json:"ended_at,omitempty"`
+	ElapsedMs      *int64              `json:"elapsed_ms"`
+	LastProgressAt *time.Time          `json:"last_progress_at"`
+	ExitCode       *int                `json:"exit_code"`
+	ErrorKind      string              `json:"error_kind,omitempty"`
+	Status         string              `json:"status"` // unknown | running | stalled | Offload final status
+	Provenance     ExecutionProvenance `json:"provenance"`
+}
+
+// ExecutionProvenance distinguishes persisted final evidence from host liveness.
+type ExecutionProvenance struct {
+	Source        string     `json:"source"` // unknown | offload_final | offload_live
+	LiveState     string     `json:"live_state,omitempty"`
+	SourceMachine string     `json:"source_machine,omitempty"`
+	ObservedAt    *time.Time `json:"observed_at,omitempty"`
+	GeneratedAt   *time.Time `json:"generated_at,omitempty"`
+	Stale         bool       `json:"stale"`
 }

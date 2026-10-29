@@ -22,26 +22,28 @@ var (
 )
 
 type Task struct {
-	EventSource    string          `gorm:"-" json:"-"`
-	ExternalID     string          `gorm:"-" json:"-"`
-	ID             string          `gorm:"primaryKey" json:"id"`
-	Kind           string          `json:"kind"`
-	Repo           string          `json:"repo"`
-	Issue          int             `json:"issue"`
-	PR             int             `json:"pr"`
-	Operator       string          `json:"operator"`
-	Payload        json.RawMessage `gorm:"type:jsonb" json:"payload"`
-	Tags           []string        `gorm:"serializer:json;type:jsonb" json:"tags"`
-	Priority       int             `json:"priority"`
-	QueuePosition  int64           `json:"queue_position"`
-	State          string          `json:"state"`
-	Attempt        int             `json:"attempt"`
-	LeaseOwner     string          `json:"lease_owner"`
-	LeaseExpiresAt *time.Time      `json:"lease_expires_at"`
-	FencingToken   int64           `json:"fencing_token"`
-	Result         json.RawMessage `gorm:"type:jsonb" json:"result"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	ApplicationAttempts int             `json:"application_attempts"`
+	ApplicationError    string          `json:"application_error,omitempty"`
+	EventSource         string          `gorm:"-" json:"-"`
+	ExternalID          string          `gorm:"-" json:"-"`
+	ID                  string          `gorm:"primaryKey" json:"id"`
+	Kind                string          `json:"kind"`
+	Repo                string          `json:"repo"`
+	Issue               int             `json:"issue"`
+	PR                  int             `json:"pr"`
+	Operator            string          `json:"operator"`
+	Payload             json.RawMessage `gorm:"type:jsonb" json:"payload"`
+	Tags                []string        `gorm:"serializer:json;type:jsonb" json:"tags"`
+	Priority            int             `json:"priority"`
+	QueuePosition       int64           `json:"queue_position"`
+	State               string          `json:"state"`
+	Attempt             int             `json:"attempt"`
+	LeaseOwner          string          `json:"lease_owner"`
+	LeaseExpiresAt      *time.Time      `json:"lease_expires_at"`
+	FencingToken        int64           `json:"fencing_token"`
+	Result              json.RawMessage `gorm:"type:jsonb" json:"result"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
 func (Task) TableName() string { return "coordinator_tasks" }
@@ -70,7 +72,11 @@ type Audit struct {
 
 func (Audit) TableName() string { return "coordinator_audit" }
 
-type Store struct{ db *gorm.DB }
+type Store struct {
+	db *gorm.DB
+	// LeaseLimits supplies current platform capacity; nil leaves standalone stores unrestricted.
+	LeaseLimits func() (int, map[string]int, error)
+}
 
 func New(db *gorm.DB) *Store { return &Store{db: db} }
 
@@ -228,6 +234,25 @@ func eligible(tags []string, w Worker) bool {
 func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 	var result Task
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var repoLimits map[string]int
+		if s.LeaseLimits != nil {
+			// Serialize platform-wide checks across all workers and API processes.
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(500387)").Error; err != nil {
+				return err
+			}
+			total, limits, err := s.LeaseLimits()
+			if err != nil {
+				return err
+			}
+			repoLimits = limits
+			var leased int64
+			if err := tx.Model(&Task{}).Where("state = 'leased'").Count(&leased).Error; err != nil {
+				return err
+			}
+			if total > 0 && leased >= int64(total) {
+				return ErrNoTask
+			}
+		}
 		var w Worker
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&w, "id = ?", worker).Error; err != nil {
 			return err
@@ -253,12 +278,18 @@ func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 				}
 				return err
 			}
-			if t.Kind == "acceptance" {
-				var live []Worker
-				if err := tx.Table("coordinator_workers").Select("coordinator_workers.*").Joins("JOIN coordinator_tokens ON coordinator_tokens.name = coordinator_workers.id").Where("coordinator_tokens.revoked = false AND coordinator_tokens.last_seen > clock_timestamp() - interval '120 seconds'").Find(&live).Error; err != nil {
+			if limit := repoLimits[t.Repo]; limit > 0 {
+				var leased int64
+				if err := tx.Model(&Task{}).Where("repo = ? AND state = 'leased'", t.Repo).Count(&leased).Error; err != nil {
 					return err
 				}
-				if err := resolveAcceptancePolicy(&t, live); err != nil {
+				if leased >= int64(limit) {
+					skipped = append(skipped, t.ID)
+					continue
+				}
+			}
+			if t.Kind == "acceptance" {
+				if err := resolveAcceptancePolicy(&t); err != nil {
 					return err
 				}
 			}

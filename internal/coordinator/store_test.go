@@ -384,3 +384,34 @@ func TestMigratedHostEligibility(t *testing.T) {
 		}
 	}
 }
+
+func TestPlatformLeaseLimitsAndCredentialTags(t *testing.T) {
+	s, _, _ := setup(t)
+	total := 2
+	s.LeaseLimits = func() (int, map[string]int, error) { return total, map[string]int{"owner/repo": 1}, nil }
+	register(t, s, "local-worker", 3, "github")
+	register(t, s, "laptop", 3, "github", "creds-laptop")
+	tagged := enqueue(t, s, 1, "github", "creds-laptop")
+	if _, err := s.Claim(ctx, "local-worker"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("local worker claimed credential task: %v", err)
+	}
+	if got := claim(t, s, "laptop"); got.ID != tagged.ID {
+		t.Fatalf("wrong task: %+v", got)
+	}
+	enqueue(t, s, 2, "github")
+	if _, err := s.Claim(ctx, "local-worker"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("repo capacity bypassed: %v", err)
+	}
+	other, err := s.Enqueue(ctx, Task{Kind: "implement", Repo: "other/repo", Issue: 1, Operator: "implement", Tags: []string{"github"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	total = 1
+	if _, err := s.Claim(ctx, "local-worker"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("global capacity bypassed: %v", err)
+	}
+	total = 2
+	if got := claim(t, s, "local-worker"); got.ID != other.ID {
+		t.Fatalf("wrong task: %+v", got)
+	}
+}

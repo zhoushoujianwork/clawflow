@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
-	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 )
 
 // Replay reference plans against normalized incident evidence supplied by #407
@@ -45,8 +44,7 @@ func TestSupervisorRecordedCaseActionPlans(t *testing.T) {
 			for _, d := range f.Duties {
 				covered[d] = true
 			}
-			evidence := wakeEvidence{Board: pipeline.Snapshot{Repos: []pipeline.RepoBoard{{Repo: f.Repo, Items: []pipeline.Item{{Issue: f.Issue, Acceptance: &pipeline.AcceptanceInfo{Verdict: "blocked", Summary: f.Evidence}}}}}}}
-			prompt := chat.BuildPilotContext(f.Name, f.Evidence, "", nil, nil, "zh") + evidencePrompt(evidence)
+			prompt := chat.BuildStewardContext(f.Evidence, "review "+f.Repo, f.Evidence, "zh")
 			if !strings.Contains(prompt, f.Evidence) || !strings.Contains(prompt, f.Repo) {
 				t.Fatal("incident not delivered to supervisor")
 			}

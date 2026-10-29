@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -19,6 +21,9 @@ func applyCoordinatorEffect(t *coordinator.Task, j *runJob, r *coordinatorReport
 		return coordinator.EffectResult{}, err
 	}
 	out := coordinator.EffectResult{Reference: e.RunID}
+	if j.client == nil {
+		return out, fmt.Errorf("cannot apply coordinator effect %q: missing VCS client", e.Kind)
+	}
 	var err error
 	switch e.Kind {
 	case "issue-comment":
@@ -42,25 +47,24 @@ func applyCoordinatorEffect(t *coordinator.Task, j *runJob, r *coordinatorReport
 	case "close-issue":
 		err = j.client.CloseIssue(e.Repo, e.Number)
 	case "pr-create":
-		// Include closed PRs: an external close between a successful write and
-		// recovery must not create a second logical PR for this intent.
-		prs, listErr := j.client.ListPRs(e.Repo, "all")
-		if listErr != nil {
-			return out, listErr
-		}
-		var pr vcs.PR
-		for _, p := range prs {
-			if p.HeadBranch == e.Head && p.HeadRepo == e.Repo && p.BaseBranch == e.Base && (p.State == "open" || strings.Contains(p.Body, "<!-- clawflow:run-id="+e.RunID+" -->")) {
-				pr = p
-				break
-			}
+		pr, lookupErr := findCoordinatorPR(j.client, e)
+		if lookupErr != nil {
+			return out, lookupErr
 		}
 		if pr.Number == 0 {
 			pr, err = j.client.CreatePR(e.Repo, vcs.PRCreateOpts{Head: e.Head, Base: e.Base, Title: e.Title, Body: e.Body + "\n\n<!-- clawflow:run-id=" + e.RunID + " -->"})
 			if err != nil {
-				return out, err
+				// A competing create (422 on GitHub, 409 on GitLab) or a
+				// lost response may have delivered the PR. Reconcile before
+				// charging an application failure; never issue another create.
+				var lookupErr error
+				pr, lookupErr = findCoordinatorPR(j.client, e)
+				if lookupErr != nil || pr.Number == 0 {
+					return out, err
+				}
 			}
 		}
+		// Adoption preserves the existing title/body, including human edits.
 		pr, err = j.client.GetPR(e.Repo, pr.Number)
 		if err != nil {
 			return out, err
@@ -73,6 +77,39 @@ func applyCoordinatorEffect(t *coordinator.Task, j *runJob, r *coordinatorReport
 		err = coordinator.ErrInvalid
 	}
 	return out, err
+}
+
+// findCoordinatorPR prefers an open same-repository PR. Closed PRs are only
+// recovered for this exact intent, so replay cannot duplicate a completed write.
+func findCoordinatorPR(client vcs.Client, e jobEffect) (vcs.PR, error) {
+	prs, err := client.ListPRs(e.Repo, "all")
+	if err != nil {
+		return vcs.PR{}, err
+	}
+	var closed vcs.PR
+	for _, pr := range prs {
+		if pr.HeadBranch != e.Head {
+			continue
+		}
+		// GitLab list responses may omit source project and target branch.
+		// Resolve details before deciding identity; never adopt a fork MR.
+		if pr.HeadRepo == "" || pr.BaseBranch == "" {
+			pr, err = client.GetPR(e.Repo, pr.Number)
+			if err != nil {
+				return vcs.PR{}, err
+			}
+		}
+		if pr.HeadRepo != e.Repo || pr.BaseBranch != e.Base || pr.HeadBranch != e.Head {
+			continue
+		}
+		if pr.State == "open" {
+			return pr, nil
+		}
+		if strings.Contains(pr.Body, "<!-- clawflow:run-id="+e.RunID+" -->") {
+			closed = pr
+		}
+	}
+	return closed, nil
 }
 
 func (s *coordinatorResults) reconcile(ctx context.Context, store coordinator.EffectStore, t *coordinator.Task, j *runJob, r *coordinatorReport, failed bool) error {
@@ -99,7 +136,7 @@ func (s *coordinatorResults) reconcile(ctx context.Context, store coordinator.Ef
 	return store.FinalizeApplication(ctx, t.ID, t.FencingToken, failed, func(current coordinator.Task) error {
 		// Restore the PR identity even when all intents were applied before restart.
 		if current.PR > 0 && r.PRNumber == 0 {
-			pr, err := j.client.GetPR(current.Repo, current.PR)
+			pr, err := coordinatorResultPR(current, j)
 			if err != nil {
 				return err
 			}
@@ -108,6 +145,17 @@ func (s *coordinatorResults) reconcile(ctx context.Context, store coordinator.Ef
 		r.Effects = nil
 		return s.apply(ctx, &current, j, r)
 	})
+}
+
+// coordinatorResultPR restores repair identity from the persisted job context.
+func coordinatorResultPR(current coordinator.Task, j *runJob) (vcs.PR, error) {
+	if j.repair != nil && j.repair.PR.Number == current.PR {
+		return j.repair.PR, nil
+	}
+	if j.client == nil {
+		return vcs.PR{}, fmt.Errorf("cannot restore PR %s#%d: missing repair PR and VCS client", current.Repo, current.PR)
+	}
+	return j.client.GetPR(current.Repo, current.PR)
 }
 
 func (s *coordinatorResults) recoverResults(ctx context.Context, store coordinator.EffectStore) error {
@@ -121,23 +169,35 @@ func (s *coordinatorResults) recoverResults(ctx context.Context, store coordinat
 		taskCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 
 		var r coordinatorReport
-		err = json.Unmarshal(t.Result, &r)
-		if err == nil && t.Kind == "acceptance" {
-			err = s.recoverAcceptance(taskCtx, store, t, &r)
-		} else if err == nil {
-			var j *runJob
-			j, err = s.loadJob(taskCtx, t)
-			if err == nil {
-				failed := r.TerminalState == "failed"
-				if r.TerminalState == "" {
-					failed = r.Status != "success" && r.Status != "skipped"
+		err = retryRateLimited(taskCtx, func() error {
+			err := json.Unmarshal(t.Result, &r)
+			if err == nil && t.Kind == "acceptance" {
+				err = s.recoverAcceptance(taskCtx, store, t, &r)
+			} else if err == nil {
+				var j *runJob
+				j, err = s.loadJob(taskCtx, t)
+				if err == nil {
+					failed := r.TerminalState == "failed"
+					if r.TerminalState == "" {
+						failed = r.Status != "success" && r.Status != "skipped"
+					}
+					err = s.reconcile(taskCtx, store, t, j, &r, failed)
 				}
-				err = s.reconcile(taskCtx, store, t, j, &r, failed)
 			}
-		}
+			return err
+		})
 		cancel()
-		if err != nil && first == nil {
-			first = err
+		var limited *retry.HTTPError
+		if errors.As(err, &limited) && limited.RateLimited {
+			runLog.Warn("coordinator/result-apply-deferred", "task", t.ID, "retry_after", limited.After)
+			continue
+		}
+		if err != nil && ctx.Err() == nil {
+			message := sanitizeReviewerText(err.Error(), 4000)
+			runLog.Warn("coordinator/result-apply-failed", "task", t.ID, "err", message)
+			if recordErr := store.RecordApplicationFailure(ctx, t.ID, t.FencingToken, message); recordErr != nil && first == nil {
+				first = recordErr
+			}
 		}
 	}
 	return first
@@ -218,4 +278,30 @@ func (s *coordinatorResults) recoverAcceptance(ctx context.Context, durable coor
 	}
 	// Reports sealed before the outbox migration retain their existing marker.
 	return durable.FinalizeApplication(ctx, t.ID, t.FencingToken, false, func(coordinator.Task) error { return saveAndPublish() })
+}
+
+// retryRateLimited leaves durable results pending if the caller cannot wait for
+// reset. Only genuine application failures consume the three-attempt ledger.
+func retryRateLimited(ctx context.Context, apply func() error) error {
+	for {
+		err := apply()
+		var limited *retry.HTTPError
+		if !errors.As(err, &limited) || !limited.RateLimited {
+			return err
+		}
+		wait := limited.After
+		if wait <= 0 {
+			wait = time.Minute
+		}
+		if deadline, ok := ctx.Deadline(); ok && time.Now().Add(wait).After(deadline) {
+			return err
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(ctx.Err(), err)
+		case <-timer.C:
+		}
+	}
 }

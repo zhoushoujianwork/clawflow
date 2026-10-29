@@ -13,6 +13,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // closesIssueRE extracts the issue number a PR body claims to close.
@@ -212,6 +213,11 @@ func attemptAutoMergeResult(a autoMergeAttempt) mergeResult {
 	if err := a.ctx.Err(); err != nil {
 		return blocked(mergeReasonCanceled, err)
 	}
+	releaseMerge, mergeErr := mergeRepoLock(a.repo)
+	if mergeErr != nil {
+		return blocked("repo_merge_busy", mergeErr)
+	}
+	defer releaseMerge()
 	if a.repoCfg.CoordinatorMode {
 		if err := coordinatorPRAllowedFn(a.ctx, a.repo, a.prNum); err != nil {
 			return blocked("coordinator_head_mismatch", err)
@@ -408,9 +414,11 @@ func autoMergeCandidate(client vcs.Client, fullName string, pr vcs.PR) (issueNum
 // spend zero API calls here. A non-zero onlyIssue restricts the sweep to PRs
 // whose closing keyword names that issue (targeted runs); 0 considers all.
 func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, repoCfg config.Repo, onlyIssue int) {
-	if !repoCfg.AutoMerge {
+	if !repoCfg.AutoMerge || !pollingAllowed(client) {
 		return
 	}
+	setVCSContext(client, github.WithStage(ctx, "automerge"))
+	defer setVCSContext(client, github.WithStage(ctx, "scan"))
 	prefix := fmt.Sprintf("[%s]", fullName)
 	prs, err := client.ListOpenPRs(fullName)
 	if err != nil {

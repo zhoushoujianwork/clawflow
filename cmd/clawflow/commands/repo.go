@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/githubauth"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -31,6 +32,12 @@ func NewRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoDisableCmd())
 	cmd.AddCommand(newRepoSetCmd())
 	cmd.AddCommand(newRepoEnsureLocalCmd())
+	for _, sub := range cmd.Commands() {
+		switch sub.Name() {
+		case "list", "add", "enable", "disable", "set":
+			routePlatformRepo(sub)
+		}
+	}
 	return cmd
 }
 
@@ -45,12 +52,12 @@ func newRepoListCmd() *cobra.Command {
 				return err
 			}
 			if len(cfg.Repos) == 0 {
-				fmt.Println("No repositories configured.")
-				fmt.Println("Add one with: clawflow repo add <owner/repo>")
+				fmt.Fprintln(cmd.OutOrStdout(), "No repositories configured.")
+				fmt.Fprintln(cmd.OutOrStdout(), "Add one with: clawflow repo add <owner/repo>")
 				return nil
 			}
-			fmt.Printf("%-40s %-10s %-12s %-10s %s\n", "REPO", "STATUS", "BASE", "AUTO_MERGE", "DESCRIPTION")
-			fmt.Println(strings.Repeat("─", 100))
+			fmt.Fprintf(cmd.OutOrStdout(), "%-40s %-10s %-12s %-10s %s\n", "REPO", "STATUS", "BASE", "AUTO_MERGE", "DESCRIPTION")
+			fmt.Fprintln(cmd.OutOrStdout(), strings.Repeat("─", 100))
 			for name, r := range cfg.Repos {
 				status := "disabled"
 				if r.Enabled {
@@ -60,7 +67,7 @@ func newRepoListCmd() *cobra.Command {
 				if r.AutoMerge {
 					autoMerge = "on"
 				}
-				fmt.Printf("%-40s %-10s %-12s %-10s %s\n", name, status, r.BaseBranch, autoMerge, r.Description)
+				fmt.Fprintf(cmd.OutOrStdout(), "%-40s %-10s %-12s %-10s %s\n", name, status, r.BaseBranch, autoMerge, r.Description)
 			}
 			return nil
 		},
@@ -82,6 +89,17 @@ func newRepoShowCmd() *cobra.Command {
 			if !exists {
 				return fmt.Errorf("repo %q not found", ownerRepo)
 			}
+			if r.Platform == "" || r.Platform == "github" {
+				creds, err := config.LoadCredentials()
+				if err != nil {
+					return err
+				}
+				identity, err := githubauth.Resolve(cmd.Context(), ownerRepo, creds.GHToken, r.BaseURL)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("github_identity: %s\npermissions: %v\nrepository_selection: %s\n", identity.Name, identity.Permissions, identity.Selection)
+			}
 			status := "disabled"
 			if r.Enabled {
 				status = "enabled"
@@ -90,6 +108,7 @@ func newRepoShowCmd() *cobra.Command {
 			fmt.Printf("status:       %s\n", status)
 			fmt.Printf("ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("acceptance_required: %v\n", r.AcceptanceRequired)
+			fmt.Printf("acceptance_max_parallel: %d\n", r.AcceptanceParallelLimit())
 			fmt.Printf("self_upgrade: %v\n", r.SelfUpgrade)
 			fmt.Printf("worker_tags:  %v\n", r.WorkerTags)
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
@@ -200,31 +219,31 @@ func newRepoAddCmd() *cobra.Command {
 				return err
 			}
 			if err := snapshot.WriteRepos(cfg); err != nil {
-				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
+				fmt.Fprintf(cmd.OutOrStdout(), "  [warn] failed to update dashboard: %v\n", err)
 			}
 			if disabled {
-				fmt.Printf("repo %q added and disabled\n", ownerRepo)
+				fmt.Fprintf(cmd.OutOrStdout(), "repo %q added and disabled\n", ownerRepo)
 			} else {
-				fmt.Printf("repo %q added and enabled\n", ownerRepo)
+				fmt.Fprintf(cmd.OutOrStdout(), "repo %q added and enabled\n", ownerRepo)
 			}
-			fmt.Printf("  platform:    %s\n", info.Platform)
+			fmt.Fprintf(cmd.OutOrStdout(), "  platform:    %s\n", info.Platform)
 			if info.BaseURL != "" {
-				fmt.Printf("  base url:    %s\n", info.BaseURL)
+				fmt.Fprintf(cmd.OutOrStdout(), "  base url:    %s\n", info.BaseURL)
 			}
-			fmt.Printf("  base branch: %s\n", baseBranch)
+			fmt.Fprintf(cmd.OutOrStdout(), "  base branch: %s\n", baseBranch)
 			if localPath != "" {
-				fmt.Printf("  local path:  %s\n", localPath)
+				fmt.Fprintf(cmd.OutOrStdout(), "  local path:  %s\n", localPath)
 			}
 			if disabled || skipLabelInit {
 				return nil
 			}
-			fmt.Printf("Initializing ClawFlow labels in %s ...\n", ownerRepo)
+			fmt.Fprintf(cmd.OutOrStdout(), "Initializing ClawFlow labels in %s ...\n", ownerRepo)
 			repoCfg := cfg.Repos[ownerRepo]
 			client, err := newVCSClient(repoCfg)
 			if err != nil {
-				fmt.Printf("  [warn] label init failed: %v\n", err)
+				fmt.Fprintf(cmd.OutOrStdout(), "  [warn] label init failed: %v\n", err)
 			} else if err := client.InitLabels(ownerRepo, vcs.ClawFlowLabels); err != nil {
-				fmt.Printf("  [warn] label init failed: %v\n", err)
+				fmt.Fprintf(cmd.OutOrStdout(), "  [warn] label init failed: %v\n", err)
 			}
 			return nil
 		},
@@ -274,7 +293,7 @@ func newRepoEnableCmd() *cobra.Command {
 		Short: "Enable a repository",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return setRepoEnabled(args[0], true)
+			return setRepoEnabled(cmd, args[0], true)
 		},
 	}
 }
@@ -285,15 +304,20 @@ func newRepoDisableCmd() *cobra.Command {
 		Short: "Disable a repository (stop monitoring without removing)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return setRepoEnabled(args[0], false)
+			return setRepoEnabled(cmd, args[0], false)
 		},
 	}
 }
 
-func setRepoEnabled(ownerRepo string, enabled bool) error {
+func setRepoEnabled(cmd *cobra.Command, ownerRepo string, enabled bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if enabled {
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			return err
+		}
 	}
 	if _, exists := cfg.Repos[ownerRepo]; !exists {
 		return fmt.Errorf("repo %q not found", ownerRepo)
@@ -306,13 +330,13 @@ func setRepoEnabled(ownerRepo string, enabled bool) error {
 		return err
 	}
 	if err := snapshot.WriteRepos(cfg); err != nil {
-		fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
+		fmt.Fprintf(cmd.OutOrStdout(), "  [warn] failed to update dashboard: %v\n", err)
 	}
 	state := "enabled"
 	if !enabled {
 		state = "disabled"
 	}
-	fmt.Printf("repo %q %s\n", ownerRepo, state)
+	fmt.Fprintf(cmd.OutOrStdout(), "repo %q %s\n", ownerRepo, state)
 	return nil
 }
 
@@ -325,6 +349,8 @@ func newRepoSetCmd() *cobra.Command {
 	var primaryProject string
 	var boundMachine string
 	var maxInFlight int
+	var acceptanceMaxParallel int
+	var testCommand string
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
@@ -375,6 +401,9 @@ func newRepoSetCmd() *cobra.Command {
 			if cmd.Flags().Changed("self-upgrade") && selfUpgrade != "on" && selfUpgrade != "off" {
 				return fmt.Errorf("--self-upgrade must be on or off")
 			}
+			if cmd.Flags().Changed("acceptance-max-parallel") && acceptanceMaxParallel < 1 {
+				return fmt.Errorf("--acceptance-max-parallel must be at least 1")
+			}
 			maxInFlightSet := cmd.Flags().Changed("max-in-flight")
 			if maxInFlightSet && maxInFlight < 1 {
 				return fmt.Errorf("--max-in-flight must be >= 1")
@@ -415,6 +444,12 @@ func newRepoSetCmd() *cobra.Command {
 				if boundMachineSet {
 					r = r.WithHostTag(boundMachine)
 				}
+				if cmd.Flags().Changed("acceptance-max-parallel") {
+					r.AcceptanceMaxParallel = acceptanceMaxParallel
+				}
+				if cmd.Flags().Changed("test-command") {
+					r.TestCommand = testCommand
+				}
 				if maxInFlightSet {
 					r.MaxInFlight = maxInFlight
 				}
@@ -425,34 +460,37 @@ func newRepoSetCmd() *cobra.Command {
 				return err
 			}
 			if err := snapshot.WriteRepos(cfg); err != nil {
-				fmt.Printf("  [warn] failed to update dashboard: %v\n", err)
+				fmt.Fprintf(cmd.OutOrStdout(), "  [warn] failed to update dashboard: %v\n", err)
 			}
-			fmt.Printf("repo %q updated\n", ownerRepo)
-			fmt.Printf("  ci_required:  %v\n", r.CIRequired)
-			fmt.Printf("  auto_merge:   %v\n", r.AutoMerge)
-			fmt.Printf("  acceptance_required: %v\n", r.AcceptanceRequired)
-			fmt.Printf("  acceptance_overlap_ci: %v\n", r.AcceptanceOverlapsCI())
-			fmt.Printf("  self_upgrade: %v\n", r.SelfUpgrade)
-			fmt.Printf("  worker_tags: %v\n", r.WorkerTags)
+			fmt.Fprintf(cmd.OutOrStdout(), "repo %q updated\n", ownerRepo)
+			fmt.Fprintf(cmd.OutOrStdout(), "  ci_required:  %v\n", r.CIRequired)
+			fmt.Fprintf(cmd.OutOrStdout(), "  auto_merge:   %v\n", r.AutoMerge)
+			fmt.Fprintf(cmd.OutOrStdout(), "  acceptance_max_parallel: %d\n", r.AcceptanceParallelLimit())
+			fmt.Fprintf(cmd.OutOrStdout(), "  acceptance_required: %v\n", r.AcceptanceRequired)
+			fmt.Fprintf(cmd.OutOrStdout(), "  acceptance_overlap_ci: %v\n", r.AcceptanceOverlapsCI())
+			fmt.Fprintf(cmd.OutOrStdout(), "  self_upgrade: %v\n", r.SelfUpgrade)
+			fmt.Fprintf(cmd.OutOrStdout(), "  worker_tags: %v\n", r.WorkerTags)
 			if maxInFlightSet {
-				fmt.Printf("  max_in_flight: %d\n", r.MaxInFlight)
+				fmt.Fprintf(cmd.OutOrStdout(), "  max_in_flight: %d\n", r.MaxInFlight)
 			}
 			if primaryProjectSet {
 				if r.PrimaryProject == "" {
-					fmt.Printf("  primary_project: (cleared)\n")
+					fmt.Fprintf(cmd.OutOrStdout(), "  primary_project: (cleared)\n")
 				} else {
-					fmt.Printf("  primary_project: %s\n", r.PrimaryProject)
+					fmt.Fprintf(cmd.OutOrStdout(), "  primary_project: %s\n", r.PrimaryProject)
 				}
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&testCommand, "test-command", "", "repository test command (empty clears it)")
 	cmd.Flags().StringVar(&ciRequired, "ci-required", "", "require successful CI before auto-merge: on or off")
 	cmd.Flags().StringVar(&acceptanceOverlapCI, "acceptance-overlap-ci", "", "start acceptance during pending CI: on or off (default on when CI is required)")
 	cmd.Flags().StringVar(&acceptanceRequired, "acceptance-required", "", "require current independent acceptance before auto-merge: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&selfUpgrade, "self-upgrade", "", "rebuild and replace the installed binary after a confirmed merge into this repo (only for the repo containing clawflow's source): on or off")
 	cmd.Flags().StringVar(&primaryProject, "primary-project", "", "authoritative project for context injection when the repo belongs to multiple projects (empty clears it)")
+	cmd.Flags().IntVar(&acceptanceMaxParallel, "acceptance-max-parallel", 3, "max concurrent independent reviews for this repository (>=1)")
 	cmd.Flags().IntVar(&maxInFlight, "max-in-flight", 0, "max issues of this repo running or awaiting review at once in the unified queue (>=1, default 2)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
 	_ = cmd.Flags().MarkDeprecated("bound-machine", "use worker_tags with host-<hostname> instead")

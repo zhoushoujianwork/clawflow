@@ -7,8 +7,11 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -95,8 +98,11 @@ func configureWorker(cmd *cobra.Command) {
 }
 
 type workerAPI struct {
-	base, token string
-	client      *http.Client
+	base, token  string
+	client       *http.Client
+	mu           sync.Mutex
+	offline      bool
+	registration any
 }
 
 func newWorkerAPI(o workerOptions) (*workerAPI, error) {
@@ -119,17 +125,17 @@ func newWorkerAPI(o workerOptions) (*workerAPI, error) {
 	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true, // Trust the explicitly supplied certificate pin instead of system CAs.
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
-				return fmt.Errorf("missing certificate")
+				return errWorkerTrust
 			}
 			sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
 			if !bytes.Equal(sum[:], pin) {
-				return fmt.Errorf("coordinator fingerprint mismatch")
+				return errWorkerTrust
 			}
 			return nil
 		}}}
-	return &workerAPI{strings.TrimSuffix(o.Coordinator, "/"), secret, &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &workerAPI{base: strings.TrimSuffix(o.Coordinator, "/"), token: secret, client: &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
-func (a *workerAPI) post(ctx context.Context, path string, in, out any) error {
+func (a *workerAPI) postOnce(ctx context.Context, path string, in, out any) error {
 	data, err := json.Marshal(in)
 	if err != nil {
 		return err
@@ -152,8 +158,11 @@ func (a *workerAPI) post(ctx context.Context, path string, in, out any) error {
 		return fmt.Errorf("coordinator request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return errWorkerAuth
+	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("coordinator HTTP %d", resp.StatusCode)
+		return workerHTTPError(resp.StatusCode)
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(resp.Body, coordinator.MaxRequestBytes)).Decode(out)
@@ -165,6 +174,7 @@ type workerBuilder func(context.Context, *coordinator.Task) (*runJob, time.Durat
 
 func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, poll time.Duration, build workerBuilder) error {
 	registration := map[string]any{"tags": o.Tags, "roles": o.Roles, "max_parallel": o.MaxParallel, "run_untagged": o.RunUntagged}
+	api.registration = registration
 	if err := api.post(ctx, "register", registration, nil); err != nil {
 		return err
 	}
@@ -181,9 +191,21 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 					Task *coordinator.Task `json:"task"`
 				}
 				if err := api.post(ctx, "claim", struct{}{}, &claim); err != nil {
-					errors <- err
-					cancel()
-					return
+					if workerFatal(err) {
+						errors <- err
+						cancel()
+						return
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					slog.Warn("worker/task", "err", err.Error())
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(poll):
+					}
+					continue
 				}
 				if claim.Task == nil {
 					select {
@@ -194,9 +216,21 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 					continue
 				}
 				if err := runWorkerTask(ctx, api, o, claim.Task, heartbeat, build); err != nil {
-					errors <- err
-					cancel()
-					return
+					if workerFatal(err) {
+						errors <- err
+						cancel()
+						return
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					slog.Warn("worker/task", "err", err.Error())
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(poll):
+					}
+					continue
 				}
 			}
 		}()
@@ -213,6 +247,15 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	stop := make(chan struct{})
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	defer stopHeartbeat()
+	go func() {
+		select {
+		case <-stop:
+		case <-heartbeatCtx.Done():
+		}
+		stopHeartbeat()
+	}()
 	done := make(chan bool, 1)
 	path := "tasks/" + url.PathEscape(t.ID) + "/"
 	fence := map[string]any{"fencing_token": t.FencingToken}
@@ -228,7 +271,16 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 				done <- true
 				return
 			case <-tick.C:
-				if err := api.post(ctx, path+"heartbeat", fence, nil); err != nil {
+				renewCtx, renewCancel := context.WithTimeout(heartbeatCtx, coordinator.LeaseTTL-interval)
+				err := api.post(renewCtx, path+"heartbeat", fence, nil)
+				renewCancel()
+				if err != nil {
+					select {
+					case <-stop:
+						done <- false
+						return
+					default:
+					}
 					cancel()
 					done <- true
 					return
@@ -270,7 +322,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 			}
 			defer os.Remove(spoolPath)
 			runCtx := workerEffectContext(ctx, spoolPath)
-			j.hooks = &jobHooks{SkipIndex: true, AfterRun: func(r *jobResult) { result = r }}
+			j.hooks = &jobHooks{SkipIndex: true, AfterRun: func(r *jobResult) { result = r }, AcquireLock: workerAcquireIssueLock, ReleaseLock: workerReleaseIssueLock}
 			_, _, failed := runOneOperatorFn(runCtx, j, timeout)
 			if j.result != nil {
 				result = j.result
@@ -297,7 +349,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 	if result.Status == "success" || result.Status == "skipped" {
 		action = "complete"
 	}
-	reportCtx, reportCancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
+	reportCtx, reportCancel := context.WithCancel(parent)
 	defer reportCancel()
 	err := api.post(reportCtx, path+action, map[string]any{"fencing_token": t.FencingToken, "result": result}, nil)
 	if lost || parent.Err() != nil {
@@ -372,7 +424,9 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	rc.TestCommand = p.RepoPolicy.TestCommand
 	rc.CIRequired = p.RepoPolicy.CIRequired
 	rc.AutoMerge = false
+	rc.AcceptanceRequired = p.RepoPolicy.AcceptanceRequired
 	j := &runJob{op: op, repo: p.Repo, repoCfg: rc, client: client, language: p.Language, sub: &operator.Subject{Number: issue.Number, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State, SubTotal: issue.SubIssuesTotal, URL: issue.URL, IsPR: op.Trigger.Target == "pr"}}
+	j.acceptancePlan = p.AcceptancePlan
 	if p.ReopenEventID != "" {
 		j.reopen = &reopenContext{Event: vcs.IssueEvent{ID: p.ReopenEventID}}
 	}
@@ -384,4 +438,79 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 		return nil, 0, fmt.Errorf("repair task missing repair payload")
 	}
 	return j, time.Duration(p.TimeoutSec) * time.Second, nil
+}
+
+var (
+	errWorkerAuth  = errors.New("coordinator authentication failed")
+	errWorkerTrust = errors.New("coordinator fingerprint mismatch")
+)
+
+type workerHTTPError int
+
+func (e workerHTTPError) Error() string { return fmt.Sprintf("coordinator HTTP %d", int(e)) }
+func workerFatal(err error) bool {
+	return errors.Is(err, errWorkerAuth) || errors.Is(err, errWorkerTrust)
+}
+
+// post retains leased execution while transport failures reconnect independently.
+func (a *workerAPI) post(ctx context.Context, path string, in, out any) error {
+	delay := time.Second
+	reconnect := false
+	for {
+		var err error
+		if reconnect && path != "register" && a.registration != nil {
+			err = a.postOnce(ctx, "register", a.registration, nil)
+		}
+		if err == nil {
+			err = a.postOnce(ctx, path, in, out)
+		}
+		if err == nil {
+			a.mu.Lock()
+			if a.offline {
+				slog.Info("worker/connected")
+				a.offline = false
+			}
+			a.mu.Unlock()
+			return nil
+		}
+		var status workerHTTPError
+		var requestErr *url.Error
+		retryable := errors.As(err, &requestErr) || (errors.As(err, &status) && (status >= 500 || status == 408 || status == 429)) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		if ctx.Err() != nil || workerFatal(err) || !retryable {
+			return err
+		}
+		a.mu.Lock()
+		if !a.offline {
+			slog.Warn("worker/disconnected", "err", err.Error())
+			a.offline = true
+		}
+		a.mu.Unlock()
+		// Equal jitter preserves the 60-second ceiling and avoids synchronized workers.
+		wait := delay/2 + time.Duration(rand.Int63n(int64(delay/2)+1))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+		delay *= 2
+		if delay > time.Minute {
+			delay = time.Minute
+		}
+		reconnect = true
+	}
+}
+
+// Worker runs hold the host issue lock so host maintenance, such as empty
+// worktree pruning, never removes a worktree an agent is still using.
+func workerAcquireIssueLock(_ context.Context, j *runJob) error {
+	err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name)
+	if err != nil && j.result != nil {
+		// Another run owns this issue on this host; retry under launch bounds.
+		j.result.Status, j.result.InfraKind = "failed", "launch"
+	}
+	return err
+}
+
+func workerReleaseIssueLock(j *runJob) {
+	snapshot.ReleaseLock(j.repo, j.sub.Number)
 }

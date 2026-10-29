@@ -1,12 +1,16 @@
 # Independent acceptance
 
-ClawFlow can require an independent review before merging a managed GitHub PR. Development and acceptance use separate native sessions. Acceptance first records a plan from the requirements without source access, then reviews a disposable detached checkout of the submitted commit with command-capable permissions.
+ClawFlow can require an independent review before merging a managed GitHub PR. Development and acceptance use separate native sessions. For acceptance-enrolled repositories, ClawFlow records a plan from the requirements before implementation without source access, then independently reviews a disposable detached checkout of the submitted commit with command-capable permissions.
 
 This is a local reference implementation for [platform issue #349](https://github.com/zhoushoujianwork/clawflow/issues/349). The broader [platform design](managed-development-design.md) describes the distributed workflow target. [Technical details](independent-acceptance-detail.md) describe evidence and limits.
 
 ## Planner 隔离
 
 默认使用 `tools-disabled`：空 scratch 目录、`ToolsDisabled: true` 和 `PermissionMode: "default"`。仅当执行器返回 `unsupported_tools` 错误时，在同一次 attempt 内重试一次 `isolated-readonly`：不传工具限制，使用空 scratch 和 `default` 只读策略（Codex 为无网络只读 sandbox）。其他错误仍终止验收。
+
+实现前的计划保存在私有的 `acceptance-plans/` 数据目录，按仓库、issue、需求摘要（标题和正文）及 planner 策略区分。实现者和 CI、验收、冲突修复均收到同一份清单，须逐项自检并在 PR 正文说明覆盖方式、执行的检查及限制。自检不能作为验收证据。需求未变时，验收复用已保存的计划；正文或 planner 策略改变后重新规划。协调器将计划随任务传给 worker，跨机器执行仍使用同一份计划。未启用 `acceptance_required` 的仓库不增加规划调用。
+
+复用计划时保留 planner 的原始会话和时间，将计划副本绑定当前 PR 契约及验收 attempt。审查仍使用独立的新会话，校验其与开发者及 planner 的身份不同，并独立获取提交对应的证据。旧的逐 attempt 计划仍可读取。
 
 计划持久化后才创建、fetch 和 checkout 审查工作区。计划及记录中的 `plan.planner_isolation`（独立计划文件中为 `planner_isolation`）、status 输出和 harvest pass/non-pass 日志记录实际模式。两种模式均要求 native policy 为 `default`；缺失或未知模式的旧计划不能通过 gate，需重新验收。
 
@@ -32,12 +36,13 @@ Enrollment preserves monitoring and automatic-merge settings. The scan sweep nev
 
 ## Automatic harvest
 
-`clawflow run` has an acceptance phase after the operator phase. It needs `auto_merge` on and `acceptance_required` on, and it only runs for the whole pass or a [targeted run](#targeted-run).
+`clawflow run` 在 operator 执行前调度独立验收。需要开启 `auto_merge` 和 `acceptance_required`，支持整轮扫描或 [targeted run](#targeted-run)。
 
-- Per repo and pass, at most one acceptance runs, for the first open PR that passes the sweep's filters, has successful required CI and has no evidence for its current contract.
-- A passing result goes straight to the conditional merge path with the accepted head SHA.
+- 每轮按仓库轮转启动符合条件的 PR 验收，每仓库最多同时运行 `acceptance_max_parallel` 个（默认 3）。通过 `clawflow repo set owner/repo --acceptance-max-parallel 3` 设置；所有后台验收与实现共享本机 `max_concurrent_agents` 限额。
+- 本地验收在独立后台进程中运行，调度轮次启动后即返回，不在审查期间持有仓库运行锁。日志见 `~/.clawflow/logs/acceptance-background.log` 和 `run.log`。
+- 验收通过后，由后续 sweep 串行合并；每次合并前重新检查当前 head、base 和证据。一个 PR 合并导致 base 变化后，其他 PR 的旧验收不能用于合并。
 - 每次完成审查后更新 PR 上由当前认证账号拥有的一条验收评论，包含提交、结论、逐项证据、未解决问题与下一步负责人；旧 attempt 保留在私有审计记录中。发布失败可由后续 harvest 重试。
-- 基础设施错误（包括提供者失败和无效评审报告）会记录日志并使 `clawflow run` 非零退出，15 分钟后可重试。同一 PR head 最多连续失败 2 次，随后以一条评论和看板原因 `acceptance-infra` 暂停。新 head、issue 正文变化或新 ClawFlow 二进制会重置计数；手动验收命令也遵守此上限。这些错误不消耗产品修复次数。
+- 启动失败使 `clawflow run` 返回非零；后台审查中的基础设施错误（包括提供者失败和无效评审报告）记录在日志和验收记录中，不改变已经返回的调度命令退出码，15 分钟后可重试。同一 PR head 最多连续失败 2 次，随后以一条评论和看板原因 `acceptance-infra` 暂停。新 head、issue 正文变化或新 ClawFlow 二进制会重置计数；手动验收命令也遵守此上限。这些错误不消耗产品修复次数。
 - A `failed` verdict is repaired on the same PR, see [Repair after a failed verdict](#repair-after-a-failed-verdict). A `blocked` verdict is not: the comment says a human decision is needed.
 
 The PR must be open, non-draft, from the same repository, and reference an open issue with a closing keyword. A successful managed development run must have captured that issue's requirements and trustworthy native execution events. Historical runs missing the requirements snapshot need a new managed development run. The configured acceptance profile must support the existing Offload execution protocol.

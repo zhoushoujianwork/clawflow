@@ -1,6 +1,8 @@
 package api
 
 import (
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -193,5 +195,18 @@ func TestDetectVSCodeAppName(t *testing.T) {
 				t.Errorf("detectVSCodeAppName(%q)\n  got  %q\n  want %q", tc.codeBin, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestStewardChatSpawn(t *testing.T) {
+	old := spawnChatTerminal
+	defer func() { spawnChatTerminal = old }()
+	called := ""
+	spawnChatTerminal = func(command string) error { called = command; return nil }
+	req := httptest.NewRequest("POST", "/api/chat/spawn", strings.NewReader(`{"pilot":true}`))
+	response := httptest.NewRecorder()
+	HandleChatSpawn(response, req)
+	if response.Code != 200 || !strings.HasSuffix(called, "pilot chat") {
+		t.Fatalf("%d %s %s", response.Code, response.Body, called)
 	}
 }
