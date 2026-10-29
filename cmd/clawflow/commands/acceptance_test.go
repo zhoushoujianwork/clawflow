@@ -76,19 +76,25 @@ func acceptanceFixture(t *testing.T) (*acceptanceFake, config.Repo) {
 	}
 	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return f, nil }
 	calls := 0
+	reviewerSession := ""
 	acceptanceNativeRun = func(_ context.Context, c execution.Config, r execution.Request, _ []string, _ io.Writer, _ func(execution.Observation)) (execution.Result, error) {
 		calls++
 		wantMode, wantPolicy := "default", "default"
 		if !r.ToolsDisabled {
 			wantMode, wantPolicy = "bypassPermissions", "managed-development"
 		}
-		if c.Profile != "acceptance-profile" || r.Resume || r.SessionKey != "" || r.PermissionMode != wantMode {
+		if c.Profile != "acceptance-profile" || (r.Resume && (r.SessionKey != reviewerSession || r.ToolsDisabled)) || (!r.Resume && r.SessionKey != "") || r.PermissionMode != wantMode {
 			t.Fatalf("unpinned native request: %+v %+v", c, r)
 		}
 		result := execution.Result{Status: "ok", ExecutionPolicy: wantPolicy, Profile: c.Profile, Backend: "fixture", Model: "fixture-model", NativeSessionID: execution.NewSessionKey(), RunID: execution.NewSessionKey(), Text: "Independent plan"}
 		if !r.ToolsDisabled {
-			if !strings.Contains(r.Prompt, "git diff <base_sha>...HEAD") || !strings.Contains(r.Prompt, "available locally") {
+			if !r.Resume && (!strings.Contains(r.Prompt, "git diff <base_sha>...HEAD") || !strings.Contains(r.Prompt, "available locally")) {
 				t.Fatal("review prompt lacks offline base comparison instructions")
+			}
+			if r.Resume {
+				result.NativeSessionID = reviewerSession
+			} else {
+				reviewerSession = result.NativeSessionID
 			}
 			result.Text = `{"status":"passed","summary":"Independent checks complete","evidence":["Source fulfills the plan","command: go test ./... => ok"]}`
 		}
@@ -1050,5 +1056,29 @@ func TestAcceptanceComparisonHistoryFailurePreventsReview(t *testing.T) {
 				t.Fatal("missing comparison history must fail")
 			}
 		})
+	}
+}
+
+func TestAcceptanceReportCorrectionReusesNativeSession(t *testing.T) {
+	f, _ := acceptanceFixture(t)
+	baseRun := acceptanceNativeRun
+	calls := 0
+	var session, workspace string
+	acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+		calls++
+		res, err := baseRun(ctx, c, req, env, w, observe)
+		if !req.ToolsDisabled && !req.Resume {
+			session, workspace = res.NativeSessionID, req.Workspace
+			res.Text = "{"
+		} else if req.Resume {
+			if req.SessionKey != session || req.Workspace != workspace || !strings.Contains(req.Prompt, "invalid acceptance report:") || !strings.Contains(req.Prompt, "do not re-review") {
+				t.Fatalf("bad correction request: %+v", req)
+			}
+		}
+		return res, err
+	}
+	r, err := runAcceptance(context.Background(), f, "o/r", 11)
+	if err != nil || r.Verdict != acceptance.Passed || calls != 3 || r.Correction == nil || r.Correction.Reviewer.SessionID != session {
+		t.Fatalf("calls=%d verdict=%s correction=%+v err=%v", calls, r.Verdict, r.Correction, err)
 	}
 }
