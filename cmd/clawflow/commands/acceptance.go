@@ -650,6 +650,38 @@ func acceptanceRemoveRemotes(ctx context.Context, dir string) error {
 	return nil
 }
 
+// acceptancePrepareCheckout makes the pinned comparison history available offline.
+// Planning still runs in an empty scratch directory before this checkout exists.
+func acceptancePrepareCheckout(ctx context.Context, workspace, origin, headBranch, headSHA, baseSHA string) error {
+	// An independent detached Git workspace avoids mutating the user's checkout
+	// or sharing FETCH_HEAD with implement/repair. Only these temp dirs are removed.
+	for _, args := range [][]string{{"init", "--quiet"}, {"remote", "add", "origin", origin}, {"check-ref-format", "refs/heads/" + headBranch}, {"fetch", "--no-tags", "origin", "refs/heads/" + headBranch}} {
+		if _, err := acceptanceGit(ctx, workspace, args...); err != nil {
+			return err
+		}
+	}
+	fetched, err := acceptanceGit(ctx, workspace, "rev-parse", "FETCH_HEAD")
+	if err != nil || fetched != headSHA {
+		return errors.New("acceptance fetched PR head changed")
+	}
+	// Fetch only the pinned base and its ancestry, without creating a ref. The
+	// full head/base histories are needed for offline three-dot comparisons.
+	if _, err := acceptanceGit(ctx, workspace, "fetch", "--no-tags", "origin", baseSHA); err != nil {
+		return err
+	}
+	if _, err := acceptanceGit(ctx, workspace, "merge-base", baseSHA, headSHA); err != nil {
+		return err
+	}
+	if _, err := acceptanceGit(ctx, workspace, "checkout", "--detach", headSHA); err != nil {
+		return err
+	}
+	// The reviewer may run arbitrary commands here, so leave it nothing to push to.
+	if err := acceptanceRemoveRemotes(ctx, workspace); err != nil {
+		return err
+	}
+	return nil
+}
+
 // acceptanceReviewerEnv returns env without VCS or ClawFlow token variables.
 func acceptanceReviewerEnv(env []string) []string {
 	out := make([]string, 0, len(env))
@@ -702,22 +734,7 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		if err != nil {
 			return "", err
 		}
-		// An independent detached Git workspace avoids mutating the user's checkout
-		// or sharing FETCH_HEAD with implement/repair. Only these temp dirs are removed.
-		for _, args := range [][]string{{"init", "--quiet"}, {"remote", "add", "origin", origin}, {"check-ref-format", "refs/heads/" + pr.HeadBranch}, {"fetch", "--no-tags", "origin", "refs/heads/" + pr.HeadBranch}} {
-			if _, err := acceptanceGit(ctx, workspace, args...); err != nil {
-				return "", err
-			}
-		}
-		fetched, err := acceptanceGit(ctx, workspace, "rev-parse", "FETCH_HEAD")
-		if err != nil || fetched != c.HeadSHA {
-			return "", errors.New("acceptance fetched PR head changed")
-		}
-		if _, err := acceptanceGit(ctx, workspace, "checkout", "--detach", c.HeadSHA); err != nil {
-			return "", err
-		}
-		// The reviewer may run arbitrary commands here, so leave it nothing to push to.
-		if err := acceptanceRemoveRemotes(ctx, workspace); err != nil {
+		if err := acceptancePrepareCheckout(ctx, workspace, origin, pr.HeadBranch, c.HeadSHA, c.BaseSHA); err != nil {
 			return "", err
 		}
 		return workspace, nil

@@ -19,6 +19,9 @@ func TestRequirementsPlanBeforeImplementationReusedByReview(t *testing.T) {
 			plans++
 		} else {
 			reviews++
+			if !strings.Contains(prompt, "git diff <base_sha>...HEAD") || !strings.Contains(prompt, "git log <base_sha>..HEAD") {
+				t.Fatal("cached-plan review lacks offline base comparison instructions")
+			}
 		}
 		return base(ctx, prompt, opts)
 	}

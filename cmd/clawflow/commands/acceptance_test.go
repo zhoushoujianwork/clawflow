@@ -87,6 +87,9 @@ func acceptanceFixture(t *testing.T) (*acceptanceFake, config.Repo) {
 		}
 		result := execution.Result{Status: "ok", ExecutionPolicy: wantPolicy, Profile: c.Profile, Backend: "fixture", Model: "fixture-model", NativeSessionID: execution.NewSessionKey(), RunID: execution.NewSessionKey(), Text: "Independent plan"}
 		if !r.ToolsDisabled {
+			if !strings.Contains(r.Prompt, "git diff <base_sha>...HEAD") || !strings.Contains(r.Prompt, "available locally") {
+				t.Fatal("review prompt lacks offline base comparison instructions")
+			}
 			result.Text = `{"status":"passed","summary":"Independent checks complete","evidence":["Source fulfills the plan","command: go test ./... => ok"]}`
 		}
 		return result, nil
@@ -950,5 +953,102 @@ func TestAcceptanceGitLabSubgroupConfiguration(t *testing.T) {
 		if (err == nil) != (repo == "ns/group/repo") {
 			t.Errorf("repo=%s err=%v", repo, err)
 		}
+	}
+}
+
+func TestAcceptanceCheckoutOfflineBaseComparison(t *testing.T) {
+	// Use real Git with diverged histories: fetching head alone cannot supply base.
+	ctx := context.Background()
+	source, workspace := t.TempDir(), t.TempDir()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := acceptanceGit(ctx, dir, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(source, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(source, "init", "--quiet")
+	git(source, "config", "user.name", "Test")
+	git(source, "config", "user.email", "test@example.com")
+	write("existing.txt", "preserved\n")
+	git(source, "add", ".")
+	git(source, "commit", "-qm", "common")
+	common := git(source, "rev-parse", "HEAD")
+	git(source, "checkout", "-qb", "feature")
+	write("changed.txt", "implementation\n")
+	git(source, "add", ".")
+	git(source, "commit", "-qm", "implementation")
+	head := git(source, "rev-parse", "HEAD")
+	git(source, "checkout", "--detach", common)
+	write("base-only.txt", "base advancement\n")
+	git(source, "add", ".")
+	git(source, "commit", "-qm", "base advancement")
+	base := git(source, "rev-parse", "HEAD")
+	c := acceptance.Contract{HeadSHA: head, BaseSHA: base}
+
+	if err := acceptancePrepareCheckout(ctx, workspace, source, "feature", c.HeadSHA, c.BaseSHA); err != nil {
+		t.Fatal(err)
+	}
+	// Remove the source to prove subsequent comparisons need no provider or remote.
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+	for _, sha := range []string{base, common} {
+		if got := git(workspace, "cat-file", "-t", sha); got != "commit" {
+			t.Fatalf("missing comparison commit %s: %s", sha, got)
+		}
+	}
+	if got := git(workspace, "diff", "--name-only", base+"...HEAD"); got != "changed.txt" {
+		t.Fatalf("unexpected PR diff: %s", got)
+	}
+	if got := git(workspace, "log", "--format=%H", base+"..HEAD"); got != head {
+		t.Fatalf("unexpected PR history: %s", got)
+	}
+	if got := git(workspace, "merge-base", base, "HEAD"); got != common {
+		t.Fatalf("unexpected merge base: %s", got)
+	}
+	if got := git(workspace, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("head changed: %s", got)
+	}
+	if got := git(workspace, "remote"); got != "" {
+		t.Fatalf("review has remotes: %s", got)
+	}
+	if got := git(workspace, "status", "--porcelain"); got != "" {
+		t.Fatalf("tracked source changed: %s", got)
+	}
+	if got := git(workspace, "rev-list", "-n", "1", "--all", "--not", head); got != "" {
+		t.Fatalf("base fetch broke immutability check: %s", got)
+	}
+}
+
+func TestAcceptanceComparisonHistoryFailurePreventsReview(t *testing.T) {
+	for _, stage := range []string{"fetch-base", "merge-base"} {
+		t.Run(stage, func(t *testing.T) {
+			f, _ := acceptanceFixture(t)
+			baseGit, baseRun := acceptanceGit, acceptanceNativeRun
+			acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+				if (stage == "fetch-base" && args[0] == "fetch" && args[len(args)-1] == f.pr.BaseSHA) ||
+					(stage == "merge-base" && args[0] == "merge-base") {
+					return "", errors.New("comparison history unavailable")
+				}
+				return baseGit(ctx, dir, args...)
+			}
+			acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, out io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+				if !req.ToolsDisabled {
+					t.Fatal("review started without comparison history")
+				}
+				return baseRun(ctx, c, req, env, out, observe)
+			}
+			if _, err := runAcceptance(context.Background(), f, "o/r", 11); err == nil {
+				t.Fatal("missing comparison history must fail")
+			}
+		})
 	}
 }
