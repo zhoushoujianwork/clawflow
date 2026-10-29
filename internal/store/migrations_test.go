@@ -200,3 +200,26 @@ func TestEnsureReadyWithoutDSN(t *testing.T) {
 		t.Fatalf("want ErrNoDSN, got %v", err)
 	}
 }
+
+// TestActionsMigrationAfterTokenScope covers upgrades from the published base.
+func TestActionsMigrationAfterTokenScope(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:5]); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations)
+	if err != nil || len(applied) != 1 || applied[0] != 6 {
+		t.Fatalf("Actions upgrade: applied=%v err=%v", applied, err)
+	}
+	for _, table := range []string{"actions_attachments", "actions_evidence"} {
+		var exists bool
+		if err := s.DB().Raw("SELECT to_regclass(?) IS NOT NULL", table).Scan(&exists).Error; err != nil || !exists {
+			t.Fatalf("missing %s: exists=%v err=%v", table, exists, err)
+		}
+	}
+	var scope string
+	if err := s.DB().Raw("SELECT column_default FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tokens' AND column_name = 'scope'").Scan(&scope).Error; err != nil || !strings.Contains(scope, "worker") {
+		t.Fatalf("token scope migration lost: default=%q err=%v", scope, err)
+	}
+}

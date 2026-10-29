@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/actions"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
@@ -70,6 +71,9 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		defer tick.Stop()
 		for {
 			if err := results.recoverResults(reconcileCtx, tasks); err != nil && reconcileCtx.Err() == nil {
+				onError(err)
+			}
+			if err := reconcileActionsObservations(reconcileCtx, actions.Ledger{DB: db.DB()}); err != nil && reconcileCtx.Err() == nil {
 				onError(err)
 			}
 			select {
