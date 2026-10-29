@@ -160,6 +160,10 @@ func TestStore(t *testing.T) {
 	if err != nil || p.Digest != r.Plan.Digest {
 		t.Fatalf("load plan: %v", err)
 	}
+	// A worker and the coordinator sharing one store save the same plan twice.
+	if err := s.SavePlan(c, r.Plan); err != nil {
+		t.Fatalf("identical plan resave: %v", err)
+	}
 	p.Text = "replacement"
 	p.Digest = digest(p.Text)
 	if s.SavePlan(c, p) == nil {
@@ -168,6 +172,9 @@ func TestStore(t *testing.T) {
 	if err := s.SaveRecord(r); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.SaveRecord(r); err != nil {
+		t.Fatalf("identical record resave: %v", err)
+	}
 	loaded, err := s.LoadRecord(c, r.AttemptID)
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +182,9 @@ func TestStore(t *testing.T) {
 	if err := Evaluate(c, loaded); err != nil {
 		t.Fatal(err)
 	}
-	if s.SaveRecord(r) == nil {
+	changed := r
+	changed.BinaryID = "different-binary"
+	if s.SaveRecord(changed) == nil {
 		t.Fatal("overwrote immutable record")
 	}
 	name, _ := planName(c, r.Plan.AttemptID)
