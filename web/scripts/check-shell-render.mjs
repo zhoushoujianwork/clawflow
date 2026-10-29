@@ -58,7 +58,7 @@ try {
         assert.ok(dimensions.content <= dimensions.viewport, JSON.stringify({ width, readonly, ...dimensions }))
       }
       await page.goto(new URL('/pipeline', origin).href)
-      await page.getByRole('heading', { name: 'Delivery pipeline' }).waitFor()
+      await page.getByRole('heading', { name: 'Work' }).waitFor()
       await page.getByRole('button', { name: new RegExp('long-repository-name') }).waitFor()
       if (!readonly) await page.getByRole('button', { name: '与平台 steward 对话' }).waitFor()
       const nav = page.getByRole('navigation', { name: 'Primary' })
@@ -86,7 +86,7 @@ try {
       await noOverflow()
       // Tab from the beginning: skip link, then content target, then navigation.
       await page.goto(new URL('/pipeline', origin).href)
-      await page.getByRole('heading', { name: 'Delivery pipeline' }).waitFor()
+      await page.getByRole('heading', { name: 'Work' }).waitFor()
       await page.keyboard.press('Tab')
       assert.equal(await page.locator(':focus').textContent(), 'Skip to content')
       assert.equal(await page.locator(':focus').evaluate(el => getComputedStyle(el).outlineStyle), 'solid')
@@ -117,7 +117,7 @@ try {
           await page.goto(new URL(path, origin).href)
           await page.getByText('This page requires local access.', { exact: false }).waitFor()
           await page.getByRole('link', { name: 'Open Work', exact: true }).click()
-          await page.getByRole('heading', { name: 'Delivery pipeline' }).waitFor()
+          await page.getByRole('heading', { name: 'Work' }).waitFor()
         }
       }
       await page.goto(new URL('/pipeline', origin).href)
