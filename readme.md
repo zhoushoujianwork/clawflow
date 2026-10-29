@@ -243,7 +243,7 @@ GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return 
 
 ### Work queue (one queue for all repositories)
 
-All enabled repositories, GitHub and GitLab, share one ClawFlow-native queue. An open leaf issue is enrolled only when it carries the `clawflow` label and meets the existing eligibility rules. Priority labels and manual rank control order, never enrollment. Existing in-flight work still counts toward concurrency limits.
+All enabled repositories, GitHub and GitLab, share one ClawFlow-native queue. Every open leaf issue is selected by default if it meets the existing eligibility rules, unless the owner applies `clawflow-skip`. The old `clawflow` label is ignored and preserved. Priority labels and manual rank control order, never eligibility. Existing in-flight work still counts toward concurrency limits.
 
 Order is `(priority, rank, created_at, key)`:
 
@@ -254,12 +254,12 @@ Order is `(priority, rank, created_at, key)`:
 ```bash
 clawflow queue list [--repo R] [--json]   # global order: key, tier, rank, state
 clawflow queue move owner/repo#12 --top
-clawflow queue add owner/repo#13 [--top | --before K | --after K]   # enroll (default: bottom)
-clawflow queue remove owner/repo#13                                 # remove the clawflow label and rank
+clawflow queue add owner/repo#13 [--top | --before K | --after K]   # rank (default: bottom)
+clawflow queue remove owner/repo#13                                 # remove manual rank only
 clawflow repo set owner/repo --max-in-flight 3   # per repo, default 2
 ```
 
-`queue add` adds the `clawflow` label as well as rank; `queue remove` removes both, even for unranked issues. `queue list` reports a separate “not enrolled” count per repository of unlabeled open issues from the last pass.
+`queue add/remove/move` only change manual rank. To exclude work, the owner applies `clawflow-skip` directly in GitHub/GitLab; only the owner removes it to resume eligibility. ClawFlow never changes this label. It prevents new issue work and managed-PR CI/acceptance/conflict repair, acceptance and auto-merge. Already running work finishes and writes back normally. `agent-skipped` remains the agent’s blocked outcome. `queue list` reports skipped open issues per repository; the Board lists them separately, and they never wake Pilot. See [queue behavior](docs/queue.md).
 
 Each pass walks the order for its repositories and dispatches while the repo's `max_in_flight` and the global `settings.max_concurrent_agents` allow. An item is in flight while it holds a local lock, or carries `agent-implemented` with an open PR that references it. Blocked items (`agent-failed`, red CI without repair, no acceptance verdict, open dependency) are skipped with a recorded reason and never stall the queue. An in-flight item blocked longer than `settings.queue.park_after` (default `45m`) is parked and stops counting toward `max_in_flight` (at most 2 per repo). Logs: `queue/pick`, `queue/skip`, `queue/park`, `queue/unpark`, `queue/format_warning`, `queue/import`. Targeted runs (`clawflow run --repo R --issue N`) bypass the queue.
 

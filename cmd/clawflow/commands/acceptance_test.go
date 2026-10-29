@@ -29,6 +29,8 @@ type acceptanceFake struct {
 	conditional func() error
 }
 
+func (f *acceptanceFake) GetIssueLabels(string, int) ([]string, error) { return f.issue.Labels, nil }
+
 func (f *acceptanceFake) GetPR(_ string, _ int) (vcs.PR, error)        { return f.pr, nil }
 func (f *acceptanceFake) GetIssue(_ string, _ int) (*vcs.Issue, error) { return f.issue, nil }
 func (f *acceptanceFake) MergePRAtHead(_ string, _ int, expected string) (string, error) {

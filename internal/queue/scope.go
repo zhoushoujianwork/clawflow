@@ -1,7 +1,7 @@
 package queue
 
-// ScopeLabel enrolls an issue in the work queue.
-const ScopeLabel = "clawflow"
+// SkipLabel is owned exclusively by the repository owner.
+const SkipLabel = "clawflow-skip"
 
 // Remove returns order without k.
 func Remove(order []Key, k Key) []Key {

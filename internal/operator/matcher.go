@@ -66,6 +66,11 @@ func ExcludedBy(sub *Subject, op *Operator) (string, bool) {
 // that rejected the subject (e.g. `missing required label "feat"`). Used by
 // the CLI's --debug trace; production matching uses the cheaper Matches.
 func MatchesWithReason(sub *Subject, op *Operator) (bool, string) {
+	for _, label := range sub.Labels {
+		if label == "clawflow-skip" {
+			return false, "owner skipped issue"
+		}
+	}
 	if op.Trigger.Target == "issue" && sub.IsPR {
 		return false, "target=issue but subject is PR"
 	}

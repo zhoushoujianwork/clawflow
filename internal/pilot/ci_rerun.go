@@ -42,6 +42,9 @@ func (e ActionExecutor) rerunCI(a Action, now time.Time) (*vcs.CIRerunPlan, erro
 			return nil, err
 		}
 		if issue != nil && issue.State == "open" && issue.SubIssuesTotal == 0 && issue.HasLabel("agent-implemented") {
+			if issue.HasLabel("clawflow-skip") {
+				return nil, errors.New("issue_skipped")
+			}
 			if issue.HasLabel("agent-running") {
 				return nil, errors.New("issue_running")
 			}

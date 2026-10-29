@@ -246,3 +246,14 @@ func TestPendingAuditPreventsReplayAfterCrash(t *testing.T) {
 		t.Fatalf("%+v %v calls=%v", r, err, c.calls)
 	}
 }
+
+func TestPilotCannotReleaseOwnerSkippedIssue(t *testing.T) {
+	e, c := testExecutor(t)
+	c.issue.Labels = append(c.issue.Labels, "clawflow-skip")
+	if _, err := e.execute(Action{Type: "release", Repo: "o/r", Issue: 1, Body: "retry"}, "run"); err == nil {
+		t.Fatal("owner skip released")
+	}
+	if len(c.calls) != 0 {
+		t.Fatalf("unexpected writes: %v", c.calls)
+	}
+}

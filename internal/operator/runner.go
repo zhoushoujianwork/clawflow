@@ -453,12 +453,13 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 	// Runs whenever the comment landed, including the disallowed-outcome case:
 	// the operator did its work and the body is on the issue, so leaving the
 	// trigger label in place only buys a duplicate comment and a second bill.
-	if outcome != "" && len(op.Trigger.LabelsConsumed) > 0 {
-		if err := v.RemoveLabel(opts.Repo, sub.Number, op.Trigger.LabelsConsumed...); err != nil {
+	consumed := slices.DeleteFunc(slices.Clone(op.Trigger.LabelsConsumed), func(label string) bool { return label == "clawflow-skip" })
+	if outcome != "" && len(consumed) > 0 {
+		if err := v.RemoveLabel(opts.Repo, sub.Number, consumed...); err != nil {
 			writeErrors = append(writeErrors, err)
 			fmt.Fprintf(os.Stderr, "  ⚠ consumed label cleanup failed: %v\n", err)
 		} else {
-			fmt.Fprintf(os.Stderr, "  ✓ consumed labels removed: %v\n", op.Trigger.LabelsConsumed)
+			fmt.Fprintf(os.Stderr, "  ✓ consumed labels removed: %v\n", consumed)
 		}
 	}
 
@@ -484,6 +485,9 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 // Outcomes whitelist. An empty whitelist is treated as "anything goes" for
 // back-compat with older skills that don't enumerate outcomes.
 func outcomeAllowed(op *Operator, label string) bool {
+	if label == "clawflow-skip" {
+		return false
+	}
 	if len(op.Outcomes) == 0 {
 		return true
 	}

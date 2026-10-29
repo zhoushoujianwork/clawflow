@@ -163,10 +163,16 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	}
 	wg.Wait()
 	snap.Events = pipeline.Relevant(events, tracked)
+	skipped := map[queue.Key]bool{}
+	for _, board := range snap.Repos {
+		for _, item := range board.SkippedIssues {
+			skipped[queue.Key{Repo: board.Repo, Number: item.Issue}] = true
+		}
+	}
 	snap.GlobalQueue = []pipeline.GlobalQueueEntry{}
 	if d.globalQueue != nil {
 		for _, r := range d.globalQueue() {
-			if _, ok := d.cfg.Repos[r.Repo]; !ok {
+			if _, ok := d.cfg.Repos[r.Repo]; !ok || skipped[queue.Key{Repo: r.Repo, Number: r.Number}] {
 				continue
 			}
 			snap.GlobalQueue = append(snap.GlobalQueue, pipeline.GlobalQueueEntry{
@@ -304,7 +310,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 	var cands []cand
 	seen := map[int]bool{}
 	add := func(c cand) {
-		if !seen[c.number] {
+		if !seen[c.number] && !hasLabel(issueByNum[c.number].Labels, queue.SkipLabel) {
 			seen[c.number] = true
 			cands = append(cands, c)
 		}
@@ -318,7 +324,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 			if !ok {
 				// Queue rows stay visible before their issue is readable.
 				it = vcs.Issue{Number: row.Number, Title: row.Title, State: "open"}
-			} else if !hasLabel(it.Labels, queue.ScopeLabel) {
+			} else if hasLabel(it.Labels, queue.SkipLabel) {
 				continue
 			}
 			add(cand{number: it.Number, queuePos: row.Position, title: it.Title, labels: it.Labels, state: it.State, updated: it.UpdatedAt})
@@ -383,13 +389,17 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		add(cand{number: n, title: title, state: "closed", updated: pr.MergedAt})
 	}
 
-	// Keep new issues available to Pilot without changing delivery-board rows.
+	// Owner-skipped issues are visible separately and never wake Pilot.
 	for _, issue := range openIssues {
-		if issue.State == "open" && !seen[issue.Number] && !hasLabel(issue.Labels, queue.ScopeLabel) {
-			board.UnqueuedIssues = append(board.UnqueuedIssues, pipeline.Item{Issue: issue.Number, Title: issue.Title, State: issue.State, UpdatedAt: issue.UpdatedAt})
+		if issue.State == "open" && hasLabel(issue.Labels, queue.SkipLabel) {
+			item := pipeline.Item{Issue: issue.Number, Title: issue.Title, State: issue.State, UpdatedAt: issue.UpdatedAt}
+			if pr, ok := prByIssue[issue.Number]; ok {
+				item.PR = &pipeline.PRInfo{Number: pr.Number, State: pr.State}
+			}
+			board.SkippedIssues = append(board.SkippedIssues, item)
 		}
 	}
-	sortBoardItems(board.UnqueuedIssues)
+	sortBoardItems(board.SkippedIssues)
 
 	detailed := 0
 	for _, c := range cands {

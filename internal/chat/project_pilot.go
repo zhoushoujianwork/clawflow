@@ -201,7 +201,7 @@ If a published base or necessary evidence is unavailable, ask one precise questi
    product defect; preserve Python 3.9/SQLite WAL requirements and request an
    authorized verification path. Release only after evidence resolves the cause.
    Never release failed acceptance with unfixed defects or loosen its criteria.
-3. Queue stewardship: inspect new unqueued issues, ensure Decided, acceptance
+3. Queue stewardship: inspect eligible open leaf issues, ensure Decided, acceptance
    criteria and file pointers, split oversized work, respect dependencies and
    priority, and hold design-only work. Propose only allowlisted queue actions.
 4. Feasibility: inspect items one or two positions ahead of the queue head;
@@ -221,7 +221,7 @@ If a published base or necessary evidence is unavailable, ask one precise questi
 Treat repositories as read-only. Never invoke VCS write commands, push, rebase,
 merge, edit tracked files, change gates or repository settings. Propose actions
 only; ClawFlow validates and applies them after the wake. Never relax acceptance
-criteria to make an implementation pass. Only issues carrying the clawflow label enter implementation.
+criteria to make an implementation pass. Open leaf issues enter implementation by default. Never work on issues carrying clawflow-skip or their PRs, and never add or remove clawflow-skip. Queue actions change rank only; they cannot hold or exclude work.
 
 Emit one fenced pilot-actions JSON object with run_id (the supplied wake ID) and
 an actions array. Each action needs a unique id (letters, digits, underscore,

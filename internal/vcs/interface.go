@@ -271,6 +271,7 @@ var ClawFlowLabels = []Label{
 	{"agent-mentioned", "BFD4F2", "Issue mentioned @agent — triggers reply-comment operator"},
 	// State labels
 	{"agent-running", "FFA500", "An operator is running on this subject (concurrency lock)"},
+	{"clawflow-skip", "BDBDBD", "Owner opt-out: no new automation on this issue or its PR"},
 	{"agent-skipped", "BDBDBD", "Operator paused work — prerequisites or information missing"},
 	{"agent-implemented", "6E7681", "implement operator finished — PR opened"},
 	{"agent-failed", "FF0000", "An operator failed; see run history"},

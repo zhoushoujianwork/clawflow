@@ -74,6 +74,13 @@ func (e ActionExecutor) overrideMerge(a Action, run string, prior map[string]Act
 	if err != nil {
 		return err
 	}
+	for _, match := range rerunClosingReference.FindAllStringSubmatch(pr.Body, -1) {
+		n, _ := strconv.Atoi(match[1])
+		issue, err := c.GetIssue(a.Repo, n)
+		if err != nil || issue == nil || issue.HasLabel("clawflow-skip") {
+			return refuseOverride("issue_skipped_or_unreadable")
+		}
+	}
 	base := rc.BaseBranch
 	if base == "" {
 		base = "main"

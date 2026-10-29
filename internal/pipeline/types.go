@@ -96,7 +96,7 @@ type RepoBoard struct {
 	AcceptanceRequired bool   `json:"acceptance_required"`
 	MaxInFlight        int    `json:"max_in_flight"`
 	Items              []Item `json:"items"`
-	UnqueuedIssues     []Item `json:"unqueued_issues,omitempty"`
+	SkippedIssues      []Item `json:"skipped_issues,omitempty"`
 	// Error is set when the repository could not be read at all.
 	Error string `json:"error,omitempty"`
 }

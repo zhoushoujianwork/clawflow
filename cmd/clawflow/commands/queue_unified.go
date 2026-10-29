@@ -74,10 +74,10 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		plan.Previous[e.Number] = e
 	}
 	plan.State.Repo = in.Repo
-	plan.State.NotEnrolled = 0
+	plan.State.Skipped = 0
 	for _, is := range in.Issues {
-		if (is.State == "" || is.State == "open") && !hasLabel(is.Labels, queue.ScopeLabel) {
-			plan.State.NotEnrolled++
+		if (is.State == "" || is.State == "open") && hasLabel(is.Labels, queue.SkipLabel) {
+			plan.State.Skipped++
 		}
 	}
 
@@ -105,6 +105,13 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		if is.State != "" && is.State != "open" {
 			continue
 		}
+		// Owner opt-out prevents new work, but an existing run still occupies
+		// its slot until the execution lock is released.
+		locked := in.Locked != nil && in.Locked(is.Number)
+		skipped := hasLabel(is.Labels, queue.SkipLabel)
+		if skipped && !locked {
+			continue
+		}
 		if in.HasChildren[is.Number] || is.SubIssuesTotal > 0 {
 			continue // parents are coordinated by track-progress, not queued
 		}
@@ -116,7 +123,7 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		c := queue.Candidate{}
 		var flightPR *vcs.PR
 		switch {
-		case in.Locked != nil && in.Locked(is.Number):
+		case locked:
 			c.InFlight = true
 		case hasLabel(is.Labels, "agent-implemented"):
 			if err := loadPRs(); err != nil {
@@ -135,13 +142,10 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		case hasLabel(is.Labels, "agent-skipped"):
 			continue
 		}
-		if c.InFlight && in.FlightBlocked != nil {
+		if c.InFlight && !skipped && in.FlightBlocked != nil {
 			c.FlightBlocked = in.FlightBlocked(is, flightPR)
 		}
 		if !c.InFlight {
-			if !hasLabel(is.Labels, queue.ScopeLabel) {
-				continue
-			}
 			switch {
 			case !scanned:
 				c.Ineligible = "not_in_open_issue_scan"
@@ -202,7 +206,6 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		plan.State.Entries = append(plan.State.Entries, queue.EntryRecord{
 			Number: e.Key.Number, Title: is.Title, Priority: e.Priority.String(), Rank: e.Rank,
 			State: e.State, Reason: e.Reason, Created: is.CreatedAt,
-			Labeled: hasLabel(is.Labels, queue.ScopeLabel),
 		})
 	}
 	return plan

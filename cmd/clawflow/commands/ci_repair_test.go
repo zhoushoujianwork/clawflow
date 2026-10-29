@@ -53,7 +53,7 @@ func TestCIRepairCandidate(t *testing.T) {
 			}
 		})
 	}
-	for _, label := range []string{"agent-failed", "agent-skipped", "agent-running", "tracking", "question"} {
+	for _, label := range []string{"clawflow-skip", "agent-failed", "agent-skipped", "agent-running", "tracking", "question"} {
 		p, i := repairFixture()
 		i.Labels = append(i.Labels, label)
 		if ciRepairCandidate("o/r", p, i) == nil {

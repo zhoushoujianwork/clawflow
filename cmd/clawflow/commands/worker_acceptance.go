@@ -23,6 +23,9 @@ type workerAcceptanceKey struct{}
 var enqueueWorkerAcceptanceFn = enqueueWorkerAcceptance
 
 func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string, rc config.Repo, pr vcs.PR, timeout time.Duration) error {
+	if err := issueWorkAllowed(client, repo, extractClosesIssue(pr.Body)); err != nil {
+		return err
+	}
 	c, _, _, _, err := acceptanceContract(ctx, client, repo, pr.Number)
 	if err != nil {
 		return err

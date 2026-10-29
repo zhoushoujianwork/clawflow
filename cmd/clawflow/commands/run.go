@@ -975,6 +975,9 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	capturedAt := time.Now().UTC()
 	targetMatch := "" // operator matched for the --issue target, if any
 	for _, iss := range issues {
+		if iss.HasLabel("clawflow-skip") {
+			continue
+		}
 		sub := &operator.Subject{
 			Number:   iss.Number,
 			Title:    iss.Title,

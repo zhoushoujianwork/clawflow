@@ -25,13 +25,12 @@ type EntryRecord struct {
 	State    string `json:"state"`
 	Reason   string `json:"reason,omitempty"`
 	Created  string `json:"created_at,omitempty"`
-	Labeled  bool   `json:"labeled,omitempty"` // carries the "clawflow" scope label
 }
 
 // RepoState is the small per-repo file under data/queue-state/. Only the pass
 // holding the repo's run lock writes it.
 type RepoState struct {
-	NotEnrolled  int               `json:"not_enrolled"` // open issues without the enrollment label
+	Skipped      int               `json:"skipped"` // open issues carrying the owner skip label
 	Version      int               `json:"version"`
 	Repo         string            `json:"repo"`
 	UpdatedAt    time.Time         `json:"updated_at"`
