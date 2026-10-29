@@ -134,7 +134,13 @@ interface WorkerPool {
   throughput: { since: string; done: number; failed: number }
 }
 
+interface APIUsage {
+ captured_at: string
+ calls_by_stage: Record<string, number>
+ budgets: Record<string, {limit: number; remaining: number; reset: string; backoff: string}>
+}
 interface Board {
+ vcs_usage?: APIUsage
   worker_pool?: WorkerPool | null
   worker_pool_error?: string
   pilot_actions?: PilotAction[]
@@ -332,6 +338,7 @@ function PipelinePage() {
       ) : board ? (
         <>
           <RuntimeHeader runtime={board.runtime} />
+          <APIUsagePanel usage={board.vcs_usage} />
           <WorkerPoolPanel pool={board.worker_pool} error={board.worker_pool_error} />
           <Attention board={board} repoInfo={repoInfo} />
           <div className="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Pipeline items">
@@ -620,5 +627,17 @@ function WorkerPoolPanel({ pool, error }: { pool?: WorkerPool | null; error?: st
       </table></div>
       {!pool.tasks.length && <p className="py-2 text-muted-foreground">No tasks.</p>}
     </>}
+  </section>
+}
+
+export function APIUsagePanel({ usage }: { usage?: APIUsage }) {
+  if (!usage) return null
+  return <section aria-label="GitHub API budget" className="border rounded p-3 mb-3 text-sm">
+    <p>GitHub API · 最近调度轮次 {new Date(usage.captured_at).toLocaleString()}</p>
+    {Object.entries(usage.budgets).map(([host, b]) => <p key={host}>
+      {host} · 剩余 {b.remaining}/{b.limit} · 重置 {new Date(b.reset).toLocaleString()}
+      {Date.parse(b.backoff) > Date.now() && ` · 退避至 ${new Date(b.backoff).toLocaleString()}`}
+    </p>)}
+    <p>各阶段请求：{Object.entries(usage.calls_by_stage).map(([stage, calls]) => `${stage}: ${calls}`).join(' · ') || '0'}</p>
   </section>
 }

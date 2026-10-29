@@ -325,7 +325,7 @@ func flightBlockedReason(ctx context.Context, client vcs.Client, repo string, re
 
 // queueDepResolver answers cross-repo dependencies by reading the issue from
 // its repo's VCS (read-only). Unknown repos and read errors fail closed.
-func queueDepResolver(cfg *config.Config) func(queue.Key) bool {
+func queueDepResolver(ctx context.Context, cfg *config.Config) func(queue.Key) bool {
 	cache := map[queue.Key]bool{}
 	return func(k queue.Key) bool {
 		if v, ok := cache[k]; ok {
@@ -334,6 +334,11 @@ func queueDepResolver(cfg *config.Config) func(queue.Key) bool {
 		open := true
 		if rc, ok := cfg.Repos[k.Repo]; ok {
 			if client, err := newVCSClient(rc); err == nil {
+				setVCSContext(client, ctx)
+				if !pollingAllowed(client) {
+					cache[k] = true
+					return true
+				}
 				if is, err := client.GetIssue(k.Repo, k.Number); err == nil && is != nil {
 					open = is.State != "closed"
 				}

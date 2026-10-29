@@ -18,13 +18,19 @@ try {
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import assert from 'node:assert/strict'
-import { itemPilotActions, PilotTimeline, RuntimeHeader, RepoSection, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
+import { itemPilotActions, PilotTimeline, RuntimeHeader, APIUsagePanel, RepoSection, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
 const runtime = { version:'test', scheduler:{status:'idle'}, execution:{ready:true,profile:'actual',backend:'codex'} }
 const noTier = renderToStaticMarkup(<RuntimeHeader runtime={runtime}/>)
 assert.ok(!noTier.includes('tier:'))
 const withTier = renderToStaticMarkup(<RuntimeHeader runtime={{...runtime, execution:{...runtime.execution,model:'recorded-model',service_tier:'priority'}}}/>)
 assert.ok(withTier.includes('recorded-model'))
 assert.ok(withTier.includes('priority'))
+const apiUsage = renderToStaticMarkup(<APIUsagePanel usage={{captured_at:'2026-10-30T00:00:00Z', calls_by_stage:{scan:8,harvest:2}, budgets:{'https://api.github.com':{limit:5000,remaining:499,reset:'2026-10-30T01:00:00Z',backoff:'2026-10-30T01:00:00Z'}}}}/>)
+assert.ok(apiUsage.includes('499/5000'))
+assert.ok(apiUsage.includes('重置'))
+assert.ok(apiUsage.includes('scan: 8'))
+assert.ok(apiUsage.includes('harvest: 2'))
+assert.equal(renderToStaticMarkup(<APIUsagePanel/>), '')
 const now = new Date().toISOString()
 const repos = Array.from({length: 5}, (_, r) => ({
   repo: 'owner/repo-' + r, enabled:true, auto_merge:false, ci_required:true,

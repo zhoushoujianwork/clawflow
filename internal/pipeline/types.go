@@ -5,6 +5,8 @@
 // the acceptance store and local files is done by the caller.
 package pipeline
 
+import "github.com/zhoushoujianwork/clawflow/internal/vcs"
+
 // Stage is the delivery stage of one item.
 type Stage string
 
@@ -26,9 +28,10 @@ const (
 
 // Snapshot is the cacheable, request-independent part of the board.
 type Snapshot struct {
-	GeneratedAt string      `json:"generated_at"`
-	Repos       []RepoBoard `json:"repos"`
-	Events      []Event     `json:"events"`
+	VCSUsage    *vcs.APIUsage `json:"vcs_usage,omitempty"`
+	GeneratedAt string        `json:"generated_at"`
+	Repos       []RepoBoard   `json:"repos"`
+	Events      []Event       `json:"events"`
 	// GlobalQueue is the single cross-repository work queue in dispatch
 	// order (priority tier, manual rank, age).
 	GlobalQueue []GlobalQueueEntry `json:"global_queue"`

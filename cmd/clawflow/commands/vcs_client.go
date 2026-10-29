@@ -1,8 +1,11 @@
 package commands
 
 import (
+	"context"
 	"fmt"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"os"
+	"path/filepath"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot/budget"
@@ -28,7 +31,9 @@ func newVCSClient(repo config.Repo) (vcs.Client, error) {
 	var base vcs.Client
 	switch platform {
 	case "github":
-		base = github.New(creds.GHToken, repo.BaseURL)
+		c := github.New(creds.GHToken, repo.BaseURL)
+		c.UseCacheDir(filepath.Join(snapshot.DataDir(), "github-http"))
+		base = c
 	case "gitlab":
 		if repo.BaseURL == "" {
 			return nil, fmt.Errorf("repo platform is gitlab but base_url is not set")
@@ -131,4 +136,17 @@ func newGitLabClientForRepo(repoName string) (*gitlab.Client, string, error) {
 		BaseURL:  info.BaseURL,
 		Owner:    info.OwnerRepo,
 	}, info.OwnerRepo)
+}
+
+// pollingAllowed only gates discovery; delivery and writes retain the reserve.
+func pollingAllowed(client vcs.Client) bool {
+	if c, ok := client.(interface{ PollingAllowed() bool }); ok {
+		return c.PollingAllowed()
+	}
+	return true
+}
+func setVCSContext(client vcs.Client, ctx context.Context) {
+	if c, ok := client.(interface{ SetRequestContext(context.Context) }); ok {
+		c.SetRequestContext(ctx)
+	}
 }

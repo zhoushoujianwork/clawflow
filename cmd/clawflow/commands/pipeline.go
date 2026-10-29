@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // Bounds that keep one board computation to a small, predictable number of
@@ -106,6 +108,11 @@ func PipelineSnapshot(ctx context.Context) (pipeline.Snapshot, error) {
 func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	now := d.now()
 	snap := pipeline.Snapshot{GeneratedAt: now.UTC().Format(time.RFC3339Nano), Repos: []pipeline.RepoBoard{}, Events: []pipeline.Event{}}
+
+	var usage vcs.APIUsage
+	if data, err := os.ReadFile(filepath.Join(snapshot.DataDir(), "vcs-usage.json")); err == nil && json.Unmarshal(data, &usage) == nil {
+		snap.VCSUsage = &usage
+	}
 
 	events, evErr := d.events()
 	if evErr != nil {
@@ -247,6 +254,10 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		board.Error = pipelineClip("VCS client unavailable: "+err.Error(), pipelineErrLimit)
 		return board
 	}
+	if !pollingAllowed(client) {
+		board.Error = vcs.ErrPollingDeferred.Error()
+		return board
+	}
 	if local, ok := client.(*pipelineLocalClient); ok {
 		local.board = d.previous[repo]
 		if local.offline && local.board.Repo != "" && local.missingIssues {
@@ -255,7 +266,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		}
 	}
 	if rcx, ok := client.(interface{ SetRequestContext(context.Context) }); ok {
-		rcx.SetRequestContext(ctx)
+		rcx.SetRequestContext(github.WithStage(ctx, "board"))
 	}
 
 	openIssues, err := client.ListOpenIssues(repo)

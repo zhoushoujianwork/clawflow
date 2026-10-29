@@ -37,6 +37,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // runLog is the package-level run.log handle, set by NewRunCmd's RunE
@@ -432,8 +433,11 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		return err
 	}
 
+	ctx, apiPass := github.BeginPass(ctx)
+
 	// Publish on every exit after configuration is available, including failed passes.
 	defer func() {
+		apiPass.Save(filepath.Join(snapshot.DataDir(), "vcs-usage.json"))
 		if err := writePassPipeline(); err != nil {
 			fmt.Fprintf(os.Stderr, "snapshot pipeline: %v\n", err)
 		}
@@ -580,7 +584,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	}
 	var jobs []*runJob
 	upgradeRepos := make(map[string]config.Repo)
-	depOpen := queueDepResolver(cfg)
+	depOpen := queueDepResolver(github.WithStage(ctx, "scan"), cfg)
 	for fullName, repoCfg := range allRepos {
 		repoCfg.CoordinatorMode = cfg.Settings.Coordinator.Enabled
 		repoCfg.CoordinatorActive = activeTasks[fullName]
@@ -614,7 +618,11 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		}
 		repoPending, repoJobs, err := scanRepoOnceQ(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, issueSink, queueRuntime{Settings: cfg.Settings.Queue, DepOpen: depOpen})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
+			if errors.Is(err, vcs.ErrPollingDeferred) {
+				preserveRepos[fullName] = true
+			} else {
+				fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
+			}
 		}
 		// Drop the queue, keep the scan. The issue snapshot still reaches the
 		// dashboard, which already renders this repo's base_branch hint
@@ -706,6 +714,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 				delete(rerunRepos, repo)
 				continue
 			}
+			setVCSContext(client, github.WithStage(ctx, "snapshot"))
 			fresh := captureIssuesSnapshot(client, repo)
 			if fresh == nil { // ListIssues failed — fall back to scan-time data
 				delete(rerunRepos, repo)
@@ -900,6 +909,14 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 		}
 	}
 
+	if !pollingAllowed(client) {
+		// Only pending delivery may spend reserved quota on the identity guard.
+		paths, _ := filepath.Glob(filepath.Join(snapshot.DataDir(), "runs", strings.ReplaceAll(fullName, "/", "__"), "issue-*", "*", "writeback.json"))
+		if !executeHere || len(paths) == 0 {
+			return nil, nil, vcs.ErrPollingDeferred
+		}
+	}
+
 	// Same-name recreation guard: owner/name is reused after delete+recreate
 	// on both platforms but the numeric repo ID is not, and issue numbering
 	// restarts at #1 — so without this check the new repo's runs land in (and
@@ -920,6 +937,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	if executeHere {
 		pendingWriteBacks = replayRepoWriteBacks(client, fullName, onlyIssue)
 	}
+	if !pollingAllowed(client) {
+		return nil, nil, vcs.ErrPollingDeferred
+	}
+	setVCSContext(client, github.WithStage(ctx, "scan"))
+
 	issues, err := client.ListOpenIssues(fullName)
 	if err != nil {
 		runLog.Warn("run/scan", "repo", fullName, "phase", "list_issues_err", "elapsed", time.Since(scanStart).Round(time.Millisecond), "err", err.Error())
@@ -1211,6 +1233,9 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	// Operator matching above keeps using ListOpenIssues so the
 	// per_page=100 budget for open issues is independent of any closed
 	// noise.
+	if !pollingAllowed(client) {
+		return pending, jobs, vcs.ErrPollingDeferred
+	}
 	*allIssues = append(*allIssues, captureIssuesSnapshot(client, fullName)...)
 
 	runLog.Info("run/scan", "repo", fullName, "phase", "done", "issues", len(issues), "pending", len(pending), "jobs", len(jobs), "elapsed", time.Since(scanStart).Round(time.Millisecond))
