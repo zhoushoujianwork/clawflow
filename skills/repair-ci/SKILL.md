@@ -13,8 +13,11 @@ operator:
 ClawFlow runs this skill through direct Offload with explicit managed-development delivery. Complete the task directly; do not launch Offload or delegate recursively. Offload profiles own credentials and models.
 
 
-Repair the existing PR specified in the repair context (CI, acceptance, or merge-conflict repair). Your cwd is a fresh
-isolated repository detached at the exact expected PR head. Stay in this cwd.
+Repair the existing PR specified in the repair context (CI, acceptance, or merge-conflict repair).
+You start in a fresh Offload session with the issue requirements, available acceptance
+criteria, PR diff against its base, and current failure input. Read the checkout
+for additional context as needed. Your cwd is an isolated repair checkout of the
+expected PR head, possibly preserving partial repair work. Stay in this cwd.
 The runner has reserved one of at most three total repair attempts for this PR.
 
 This is local-reproduction-based repair: ClawFlow supplies aggregate CI failure
