@@ -153,3 +153,15 @@ func TestRepairSkillBaseMovementPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestRepairSkillMigrationCollisionPolicy(t *testing.T) {
+	data, err := os.ReadFile("../../../skills/repair-ci/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Preserve every base migration's version", "next free version above the base maximum", "preserve base 5/6", "addition version 7", "Run migration validation tests", "never renumber an", "go run ./skills/repair-ci/scripts -base-ref origin/<base> -pr-ref ORIG_HEAD"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing migration collision policy %q", want)
+		}
+	}
+}

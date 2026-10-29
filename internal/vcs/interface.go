@@ -277,3 +277,9 @@ var ClawFlowLabels = []Label{
 	{"agent-failed", "FF0000", "An operator failed; see run history"},
 	{"agent-replied", "E99695", "reply-comment operator has responded to a mention"},
 }
+
+// PRFileProvider optionally exposes all changed paths, including rename sources.
+// An incomplete provider response must return an error rather than partial data.
+type PRFileProvider interface {
+	ListPRFiles(repo string, prNumber int) ([]string, error)
+}

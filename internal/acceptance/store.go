@@ -685,3 +685,49 @@ func (s *Store) CompleteRecordsAtHead(repo string, pr int, head string) ([]Recor
 	}
 	return s.CompleteRecords(latest.Contract)
 }
+
+// LatestPlanForTask returns the latest saved plan for unchanged issue requirements.
+// This is a scheduling hint only: historical head/base and verdict are irrelevant
+// and the returned plan must never be used as acceptance authorization.
+func (s *Store) LatestPlanForTask(repo, task, requirements string) (Plan, error) {
+	dir, err := s.root.Open(".")
+	if err != nil {
+		return Plan{}, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(10001)
+	if err != nil && err != io.EOF {
+		return Plan{}, err
+	}
+	if len(entries) > 10000 {
+		return Plan{}, errors.New("too many acceptance records")
+	}
+	var latest Plan
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".record") {
+			continue
+		}
+		var r Record
+		if err := s.read(entry.Name(), &r); err != nil {
+			return Plan{}, err
+		}
+		c := r.Contract
+		if c.Repository != repo || c.TaskID != task || c.Requirements != requirements {
+			continue
+		}
+		if _, err := s.loadRecord(c, entry.Name()); err != nil {
+			return Plan{}, err
+		}
+		if r.Plan.Text == "" {
+			continue
+		}
+		p, err := s.LoadPlan(c, r.AttemptID)
+		if err != nil {
+			return Plan{}, err
+		}
+		if p.CompletedAt.After(latest.CompletedAt) {
+			latest = p
+		}
+	}
+	return latest, nil
+}
