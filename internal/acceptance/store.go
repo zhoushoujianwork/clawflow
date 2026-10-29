@@ -130,6 +130,11 @@ func (s *Store) write(name string, value any) error {
 		return closeErr
 	}
 	if err := s.root.Rename(tmp, name); err != nil {
+		// References are immutable, but a worker and the coordinator may share
+		// one store and publish the same content twice; that is not a conflict.
+		if existing, readErr := s.readData(name); readErr == nil && bytes.Equal(existing, data) {
+			return nil
+		}
 		return err
 	}
 	dir, err := s.root.Open(".")
@@ -148,64 +153,73 @@ func (s *Store) write(name string, value any) error {
 }
 
 func (s *Store) read(name string, value any) error {
-	st, err := s.root.Lstat(name)
+	data, err := s.readData(name)
 	if err != nil {
 		return err
 	}
+	return decodeStrict(data, value)
+}
+
+// readData returns the verified payload of one stored reference.
+func (s *Store) readData(name string) (json.RawMessage, error) {
+	st, err := s.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
 	if !st.IsDir() || st.Mode().Perm()&0077 != 0 {
-		return errors.New("acceptance reference must be a private directory, not a symlink")
+		return nil, errors.New("acceptance reference must be a private directory, not a symlink")
 	}
 	slot, err := s.root.OpenRoot(name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer slot.Close()
 	dir, err := slot.Open(".")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	openedDir, statErr := dir.Stat()
 	_ = dir.Close()
 	if statErr != nil {
-		return statErr
+		return nil, statErr
 	}
 	if !os.SameFile(st, openedDir) {
-		return errors.New("acceptance reference changed during open")
+		return nil, errors.New("acceptance reference changed during open")
 	}
 	st, err = slot.Lstat("data.json")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 || st.Size() > maxFileBytes {
-		return errors.New("acceptance file is not a bounded private regular file")
+		return nil, errors.New("acceptance file is not a bounded private regular file")
 	}
 	f, err := slot.Open("data.json")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	opened, err := f.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !os.SameFile(st, opened) {
-		return errors.New("acceptance file changed during open")
+		return nil, errors.New("acceptance file changed during open")
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(b) > maxFileBytes {
-		return errors.New("acceptance file exceeds size limit")
+		return nil, errors.New("acceptance file exceeds size limit")
 	}
 	var e envelope
 	if err := decodeStrict(b, &e); err != nil {
-		return err
+		return nil, err
 	}
 	if e.Version != Version || e.Digest != digest(e.Data) {
-		return errors.New("acceptance file digest mismatch")
+		return nil, errors.New("acceptance file digest mismatch")
 	}
-	return decodeStrict(e.Data, value)
+	return e.Data, nil
 }
 
 func (s *Store) SavePlan(c Contract, p Plan) error {

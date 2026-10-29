@@ -40,6 +40,9 @@ var Migrations = []Migration{
 	{Version: 6, Name: "actions_evidence", Up: migrateActions},
 	{Version: 7, Name: "scheduled_checks", Up: migrateSchedules},
 	{Version: 8, Name: "offload_execution_evidence", Up: migrateExecutionEvidence},
+	{Version: 9, Name: "coordinator_application_errors", Up: func(tx *gorm.DB) error {
+		return tx.Exec("ALTER TABLE coordinator_tasks ADD COLUMN application_attempts integer NOT NULL DEFAULT 0, ADD COLUMN application_error text NOT NULL DEFAULT ''").Error
+	}},
 }
 
 type schemaMigration struct {

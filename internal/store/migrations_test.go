@@ -281,7 +281,7 @@ func TestExecutionEvidenceUpgradePreservesLegacy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	applied, err := s.Migrate(ctx, store.Migrations)
+	applied, err := s.Migrate(ctx, store.Migrations[:8])
 	if err != nil || len(applied) != 1 || applied[0] != 8 {
 		t.Fatalf("upgrade=%v err=%v", applied, err)
 	}
@@ -293,5 +293,21 @@ func TestExecutionEvidenceUpgradePreservesLegacy(t *testing.T) {
 		if rows[0].ExitCode != nil || rows[0].ElapsedMs != nil || rows[0].Status != "success" {
 			t.Fatalf("legacy evidence inferred: %+v", rows[0])
 		}
+	}
+}
+
+func TestCoordinatorApplicationErrorsMigrationAfterExecutionEvidence(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:8]); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations)
+	if err != nil || len(applied) != 1 || applied[0] != 9 {
+		t.Fatalf("application errors upgrade: applied=%v err=%v", applied, err)
+	}
+	var columns int64
+	if err := s.DB().Raw("SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tasks' AND column_name IN ('application_attempts', 'application_error')").Scan(&columns).Error; err != nil || columns != 2 {
+		t.Fatalf("application error columns: count=%d err=%v", columns, err)
 	}
 }

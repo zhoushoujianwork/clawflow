@@ -26,9 +26,11 @@ const (
 )
 
 type Attempt struct {
-	Head    string    `json:"head"`
-	Attempt int       `json:"attempt"`
-	At      time.Time `json:"at"`
+	TaskID    string    `json:"task_id,omitempty"`
+	Completed bool      `json:"completed,omitempty"`
+	Head      string    `json:"head"`
+	Attempt   int       `json:"attempt"`
+	At        time.Time `json:"at"`
 	// Released is the infrastructure kind that made this reservation
 	// non-consuming. Empty means the attempt counts against the repair budget.
 	Released string `json:"released,omitempty"`
@@ -259,5 +261,50 @@ func ReserveRerun(root, repo string, pr vcs.PR, now time.Time) error {
 		backoff = MaxBackoff
 	}
 	ledger.NotBefore = now.Add(backoff)
+	return Save(dir, path, ledger)
+}
+
+// ApplyResult reconciles coordinator results, including legacy tasks without a
+// reservation. Task identity makes replay safe even when attempt numbers repeat
+// after an infrastructure release. Historical results must not recheck cooldown.
+func ApplyResult(root, repo string, pr vcs.PR, attempt int, taskID, reason, kind string, now time.Time) error {
+	if attempt < 1 || taskID == "" {
+		return errors.New("invalid repair result identity")
+	}
+	unlock, err := Lock(root, repo, pr.Number)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	dir, path := Path(root, repo, pr.Number)
+	ledger, err := Load(path)
+	if err != nil {
+		return err
+	}
+	idx := -1
+	for i := len(ledger.Attempts) - 1; i >= 0; i-- {
+		a := ledger.Attempts[i]
+		if a.TaskID == taskID {
+			return nil
+		}
+		if idx < 0 && a.TaskID == "" && !a.Completed && a.Head == pr.HeadSHA && a.Attempt == attempt {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		ledger.Attempts = append(ledger.Attempts, Attempt{Head: pr.HeadSHA, Attempt: attempt, At: now, Reason: reason})
+		idx = len(ledger.Attempts) - 1
+	}
+	a := &ledger.Attempts[idx]
+	a.TaskID, a.Completed = taskID, true
+	if a.Released == "" && kind != "" {
+		a.Released = kind
+		_, infra := ledger.Counts()
+		backoff := Cooldown << uint(infra)
+		if backoff > MaxBackoff || backoff <= 0 {
+			backoff = MaxBackoff
+		}
+		ledger.NotBefore = now.Add(backoff)
+	}
 	return Save(dir, path, ledger)
 }

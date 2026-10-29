@@ -130,7 +130,7 @@ interface PilotAction {
 interface WorkerPool {
   generated_at: string
   workers: { name: string; tags: string[]; roles: string[]; live: boolean; last_seen: string | null; last_heartbeat: string | null; running_tasks: string[] }[]
-  tasks: { id: string; repo: string; issue: number; pr: number; kind: string; state: string; stage: string; waiting_reason?: string; tags: string[]; priority: number; worker: string; lease_expires_at: string | null; attempt: number }[]
+  tasks: { id: string; repo: string; issue: number; pr: number; kind: string; state: string; stage: string; waiting_reason?: string; application_error?: string; application_attempts: number; tags: string[]; priority: number; worker: string; lease_expires_at: string | null; attempt: number }[]
   throughput: { since: string; done: number; failed: number }
 }
 
@@ -613,7 +613,7 @@ function WorkerPoolPanel({ pool, error }: { pool?: WorkerPool | null; error?: st
         <thead><tr>{['Task / repository', 'Kind', 'State / stage', 'Tags', 'Priority', 'Worker', 'Lease expiry', 'Retries'].map(h => <th key={h} className="p-2">{h}</th>)}</tr></thead>
         <tbody>{pool.tasks.map(t => <tr key={t.id} className="border-t">
           <td className="p-2 break-all" title={t.id}>{t.id.slice(0, 12)} · {t.repo} {t.pr ? `PR #${t.pr}` : `#${t.issue}`}</td>
-          <td className="p-2">{t.kind}</td><td className="p-2">{t.state}{t.stage !== t.state ? ` / ${t.stage}` : ''}{t.waiting_reason && <p>{t.waiting_reason}</p>}</td>
+          <td className="p-2">{t.kind}</td><td className="p-2">{t.state}{t.stage !== t.state ? ` / ${t.stage}` : ''}{t.waiting_reason && <p>{t.waiting_reason}</p>}{t.application_error && <p className="text-red-600">结果应用失败（{t.application_attempts}/3）：{t.application_error}</p>}</td>
           <td className="p-2">{t.tags.join(', ') || '—'}</td><td className="p-2">{t.priority}</td><td className="p-2">{t.worker || '—'}</td>
           <td className="p-2">{t.lease_expires_at ? new Date(t.lease_expires_at).toLocaleString() : '—'}</td><td className="p-2">{t.attempt}</td>
         </tr>)}</tbody>

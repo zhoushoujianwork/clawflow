@@ -19,6 +19,9 @@ func applyCoordinatorEffect(t *coordinator.Task, j *runJob, r *coordinatorReport
 		return coordinator.EffectResult{}, err
 	}
 	out := coordinator.EffectResult{Reference: e.RunID}
+	if j.client == nil {
+		return out, fmt.Errorf("cannot apply coordinator effect %q: missing VCS client", e.Kind)
+	}
 	var err error
 	switch e.Kind {
 	case "issue-comment":
@@ -99,7 +102,7 @@ func (s *coordinatorResults) reconcile(ctx context.Context, store coordinator.Ef
 	return store.FinalizeApplication(ctx, t.ID, t.FencingToken, failed, func(current coordinator.Task) error {
 		// Restore the PR identity even when all intents were applied before restart.
 		if current.PR > 0 && r.PRNumber == 0 {
-			pr, err := j.client.GetPR(current.Repo, current.PR)
+			pr, err := coordinatorResultPR(current, j)
 			if err != nil {
 				return err
 			}
@@ -108,6 +111,17 @@ func (s *coordinatorResults) reconcile(ctx context.Context, store coordinator.Ef
 		r.Effects = nil
 		return s.apply(ctx, &current, j, r)
 	})
+}
+
+// coordinatorResultPR restores repair identity from the persisted job context.
+func coordinatorResultPR(current coordinator.Task, j *runJob) (vcs.PR, error) {
+	if j.repair != nil && j.repair.PR.Number == current.PR {
+		return j.repair.PR, nil
+	}
+	if j.client == nil {
+		return vcs.PR{}, fmt.Errorf("cannot restore PR %s#%d: missing repair PR and VCS client", current.Repo, current.PR)
+	}
+	return j.client.GetPR(current.Repo, current.PR)
 }
 
 func (s *coordinatorResults) recoverResults(ctx context.Context, store coordinator.EffectStore) error {
@@ -136,8 +150,12 @@ func (s *coordinatorResults) recoverResults(ctx context.Context, store coordinat
 			}
 		}
 		cancel()
-		if err != nil && first == nil {
-			first = err
+		if err != nil && ctx.Err() == nil {
+			message := sanitizeReviewerText(err.Error(), 4000)
+			runLog.Warn("coordinator/result-apply-failed", "task", t.ID, "err", message)
+			if recordErr := store.RecordApplicationFailure(ctx, t.ID, t.FencingToken, message); recordErr != nil && first == nil {
+				first = recordErr
+			}
 		}
 	}
 	return first

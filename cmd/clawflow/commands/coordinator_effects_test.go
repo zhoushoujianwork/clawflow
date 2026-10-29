@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -125,5 +127,132 @@ func TestCoordinatorDurableReportRecovery(t *testing.T) {
 	current, _ := tasks.Task(ctx, task.ID)
 	if current.State != "done" || current.PR != 11 {
 		t.Fatalf("%+v", current)
+	}
+}
+
+func TestCoordinatorPoisonedResultIsBoundedAndIsolated(t *testing.T) {
+	db := storetest.New(t)
+	ctx := context.Background()
+	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	tasks := coordinator.New(db.DB())
+	if err := tasks.RegisterWorker(ctx, coordinator.Worker{ID: "w", MaxParallel: 2, RunUntagged: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{1, 2} {
+		if _, err := tasks.Enqueue(ctx, coordinator.Task{Repo: "o/r", Issue: n, Kind: "implement", Operator: "implement"}); err != nil {
+			t.Fatal(err)
+		}
+		task, err := tasks.Claim(ctx, "w")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tasks.AcceptResult(ctx, task.ID, "w", task.FencingToken, json.RawMessage(`{"status":"success"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	// Recreate the result service on every pass, as during a process restart.
+	for i := 0; i < 5; i++ {
+		service := &coordinatorResults{tasks: tasks, loadJob: func(context.Context, *coordinator.Task) (*runJob, error) { return &runJob{}, nil }, apply: func(_ context.Context, task *coordinator.Task, _ *runJob, _ *coordinatorReport) error {
+			if task.Issue == 1 {
+				calls++
+				return errors.New("poisoned result")
+			}
+			return nil
+		}}
+		if err := service.recoverResults(ctx, tasks); err != nil {
+			t.Fatal(err)
+		}
+	}
+	board, err := tasks.Board(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 || len(board.Tasks) != 2 {
+		t.Fatalf("calls=%d board=%+v", calls, board)
+	}
+	for _, task := range board.Tasks {
+		if task.Issue == 1 && (task.State != "failed" || task.ApplicationError != "poisoned result" || task.ApplicationAttempts != 3) {
+			t.Fatalf("poison: %+v", task)
+		}
+		if task.Issue == 2 && task.State != "done" {
+			t.Fatalf("healthy task: %+v", task)
+		}
+	}
+}
+
+func TestCoordinatorRecoversLegacyRepairWithoutReservation(t *testing.T) {
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	db := storetest.New(t)
+	withRunLog(t)
+	ctx := context.Background()
+	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	tasks := coordinator.New(db.DB())
+	if err := tasks.RegisterWorker(ctx, coordinator.Worker{ID: "w", MaxParallel: 1, RunUntagged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tasks.Enqueue(ctx, coordinator.Task{Repo: "o/r", Issue: 1, PR: 11, Kind: "repair", Operator: "repair-ci"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := tasks.Claim(ctx, "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tasks.AcceptResult(ctx, task.ID, "w", task.FencingToken, json.RawMessage(`{"status":"failed","infra_kind":"launch"}`)); err != nil {
+		t.Fatal(err)
+	}
+	j := &runJob{repo: "o/r", op: &operator.Operator{Name: "repair-ci"}, sub: &operator.Subject{Number: 1}, repair: &ciRepairContext{PR: vcs.PR{Number: 11, HeadSHA: strings.Repeat("a", 40)}, Attempt: 1}}
+	for i := 0; i < 2; i++ {
+		service := &coordinatorResults{tasks: tasks, loadJob: func(context.Context, *coordinator.Task) (*runJob, error) { return j, nil }, apply: applyCoordinatorReport}
+		if err := service.recoverResults(ctx, tasks); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, err := tasks.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.State != "failed" || current.ApplicationAttempts != 0 {
+		t.Fatalf("legacy result not recovered: %+v", current)
+	}
+	_, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", 11)
+	ledger, err := loadCIRepairLedger(path)
+	if err != nil || len(ledger.Attempts) != 1 || ledger.Attempts[0].Released != "launch" {
+		t.Fatalf("legacy ledger: %+v %v", ledger, err)
+	}
+}
+
+func TestCoordinatorResultPRRestoration(t *testing.T) {
+	pr := vcs.PR{Number: 11, URL: "https://example.test/pull/11", HeadBranch: "fix/1"}
+	current := coordinator.Task{Repo: "o/r", PR: 11}
+	for _, client := range []vcs.Client{nil, &intentVCS{}} {
+		// An empty intentVCS would panic on GetPR; the repair snapshot must win.
+		got, err := coordinatorResultPR(current, &runJob{client: client, repair: &ciRepairContext{PR: pr}})
+		if err != nil || got.Number != pr.Number || got.URL != pr.URL || got.HeadBranch != pr.HeadBranch {
+			t.Fatalf("repair identity: %+v %v", got, err)
+		}
+	}
+	client := &intentVCS{prs: []vcs.PR{pr}}
+	if got, err := coordinatorResultPR(current, &runJob{client: client}); err != nil || got.Number != 11 {
+		t.Fatalf("client fallback: %+v %v", got, err)
+	}
+	for _, j := range []*runJob{{}, {repair: &ciRepairContext{PR: vcs.PR{Number: 12}}}} {
+		if _, err := coordinatorResultPR(current, j); err == nil {
+			t.Fatal("missing PR identity must return an error")
+		}
+	}
+}
+
+func TestCoordinatorEffectWithoutClientReturnsError(t *testing.T) {
+	payload, err := json.Marshal(jobEffect{Kind: "issue-comment", Repo: "o/r", Number: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyCoordinatorEffect(&coordinator.Task{}, &runJob{}, &coordinatorReport{}, coordinator.EffectIntent{Payload: payload}); err == nil {
+		t.Fatal("missing client must return an error")
 	}
 }
