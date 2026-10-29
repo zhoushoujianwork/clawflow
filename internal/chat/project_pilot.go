@@ -420,6 +420,13 @@ Allowed fields by type, in addition to id/type/repo:
 - queue_move: issue, position (top or bottom), within unified queue rank.
 - label_add, label_remove: issue, label (bug, feature, P0, P1, P2, P3 only).
 - note: body, persisted for the board.
+- schedule_add, schedule_update: schedule_id (stable unique letters/digits/hyphens/underscore),
+  schedule: {cron: "*/30 * * * *", timezone: "Asia/Shanghai", prompt: "user instruction",
+  ops: 5, timeout_seconds: 3600, enabled: true}. These platform actions omit repo.
+  Use numeric five-field cron; timezone is required. Only create or change checks
+  when the user explicitly requests it. Updates replace the complete definition.
+- schedule_remove: schedule_id; omit repo. Only remove when the user requests it.
+  Existing checks are in scheduled_checks evidence; list them in prose on request.
 - rerun_ci: pr (positive PR number). GitHub managed PRs only; reruns failed
   Actions jobs selected by exact-head CI checks once per head. Infrastructure limits apply.
 - override_merge: pr, head (reviewed 40-character SHA), followups (create_issue action IDs).

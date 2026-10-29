@@ -24,6 +24,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/gitsync"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	ptyserver "github.com/zhoushoujianwork/clawflow/internal/pty"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/webguard"
@@ -358,6 +359,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/project/generate-deployment/status", api.HandleProjectGenerateDeploymentStatus)
 			mux.HandleFunc("/api/project/automation", api.HandleProjectAutomation)
 			mux.HandleFunc("/api/project/bind", api.HandleProjectBind)
+			mux.HandleFunc("/api/pilot/schedules", api.HandleScheduledChecks)
 			mux.HandleFunc("/api/project/pilot/wake", api.HandlePilotWake)
 			mux.HandleFunc("/api/project/pilot/stream", api.HandlePilotStream)
 			mux.HandleFunc("/api/project/get", api.HandleProjectGet)
@@ -561,8 +563,30 @@ func runPeriodicScheduler() {
 	hostname, _ := os.Hostname()
 	// lastFire is per repo so a repo whose pass is still running (or that
 	// finished early) never makes the others wait or fire again.
+	checkStore, err := pilot.OpenCheckStore(context.Background())
+	if err != nil {
+		webLog.Info("web/scheduled_checks_unavailable")
+	}
+	defer func() {
+		if checkStore != nil {
+			checkStore.Close()
+		}
+	}()
 	lastFire := map[string]time.Time{}
+	lastCheckMinute := time.Now().Truncate(time.Minute)
 	for range tick.C {
+		now := time.Now()
+		if minute := now.Truncate(time.Minute); minute.After(lastCheckMinute) {
+			lastCheckMinute = minute
+			if checkStore == nil {
+				checkStore, err = pilot.OpenCheckStore(context.Background())
+			}
+			if checkStore != nil {
+				if err := pilot.TickChecks(context.Background(), checkStore, now); err != nil {
+					webLog.Info("web/scheduled_checks_error")
+				}
+			}
+		}
 		cfg, err := config.Load()
 		if err != nil {
 			api.SetSchedulerNextFire(time.Time{})
@@ -604,7 +628,7 @@ func runPeriodicScheduler() {
 		// Time to fire. Repos with an active pass, and repos beyond the
 		// max_concurrent_agents cap, are skipped and retried next tick.
 		started, _ := api.TriggerScheduledRuns(cfg, hostname, due)
-		now := time.Now()
+		now = time.Now()
 		for _, repo := range started {
 			lastFire[repo] = now
 			fmt.Fprintf(os.Stderr, "[scheduler] auto-fire %s at %s (next in %s)\n",

@@ -59,7 +59,7 @@ func upgradePilotMerges(ctx context.Context, cfg *config.Config, results []pilot
 // NewPilotCmd exposes the global steward and the audited action executor.
 func NewPilotCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "pilot", Short: "与全局平台 steward 对话"}
-	cmd.AddCommand(newPilotConversationCmd("ask"), newPilotConversationCmd("chat"), newPilotConversationCmd("wake"), newPilotApplyCmd())
+	cmd.AddCommand(newPilotConversationCmd("ask"), newPilotConversationCmd("chat"), newPilotConversationCmd("wake"), newPilotApplyCmd(), newPilotScheduleCmd())
 	return cmd
 }
 
