@@ -11,11 +11,17 @@ import (
 	"gorm.io/gorm"
 )
 
-var ErrToken = errors.New("invalid or revoked worker token")
+var ErrToken = errors.New("invalid or revoked token")
+
+const (
+	ScopeWorker = "worker"
+	ScopeAdmin  = "admin"
+)
 
 // Token exposes metadata only. Neither the hash nor the secret is listed.
 type Token struct {
 	Name      string `gorm:"primaryKey"`
+	Scope     string `gorm:"not null;default:worker"`
 	CreatedAt time.Time
 	LastSeen  *time.Time
 	Revoked   bool
@@ -31,7 +37,17 @@ type storedToken struct {
 func (storedToken) TableName() string { return "coordinator_tokens" }
 
 // CreateToken returns 32 random bytes encoded as hex exactly once.
-func (s *Store) CreateToken(ctx context.Context, name string) (string, error) {
+func (s *Store) CreateToken(ctx context.Context, name string, scopes ...string) (string, error) {
+	scope := ScopeWorker
+	if len(scopes) > 1 {
+		return "", ErrInvalid
+	}
+	if len(scopes) == 1 {
+		scope = scopes[0]
+	}
+	if scope != ScopeWorker && scope != ScopeAdmin {
+		return "", ErrInvalid
+	}
 	if strings.TrimSpace(name) == "" {
 		return "", ErrInvalid
 	}
@@ -41,7 +57,7 @@ func (s *Store) CreateToken(ctx context.Context, name string) (string, error) {
 	}
 	hash := sha256.Sum256([]byte(secret))
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&storedToken{Token: Token{Name: name, CreatedAt: time.Now().UTC()}, Hash: hash[:]}).Error; err != nil {
+		if err := tx.Create(&storedToken{Token: Token{Name: name, Scope: scope, CreatedAt: time.Now().UTC()}, Hash: hash[:]}).Error; err != nil {
 			return err
 		}
 		return audit(tx, name, "", "token-create")
@@ -99,6 +115,11 @@ func (s *Store) RevokeToken(ctx context.Context, name string) error {
 }
 func (s *Store) ListTokens(ctx context.Context) ([]Token, error) {
 	var tokens []Token
-	err := s.db.WithContext(ctx).Select("name, created_at, last_seen, revoked").Order("name").Find(&tokens).Error
+	err := s.db.WithContext(ctx).Select("name, scope, created_at, last_seen, revoked").Order("name").Find(&tokens).Error
 	return tokens, err
+}
+
+// HasScope preserves worker access for tokens issued before scoped tokens existed.
+func (t Token) HasScope(scope string) bool {
+	return t.Scope == scope || (t.Scope == "" && scope == ScopeWorker)
 }

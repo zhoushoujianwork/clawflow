@@ -499,42 +499,13 @@ type projectAutomationRequest struct {
 	CooldownMinutes int    `json:"cooldown_minutes"`
 }
 
-// HandleProjectAutomation flips the per-project PM auto-wakeup
-// toggle. The dashboard's project detail page sends one of these
-// every time the user moves the switch or edits the cooldown.
-//
-// Implementation note: the request always carries both `enabled` and
-// `cooldown_minutes` (the UI sends the full current state), so we
-// pass cooldown straight through. The CLI's "disable" path uses
-// SetAutomation(name, false, -1) to keep the prior cooldown — that's
-// for terminal use where the user shouldn't have to retype the value.
-// The dashboard never has that ambiguity since the form holds the
-// canonical value.
+// HandleProjectAutomation preserves the legacy endpoint as a notice-only no-op.
 func HandleProjectAutomation(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", 405)
 		return
 	}
-	var req projectAutomationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, 400, map[string]string{"error": "invalid JSON"})
-		return
-	}
-	name := strings.TrimSpace(req.Project)
-	if name == "" {
-		writeJSON(w, 400, map[string]string{"error": "project is required"})
-		return
-	}
-	if req.CooldownMinutes < 0 {
-		writeJSON(w, 400, map[string]string{"error": "cooldown_minutes must be >= 0"})
-		return
-	}
-	if err := project.SetAutomation(name, req.Enabled, req.CooldownMinutes); err != nil {
-		writeJSON(w, 400, map[string]string{"error": err.Error()})
-		return
-	}
-	_ = snapshot.WriteProjects()
-	writeJSON(w, 200, map[string]string{"status": "ok"})
+	writeJSON(w, 200, map[string]string{"status": "ok", "message": "项目自动唤醒已移除；请使用 clawflow pilot ask 或 clawflow pilot chat。"})
 }
 
 // projectBindRequest mirrors repoBindRequest for project-level Pilot
@@ -553,49 +524,13 @@ type projectBindResponse struct {
 	BoundMachine string `json:"bound_machine,omitempty"`
 }
 
-// HandleProjectBind handles POST /api/project/bind. Mirrors the
-// repo-level /api/repo/bind ergonomics but writes
-// project.Automation.BoundMachine instead of repo.BoundMachine.
-//
-// Unlike repo bind, project state lives only in
-// ~/.clawflow/projects/<name>/project.yaml (not in the Gist), so there
-// is no AutoPush — the change is local-only by design.
+// HandleProjectBind preserves the retired project binding endpoint as a no-op.
 func HandleProjectBind(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", 405)
 		return
 	}
-	var req projectBindRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
-		return
-	}
-	name := strings.TrimSpace(req.Project)
-	if name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
-		return
-	}
-
-	machine := ""
-	if req.Bind {
-		if req.Machine != "" {
-			machine = req.Machine
-		} else {
-			h, err := os.Hostname()
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot determine hostname: " + err.Error()})
-				return
-			}
-			machine = h
-		}
-	}
-
-	if err := project.SetAutomationBoundMachine(name, machine); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	_ = snapshot.WriteProjects()
-	writeJSON(w, http.StatusOK, projectBindResponse{Status: "ok", BoundMachine: machine})
+	writeJSON(w, 200, map[string]string{"status": "ok", "message": "项目自动唤醒已移除；请使用 clawflow pilot ask 或 clawflow pilot chat。"})
 }
 
 func HandleProjectRemoveRepo(w http.ResponseWriter, r *http.Request) {

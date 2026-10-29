@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -221,7 +222,9 @@ func TestRepoSetAcceptanceMaxParallel(t *testing.T) {
 				t.Fatal(err)
 			}
 			cmd := newRepoSetCmd()
-			cmd.SetArgs([]string{"o/r", "--acceptance-max-parallel", value})
+			var output bytes.Buffer
+			cmd.SetOut(&output)
+			cmd.SetArgs([]string{"o/r", "--acceptance-max-parallel", value, "--test-command", "go test ./..."})
 			err := cmd.Execute()
 			n, _ := strconv.Atoi(value)
 			if (err != nil) != (n < 1) {
@@ -234,6 +237,16 @@ func TestRepoSetAcceptanceMaxParallel(t *testing.T) {
 			want := n
 			if n < 1 {
 				want = 3
+			}
+			wantTestCommand := "go test ./..."
+			if n < 1 {
+				wantTestCommand = ""
+			}
+			if loaded.Repos["o/r"].TestCommand != wantTestCommand {
+				t.Fatalf("test command=%q want=%q", loaded.Repos["o/r"].TestCommand, wantTestCommand)
+			}
+			if n >= 1 && !strings.Contains(output.String(), "acceptance_max_parallel: "+value) {
+				t.Fatalf("missing parallel limit in command output: %q", output.String())
 			}
 			if loaded.Repos["o/r"].AcceptanceMaxParallel != want || !loaded.Repos["o/r"].AutoMerge {
 				t.Fatalf("unexpected config: %+v", loaded.Repos["o/r"])

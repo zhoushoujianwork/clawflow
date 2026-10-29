@@ -77,23 +77,6 @@ func withSnapshotLock(fn func() error) error {
 	return fn()
 }
 
-// PilotScheduleLockPath guards pilot.Schedule so only one pass wakes projects
-// at a time (passes are repo-scoped and run concurrently).
-func PilotScheduleLockPath() string {
-	return filepath.Join(LockDir(), "pilot-schedule.lock")
-}
-
-// TryAcquirePilotScheduleLock takes the pilot scheduling lock without waiting.
-func TryAcquirePilotScheduleLock() bool {
-	_, err := acquirePIDLock(PilotScheduleLockPath(), RunLockInfo{PID: os.Getpid(), StartedAt: time.Now().UTC()})
-	return err == nil
-}
-
-// ReleasePilotScheduleLock releases the pilot scheduling lock if held by this process.
-func ReleasePilotScheduleLock() {
-	releasePIDLock(PilotScheduleLockPath())
-}
-
 // ConfigSyncLockPath guards config auto-pull / auto-push. Passes are repo
 // scoped and run concurrently; config.yaml is rewritten non-atomically by
 // ApplyGistConfig, so concurrent syncs must be serialized.

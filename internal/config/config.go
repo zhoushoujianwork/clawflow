@@ -126,8 +126,16 @@ func (s CoordinatorSettings) ListenAddress() string {
 	return s.Listen
 }
 
+// PlatformSettings selects the remote admin API; credentials remain in a local file.
+type PlatformSettings struct {
+	URL         string `yaml:"url" json:"url"`
+	TokenFile   string `yaml:"token_file" json:"token_file"`
+	Fingerprint string `yaml:"fingerprint,omitempty" json:"fingerprint,omitempty"`
+}
+
 // Settings holds global ClawFlow settings.
 type Settings struct {
+	Platform    PlatformSettings    `yaml:"platform,omitempty"`
 	Pilot       PilotSettings       `yaml:"pilot,omitempty"`
 	Coordinator CoordinatorSettings `yaml:"coordinator,omitempty"`
 	Execution   ExecutionSettings   `yaml:"execution,omitempty"`
