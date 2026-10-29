@@ -7,7 +7,7 @@ import (
 )
 
 // Paths are hints, never instructions or filesystem reads. URLs and absolute
-// paths are excluded; a bare filename inherits the last explicit directory.
+// paths are excluded; bare filenames also retain their literal root path.
 var fileHint = regexp.MustCompile("[A-Za-z0-9_./-]+")
 
 // EstimateFiles extracts explicit repository file hints from requirements or
@@ -30,6 +30,9 @@ func EstimateFiles(text string) []string {
 		if strings.Contains(name, "/") {
 			dir = path.Dir(name)
 		} else if dir != "" {
+			// A bare name may be a root file, not a sibling abbreviation.
+			// Keep both hints so directory inheritance cannot hide it.
+			out = append(out, name)
 			name = dir + "/" + name
 		}
 		out = append(out, name)

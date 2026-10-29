@@ -10,7 +10,7 @@ func TestEstimateFiles(t *testing.T) {
 		text string
 		want []string
 	}{
-		{"Edit `internal/acceptance/runner.go`, `contract.go` and `store.go`.", []string{"internal/acceptance/runner.go", "internal/acceptance/contract.go", "internal/acceptance/store.go"}},
+		{"Edit `internal/acceptance/runner.go`, `contract.go` and `store.go`.", []string{"internal/acceptance/runner.go", "contract.go", "internal/acceptance/contract.go", "store.go", "internal/acceptance/store.go"}},
 		{"No explicit files", nil},
 		{"https://example.com/foo.go /tmp/private.go ../secret.go", nil},
 		{"Update ./web/src/app.tsx", []string{"web/src/app.tsx"}},
@@ -33,5 +33,19 @@ func TestEstimateFiles(t *testing.T) {
 	}
 	if FilesOverlap([]string{"internal/a.go"}, []string{"internal/b.go"}) {
 		t.Fatal("independent files overlap")
+	}
+}
+
+func TestEstimateMixedRootAndNestedFiles(t *testing.T) {
+	for _, root := range []string{"go.mod", "go.sum", "Dockerfile", "Makefile", "README.md", ".editorconfig", "Buildfile"} {
+		t.Run(root, func(t *testing.T) {
+			files := EstimateFiles("Edit `internal/a.go` and `" + root + "`.")
+			if !FilesOverlap(files, []string{root}) {
+				t.Fatalf("explicit root file %q lost in estimate: %v", root, files)
+			}
+			if !FilesOverlap(files, []string{"internal/a.go"}) {
+				t.Fatalf("nested file lost in estimate: %v", files)
+			}
+		})
 	}
 }

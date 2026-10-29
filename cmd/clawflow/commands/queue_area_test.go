@@ -63,6 +63,24 @@ func TestQueueAreaNamedFilesWithoutKnownExtension(t *testing.T) {
 	}
 }
 
+func TestQueueAreaMixedRootAndNestedFiles(t *testing.T) {
+	for _, root := range []string{"go.mod", "Dockerfile", "README.md", ".editorconfig", "Buildfile"} {
+		t.Run(root, func(t *testing.T) {
+			in := areaInput()
+			in.Issues[0].Body = "Edit `internal/a.go` and `" + root + "`."
+			in.PRFiles = func(int) ([]string, error) { return []string{root}, nil }
+			p := planRepoQueue(in)
+			if p.Err != "" || p.Picks[1] || !p.Picks[2] {
+				t.Fatalf("root overlap must park while independent work starts: %+v", p)
+			}
+			e := p.State.Entries[0]
+			if e.State != queue.StateParked || e.Reason != "area_busy" || e.BlockingPR != 9 {
+				t.Fatalf("missing root-file area hold: %+v", e)
+			}
+		})
+	}
+}
+
 func TestQueueAreaStarvationAndReset(t *testing.T) {
 	in := areaInput()
 	in.Issues = in.Issues[:1]
