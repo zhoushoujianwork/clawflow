@@ -3,6 +3,8 @@ package coordinator
 import (
 	"context"
 	"database/sql"
+	"slices"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -30,6 +32,7 @@ type BoardWorker struct {
 	RunningTasks  []string   `json:"running_tasks"`
 }
 type BoardTask struct {
+	WaitingReason  string     `json:"waiting_reason,omitempty" gorm:"-"`
 	ID             string     `json:"id"`
 	Repo           string     `json:"repo"`
 	Issue          int        `json:"issue"`
@@ -135,6 +138,22 @@ func deriveBoard(now time.Time, workers []Worker, tokens []Token, heartbeats map
 			row.RunningTasks = []string{}
 		}
 		out.Workers = append(out.Workers, row)
+	}
+	for i := range out.Tasks {
+		task := &out.Tasks[i]
+		if task.State != "pending" || len(task.Tags) == 0 {
+			continue
+		}
+		matched := false
+		for j, w := range workers {
+			if out.Workers[j].Live && eligible(task.Tags, w) && ((task.Kind == "acceptance" && AcceptanceEligible(task.Tags, w)) || (task.Kind != "acceptance" && (len(w.Roles) == 0 || slices.Contains(w.Roles, "operator")))) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			task.WaitingReason = "waiting for a worker with tags " + strings.Join(task.Tags, ", ")
+		}
 	}
 	return out
 }

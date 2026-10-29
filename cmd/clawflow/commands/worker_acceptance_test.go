@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -341,5 +342,14 @@ func TestAcceptanceDevelopmentWorkerBaseMerge(t *testing.T) {
 				t.Fatal("contract lost merged head")
 			}
 		})
+	}
+}
+
+func TestAcceptanceInheritsCredentialLabelWithKindOverride(t *testing.T) {
+	rc := config.Repo{WorkerTags: []string{"dev"}, WorkerTagsByKind: map[string][]string{"acceptance": {"review"}}}
+	task, payload := coordinatorTask(&runJob{repo: "o/r", repoCfg: rc, op: &operator.Operator{Name: "acceptance"}, sub: &operator.Subject{Number: 42, Labels: []string{"worker:creds-laptop"}}}, time.Minute)
+	want := []string{"creds-laptop", "github", "review"}
+	if !reflect.DeepEqual(task.Tags, want) || !reflect.DeepEqual(payload.Tags, want) {
+		t.Fatalf("credential label lost: task=%v payload=%v", task.Tags, payload.Tags)
 	}
 }

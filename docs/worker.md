@@ -113,3 +113,29 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.clawflow.worker.plist
 
 coordinator 的扫描、定向运行、harvest 不受机器绑定限制。未启用 coordinator 时保持本机运行能力，
 不会因为迁移的 host 标签跳过仓库；主机限制在 worker 领取任务时生效。
+
+## 平台主机与客户端调度
+
+设置 `settings.platform.url` 的客户端不会本地调度：`clawflow run` 和 Web 自动调度均拒绝执行并提示平台地址。
+`repo enable` 通过正常客户端命令转发给平台；本地配置的启用入口拒绝写入。
+`clawflow worker` 仍可运行。一次性调试可用 `clawflow run --local`，命令会警告并绕过平台执行本地运行。
+
+平台主机启用 coordinator 后只扫描、入队、收集结果和决定合并，算子及验收执行由 worker 领取。
+已有 enabled 仓库继续参与调度，无需重新注册。主机需要贡献执行能力时，可启用同进程 worker：
+
+```yaml
+settings:
+  coordinator:
+    enabled: true
+    local_worker:
+      enabled: true
+      max_parallel: 2
+      tags: [github]
+```
+
+随 `clawflow web` 启停的本地 worker 使用普通 HTTPS API、证书指纹和独立 worker token；
+token 保存在状态目录 `data/coordinator/local-worker.token`，权限为 `0600`，不要提交或同步。
+`local_worker` 默认关闭，`max_parallel` 默认 1。任务仍必须匹配全部标签，不会回退到主机直接执行。
+例如 `worker:creds-laptop` 任务及其验收，只能由带有 `creds-laptop` 标签的 worker 领取。
+未匹配的任务保持 pending，看板显示等待的标签；任务表显示持有租约的 worker，仓库栏显示所属平台。
+全局 `max_concurrent_agents` 和仓库 `max_in_flight` 在平台领取租约时执行，跨所有 worker 共享。

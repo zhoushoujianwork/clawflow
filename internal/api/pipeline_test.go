@@ -487,3 +487,24 @@ func TestPipelineWorkerPoolLANContract(t *testing.T) {
 		t.Fatalf("disabled: %s", w.Body)
 	}
 }
+
+func TestPipelineRepositoryHostingPlatform(t *testing.T) {
+	resetPipeline(t, nil)
+	if err := snapshot.WritePipeline(fakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Settings: config.Settings{Coordinator: config.CoordinatorSettings{Enabled: true}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://platform.example:8090/api/pipeline", nil)
+	response := httptest.NewRecorder()
+	HandlePipeline(response, request)
+	var board pipeline.Board
+	if err := json.Unmarshal(response.Body.Bytes(), &board); err != nil {
+		t.Fatal(err)
+	}
+	if len(board.Repos) != 1 || board.Repos[0].HostingPlatform != "https://platform.example:8093" {
+		t.Fatalf("missing platform: %s", response.Body.String())
+	}
+}

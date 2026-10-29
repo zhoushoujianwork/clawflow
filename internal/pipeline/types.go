@@ -87,6 +87,7 @@ type Execution struct {
 
 // RepoBoard is the board for one repository.
 type RepoBoard struct {
+	HostingPlatform    string `json:"hosting_platform,omitempty"`
 	Stale              bool   `json:"stale"`
 	Repo               string `json:"repo"`
 	Enabled            bool   `json:"enabled"`

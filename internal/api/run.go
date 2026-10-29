@@ -85,6 +85,10 @@ func canStartRunLocked(active map[string]bool, repo string) bool {
 // The manual Run button (HandleRun) and the periodic scheduler
 // (TriggerScheduledRuns) share this gate so they can never overlap on a repo.
 func TriggerRun(repo string, issue int) bool {
+	cfg, err := config.Load()
+	if err != nil || cfg.Settings.SchedulingError() != nil {
+		return false
+	}
 	runMu.Lock()
 	if !canStartRunLocked(activeRuns, repo) {
 		runMu.Unlock()
@@ -104,7 +108,7 @@ func TriggerRun(repo string, issue int) bool {
 // by counting passes (which also do non-agent work). An active unscoped pass
 // blocks everything. Result order is alphabetical.
 func PlanScheduledRuns(cfg *config.Config, hostname string, active map[string]bool, only map[string]bool) []string {
-	if active[unscopedKey] {
+	if cfg.Settings.SchedulingError() != nil || active[unscopedKey] {
 		return nil
 	}
 	var names []string
@@ -244,6 +248,15 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		http.Error(w, "config unavailable", 503)
+		return
+	}
+	if err := cfg.Settings.SchedulingError(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	var req runRequest
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -291,11 +304,14 @@ func currentRunStatus() runResponse {
 	if cfg, err := config.Load(); err == nil {
 		resp.IntervalMinutes = cfg.Settings.RunIntervalMinutes
 		resp.Paused = cfg.Settings.RunPaused
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			resp.Status, resp.Message, resp.IntervalMinutes = "client", err.Error(), 0
+		}
 	}
 	schedMu.Lock()
 	next := schedNextFire
 	schedMu.Unlock()
-	if !next.IsZero() {
+	if resp.Status != "client" && !next.IsZero() {
 		resp.NextFireUnixMs = next.UnixMilli()
 	}
 	return resp

@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -88,7 +89,7 @@ func TestPilotAndCoordinatorSettingsRoundTrip(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	original := &config.Config{Settings: config.Settings{
 		Pilot:       config.PilotSettings{StallAfter: "45m"},
-		Coordinator: config.CoordinatorSettings{Enabled: true, Listen: "127.0.0.1:9999"},
+		Coordinator: config.CoordinatorSettings{Enabled: true, Listen: "127.0.0.1:9999", LocalWorker: config.LocalWorkerSettings{Enabled: true, MaxParallel: 2, Tags: []string{"github", "macos"}}},
 	}}
 	if err := original.Save(); err != nil {
 		t.Fatal(err)
@@ -100,7 +101,7 @@ func TestPilotAndCoordinatorSettingsRoundTrip(t *testing.T) {
 	if loaded.Settings.Pilot != original.Settings.Pilot {
 		t.Fatalf("pilot settings lost: %+v", loaded.Settings.Pilot)
 	}
-	if loaded.Settings.Coordinator != original.Settings.Coordinator {
+	if !reflect.DeepEqual(loaded.Settings.Coordinator, original.Settings.Coordinator) {
 		t.Fatalf("coordinator settings lost: %+v", loaded.Settings.Coordinator)
 	}
 }

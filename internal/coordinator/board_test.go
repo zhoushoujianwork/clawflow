@@ -91,3 +91,20 @@ func TestBoardStoreProjection(t *testing.T) {
 		t.Fatalf("completed board: %+v, %v", b, err)
 	}
 }
+
+func TestBoardWaitingForCredentialWorker(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-time.Second)
+	task := BoardTask{State: "pending", Kind: "implement", Tags: []string{"github", "creds-laptop"}}
+	workers := []Worker{{ID: "local-worker", Tags: []string{"github"}}, {ID: "laptop", Tags: task.Tags}}
+	tokens := []Token{{Name: "local-worker", LastSeen: &recent}}
+	b := deriveBoard(now, workers, tokens, nil, []BoardTask{task})
+	if !strings.Contains(b.Tasks[0].WaitingReason, "creds-laptop") {
+		t.Fatalf("missing waiting reason: %+v", b)
+	}
+	tokens = append(tokens, Token{Name: "laptop", LastSeen: &recent})
+	b = deriveBoard(now, workers, tokens, nil, []BoardTask{task})
+	if b.Tasks[0].WaitingReason != "" {
+		t.Fatalf("eligible live worker ignored: %+v", b)
+	}
+}

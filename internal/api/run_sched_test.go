@@ -3,7 +3,10 @@ package api
 import (
 	"context"
 	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -117,5 +120,50 @@ func TestCurrentRunStatusAgentSlots(t *testing.T) {
 	release()
 	if st := currentRunStatus(); st.AgentSlotsUsed != 0 {
 		t.Fatalf("released status=%+v", st)
+	}
+}
+
+func TestClientNeverSchedules(t *testing.T) {
+	cfg := schedCfg(4, false, map[string]config.Repo{"o/r": {Enabled: true}})
+	cfg.Settings.Platform.URL = "https://platform.example"
+	if got := PlanScheduledRuns(cfg, "", map[string]bool{}, nil); len(got) != 0 {
+		t.Fatalf("client scheduled %v", got)
+	}
+	started, _ := TriggerScheduledRuns(cfg, "", nil)
+	if len(started) != 0 {
+		t.Fatalf("client started %v", started)
+	}
+}
+
+func TestClientManualWebRunRefused(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Settings: config.Settings{Platform: config.PlatformSettings{URL: "https://platform.example"}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	HandleRun(response, httptest.NewRequest(http.MethodPost, "/api/run", strings.NewReader(`{}`)))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), cfg.Settings.Platform.URL) {
+		t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+	}
+	if TriggerRun("o/r", 1) {
+		t.Fatal("client started a subprocess")
+	}
+}
+
+func TestClientWebLocalEnableRefused(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {}}, Settings: config.Settings{Platform: config.PlatformSettings{URL: "https://platform.example"}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	HandleRepoConfig(response, httptest.NewRequest(http.MethodPost, "/api/repo/config", strings.NewReader(`{"repo":"o/r","enabled":true}`)))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), cfg.Settings.Platform.URL) {
+		t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+	}
+	loaded, err := config.Load()
+	if err != nil || loaded.Repos["o/r"].Enabled {
+		t.Fatalf("local config changed: %v", err)
 	}
 }
