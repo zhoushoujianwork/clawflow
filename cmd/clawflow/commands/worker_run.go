@@ -421,6 +421,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	}
 	rc.LocalPath = local
 	rc.BaseBranch = p.RepoPolicy.BaseBranch
+	rc.AcceptanceSetupCommand = p.RepoPolicy.AcceptanceSetupCommand
 	rc.TestCommand = p.RepoPolicy.TestCommand
 	rc.CIRequired = p.RepoPolicy.CIRequired
 	rc.AutoMerge = false

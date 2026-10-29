@@ -1765,6 +1765,12 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		return false, false, true
 	}
 	workdir := wtResult.Path
+	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
+		status := execution.PrepareCheckout(ctx, j.repoCfg.AcceptanceSetupCommand, execution.Options{Workspace: workdir, Role: roleForOperator(j.op.Name)}, nil)
+		if status != "" {
+			fmt.Fprintf(os.Stderr, "%s checkout_setup: %s\n", prefix, status)
+		}
+	}
 	if wtResult.Resumed {
 		fmt.Fprintf(os.Stderr, "%s ✓ workdir RESUMED: %s (branch: %s)\n", prefix, workdir, wtResult.BranchName)
 	} else {

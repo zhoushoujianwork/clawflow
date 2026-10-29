@@ -34,6 +34,16 @@ clawflow acceptance status --repo owner/repo --pr 123 --json
 
 Enrollment preserves monitoring and automatic-merge settings. The scan sweep never launches a reviewer; it only reports missing evidence. `clawflow acceptance run` stays available for explicit runs.
 
+仓库可声明 checkout 构建准备命令；实现、修复和独立审阅使用同一准备流程。例如：
+
+```bash
+clawflow repo set zhoushoujianwork/clawflow --acceptance-setup-command 'cd web && pnpm install --frozen-lockfile && pnpm build'
+```
+
+对应配置字段为 `acceptance_setup_command`，空值关闭。计划保存并创建审阅 checkout 后、reviewer 启动前执行；每个 checkout 的相同命令只尝试一次。准备脚本通过与后续执行相同的 profile、sandbox 和网络策略运行，最多十分钟，不保留命令输出或原生回答。命令失败时，在同一 sandbox 内尝试创建空 `web/dist/index.html`；不覆盖已跟踪文件，也不沿资产路径的符号链接写入。占位文件和私有准备状态加入本地 Git exclude，脚本运行后删除，均不提交。
+
+私有验收记录的 `environment_notes` 保存 `checkout_setup: ok|fallback|failed`。准备执行本身不可用或占位失败时记录 `failed`，仍允许 reviewer 使用已有证据。占位仅解决 Go embed 编译，不证明前端功能；本地检查因环境不可用时，应使用覆盖对应标准的可信 exact-head CI，不能把这种环境问题当成代码缺陷，也不能在已有充分 CI 证据时返回 `infrastructure_error`。
+
 ## Automatic harvest
 
 `clawflow run` 在 operator 执行前调度独立验收。需要开启 `auto_merge` 和 `acceptance_required`，支持整轮扫描或 [targeted run](#targeted-run)。

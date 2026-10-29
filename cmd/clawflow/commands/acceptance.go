@@ -183,7 +183,8 @@ func acceptancePolicy(repo string, rc config.Repo, ec execution.Config) string {
 		Repository, Platform, BaseURL, BaseBranch, LocalPath string
 		CIRequired, AcceptanceRequired                       bool
 		Command, Profile, CodexSandbox                       string
-	}{1, repo, rc.Platform, rc.BaseURL, rc.BaseBranch, rc.LocalPath, rc.CIRequired, rc.AcceptanceRequired, ec.Command, ec.Profile, ec.CodexSandbox})
+		SetupCommand                                         string
+	}{1, repo, rc.Platform, rc.BaseURL, rc.BaseBranch, rc.LocalPath, rc.CIRequired, rc.AcceptanceRequired, ec.Command, ec.Profile, ec.CodexSandbox, rc.AcceptanceSetupCommand})
 }
 
 func acceptanceSHA(s string) bool {
@@ -868,7 +869,7 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 	if provider, ok := client.(vcs.CIEvidenceProvider); ok {
 		ci = func() (vcs.CIEvidence, error) { return provider.GetCIEvidence(repo, prNumber) }
 	}
-	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, PlanStore: planStore, PlanPolicy: planPolicy, SavedPlan: savedPlan, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
+	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, PlanStore: planStore, PlanPolicy: planPolicy, SavedPlan: savedPlan, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand, SetupCommand: rc.AcceptanceSetupCommand}).Run(ctx, c, scratch, workspace)
 	if r.Completed {
 		if publishErr := publishAcceptanceReport(ctx, client, r); publishErr != nil {
 			return r, errors.Join(err, publishErr)

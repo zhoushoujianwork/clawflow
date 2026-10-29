@@ -29,8 +29,9 @@ type Runner struct {
 	Prepare func(context.Context) (string, error)
 	// TestCommand is the repository's configured test command; the reviewer is
 	// told to run it. Empty means the reviewer discovers the standard command.
-	TestCommand string
-	CIRequired  bool
+	TestCommand  string
+	SetupCommand string
+	CIRequired   bool
 	// CI is queried immediately before review, after independent planning.
 	CI func() (vcs.CIEvidence, error)
 }
@@ -167,6 +168,10 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 			}
 		}
 	}
+	setupStatus := execution.PrepareCheckout(ctx, runner.SetupCommand, execution.Options{Workspace: workspace, Role: "acceptance"}, execution.SetupExecutor(runner.Execute))
+	if setupStatus != "" {
+		record.EnvironmentNotes = append(record.EnvironmentNotes, "checkout_setup: "+setupStatus)
+	}
 	record.Before, err = runner.Inspect(ctx, workspace)
 	if err != nil {
 		return record, err
@@ -219,6 +224,9 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	execute := runner.Execute
 	if execute == nil {
 		execute = execution.Execute
+	}
+	if setupStatus != "" {
+		prompt += " Checkout prerequisite setup status: " + setupStatus + ". Setup output is private; do not publish it. A fallback placeholder is compilation support only, never proof of frontend behavior. If setup did not succeed and local execution is unavailable, reuse trustworthy successful exact-head CI covering the criterion instead of returning infrastructure_error. "
 	}
 	prompt += "The contract base_sha and its merge base with HEAD are available locally. Use git diff <base_sha>...HEAD and git log <base_sha>..HEAD for offline comparisons; no remote or credentials are available. "
 	reviewed, reviewErr := runner.executeRecorded(ctx, c, "acceptance-review", execute, prompt+string(input),

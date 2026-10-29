@@ -112,7 +112,7 @@ func resultFixture(t *testing.T) (*resultStoreFake, *runJob, *resultClientFake, 
 
 func TestCoordinatorPayloadAndDispatch(t *testing.T) {
 	withRunLog(t)
-	j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement", Prompt: "instructions", Source: "/private/path"}, sub: &operator.Subject{Number: 7, Labels: []string{"clawflow", "worker:heavy", "priority:high"}}, language: "zh", repoCfg: config.Repo{BaseBranch: "main", TestCommand: "go test ./...", CIRequired: true, WorkerTags: []string{"codex"}, Priority: 2}}
+	j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement", Prompt: "instructions", Source: "/private/path"}, sub: &operator.Subject{Number: 7, Labels: []string{"clawflow", "worker:heavy", "priority:high"}}, language: "zh", repoCfg: config.Repo{BaseBranch: "main", TestCommand: "go test ./...", AcceptanceSetupCommand: "make assets", CIRequired: true, WorkerTags: []string{"codex"}, Priority: 2}}
 	s := &resultStoreFake{}
 	old := runOneOperatorFn
 	runOneOperatorFn = func(context.Context, *runJob, time.Duration) (bool, bool, bool) {
@@ -135,7 +135,7 @@ func TestCoordinatorPayloadAndDispatch(t *testing.T) {
 	if err := json.Unmarshal(s.task.Payload, &p); err != nil {
 		t.Fatal(err)
 	}
-	if p.TaskID != "task" || p.Repo != "o/r" || p.Issue != 7 || p.Role != "operator" || p.Language != "zh" || p.TimeoutSec != 60 || p.Platform != "github" || p.RepoPolicy.BaseBranch != "main" || !p.RepoPolicy.CIRequired || p.RepoPolicy.TestCommand != "go test ./..." || p.Scan.ObservedAt.IsZero() {
+	if p.TaskID != "task" || p.Repo != "o/r" || p.Issue != 7 || p.Role != "operator" || p.Language != "zh" || p.TimeoutSec != 60 || p.Platform != "github" || p.RepoPolicy.BaseBranch != "main" || !p.RepoPolicy.CIRequired || p.RepoPolicy.TestCommand != "go test ./..." || p.RepoPolicy.AcceptanceSetupCommand != "make assets" || p.Scan.ObservedAt.IsZero() {
 		t.Fatalf("payload: %+v", p)
 	}
 	if !reflect.DeepEqual(p.Tags, []string{"codex", "heavy"}) || len(p.SkillDigest) != 64 {

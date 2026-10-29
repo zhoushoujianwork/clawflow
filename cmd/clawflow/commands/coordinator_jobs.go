@@ -44,10 +44,11 @@ type coordinatorPayload struct {
 	TimeoutSec        int64                `json:"timeout_sec"`
 	Tags              []string             `json:"tags"`
 	RepoPolicy        struct {
-		BaseBranch         string `json:"base_branch"`
-		TestCommand        string `json:"test_command"`
-		AcceptanceRequired bool   `json:"acceptance_required"`
-		CIRequired         bool   `json:"ci_required"`
+		AcceptanceSetupCommand string `json:"acceptance_setup_command,omitempty"`
+		BaseBranch             string `json:"base_branch"`
+		TestCommand            string `json:"test_command"`
+		AcceptanceRequired     bool   `json:"acceptance_required"`
+		CIRequired             bool   `json:"ci_required"`
 	} `json:"repo_policy"`
 	ReopenEventID string             `json:"reopen_event_id"`
 	Repair        *coordinatorRepair `json:"repair,omitempty"`
@@ -128,6 +129,7 @@ func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordi
 		}
 	}
 	p := coordinatorPayload{Kind: kind, Operator: j.op.Name, SkillDigest: skillDigest(j.op), Repo: j.repo, Platform: platform, BaseURL: j.repoCfg.BaseURL, Issue: j.sub.Number, Role: roleForOperator(j.op.Name), Language: j.language, TimeoutSec: int64(timeout / time.Second), Tags: unique}
+	p.RepoPolicy.AcceptanceSetupCommand = j.repoCfg.AcceptanceSetupCommand
 	p.RepoPolicy.BaseBranch, p.RepoPolicy.TestCommand, p.RepoPolicy.CIRequired = j.repoCfg.BaseBranch, j.repoCfg.TestCommand, j.repoCfg.CIRequired
 	p.AcceptancePlan = j.acceptancePlan
 	p.RepoPolicy.AcceptanceRequired = j.repoCfg.AcceptanceRequired

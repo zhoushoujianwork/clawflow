@@ -46,6 +46,10 @@ type Repo struct {
 	CITimeout          int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
+
+	// AcceptanceSetupCommand prepares generated prerequisites in disposable checkouts.
+	AcceptanceSetupCommand string `yaml:"acceptance_setup_command,omitempty" json:"acceptance_setup_command,omitempty"`
+
 	// AcceptanceMaxParallel caps simultaneous independent reviews; zero defaults to 3.
 	AcceptanceMaxParallel int `yaml:"acceptance_max_parallel,omitempty" json:"acceptance_max_parallel,omitempty"`
 
