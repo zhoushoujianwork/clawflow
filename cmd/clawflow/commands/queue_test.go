@@ -389,3 +389,37 @@ func TestRunOptOutPreservesExclusions(t *testing.T) {
 		t.Fatalf("dispatched %v", got)
 	}
 }
+
+func TestPlanRepoQueueSkippedRunKeepsSlotUntilUnlocked(t *testing.T) {
+	in := plannerInput("o/r",
+		plannerIssue(1, "2026-01-01T00:00:00Z", "clawflow-skip", "agent-implemented"),
+		plannerIssue(2, "2026-01-02T00:00:00Z"),
+	)
+	in.MaxInFlight = 1
+	in.Locked = func(n int) bool { return n == 1 }
+	in.OpenPRs = func() ([]vcs.PR, error) {
+		t.Fatal("skipped issue must not inspect PR delivery")
+		return nil, nil
+	}
+	in.FlightBlocked = func(vcs.Issue, *vcs.PR) string {
+		t.Fatal("skipped active run must not be parked")
+		return "blocked"
+	}
+	in.State.BlockedSince = map[int]time.Time{1: in.Now.Add(-2 * in.ParkAfter)}
+	in.State.Parked = []int{1}
+	p := planRepoQueue(in)
+	if p.Result.InFlight != 1 || len(p.Picks) != 0 || p.State.Skipped != 1 {
+		t.Fatalf("locked skipped run: inflight=%d picks=%v skipped=%d", p.Result.InFlight, p.Picks, p.State.Skipped)
+	}
+	in.MaxInFlight = 2
+	p = planRepoQueue(in)
+	if p.Result.InFlight != 1 || len(p.Picks) != 1 || !p.Picks[2] {
+		t.Fatalf("spare slot: inflight=%d picks=%v", p.Result.InFlight, p.Picks)
+	}
+	in.MaxInFlight = 1
+	in.Locked = func(int) bool { return false }
+	p = planRepoQueue(in)
+	if p.Result.InFlight != 0 || len(p.Picks) != 1 || !p.Picks[2] {
+		t.Fatalf("unlocked skipped run: inflight=%d picks=%v", p.Result.InFlight, p.Picks)
+	}
+}
