@@ -84,12 +84,12 @@ func acceptanceReportBody(r acceptance.Record) string {
 				fmt.Fprintf(&b, "  - %s / %s: %s; reference: %s; commit: `%s`\n", e.Type, e.Result, clean(e.Check), clean(e.Reference), clean(e.Commit))
 			}
 			if check.Missing != "" {
-				fmt.Fprintf(&b, "  - Missing proof: %s\n", clean(check.Missing))
+				fmt.Fprintf(&b, "  - Missing proof: %s\n", clean(string(check.Missing)))
 			}
 		}
 	}
 	for _, f := range acceptance.DeduplicateFindings(r.Findings) {
-		fmt.Fprintf(&b, "\nFinding (%s): %s — %s\n", clean(f.Kind), clean(f.Summary), clean(f.Evidence))
+		fmt.Fprintf(&b, "\nFinding (%s): %s — %s\n", clean(f.Kind), clean(f.Summary), clean(string(f.Evidence)))
 	}
 	fmt.Fprintf(&b, "\nNext action owner: %s\nNext action: %s\n\nPrior attempts remain in the private acceptance audit store. CI and merge gates remain required.\n", clean(owner), clean(next))
 	return b.String()

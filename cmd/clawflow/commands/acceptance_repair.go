@@ -101,7 +101,7 @@ func findingsFromRecord(r acceptance.Record) *acceptanceFindings {
 			target = finding.Defect
 		}
 		f.Summary += sanitizeReviewerText(finding.Kind+": "+target+": "+finding.Summary, acceptanceFindingEntryLimit) + "\n"
-		f.Evidence = append(f.Evidence, sanitizeReviewerText(finding.Evidence, acceptanceFindingEntryLimit))
+		f.Evidence = append(f.Evidence, sanitizeReviewerText(string(finding.Evidence), acceptanceFindingEntryLimit))
 	}
 	f.Summary = sanitizeReviewerText(f.Summary, acceptanceFindingSummaryLimit)
 	return f

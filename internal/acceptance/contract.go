@@ -189,7 +189,7 @@ type Finding struct {
 	Summary     string               `json:"summary"`
 	Requirement string               `json:"requirement,omitempty"`
 	Defect      string               `json:"defect,omitempty"`
-	Evidence    string               `json:"evidence,omitempty"`
+	Evidence    Text                 `json:"evidence,omitempty"`
 }
 
 func (f Finding) Failing() bool {
@@ -210,12 +210,12 @@ func validateFindings(findings []Finding) (bool, error) {
 		switch f.Kind {
 		case "advisory":
 		case "requirement":
-			if !nonempty(f.Requirement, f.Evidence) {
+			if !nonempty(f.Requirement, string(f.Evidence)) {
 				return false, errors.New("requirement finding requires requirement and concrete evidence")
 			}
 			failing = true
 		case "defect":
-			if !nonempty(f.Defect, f.Evidence) {
+			if !nonempty(f.Defect, string(f.Evidence)) {
 				return false, errors.New("defect finding requires defect and concrete evidence")
 			}
 			failing = true

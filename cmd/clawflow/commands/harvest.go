@@ -375,7 +375,7 @@ func harvestNonpassComment(r acceptance.Record) string {
 		if i >= acceptanceFindingEvidenceLimit {
 			break
 		}
-		summary += "\n\n" + sanitizeReviewerText(f.Kind+": "+f.Summary+" "+f.Requirement+" "+f.Defect+" "+f.Evidence, acceptanceFindingEntryLimit)
+		summary += "\n\n" + sanitizeReviewerText(f.Kind+": "+f.Summary+" "+f.Requirement+" "+f.Defect+" "+string(f.Evidence), acceptanceFindingEntryLimit)
 	}
 	next := ""
 	if r.Verdict == acceptance.Blocked {
