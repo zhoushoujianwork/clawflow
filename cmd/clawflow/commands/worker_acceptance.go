@@ -117,6 +117,7 @@ func workerAcceptanceContract(ctx context.Context, client vcs.Client, repo strin
 	if err != nil {
 		return c, rc, ec, pr, err
 	}
+	rc.AcceptanceSetupCommand = p.RepoPolicy.AcceptanceSetupCommand
 	rc.CIRequired, rc.TestCommand, rc.AutoMerge = p.RepoPolicy.CIRequired, p.RepoPolicy.TestCommand, false
 	platform := rc.Platform
 	if platform == "" {

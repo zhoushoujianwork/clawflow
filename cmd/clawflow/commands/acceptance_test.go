@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1148,5 +1150,88 @@ func TestAcceptanceReportCorrectionReusesNativeSession(t *testing.T) {
 	r, err := runAcceptance(context.Background(), f, "o/r", 11)
 	if err != nil || r.Verdict != acceptance.Passed || calls != 3 || r.Correction == nil || r.Correction.Reviewer.SessionID != session {
 		t.Fatalf("calls=%d verdict=%s correction=%+v err=%v", calls, r.Verdict, r.Correction, err)
+	}
+}
+
+func TestAcceptanceCheckoutSetup(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			ctx := context.Background()
+			local, workspace := t.TempDir(), t.TempDir()
+			git := func(dir string, args ...string) string {
+				t.Helper()
+				out, err := acceptanceGit(ctx, dir, args...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return out
+			}
+			git(local, "init", "--quiet")
+			git(local, "config", "user.name", "Test")
+			git(local, "config", "user.email", "test@example.com")
+			for name, content := range map[string]string{
+				"go.mod":   "module fixture\n\ngo 1.25.0\n",
+				"embed.go": "package fixture\nimport \"embed\"\n//go:embed all:web/dist\nvar Assets embed.FS\n",
+			} {
+				if err := os.WriteFile(filepath.Join(local, name), []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			git(local, "add", ".")
+			git(local, "commit", "-qm", "fixture")
+			head := git(local, "rev-parse", "HEAD")
+			if err := acceptancePrepareCheckout(ctx, workspace, local, "missing", "feature", head, head); err != nil {
+				t.Fatal(err)
+			}
+			command, want := "mkdir -p web/dist && printf built > web/dist/index.html", "ok"
+			if fail {
+				command, want = "echo private-setup-output; exit 1", "fallback"
+			}
+			rc := config.Repo{AcceptanceSetupCommand: command}
+			calls := 0
+			execute := func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
+				calls++
+				if opts.Workspace != workspace || opts.PermissionMode != "bypassPermissions" || opts.Role != "acceptance" || opts.Resume || opts.Events != nil {
+					t.Fatal("setup policy mismatch")
+				}
+				scripts, _ := filepath.Glob(filepath.Join(workspace, ".clawflow-checkout-setup", "*.sh"))
+				if len(scripts) != 1 {
+					t.Fatal("missing setup script")
+				}
+				cmd := exec.CommandContext(ctx, "sh", scripts[0])
+				cmd.Dir = workspace
+				output, err := cmd.CombinedOutput()
+				if len(output) != 0 {
+					t.Fatal("setup output leaked")
+				}
+				return execution.Result{Text: "private native answer"}, err
+			}
+			for i := 0; i < 2; i++ {
+				if got := execution.PrepareCheckout(ctx, rc.AcceptanceSetupCommand, execution.Options{Workspace: workspace, Role: "acceptance"}, execute); got != want {
+					t.Fatalf("status=%s want=%s", got, want)
+				}
+			}
+			if calls != 1 {
+				t.Fatalf("setup calls=%d", calls)
+			}
+			cmd := exec.CommandContext(ctx, "go", "build", "./...")
+			cmd.Dir = workspace
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("embed fixture build: %s: %v", out, err)
+			}
+			if fail {
+				b, err := os.ReadFile(filepath.Join(workspace, "web/dist/index.html"))
+				if err != nil || len(b) != 0 {
+					t.Fatalf("placeholder: %v, length=%d", err, len(b))
+				}
+			}
+			git(workspace, "add", ".")
+			if got := git(workspace, "diff", "--cached", "--name-only"); got != "" {
+				t.Fatalf("setup artifacts staged: %s", got)
+			}
+			if got := git(workspace, "rev-parse", "HEAD"); got != head {
+				t.Fatal("setup changed HEAD")
+			}
+		})
 	}
 }

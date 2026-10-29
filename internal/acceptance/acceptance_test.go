@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -852,5 +853,63 @@ func TestRecordsAtHeadIndependentOfContract(t *testing.T) {
 	}
 	if _, err := s.RecordsAtHead(r.Contract.Repository, r.Contract.PRNumber, "other-head"); err == nil {
 		t.Fatal("unreadable record treated as absent")
+	}
+}
+
+func TestRunnerRecordsCheckoutSetup(t *testing.T) {
+	for _, want := range []string{"ok", "fallback", "failed"} {
+		t.Run(want, func(t *testing.T) {
+			r, scratch, workspace := setupRunner(t)
+			cmd := exec.Command("git", "init", "--quiet", workspace)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git init: %s %v", out, err)
+			}
+			r.SetupCommand = "mkdir -p web/dist && : > web/dist/index.html"
+			if want == "fallback" {
+				r.SetupCommand = "exit 1"
+			}
+			base := r.Execute
+			setupDone, reviewSeen := false, false
+			r.Execute = func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
+				if strings.HasPrefix(prompt, "Run only this prerequisite script") {
+					if opts.Workspace != workspace || opts.Role != "acceptance" || opts.PermissionMode != "bypassPermissions" || opts.ToolsDisabled {
+						t.Fatal("setup escaped review policy")
+					}
+					setupDone = true
+					if want == "failed" {
+						return execution.Result{}, errors.New("private failure")
+					}
+					scripts, _ := filepath.Glob(filepath.Join(workspace, ".clawflow-checkout-setup", "*.sh"))
+					if len(scripts) != 1 {
+						t.Fatal("missing setup script")
+					}
+					cmd := exec.CommandContext(ctx, "sh", scripts[0])
+					cmd.Dir = workspace
+					if out, err := cmd.CombinedOutput(); err != nil || len(out) != 0 {
+						t.Fatalf("setup output=%q err=%v", out, err)
+					}
+					return execution.Result{Text: "private setup output"}, nil
+				}
+				if opts.Workspace == workspace {
+					reviewSeen = true
+					if !setupDone || !strings.Contains(prompt, "setup status: "+want) || !strings.Contains(prompt, "instead of returning infrastructure_error") {
+						t.Fatal("review missing setup/CI guidance")
+					}
+				}
+				return base(ctx, prompt, opts)
+			}
+			record, err := r.Run(context.Background(), contract(), scratch, workspace)
+			if err != nil || !reviewSeen || record.Verdict != Passed {
+				t.Fatalf("review: %s %v", record.Verdict, err)
+			}
+			saved, err := r.Store.LoadRecord(contract(), record.AttemptID)
+			if err != nil || len(saved.EnvironmentNotes) != 1 || saved.EnvironmentNotes[0] != "checkout_setup: "+want {
+				t.Fatalf("notes=%v err=%v", saved.EnvironmentNotes, err)
+			}
+			encoded, _ := json.Marshal(saved)
+			if strings.Contains(string(encoded), "private setup output") || strings.Contains(string(encoded), "private failure") {
+				t.Fatal("setup output persisted in acceptance record")
+			}
+		})
 	}
 }
