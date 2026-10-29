@@ -218,7 +218,7 @@ func (s *coordinatorResults) finishAcceptance(ctx context.Context, t *coordinato
 		return err
 	}
 	// The normal coordinator sweep consumes this record for repair or conditional merge.
-	return nil
+	return publishAcceptanceReport(ctx, client, *r.Acceptance)
 }
 
 // Resolve worker ownership only at a head justified by the existing provenance check.

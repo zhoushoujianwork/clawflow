@@ -45,6 +45,10 @@ func (f *acceptanceFake) MergePRAtHead(_ string, _ int, expected string) (string
 
 func acceptanceFixture(t *testing.T) (*acceptanceFake, config.Repo) {
 	t.Helper()
+	// Preserve legacy record fixtures; structured evidence has dedicated fixtures.
+	oldSchema := acceptanceEvidenceSchema
+	acceptanceEvidenceSchema = 0
+	t.Cleanup(func() { acceptanceEvidenceSchema = oldSchema })
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", "/usr/bin/true")
 	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "acceptance-profile")

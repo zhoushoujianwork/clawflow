@@ -130,6 +130,11 @@ func classifyAcceptanceForRepair(ctx context.Context, client vcs.Client, repo st
 	if errors.Is(err, errAcceptanceMissing) || !rec.Completed || rec.Cancelled || len(rec.Evidence) == 0 {
 		return acceptanceNoRepair, rec, c, err
 	}
+	if c.EvidenceSchema == 1 {
+		if validateErr := acceptance.ValidateUpload(c, rec); validateErr != nil {
+			return acceptanceNoRepair, rec, c, validateErr
+		}
+	}
 	switch rec.Verdict {
 	case acceptance.Failed:
 		// Legacy unstructured failures remain visible but cannot authorize a
@@ -158,7 +163,13 @@ func scanAcceptanceRepair(ctx context.Context, client vcs.Client, repo string, c
 		log("blocked_needs_human", "attempt_id", rec.AttemptID)
 		// The harvest comment already says a human must decide; the shared
 		// marker keeps this to one comment even if harvest could not post it.
-		repairNotifier(client, repo, cfg, pr.Number, issueNum).notify(harvestNonpassComment(rec), harvestMarker(rec))
+		if rec.Contract.EvidenceSchema == 1 {
+			if err := reconcileAcceptanceReport(ctx, client, rec); err != nil {
+				log("report_publish_error", "err", err.Error())
+			}
+		} else {
+			repairNotifier(client, repo, cfg, pr.Number, issueNum).notify(harvestNonpassComment(rec), harvestMarker(rec))
+		}
 		return nil
 	case acceptanceRepairFailed:
 	default:

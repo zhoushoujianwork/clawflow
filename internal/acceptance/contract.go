@@ -27,6 +27,7 @@ type Identity struct {
 // requirements or pinned inputs change. Digest uses the fixed struct field
 // order of encoding/json, with no maps or optional normalization.
 type Contract struct {
+	EvidenceSchema int      `json:"evidence_schema,omitempty"`
 	Version        int      `json:"version"`
 	TaskID         string   `json:"task_id"`
 	Generation     uint64   `json:"generation"`
@@ -50,7 +51,7 @@ func nonempty(values ...string) bool {
 }
 
 func (c Contract) Validate() error {
-	if c.Version != Version || c.Generation == 0 || c.PRNumber <= 0 ||
+	if (c.EvidenceSchema != 0 && c.EvidenceSchema != 1) || c.Version != Version || c.Generation == 0 || c.PRNumber <= 0 ||
 		!nonempty(c.TaskID, c.Repository, c.HeadSHA, c.BaseSHA, c.PolicyDigest, c.Requirements, c.Development.SessionID, c.Development.RunID) {
 		return errors.New("invalid acceptance contract")
 	}
@@ -117,15 +118,16 @@ func (n Native) validate(dev Identity, policy string) error {
 }
 
 type Plan struct {
-	PlannerIsolation string    `json:"planner_isolation"`
-	Version          int       `json:"version"`
-	AttemptID        string    `json:"attempt_id"`
-	ContractDigest   string    `json:"contract_digest"`
-	Text             string    `json:"text"`
-	Digest           string    `json:"digest"`
-	Planner          Native    `json:"planner"`
-	StartedAt        time.Time `json:"started_at"`
-	CompletedAt      time.Time `json:"completed_at"`
+	Criteria         []Criterion `json:"criteria,omitempty"`
+	PlannerIsolation string      `json:"planner_isolation"`
+	Version          int         `json:"version"`
+	AttemptID        string      `json:"attempt_id"`
+	ContractDigest   string      `json:"contract_digest"`
+	Text             string      `json:"text"`
+	Digest           string      `json:"digest"`
+	Planner          Native      `json:"planner"`
+	StartedAt        time.Time   `json:"started_at"`
+	CompletedAt      time.Time   `json:"completed_at"`
 }
 
 func (p Plan) validate(c Contract) error {
@@ -139,6 +141,11 @@ func (p Plan) validate(c Contract) error {
 	}
 	if p.PlannerIsolation != ToolsDisabled && p.PlannerIsolation != IsolatedReadonly {
 		return errors.New("invalid planner isolation mode")
+	}
+	if c.EvidenceSchema == 1 {
+		if err := validateCriteria(c, p); err != nil {
+			return err
+		}
 	}
 	return p.Planner.validate(c.Development, PlannerPolicy)
 }
@@ -176,12 +183,13 @@ func (l FindingLocation) Validate() error {
 // Requirement names a contract requirement; Defect names a correctness/safety
 // violation in changed code. Advisory items cannot make acceptance fail.
 type Finding struct {
-	Locations   []FindingLocation `json:"locations,omitempty"`
-	Kind        string            `json:"kind"`
-	Summary     string            `json:"summary"`
-	Requirement string            `json:"requirement,omitempty"`
-	Defect      string            `json:"defect,omitempty"`
-	Evidence    string            `json:"evidence,omitempty"`
+	Observation *RequirementEvidence `json:"observation,omitempty"`
+	Locations   []FindingLocation    `json:"locations,omitempty"`
+	Kind        string               `json:"kind"`
+	Summary     string               `json:"summary"`
+	Requirement string               `json:"requirement,omitempty"`
+	Defect      string               `json:"defect,omitempty"`
+	Evidence    string               `json:"evidence,omitempty"`
 }
 
 func (f Finding) Failing() bool {
@@ -224,8 +232,11 @@ const (
 )
 
 type Record struct {
-	ReviewMode string          `json:"review_mode,omitempty"`
-	CI         *vcs.CIEvidence `json:"ci,omitempty"`
+	Checks     []RequirementCheck `json:"checks,omitempty"`
+	NextAction string             `json:"next_action,omitempty"`
+	NextOwner  string             `json:"next_owner,omitempty"`
+	ReviewMode string             `json:"review_mode,omitempty"`
+	CI         *vcs.CIEvidence    `json:"ci,omitempty"`
 
 	Version         int       `json:"version"`
 	Contract        Contract  `json:"contract"`
@@ -265,6 +276,10 @@ func hasExecutedCommand(evidence []string) bool {
 // Evaluate returns nil only for a complete passing record for exactly expected.
 // Callers must obtain expected from their current authoritative inputs.
 func Evaluate(expected Contract, r Record) error {
+	return evaluate(expected, r, true)
+}
+
+func evaluate(expected Contract, r Record, checkRequirements bool) error {
 	d, err := expected.Digest()
 	if err != nil {
 		return err
@@ -296,7 +311,12 @@ func Evaluate(expected Contract, r Record) error {
 			return errors.New("missing acceptance evidence")
 		}
 	}
-	if !hasExecutedCommand(r.Evidence) {
+	if expected.EvidenceSchema == 1 && checkRequirements {
+		if err := ValidateChecks(expected, r); err != nil {
+			return err
+		}
+	}
+	if expected.EvidenceSchema != 1 && !hasExecutedCommand(r.Evidence) {
 		return errors.New("acceptance evidence lists no executed command")
 	}
 	if err := r.Plan.validate(expected); err != nil {

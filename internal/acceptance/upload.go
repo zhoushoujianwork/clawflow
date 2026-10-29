@@ -37,7 +37,10 @@ func ValidateUpload(c Contract, r Record) error {
 	if _, err := validateFindings(r.Findings); err != nil {
 		return err
 	}
+	if err := ValidateChecks(c, r); err != nil {
+		return err
+	}
 	checked := r
 	checked.Verdict, checked.Findings = Passed, nil
-	return Evaluate(c, checked)
+	return evaluate(c, checked, false)
 }

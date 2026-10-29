@@ -131,10 +131,14 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if execute == nil {
 		execute = execution.Execute
 	}
+	planInstruction := ""
+	if c.EvidenceSchema == 1 {
+		planInstruction = criteriaInstruction
+	}
 	plan := Plan{PlannerIsolation: ToolsDisabled, Version: Version, ContractDigest: d, AttemptID: record.AttemptID, StartedAt: time.Now().UTC()}
 	// Only requirements are sent in phase one: no source locations, Git inputs,
 	// developer output, contract identity, or development session identifiers.
-	planned, err := runner.executeRecorded(ctx, c, "acceptance-plan", execute, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not inspect source or use tools.\n\n"+c.Requirements,
+	planned, err := runner.executeRecorded(ctx, c, "acceptance-plan", execute, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not inspect source or use tools.\n\n"+planInstruction+c.Requirements,
 		execution.Options{Workspace: scratch, Role: "acceptance", PermissionMode: "default", ToolsDisabled: true})
 	record.Plan.PlannerIsolation = ToolsDisabled
 	if err != nil && execution.IsKind(err, "unsupported_tools") && planned.ErrorKind == "unsupported_tools" {
@@ -147,7 +151,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		}
 		plan.PlannerIsolation = IsolatedReadonly
 		record.Plan.PlannerIsolation = IsolatedReadonly
-		planned, err = runner.executeRecorded(ctx, c, "acceptance-plan", execute, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not read files outside your working directory or any repository. Do not inspect source.\n\n"+c.Requirements,
+		planned, err = runner.executeRecorded(ctx, c, "acceptance-plan", execute, "Create an independent acceptance test plan for these requirements. Return the plan as nonempty text. Do not read files outside your working directory or any repository. Do not inspect source.\n\n"+planInstruction+c.Requirements,
 			execution.Options{Workspace: scratch, Role: "acceptance", PermissionMode: "default"})
 	}
 	if err != nil {
@@ -158,6 +162,11 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	}
 	plan.Planner = native(planned)
 	plan.Text = planned.Text
+	if c.EvidenceSchema == 1 {
+		if err = decodeStrict([]byte(unfenceReport(plan.Text)), &plan.Criteria); err != nil {
+			return record, err
+		}
+	}
 	plan.Digest = digest(plan.Text)
 	plan.CompletedAt = time.Now().UTC()
 	if err = plan.validate(c); err != nil {
@@ -232,6 +241,16 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		evidence, _ := json.Marshal(record.CI)
 		prompt = strings.Replace(runner.reviewPrompt(), runner.fullSuiteInstruction(), "Required CI succeeded on the exact contract head. Review mode: ci-verified. Run requirement-targeted tests and review the source instead of re-running the full suite. Authoritative CI check identities: "+string(evidence)+". ", 1)
 	}
+	if c.EvidenceSchema == 1 {
+		prompt = "Review the immutable submitted checkout against the approved requirements and saved criteria. Do not edit tracked source, commit, change HEAD or publish comments. The plan is not authority to expand scope. Run only checks needed to close evidence gaps. " + checksInstruction + " Return raw JSON with status, summary, evidence (nonempty string array), findings (kind: requirement|defect|advisory, summary, requirement, defect, evidence, observation for failing findings, optional locations [{path: repository-relative, line: positive head-revision line, side: head}]), checks, next_action, next_owner. Failing findings require concrete evidence; advisory findings never fail acceptance. "
+		if record.CI != nil {
+			ci, _ := json.Marshal(record.CI)
+			prompt += " Authoritative exact-head CI observation (establish relevant coverage before reuse): " + string(ci)
+		}
+		if runner.TestCommand != "" {
+			prompt += " Configured test command, use only as needed: " + runner.TestCommand
+		}
+	}
 	reviewed, reviewErr := runner.executeRecorded(ctx, c, "acceptance-review", execute, prompt+string(input),
 		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "bypassPermissions"})
 	record.Reviewer = native(reviewed)
@@ -252,16 +271,22 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		return record, errors.New("review requires a fresh native session and run")
 	}
 	var output struct {
-		Status   Verdict   `json:"status"`
-		Findings []Finding `json:"findings"`
-		Summary  string    `json:"summary"`
-		Evidence []string  `json:"evidence"`
+		Checks     []RequirementCheck `json:"checks"`
+		NextAction string             `json:"next_action"`
+		NextOwner  string             `json:"next_owner"`
+		Status     Verdict            `json:"status"`
+		Findings   []Finding          `json:"findings"`
+		Summary    string             `json:"summary"`
+		Evidence   []string           `json:"evidence"`
 	}
 	if len(reviewed.Text) > maxFileBytes {
 		return record, errors.New("acceptance report exceeds size limit")
 	}
 	if err = decodeStrict([]byte(unfenceReport(reviewed.Text)), &output); err != nil {
 		return record, fmt.Errorf("invalid acceptance report: %w", err)
+	}
+	if output.Status == "infrastructure_error" {
+		return record, errors.New("review infrastructure failure: " + output.Summary)
 	}
 	if (output.Status != Passed && output.Status != Failed && output.Status != Blocked) || !nonempty(output.Summary) || len(output.Evidence) == 0 {
 		return record, errors.New("acceptance report requires typed verdict, summary and evidence")
@@ -278,7 +303,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if output.Status == Failed && len(output.Findings) == 0 {
 		return record, errors.New("failed verdict requires requirement or defect findings")
 	}
-	if output.Status != Blocked {
+	if c.EvidenceSchema != 1 && output.Status != Blocked {
 		if failing {
 			output.Status = Failed
 		} else {
@@ -286,8 +311,13 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		}
 	}
 	record.Findings = output.Findings
+	record.Checks, record.NextAction, record.NextOwner = output.Checks, output.NextAction, output.NextOwner
 	record.Verdict = output.Status
 	record.Report = output.Summary
+	if err = ValidateChecks(c, record); err != nil {
+		return record, err
+	}
+	record.Findings = DeduplicateFindings(record.Findings)
 	record.Evidence = output.Evidence
 	return record, nil
 }

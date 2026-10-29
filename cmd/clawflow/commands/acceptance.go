@@ -35,6 +35,7 @@ var acceptanceNativeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$
 
 // These narrow boundaries allow isolated tests without network or live agents.
 var acceptanceClientFactory = newVCSClient
+var acceptanceEvidenceSchema = 1
 var acceptanceNativeRun = execution.Run
 var acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "core.fsmonitor=false"}, args...)...)
@@ -293,7 +294,7 @@ func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prN
 		generation = 1
 	}
 	policy := acceptanceHash(struct{ Policy, TargetBranch string }{acceptancePolicy(repo, rc, ec), pr.BaseBranch})
-	c = acceptance.Contract{Version: acceptance.Version, TaskID: repo + ":issue:" + strconv.Itoa(issueNum), Generation: generation, Repository: repo, PRNumber: prNumber, HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, PolicyDigest: policy, Requirements: requirements, Development: dev}
+	c = acceptance.Contract{EvidenceSchema: acceptanceEvidenceSchema, Version: acceptance.Version, TaskID: repo + ":issue:" + strconv.Itoa(issueNum), Generation: generation, Repository: repo, PRNumber: prNumber, HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, PolicyDigest: policy, Requirements: requirements, Development: dev}
 	// IntegrationSHA stays empty: GitHub's merge_commit_sha is not test evidence.
 	return c, rc, ec, pr, c.Validate()
 }
@@ -763,6 +764,11 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		ci = func() (vcs.CIEvidence, error) { return provider.GetCIEvidence(repo, prNumber) }
 	}
 	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
+	if r.Completed {
+		if publishErr := publishAcceptanceReport(ctx, client, r); publishErr != nil {
+			return r, errors.Join(err, publishErr)
+		}
+	}
 	if err == nil {
 		// Run returns nil only after the reviewer report was parsed and the
 		// record was saved, so a failed/blocked verdict reaching here is a

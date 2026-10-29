@@ -964,3 +964,45 @@ func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
 }
 
 func randomCommentID() []byte { id := make([]byte, 16); _, _ = rand.Read(id); return id }
+
+// PublishAcceptanceComment uses MR notes, never issue notes.
+func (c *Client) PublishAcceptanceComment(repo string, pr int, report vcs.AcceptanceComment) error {
+	data, _, err := c.do("GET", "/user", nil)
+	if err != nil {
+		return err
+	}
+	var actor struct {
+		Username string `json:"username"`
+	}
+	if err := json.Unmarshal(data, &actor); err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), pr)
+	return vcs.UpsertAcceptanceComment(report, actor.Username,
+		func() ([]vcs.IssueComment, error) {
+			data, err := c.allPages(path + "?per_page=100")
+			if err != nil {
+				return nil, err
+			}
+			var notes []struct {
+				ID     int64  `json:"id"`
+				Body   string `json:"body"`
+				Author struct {
+					Username string `json:"username"`
+				} `json:"author"`
+			}
+			if err := json.Unmarshal(data, &notes); err != nil {
+				return nil, err
+			}
+			out := make([]vcs.IssueComment, len(notes))
+			for i, n := range notes {
+				out[i] = vcs.IssueComment{ID: n.ID, Body: n.Body, Author: n.Author.Username}
+			}
+			return out, nil
+		},
+		func(body string) error { _, _, e := c.do("POST", path, url.Values{"body": {body}}); return e },
+		func(id int64, body string) error {
+			_, _, e := c.do("PUT", fmt.Sprintf("%s/%d", path, id), url.Values{"body": {body}})
+			return e
+		})
+}
