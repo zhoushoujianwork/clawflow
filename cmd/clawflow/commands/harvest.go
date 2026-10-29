@@ -169,7 +169,11 @@ func harvestRepo(ctx context.Context, fullName string, repoCfg config.Repo, only
 				continue
 			}
 		}
-		_, _, evErr := currentAcceptance(ctx, client, fullName, pr.Number)
+		_, latest, evErr := currentAcceptance(ctx, client, fullName, pr.Number)
+		if publishErr := reconcileAcceptanceReport(ctx, client, latest); publishErr != nil {
+			skip("report_publish_error", "pr", pr.Number, "err", publishErr.Error())
+			continue
+		}
 		switch {
 		case evErr == nil:
 			// Already accepted: the sweep merges it.
@@ -257,13 +261,15 @@ func harvestRun(ctx context.Context, client vcs.Client, setCtx func(context.Cont
 	attempt := autoMergeAttempt{ctx: ctx, client: client, repo: fullName, repoCfg: repoCfg, prNum: pr.Number, issueNum: issueNum, prefix: prefix, ciPoll: true, quiet: true}
 	switch {
 	case err == nil:
-		if len(record.Findings) > 0 {
+		if record.Contract.EvidenceSchema != 1 && len(record.Findings) > 0 {
 			attempt.notify(harvestNonpassComment(record), harvestMarker(record))
 		}
 		merged := attemptAutoMerge(attempt)
 		runLog.Info("run/harvest_end", "repo", fullName, "pr", pr.Number, "issue", issueNum, "verdict", string(record.Verdict), "planner_isolation", record.Plan.PlannerIsolation, "status", "accepted", "merged", merged, "duration", elapsed)
 	case errors.Is(err, errAcceptanceNonpass):
-		attempt.notify(harvestNonpassComment(record), harvestMarker(record))
+		if record.Contract.EvidenceSchema != 1 {
+			attempt.notify(harvestNonpassComment(record), harvestMarker(record))
+		}
 		runLog.Info("run/harvest_end", "repo", fullName, "pr", pr.Number, "issue", issueNum, "verdict", string(record.Verdict), "planner_isolation", record.Plan.PlannerIsolation, "status", "nonpass", "merged", false, "duration", elapsed)
 		fmt.Fprintf(os.Stderr, "%s ✗ acceptance %s for PR #%d\n", prefix, record.Verdict, pr.Number)
 	default:

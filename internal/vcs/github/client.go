@@ -1363,3 +1363,31 @@ func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
 }
 
 func randomCommentID() []byte { id := make([]byte, 16); _, _ = rand.Read(id); return id }
+
+// PublishAcceptanceComment updates one authenticated-actor-owned PR comment.
+func (c *Client) PublishAcceptanceComment(repo string, pr int, report vcs.AcceptanceComment) error {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	data, _, err := c.do("GET", "/user", nil)
+	if err != nil {
+		return err
+	}
+	var actor struct {
+		Login string `json:"login"`
+	}
+	if err := json.Unmarshal(data, &actor); err != nil {
+		return err
+	}
+	return vcs.UpsertAcceptanceComment(report, actor.Login,
+		func() ([]vcs.IssueComment, error) { return c.ListIssueCommentsDetail(repo, pr) },
+		func(body string) error {
+			_, _, e := c.do("POST", fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, name, pr), map[string]string{"body": body})
+			return e
+		},
+		func(id int64, body string) error {
+			_, _, e := c.do("PATCH", fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, name, id), map[string]string{"body": body})
+			return e
+		})
+}
