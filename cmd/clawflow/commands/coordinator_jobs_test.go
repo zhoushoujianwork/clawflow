@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -576,5 +579,110 @@ func TestCoordinatorEnqueueHonorsDependsOn(t *testing.T) {
 		if (len(fired) == 1) != (state == "closed") {
 			t.Fatalf("dependency %s: fired=%v", state, fired)
 		}
+	}
+}
+
+func TestCoordinatorProvenance(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%v", legacy), func(t *testing.T) {
+			s, job, _, svc := resultFixture(t)
+			code, elapsed := 0, int64(1234)
+			local := snapshot.RunMeta{Machine: "laptop", Profile: "dev", Backend: "codex", Model: "gpt-model",
+				ExecutionMetadata:  snapshot.ExecutionMetadata{OffloadRunID: "offload-123", CallerRunID: "caller-123", SessionID: "session-123", ExitCode: &code, ElapsedMs: &elapsed, ExecutionStatus: "ok"},
+				DevelopmentSession: snapshot.DevelopmentSession{Workdir: "/private/never-upload"}, IssueBody: "never upload prompt"}
+			report := jobResult{Status: "success", Usage: &snapshot.Usage{InputTokens: 42, CostUnavailable: true}}
+			wantMachine := "w"
+			if !legacy {
+				report.Provenance = provenanceFromRun(local)
+				wantMachine = "laptop"
+			}
+			raw, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(raw, []byte("never")) {
+				t.Fatal("private local fields uploaded")
+			}
+			if err := svc.Complete(context.Background(), "task", "w", 3, raw); err != nil {
+				t.Fatal(err)
+			}
+			dir := snapshot.RunDir(s.task.Repo, s.task.Issue, s.task.CreatedAt) + "-task-" + s.task.ID
+			payload, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			row, _, err := store.DecodeRun(dir, "run", payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.Machine != wantMachine || row.CostUSD != nil || row.InputTokens == nil || *row.InputTokens != 42 {
+				t.Fatalf("row %+v", row)
+			}
+			if !legacy {
+				var got snapshot.RunMeta
+				if err := json.Unmarshal(payload, &got); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(provenanceFromRun(got), report.Provenance) {
+					t.Fatalf("provenance %+v", got)
+				}
+				if row.Model != local.Model || row.Profile != local.Profile || row.Backend != local.Backend || row.OffloadRunID != local.OffloadRunID {
+					t.Fatalf("row %+v", row)
+				}
+			}
+			t.Run("usage-api-postgres", func(t *testing.T) {
+				db := storetest.New(t)
+				if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
+					t.Fatal(err)
+				}
+				snapshot.BindRunStore(db)
+				t.Cleanup(func() { snapshot.BindRunStore(nil) })
+				// Exercise the coordinator writer with the SQL store bound as in production.
+				var saved coordinatorReport
+				if err := json.Unmarshal(s.task.Result, &saved); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyCoordinatorReport(context.Background(), &s.task, job, &saved); err != nil {
+					t.Fatal(err)
+				}
+				rows, err := db.Runs(context.Background(), "run", store.RunFilter{})
+				if err != nil || len(rows) != 1 || rows[0].Machine != wantMachine {
+					t.Fatalf("rows %+v, %v", rows, err)
+				}
+				if !legacy && (rows[0].Model != local.Model || rows[0].Profile != local.Profile || rows[0].Backend != local.Backend || rows[0].OffloadRunID != local.OffloadRunID) {
+					t.Fatalf("row %+v", rows[0])
+				}
+				rr := httptest.NewRecorder()
+				api.HandleUsage(rr, httptest.NewRequest("GET", "/api/usage", nil))
+				var usage store.UsageSummary
+				if err := json.Unmarshal(rr.Body.Bytes(), &usage); err != nil || rr.Code != 200 {
+					t.Fatalf("usage %d %s: %v", rr.Code, rr.Body.String(), err)
+				}
+				machine := usage.ByMachine[wantMachine]
+				if machine.Runs != 1 || machine.Coverage.Tokens != 1 || machine.Coverage.Cost != 0 || machine.TotalCostUSD != nil {
+					t.Fatalf("machine %+v", machine)
+				}
+				if !legacy && (usage.ByModel[local.Model].Runs != 1 || usage.ByModel[local.Model].TotalCostUSD != nil || usage.ByProfile[local.Profile].Runs != 1) {
+					t.Fatalf("usage %+v", usage)
+				}
+			})
+		})
+	}
+}
+
+func TestCoordinatorRejectsInvalidProvenance(t *testing.T) {
+	for _, block := range []string{
+		`{"machine":"laptop","prompt":"secret"}`, `{"workdir":"/private"}`,
+		`{"machine":"` + strings.Repeat("x", 257) + `"}`,
+		`{"model":"` + strings.Repeat("x", 257) + `"}`,
+		`{"elapsed_ms":-1}`, `{"session_id":"line\nbreak"}`,
+	} {
+		t.Run(block[:min(len(block), 40)], func(t *testing.T) {
+			s, _, c, svc := resultFixture(t)
+			err := svc.Complete(context.Background(), "task", "w", 3, json.RawMessage(`{"status":"success","provenance":`+block+`}`))
+			if !errors.Is(err, coordinator.ErrInvalid) || len(s.task.Result) != 0 || len(c.calls) != 0 {
+				t.Fatalf("accepted invalid report: %v", err)
+			}
+		})
 	}
 }

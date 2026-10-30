@@ -22,7 +22,47 @@ type jobHooks struct {
 	SkipIndex     bool
 }
 
+// jobProvenance deliberately excludes workdirs, prompts, credentials and raw events.
+// Keep this wire schema separate from extensible local execution records.
+type jobProvenance struct {
+	Machine         string `json:"machine,omitempty"`
+	Profile         string `json:"profile,omitempty"`
+	Backend         string `json:"backend,omitempty"`
+	Model           string `json:"model,omitempty"`
+	OffloadRunID    string `json:"offload_run_id,omitempty"`
+	CallerRunID     string `json:"caller_run_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	ExitCode        *int   `json:"exit_code"`
+	ErrorKind       string `json:"error_kind,omitempty"`
+	ElapsedMs       *int64 `json:"elapsed_ms"`
+	ExecutionStatus string `json:"execution_status,omitempty"`
+}
+
+func provenanceFromRun(m snapshot.RunMeta) *jobProvenance {
+	return &jobProvenance{Machine: m.Machine, Profile: m.Profile, Backend: m.Backend, Model: m.Model,
+		OffloadRunID: m.OffloadRunID, CallerRunID: m.CallerRunID, SessionID: m.SessionID,
+		ExitCode: m.ExitCode, ErrorKind: m.ErrorKind, ElapsedMs: m.ElapsedMs, ExecutionStatus: m.ExecutionStatus}
+}
+
+func (p *jobProvenance) valid() bool {
+	if p == nil {
+		return true
+	}
+	for _, value := range []string{p.Machine, p.Profile, p.Backend, p.Model, p.OffloadRunID, p.CallerRunID, p.SessionID, p.ErrorKind, p.ExecutionStatus} {
+		if len(value) > 256 {
+			return false
+		}
+		for _, c := range value {
+			if c < 33 || c > 126 {
+				return false
+			}
+		}
+	}
+	return p.ElapsedMs == nil || *p.ElapsedMs >= 0
+}
+
 type jobResult struct {
+	Provenance        *jobProvenance  `json:"provenance,omitempty"`
 	DevelopmentEvents string          `json:"development_events,omitempty"`
 	Status            string          `json:"status"`
 	Outcome           string          `json:"outcome,omitempty"`
