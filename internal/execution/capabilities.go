@@ -13,6 +13,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 )
 
 // CapabilitySchemaVersion is the Report schema version.
@@ -229,6 +231,11 @@ func probeEnvironment(home string) []string {
 // problem string is a fixed, safe message. Exit status 0 and 2 (Go flag help)
 // are the only accepted outcomes.
 func runHelpProbe(ctx context.Context, command string) ([]byte, string) {
+	release, err := housekeeping.Gate(ctx, os.TempDir(), false)
+	if err != nil {
+		return nil, "probe workspace unavailable"
+	}
+	defer release()
 	dir, err := os.MkdirTemp("", "clawflow-capability-*")
 	if err != nil {
 		return nil, "probe workspace unavailable"

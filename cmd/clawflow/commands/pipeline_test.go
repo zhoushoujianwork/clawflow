@@ -507,6 +507,7 @@ func TestPipelinePassSnapshotUsesLocalEvidence(t *testing.T) {
 }
 
 func TestRunPassWritesPipelineOnEarlyExit(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	cfg := &config.Config{Repos: map[string]config.Repo{}}
 	if err := cfg.Save(); err != nil {

@@ -11,6 +11,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
@@ -61,6 +62,11 @@ func prepareImplementationPlan(ctx context.Context, j *runJob) (*acceptance.Plan
 		return nil, err
 	}
 	defer store.Close()
+	releaseMaintenance, err := housekeeping.Gate(ctx, os.TempDir(), false)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseMaintenance()
 	scratch, err := os.MkdirTemp("", "clawflow-acceptance-plan-")
 	if err != nil {
 		return nil, err

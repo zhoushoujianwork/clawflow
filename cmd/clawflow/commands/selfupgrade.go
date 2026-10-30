@@ -21,6 +21,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
@@ -114,18 +115,31 @@ type selfUpgrader struct {
 	// Lock takes the local upgrade lock; ok=false means another upgrade holds it.
 	Lock func() (release func(), ok bool, err error)
 
-	MkdirTemp func(dir, pattern string) (string, error)
-	RemoveAll func(path string) error
-	Stat      func(path string) (os.FileInfo, error)
-	Copy      func(src, dst string, mode os.FileMode) error
-	Rename    func(oldpath, newpath string) error
-	Remove    func(path string) error
+	DiskProbe    func(string) (housekeeping.Disk, error)
+	Housekeeping func(context.Context)
+	MinFreeBytes uint64
+	MkdirTemp    func(dir, pattern string) (string, error)
+	RemoveAll    func(path string) error
+	Stat         func(path string) (os.FileInfo, error)
+	Copy         func(src, dst string, mode os.FileMode) error
+	Rename       func(oldpath, newpath string) error
+	Remove       func(path string) error
 }
 
 func newSelfUpgrader() *selfUpgrader {
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = &config.Config{}
+	}
+	limits := cfg.Settings.Housekeeping.Limits()
 	return &selfUpgrader{
-		Version: Version,
-		Commit:  installedCommit(),
+		Version:      Version,
+		MinFreeBytes: limits.MinFreeBytes,
+		DiskProbe: func(path string) (housekeeping.Disk, error) {
+			return housekeeping.Probe(path, limits.DiskWarningPercent)
+		},
+		Housekeeping: func(ctx context.Context) { runHousekeeping(ctx, cfg, false) },
+		Commit:       installedCommit(),
 		Executable: func() (string, error) {
 			exe, err := os.Executable()
 			if err != nil {
@@ -360,6 +374,17 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 	}
 	mode := info.Mode().Perm() | 0o111
 
+	// The build and Go temporary outputs live on the temp volume; the source
+	// and destination may be on separate volumes. Reclaim before allocating.
+	if err := u.ensureDisk(ctx, localPath, filepath.Dir(dest), os.TempDir()); err != nil {
+		out.Detail = err.Error()
+		return skip("insufficient_disk")
+	}
+	releaseMaintenance, err := housekeeping.Gate(ctx, os.TempDir(), false)
+	if err != nil {
+		return fail("protect upgrade workspace: %v", err)
+	}
+	defer releaseMaintenance()
 	tmp, err := u.MkdirTemp("", "clawflow-selfupgrade-*")
 	if err != nil {
 		return fail("create temp dir: %v", err)
@@ -562,4 +587,27 @@ func runSelfUpgradePhase(ctx context.Context, cfg *config.Config, u *selfUpgrade
 		}
 	}
 	return nil
+}
+
+// ensureDisk fails closed when a volume cannot be probed. Tests inject the probe.
+func (u *selfUpgrader) ensureDisk(ctx context.Context, paths ...string) error {
+	check := func() error {
+		for _, path := range paths {
+			disk, err := u.DiskProbe(path)
+			if err != nil {
+				return fmt.Errorf("free-space probe unavailable: %w", err)
+			}
+			if disk.Available < u.MinFreeBytes {
+				return fmt.Errorf("available %d bytes; require %d bytes", disk.Available, u.MinFreeBytes)
+			}
+		}
+		return nil
+	}
+	if err := check(); err == nil {
+		return nil
+	}
+	if u.Housekeeping != nil {
+		u.Housekeeping(ctx)
+	}
+	return check()
 }

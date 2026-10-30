@@ -155,8 +155,35 @@ type PlatformSettings struct {
 	Fingerprint string `yaml:"fingerprint,omitempty" json:"fingerprint,omitempty"`
 }
 
+// HousekeepingSettings bounds resource use on the scheduler host. Zero selects defaults.
+type HousekeepingSettings struct {
+	Disabled            bool    `yaml:"disabled,omitempty"`
+	TempMaxAgeHours     int     `yaml:"temp_max_age_hours,omitempty"`
+	ReviewCacheMaxBytes int64   `yaml:"review_cache_max_bytes,omitempty"`
+	MinFreeBytes        uint64  `yaml:"min_free_bytes,omitempty"`
+	DiskWarningPercent  float64 `yaml:"disk_warning_percent,omitempty"`
+}
+
+func (s HousekeepingSettings) Limits() HousekeepingSettings {
+	if s.TempMaxAgeHours <= 0 || int64(s.TempMaxAgeHours) > int64((1<<63-1)/time.Hour) {
+		s.TempMaxAgeHours = 24
+	}
+	if s.ReviewCacheMaxBytes <= 0 {
+		s.ReviewCacheMaxBytes = 2 << 30
+	}
+	if s.MinFreeBytes == 0 {
+		s.MinFreeBytes = 2 << 30
+	}
+	if !(s.DiskWarningPercent > 0 && s.DiskWarningPercent <= 100) {
+		s.DiskWarningPercent = 85
+	}
+	return s
+}
+
 // Settings holds global ClawFlow settings.
 type Settings struct {
+	Housekeeping HousekeepingSettings `yaml:"housekeeping,omitempty"`
+
 	GitHubApp   GitHubAppSettings   `yaml:"github_app,omitempty" json:"-"`
 	Platform    PlatformSettings    `yaml:"platform,omitempty"`
 	Pilot       PilotSettings       `yaml:"pilot,omitempty"`

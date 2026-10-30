@@ -15,6 +15,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -82,6 +83,11 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 		return err
 	}
 	defer planStore.Close()
+	releaseMaintenance, err := housekeeping.Gate(ctx, os.TempDir(), false)
+	if err != nil {
+		return err
+	}
+	defer releaseMaintenance()
 	scratch, err := os.MkdirTemp("", "clawflow-acceptance-plan-")
 	if err != nil {
 		return err

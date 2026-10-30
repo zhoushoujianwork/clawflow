@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 )
 
 func NewPlatformCmd() *cobra.Command {
@@ -234,6 +235,26 @@ func (a *platformAdmin) Repos(ctx context.Context, input coordinator.RepoRequest
 func (a *platformAdmin) Status(ctx context.Context) (coordinator.PlatformStatus, error) {
 	board, err := a.board(ctx)
 	out := coordinator.PlatformStatus{Version: Version, Queue: map[string]int{}, Workers: []coordinator.BoardWorker{}}
+	limits := (config.HousekeepingSettings{}).Limits()
+	if cfg, err := config.Load(); err == nil {
+		limits = cfg.Settings.Housekeeping.Limits()
+	}
+	if disk, err := housekeeping.Probe(config.StateDir(), limits.DiskWarningPercent); err == nil {
+		out.Disk = &disk
+	} else {
+		out.DiskError = "host disk probe unavailable"
+	}
+	if disk, err := housekeeping.Probe(os.TempDir(), limits.DiskWarningPercent); err == nil {
+		out.TempDisk = &disk
+	} else {
+		out.DiskError = "temp disk probe unavailable"
+	}
+	if data, err := os.ReadFile(housekeepingResultPath()); err == nil {
+		var last housekeeping.Result
+		if json.Unmarshal(data, &last) == nil {
+			out.LastHousekeeping = &last
+		}
+	}
 	for _, task := range board.Tasks {
 		out.Queue[task.State]++
 	}
