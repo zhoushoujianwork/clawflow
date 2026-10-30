@@ -1,31 +1,16 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, FolderOpen, ListTodo, MessageSquare, Sparkles, X, Trash2, Plus, Loader2, Activity, RotateCw } from 'lucide-react'
+import { ChevronLeft, ChevronDown, ChevronRight, FolderKanban, FolderOpen, MessageSquare, Sparkles, X, Trash2, Plus, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useChatDrawer } from '../lib/chatContext'
 import { Markdown } from '../components/Markdown'
 import { useDocUpdater } from '../components/DocUpdater'
-import {
-  IssueList,
-  PROJECT_SECTIONS,
-  useIssueGroups,
-  type IssueEntry,
-  type PendingEntry,
-  type Run,
-} from '../components/IssueList'
+import { ContextWorkLinks } from '../components/ContextWorkLinks'
 import { repoUrl, useRepoInfoMap } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 import { useConfigChanged } from '../lib/configEvents'
 import { GitSyncCell, type GitStatus } from '../components/GitSyncCell'
-import {
-  type PilotRun,
-  DUTY_KEYS,
-  DUTY_LABELS,
-  dutyStatusColour,
-  PilotRunDetailModal,
-} from '../components/PilotRun'
-
 // Long claude -p run (typically 30s–2min). The job runs server-side
 // so the user is free to navigate away — re-opening the page resumes
 // the spinner via /api/project/generate-context/status polling.
@@ -119,14 +104,6 @@ function ProjectDetail() {
   // Remove repo state
   const [removingRepo, setRemovingRepo] = useState<string | null>(null)
 
-  // Pilot runs state. We only keep the modal-detail state on the
-  // project page now — the full Pilot wake history lives on
-  // /projects/$name/pilot-runs. pilotRuns is still fetched so the
-  // "Latest wake" card and the "N wakes" link can read counts +
-  // the newest entry without bouncing to the history page.
-  const [pilotRuns, setPilotRuns] = useState<PilotRun[]>([])
-  const [pilotRunDetail, setPilotRunDetail] = useState<PilotRun | null>(null)
-
   // IDE deep-link scheme for the per-repo "open in IDE" shortcut. Resolved
   // from /api/settings.global.default_ide — same logic as the repo list page
   // (_app.repos.index.tsx) so both surfaces honour the user's IDE choice.
@@ -160,14 +137,6 @@ function ProjectDetail() {
   const [generateDeploymentError, setGenerateDeploymentError] = useState<string | null>(null)
   const deploymentPollTimerRef = useRef<number | null>(null)
 
-  // Cross-repo backlog state — same data sources the per-repo page
-  // reads, just filtered to project.repos here. The shared IssueList
-  // component does the merging, sectioning, and rendering.
-  const [allIssues, setAllIssues] = useState<IssueEntry[]>([])
-  const [allRuns, setAllRuns] = useState<Run[]>([])
-  const [allPending, setAllPending] = useState<PendingEntry[]>([])
-  const [backlogExpanded, setBacklogExpanded] = useState<Set<string>>(new Set())
-  const [backlogSyncing, setBacklogSyncing] = useState(false)
   const repoInfoMap = useRepoInfoMap()
 
   function fetchProject() {
@@ -194,8 +163,6 @@ function ProjectDetail() {
     // render auto_merge badges immediately. The add-repo
     // dropdown re-fetches on open to catch any repos added since.
     fetchAvailableRepos()
-    fetchPilotRuns()
-    fetchBacklog()
     fetchGitStatus()
     // Pull the current machine's hostname once so the bind button can
     // render the actual name. Best-effort: failing leaves the label as
@@ -239,18 +206,9 @@ function ProjectDetail() {
     return () => { stopPolling(); stopDeploymentPolling() }
   }, [name])
 
-  // Polling fallback for the live badge: re-fetch pilot-runs every 5s so the
-  // running/idle state surfaces even when SSE is unavailable. Cheap and
-  // unobtrusive; mirrors the dashboard's 5s refetch cadence.
-  useEffect(() => {
-    const id = setInterval(() => fetchPilotRuns(), 5000)
-    return () => clearInterval(id)
-  }, [name])
-
   useConfigChanged(() => {
     fetchProject()
     fetchAvailableRepos()
-    fetchBacklog()
   })
 
   // Seed git sync status from the cache (instant). The Repos page owns the
@@ -287,53 +245,6 @@ function ProjectDetail() {
         }
         setRepoMeta(byName)
       })
-  }
-
-  // fetchBacklog pulls the three snapshot files in parallel. No
-  // server-side filtering — the backlog is a small client-side
-  // .filter() across what's already on disk.
-  function fetchBacklog() {
-    Promise.all([
-      fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-      fetch('/api/runs', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-      fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-    ]).then(([issues, runs, pending]) => {
-      setAllIssues(Array.isArray(issues) ? issues : [])
-      setAllRuns(Array.isArray(runs) ? runs : [])
-      setAllPending(Array.isArray(pending) ? pending : [])
-    })
-  }
-
-  // syncBacklog calls /api/repo/refresh-issues for every member repo
-  // sequentially — same endpoint the repo page's Sync button uses.
-  // Sequential because the endpoint hits the VCS provider per call;
-  // parallel fan-out would just multiply rate-limit pressure.
-  async function syncBacklog() {
-    if (!project || backlogSyncing) return
-    setBacklogSyncing(true)
-    try {
-      for (const repo of project.repos ?? []) {
-        try {
-          await fetch('/api/repo/refresh-issues', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ repo }),
-          })
-        } catch {
-          // One repo failing (auth, network) shouldn't abort the rest.
-        }
-      }
-      fetchBacklog()
-    } finally {
-      setBacklogSyncing(false)
-    }
-  }
-
-  function fetchPilotRuns() {
-    fetch(`/api/project/pilot-runs?project=${encodeURIComponent(name)}`, { cache: 'no-store' })
-      .then(r => (r.ok ? r.json() : []))
-      .catch(() => [])
-      .then(data => setPilotRuns(Array.isArray(data) ? data : []))
   }
 
   async function handleDelete() {
@@ -519,20 +430,6 @@ function ProjectDetail() {
     .filter(r => !project?.repos?.includes(r))
     .filter(r => !repoSearch || r.toLowerCase().includes(repoSearch.toLowerCase()))
 
-  // latestWakeWithDuties = the most recent Pilot wake whose output had
-  // a parseable duties block. Used to render the project-page digest
-  // card (Layer 1) and the duty-status chips strip (Layer 2). When no
-  // such wake exists yet (first wakes after upgrade, or all failures),
-  // both surfaces stay hidden — the legacy Pilot Activity card below
-  // still shows the run history regardless.
-  const latestWakeWithDuties = useMemo<PilotRun | null>(() => {
-    for (const r of pilotRuns) {
-      if (r.status === 'success' && r.duties) return r
-    }
-    return null
-  }, [pilotRuns])
-
-
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
       <Link
@@ -612,132 +509,8 @@ function ProjectDetail() {
             )}
           </div>
 
-          {/* Single Pilot status card — consolidates the digest + duty
-              chips into one bordered surface so the project page reads
-              as "one Pilot panel" instead of three stacked widgets.
-              Header line: latest wake time + verdict, clickable into
-              the full run modal. Chip row: only renders text when the
-              status is NOT ok (ok-everywhere = quiet by design). */}
-          {latestWakeWithDuties?.duties && (
-            <section className="mb-6">
-              <div className="bg-card border border-border rounded-xl overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setPilotRunDetail(latestWakeWithDuties)}
-                  className="w-full flex items-center gap-2 px-4 py-2.5 border-b border-border hover:bg-secondary/30 transition-colors text-left"
-                  title="Open full pilot run"
-                >
-                  <Activity className="w-4 h-4 text-muted-foreground" />
-                  <span className="text-sm font-semibold text-foreground">Latest Pilot wake</span>
-                  <span className="text-[11px] text-muted-foreground tabular-nums">
-                    {new Date(latestWakeWithDuties.started_at).toLocaleString()}
-                  </span>
-                  {latestWakeWithDuties.result && (
-                    <span className="text-[11px] text-muted-foreground truncate ml-1">
-                      · {latestWakeWithDuties.result.replace(/^PILOT-RESULT:\s*/, '')}
-                    </span>
-                  )}
-                </button>
-
-                {/* Duty chip row. Each chip is a colored pill; when the
-                    status is "ok" we elide any text and just show the
-                    duty name — green pill alone communicates the state.
-                    Non-ok statuses get their text label appended so the
-                    user knows where to look. */}
-                <div className="px-4 py-2.5 flex items-center gap-1.5 flex-wrap border-b border-border">
-                  {DUTY_KEYS.map(key => {
-                    const duty = latestWakeWithDuties.duties![key]
-                    if (!duty) return null
-                    const isOk = duty.status === 'ok'
-                    const actCount = duty.actions?.length ?? 0
-                    return (
-                      <button
-                        key={key}
-                        type="button"
-                        onClick={() => setPilotRunDetail(latestWakeWithDuties)}
-                        className={cn(
-                          'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium border transition-colors hover:brightness-95',
-                          dutyStatusColour(duty.status),
-                        )}
-                        title={duty.note || (actCount > 0 ? duty.actions!.join('; ') : DUTY_LABELS[key])}
-                      >
-                        <span>{DUTY_LABELS[key]}</span>
-                        {!isOk && (
-                          <span className="text-[10px] opacity-80 tabular-nums">
-                            {duty.status === 'action_taken' ? `${actCount}` : duty.status}
-                          </span>
-                        )}
-                      </button>
-                    )
-                  })}
-                </div>
-
-                {/* Issue digest — the passive review duty. Embedded here
-                    rather than its own card so the user sees the prose
-                    summary right where they expect Pilot status, not
-                    scattered across the page. */}
-                {latestWakeWithDuties.duties.issue_digest && (
-                  <div className="px-4 py-3">
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <ListTodo className="w-3.5 h-3.5 text-muted-foreground" />
-                      <span className="text-xs font-semibold text-foreground">Issue digest</span>
-                      {latestWakeWithDuties.duties.issue_digest.since_hours ? (
-                        <span className="text-[10px] text-muted-foreground tabular-nums">past {latestWakeWithDuties.duties.issue_digest.since_hours}h</span>
-                      ) : null}
-                      <span className="text-[11px] text-muted-foreground tabular-nums ml-auto">
-                        +{latestWakeWithDuties.duties.issue_digest.new ?? 0} new
-                        {' · '}
-                        −{latestWakeWithDuties.duties.issue_digest.closed ?? 0} closed
-                      </span>
-                    </div>
-                    {latestWakeWithDuties.duties.issue_digest.summary && (
-                      // Render through Markdown so a single `\n` collapses to a
-                      // soft wrap (space) and the prose reflows to the container
-                      // width, instead of `whitespace-pre-wrap` faithfully
-                      // displaying every stray hard newline left over from
-                      // terminal-column wrapping. See issue #231.
-                      <Markdown className="text-xs text-foreground/85">
-                        {latestWakeWithDuties.duties.issue_digest.summary}
-                      </Markdown>
-                    )}
-                  </div>
-                )}
-
-                {/* History footer — drop the full wake-list off the
-                    project page (it had grown into a competing 5-row
-                    card right below this one). Single link to the
-                    dedicated history page; the count makes it
-                    discoverable without forcing a click to see scale. */}
-                <Link
-                  to="/projects/$name/pilot-runs"
-                  params={{ name }}
-                  className="block px-4 py-2 border-t border-border text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary/30 transition-colors text-center"
-                >
-                  View all {pilotRuns.length} wake{pilotRuns.length !== 1 ? 's' : ''} →
-                </Link>
-              </div>
-            </section>
-          )}
-
-          {/* When no wake has duties yet (fresh project, or all wakes
-              pre-upgrade) the Latest card is hidden but the user still
-              wants a way into the history. Show a thin fallback link
-              so /pilot-runs is never orphaned. */}
-          {!latestWakeWithDuties && pilotRuns.length > 0 && (
-            <section className="mb-6">
-              <Link
-                to="/projects/$name/pilot-runs"
-                params={{ name }}
-                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-              >
-                <Activity className="w-3.5 h-3.5" />
-                View {pilotRuns.length} Pilot wake{pilotRuns.length !== 1 ? 's' : ''} →
-              </Link>
-            </section>
-          )}
-
-
-          {pilotRunDetail && <PilotRunDetailModal run={pilotRunDetail} onClose={() => setPilotRunDetail(null)} />}
+          <ContextWorkLinks project={name} />
+          <Link to="/projects/$name/pilot-runs" params={{ name }} className="inline-block text-sm underline mb-6">Pilot 历史记录</Link>
 
           {/* Member repos — moved above the doc sections so the
               user sees the repo list before the config controls. */}
@@ -1133,163 +906,9 @@ function ProjectDetail() {
             )}
           </section>
 
-          {/* Backlog — cross-repo issue + run + pending aggregate so the
-              user can see project progress without bouncing into each
-              repo page. Same renderer as the per-repo page (shared
-              IssueList component); the project-level section config
-              adds an "Awaiting implementation" bucket up front and shows
-              the repo column on each row. */}
-          <BacklogSection
-            project={project}
-            issues={allIssues}
-            runs={allRuns}
-            pending={allPending}
-            repoMap={repoInfoMap}
-            expanded={backlogExpanded}
-            onToggle={k =>
-              setBacklogExpanded(prev => {
-                const next = new Set(prev)
-                if (next.has(k)) next.delete(k)
-                else next.add(k)
-                return next
-              })
-            }
-            onSync={syncBacklog}
-            syncing={backlogSyncing}
-          />
 
         </>
       )}
     </div>
-  )
-}
-
-// BacklogSection is the project-level cross-repo issue aggregate. It
-// owns the collapsed/open state and the bucket-counts header, and
-// delegates the actual list rendering to the shared IssueList. Heavy
-// per-row markup (StatusBadge, Timeline, etc.) lives in IssueList so
-// adding/changing row chrome doesn't require editing this file too.
-function BacklogSection({
-  project,
-  issues,
-  runs,
-  pending,
-  repoMap,
-  expanded,
-  onToggle,
-  onSync,
-  syncing,
-}: {
-  project: Project
-  issues: IssueEntry[]
-  runs: Run[]
-  pending: PendingEntry[]
-  repoMap: ReturnType<typeof useRepoInfoMap>
-  expanded: Set<string>
-  onToggle: (key: string) => void
-  onSync: () => void
-  syncing: boolean
-}) {
-  // Filter all three datasets to this project's member repos before
-  // merging. Cheap (a few hundred entries at most) so doing it inline
-  // beats threading per-project filtered slices through the API.
-  const memberSet = useMemo(() => new Set(project.repos ?? []), [project.repos])
-  const filteredIssues = useMemo(() => issues.filter(i => memberSet.has(i.repo)), [issues, memberSet])
-  const filteredRuns = useMemo(() => runs.filter(r => memberSet.has(r.repo)), [runs, memberSet])
-  const filteredPending = useMemo(() => pending.filter(p => memberSet.has(p.repo)), [pending, memberSet])
-  const groups = useIssueGroups({
-    issues: filteredIssues,
-    runs: filteredRuns,
-    pending: filteredPending,
-  })
-
-  // Counts roll up per section without rebuilding the buckets — same
-  // predicates as PROJECT_SECTIONS, applied once for the header
-  // summary line. Cheap, no need to memoize.
-  const counts = {
-    inFlight: 0,
-    queued: 0,
-    awaiting: 0,
-    done: 0,
-    closed: 0,
-  }
-  for (const g of groups) {
-    if (g.state === 'closed') counts.closed++
-    else if (g.runs[0]?.status === 'running') counts.inFlight++
-    else if (g.pending.length > 0) counts.queued++
-    else {
-      const labels = g.labels ?? []
-      const hasTrigger = labels.includes('bug') || labels.includes('feature')
-      const hasAgentLabel = labels.some(l => l.startsWith('agent-'))
-      if (g.runs.length === 0 && hasTrigger && !hasAgentLabel) counts.awaiting++
-      else counts.done++
-    }
-  }
-
-  const [open, setOpen] = useState(true)
-
-  if ((project.repos?.length ?? 0) === 0) return null
-
-  return (
-    <section className="mb-6">
-      <div className="flex items-center gap-2 mb-2">
-        <button
-          type="button"
-          onClick={() => setOpen(o => !o)}
-          className="inline-flex items-center gap-1 text-sm font-semibold text-foreground hover:text-foreground"
-          aria-expanded={open}
-        >
-          {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-          <ListTodo className="w-3.5 h-3.5 text-muted-foreground" />
-          Backlog{' '}
-          <span className="font-normal text-muted-foreground">({groups.length})</span>
-        </button>
-        <span className="text-xs text-muted-foreground">
-          {counts.inFlight} in flight · {counts.queued} queued ·{' '}
-          <span className={cn(counts.awaiting > 0 && 'text-red-600 dark:text-red-400 font-medium')}>
-            {counts.awaiting} awaiting eval
-          </span>{' '}
-          · {counts.done} done · {counts.closed} closed
-        </span>
-        <button
-          onClick={onSync}
-          disabled={syncing}
-          title="Refresh issue state for every member repo"
-          className={cn(
-            'ml-auto inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border transition-colors',
-            syncing
-              ? 'border-border text-muted-foreground bg-secondary/30'
-              : 'border-border text-foreground hover:bg-secondary/50',
-          )}
-        >
-          {syncing ? (
-            <>
-              <Loader2 className="w-3 h-3 animate-spin" /> syncing…
-            </>
-          ) : (
-            <>
-              <RotateCw className="w-3 h-3" /> Sync all
-            </>
-          )}
-        </button>
-      </div>
-      {open && (
-        groups.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-4">
-            No issues across {project.repos?.length ?? 0} repo{project.repos?.length === 1 ? '' : 's'} yet.
-            Click <strong>Sync all</strong> to pull current state from VCS.
-          </p>
-        ) : (
-          <IssueList
-            groups={groups}
-            sections={PROJECT_SECTIONS}
-            showRepo={true}
-            repoMap={repoMap}
-            expanded={expanded}
-            onToggle={onToggle}
-          />
-        )
-      )}
-    </section>
   )
 }
