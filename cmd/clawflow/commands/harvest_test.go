@@ -2,12 +2,16 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,7 +19,10 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
+	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
 )
 
 // harvestFixture builds the acceptance fixture with the repo enabled, a run.log
@@ -31,6 +38,13 @@ func harvestFixture(t *testing.T) (*acceptanceFake, func() string, *int) {
 	}
 	runLog = lg
 	calls := 0
+	oldLaunch := launchHarvestFn
+	launchHarvestFn = func(ctx context.Context, task harvestTask, _ int) error {
+		if failure := harvestRun(ctx, task.client, func(context.Context) {}, task.repo, task.rc, task.pr, extractClosesIssue(task.pr.Body), task.timeout); failure != nil {
+			return errors.New("harvest failed")
+		}
+		return nil
+	}
 	oldFn := runAcceptanceFn
 	runAcceptanceFn = func(ctx context.Context, c vcs.Client, repo string, pr int) (acceptance.Record, error) {
 		calls++
@@ -40,6 +54,7 @@ func harvestFixture(t *testing.T) (*acceptanceFake, func() string, *int) {
 		lg.Close()
 		runLog = old
 		runAcceptanceFn = oldFn
+		launchHarvestFn = oldLaunch
 	})
 	return f, func() string {
 		b, err := os.ReadFile(filepath.Join(clog.LogsDir(), "run.log"))
@@ -112,7 +127,7 @@ func TestHarvestNoDispatch(t *testing.T) {
 			setHarvestRepo(t, func(r *config.Repo) { v := false; r.AcceptanceOverlapCI = &v })
 		}},
 		{name: "ci failed", reason: "ci_not_success", setup: func(_ *testing.T, f *acceptanceFake) { f.ciStatus = vcs.CIStatusFailure }},
-		{name: "not mergeable", reason: "not_clean", setup: func(_ *testing.T, f *acceptanceFake) {
+		{name: "not mergeable", reason: "conflict", setup: func(_ *testing.T, f *acceptanceFake) {
 			f.mergeability = map[int]vcs.MergeStatus{11: vcs.MergeStatusConflict}
 		}},
 		{name: "draft", reason: "draft", setup: func(_ *testing.T, f *acceptanceFake) {
@@ -178,16 +193,20 @@ func TestHarvestRunTimeoutClampedToWatchdog(t *testing.T) {
 	}
 }
 
-func TestHarvestOneRunPerRepoPerPass(t *testing.T) {
+func TestHarvestUpToRepoLimitPerPass(t *testing.T) {
 	f, _, _ := harvestFixture(t)
-	f.openPRs = []vcs.PR{f.pr, {Number: 12, Title: "Second", Body: "Fixes #43"}}
+	f.openPRs = []vcs.PR{f.pr, f.pr, f.pr}
+	for i := range f.openPRs {
+		f.openPRs[i].Number = 11 + i
+	}
+	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return harvestMultiFake{f}, nil }
 	runs := 0
 	runAcceptanceFn = func(context.Context, vcs.Client, string, int) (acceptance.Record, error) {
 		runs++
 		return acceptance.Record{}, errors.New("stop")
 	}
 	failed := harvest(t, "", 0)
-	if runs != 1 || len(failed) != 1 {
+	if runs != 3 || len(failed) != 3 {
 		t.Fatalf("runs=%d failed=%v", runs, failed)
 	}
 }
@@ -321,12 +340,12 @@ func TestHarvestRetriesInfrastructureAttemptAfterCooldown(t *testing.T) {
 	}
 }
 
-func TestHarvestStopsAfterThreeInfrastructureAttempts(t *testing.T) {
+func TestHarvestStopsAfterTwoInfrastructureAttempts(t *testing.T) {
 	f, readLog, calls := harvestFixture(t)
 	var offset time.Duration
 	harvestClock(t, &offset)
 	failProvider()
-	for i := 1; i <= 3; i++ {
+	for i := 1; i <= 2; i++ {
 		offset = time.Duration(i) * 16 * time.Minute
 		if failed := harvest(t, "", 0); len(failed) != 1 || *calls != i {
 			t.Fatalf("attempt %d failed=%v runs=%d", i, failed, *calls)
@@ -338,7 +357,7 @@ func TestHarvestStopsAfterThreeInfrastructureAttempts(t *testing.T) {
 	// Exhaustion is reported once and is not a new run failure.
 	offset = 10 * time.Hour
 	for pass := 0; pass < 2; pass++ {
-		if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 3 {
+		if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 2 {
 			t.Fatalf("exhausted pass %d failed=%v runs=%d", pass, failed, *calls)
 		}
 		f.existingComments = append([]string(nil), f.comments...)
@@ -347,11 +366,30 @@ func TestHarvestStopsAfterThreeInfrastructureAttempts(t *testing.T) {
 		t.Fatalf("comments = %v, want exactly one", f.comments)
 	}
 	c := f.comments[0]
-	if !strings.Contains(c, "3 attempts") || !strings.Contains(c, "clawflow acceptance run --repo o/r --pr 11") || !strings.Contains(c, "<!-- clawflow:acceptance-infra=") {
+	if !strings.Contains(c, "2 attempts") || !strings.Contains(c, "clawflow acceptance run --repo o/r --pr 11") || !strings.Contains(c, "<!-- clawflow:acceptance-infra=") {
 		t.Fatalf("unexpected comment: %q", c)
 	}
 	if !strings.Contains(readLog(), "reason=infra_exhausted") {
 		t.Fatalf("missing infra_exhausted skip:\n%s", readLog())
+	}
+	info, err := pipelineAcceptance(context.Background(), f, "o/r", config.Repo{AcceptanceRequired: true}, f.pr, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, reason, _ := pipeline.Derive(pipeline.Evidence{IssueState: "open", AcceptanceRequired: true, PR: &pipeline.PRInfo{Number: 11, State: "open", CI: "success"}, Acceptance: info})
+	if stage != pipeline.StageBlocked || !strings.Contains(reason, "acceptance-infra") {
+		t.Fatalf("board did not park: %s %s", stage, reason)
+	}
+	// Even the manual/worker execution entry point must not launch a third review.
+	acceptanceNativeRun = func(context.Context, execution.Config, execution.Request, []string, io.Writer, func(execution.Observation)) (execution.Result, error) {
+		t.Fatal("third infrastructure review started")
+		return execution.Result{}, nil
+	}
+	if _, err := runAcceptance(context.Background(), f, "o/r", 11); err == nil || !strings.Contains(err.Error(), "acceptance-infra") {
+		t.Fatalf("entry point did not park: %v", err)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("duplicate exhaustion comment: %v", f.comments)
 	}
 	// The merge gate never accepts an infrastructure record.
 	if attemptAutoMerge(autoMergeAttempt{ctx: context.Background(), client: f, repo: "o/r", repoCfg: config.Repo{AutoMerge: true, AcceptanceRequired: true}, prNum: 11, quiet: true}) || len(f.expected) != 0 {
@@ -537,5 +575,153 @@ func TestAcceptanceWiresExactCIEvidence(t *testing.T) {
 	}
 	if record.ReviewMode != acceptance.CIVerified || record.CI == nil || record.CI.HeadSHA != record.Contract.HeadSHA {
 		t.Fatalf("CI evidence not wired: %+v", record)
+	}
+}
+
+func TestHarvestGitLabConditionalMerge(t *testing.T) {
+	f, readLog, calls := harvestFixture(t)
+	var merges atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mr := map[string]any{
+			"iid": 11, "title": f.pr.Title, "description": f.pr.Body, "state": "opened",
+			"sha": f.pr.HeadSHA, "diff_refs": map[string]string{"base_sha": f.pr.BaseSHA},
+			"source_branch": f.pr.HeadBranch, "target_branch": "main",
+			"source_project_id": 1, "target_project_id": 1, "merge_status": "can_be_merged",
+			"head_pipeline": map[string]any{"id": 5, "sha": f.pr.HeadSHA},
+		}
+		var result any
+		switch r.Method + " " + r.URL.Path {
+		case "DELETE /api/v4/projects/o/r/repository/branches/fix/issue-42":
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case "GET /api/v4/projects/o/r/merge_requests":
+			result = []any{mr}
+		case "GET /api/v4/projects/o/r/merge_requests/11":
+			result = mr
+		case "GET /api/v4/projects/o/r/issues/42":
+			result = map[string]any{"iid": 42, "title": f.issue.Title, "description": f.issue.Body, "state": "opened"}
+		case "GET /api/v4/projects/o/r/pipelines/5":
+			result = map[string]any{"id": 5, "sha": f.pr.HeadSHA, "status": "success"}
+		case "PUT /api/v4/projects/o/r/merge_requests/11/merge":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["sha"] != f.pr.HeadSHA || body["merge_when_pipeline_succeeds"] != false {
+				t.Errorf("unexpected merge request: %v, err=%v", body, err)
+			}
+			merges.Add(1)
+			result = map[string]string{"state": "merged", "merge_commit_sha": strings.Repeat("c", 40)}
+		default:
+			t.Errorf("unexpected GitLab request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(result)
+	}))
+	defer srv.Close()
+	setHarvestRepo(t, func(r *config.Repo) { r.Platform = "gitlab"; r.BaseURL = srv.URL })
+	oldGit := acceptanceGit
+	acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+		if args[0] == "config" {
+			return srv.URL + "/o/r.git", nil
+		}
+		return oldGit(ctx, dir, args...)
+	}
+	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return gitlab.New("test-token", srv.URL), nil }
+	if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 1 || merges.Load() != 1 {
+		t.Fatalf("failed=%v calls=%d merges=%d log=%s", failed, *calls, merges.Load(), readLog())
+	}
+}
+
+func TestHarvestIgnoresRetiredBinding(t *testing.T) {
+	_, _, calls := harvestFixture(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := cfg.Repos["o/r"]
+	repo.BoundMachine = "other-host"
+	repo.WorkerTags = []string{"host-other-host"}
+	cfg.Repos["o/r"] = repo
+	cfg.Settings.RequireBinding = true
+	cfg.Settings.Coordinator.Enabled = true
+	enqueued := 0
+	oldEnqueue := enqueueWorkerAcceptanceFn
+	t.Cleanup(func() { enqueueWorkerAcceptanceFn = oldEnqueue })
+	enqueueWorkerAcceptanceFn = func(_ context.Context, _ vcs.Client, name string, rc config.Repo, pr vcs.PR, _ time.Duration) error {
+		if name != "o/r" || !rc.CoordinatorMode || pr.Number != 11 || !reflect.DeepEqual(rc.WorkerTags, []string{"host-other-host"}) {
+			t.Fatalf("acceptance routing lost repository scope or host tags: %s %+v %+v", name, rc, pr)
+		}
+		enqueued++
+		return nil
+	}
+	failed := runHarvestPhase(context.Background(), cfg, "o/r", 0, 30*time.Minute, time.Now().Add(2*time.Hour))
+	if len(failed) != 0 || enqueued != 1 || *calls != 0 {
+		t.Fatalf("legacy binding prevented enqueue or ran local acceptance: failed=%v enqueued=%d local=%d", failed, enqueued, *calls)
+	}
+}
+
+func TestOwnerSkipBlocksPRWork(t *testing.T) {
+	f, _, calls := harvestFixture(t)
+	f.issue.Labels = []string{"agent-implemented", "clawflow-skip"}
+	if failed := harvest(t, "", 0); len(failed) != 0 || *calls != 0 {
+		t.Fatalf("harvest started: %v calls=%d", failed, *calls)
+	}
+	if _, err := runAcceptance(context.Background(), f, "o/r", 11); err == nil {
+		t.Fatal("acceptance started")
+	}
+	sweepAutoMergePRs(context.Background(), f, "o/r", config.Repo{AutoMerge: true}, 0)
+	if len(f.merged) != 0 || len(f.expected) != 0 {
+		t.Fatal("skipped PR merged")
+	}
+	if ciRepairCandidate("o/r", f.pr, f.issue) == nil {
+		t.Fatal("skipped PR repair accepted")
+	}
+	if attemptAutoMerge(autoMergeAttempt{ctx: context.Background(), client: f, repo: "o/r", prNum: 11, issueNum: 42}) {
+		t.Fatal("inline merge accepted")
+	}
+}
+
+func TestHarvestInfraReset(t *testing.T) {
+	for _, change := range []string{"head", "body", "binary"} {
+		t.Run(change, func(t *testing.T) {
+			f, _, calls := harvestFixture(t)
+			var offset time.Duration
+			harvestClock(t, &offset)
+			failProvider()
+			for i := 0; i < harvestMaxInfra; i++ {
+				offset = time.Duration(i) * 16 * time.Minute
+				harvest(t, "", 0)
+			}
+			offset = time.Hour
+			if failures := harvest(t, "", 0); len(failures) != 0 || *calls != 2 {
+				t.Fatalf("not parked: %v runs=%d", failures, *calls)
+			}
+			switch change {
+			case "head":
+				f.pr.HeadSHA = strings.Repeat("d", 40)
+				f.openPRs = []vcs.PR{f.pr}
+				dir := writeAcceptanceDevelopment(t, "success", time.Now(), nil)
+				var meta snapshot.RunMeta
+				data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(data, &meta); err != nil {
+					t.Fatal(err)
+				}
+				meta.HeadSHA = f.pr.HeadSHA
+				if err := snapshot.WriteRunMeta(dir, meta); err != nil {
+					t.Fatal(err)
+				}
+			case "body":
+				f.issue.Body += "\nAdditional requirement"
+			case "binary":
+				old := acceptance.BinaryID
+				acceptance.BinaryID = func() string { return "new-binary" }
+				t.Cleanup(func() { acceptance.BinaryID = old })
+			}
+			if failures := harvest(t, "", 0); len(failures) != 1 || *calls != 3 {
+				t.Fatalf("did not reset: %v runs=%d", failures, *calls)
+			}
+		})
 	}
 }

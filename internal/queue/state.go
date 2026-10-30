@@ -18,30 +18,28 @@ const StateVersion = 1
 // EntryRecord is the last scheduling verdict for one issue, kept for
 // `queue list` and the board.
 type EntryRecord struct {
-	Number   int    `json:"number"`
-	Title    string `json:"title,omitempty"`
-	Priority string `json:"priority"`
-	Rank     int    `json:"rank"` // -1 = unranked
-	State    string `json:"state"`
-	Reason   string `json:"reason,omitempty"`
-	Created  string `json:"created_at,omitempty"`
-	Labeled  bool   `json:"labeled,omitempty"` // carries the "clawflow" scope label
+	BlockingPR int    `json:"blocking_pr,omitempty"`
+	AreaPasses int    `json:"area_passes,omitempty"`
+	Number     int    `json:"number"`
+	Title      string `json:"title,omitempty"`
+	Priority   string `json:"priority"`
+	Rank       int    `json:"rank"` // -1 = unranked
+	State      string `json:"state"`
+	Reason     string `json:"reason,omitempty"`
+	Created    string `json:"created_at,omitempty"`
 }
 
 // RepoState is the small per-repo file under data/queue-state/. Only the pass
 // holding the repo's run lock writes it.
 type RepoState struct {
-	Version          int               `json:"version"`
-	Repo             string            `json:"repo"`
-	UpdatedAt        time.Time         `json:"updated_at"`
-	BlockedSince     map[int]time.Time `json:"blocked_since,omitempty"`
-	Parked           []int             `json:"parked,omitempty"`
-	Warned           map[string]bool   `json:"warned,omitempty"` // "<number>|<warning>" already reported
-	Imported         bool              `json:"imported,omitempty"`
-	ScopeSet         bool              `json:"scope_set,omitempty"` // migration persisted queue_scope
-	Scope            string            `json:"scope,omitempty"`     // effective scope at the last pass
-	DeprecationShown bool              `json:"deprecation_shown,omitempty"`
-	Entries          []EntryRecord     `json:"entries,omitempty"`
+	Skipped      int               `json:"skipped"` // open issues carrying the owner skip label
+	Version      int               `json:"version"`
+	Repo         string            `json:"repo"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+	BlockedSince map[int]time.Time `json:"blocked_since,omitempty"`
+	Parked       []int             `json:"parked,omitempty"`
+	Warned       map[string]bool   `json:"warned,omitempty"` // "<number>|<warning>" already reported
+	Entries      []EntryRecord     `json:"entries,omitempty"`
 }
 
 // StateDir returns ~/.clawflow/data/queue-state.

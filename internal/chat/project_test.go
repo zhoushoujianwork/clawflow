@@ -277,92 +277,17 @@ func TestBuildPilotContext_RecentHistory(t *testing.T) {
 	}
 }
 
-func TestBuildPilotContext_StandardPlays(t *testing.T) {
-	repos := []PilotRepoDigest{}
-	prompt := BuildPilotContext("p", "", "", nil, repos, "")
-
-	// Section header present
-	if !containsStr(prompt, "Standard plays") {
-		t.Error("missing Standard plays section header")
+func TestBuildPilotContext_StructuredActions(t *testing.T) {
+	prompt := BuildPilotContext("p", "", "", nil, nil, "")
+	for _, want := range []string{"pilot-actions", "edit_spec", "pilot_override_merge", "read-only", "five actions per wake"} {
+		if !containsStr(prompt, want) {
+			t.Errorf("missing %s", want)
+		}
 	}
-
-	// Play 1 — branch cleanup
-	if !containsStr(prompt, "Stale-branch cleanup") {
-		t.Error("missing Play 1 (stale branch cleanup) header")
-	}
-	if !containsStr(prompt, "git push origin --delete") {
-		t.Error("missing branch deletion command")
-	}
-	if !containsStr(prompt, "merged") || !containsStr(prompt, "default/base branch") {
-		t.Error("missing branch-cleanup safety bounds (merged-only, skip default)")
-	}
-	// Play 1 — local-branch cleanup (the local twin: clawflow branch delete)
-	if !containsStr(prompt, "clawflow branch delete --repo <owner/repo> --yes") {
-		t.Error("missing local-branch cleanup command (clawflow branch delete --yes)")
-	}
-	if !containsStr(prompt, "remote-clean does NOT imply local-clean") {
-		t.Error("missing instruction to run local cleanup even when remote is clean")
-	}
-
-	// Play 2 — conflict resolution
-	if !containsStr(prompt, "Merge-conflict resolution") {
-		t.Error("missing Play 2 (conflict resolution) header")
-	}
-	if !containsStr(prompt, "git rebase") {
-		t.Error("missing rebase instruction")
-	}
-	if !containsStr(prompt, "--force-with-lease") {
-		t.Error("missing force-with-lease guard")
-	}
-	if !containsStr(prompt, "ONE conflict resolution per wake") {
-		t.Error("missing per-wake conflict resolution cap")
-	}
-	if !containsStr(prompt, "git rebase --abort") {
-		t.Error("missing abort-on-failure escape hatch")
-	}
-
-	// Play 3 — log patrol
-	if !containsStr(prompt, "Runtime log patrol") {
-		t.Error("missing Play 3 (log patrol) header")
-	}
-	if !containsStr(prompt, "PATROL:") {
-		t.Error("missing PATROL summary line format")
-	}
-
-	// Play 5 — dependency-unlock re-push
-	if !containsStr(prompt, "Dependency-unlock retry") {
-		t.Error("missing Play 5 (dependency-unlock re-push) header")
-	}
-	if !containsStr(prompt, "label remove") || !containsStr(prompt, "agent-skipped") {
-		t.Error("missing agent-skipped label-remove action in Play 5")
-	}
-	if !containsStr(prompt, "every cited prerequisite is") {
-		t.Error("missing all-dependencies-merged gate in Play 5")
-	}
-	if !containsStr(prompt, "design or scope question remains") {
-		t.Error("missing unresolved-design-item guard in Play 5 (must not auto-re-push on open design questions)")
-	}
-	if !containsStr(prompt, "Never undo a human re-skip") {
-		t.Error("missing human ping-pong / re-skip guard in Play 5")
-	}
-	if !containsStr(prompt, "per wake") {
-		t.Error("missing per-wake cap on dependency-unlock re-pushes")
-	}
-
-	// Hard rules narrow exception converged onto Play 5
-	if !containsStr(prompt, "ONLY during an active Play 5") {
-		t.Error("missing Play 5-scoped narrow exception for agent-skipped removal in Hard rules")
-	}
-
-	// Hard rules updated to allow narrow Edit/push exceptions
-	if !containsStr(prompt, "Edit") || !containsStr(prompt, "ONLY inside an") {
-		t.Error("hard rules missing the active-play scope on Edit/Write")
-	}
-	if !containsStr(prompt, "push --force-with-lease") {
-		t.Error("hard rules missing force-with-lease exception line")
-	}
-	if !containsStr(prompt, "push --delete") {
-		t.Error("hard rules missing branch-delete exception line")
+	for _, bad := range []string{"git push", "git rebase", "clawflow branch delete", "clawflow label remove", "Open a PR for repo-level docs"} {
+		if containsStr(prompt, bad) {
+			t.Errorf("direct write instruction: %s", bad)
+		}
 	}
 }
 
@@ -493,7 +418,7 @@ func containsStr(s, substr string) bool {
 
 func TestBuildPilotContext_CategoryHygieneIsOptional(t *testing.T) {
 	prompt := BuildPilotContext("test-project", "", "", nil, nil, "")
-	if !containsStr(prompt, "Eligible unlabeled issues already enter implementation") {
+	if !containsStr(prompt, "Open leaf issues enter implementation by default") || !containsStr(prompt, "Never work on issues carrying clawflow-skip") {
 		t.Fatal("missing direct implementation guidance")
 	}
 	if containsStr(prompt, "operators won't pick them up otherwise") || containsStr(prompt, "Fix missing trigger labels") {

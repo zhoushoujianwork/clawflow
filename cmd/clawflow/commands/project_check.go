@@ -165,9 +165,7 @@ func inspectProject(name string) projectCheckResult {
 	if !pOK {
 		return r
 	}
-	host, hostErr := os.Hostname()
-	r.add("pilot", name, stateWarning(p.Automation.Enabled), fmt.Sprintf("Pilot enabled=%t, cooldown_minutes=%d, cooldown_remaining_seconds=%d", p.Automation.Enabled, p.Automation.CooldownMinutes, int(p.CooldownRemaining(time.Now()).Seconds())), "")
-	checkMachine(&r, "pilot_binding", name, p.Automation.BoundMachine, host, hostErr, cfgOK && cfg.Settings.RequireBinding)
+	r.add("pilot", name, "passed", "全局 steward：clawflow pilot ask / chat；项目自动唤醒已移除", "")
 	for _, doc := range []string{"context", "testing"} {
 		data, err := os.ReadFile(filepath.Join(project.ProjectDir(name), doc+".md"))
 		if err != nil || strings.TrimSpace(string(data)) == "" {
@@ -219,7 +217,7 @@ func inspectProject(name string) projectCheckResult {
 				r.add("primary_project", repo, status, "Authoritative project: "+rc.PrimaryProject, "")
 			}
 		}
-		checkMachine(&r, "repo_binding", repo, rc.BoundMachine, host, hostErr, cfg.Settings.RequireBinding)
+		r.add("worker_tags", repo, "warning", "Worker tag matching is enforced at claim time; worker availability unverified", "")
 		platform := rc.Platform
 		if platform == "" {
 			platform = "github"

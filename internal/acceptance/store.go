@@ -130,6 +130,11 @@ func (s *Store) write(name string, value any) error {
 		return closeErr
 	}
 	if err := s.root.Rename(tmp, name); err != nil {
+		// References are immutable, but a worker and the coordinator may share
+		// one store and publish the same content twice; that is not a conflict.
+		if existing, readErr := s.readData(name); readErr == nil && bytes.Equal(existing, data) {
+			return nil
+		}
 		return err
 	}
 	dir, err := s.root.Open(".")
@@ -148,64 +153,73 @@ func (s *Store) write(name string, value any) error {
 }
 
 func (s *Store) read(name string, value any) error {
-	st, err := s.root.Lstat(name)
+	data, err := s.readData(name)
 	if err != nil {
 		return err
 	}
+	return decodeStrict(data, value)
+}
+
+// readData returns the verified payload of one stored reference.
+func (s *Store) readData(name string) (json.RawMessage, error) {
+	st, err := s.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
 	if !st.IsDir() || st.Mode().Perm()&0077 != 0 {
-		return errors.New("acceptance reference must be a private directory, not a symlink")
+		return nil, errors.New("acceptance reference must be a private directory, not a symlink")
 	}
 	slot, err := s.root.OpenRoot(name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer slot.Close()
 	dir, err := slot.Open(".")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	openedDir, statErr := dir.Stat()
 	_ = dir.Close()
 	if statErr != nil {
-		return statErr
+		return nil, statErr
 	}
 	if !os.SameFile(st, openedDir) {
-		return errors.New("acceptance reference changed during open")
+		return nil, errors.New("acceptance reference changed during open")
 	}
 	st, err = slot.Lstat("data.json")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 || st.Size() > maxFileBytes {
-		return errors.New("acceptance file is not a bounded private regular file")
+		return nil, errors.New("acceptance file is not a bounded private regular file")
 	}
 	f, err := slot.Open("data.json")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	opened, err := f.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !os.SameFile(st, opened) {
-		return errors.New("acceptance file changed during open")
+		return nil, errors.New("acceptance file changed during open")
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(b) > maxFileBytes {
-		return errors.New("acceptance file exceeds size limit")
+		return nil, errors.New("acceptance file exceeds size limit")
 	}
 	var e envelope
 	if err := decodeStrict(b, &e); err != nil {
-		return err
+		return nil, err
 	}
 	if e.Version != Version || e.Digest != digest(e.Data) {
-		return errors.New("acceptance file digest mismatch")
+		return nil, errors.New("acceptance file digest mismatch")
 	}
-	return decodeStrict(e.Data, value)
+	return e.Data, nil
 }
 
 func (s *Store) SavePlan(c Contract, p Plan) error {
@@ -235,6 +249,9 @@ func (s *Store) LoadPlan(c Contract, attempt string) (Plan, error) {
 }
 
 func (s *Store) SaveRecord(r Record) error {
+	if r.BinaryID == "" {
+		r.BinaryID = BinaryID()
+	}
 	d, err := r.Contract.Digest()
 	if err != nil {
 		return err
@@ -303,8 +320,8 @@ func (s *Store) LatestRecord(c Contract) (Record, error) {
 func IsInfrastructure(r Record) bool { return r.Completed && len(r.Evidence) == 0 }
 
 // InfrastructureAttempts is a read-only summary of the completed infrastructure
-// attempts for exactly one contract.
-// Count is how many completed attempts ended without a reviewer verdict, LastAt
+// attempts for one head and requirements, independent of base or policy changes.
+// Count is the consecutive failures from the current binary, LastAt
 // is the latest of their CompletedAt times, and LatestIsInfra reports whether
 // the newest completed record of any kind is one of them. Corruption and
 // ambiguous ordering fail closed with an error, exactly as in LatestRecord.
@@ -316,23 +333,20 @@ type InfrastructureAttempts struct {
 
 // InfrastructureAttempts scans the contract's records without writing.
 func (s *Store) InfrastructureAttempts(c Contract) (InfrastructureAttempts, error) {
-	var out InfrastructureAttempts
-	complete, err := s.completeRecords(c)
+	records, err := s.RecordsAtHead(c.Repository, c.PRNumber, c.HeadSHA)
 	if err != nil {
-		return out, err
+		return InfrastructureAttempts{}, err
 	}
-	for _, r := range complete {
-		if IsInfrastructure(r) {
-			out.Count++
-			if r.CompletedAt.After(out.LastAt) {
-				out.LastAt = r.CompletedAt
-			}
+	var complete []Record
+	for _, r := range records {
+		if r.Completed {
+			complete = append(complete, r)
 		}
 	}
-	if len(complete) > 0 {
-		out.LatestIsInfra = IsInfrastructure(complete[len(complete)-1])
+	if len(complete) > 0 && complete[len(complete)-1].Contract.Requirements != c.Requirements {
+		return InfrastructureAttempts{}, nil
 	}
-	return out, nil
+	return ConsecutiveInfrastructure(complete), nil
 }
 
 // CompleteRecords returns every completed record for exactly c, oldest first,
@@ -390,6 +404,9 @@ func (s *Store) completeRecords(c Contract) ([]Record, error) {
 }
 
 func completeRecord(r Record) error {
+	if err := validateUnstructured(r); err != nil {
+		return err
+	}
 	if len(r.Findings) > 0 {
 		failing, err := validateFindings(r.Findings)
 		if err != nil {
@@ -404,7 +421,7 @@ func completeRecord(r Record) error {
 		(r.Verdict != Passed && r.Verdict != Failed && r.Verdict != Blocked) {
 		return errors.New("incoherent complete acceptance record")
 	}
-	if r.Plan.Text != "" && (r.Plan.StartedAt.Before(r.StartedAt) || r.Plan.CompletedAt.After(r.CompletedAt)) {
+	if r.Plan.Text != "" && ((r.Plan.RequirementsDigest == "" && r.Plan.StartedAt.Before(r.StartedAt)) || r.Plan.CompletedAt.After(r.CompletedAt)) {
 		return errors.New("incoherent acceptance plan timestamps")
 	}
 	if !r.ReviewStartedAt.IsZero() && (r.Plan.Text == "" || r.ReviewStartedAt.Before(r.Plan.CompletedAt) || r.ReviewStartedAt.After(r.CompletedAt)) {
@@ -426,7 +443,7 @@ func decodeStrict(b []byte, value any) error {
 		for typ != nil && typ.Kind() == reflect.Pointer {
 			typ = typ.Elem()
 		}
-		if typ == reflect.TypeOf(json.RawMessage{}) {
+		if typ == reflect.TypeOf(json.RawMessage{}) || typ == reflect.TypeOf(Text("")) {
 			typ = nil
 		}
 		t, err := d.Token()
@@ -569,4 +586,148 @@ func (s *Store) DevelopmentAtHead(repo string, pr int, task, head string) (map[I
 		identities[c.Development] = true
 	}
 	return identities, nil
+}
+
+// RecordsAtHead reads evidence independently of development provenance. Any
+// unreadable record prevents proving absence, even when its head is unknown.
+func (s *Store) RecordsAtHead(repo string, pr int, head string) ([]Record, error) {
+	dir, err := s.root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(10001)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if len(entries) > 10000 {
+		return nil, errors.New("too many acceptance records")
+	}
+	var records []Record
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".record") {
+			continue
+		}
+		var r Record
+		if err := s.read(entry.Name(), &r); err != nil {
+			return nil, err
+		}
+		if r.Contract.Repository != repo || r.Contract.PRNumber != pr || r.Contract.HeadSHA != head {
+			continue
+		}
+		r, err = s.loadRecord(r.Contract, entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		if r.Completed {
+			if err := completeRecord(r); err != nil {
+				return nil, err
+			}
+		}
+		records = append(records, r)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].StartedAt.Before(records[j].StartedAt) })
+	for i := 1; i < len(records); i++ {
+		if !records[i-1].StartedAt.Before(records[i].StartedAt) || (records[i-1].Completed && records[i].Completed && !records[i-1].CompletedAt.Before(records[i].CompletedAt)) {
+			return nil, errors.New("ambiguous acceptance records")
+		}
+	}
+	return records, nil
+}
+
+// CompleteRecordsAtHead returns the completed attempts for the most recently
+// completed contract at the observed PR head. This is a read-only dashboard
+// view, not proof that requirements, base or policy still match that contract.
+func (s *Store) CompleteRecordsAtHead(repo string, pr int, head string) ([]Record, error) {
+	dir, err := s.root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(10001)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if len(entries) > 10000 {
+		return nil, errors.New("too many acceptance records")
+	}
+	var latest *Record
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".record") {
+			continue
+		}
+		var r Record
+		if err := s.read(entry.Name(), &r); err != nil {
+			return nil, err
+		}
+		if r.Contract.Repository != repo || r.Contract.PRNumber != pr || r.Contract.HeadSHA != head {
+			continue
+		}
+		r, err = s.loadRecord(r.Contract, entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		if !r.Completed {
+			continue
+		}
+		if err := completeRecord(r); err != nil {
+			return nil, err
+		}
+		if latest != nil && r.CompletedAt.Equal(latest.CompletedAt) {
+			return nil, errors.New("ambiguous acceptance attempt ordering")
+		}
+		if latest == nil || r.CompletedAt.After(latest.CompletedAt) {
+			latest = &r
+		}
+	}
+	if latest == nil {
+		return nil, nil
+	}
+	return s.CompleteRecords(latest.Contract)
+}
+
+// LatestPlanForTask returns the latest saved plan for unchanged issue requirements.
+// This is a scheduling hint only: historical head/base and verdict are irrelevant
+// and the returned plan must never be used as acceptance authorization.
+func (s *Store) LatestPlanForTask(repo, task, requirements string) (Plan, error) {
+	dir, err := s.root.Open(".")
+	if err != nil {
+		return Plan{}, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(10001)
+	if err != nil && err != io.EOF {
+		return Plan{}, err
+	}
+	if len(entries) > 10000 {
+		return Plan{}, errors.New("too many acceptance records")
+	}
+	var latest Plan
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".record") {
+			continue
+		}
+		var r Record
+		if err := s.read(entry.Name(), &r); err != nil {
+			return Plan{}, err
+		}
+		c := r.Contract
+		if c.Repository != repo || c.TaskID != task || c.Requirements != requirements {
+			continue
+		}
+		if _, err := s.loadRecord(c, entry.Name()); err != nil {
+			return Plan{}, err
+		}
+		if r.Plan.Text == "" {
+			continue
+		}
+		p, err := s.LoadPlan(c, r.AttemptID)
+		if err != nil {
+			return Plan{}, err
+		}
+		if p.CompletedAt.After(latest.CompletedAt) {
+			latest = p
+		}
+	}
+	return latest, nil
 }

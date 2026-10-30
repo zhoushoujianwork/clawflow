@@ -97,6 +97,8 @@ func captureStderr(t *testing.T, fn func()) string {
 
 func targetedConfig(t *testing.T, mutate func(*config.Repo)) {
 	t.Helper()
+	// Scheduler housekeeping must never scan the host temp root in tests.
+	t.Setenv("TMPDIR", t.TempDir())
 	repo := config.Repo{Enabled: false, Platform: "github", BaseURL: "https://vcs.invalid", LocalPath: t.TempDir(), BaseBranch: "main"}
 	if mutate != nil {
 		mutate(&repo)
@@ -221,7 +223,7 @@ func TestRunOnceUnknownRepoErrors(t *testing.T) {
 	}
 }
 
-func TestRunOnceTargetedRespectsBinding(t *testing.T) {
+func TestRunOnceTargetedIgnoresRetiredBinding(t *testing.T) {
 	host, _ := os.Hostname()
 	if host == "" {
 		t.Skip("hostname unavailable")
@@ -244,8 +246,8 @@ func TestRunOnceTargetedRespectsBinding(t *testing.T) {
 			if err := runOnce(context.Background(), "o/r", 7, time.Minute); err != nil {
 				t.Fatal(err)
 			}
-			if len(dispatched()) != 0 {
-				t.Fatalf("dispatched %v despite binding", dispatched())
+			if len(dispatched()) != 1 {
+				t.Fatalf("legacy binding prevented dispatch: %v", dispatched())
 			}
 		})
 	}

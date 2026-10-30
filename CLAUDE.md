@@ -2,13 +2,15 @@
 
 ## 项目简介
 
-ClawFlow connects GitHub/GitLab issues and PRs to autonomous implementation through `offload`. Humans set project direction and describe features. Eligible open leaf issues of all enabled repos (GitHub and GitLab) share one ClawFlow-native queue ordered by `(P0..P3 label, manual rank in ~/.clawflow/data/queue.json, created_at, key)` with per-repo `max_in_flight`, `queue_scope` (`all|labeled|ranked`; migrated `queue_issue` repos become `ranked`) and `Depends on:` lines (`clawflow queue list/move/add/remove/import`; `queue_issue` is deprecated and imported once), then enter `implement`; analysis, planning, tests and repair happen within that attempt. Questions/comments retain their reply paths, and parents retain `track-progress` through the operational `progress-check` trigger.
+ClawFlow connects GitHub/GitLab issues and PRs to autonomous implementation through `offload`. Humans set project direction and describe features. Eligible open leaf issues of all enabled repos (GitHub and GitLab) share one ClawFlow-native queue ordered by `(P0..P3 label, manual rank in ~/.clawflow/data/queue.json, created_at, key)` with per-repo `max_in_flight` and `Depends on:` lines. All `Depends on:` lines contribute comma-separated `#N` or `owner/repo#N` prerequisites, deduplicated in first-seen order up to 10; invalid and excess tokens are ignored with warnings. Every open leaf issue is selected by default unless the owner adds `clawflow-skip`; the legacy `clawflow` label is ignored and preserved. `queue add/remove/move` only manage rank. Skipped issues and their managed PRs start no new implementation, repair, acceptance or auto-merge; running results still write back. Only the owner changes `clawflow-skip`, which is distinct from agent-owned `agent-skipped`. Eligible issues enter `implement`; analysis, planning, tests and repair happen within that attempt. Questions/comments retain their reply paths, and parents retain `track-progress` through the operational `progress-check` trigger.
 
-The current runner uses VCS labels/comments for visible coordination, local files for history and locks (`~/.clawflow/locks/`), and bounded repair bookkeeping. `lock_label` and `agent-running` are not execution locks. Pause/cancel controls, machine bindings, terminal exclusions and retry bounds remain in force.
+Pilot is one platform-wide steward, invoked only through `clawflow pilot ask`, `pilot chat`, or an explicit user-defined check (scheduled-check management is a separate slice). Repository passes and web ticks never wake it automatically. Legacy `project automation ...` commands are notice-only no-ops; project automation YAML is ignored and dropped on save. The global charter is `~/.clawflow/pilot/charter.md`, seeded once from existing project context; per-project `context.md` remains implementation context. Invocations have an ops budget and timeout, use the existing policy-gated audited action executor, and never change `clawflow-skip`.
+
+The current runner uses VCS labels/comments for visible coordination, local files for history and locks (`~/.clawflow/locks/`), and bounded repair bookkeeping. `lock_label` and `agent-running` are not execution locks. Pause/cancel controls, worker tag affinity, terminal exclusions and retry bounds remain in force.
 
 There is one autonomous lifecycle, without a workflow selector or built-in evaluation/approval stage. The exact names `classify`, `evaluate-bug`, `evaluate-feat` and `decompose` are retired and rejected as user overrides. Other custom operators and historical records are preserved. The eval model role is only for custom `evaluate-*` extensions.
 
-Old config input remains readable. Explicit legacy selection emits a migration notice and proceeds autonomously. Rewritten configs omit `workflow`, `auto_approve`, `auto_evaluate_all_issues` and `confidence_threshold`; supported enablement, bindings, merge/CI and other settings are preserved.
+Old config input remains readable. Explicit legacy selection emits a migration notice and proceeds autonomously. Rewritten configs omit `workflow`, `auto_approve`, `auto_evaluate_all_issues` and `confidence_threshold`; supported enablement, worker tags, merge/CI and other settings are preserved.
 
 ```bash
 clawflow repo set owner/repo --auto-merge on --ci-required on
@@ -16,7 +18,7 @@ clawflow repo enable owner/repo
 clawflow run --repo owner/repo
 ```
 
-Required CI accepts success only. Failed-CI repair is limited to same-repository GitHub managed PRs, local reproduction, at most three attempts per PR and a five-minute cooldown. It updates the existing branch without force; it uses bounded, redacted exact-head GitHub job-log excerpts as untrusted diagnostic evidence and does not repair forks/GitLab MRs. For `acceptance_required` repos the same operator also repairs a reviewer verdict `failed` (never `blocked`) on the same PR, sharing the per-PR three-attempt ledger; reviewer text is passed as untrusted data. Other GitLab capabilities remain supported.
+Required CI accepts success only. Failed-CI repair is limited to same-repository GitHub managed PRs and same-project GitLab MRs, local reproduction, at most three attempts per PR and a five-minute cooldown. It updates the existing branch without force; it uses bounded, redacted exact-head GitHub/GitLab job-log excerpts as untrusted diagnostic evidence and does not repair forks. For `acceptance_required` repos the same operator also repairs a reviewer verdict `failed` (never `blocked`) on the same PR, sharing the per-PR three-attempt ledger; reviewer text is passed as untrusted data. Other GitLab capabilities remain supported.
 
 The [managed development design](docs/managed-development-design.md) proposes a durable task/effect engine beyond the implemented runner. Do not describe its proposed contracts as existing capabilities. Config sync remains available through `clawflow sync push/pull`, excluding tokens and local paths.
 
@@ -353,3 +355,12 @@ skills/<operator-name>/
 | 算子 frontmatter、触发说明 | 评论/prompt 模板 |
 | 流程步骤、CLI 命令 | 评估维度表格 |
 | 安全约束、核心指令 | 详细示例、参考文档 |
+
+## Worker 主机亲和性
+
+Worker 自动携带 `host-<hostname>` 标签（小写，去掉 `.local`）。仓库通过
+`worker_tags: [host-work-mac]` 指定执行主机。旧 `bound_machine` 读取时追加对应标签并提示；
+`require_binding` 读取后忽略并提示。重写配置不再包含这两个字段。
+`repo set --bound-machine X` 是已弃用的别名，替换 host 标签并保留其他标签；空值清除 host 标签。
+扫描、定向运行和 harvest 不再按主机绑定过滤；无 coordinator 的单机运行照常处理仓库，
+只有 worker 领取任务时按标签执行主机亲和性约束。

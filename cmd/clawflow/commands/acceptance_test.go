@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -29,6 +31,8 @@ type acceptanceFake struct {
 	conditional func() error
 }
 
+func (f *acceptanceFake) GetIssueLabels(string, int) ([]string, error) { return f.issue.Labels, nil }
+
 func (f *acceptanceFake) GetPR(_ string, _ int) (vcs.PR, error)        { return f.pr, nil }
 func (f *acceptanceFake) GetIssue(_ string, _ int) (*vcs.Issue, error) { return f.issue, nil }
 func (f *acceptanceFake) MergePRAtHead(_ string, _ int, expected string) (string, error) {
@@ -43,6 +47,10 @@ func (f *acceptanceFake) MergePRAtHead(_ string, _ int, expected string) (string
 
 func acceptanceFixture(t *testing.T) (*acceptanceFake, config.Repo) {
 	t.Helper()
+	// Preserve legacy record fixtures; structured evidence has dedicated fixtures.
+	oldSchema := acceptanceEvidenceSchema
+	acceptanceEvidenceSchema = 0
+	t.Cleanup(func() { acceptanceEvidenceSchema = oldSchema })
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", "/usr/bin/true")
 	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "acceptance-profile")
@@ -70,17 +78,26 @@ func acceptanceFixture(t *testing.T) (*acceptanceFake, config.Repo) {
 	}
 	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return f, nil }
 	calls := 0
+	reviewerSession := ""
 	acceptanceNativeRun = func(_ context.Context, c execution.Config, r execution.Request, _ []string, _ io.Writer, _ func(execution.Observation)) (execution.Result, error) {
 		calls++
 		wantMode, wantPolicy := "default", "default"
 		if !r.ToolsDisabled {
 			wantMode, wantPolicy = "bypassPermissions", "managed-development"
 		}
-		if c.Profile != "acceptance-profile" || r.Resume || r.SessionKey != "" || r.PermissionMode != wantMode {
+		if c.Profile != "acceptance-profile" || (r.Resume && (r.SessionKey != reviewerSession || r.ToolsDisabled)) || (!r.Resume && r.SessionKey != "") || r.PermissionMode != wantMode {
 			t.Fatalf("unpinned native request: %+v %+v", c, r)
 		}
 		result := execution.Result{Status: "ok", ExecutionPolicy: wantPolicy, Profile: c.Profile, Backend: "fixture", Model: "fixture-model", NativeSessionID: execution.NewSessionKey(), RunID: execution.NewSessionKey(), Text: "Independent plan"}
 		if !r.ToolsDisabled {
+			if !r.Resume && (!strings.Contains(r.Prompt, "git diff <base_sha>...HEAD") || !strings.Contains(r.Prompt, "available locally")) {
+				t.Fatal("review prompt lacks offline base comparison instructions")
+			}
+			if r.Resume {
+				result.NativeSessionID = reviewerSession
+			} else {
+				reviewerSession = result.NativeSessionID
+			}
 			result.Text = `{"status":"passed","summary":"Independent checks complete","evidence":["Source fulfills the plan","command: go test ./... => ok"]}`
 		}
 		return result, nil
@@ -795,6 +812,23 @@ func TestAcceptanceReviewerEnvStripsTokens(t *testing.T) {
 	}
 }
 
+func TestAcceptanceReviewerEnvUsesWritableGoCache(t *testing.T) {
+	out := acceptanceReviewerEnv([]string{"PATH=/bin", "GOCACHE=/home/u/Library/Caches/go-build", "GOTMPDIR=/x"})
+	var cache, tmp []string
+	for _, kv := range out {
+		switch {
+		case strings.HasPrefix(kv, "GOCACHE="):
+			cache = append(cache, kv)
+		case strings.HasPrefix(kv, "GOTMPDIR="):
+			tmp = append(tmp, kv)
+		}
+	}
+	root := filepath.Join(os.TempDir(), "clawflow-review-go")
+	if len(cache) != 1 || !strings.HasPrefix(cache[0], "GOCACHE="+root) || len(tmp) != 1 || !strings.HasPrefix(tmp[0], "GOTMPDIR="+root) {
+		t.Fatalf("go cache env = %v %v", cache, tmp)
+	}
+}
+
 func TestAcceptanceCheckoutAfterPersistedPlan(t *testing.T) {
 	f, _ := acceptanceFixture(t)
 	git, nativeRun := acceptanceGit, acceptanceNativeRun
@@ -898,6 +932,305 @@ func TestAcceptanceWritebackFailurePreservesContract(t *testing.T) {
 			_, _, _, _, err := acceptanceContract(context.Background(), f, "o/r", 11)
 			if err != nil {
 				t.Fatalf("status=%s contract error=%v", status, err)
+			}
+		})
+	}
+}
+
+func TestAcceptanceGitLabOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		origin string
+		want   bool
+	}{
+		{"https://gitlab.example:8443/ns/group/repo.git", true},
+		{"git@gitlab.example:ns/group/repo.git", true},
+		{"https://other.example:8443/ns/group/repo.git", false},
+		{"https://gitlab.example/ns/group/repo.git", false},
+		{"https://gitlab.example:8443/ns/repo.git", false},
+		{"https://gitlab.example:8443/ns/group/repo.git?x=1", false},
+		{"https://user@gitlab.example:8443/ns/group/repo.git", false},
+		{"git@other.example:ns/group/repo.git", false},
+		{"/tmp/ns/group/repo", false},
+	} {
+		rc := config.Repo{Platform: "gitlab", BaseURL: "https://gitlab.example:8443"}
+		if got := acceptanceOriginMatches(tc.origin, rc, "ns/group/repo"); got != tc.want {
+			t.Errorf("origin=%s got=%v want=%v", tc.origin, got, tc.want)
+		}
+	}
+}
+
+func TestAcceptanceGitLabSubgroupConfiguration(t *testing.T) {
+	acceptanceFixture(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.Repos["o/r"]
+	rc.Platform = "gitlab"
+	for _, repo := range []string{"ns/group/repo", "ns//repo", "ns/../repo"} {
+		cfg.Repos[repo] = rc
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range []string{"ns/group/repo", "ns//repo", "ns/../repo"} {
+		_, _, err := acceptanceConfiguration(repo)
+		if (err == nil) != (repo == "ns/group/repo") {
+			t.Errorf("repo=%s err=%v", repo, err)
+		}
+	}
+}
+
+func TestAcceptanceCheckoutBorrowsLocalObjects(t *testing.T) {
+	// The local clone already has head and base, so no remote is contacted:
+	// origin points nowhere and must never be used.
+	ctx := context.Background()
+	local, workspace := t.TempDir(), t.TempDir()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := acceptanceGit(ctx, dir, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	commit := func(name string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(local, name), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+		git(local, "add", ".")
+		git(local, "commit", "-qm", name)
+		return git(local, "rev-parse", "HEAD")
+	}
+	git(local, "init", "--quiet")
+	git(local, "config", "user.name", "Test")
+	git(local, "config", "user.email", "test@example.com")
+	common := commit("common.txt")
+	git(local, "checkout", "-qb", "feature")
+	head := commit("changed.txt")
+	git(local, "checkout", "--detach", common)
+	base := commit("base.txt")
+	missing := filepath.Join(t.TempDir(), "no-such-remote")
+	if err := acceptancePrepareCheckout(ctx, workspace, local, missing, "feature", head, base); err != nil {
+		t.Fatal(err)
+	}
+	if got := git(workspace, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("head = %s, want %s", got, head)
+	}
+	if got := git(workspace, "diff", "--name-only", base+"...HEAD"); got != "changed.txt" {
+		t.Fatalf("unexpected PR diff: %s", got)
+	}
+	if got, _ := acceptanceGit(ctx, workspace, "remote"); got != "" {
+		t.Fatalf("review checkout has remotes: %q", got)
+	}
+	// A head the local clone does not have falls back to the remote, which
+	// fails here, proving the local path is only used when complete.
+	other := t.TempDir()
+	if err := acceptancePrepareCheckout(ctx, other, local, missing, "feature", strings.Repeat("a", 40), base); err == nil {
+		t.Fatal("missing local head did not fall back to the remote")
+	}
+}
+
+func TestAcceptanceCheckoutOfflineBaseComparison(t *testing.T) {
+	// Use real Git with diverged histories: fetching head alone cannot supply base.
+	ctx := context.Background()
+	source, workspace := t.TempDir(), t.TempDir()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := acceptanceGit(ctx, dir, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(source, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(source, "init", "--quiet")
+	git(source, "config", "user.name", "Test")
+	git(source, "config", "user.email", "test@example.com")
+	write("existing.txt", "preserved\n")
+	git(source, "add", ".")
+	git(source, "commit", "-qm", "common")
+	common := git(source, "rev-parse", "HEAD")
+	git(source, "checkout", "-qb", "feature")
+	write("changed.txt", "implementation\n")
+	git(source, "add", ".")
+	git(source, "commit", "-qm", "implementation")
+	head := git(source, "rev-parse", "HEAD")
+	git(source, "checkout", "--detach", common)
+	write("base-only.txt", "base advancement\n")
+	git(source, "add", ".")
+	git(source, "commit", "-qm", "base advancement")
+	base := git(source, "rev-parse", "HEAD")
+	c := acceptance.Contract{HeadSHA: head, BaseSHA: base}
+
+	if err := acceptancePrepareCheckout(ctx, workspace, "", source, "feature", c.HeadSHA, c.BaseSHA); err != nil {
+		t.Fatal(err)
+	}
+	// Remove the source to prove subsequent comparisons need no provider or remote.
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+	for _, sha := range []string{base, common} {
+		if got := git(workspace, "cat-file", "-t", sha); got != "commit" {
+			t.Fatalf("missing comparison commit %s: %s", sha, got)
+		}
+	}
+	if got := git(workspace, "diff", "--name-only", base+"...HEAD"); got != "changed.txt" {
+		t.Fatalf("unexpected PR diff: %s", got)
+	}
+	if got := git(workspace, "log", "--format=%H", base+"..HEAD"); got != head {
+		t.Fatalf("unexpected PR history: %s", got)
+	}
+	if got := git(workspace, "merge-base", base, "HEAD"); got != common {
+		t.Fatalf("unexpected merge base: %s", got)
+	}
+	if got := git(workspace, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("head changed: %s", got)
+	}
+	if got := git(workspace, "remote"); got != "" {
+		t.Fatalf("review has remotes: %s", got)
+	}
+	if got := git(workspace, "status", "--porcelain"); got != "" {
+		t.Fatalf("tracked source changed: %s", got)
+	}
+	if got := git(workspace, "rev-list", "-n", "1", "--all", "--not", head); got != "" {
+		t.Fatalf("base fetch broke immutability check: %s", got)
+	}
+}
+
+func TestAcceptanceComparisonHistoryFailurePreventsReview(t *testing.T) {
+	for _, stage := range []string{"fetch-base", "merge-base"} {
+		t.Run(stage, func(t *testing.T) {
+			f, _ := acceptanceFixture(t)
+			baseGit, baseRun := acceptanceGit, acceptanceNativeRun
+			acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+				if (stage == "fetch-base" && args[0] == "fetch" && args[len(args)-1] == f.pr.BaseSHA) ||
+					(stage == "merge-base" && args[0] == "merge-base") {
+					return "", errors.New("comparison history unavailable")
+				}
+				return baseGit(ctx, dir, args...)
+			}
+			acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, out io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+				if !req.ToolsDisabled {
+					t.Fatal("review started without comparison history")
+				}
+				return baseRun(ctx, c, req, env, out, observe)
+			}
+			if _, err := runAcceptance(context.Background(), f, "o/r", 11); err == nil {
+				t.Fatal("missing comparison history must fail")
+			}
+		})
+	}
+}
+
+func TestAcceptanceReportCorrectionReusesNativeSession(t *testing.T) {
+	f, _ := acceptanceFixture(t)
+	baseRun := acceptanceNativeRun
+	calls := 0
+	var session, workspace string
+	acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+		calls++
+		res, err := baseRun(ctx, c, req, env, w, observe)
+		if !req.ToolsDisabled && !req.Resume {
+			session, workspace = res.NativeSessionID, req.Workspace
+			res.Text = "{"
+		} else if req.Resume {
+			if req.SessionKey != session || req.Workspace != workspace || !strings.Contains(req.Prompt, "invalid acceptance report:") || !strings.Contains(req.Prompt, "do not re-review") {
+				t.Fatalf("bad correction request: %+v", req)
+			}
+		}
+		return res, err
+	}
+	r, err := runAcceptance(context.Background(), f, "o/r", 11)
+	if err != nil || r.Verdict != acceptance.Passed || calls != 3 || r.Correction == nil || r.Correction.Reviewer.SessionID != session {
+		t.Fatalf("calls=%d verdict=%s correction=%+v err=%v", calls, r.Verdict, r.Correction, err)
+	}
+}
+
+func TestAcceptanceCheckoutSetup(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			ctx := context.Background()
+			local, workspace := t.TempDir(), t.TempDir()
+			git := func(dir string, args ...string) string {
+				t.Helper()
+				out, err := acceptanceGit(ctx, dir, args...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return out
+			}
+			git(local, "init", "--quiet")
+			git(local, "config", "user.name", "Test")
+			git(local, "config", "user.email", "test@example.com")
+			for name, content := range map[string]string{
+				"go.mod":   "module fixture\n\ngo 1.25.0\n",
+				"embed.go": "package fixture\nimport \"embed\"\n//go:embed all:web/dist\nvar Assets embed.FS\n",
+			} {
+				if err := os.WriteFile(filepath.Join(local, name), []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			git(local, "add", ".")
+			git(local, "commit", "-qm", "fixture")
+			head := git(local, "rev-parse", "HEAD")
+			if err := acceptancePrepareCheckout(ctx, workspace, local, "missing", "feature", head, head); err != nil {
+				t.Fatal(err)
+			}
+			command, want := "mkdir -p web/dist && printf built > web/dist/index.html", "ok"
+			if fail {
+				command, want = "echo private-setup-output; exit 1", "fallback"
+			}
+			rc := config.Repo{AcceptanceSetupCommand: command}
+			calls := 0
+			execute := func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
+				calls++
+				if opts.Workspace != workspace || opts.PermissionMode != "bypassPermissions" || opts.Role != "acceptance" || opts.Resume || opts.Events != nil {
+					t.Fatal("setup policy mismatch")
+				}
+				scripts, _ := filepath.Glob(filepath.Join(workspace, ".clawflow-checkout-setup", "*.sh"))
+				if len(scripts) != 1 {
+					t.Fatal("missing setup script")
+				}
+				cmd := exec.CommandContext(ctx, "sh", scripts[0])
+				cmd.Dir = workspace
+				output, err := cmd.CombinedOutput()
+				if len(output) != 0 {
+					t.Fatal("setup output leaked")
+				}
+				return execution.Result{Text: "private native answer"}, err
+			}
+			for i := 0; i < 2; i++ {
+				if got := execution.PrepareCheckout(ctx, rc.AcceptanceSetupCommand, execution.Options{Workspace: workspace, Role: "acceptance"}, execute); got != want {
+					t.Fatalf("status=%s want=%s", got, want)
+				}
+			}
+			if calls != 1 {
+				t.Fatalf("setup calls=%d", calls)
+			}
+			cmd := exec.CommandContext(ctx, "go", "build", "./...")
+			cmd.Dir = workspace
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("embed fixture build: %s: %v", out, err)
+			}
+			if fail {
+				b, err := os.ReadFile(filepath.Join(workspace, "web/dist/index.html"))
+				if err != nil || len(b) != 0 {
+					t.Fatalf("placeholder: %v, length=%d", err, len(b))
+				}
+			}
+			git(workspace, "add", ".")
+			if got := git(workspace, "diff", "--cached", "--name-only"); got != "" {
+				t.Fatalf("setup artifacts staged: %s", got)
+			}
+			if got := git(workspace, "rev-parse", "HEAD"); got != head {
+				t.Fatal("setup changed HEAD")
 			}
 		})
 	}

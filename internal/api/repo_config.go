@@ -43,6 +43,12 @@ func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Enabled != nil && *req.Enabled {
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+	}
 	repo, ok := cfg.Repos[req.Repo]
 	if !ok {
 		writeJSON(w, 404, map[string]string{"error": "repo not found in config"})

@@ -206,7 +206,7 @@ func TestProjectCheckReadOnlyJSON(t *testing.T) {
 			t.Cleanup(func() { http.DefaultTransport = old })
 			before := checkTree(t, home)
 			r, err, stderr := executeCheck(t, "demo")
-			ready := scenario == "ready" || scenario == "dirty"
+			ready := scenario == "ready" || scenario == "dirty" || scenario == "binding"
 			if ready && (err != nil || r.Status != "ready") || !ready && (err == nil || r.Status != "blocked") {
 				t.Fatalf("status=%s err=%v checks=%+v", r.Status, err, r.Checks)
 			}

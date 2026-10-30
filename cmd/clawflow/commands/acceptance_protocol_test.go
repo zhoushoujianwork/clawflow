@@ -101,16 +101,16 @@ func readAcceptanceProtocolCaptures(path string) ([]acceptanceProtocolCapture, e
 // source tool/progress record. It verifies phase order and that the planner's
 // exact output is durable in the fixture-supplied private store outside source.
 func acceptanceProtocolPlanPersisted(store, cwd, prompt string, captures []acceptanceProtocolCapture) error {
-	if len(captures) == 0 || captures[len(captures)-1].Phase != "plan" {
-		return errors.New("review started without an immediately preceding planner invocation")
-	}
-	planners := 0
-	for _, c := range captures {
-		if c.Phase == "plan" {
-			planners++
+	token := ""
+	bindings := 1 // This review must already have its durable plan binding.
+	for _, capture := range captures {
+		if capture.Phase == "plan" {
+			token = capture.Token
+		}
+		if capture.Phase == "review" {
+			bindings++
 		}
 	}
-	token := captures[len(captures)-1].Token
 	if token == "" || !strings.Contains(prompt, token) {
 		return errors.New("review prompt lacks the planner output")
 	}
@@ -147,8 +147,8 @@ func acceptanceProtocolPlanPersisted(store, cwd, prompt string, captures []accep
 		}
 		found = found || strings.Contains(string(b), token)
 	}
-	if plans != planners || !found {
-		return fmt.Errorf("plan not persisted before review: %d stored for %d planner runs, current found=%t", plans, planners, found)
+	if plans != bindings || !found {
+		return fmt.Errorf("plan not persisted before review: %d stored for %d review bindings, current found=%t", plans, bindings, found)
 	}
 	return nil
 }
@@ -386,7 +386,7 @@ func (e *acceptanceProtocolEnv) assertNoWrites(t *testing.T) {
 	if len(e.f.merged) != 0 || len(e.f.deletedBranches) != 0 || len(e.f.comments) != 0 || len(e.f.expected) != 0 {
 		t.Fatalf("unexpected VCS writes: merged=%v deleted=%v comments=%v conditional=%v", e.f.merged, e.f.deletedBranches, e.f.comments, e.f.expected)
 	}
-	allowed := []string{"config", "init", "remote", "check-ref-format", "fetch", "rev-parse", "checkout", "status", "rev-list"}
+	allowed := []string{"config", "init", "remote", "check-ref-format", "fetch", "rev-parse", "checkout", "status", "rev-list", "merge-base"}
 	for _, args := range *e.git {
 		if !slices.Contains(allowed, args[0]) {
 			t.Fatalf("unexpected git operation %v", args)
@@ -600,7 +600,7 @@ func TestAcceptanceProtocolFaultsBlockAfterEarlierPass(t *testing.T) {
 				t.Fatalf("want %s, got %v", tc.kind, err)
 			}
 			e.assertNoViolations(t)
-			if caps := e.captures(t); len(caps) != 4 || caps[2].Phase != "plan" || caps[3].Phase != "review" {
+			if caps := e.captures(t); len(caps) != 3 || caps[0].Phase != "plan" || caps[1].Phase != "review" || caps[2].Phase != "review" {
 				t.Fatalf("captures: %+v", caps)
 			}
 			if r.Verdict != tc.verdict || !r.Completed || r.AttemptID == first.AttemptID || acceptance.Evaluate(r.Contract, r) == nil {

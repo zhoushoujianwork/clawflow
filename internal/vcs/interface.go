@@ -23,9 +23,9 @@ type Issue struct {
 	Body   string   `json:"body"`
 	Labels []string `json:"labels"`
 	State  string   `json:"state"`
-	// URL is the web (HTML) URL of the issue. Populated by GetIssue
-	// (GitHub html_url / GitLab web_url); other list calls may leave it
-	// empty.
+	// URL is the web (HTML) URL of the issue, copied verbatim from the API
+	// response (GitHub html_url / GitLab web_url). Populated by GetIssue and
+	// CreateIssue; other list calls may leave it empty.
 	URL       string `json:"url,omitempty"`
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
@@ -113,9 +113,37 @@ const (
 
 // CIEvidence is an exact-head observation, not an atomic merge authorization.
 type CIEvidence struct {
-	HeadSHA  string   `json:"head_sha"`
-	Status   CIStatus `json:"status"`
-	CheckIDs []int64  `json:"check_ids"`
+	HeadSHA  string    `json:"head_sha"`
+	Status   CIStatus  `json:"status"`
+	CheckIDs []int64   `json:"check_ids"`
+	Checks   []CICheck `json:"checks,omitempty"`
+}
+
+// CICheck carries suite provenance from the same exact-head aggregation.
+type CICheck struct {
+	Name       string  `json:"name"`
+	ID         int64   `json:"id"`
+	HeadSHA    string  `json:"head_sha"`
+	Status     string  `json:"status"`
+	Conclusion *string `json:"conclusion"`
+	CheckSuite struct {
+		ID int64 `json:"id"`
+	} `json:"check_suite"`
+	App struct {
+		Slug string `json:"slug"`
+	} `json:"app"`
+}
+
+// CIRerunPlan includes checks that cannot be mapped to a rerunnable Actions run.
+type CIRerunPlan struct {
+	HeadSHA       string  `json:"head_sha"`
+	RunIDs        []int64 `json:"run_ids"`
+	NotRerunnable []int64 `json:"not_rerunnable_check_ids,omitempty"`
+	RerunIDs      []int64 `json:"rerun_ids,omitempty"`
+}
+type CIRerunProvider interface {
+	PlanCIRerun(repo string, prNumber int) (CIRerunPlan, error)
+	RerunFailedJobs(repo string, runID int64) error
 }
 
 // SuccessfulFor rejects missing or duplicate identities and stale observations.
@@ -244,8 +272,15 @@ var ClawFlowLabels = []Label{
 	{"agent-mentioned", "BFD4F2", "Issue mentioned @agent — triggers reply-comment operator"},
 	// State labels
 	{"agent-running", "FFA500", "An operator is running on this subject (concurrency lock)"},
+	{"clawflow-skip", "BDBDBD", "Owner opt-out: no new automation on this issue or its PR"},
 	{"agent-skipped", "BDBDBD", "Operator paused work — prerequisites or information missing"},
 	{"agent-implemented", "6E7681", "implement operator finished — PR opened"},
 	{"agent-failed", "FF0000", "An operator failed; see run history"},
 	{"agent-replied", "E99695", "reply-comment operator has responded to a mention"},
+}
+
+// PRFileProvider optionally exposes all changed paths, including rename sources.
+// An incomplete provider response must return an error rather than partial data.
+type PRFileProvider interface {
+	ListPRFiles(repo string, prNumber int) ([]string, error)
 }

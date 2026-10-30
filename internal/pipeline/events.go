@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// MaxEvents is how many run.log events the board returns.
+// MaxEvents bounds each of the recent and retained-important log windows.
 const MaxEvents = 50
 
 const maxFieldLen = 300
@@ -15,8 +15,8 @@ const maxFieldLen = 300
 // eventPrefixes are the run/* areas the board shows; everything else in
 // run.log (per-lock, per-scan chatter) is noise for a delivery view.
 var eventPrefixes = []string{
-	"run/harvest", "run/automerge", "run/queue", "queue/", "run/self_upgrade",
-	"run/target_skip", "run/exit", "run/ci_repair", "run/end",
+	"vcs/rate_limited", "coordinator/result-apply-deferred", "run/harvest", "run/automerge", "queue/", "run/self_upgrade",
+	"run/lock_timeout", "run/target_skip", "run/exit", "run/ci_repair", "run/end",
 }
 
 // IsBoardEvent reports whether a run.log area belongs on the board.
@@ -143,32 +143,6 @@ func ParseEvents(r io.Reader) []Event {
 	return out
 }
 
-// LastDecision returns the most recent run/queue_{pick,wait,blocked} event of
-// repo's queue, or nil when none is recorded.
-func LastDecision(events []Event, repo string) *QueueDecision {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
-		if ev.Fields["repo"] != repo {
-			continue
-		}
-		var action string
-		switch ev.Event {
-		case "run/queue_pick":
-			action = "pick"
-		case "run/queue_wait":
-			action = "wait"
-		case "run/queue_blocked":
-			action = "blocked"
-		default:
-			continue
-		}
-		d := &QueueDecision{Action: action, Reason: ev.Fields["reason"], At: ev.Time}
-		d.Issue = atoi(ev.Fields["issue"])
-		return d
-	}
-	return nil
-}
-
 func atoi(s string) int {
 	n := 0
 	for _, c := range s {
@@ -180,12 +154,33 @@ func atoi(s string) int {
 	return n
 }
 
-// Relevant keeps the last MaxEvents events that concern one of the given
-// repositories (events without a repo field, such as run/exit, always count).
+// importantTransition protects terminal evidence from repetitive polling in the
+// bounded log tail. It is display-only and never feeds task state.
+func importantTransition(e Event) bool {
+	if e.Level == "error" || e.Level == "warn" || e.Fields["status"] == "failed" || e.Fields["status"] == "merged" || e.Fields["status"] == "error" {
+		return true
+	}
+	if strings.Contains(e.Event, "skip") || strings.Contains(e.Event, "sweep") || strings.Contains(e.Event, "poll") {
+		return false
+	}
+	return strings.Contains(e.Event, "harvest_end") || strings.Contains(e.Event, "automerge_merged") ||
+		strings.Contains(e.Event, "automerge_success") || strings.Contains(e.Event, "ci_repair")
+}
+
+// Relevant keeps the latest MaxEvents plus up to MaxEvents older important
+// transitions from the bounded tail. Repo-less events always count.
 func Relevant(events []Event, repos map[string]bool) []Event {
 	var out []Event
-	for i := len(events) - 1; i >= 0 && len(out) < MaxEvents; i-- {
+	recent, retained := 0, 0
+	for i := len(events) - 1; i >= 0; i-- {
 		if r := events[i].Fields["repo"]; r != "" && !repos[r] {
+			continue
+		}
+		if recent < MaxEvents {
+			recent++
+		} else if retained < MaxEvents && importantTransition(events[i]) {
+			retained++
+		} else {
 			continue
 		}
 		out = append(out, events[i])

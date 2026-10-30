@@ -42,7 +42,7 @@ function PilotRunsPage() {
     const text = runs.map(r => {
       const ts = new Date(r.started_at).toLocaleString()
       const result = r.result ? r.result.replace(/^PILOT-RESULT:\s*/, '') : r.error ?? 'no result'
-      const cost = r.usage ? ` $${r.usage.total_cost_usd.toFixed(2)}` : ''
+      const cost = r.usage?.total_cost_usd != null ? ` $${r.usage.total_cost_usd.toFixed(2)}` : ' Cost not reported'
       return `[${ts}]${cost} ${result}`
     }).join('\n')
     navigator.clipboard.writeText(text).then(() => {
@@ -117,14 +117,15 @@ function PilotRunsPage() {
                     · {Math.round((new Date(run.ended_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s
                   </span>
                 )}
-                {run.usage && (
+                {!run.usage && <span className="text-xs text-muted-foreground">· Cost and tokens not reported</span>}
+ {run.usage && (
                   <>
                     <span
                       className="text-xs text-muted-foreground tabular-nums"
                       title={run.usage.estimated ? run.usage.estimated_reason : undefined}
                     >
-                      {run.usage.estimated
-                        ? `· cost n/a · ${(run.usage.input_tokens / 1000).toFixed(0)}k tok`
+                      {(run.usage.estimated || run.usage.total_cost_usd == null)
+                        ? '· cost not reported'
                         : `· $${run.usage.total_cost_usd.toFixed(2)}`}
                     </span>
                     <span className="text-xs text-muted-foreground tabular-nums">

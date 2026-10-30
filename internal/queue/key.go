@@ -83,49 +83,39 @@ func PriorityFromLabels(labels []string) (Priority, []string) {
 
 const dependsPrefix = "Depends on:"
 
-// ParseDependsOn parses the single `Depends on:` body line. Tokens are
-// comma-separated `#N` (same repo) or full item keys. At most MaxDependencies
-// are returned; unparseable tokens, extra tokens and extra Depends lines
-// produce warnings while the valid ones still apply.
+// ParseDependsOn parses all `Depends on:` body lines. Tokens are
+// comma-separated `#N` (same repo) or full item keys. Dependencies are deduplicated
+// in first-seen order across lines. At most MaxDependencies are returned;
+// unparseable and extra tokens produce warnings while the valid ones still apply.
 func ParseDependsOn(body, repo string) ([]Key, []string) {
-	var line string
-	var warns []string
-	found := false
-	for _, l := range strings.Split(body, "\n") {
-		l = strings.TrimRight(l, "\r")
-		if !strings.HasPrefix(l, dependsPrefix) {
-			continue
-		}
-		if found {
-			warns = append(warns, "multiple \"Depends on:\" lines; only the first is used")
-			break
-		}
-		line, found = strings.TrimPrefix(l, dependsPrefix), true
-	}
-	if !found {
-		return nil, nil
-	}
 	var deps []Key
+	var warns []string
 	seen := map[Key]bool{}
-	for _, tok := range strings.Split(line, ",") {
-		tok = strings.TrimSpace(tok)
-		if tok == "" {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(line, dependsPrefix) {
 			continue
 		}
-		k, err := parseDepToken(tok, repo)
-		if err != nil {
-			warns = append(warns, fmt.Sprintf("dependency %q ignored: not #N or owner/repo#N", tok))
-			continue
+		for _, tok := range strings.Split(strings.TrimPrefix(line, dependsPrefix), ",") {
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				continue
+			}
+			k, err := parseDepToken(tok, repo)
+			if err != nil {
+				warns = append(warns, fmt.Sprintf("dependency %q ignored: not #N or owner/repo#N", tok))
+				continue
+			}
+			if seen[k] {
+				continue
+			}
+			if len(deps) >= MaxDependencies {
+				warns = append(warns, fmt.Sprintf("more than %d dependencies; extra %q ignored", MaxDependencies, tok))
+				continue
+			}
+			seen[k] = true
+			deps = append(deps, k)
 		}
-		if seen[k] {
-			continue
-		}
-		if len(deps) >= MaxDependencies {
-			warns = append(warns, fmt.Sprintf("more than %d dependencies; extra %q ignored", MaxDependencies, tok))
-			continue
-		}
-		seen[k] = true
-		deps = append(deps, k)
 	}
 	return deps, warns
 }

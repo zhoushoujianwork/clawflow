@@ -1,6 +1,7 @@
-import { createFileRoute, Outlet, Link } from '@tanstack/react-router'
+import { createFileRoute, Outlet, Link, useLocation } from '@tanstack/react-router'
+import { ReadOnlyContext } from '../lib/session'
 import { VersionBadge } from '../components/VersionBadge'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTheme } from '../lib/useTheme'
 import { ChatProvider, useChatDrawer } from '../lib/chatContext'
 import { ChatDrawer } from '../components/ChatDrawer'
@@ -12,6 +13,16 @@ export const Route = createFileRoute('/_app')({
 
 function AppLayout() {
   const { theme, toggle } = useTheme()
+  const [readonly, setReadonly] = useState(true)
+  const [sessionReady, setSessionReady] = useState(false)
+  const pathname = useLocation({ select: location => location.pathname })
+  useEffect(() => {
+    fetch('/api/session', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => { setReadonly(d.readonly !== false); setSessionReady(true) })
+      .catch(() => setSessionReady(true))
+  }, [])
+  const allowedPage = ['/pipeline', '/usage'].includes(pathname)
   const [currentVersion, setCurrentVersion] = useState<string | null>(null)
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
   const [channel, setChannel] = useState('')
@@ -21,8 +32,9 @@ function AppLayout() {
   const [restarting, setRestarting] = useState(false)
   const [showTooltip, setShowTooltip] = useState(false)
 
-  // Check version once on mount
+  // Version details are available only to local sessions.
   useEffect(() => {
+    if (!sessionReady || readonly) return
     fetch('/api/version', { cache: 'no-store' })
       .then(r => r.ok ? r.json() : null)
       .then(d => {
@@ -35,7 +47,7 @@ function AppLayout() {
         }
       })
       .catch(() => {})
-  }, [])
+  }, [sessionReady, readonly])
 
   const triggerUpdate = useCallback(() => {
     setUpdating(true)
@@ -73,15 +85,17 @@ function AppLayout() {
   }, [])
 
   return (
+    <ReadOnlyContext.Provider value={readonly}>
     <ChatProvider>
-      <div className="min-h-screen font-ibm-plex-sans" style={{ background: 'hsl(var(--bg-primary))' }}>
+      <div className="app-shell min-h-screen font-ibm-plex-sans" style={{ background: 'hsl(var(--bg-primary))' }}>
+        <a className="skip-link" href="#main-content">Skip to content</a>
         <header
-          className="sticky top-0 z-50 h-12 flex items-center justify-between px-6 border-b"
+          className="app-header border-b"
           style={{ background: 'hsl(var(--bg-primary))', borderColor: 'hsl(var(--border))' }}
         >
-          <div className="flex items-center gap-5">
+          <div className="app-navigation">
             <a
-              href="/"
+              href="/pipeline"
               className="flex items-center gap-1.5 font-semibold text-sm hover:opacity-80 transition-opacity"
               style={{ color: 'hsl(var(--text-high))' }}
             >
@@ -99,76 +113,28 @@ function AppLayout() {
                 local
               </span>
             </a>
-            <nav className="flex gap-1">
-              <Link
-                to="/dashboard"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Dashboard
-              </Link>
-              <Link
-                to="/repos"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Repos
-              </Link>
-              <Link
-                to="/projects"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Projects
-              </Link>
-              <Link
-                to="/operators"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Operators
-              </Link>
-              <Link
-                to="/pipeline"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Pipeline
-              </Link>
-              <Link
-                to="/usage"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Usage
-              </Link>
-              <Link
-                to="/settings"
-                className="text-sm font-medium px-2.5 py-1 rounded-sm transition-colors"
-                style={{ color: 'hsl(var(--text-low))' }}
-                activeProps={{ style: { color: 'hsl(var(--brand))', background: 'hsl(var(--brand) / 0.08)' } }}
-              >
-                Settings
-              </Link>
+            <nav className="primary-nav" aria-label="Primary">
+              <ShellLink to="/pipeline">Work</ShellLink>
+              <ShellLink to="/usage">Usage</ShellLink>
+              {!readonly && <NavigationGroup label="Management" active={/^\/(repos|projects)(\/|$)/.test(pathname)} pathname={pathname}>
+                <ShellLink to="/repos">Repositories</ShellLink>
+                <ShellLink to="/projects">Projects</ShellLink>
+              </NavigationGroup>}
+              {!readonly && <NavigationGroup label="Administration" active={/^\/(operators|settings)(\/|$)/.test(pathname)} pathname={pathname}>
+                <ShellLink to="/operators">Operators</ShellLink>
+                <ShellLink to="/settings">Settings</ShellLink>
+              </NavigationGroup>}
             </nav>
           </div>
 
-          <div className="flex items-center gap-2">
-            {/* Version badge with upgrade indicator.
-                Lives in the right-hand cluster (anchored to the right edge by
-                the header's justify-between) so its async appearance after the
-                /api/version fetch never shifts the left-side nav — regardless
-                of how long the version string is. See issue #284. */}
+          <div className="app-tools">
+            {readonly && <span className="text-xs">Read-only</span>}
+            {/* Keep asynchronous version details in the tools cluster. */}
             {currentVersion && (
               <VersionBadge currentVersion={currentVersion} latestVersion={latestVersion} channel={channel} versionDetail={versionDetail} updateAvailable={updateAvailable} updating={updating} restarting={restarting} showTooltip={showTooltip} triggerUpdate={triggerUpdate} setShowTooltip={setShowTooltip} />
             )}
-            <ReportIssueButton />
+            {!readonly && <StewardButton />}
+            {!readonly && <ReportIssueButton />}
             <a
               href="https://github.com/zhoushoujianwork/clawflow"
               target="_blank"
@@ -190,7 +156,7 @@ function AppLayout() {
                 />
               </svg>
             </a>
-            <SyncPopover />
+            {!readonly && <SyncPopover />}
             <button
               onClick={toggle}
               className="w-7 h-7 flex items-center justify-center rounded-sm transition-colors"
@@ -201,12 +167,15 @@ function AppLayout() {
             </button>
           </div>
         </header>
-        <main>
-          <Outlet />
+        <main id="main-content" className="app-content" data-page={pathname} tabIndex={-1}>
+          {!sessionReady ? <p className="p-6">Loading session…</p> :
+            readonly && !allowedPage ? <p className="p-6">This page requires local access. <Link to="/pipeline">Open Work</Link></p> :
+            <Outlet />}
         </main>
-        <ChatDrawer />
+        {!readonly && <ChatDrawer />}
       </div>
     </ChatProvider>
+    </ReadOnlyContext.Provider>
   )
 }
 
@@ -239,4 +208,33 @@ function ReportIssueButton() {
       </svg>
     </button>
   )
+}
+
+function StewardButton() {
+  const { open } = useChatDrawer()
+  return <button onClick={() => { void open({ pilot: true }) }}
+    className="px-2 py-1 text-xs rounded-sm hover:opacity-80"
+    aria-label="与平台 steward 对话" title="与平台 steward 对话">Steward</button>
+}
+
+type ShellDestination = '/pipeline' | '/usage' | '/repos' | '/projects' | '/operators' | '/settings'
+
+function ShellLink({ to, children }: { to: ShellDestination; children: ReactNode }) {
+  return <Link to={to} className="shell-link" activeProps={{ 'aria-current': 'page' }}>{children}</Link>
+}
+
+function NavigationGroup({ label, active, pathname, children }: { label: string; active: boolean; pathname: string; children: ReactNode }) {
+  const ref = useRef<HTMLDetailsElement>(null)
+  useEffect(() => { if (ref.current) ref.current.open = false }, [pathname])
+  return <details ref={ref} className="nav-group" onBlur={event => {
+    if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false
+  }} onKeyDown={event => {
+    if (event.key === 'Escape' && ref.current) {
+      ref.current.open = false
+      ref.current.querySelector('summary')?.focus()
+    }
+  }}>
+    <summary className="shell-link" data-active={active || undefined}>{label}</summary>
+    <div className="nav-group-links">{children}</div>
+  </details>
 }

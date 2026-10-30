@@ -162,11 +162,7 @@ to clean them up.`,
   # Remove all analysis + orphan Claude worktrees
   clawflow worktree prune`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return fmt.Errorf("home dir: %w", err)
-			}
-			wtRoot := filepath.Join(home, ".clawflow", "worktrees")
+			wtRoot := filepath.Join(config.StateDir(), "worktrees")
 
 			slugDirs, err := os.ReadDir(wtRoot)
 			if err != nil {

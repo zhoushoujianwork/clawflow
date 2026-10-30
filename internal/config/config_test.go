@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -70,4 +72,66 @@ func TestParseRepoInput(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCoordinatorDefaults(t *testing.T) {
+	var settings config.Settings
+	if settings.Coordinator.Enabled || settings.Coordinator.ListenAddress() != ":8093" {
+		t.Fatalf("unexpected coordinator defaults: %+v", settings.Coordinator)
+	}
+	settings.Coordinator.Listen = "127.0.0.1:9999"
+	if settings.Coordinator.ListenAddress() != "127.0.0.1:9999" {
+		t.Fatal("explicit listener ignored")
+	}
+}
+
+func TestPilotAndCoordinatorSettingsRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	original := &config.Config{Settings: config.Settings{
+		Pilot:       config.PilotSettings{StallAfter: "45m"},
+		Coordinator: config.CoordinatorSettings{Enabled: true, Listen: "127.0.0.1:9999", LocalWorker: config.LocalWorkerSettings{Enabled: true, MaxParallel: 2, Tags: []string{"github", "macos"}}},
+	}}
+	if err := original.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Settings.Pilot != original.Settings.Pilot {
+		t.Fatalf("pilot settings lost: %+v", loaded.Settings.Pilot)
+	}
+	if !reflect.DeepEqual(loaded.Settings.Coordinator, original.Settings.Coordinator) {
+		t.Fatalf("coordinator settings lost: %+v", loaded.Settings.Coordinator)
+	}
+}
+
+func TestPlatformSettingsRemainMachineLocal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	local := &config.Config{Repos: map[string]config.Repo{}, Settings: config.Settings{Platform: config.PlatformSettings{URL: "https://platform.example", TokenFile: "/private/admin-token", Fingerprint: "pin"}}}
+	if err := local.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Settings.Platform != local.Settings.Platform {
+		t.Fatal("platform settings did not round trip")
+	}
+	data, err := config.MarshalForGist(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("platform.example")) || bytes.Contains(data, []byte("admin-token")) || bytes.Contains(data, []byte("fingerprint")) {
+		t.Fatal("platform connection leaked into sync")
+	}
+	merged, err := config.MergeConfigs(local, []byte("settings:\n  platform:\n    url: https://untrusted.example\n    token_file: /untrusted\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Settings.Platform != local.Settings.Platform {
+		t.Fatal("sync replaced local platform trust")
+	}
+
 }

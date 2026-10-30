@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,7 +19,9 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
@@ -33,7 +34,8 @@ import (
 // after the replacement restores <path>.prev.
 
 const (
-	selfUpgradeTimeout = 30 * time.Minute
+	selfUpgradeTimeout      = 30 * time.Minute
+	upgradeMigrationTimeout = 5 * time.Minute
 )
 
 var fullSHARE = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -50,6 +52,14 @@ type selfUpgradeOutcome struct {
 	From, To string
 	Result   string
 	Reason   string
+	Detail   string
+}
+
+func (out selfUpgradeOutcome) description() string {
+	if out.Detail != "" {
+		return out.Reason + ": " + out.Detail
+	}
+	return out.Reason
 }
 
 // mergeLedger records, per pass, the repositories where ClawFlow confirmed a
@@ -105,18 +115,31 @@ type selfUpgrader struct {
 	// Lock takes the local upgrade lock; ok=false means another upgrade holds it.
 	Lock func() (release func(), ok bool, err error)
 
-	MkdirTemp func(dir, pattern string) (string, error)
-	RemoveAll func(path string) error
-	Stat      func(path string) (os.FileInfo, error)
-	Copy      func(src, dst string, mode os.FileMode) error
-	Rename    func(oldpath, newpath string) error
-	Remove    func(path string) error
+	DiskProbe    func(string) (housekeeping.Disk, error)
+	Housekeeping func(context.Context)
+	MinFreeBytes uint64
+	MkdirTemp    func(dir, pattern string) (string, error)
+	RemoveAll    func(path string) error
+	Stat         func(path string) (os.FileInfo, error)
+	Copy         func(src, dst string, mode os.FileMode) error
+	Rename       func(oldpath, newpath string) error
+	Remove       func(path string) error
 }
 
 func newSelfUpgrader() *selfUpgrader {
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = &config.Config{}
+	}
+	limits := cfg.Settings.Housekeeping.Limits()
 	return &selfUpgrader{
-		Version: Version,
-		Commit:  installedCommit(),
+		Version:      Version,
+		MinFreeBytes: limits.MinFreeBytes,
+		DiskProbe: func(path string) (housekeeping.Disk, error) {
+			return housekeeping.Probe(path, limits.DiskWarningPercent)
+		},
+		Housekeeping: func(ctx context.Context) { runHousekeeping(ctx, cfg, false) },
+		Commit:       installedCommit(),
 		Executable: func() (string, error) {
 			exe, err := os.Executable()
 			if err != nil {
@@ -188,45 +211,29 @@ func selfUpgradeLockPath() string {
 	return filepath.Join(snapshot.LockDir(), "self-upgrade.lock")
 }
 
-// selfUpgradeLockMu serializes create/write/reclaim within this process.
-// O_EXCL alone exposes an empty file before its owner PID has been written.
+// selfUpgradeLockMu serializes descriptor publication and release.
 var selfUpgradeLockMu sync.Mutex
 
-// acquireSelfUpgradeLock takes an O_EXCL lockfile holding the owner PID.
-// A lock whose owner is dead is reclaimed.
 func acquireSelfUpgradeLock() (func(), bool, error) {
 	selfUpgradeLockMu.Lock()
 	defer selfUpgradeLockMu.Unlock()
-	path := selfUpgradeLockPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	f, err := filelock.Try(selfUpgradeLockPath(), snapshot.RunLockInfo{
+		PID: os.Getpid(), StartedAt: time.Now().UTC(), Version: Version,
+	})
+	if errors.Is(err, filelock.ErrHeld) {
+		return nil, false, nil
+	}
+	if err != nil {
 		return nil, false, err
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil {
-			_, werr := fmt.Fprintf(f, "%d\n", os.Getpid())
-			cerr := f.Close()
-			if werr != nil || cerr != nil {
-				_ = os.Remove(path)
-				return nil, false, errors.Join(werr, cerr)
-			}
-			return func() {
-				selfUpgradeLockMu.Lock()
-				defer selfUpgradeLockMu.Unlock()
-				_ = os.Remove(path)
-			}, true, nil
-		}
-		if !os.IsExist(err) {
-			return nil, false, err
-		}
-		data, rerr := os.ReadFile(path)
-		pid, perr := strconv.Atoi(strings.TrimSpace(string(data)))
-		if rerr == nil && perr == nil && pidAlive(pid) {
-			return nil, false, nil
-		}
-		_ = os.Remove(path) // stale or unreadable: reclaim and retry once
-	}
-	return nil, false, nil
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			selfUpgradeLockMu.Lock()
+			defer selfUpgradeLockMu.Unlock()
+			filelock.Release(f)
+		})
+	}, true, nil
 }
 
 // copyExecutable copies src to dst with mode and fsyncs it.
@@ -367,6 +374,17 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 	}
 	mode := info.Mode().Perm() | 0o111
 
+	// The build and Go temporary outputs live on the temp volume; the source
+	// and destination may be on separate volumes. Reclaim before allocating.
+	if err := u.ensureDisk(ctx, localPath, filepath.Dir(dest), os.TempDir()); err != nil {
+		out.Detail = err.Error()
+		return skip("insufficient_disk")
+	}
+	releaseMaintenance, err := housekeeping.Gate(ctx, os.TempDir(), false)
+	if err != nil {
+		return fail("protect upgrade workspace: %v", err)
+	}
+	defer releaseMaintenance()
 	tmp, err := u.MkdirTemp("", "clawflow-selfupgrade-*")
 	if err != nil {
 		return fail("create temp dir: %v", err)
@@ -420,6 +438,12 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 		return fail("candidate execution check: %v", checkErr)
 	}
 
+	// Migrate with the candidate while the installed binary is still intact.
+	if err := u.migrateCandidate(ctx, candidate); err != nil {
+		out.Reason, out.Detail = "migrate", err.Error()
+		return out
+	}
+
 	// 4. Replace atomically; keep the previous binary as <path>.prev.
 	prev := dest + ".prev"
 	staged := dest + ".new"
@@ -454,6 +478,21 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 
 	out.Result, out.Reason = selfUpgradeUpgraded, ""
 	return out
+}
+
+// migrateCandidate applies the candidate's registry before any binary replacement.
+// Older processes remain live, so migrations must be expand-only.
+func (u *selfUpgrader) migrateCandidate(ctx context.Context, candidate string) error {
+	ctx, cancel := context.WithTimeout(ctx, upgradeMigrationTimeout)
+	defer cancel()
+	_, err := u.Run(ctx, filepath.Dir(candidate), candidate, "db", "migrate")
+	if ctx.Err() != nil {
+		return fmt.Errorf("candidate db migrate: %w", ctx.Err())
+	}
+	if err != nil {
+		return fmt.Errorf("candidate db migrate: %w", err)
+	}
+	return nil
 }
 
 // verifyVersion checks that `<bin> version` prints want on its first line.
@@ -530,10 +569,13 @@ func runSelfUpgradePhase(ctx context.Context, cfg *config.Config, u *selfUpgrade
 		if res.Reason != "" {
 			fields = append(fields, "reason", res.Reason)
 		}
+		if res.Detail != "" {
+			fields = append(fields, "detail", res.Detail)
+		}
 		switch res.Result {
 		case selfUpgradeFailed:
 			runLog.Warn("run/self_upgrade", fields...)
-			fmt.Fprintf(os.Stderr, "[%s] ⚠ self-upgrade failed: %s\n", repo, res.Reason)
+			fmt.Fprintf(os.Stderr, "[%s] ⚠ self-upgrade failed: %s\n", repo, res.description())
 			return []firedKey{{Repo: repo, Operator: "self_upgrade"}}
 		case selfUpgradeSkipped:
 			runLog.Info("run/self_upgrade", fields...)
@@ -545,4 +587,27 @@ func runSelfUpgradePhase(ctx context.Context, cfg *config.Config, u *selfUpgrade
 		}
 	}
 	return nil
+}
+
+// ensureDisk fails closed when a volume cannot be probed. Tests inject the probe.
+func (u *selfUpgrader) ensureDisk(ctx context.Context, paths ...string) error {
+	check := func() error {
+		for _, path := range paths {
+			disk, err := u.DiskProbe(path)
+			if err != nil {
+				return fmt.Errorf("free-space probe unavailable: %w", err)
+			}
+			if disk.Available < u.MinFreeBytes {
+				return fmt.Errorf("available %d bytes; require %d bytes", disk.Available, u.MinFreeBytes)
+			}
+		}
+		return nil
+	}
+	if err := check(); err == nil {
+		return nil
+	}
+	if u.Housekeeping != nil {
+		u.Housekeeping(ctx)
+	}
+	return check()
 }

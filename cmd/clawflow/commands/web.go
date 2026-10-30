@@ -22,8 +22,10 @@ import (
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 	"github.com/zhoushoujianwork/clawflow/internal/gitsync"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
+	"github.com/zhoushoujianwork/clawflow/internal/pilot"
 	ptyserver "github.com/zhoushoujianwork/clawflow/internal/pty"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/webguard"
@@ -42,19 +44,39 @@ var webLog *clog.Logger
 // startup refreshes (repos/projects/operators) right here.
 func NewWebCmd() *cobra.Command {
 	var (
-		port     int
-		host     string
-		openFlag bool
+		port       int
+		host       string
+		openFlag   bool
+		remote     string
+		allowCIDRs []string
 	)
 	cmd := &cobra.Command{
-		Use:   "web",
-		Short: "Serve the local ClawFlow dashboard on localhost",
+		Use:     "web",
+		Short:   "Serve the local ClawFlow dashboard on localhost",
+		Example: "  clawflow web --host 0.0.0.0 --remote readonly --allow-cidr 192.168.0.0/16",
 		Long: `Starts a tiny static file server at http://<host>:<port>/ backed by
 ~/.clawflow/dashboard/. The dashboard renders snapshots written by
 previous 'clawflow run' invocations (repos.json, operators.json,
-runs.json, plus per-run events.jsonl for replay). No VCS calls happen
+PostgreSQL run history, plus per-run events.jsonl for replay). No VCS calls happen
 here — run 'clawflow run' first if you want fresh data.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			lock, err := controllerLock()
+			if err != nil {
+				return err
+			}
+			defer filelock.Release(lock)
+			remotePolicy, err := webguard.NewRemotePolicy(remote, allowCIDRs)
+			if err != nil {
+				return err
+			}
+			// PostgreSQL is required: fail fast before touching any state
+			// or binding the port.
+			release, err := gateStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer release()
+
 			// Migrate legacy ~/.clawflow/dashboard/data/ → ~/.clawflow/data/
 			// for installs upgrading from the pre-split layout. No-op for
 			// fresh installs.
@@ -148,7 +170,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 
 			// Reconcile any "running" entries left over from an
 			// interrupted `clawflow run` (Ctrl-C, SIGTERM, machine
-			// sleep), then regenerate runs.json from the cleaned tree.
+			// sleep), updating their PostgreSQL rows.
 			// Without this, restarting the dashboard would still show a
 			// frozen "running" row pointing at a long-dead process —
 			// and any deleted run dirs would linger in the index until
@@ -186,27 +208,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 				fmt.Fprintf(os.Stderr, "✓ pruned %d stale pending entr(ies)\n", n)
 				lg.Info("web/prune_pending", "removed", n)
 			}
-			if _, err := snapshot.WriteRunsIndex(50); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠ snapshot runs index on startup: %v\n", err)
-			}
-			// Regenerate usage.json with period data on startup so the
-			// dashboard has fresh billing breakdowns without waiting for
-			// the next `clawflow run`.
-			if allEntries, err := snapshot.WriteRunsIndex(0); err == nil {
-				billingDay := 1
-				if cfg, err := config.Load(); err == nil {
-					billingDay = cfg.Settings.BillingCycleDay
-				}
-				// Merge Pilot wakes in — they are the priciest runs and
-				// were absent from usage.json entirely (issue #321).
-				if err := snapshot.WriteUsageSummary(snapshot.UsageEntriesWithPilot(allEntries), billingDay); err != nil {
-					fmt.Fprintf(os.Stderr, "⚠ snapshot usage summary on startup: %v\n", err)
-				}
-			}
 
 			// Background reconcile: every minute, sweep for orphaned
 			// running entries (events.jsonl gone quiet for >2 min) and
-			// regenerate runs.json so the dashboard's poll picks up the
+			// persist changed rows so the dashboard's poll picks up the
 			// flip. Without this loop, an interrupt taken AFTER web
 			// starts wouldn't be reflected until the next `clawflow run`
 			// or web restart.
@@ -221,7 +226,6 @@ here — run 'clawflow run' first if you want fresh data.`,
 					}
 					if n > 0 {
 						fmt.Fprintf(os.Stderr, "✓ reconciled %d orphaned run(s)\n", n)
-						_, _ = snapshot.WriteRunsIndex(50)
 					}
 					// Logged unconditionally (n=0 is the steady state) so
 					// the user can confirm the ticker is alive at all.
@@ -272,7 +276,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// disk extraction. fs.Sub strips the `web/dist/` prefix so
 			// requests for `/assets/foo.js` map to `web/dist/assets/foo.js`
 			// inside the embed.
-			spaFS, err := fs.Sub(rootmod.EmbeddedDashboard, "web/dist")
+			spaFS, err := fs.Sub(rootmod.EmbeddedDashboard, rootmod.DashboardRoot)
 			if err != nil {
 				return fmt.Errorf("embedded SPA fs: %w", err)
 			}
@@ -287,10 +291,13 @@ here — run 'clawflow run' first if you want fresh data.`,
 			}
 			dataFsrv := http.FileServer(http.Dir(dataDir))
 			mux := http.NewServeMux()
+			mux.HandleFunc("/api/session", remotePolicy.Session)
 			mux.Handle("/data/", http.StripPrefix("/data/", dataFsrv))
 			mux.HandleFunc("/ws/pty", ptyserver.HandlePTY)
 			mux.HandleFunc("/api/labels/add", api.HandleAddLabel)
 			mux.HandleFunc("/api/labels/remove", api.HandleRemoveLabel)
+			mux.HandleFunc("/api/runs", api.HandleRuns)
+			mux.HandleFunc("/api/usage", api.HandleUsage)
 			mux.HandleFunc("/api/run", api.HandleRun)
 			mux.HandleFunc("/api/run/status", api.HandleRunStatus)
 			mux.HandleFunc("/api/run/stream", api.HandleRunStream)
@@ -358,6 +365,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/project/generate-deployment/status", api.HandleProjectGenerateDeploymentStatus)
 			mux.HandleFunc("/api/project/automation", api.HandleProjectAutomation)
 			mux.HandleFunc("/api/project/bind", api.HandleProjectBind)
+			mux.HandleFunc("/api/pilot/schedules", api.HandleScheduledChecks)
 			mux.HandleFunc("/api/project/pilot/wake", api.HandlePilotWake)
 			mux.HandleFunc("/api/project/pilot/stream", api.HandlePilotStream)
 			mux.HandleFunc("/api/project/get", api.HandleProjectGet)
@@ -405,14 +413,15 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// the WS path can't drift looser than the HTTP path.
 			guard := webguard.New(host, port)
 			ptyserver.ConfigureOriginGuard(host, port)
-			if webguard.IsWildcardHost(host) {
+			fmt.Fprintf(os.Stderr, "Web remote mode: %s\n", remote)
+			if webguard.IsWildcardHost(host) && remote == "off" {
 				fmt.Fprintf(os.Stderr, "⚠ binding %s exposes the dashboard beyond loopback; Host-header rebinding protection is disabled for this bind (Origin/CSRF checks still apply)\n", addr)
 				lg.Warn("web/host_unguarded", "host", host, "port", port)
 			}
 
 			srv := &http.Server{
 				Addr:              addr,
-				Handler:           guard.Middleware(mux),
+				Handler:           remotePolicy.Middleware(guard.Middleware(mux)),
 				ReadHeaderTimeout: 5 * time.Second,
 			}
 
@@ -437,7 +446,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 					fmt.Fprintf(os.Stderr, "respawn: locate self: %v\n", err)
 					return
 				}
-				helper := exec.Command(self, "__respawn", "--addr", addr) //nolint:gosec
+				helper := exec.Command(self, append([]string{"__respawn", "--addr", addr}, remoteArgs(remote, allowCIDRs)...)...) //nolint:gosec
 				helper.Stdin = nil
 				helper.Stdout = os.Stdout
 				helper.Stderr = os.Stderr
@@ -472,11 +481,26 @@ here — run 'clawflow run' first if you want fresh data.`,
 				return err
 			}
 
+			defer ln.Close()
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			coordinatorErrors := make(chan error, 1)
+			stopCoordinator, err := startCoordinator(cmd.Context(), cfg.Settings.Coordinator, cmd.ErrOrStderr(), func(err error) {
+				coordinatorErrors <- err
+				_ = srv.Close()
+			})
+			if err != nil {
+				return fmt.Errorf("start coordinator: %w", err)
+			}
+			defer stopCoordinator()
+
 			// Record this instance in the pid file so `clawflow web restart`
 			// (and future invocations that hit a busy port) know who owns
 			// the dashboard. Best-effort — a write failure shouldn't block
 			// serving, it just degrades the restart UX.
-			if err := writeWebPid(webPidInfo{PID: os.Getpid(), Host: host, Port: port, StartedAt: time.Now(), ServiceName: os.Getenv("XPC_SERVICE_NAME")}); err != nil {
+			if err := writeWebPid(webPidInfo{PID: os.Getpid(), Host: host, Port: port, Remote: remote, AllowCIDRs: allowCIDRs, StartedAt: time.Now(), ServiceName: os.Getenv("XPC_SERVICE_NAME")}); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠ write pid file: %v\n", err)
 			}
 			defer removeWebPid()
@@ -504,11 +528,18 @@ here — run 'clawflow run' first if you want fresh data.`,
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				return err
 			}
-			return nil
+			select {
+			case err := <-coordinatorErrors:
+				return fmt.Errorf("coordinator: %w", err)
+			default:
+				return nil
+			}
 		},
 	}
 	cmd.Flags().IntVar(&port, "port", 8090, "TCP port to bind")
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host/IP to bind — 127.0.0.1 by default so the dashboard stays off the LAN")
+	cmd.Flags().StringVar(&remote, "remote", "off", "remote access: off or readonly")
+	cmd.Flags().StringArrayVar(&allowCIDRs, "allow-cidr", nil, "allowed remote client CIDR (repeatable; requires --remote readonly)")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the dashboard in your default browser")
 	cmd.AddCommand(newWebRestartCmd(), newWebServiceCmd())
 	return cmd
@@ -531,6 +562,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 // fancy ticker reset logic. 30s is also fine-grained enough that the
 // dashboard countdown (`next in M:SS`) never lags noticeably.
 func runPeriodicScheduler() {
+	runPeriodicSchedulerContext(context.Background())
+}
+
+func runPeriodicSchedulerContext(ctx context.Context) {
 	const checkEvery = 30 * time.Second
 	tick := time.NewTicker(checkEvery)
 	defer tick.Stop()
@@ -538,11 +573,43 @@ func runPeriodicScheduler() {
 	hostname, _ := os.Hostname()
 	// lastFire is per repo so a repo whose pass is still running (or that
 	// finished early) never makes the others wait or fire again.
+	checkStore, err := pilot.OpenCheckStore(ctx)
+	if err != nil {
+		webLog.Info("web/scheduled_checks_unavailable")
+	}
+	defer func() {
+		if checkStore != nil {
+			checkStore.Close()
+		}
+	}()
 	lastFire := map[string]time.Time{}
-	for range tick.C {
+	lastCheckMinute := time.Now().Truncate(time.Minute)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		now := time.Now()
+		if minute := now.Truncate(time.Minute); minute.After(lastCheckMinute) {
+			lastCheckMinute = minute
+			if checkStore == nil {
+				checkStore, err = pilot.OpenCheckStore(ctx)
+			}
+			if checkStore != nil {
+				if err := pilot.TickChecks(ctx, checkStore, now); err != nil {
+					webLog.Info("web/scheduled_checks_error")
+				}
+			}
+		}
 		cfg, err := config.Load()
 		if err != nil {
 			api.SetSchedulerNextFire(time.Time{})
+			continue
+		}
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			api.SetSchedulerNextFire(time.Time{})
+			fmt.Fprintln(os.Stderr, err)
 			continue
 		}
 		interval := cfg.Settings.RunIntervalMinutes
@@ -576,7 +643,7 @@ func runPeriodicScheduler() {
 		// Time to fire. Repos with an active pass, and repos beyond the
 		// max_concurrent_agents cap, are skipped and retried next tick.
 		started, _ := api.TriggerScheduledRuns(cfg, hostname, due)
-		now := time.Now()
+		now = time.Now()
 		for _, repo := range started {
 			lastFire[repo] = now
 			fmt.Fprintf(os.Stderr, "[scheduler] auto-fire %s at %s (next in %s)\n",
@@ -644,6 +711,8 @@ func openBrowser(url string) {
 // in-use port read it to figure out whether the process holding the port
 // is our own — in which case replacing it is safe.
 type webPidInfo struct {
+	Remote      string    `json:"remote,omitempty"`
+	AllowCIDRs  []string  `json:"allow_cidrs,omitempty"`
 	ServiceName string    `json:"service_name,omitempty"`
 	PID         int       `json:"pid"`
 	Host        string    `json:"host"`
@@ -745,12 +814,12 @@ a fresh web instance.`,
 			info, ok := readWebPid()
 			if !ok {
 				fmt.Fprintln(os.Stderr, "no running clawflow web found (no pid file); starting a fresh instance")
-				return execSelfWeb("127.0.0.1", 8090)
+				return execSelfWeb(webPidInfo{Host: "127.0.0.1", Port: 8090})
 			}
 			if !pidAlive(info.PID) {
 				fmt.Fprintf(os.Stderr, "pid file points at pid %d but it is not running; cleaning up and starting fresh\n", info.PID)
 				removeWebPid()
-				return execSelfWeb(info.Host, info.Port)
+				return execSelfWeb(info)
 			}
 			if !isClawflowProcess(info.PID) {
 				return fmt.Errorf("pid %d in pid file is not a clawflow process; refusing to signal it\n  remove %s manually if you're sure it's stale", info.PID, webPidPath())
@@ -767,11 +836,26 @@ a fresh web instance.`,
 // replacing this process in place via syscall.Exec. The user sees one
 // continuous process lineage rather than `web restart` exiting and them
 // having to relaunch `web`.
-func execSelfWeb(host string, port int) error {
+func execSelfWeb(info webPidInfo) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	argv := []string{"clawflow", "web", "--host", host, "--port", strconv.Itoa(port)}
+	argv := webArgs(info)
 	return syscall.Exec(self, argv, os.Environ())
+}
+
+func remoteArgs(mode string, cidrs []string) []string {
+	if mode == "" {
+		mode = "off"
+	}
+	args := []string{"--remote", mode}
+	for _, cidr := range cidrs {
+		args = append(args, "--allow-cidr", cidr)
+	}
+	return args
+}
+
+func webArgs(info webPidInfo) []string {
+	return append([]string{"clawflow", "web", "--host", info.Host, "--port", strconv.Itoa(info.Port)}, remoteArgs(info.Remote, info.AllowCIDRs)...)
 }

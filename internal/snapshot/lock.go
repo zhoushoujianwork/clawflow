@@ -9,12 +9,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 )
 
-// lockFileMu serializes lockfile creation, publication, reclamation and removal
-// within this process. O_EXCL only makes creation atomic: another goroutine
-// must not mistake a not-yet-written payload for a corrupt lock and remove it.
-// This mutex is held for filesystem operations, never for the protected work.
+// lockFileMu protects the process-owned descriptor registry.
 var lockFileMu sync.Mutex
 
 // LockInfo is the JSON payload written to each lockfile.
@@ -28,8 +27,7 @@ type LockInfo struct {
 
 // LockDir returns ~/.clawflow/locks/.
 func LockDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "locks")
+	return filepath.Join(StateDir(), "locks")
 }
 
 // LockPath returns the lockfile path for a (repo, issue) pair.
@@ -38,110 +36,21 @@ func LockPath(repo string, issueNum int) string {
 	return filepath.Join(LockDir(), slug, fmt.Sprintf("issue-%d.lock", issueNum))
 }
 
-// AcquireLock creates a lockfile for the given (repo, issue). Returns nil
-// on success, an error if the lock is already held by a live process.
-// Stale locks (owner PID is dead) are automatically reclaimed.
-//
-// The lockfile is created exclusively; in-process acquisition and reclamation
-// are serialized through lockFileMu.
+// AcquireLock holds a kernel lock until ReleaseLock.
 func AcquireLock(repo string, issueNum int, operatorName string) error {
-	lockFileMu.Lock()
-	defer lockFileMu.Unlock()
-
-	path := LockPath(repo, issueNum)
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir lock dir: %w", err)
-	}
-
-	info := LockInfo{
-		PID:       os.Getpid(),
-		StartedAt: time.Now().UTC(),
-		Operator:  operatorName,
-		Repo:      repo,
-		Issue:     issueNum,
-	}
-	data, err := json.Marshal(info)
-	if err != nil {
-		return err
-	}
-
-	// First attempt: O_CREATE|O_EXCL is atomic — only one caller wins.
-	if err := writeExclusive(path, data); err == nil {
-		return nil
-	} else if !os.IsExist(err) {
-		return fmt.Errorf("create lockfile: %w", err)
-	}
-
-	// Lock file already exists. Check whether the owner is still alive.
-	existing, readErr := ReadLock(path)
-	if readErr != nil {
-		// Unreadable/corrupt lockfile — try to remove and re-acquire once.
-		_ = os.Remove(path)
-		if err2 := writeExclusive(path, data); err2 != nil {
-			if os.IsExist(err2) {
-				return fmt.Errorf("lock already held by another process")
-			}
-			return fmt.Errorf("create lockfile: %w", err2)
-		}
-		return nil
-	}
-
-	if processAlive(existing.PID) {
-		return fmt.Errorf("locked by PID %d (operator %s, since %s)",
-			existing.PID, existing.Operator, existing.StartedAt.Format(time.RFC3339))
-	}
-
-	// Stale lock — owner is dead. Remove it and retry exclusive creation.
-	_ = os.Remove(path)
-	if err2 := writeExclusive(path, data); err2 != nil {
-		if os.IsExist(err2) {
-			// Another process won the reclaim race — report the new owner.
-			if info2, readErr2 := ReadLock(path); readErr2 == nil {
-				return fmt.Errorf("locked by PID %d (operator %s, since %s)",
-					info2.PID, info2.Operator, info2.StartedAt.Format(time.RFC3339))
-			}
-			return fmt.Errorf("lock already held by another process")
-		}
-		return fmt.Errorf("create lockfile: %w", err2)
-	}
-	return nil
+	return acquireFileLock(LockPath(repo, issueNum), LockInfo{
+		PID: os.Getpid(), StartedAt: time.Now().UTC(), Operator: operatorName, Repo: repo, Issue: issueNum,
+	})
 }
 
-// writeExclusive exclusively creates path, then writes data to it using
-// O_CREATE|O_EXCL. Creation and payload publication are separate operations.
-// Returns os.ErrExist (via os.IsExist) if the file already exists.
-func writeExclusive(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	_, werr := f.Write(data)
-	cerr := f.Close()
-	if werr != nil {
-		return werr
-	}
-	return cerr
-}
+// ReleaseLock releases only a descriptor acquired by this process.
+func ReleaseLock(repo string, issueNum int) { releasePIDLock(LockPath(repo, issueNum)) }
 
-// ReleaseLock removes the lockfile for the given (repo, issue). No-op if
-// the file doesn't exist.
-func ReleaseLock(repo string, issueNum int) {
-	lockFileMu.Lock()
-	defer lockFileMu.Unlock()
+// IsLocked checks kernel ownership (or a live legacy PID).
+func IsLocked(repo string, issueNum int) bool { return LockHeld(LockPath(repo, issueNum)) }
 
-	_ = os.Remove(LockPath(repo, issueNum))
-}
-
-// IsLocked reports whether a live lock exists for the given (repo, issue).
-// Returns false if the lockfile is missing or the owner PID is dead.
-func IsLocked(repo string, issueNum int) bool {
-	info, err := ReadLock(LockPath(repo, issueNum))
-	if err != nil {
-		return false
-	}
-	return processAlive(info.PID)
-}
+// LockHeld reports ownership without relying on the informational PID.
+func LockHeld(path string) bool { return filelock.Held(path) }
 
 // ReadLock parses a lockfile. Returns an error if the file doesn't exist
 // or can't be parsed.
@@ -157,35 +66,9 @@ func ReadLock(path string) (*LockInfo, error) {
 	return &info, nil
 }
 
-// CleanStaleLocks walks the locks directory and removes any lockfile whose
-// owner PID is no longer running. Called by ReconcileStaleRuns.
-func CleanStaleLocks() int {
-	lockFileMu.Lock()
-	defer lockFileMu.Unlock()
-
-	lockDir := LockDir()
-	if _, err := os.Stat(lockDir); os.IsNotExist(err) {
-		return 0
-	}
-	cleaned := 0
-	_ = filepath.WalkDir(lockDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || filepath.Ext(path) != ".lock" {
-			return nil
-		}
-		info, err := ReadLock(path)
-		if err != nil {
-			_ = os.Remove(path)
-			cleaned++
-			return nil
-		}
-		if !processAlive(info.PID) {
-			_ = os.Remove(path)
-			cleaned++
-		}
-		return nil
-	})
-	return cleaned
-}
+// CleanStaleLocks is retained for callers; kernel locks need no reclamation.
+// Persistent lockfiles must never be removed, even when their owner is dead.
+func CleanStaleLocks() int { return 0 }
 
 // processAlive checks whether a process with the given PID is still running.
 // On Unix, sending signal 0 checks existence without affecting the process.
@@ -217,79 +100,17 @@ func RunLockPath() string {
 	return filepath.Join(LockDir(), "run.lock")
 }
 
-// AcquireRunLock acquires the process-level single-instance lock for
-// `clawflow run`. Returns nil on success. If another live clawflow run
-// process holds the lock, returns an error containing the holder's PID
-// and start time so the caller can log a meaningful skip message.
-// Stale locks (owner PID is dead) are automatically reclaimed using the
-// same O_CREATE|O_EXCL + PID-liveness pattern as AcquireLock.
+// AcquireRunLock acquires the legacy global run lock.
 func AcquireRunLock(version string) error {
-	lockFileMu.Lock()
-	defer lockFileMu.Unlock()
-
-	path := RunLockPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir lock dir: %w", err)
+	holder, err := acquirePIDLock(RunLockPath(), RunLockInfo{PID: os.Getpid(), StartedAt: time.Now().UTC(), Version: version})
+	if holder != nil {
+		return runLockHeldError(holder)
 	}
-
-	info := RunLockInfo{
-		PID:       os.Getpid(),
-		StartedAt: time.Now().UTC(),
-		Version:   version,
-	}
-	data, err := json.Marshal(info)
-	if err != nil {
-		return err
-	}
-
-	// First attempt: O_CREATE|O_EXCL is atomic — only one caller wins.
-	if err := writeExclusive(path, data); err == nil {
-		return nil
-	} else if !os.IsExist(err) {
-		return fmt.Errorf("create run lockfile: %w", err)
-	}
-
-	// Lock file already exists. Check whether the owner is still alive.
-	existing, readErr := ReadRunLock()
-	if readErr != nil {
-		// Unreadable/corrupt lockfile — remove and retry once.
-		_ = os.Remove(path)
-		if err2 := writeExclusive(path, data); err2 != nil {
-			if os.IsExist(err2) {
-				return fmt.Errorf("run lock already held by another process")
-			}
-			return fmt.Errorf("create run lockfile: %w", err2)
-		}
-		return nil
-	}
-
-	if processAlive(existing.PID) {
-		return fmt.Errorf("another clawflow run is active (pid=%d, started=%s)",
-			existing.PID, existing.StartedAt.Format(time.RFC3339))
-	}
-
-	// Stale lock — owner is dead. Remove it and retry exclusive creation.
-	_ = os.Remove(path)
-	if err2 := writeExclusive(path, data); err2 != nil {
-		if os.IsExist(err2) {
-			if info2, readErr2 := ReadRunLock(); readErr2 == nil {
-				return fmt.Errorf("another clawflow run is active (pid=%d, started=%s)",
-					info2.PID, info2.StartedAt.Format(time.RFC3339))
-			}
-			return fmt.Errorf("run lock already held by another process")
-		}
-		return fmt.Errorf("create run lockfile: %w", err2)
-	}
-	return nil
+	return err
 }
 
-// ReleaseRunLock removes the process-level run lockfile. No-op if missing.
-func ReleaseRunLock() {
-	lockFileMu.Lock()
-	defer lockFileMu.Unlock()
-
-	_ = os.Remove(RunLockPath())
-}
+// ReleaseRunLock unlocks and closes the owned descriptor.
+func ReleaseRunLock() { releasePIDLock(RunLockPath()) }
 
 // ReadRunLock parses the run lockfile. Returns an error if the file doesn't
 // exist or can't be parsed.

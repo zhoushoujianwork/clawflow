@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -215,6 +214,10 @@ func resetIdle(ownRunLock bool) error {
 		if err != nil {
 			return err
 		}
+		var protocol struct{ Protocol string }
+		if json.Unmarshal(data, &protocol) == nil && protocol.Protocol == "flock" && !snapshot.LockHeld(path) {
+			return nil
+		}
 		var lock struct {
 			PID int `json:"pid"`
 		}
@@ -224,8 +227,7 @@ func resetIdle(ownRunLock bool) error {
 		if ownRunLock && path == snapshot.RunLockPath() && lock.PID == os.Getpid() {
 			return nil
 		}
-		err = syscall.Kill(lock.PID, 0)
-		if !errors.Is(err, syscall.ESRCH) {
+		if snapshot.LockHeld(path) {
 			return fmt.Errorf("active or inaccessible lock %s (pid %d)", path, lock.PID)
 		}
 		return nil

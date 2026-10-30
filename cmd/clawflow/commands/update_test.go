@@ -3,12 +3,14 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
@@ -231,6 +233,8 @@ func TestDelayedReleaseCannotDowngradeInstalledBinary(t *testing.T) {
 		{name: "source ancestry uses installed commit", version: "v1.0.0", channel: "source", explicit: true, wantError: "refusing release downgrade"},
 		{name: "unknown version", version: "unknown", channel: "release", wantError: "refusing downgrade"},
 		{name: "shared lock busy", version: "v1.0.0", channel: "release", busy: true, wantError: "another upgrade"},
+		{name: "migration failure", version: "v1.0.0", channel: "release", wantError: "migration failed"},
+		{name: "no pending migrations", version: "v1.0.0", channel: "release"},
 		{name: "upgrade", version: "v1.0.0", channel: "release"},
 		{name: "explicit downgrade", version: "v3.0.0", channel: "release", allow: true},
 		{name: "explicit source downgrade", version: "v3.0.0", channel: "source", explicit: true, allow: true},
@@ -290,6 +294,8 @@ func TestDelayedReleaseCannotDowngradeInstalledBinary(t *testing.T) {
 			}
 			u := newSelfUpgrader()
 			u.Executable = func() (string, error) { return dest, nil }
+			migrationCalls := 0
+			pending := tc.name != "no pending migrations"
 			u.Run = func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 				// The installed identity must be read under the shared source lock.
 				release, ok, err := acquireSelfUpgradeLock()
@@ -300,6 +306,26 @@ func TestDelayedReleaseCannotDowngradeInstalledBinary(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if strings.Join(args, " ") == "db migrate" {
+					migrationCalls++
+					got, err := os.ReadFile(dest)
+					if err != nil || string(got) != installed || name == dest {
+						t.Fatal("migration ran after swap or used installed binary")
+					}
+					info, err := os.Stat(name)
+					if err != nil || info.Mode().Perm()&0111 == 0 {
+						t.Fatal("candidate is not executable")
+					}
+					deadline, ok := ctx.Deadline()
+					if !ok || time.Until(deadline) > upgradeMigrationTimeout {
+						t.Fatal("missing migration timeout")
+					}
+					if tc.name == "migration failure" {
+						return nil, errors.New("migration failed")
+					}
+					pending = false
+					return []byte("database is up to date"), nil
+				}
 				return runSelfUpgradeCmd(ctx, dir, name, args...)
 			}
 			err := u.downloadReleaseBinary(tc.explicit, tc.allow)
@@ -309,6 +335,16 @@ func TestDelayedReleaseCannotDowngradeInstalledBinary(t *testing.T) {
 				}
 			} else if err != nil {
 				t.Fatal(err)
+			}
+			if (tc.wantError == "" && tc.version != "v2.0.0") || tc.name == "migration failure" {
+				if migrationCalls != 1 {
+					t.Fatalf("migration calls=%d", migrationCalls)
+				}
+				if tc.wantError == "" && pending {
+					t.Fatal("pending migration not applied")
+				}
+			} else if migrationCalls != 0 {
+				t.Fatal("migration ran for a rejected or unchanged release")
 			}
 			want := "downloaded release"
 			if tc.wantError != "" || tc.version == "v2.0.0" {

@@ -21,9 +21,7 @@ type Evidence struct {
 	AutoMerge  bool
 	CIRequired bool
 
-	// Decision is the latest queue decision about this very issue, if any.
-	Decision *QueueDecision
-	InQueue  bool
+	InQueue bool
 
 	// Now is the evaluation time; a zero value treats retry times as future.
 	Now time.Time
@@ -101,17 +99,6 @@ func Derive(e Evidence) (Stage, string, []string) {
 		add("label agent-implemented")
 		return StageBlocked, "marked implemented but no pull request was found", ev
 	}
-	if d := e.Decision; d != nil {
-		add("queue %s: %s", d.Action, d.Reason)
-		switch d.Action {
-		case "blocked":
-			return StageBlocked, "queue blocked: " + d.Reason, ev
-		case "pick":
-			return StageQueued, "picked by the queue; waiting for the next run", ev
-		default:
-			return StageQueued, "waiting in the queue: " + d.Reason, ev
-		}
-	}
 	if e.InQueue {
 		return StageQueued, "waiting in the queue", ev
 	}
@@ -133,6 +120,21 @@ func derivePROpen(e Evidence, ev []string) (Stage, string, []string) {
 			return StageAcceptanceRunning, "acceptance running (CI pending); independent acceptance is reviewing the PR", ev
 		}
 		return StageAcceptanceRunning, "independent acceptance is reviewing the PR", ev
+	}
+	// A live implement/repair run (lock held) wins over static PR, CI and
+	// verdict state: the board must show what is happening now. Failed CI keeps
+	// its own stage, which already reports a running repair.
+	if e.Run != nil && e.Run.Live && pr.CI != "failure" {
+		why := fmt.Sprintf("%s is running on PR #%d", e.Run.Operator, pr.Number)
+		if e.Run.Stage != "" {
+			why += " (" + e.Run.Stage + ")"
+		}
+		return StageImplementing, why, ev
+	}
+
+	// Completed non-passing acceptance evidence remains actionable even while CI changes.
+	if e.AcceptanceRequired && a != nil && a.Attempts > 0 && (a.LatestIsInfra || a.Verdict == "failed" || a.Verdict == "blocked") {
+		return deriveAcceptanceFailure(a, e.Now, ev)
 	}
 
 	if pr.CI != "" {
@@ -182,20 +184,6 @@ func derivePROpen(e Evidence, ev []string) (Stage, string, []string) {
 		switch {
 		case a.Attempts == 0:
 			return StageAcceptancePending, "waiting for independent acceptance to start", ev
-		case a.LatestIsInfra:
-			if a.MaxInfraRetries > 0 && a.InfraAttempts >= a.MaxInfraRetries {
-				return StageBlocked, fmt.Sprintf("acceptance could not run after %d infrastructure attempts; retries stopped", a.InfraAttempts), ev
-			}
-			why := fmt.Sprintf("acceptance hit an infrastructure error (attempt %d)", a.InfraAttempts)
-			switch retry := ParseTime(a.NextRetryAt); {
-			case retry.IsZero():
-				why += "; rerun with clawflow acceptance run"
-			case !e.Now.IsZero() && !retry.After(e.Now):
-				why += "; retry is due on the next run"
-			default:
-				why += "; next retry at " + a.NextRetryAt
-			}
-			return StageInfraRetry, why, ev
 		case a.Verdict == "passed" && a.Valid:
 			add("acceptance verdict=passed")
 			if e.AutoMerge {
@@ -204,14 +192,43 @@ func derivePROpen(e Evidence, ev []string) (Stage, string, []string) {
 			return StageAccepted, "accepted; waiting for a manual merge", ev
 		case a.Verdict == "passed":
 			return StageAcceptancePending, "the last passing record no longer matches the current head or requirements", ev
-		case a.Verdict == "failed" || a.Verdict == "blocked":
-			add("acceptance verdict=%s", a.Verdict)
-			return StageRejected, "acceptance " + a.Verdict + "; a new commit or issue update is needed", ev
 		}
 		return StageAcceptancePending, "waiting for independent acceptance", ev
 	}
 
 	return StagePROpen, "PR is open", ev
+}
+
+func deriveAcceptanceFailure(a *AcceptanceInfo, now time.Time, ev []string) (Stage, string, []string) {
+	ev = append(ev, fmt.Sprintf("acceptance attempts=%d infrastructure=%d", a.Attempts, a.InfraAttempts))
+	if a.LatestIsInfra {
+		if a.MaxInfraRetries > 0 && a.InfraAttempts >= a.MaxInfraRetries {
+			return StageBlocked, fmt.Sprintf("acceptance-infra: acceptance could not run after %d infrastructure attempts; retries stopped", a.InfraAttempts), ev
+		}
+		attempt := fmt.Sprint(a.InfraAttempts)
+		if a.MaxInfraRetries > 0 {
+			attempt += fmt.Sprintf("/%d", a.MaxInfraRetries)
+		}
+		why := fmt.Sprintf("acceptance hit an infrastructure error (attempt %s)", attempt)
+		switch retry := ParseTime(a.NextRetryAt); {
+		case retry.IsZero():
+			why += "; rerun with clawflow acceptance run"
+		case !now.IsZero() && !retry.After(now):
+			why += "; retry is due on the next run"
+		default:
+			why += "; next retry at " + a.NextRetryAt
+		}
+		return StageInfraRetry, why, ev
+	}
+
+	ev = append(ev, "acceptance verdict="+a.Verdict)
+	if a.Verdict == "blocked" {
+		return StageBlocked, "acceptance blocked; a new commit or issue update is needed", ev
+	}
+	if a.Unstructured {
+		return StageRejected, "acceptance failed (unstructured findings); repair and fresh acceptance are needed", ev
+	}
+	return StageRejected, "acceptance failed; a new commit or issue update is needed", ev
 }
 
 // ParseTime parses an RFC3339 timestamp, returning the zero time on failure.

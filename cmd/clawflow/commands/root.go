@@ -24,9 +24,15 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	// runs stay quiet enough to schedule via cron.
 	root.PersistentFlags().BoolVar(&Debug, "debug", false, "Print debug trace to stderr (matcher decisions, scan counts)")
 
+	root.AddCommand(newGitCredentialCmd())
 	root.AddCommand(NewLoginCmd())
 	root.AddCommand(NewSyncCmd())
 	root.AddCommand(NewResetCmd())
+	root.AddCommand(NewDBCmd())
+	root.AddCommand(NewWorkerCmd())
+	root.AddCommand(NewPlatformCmd())
+	root.AddCommand(NewDashboardCmd())
+	root.AddCommand(NewControllerCmd())
 	root.AddCommand(NewRunCmd())
 	root.AddCommand(NewWebCmd())
 	root.AddCommand(NewChatCmd())
@@ -45,8 +51,10 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewPilotCmd())
 	root.AddCommand(NewRespawnCmd())
 	root.AddCommand(NewExecutionCmd())
+	root.AddCommand(NewComponentsCmd())
 	// Helpers retained for operator use (invoked from SKILL.md bodies):
 	root.AddCommand(NewWorktreeCmd())
+	root.AddCommand(NewHousekeepingCmd())
 	root.AddCommand(NewBranchCmd())
 	root.AddCommand(NewStatusCmd())
 	root.AddCommand(NewPRCheckCmd())
@@ -77,5 +85,6 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 		},
 	})
 
+	installSpoolGuards(root)
 	return root
 }

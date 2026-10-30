@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/project"
+	"github.com/zhoushoujianwork/clawflow/internal/resourcelease"
 )
 
 // Lifecycle stages emitted via RunOptions.StageFunc as Run progresses. These
@@ -188,6 +190,16 @@ type VCS interface {
 
 // RunOptions configures a single operator invocation.
 type RunOptions struct {
+	// Native resume is restricted to development operators.
+	SessionKey        string
+	ResumePrompt      string
+	OnExecutionResult func(execution.Result, error, bool)
+	OnSessionResume   func(outcome, reason string)
+	ExecuteFunc       func(context.Context, string, execution.Options) (execution.Result, error)
+	PrecheckFunc      func(context.Context, string, execution.Options) (execution.Result, error)
+
+	PrepareFreshSession func() error
+
 	// ValidateOutcome checks runner-owned repair invariants before write-back.
 	ValidateOutcome func(outcome, body string) error
 
@@ -265,14 +277,25 @@ var writeBackTimeout = 5 * time.Minute
 // Run executes one operator against one subject and returns the operator's
 // final stdout text, the outcome label (empty if none), or an error.
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
-	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language)
+	if op.Name == "implement" || op.Name == "repair-ci" {
+		release, err := project.AcquireResources(opts.Repo, resourcelease.Holder{
+			Task: fmt.Sprintf("#%d", sub.Number), Phase: op.Name, Attempt: opts.RunID,
+		})
+		if err != nil {
+			return err.Error(), "", err
+		}
+		defer release()
+	}
+	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language, ctx)
 	userMessage := BuildUserMessage(sub, opts.Repo, opts.Comments)
 	if opts.ResumeContext != "" {
 		userMessage += "\n---\n\n" + opts.ResumeContext
 	}
 	runFunc := opts.RunFunc
 	if runFunc == nil {
-		runFunc = RunOffload
+		runFunc = func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, instructions ...string) (string, error) {
+			return runDevelopment(ctx, prompt, opts, instructions...)
+		}
 		if op.Name != "implement" && op.Name != "repair-ci" {
 			runFunc = func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, instructions ...string) (string, error) {
 				options := execution.Options{Workspace: workdir, Role: role, Timeout: timeout, Events: events}
@@ -286,7 +309,14 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		}
 	}
 	emitStage(opts.StageFunc, StageOffloadStarted)
-	output, err := runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Role, systemPrompt)
+	var output string
+	var err error
+	if op.Name == "implement" && opts.ResumePrompt == "" && opts.ResumeContext == "" && (opts.RunFunc == nil || opts.PrecheckFunc != nil) {
+		output = precheck(ctx, userMessage, opts)
+	}
+	if output == "" {
+		output, err = runFunc(ctx, userMessage, opts.Workdir, opts.Timeout, opts.EventWriter, opts.Role, systemPrompt)
+	}
 	if err != nil {
 		// Failure path: do NOT pollute the issue with a comment. The
 		// failure is already recorded in events.jsonl + the dashboard
@@ -442,12 +472,13 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 	// Runs whenever the comment landed, including the disallowed-outcome case:
 	// the operator did its work and the body is on the issue, so leaving the
 	// trigger label in place only buys a duplicate comment and a second bill.
-	if outcome != "" && len(op.Trigger.LabelsConsumed) > 0 {
-		if err := v.RemoveLabel(opts.Repo, sub.Number, op.Trigger.LabelsConsumed...); err != nil {
+	consumed := slices.DeleteFunc(slices.Clone(op.Trigger.LabelsConsumed), func(label string) bool { return label == "clawflow-skip" })
+	if outcome != "" && len(consumed) > 0 {
+		if err := v.RemoveLabel(opts.Repo, sub.Number, consumed...); err != nil {
 			writeErrors = append(writeErrors, err)
 			fmt.Fprintf(os.Stderr, "  ⚠ consumed label cleanup failed: %v\n", err)
 		} else {
-			fmt.Fprintf(os.Stderr, "  ✓ consumed labels removed: %v\n", op.Trigger.LabelsConsumed)
+			fmt.Fprintf(os.Stderr, "  ✓ consumed labels removed: %v\n", consumed)
 		}
 	}
 
@@ -473,6 +504,9 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 // Outcomes whitelist. An empty whitelist is treated as "anything goes" for
 // back-compat with older skills that don't enumerate outcomes.
 func outcomeAllowed(op *Operator, label string) bool {
+	if label == "clawflow-skip" {
+		return false
+	}
 	if len(op.Outcomes) == 0 {
 		return true
 	}

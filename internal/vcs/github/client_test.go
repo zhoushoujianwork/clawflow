@@ -160,6 +160,49 @@ func TestCreateIssue(t *testing.T) {
 	}
 }
 
+func TestCreateIssuePreservesAPIURL(t *testing.T) {
+	tests := []struct {
+		name string
+		resp map[string]any
+		want string
+	}{
+		{"github.com", map[string]any{"number": 1, "html_url": "https://github.com/owner/repo/issues/1"}, "https://github.com/owner/repo/issues/1"},
+		{"enterprise host verbatim", map[string]any{"number": 1, "html_url": "https://ghe.example.com/owner/repo/issues/1"}, "https://ghe.example.com/owner/repo/issues/1"},
+		{"empty url stays empty", map[string]any{"number": 1}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			posts := 0
+			client := newTestClient(t, map[string]http.HandlerFunc{
+				"POST /repos/owner/repo/issues": func(w http.ResponseWriter, r *http.Request) {
+					posts++
+					jsonResp(w, 201, tt.resp)
+				},
+			})
+			issue, err := client.CreateIssue("owner/repo", "t", "b")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if issue.URL != tt.want || issue.Number != 1 || posts != 1 {
+				t.Errorf("URL=%q number=%d posts=%d, want URL %q with one POST", issue.URL, issue.Number, posts, tt.want)
+			}
+		})
+	}
+}
+
+func TestCreatePRPreservesAPIURL(t *testing.T) {
+	const want = "https://ghe.example.com/owner/repo/pull/7"
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"POST /repos/owner/repo/pulls": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 201, map[string]any{"number": 7, "title": "t", "state": "open", "html_url": want, "head": map[string]string{"ref": "fix"}})
+		},
+	})
+	pr, err := client.CreatePR("owner/repo", vcs.PRCreateOpts{Head: "fix", Base: "main"})
+	if err != nil || pr.URL != want {
+		t.Fatalf("pr=%+v err=%v", pr, err)
+	}
+}
+
 func TestUpdateIssue(t *testing.T) {
 	var got map[string]string
 	client := newTestClient(t, map[string]http.HandlerFunc{
@@ -441,5 +484,57 @@ func TestPostIssueCommentIdempotent_DeduplicatesOnRetry(t *testing.T) {
 	}
 	if postCalls != 1 {
 		t.Errorf("expected still 1 POST after dedup retry, got %d (duplicate comment posted)", postCalls)
+	}
+}
+
+func TestListSubIssuesReadsEveryPage(t *testing.T) {
+	page := func(from, n int) []map[string]any {
+		rows := make([]map[string]any, n)
+		for i := range rows {
+			rows[i] = map[string]any{"id": from + i, "number": from + i, "title": "t", "state": "open"}
+		}
+		return rows
+	}
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/issues/1/sub_issues": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("per_page") != "100" {
+				t.Errorf("per_page = %q, want 100", r.URL.Query().Get("per_page"))
+			}
+			switch r.URL.Query().Get("page") {
+			case "1":
+				jsonResp(w, 200, page(1, 100))
+			case "2":
+				jsonResp(w, 200, page(101, 5))
+			default:
+				t.Errorf("unexpected page %q", r.URL.Query().Get("page"))
+				jsonResp(w, 200, []map[string]any{})
+			}
+		},
+	})
+	subs, err := client.ListSubIssues("owner/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subs) != 105 || subs[0].Number != 1 || subs[104].Number != 105 {
+		t.Fatalf("got %d sub-issues (first %d, last %d), want 105 in order", len(subs), subs[0].Number, subs[len(subs)-1].Number)
+	}
+}
+
+func TestListSubIssuesFailsOnLaterPageError(t *testing.T) {
+	rows := make([]map[string]any, 100)
+	for i := range rows {
+		rows[i] = map[string]any{"id": i + 1, "number": i + 1, "state": "open"}
+	}
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/issues/1/sub_issues": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("page") == "1" {
+				jsonResp(w, 200, rows)
+				return
+			}
+			http.Error(w, "boom", 502)
+		},
+	})
+	if _, err := client.ListSubIssues("owner/repo", 1); err == nil {
+		t.Fatal("expected an error for a failed later page, got a truncated list")
 	}
 }

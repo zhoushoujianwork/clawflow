@@ -21,7 +21,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 )
 
 const MaxRequestBytes = 4 << 20
@@ -57,6 +60,18 @@ func WithEnvironment(c Config) Config {
 		c.Command = "offload"
 	}
 	return c
+}
+
+// ProfileForRole resolves a role override with the same environment precedence as execution.
+func ProfileForRole(c Config, role string) string {
+	profile := c.Profile
+	if override := c.RoleProfiles[role]; override != "" {
+		profile = override
+	}
+	if override, ok := os.LookupEnv("CLAWFLOW_OFFLOAD_PROFILE"); ok {
+		profile = override
+	}
+	return profile
 }
 
 func ValidateConfig(c Config) error {
@@ -116,20 +131,56 @@ type Observation struct {
 }
 
 type Result struct {
-	Status          string          `json:"status"`
-	Text            string          `json:"result"`
-	Model           string          `json:"model"`
-	SessionKey      string          `json:"-"`
-	NativeSessionID string          `json:"session"`
-	Profile         string          `json:"profile"`
-	Backend         string          `json:"backend"`
-	RunID           string          `json:"run_id"`
-	CallerRunID     string          `json:"caller_run_id"`
-	ExecutionPolicy string          `json:"execution_policy"`
-	ExitCode        int             `json:"exit_code"`
-	ErrorKind       string          `json:"error_kind"`
-	Error           string          `json:"error"`
-	Usage           json.RawMessage `json:"usage"`
+	Status           string          `json:"status"`
+	Text             string          `json:"result"`
+	Model            string          `json:"model"`
+	SessionKey       string          `json:"-"`
+	NativeSessionID  string          `json:"session"`
+	Profile          string          `json:"profile"`
+	Backend          string          `json:"backend"`
+	RunID            string          `json:"run_id"`
+	CallerRunID      string          `json:"caller_run_id"`
+	ExecutionPolicy  string          `json:"execution_policy"`
+	ExitCode         int             `json:"exit_code"`
+	ReportedExitCode *int            `json:"-"`
+	ElapsedMs        *int64          `json:"elapsed_ms"`
+	Machine          string          `json:"-"`
+	ErrorKind        string          `json:"error_kind"`
+	Error            string          `json:"error"`
+	Usage            json.RawMessage `json:"usage"`
+	CostUSD          *float64        `json:"cost_usd"`
+	CostIsEstimate   bool            `json:"cost_is_estimate"`
+	CostBasis        string          `json:"cost_basis"`
+	CostUnavailable  string          `json:"cost_unavailable"`
+	UsageUnavailable string          `json:"usage_unavailable"`
+}
+
+// UnmarshalJSON preserves whether Offload actually reported an exit code while
+// keeping the existing integer API used by execution and acceptance policy.
+func (r *Result) UnmarshalJSON(raw []byte) error {
+	type plain Result
+	var decoded struct {
+		*plain
+		ExitCode *int `json:"exit_code"`
+	}
+	*r = Result{}
+	decoded.plain = (*plain)(r)
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	r.ReportedExitCode = decoded.ExitCode
+	if decoded.ExitCode != nil {
+		r.ExitCode = *decoded.ExitCode
+	}
+	return nil
+}
+
+// TokenUsage contains this run's inclusive input counts, not cumulative session usage.
+type TokenUsage struct {
+	InputTokens           *int64 `json:"input_tokens"`
+	CachedInputTokens     *int64 `json:"cached_input_tokens"`
+	CacheWriteInputTokens *int64 `json:"cache_write_input_tokens"`
+	OutputTokens          *int64 `json:"output_tokens"`
 }
 
 // Event contains sanitized metadata only; final answer text comes from stdout.
@@ -210,11 +261,7 @@ func acquireOwnership(workspace, profile, session string, resume bool) (func(), 
 		return nil, err
 	}
 	workspace = canonical
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	dir := filepath.Join(home, ".clawflow", "execution-locks")
+	dir := filepath.Join(config.StateDir(), "execution-locks")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -251,8 +298,28 @@ func acquireOwnership(workspace, profile, session string, resume bool) (func(), 
 }
 
 // Run starts exactly one Offload process. Uncertain failures never replay work.
-func Run(ctx context.Context, c Config, req Request, env []string, events io.Writer, observe func(Observation)) (Result, error) {
-	var result Result
+func Run(ctx context.Context, c Config, req Request, env []string, events io.Writer, observe func(Observation)) (result Result, runErr error) {
+	// Caller identity and local provenance survive even when no final record arrives.
+	defer func() {
+		result.CallerRunID = req.RequestID
+		result.Machine, _ = os.Hostname()
+		if result.Profile == "" {
+			result.Profile = c.Profile
+		}
+		if result.ErrorKind == "" && runErr != nil {
+			var e *Error
+			switch {
+			case errors.Is(runErr, context.DeadlineExceeded):
+				result.ErrorKind = "timeout"
+			case errors.Is(runErr, context.Canceled):
+				result.ErrorKind = "canceled"
+			case errors.As(runErr, &e):
+				result.ErrorKind = e.Kind
+			default:
+				result.ErrorKind = "execution"
+			}
+		}
+	}()
 	if err := validateRequest(req); err != nil {
 		return result, err
 	}
@@ -267,11 +334,21 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, err
 	}
 	req.Workspace = canonical
+	releaseSlot, err := agentcapacity.Acquire(ctx)
+	if err != nil {
+		return result, fmt.Errorf("acquire agent capacity: %w", err)
+	}
+	defer releaseSlot()
 	release, err := acquireOwnership(req.Workspace, c.Profile, req.SessionKey, req.Resume)
 	if err != nil {
 		return result, err
 	}
 	defer release()
+	releaseMaintenance, err := housekeeping.Gate(ctx, os.TempDir(), false)
+	if err != nil {
+		return result, err
+	}
+	defer releaseMaintenance()
 	dir, err := os.MkdirTemp("", "clawflow-offload-*")
 	if err != nil {
 		return result, err
@@ -311,6 +388,15 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if env == nil {
 		env = os.Environ()
 	}
+	if c.TestDatabaseDSN != "" && req.PermissionMode == "bypassPermissions" {
+		filtered := make([]string, 0, len(env)+1)
+		for _, kv := range env {
+			if !strings.HasPrefix(kv, "CLAWFLOW_TEST_DATABASE_DSN=") {
+				filtered = append(filtered, kv)
+			}
+		}
+		env = append(filtered, "CLAWFLOW_TEST_DATABASE_DSN="+c.TestDatabaseDSN)
+	}
 	if redact(req.Prompt, env) != req.Prompt || redact(req.Instructions, env) != req.Instructions || redact(strings.Join(args, " "), env) != strings.Join(args, " ") {
 		return result, errors.New("Offload request contains an environment secret")
 	}
@@ -324,6 +410,12 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	}
 	cmd := exec.Command(command, args...)
 	cmd.Dir = req.Workspace
+	if req.PermissionMode == "bypassPermissions" {
+		env, err = gitexec.AppEnvironment(env)
+		if err != nil {
+			return result, err
+		}
+	}
 	cmd.Env = env
 	// File descriptors avoid os/exec copy goroutines whose pipes can be held
 	// open by native descendants after Offload has already returned a result.
@@ -400,6 +492,19 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if eventErr == nil {
 		eventErr = tail.poll()
 	}
+	// Preserve validated stream identity even if interruption prevents a final
+	// event or stdout. Never recover answer text/outcomes from events.
+	if tail.runID != "" {
+		result = Result{NativeSessionID: tail.session, SessionKey: tail.session, Profile: c.Profile, Backend: tail.backend, Model: tail.model, RunID: tail.runID, CallerRunID: req.RequestID}
+	}
+	if tail.final != nil {
+		e := tail.final
+		model := e.Model
+		if model == "" {
+			model = tail.model
+		}
+		result = Result{NativeSessionID: e.Session, SessionKey: e.Session, Profile: c.Profile, Backend: e.Backend, Model: model, RunID: e.RunID, CallerRunID: e.CallerRunID, Status: e.Status, ErrorKind: e.ErrorKind, ExitCode: e.ExitCode, ReportedExitCode: &e.ExitCode}
+	}
 	if eventErr != nil {
 		return result, eventErr
 	}
@@ -432,12 +537,17 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, &Error{Kind: "transport"}
 	}
 	raw := bytes.TrimSpace(output)
-	if !validJSON(raw) || json.Unmarshal(raw, &result) != nil || !hasFields(raw, "status", "exit_code", "profile", "run_id", "caller_run_id", "execution_policy") {
+	var decoded Result
+	if !validJSON(raw) || json.Unmarshal(raw, &decoded) != nil || !hasFields(raw, "status", "exit_code", "profile", "run_id", "caller_run_id", "execution_policy") {
 		if runCtx.Err() != nil {
 			return result, runCtx.Err()
 		}
-		return Result{}, &Error{Kind: "protocol_invalid_result"}
+		return result, &Error{Kind: "protocol_invalid_result"}
 	}
+	if decoded.Model == "" {
+		decoded.Model = result.Model
+	}
+	result = decoded
 	result.Text = redact(result.Text, env)
 	result.Error = redact(result.Error, env)
 	result.SessionKey = result.NativeSessionID
@@ -475,7 +585,7 @@ var capacityMessage = regexp.MustCompile(`(?i)\bat capacity\b|\boverloaded\b|\bc
 
 func safeKind(s string) string {
 	switch s {
-	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "timeout", "canceled", "execution", "launch", "events_io":
+	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "unknown_session", "session_expired", "session_not_found", "ownership_mismatch", "backend_mismatch", "profile_mismatch", "resume_rejected", "context_exhausted", "context_limit", "context_length_exceeded", "timeout", "canceled", "execution", "launch", "events_io":
 		return s
 	}
 	return "execution"
@@ -509,13 +619,7 @@ func execute(ctx context.Context, prompt string, opts Options, observe func(Obse
 	if err != nil {
 		return Result{}, err
 	}
-	if profile := c.RoleProfiles[opts.Role]; profile != "" {
-		c.Profile = profile
-	}
-	// An explicit environment profile overrides role selection too.
-	if profile, ok := os.LookupEnv("CLAWFLOW_OFFLOAD_PROFILE"); ok {
-		c.Profile = profile
-	}
+	c.Profile = ProfileForRole(c, opts.Role)
 	if opts.Profile != "" {
 		c.Profile = opts.Profile
 	} // Pin returned profile on resume.
@@ -561,7 +665,7 @@ func execute(ctx context.Context, prompt string, opts Options, observe func(Obse
 	}
 	req := Request{Version: 1, RequestID: NewSessionKey(), SessionKey: opts.SessionKey, Resume: opts.Resume, Workspace: opts.Workspace, Model: opts.Model, Instructions: opts.Instructions, Prompt: prompt, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: opts.Timeout.Milliseconds(), MaxBudgetUSD: opts.MaxBudgetUSD}
 	// Credentials and models come only from Offload profiles or explicit model input.
-	return Run(ctx, c, req, os.Environ(), opts.Events, observe)
+	return Run(ctx, c, req, effectEnvironment(ctx, os.Environ()), opts.Events, observe)
 }
 
 func Chat(ctx context.Context, in io.Reader, out io.Writer, opts Options) error {
@@ -646,7 +750,7 @@ func redact(s string, env []string) string {
 	for _, kv := range env {
 		k, v, ok := strings.Cut(kv, "=")
 		k = strings.ToUpper(k)
-		if ok && v != "" && (strings.HasSuffix(k, "_TOKEN") || strings.HasSuffix(k, "_KEY") || strings.HasSuffix(k, "_SECRET") || strings.HasSuffix(k, "_PASSWORD")) {
+		if ok && v != "" && (strings.HasSuffix(k, "_TOKEN") || strings.HasSuffix(k, "_KEY") || strings.HasSuffix(k, "_SECRET") || strings.HasSuffix(k, "_PASSWORD") || strings.HasSuffix(k, "_DSN")) {
 			s = strings.ReplaceAll(s, v, "[redacted]")
 		}
 	}

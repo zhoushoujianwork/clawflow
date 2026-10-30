@@ -29,7 +29,7 @@ func TestParseLineNoFieldsAndWarn(t *testing.T) {
 	if !ok || ev.Event != "run/exit" || ev.Level != "warn" || len(ev.Fields) != 0 {
 		t.Fatalf("%+v %v", ev, ok)
 	}
-	ev, ok = ParseLine(`2026-10-27T04:09:43Z INFO  run/queue_blocked repo=o/r reason="sub issues\nunreadable" tail`)
+	ev, ok = ParseLine(`2026-10-27T04:09:43Z INFO  queue/skip repo=o/r reason="sub issues\nunreadable" tail`)
 	if !ok || ev.Fields["reason"] != "sub issues\nunreadable" {
 		t.Fatalf("%+v %v", ev, ok)
 	}
@@ -56,7 +56,7 @@ func TestParseEventsFiltersAreas(t *testing.T) {
 		"2026-10-27T04:00:01Z INFO  run/lock pid=1 repo=o/r issue=1 op=implement",
 		"2026-10-27T04:00:02Z INFO  run/harvest_skip repo=o/r reason=ci_not_success pr=3",
 		"2026-10-27T04:00:03Z INFO  run/automerge_sweep repo=o/r merged=0",
-		"2026-10-27T04:00:04Z INFO  run/queue_pick repo=o/r queue=9 issue=4 reason=head_eligible",
+		"2026-10-27T04:00:04Z INFO  queue/pick repo=o/r queue=9 issue=4 reason=head_eligible",
 		"2026-10-27T04:00:05Z INFO  run/self_upgrade from=v1 to=v2",
 		"2026-10-27T04:00:06Z INFO  run/target_skip repo=o/r issue=4 reason=issue_not_open",
 		"2026-10-27T04:00:07Z INFO  run/exit pid=1",
@@ -68,27 +68,9 @@ func TestParseEventsFiltersAreas(t *testing.T) {
 	for _, e := range got {
 		names = append(names, e.Event)
 	}
-	want := "run/harvest_skip run/automerge_sweep run/queue_pick run/self_upgrade run/target_skip run/exit"
+	want := "run/harvest_skip run/automerge_sweep queue/pick run/self_upgrade run/target_skip run/exit"
 	if strings.Join(names, " ") != want {
 		t.Fatalf("events = %v", names)
-	}
-}
-
-func TestLastDecision(t *testing.T) {
-	evs := ParseEvents(strings.NewReader(strings.Join([]string{
-		"2026-10-27T04:00:00Z INFO  run/queue_pick repo=o/r queue=9 issue=4 reason=head_eligible",
-		"2026-10-27T04:01:00Z INFO  run/queue_wait repo=other/x queue=1 issue=8 reason=in_flight_locked",
-		"2026-10-27T04:02:00Z INFO  run/queue_blocked repo=o/r queue=9 issue=5 reason=not_a_leaf",
-	}, "\n")))
-	d := LastDecision(evs, "o/r")
-	if d == nil || d.Action != "blocked" || d.Issue != 5 || d.Reason != "not_a_leaf" || d.At != "2026-10-27T04:02:00Z" {
-		t.Fatalf("%+v", d)
-	}
-	if d := LastDecision(evs, "other/x"); d == nil || d.Action != "wait" {
-		t.Fatalf("%+v", d)
-	}
-	if LastDecision(evs, "none/none") != nil {
-		t.Fatal("expected nil")
 	}
 }
 
@@ -137,5 +119,36 @@ func TestReadEventsTail(t *testing.T) {
 	}
 	if evs[len(evs)-1].Fields["n"] != "199" {
 		t.Fatalf("last = %v", evs[len(evs)-1])
+	}
+}
+
+func TestLockTimeoutIsBoardEvent(t *testing.T) {
+	events := ParseEvents(strings.NewReader("2026-10-27T04:00:00Z WARN run/lock_timeout repo=o/r reason=busy"))
+	if len(events) != 1 || events[0].Event != "run/lock_timeout" {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestRelevantRetainsTerminalEvidenceBeyondPolls(t *testing.T) {
+	failed := Event{Time: "2026-10-30T00:00:00Z", Event: "run/harvest_end", Fields: map[string]string{"repo": "o/r", "status": "failed"}}
+	events := []Event{failed}
+	for i := 0; i < 100; i++ {
+		events = append(events, Event{Event: "run/automerge_sweep", Fields: map[string]string{"repo": "o/r"}})
+	}
+	got := Relevant(events, map[string]bool{"o/r": true})
+	if len(got) != MaxEvents+1 || got[0].Fields["status"] != "failed" {
+		t.Fatalf("terminal evidence lost: %+v", got)
+	}
+	if len(events) != 101 || events[0].Fields["status"] != "failed" {
+		t.Fatal("projection changed input")
+	}
+	for i := 0; i < 200; i++ {
+		events = append(events, failed)
+	}
+	if got := Relevant(events, map[string]bool{"o/r": true}); len(got) != 2*MaxEvents {
+		t.Fatalf("unbounded evidence: %d", len(got))
+	}
+	if got := Relevant(events, map[string]bool{"other": true}); len(got) != 0 {
+		t.Fatal("untracked evidence leaked")
 	}
 }

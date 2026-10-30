@@ -140,8 +140,8 @@ func TestRunOnceReleasesRepoLockOnExit(t *testing.T) {
 	if err := runOnce(context.Background(), "", 0, time.Minute); err != nil {
 		t.Fatalf("runOnce: %v", err)
 	}
-	if _, err := os.Stat(snapshot.RepoRunLockPath("o/r")); !os.IsNotExist(err) {
-		t.Fatalf("repo lock left behind: %v", err)
+	if snapshot.LockHeld(snapshot.RepoRunLockPath("o/r")) {
+		t.Fatal("repo lock still held")
 	}
 }
 

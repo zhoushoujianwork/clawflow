@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -42,13 +45,13 @@ type repoQueueInput struct {
 	// pickable candidate without a job is not a queue candidate.
 	ImplementJobs map[int]bool
 	Locked        func(number int) bool
-	// OpenPRs is only called when some open issue carries agent-implemented.
+	// OpenPRs and PRFiles are read once per pass as needed.
+	PRFiles func(int) ([]string, error)
 	OpenPRs func() ([]vcs.PR, error)
 	// FlightBlocked names why delivery of an in-flight issue is not
 	// progressing (CI red without repair, no acceptance verdict, ...). pr is
 	// nil while the issue is merely locked.
 	FlightBlocked func(issue vcs.Issue, pr *vcs.PR) string
-	Scope         string // queue.ScopeAll | ScopeLabeled | ScopeRanked
 	MaxInFlight   int
 	ParkAfter     time.Duration
 	Rank          []queue.Key
@@ -63,7 +66,6 @@ type repoQueuePlan struct {
 	Result   queue.SelectResult
 	State    queue.RepoState // updated; persist after applying
 	Warnings []string        // newly seen format warnings, "#N: message"
-	Enroll   []queue.Key     // labeled issues to append to the rank (scope ranked)
 	Err      string          // non-empty: fail closed, no implement job runs
 	Previous map[int]queue.EntryRecord
 }
@@ -76,6 +78,12 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		plan.Previous[e.Number] = e
 	}
 	plan.State.Repo = in.Repo
+	plan.State.Skipped = 0
+	for _, is := range in.Issues {
+		if (is.State == "" || is.State == "open") && hasLabel(is.Labels, queue.SkipLabel) {
+			plan.State.Skipped++
+		}
+	}
 
 	open := map[int]bool{}
 	for _, is := range in.Issues {
@@ -95,12 +103,18 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		return nil
 	}
 
-	rankPos := queue.Positions(in.Rank)
-	var enroll []queue.Key
+	prFiles := map[int][]string{}
 	var cands []queue.Candidate
 	meta := map[queue.Key]vcs.Issue{}
 	for _, is := range in.Issues {
 		if is.State != "" && is.State != "open" {
+			continue
+		}
+		// Owner opt-out prevents new work, but an existing run still occupies
+		// its slot until the execution lock is released.
+		locked := in.Locked != nil && in.Locked(is.Number)
+		skipped := hasLabel(is.Labels, queue.SkipLabel)
+		if skipped && !locked {
 			continue
 		}
 		if in.HasChildren[is.Number] || is.SubIssuesTotal > 0 {
@@ -113,10 +127,7 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		key := queue.Key{Repo: in.Repo, Number: is.Number}
 		c := queue.Candidate{}
 		var flightPR *vcs.PR
-		switch {
-		case in.Locked != nil && in.Locked(is.Number):
-			c.InFlight = true
-		case hasLabel(is.Labels, "agent-implemented"):
+		if !locked {
 			if err := loadPRs(); err != nil {
 				plan.Err = "open_prs_unreadable: " + err.Error()
 				return plan
@@ -127,30 +138,20 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 					break
 				}
 			}
-			if !c.InFlight {
-				continue // delivered; nothing left for the queue to do
-			}
-		case hasLabel(is.Labels, "agent-skipped"):
+		}
+		switch {
+		case locked:
+			c.InFlight = true
+		case c.InFlight:
+			// A delivered branch stays in harvest/repair even if its
+			// agent-implemented label has not been written yet.
+		case hasLabel(is.Labels, "agent-implemented"), hasLabel(is.Labels, "agent-skipped"):
 			continue
 		}
-		if c.InFlight && in.FlightBlocked != nil {
+		if c.InFlight && !skipped && in.FlightBlocked != nil {
 			c.FlightBlocked = in.FlightBlocked(is, flightPR)
 		}
 		if !c.InFlight {
-			labeled := hasLabel(is.Labels, queue.ScopeLabel)
-			switch in.Scope {
-			case queue.ScopeLabeled:
-				if !labeled {
-					continue
-				}
-			case queue.ScopeRanked:
-				if _, ranked := rankPos[key]; !ranked {
-					if !labeled {
-						continue
-					}
-					enroll = append(enroll, key)
-				}
-			}
 			switch {
 			case !scanned:
 				c.Ineligible = "not_in_open_issue_scan"
@@ -158,6 +159,45 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 				c.Ineligible = queueReasonSlug(reason)
 			case !in.ImplementJobs[is.Number]:
 				continue // another operator owns the issue this pass
+			}
+		}
+		if !c.InFlight && c.Ineligible == "" && in.PRFiles != nil {
+			savedPlan, err := queueAcceptancePlan(in.Repo, is)
+			if err != nil {
+				plan.Err = "acceptance_plan_unreadable: " + err.Error()
+				return plan
+			}
+			estimate := append(queue.EstimateFiles(is.Body), queue.EstimateFiles(savedPlan)...)
+			if len(estimate) > 0 {
+				if err := loadPRs(); err != nil {
+					plan.Err = "open_prs_unreadable: " + err.Error()
+					return plan
+				}
+				for _, pr := range prs {
+					if pr.State != "open" || pr.IsMerged() || (pr.HeadRepo != "" && !strings.EqualFold(pr.HeadRepo, in.Repo)) {
+						continue
+					}
+					n := pipelinePRIssue(pr)
+					if n == 0 || n == is.Number || !vcs.ManagedIssueBranch(pr.HeadBranch, n) {
+						continue
+					}
+					files, ok := prFiles[pr.Number]
+					if !ok {
+						var err error
+						files, err = in.PRFiles(pr.Number)
+						if err != nil {
+							plan.Err = "pr_files_unreadable: " + err.Error()
+							return plan
+						}
+						prFiles[pr.Number] = files
+					}
+					if queue.FilesOverlap(estimate, files) && (c.BlockingPR == 0 || pr.Number < c.BlockingPR) {
+						c.BlockingPR = pr.Number
+					}
+				}
+				if prev := plan.Previous[is.Number]; c.BlockingPR > 0 && prev.BlockingPR == c.BlockingPR && prev.Reason == "area_busy" {
+					c.AreaPasses = prev.AreaPasses
+				}
 			}
 		}
 		prio, pw := queue.PriorityFromLabels(is.Labels)
@@ -172,8 +212,6 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		}
 	}
 	plan.State.PruneWarned(open)
-	plan.Enroll = enroll
-	plan.State.Scope = in.Scope
 
 	depOpen := func(d queue.Key) bool {
 		if d.Repo == in.Repo {
@@ -212,8 +250,7 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		is := meta[e.Key]
 		plan.State.Entries = append(plan.State.Entries, queue.EntryRecord{
 			Number: e.Key.Number, Title: is.Title, Priority: e.Priority.String(), Rank: e.Rank,
-			State: e.State, Reason: e.Reason, Created: is.CreatedAt,
-			Labeled: hasLabel(is.Labels, queue.ScopeLabel),
+			State: e.State, Reason: e.Reason, Created: is.CreatedAt, BlockingPR: e.BlockingPR, AreaPasses: e.AreaPasses,
 		})
 	}
 	return plan
@@ -237,23 +274,6 @@ func queueReasonSlug(reason string) string {
 // decisions and persists the repo's queue state. Jobs of other operators are
 // returned untouched. A plan error fails closed: no implement job survives.
 func applyUnifiedQueue(repo string, jobs []*runJob, plan repoQueuePlan) []*runJob {
-	if plan.Err == "" && len(plan.Enroll) > 0 {
-		// Enrollment must be durable before dispatch; on failure the enrolled
-		// items are not dispatched this pass (retried next pass).
-		_, err := queue.UpdateRank(func(order []queue.Key) ([]queue.Key, error) {
-			return append(order, plan.Enroll...), nil
-		}, nil)
-		if err != nil {
-			runLog.Warn("queue/enroll", "repo", repo, "err", err.Error(), "result", "retry")
-			for _, k := range plan.Enroll {
-				delete(plan.Picks, k.Number)
-			}
-		} else {
-			for _, k := range plan.Enroll {
-				runLog.Info("queue/enroll", "repo", repo, "issue", k.Number, "label", queue.ScopeLabel)
-			}
-		}
-	}
 	if plan.Err != "" {
 		runLog.Warn("queue/skip", "repo", repo, "reason", plan.Err, "scope", "repo")
 	} else {
@@ -271,7 +291,7 @@ func applyUnifiedQueue(repo string, jobs []*runJob, plan repoQueuePlan) []*runJo
 			}
 		}
 		for _, k := range plan.Result.Newly.Parked {
-			runLog.Info("queue/park", "repo", repo, "issue", k.Number, "reason", plan.Result.Entries[entryIndex(plan.Result, k)].Reason)
+			runLog.Info("queue/park", "repo", repo, "issue", k.Number, "reason", plan.Result.Entries[entryIndex(plan.Result, k)].Reason, "blocking_pr", plan.Result.Entries[entryIndex(plan.Result, k)].BlockingPR)
 		}
 		for _, k := range plan.Result.Newly.Unparked {
 			runLog.Info("queue/unpark", "repo", repo, "issue", k.Number)
@@ -299,10 +319,8 @@ func entryIndex(r queue.SelectResult, k queue.Key) int {
 	return 0
 }
 
-// queueRepoParams extracts the per-repo caps and scope from config with
-// defaults. An unknown scope fails closed ("ranked") for repos that ever had
-// a queue_issue.
-func queueRepoParams(repoCfg config.Repo, qs config.QueueSettings) (maxInFlight int, parkAfter time.Duration, scope string) {
+// queueRepoParams extracts concurrency and parking settings with defaults.
+func queueRepoParams(repoCfg config.Repo, qs config.QueueSettings) (maxInFlight int, parkAfter time.Duration) {
 	maxInFlight = repoCfg.MaxInFlight
 	if maxInFlight < 1 {
 		maxInFlight = queue.DefaultMaxInFlight
@@ -310,11 +328,6 @@ func queueRepoParams(repoCfg config.Repo, qs config.QueueSettings) (maxInFlight 
 	parkAfter = queue.DefaultParkAfter
 	if d, err := time.ParseDuration(qs.ParkAfter); err == nil && d > 0 {
 		parkAfter = d
-	}
-	var fellBack bool
-	scope, fellBack = queue.EffectiveScope(repoCfg.QueueScope, qs.Scope, repoCfg.QueueIssue > 0)
-	if fellBack {
-		runLog.Warn("queue/scope", "value", firstNonEmpty(repoCfg.QueueScope, qs.Scope), "using", scope, "reason", "unknown_scope")
 	}
 	return
 }
@@ -356,7 +369,7 @@ func flightBlockedReason(ctx context.Context, client vcs.Client, repo string, re
 
 // queueDepResolver answers cross-repo dependencies by reading the issue from
 // its repo's VCS (read-only). Unknown repos and read errors fail closed.
-func queueDepResolver(cfg *config.Config) func(queue.Key) bool {
+func queueDepResolver(ctx context.Context, cfg *config.Config) func(queue.Key) bool {
 	cache := map[queue.Key]bool{}
 	return func(k queue.Key) bool {
 		if v, ok := cache[k]; ok {
@@ -365,6 +378,11 @@ func queueDepResolver(cfg *config.Config) func(queue.Key) bool {
 		open := true
 		if rc, ok := cfg.Repos[k.Repo]; ok {
 			if client, err := newVCSClient(rc); err == nil {
+				setVCSContext(client, ctx)
+				if !pollingAllowed(client) {
+					cache[k] = true
+					return true
+				}
 				if is, err := client.GetIssue(k.Repo, k.Number); err == nil && is != nil {
 					open = is.State != "closed"
 				}
@@ -399,4 +417,37 @@ func pruneRepoRank(repo string, issues []vcs.Issue) {
 	if _, err := queue.UpdateRank(nil, func(k queue.Key) bool { return k.Repo != repo || open[k.Number] }); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] ⚠ queue rank prune: %v\n", repo, err)
 	}
+}
+
+// queueAcceptancePlan finds historical plans for this issue, including plans
+// from closed PRs. Only unchanged requirements are applicable to a new attempt.
+func queueAcceptancePlan(repo string, issue vcs.Issue) (string, error) {
+	root := filepath.Dir(acceptanceStorePath(repo, 1))
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var latest acceptance.Plan
+	for _, entry := range entries {
+		pr, err := strconv.Atoi(entry.Name())
+		if err != nil || pr <= 0 {
+			continue
+		}
+		store, err := acceptance.OpenStore(filepath.Join(root, entry.Name()))
+		if err != nil {
+			return "", err
+		}
+		p, readErr := store.LatestPlanForTask(repo, repo+":issue:"+strconv.Itoa(issue.Number), issue.Title+"\n\n"+issue.Body)
+		closeErr := store.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return "", err
+		}
+		if p.CompletedAt.After(latest.CompletedAt) {
+			latest = p
+		}
+	}
+	return latest.Text, nil
 }

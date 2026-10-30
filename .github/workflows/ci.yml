@@ -8,6 +8,20 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: clawflow
+          POSTGRES_PASSWORD: clawflow
+          POSTGRES_DB: clawflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U clawflow -d clawflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -15,20 +29,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-
-      - name: Build web bundle
-        run: cd web && pnpm install --frozen-lockfile && pnpm build
-
       - name: Unit tests
+        env:
+          CLAWFLOW_TEST_DATABASE_DSN: postgres://clawflow:clawflow@localhost:5432/clawflow_test?sslmode=disable
         run: go test -v -race ./...
 
       - name: CLI smoke tests
@@ -37,6 +40,7 @@ jobs:
           ./clawflow --help
           ./clawflow version
           ./clawflow run --help
+          ./clawflow db --help
           ./clawflow operators list
           # Hard fail if any embedded SKILL.md has bad frontmatter.
           ./clawflow operators validate
@@ -50,3 +54,61 @@ jobs:
           ./clawflow pr-check --help
           ./clawflow update --help
           ./clawflow web --help
+          ./clawflow controller --help
+          ./clawflow dashboard --help
+          ./clawflow worker join --help
+
+  native:
+    name: Native macOS
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Headless native tests
+        run: swift test --package-path macos
+      - name: Build app without opening it
+        run: make native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClawFlow-macOS
+          path: macos/dist/ClawFlow.app
+
+  web-render:
+    name: Web render
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build web bundle
+        run: pnpm --dir web install --frozen-lockfile && pnpm --dir web build
+
+      - name: Install isolated headless Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/render-tools" --no-package-lock playwright@1.56.1
+          "$RUNNER_TEMP/render-tools/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Run all render fixtures
+        working-directory: web
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/render-tools/node_modules/playwright/index.mjs
+        run: |
+          for fixture in scripts/check-*-render.mjs; do
+            echo "Running $fixture"
+            node "$fixture"
+          done

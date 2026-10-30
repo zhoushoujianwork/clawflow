@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
@@ -21,8 +22,11 @@ import (
 var (
 	// runMu guards activeRuns. Keys are repo names of in-flight repo-scoped
 	// `clawflow run --repo R` passes; unscopedKey marks an unscoped pass.
-	runMu      sync.Mutex
-	activeRuns = map[string]bool{}
+	runMu           sync.Mutex
+	activeRuns      = map[string]bool{}
+	activeRunStarts = map[string]time.Time{}
+	lastPassResult  string
+	lastPassAt      time.Time
 
 	schedMu       sync.Mutex
 	schedNextFire time.Time // zero when no scheduler is running or interval=0
@@ -32,18 +36,16 @@ var (
 // empty, so it cannot collide.
 const unscopedKey = ""
 
-// defaultMaxScheduledRuns caps concurrent scheduler passes when
-// settings.max_concurrent_agents is unset.
-const defaultMaxScheduledRuns = 4
-
 type runRequest struct {
 	Repo  string `json:"repo,omitempty"`
 	Issue int    `json:"issue,omitempty"`
 }
 
 type runResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+	AgentSlotsUsed  int    `json:"agent_slots_used"`
+	AgentSlotsTotal int    `json:"agent_slots_total"`
+	Status          string `json:"status"`
+	Message         string `json:"message,omitempty"`
 	// Scheduler fields — populated by HandleRunStatus so the dashboard
 	// can render the auto-run banner ("every 5m · next in 2:14") in one
 	// fetch alongside the running/idle indicator.
@@ -83,12 +85,17 @@ func canStartRunLocked(active map[string]bool, repo string) bool {
 // The manual Run button (HandleRun) and the periodic scheduler
 // (TriggerScheduledRuns) share this gate so they can never overlap on a repo.
 func TriggerRun(repo string, issue int) bool {
+	cfg, err := config.Load()
+	if err != nil || cfg.Settings.SchedulingError() != nil {
+		return false
+	}
 	runMu.Lock()
 	if !canStartRunLocked(activeRuns, repo) {
 		runMu.Unlock()
 		return false
 	}
 	activeRuns[repo] = true
+	activeRunStarts[repo] = time.Now()
 	runMu.Unlock()
 	spawnRun(repo, issue)
 	return true
@@ -97,18 +104,13 @@ func TriggerRun(repo string, issue int) bool {
 // PlanScheduledRuns is the scheduler's pure decision: which repos to start a
 // pass for now. A repo qualifies when it is enabled, belongs on this machine
 // (bound_machine / require_binding), is in only (when only is non-nil) and has
-// no active pass. At most max(settings.max_concurrent_agents, default 4)
-// passes may be active, so the result is capped at the remaining slots. An
-// active unscoped pass blocks everything. Result order is alphabetical.
+// no active pass. Agent capacity is enforced at the execution boundary, not
+// by counting passes (which also do non-agent work). An active unscoped pass
+// blocks everything. Result order is alphabetical.
 func PlanScheduledRuns(cfg *config.Config, hostname string, active map[string]bool, only map[string]bool) []string {
-	if active[unscopedKey] {
+	if cfg.Settings.SchedulingError() != nil || active[unscopedKey] {
 		return nil
 	}
-	limit := cfg.Settings.MaxConcurrentAgents
-	if limit <= 0 {
-		limit = defaultMaxScheduledRuns
-	}
-	slots := limit - len(active)
 	var names []string
 	for name, repo := range cfg.EnabledRepos() {
 		if only != nil && !only[name] {
@@ -120,12 +122,6 @@ func PlanScheduledRuns(cfg *config.Config, hostname string, active map[string]bo
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	if slots < 0 {
-		slots = 0
-	}
-	if len(names) > slots {
-		names = names[:slots]
-	}
 	return names
 }
 
@@ -138,6 +134,7 @@ func TriggerScheduledRuns(cfg *config.Config, hostname string, only map[string]b
 	chosen := PlanScheduledRuns(cfg, hostname, activeRuns, only)
 	for _, repo := range chosen {
 		activeRuns[repo] = true
+		activeRunStarts[repo] = time.Now()
 	}
 	active = make(map[string]bool, len(activeRuns))
 	for k := range activeRuns {
@@ -209,9 +206,17 @@ func spawnRun(repo string, issue int) {
 			cancel()
 			runMu.Lock()
 			delete(activeRuns, repo)
+			delete(activeRunStarts, repo)
 			runMu.Unlock()
 		}()
-		_ = cmd.Run()
+		err := cmd.Run()
+		runMu.Lock()
+		lastPassResult = "success"
+		if err != nil {
+			lastPassResult = "error"
+		}
+		lastPassAt = time.Now()
+		runMu.Unlock()
 		if ctx.Err() == context.DeadlineExceeded {
 			fmt.Fprintf(os.Stderr,
 				"[run-watchdog] clawflow run exceeded %s and was force-killed (issue #216 safeguard); auto-run scheduler unblocked\n",
@@ -241,6 +246,15 @@ func runWatchdogTimeout() time.Duration {
 func HandleRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		http.Error(w, "config unavailable", 503)
+		return
+	}
+	if err := cfg.Settings.SchedulingError(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	var req runRequest
@@ -285,14 +299,19 @@ func currentRunStatus() runResponse {
 	}
 
 	resp := runResponse{Status: status, ActiveRepos: repos}
+	resp.AgentSlotsTotal, _ = agentcapacity.Total()
+	resp.AgentSlotsUsed = agentcapacity.Used()
 	if cfg, err := config.Load(); err == nil {
 		resp.IntervalMinutes = cfg.Settings.RunIntervalMinutes
 		resp.Paused = cfg.Settings.RunPaused
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			resp.Status, resp.Message, resp.IntervalMinutes = "client", err.Error(), 0
+		}
 	}
 	schedMu.Lock()
 	next := schedNextFire
 	schedMu.Unlock()
-	if !next.IsZero() {
+	if resp.Status != "client" && !next.IsZero() {
 		resp.NextFireUnixMs = next.UnixMilli()
 	}
 	return resp
@@ -349,15 +368,14 @@ func HandleRunCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Owner already exited but never released the lock (Ctrl+C, SIGKILL,
-	// crash). Just clean the lock file so the next run isn't blocked.
-	if !processAlive(info.PID) {
+	// A persistent owner record is not evidence that the operation is active.
+	// Never signal a live process merely because it last owned this inode.
+	if !snapshot.IsLocked(req.Repo, req.Issue) || !processAlive(info.PID) {
 		snapshot.ReleaseLock(req.Repo, req.Issue)
 		// Owner died without finalizing meta — flip running rows to
 		// failed too so the dashboard doesn't keep showing a phantom
 		// running run after we ack the cancel.
 		snapshot.MarkRunningAsCancelled(req.Repo, req.Issue, "runner exited without finalizing; cleared by cancel")
-		_, _ = snapshot.WriteRunsIndex(50)
 		writeJSON(w, http.StatusOK, cancelResponse{Status: "already_dead", PID: info.PID})
 		return
 	}
@@ -371,11 +389,6 @@ func HandleRunCancel(w http.ResponseWriter, r *http.Request) {
 	// reconciler fires (10 min for `implement`), which feels like the
 	// cancel button did nothing.
 	snapshot.MarkRunningAsCancelled(req.Repo, req.Issue, "cancelled by user via dashboard")
-	if _, werr := snapshot.WriteRunsIndex(50); werr != nil {
-		// Non-fatal: cancellation succeeded; index will catch up on the
-		// next reconciler tick (~1 min).
-		_ = werr
-	}
 
 	writeJSON(w, http.StatusOK, cancelResponse{
 		Status: "cancelled",

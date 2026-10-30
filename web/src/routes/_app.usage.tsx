@@ -1,514 +1,214 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { Bot, Receipt } from 'lucide-react'
-import { type RepoInfoMap, type Platform } from '../lib/vcsUrls'
-import { VcsIcon } from '../components/VcsIcon'
 
-interface UsageAggregate {
+interface Coverage {
+  cost: number; input: number; output: number; cache_read: number; cache_write: number; tokens: number
+}
+export interface UsageAggregate {
   runs: number
-  total_cost_usd: number
-  input_tokens: number
-  output_tokens: number
-  cache_read_input_tokens: number
-  cache_creation_input_tokens: number
-  duration_ms: number
+  total_cost_usd: number | null
+  total_tokens: number | null
+  input_tokens: number | null
+  output_tokens: number | null
+  cache_read_input_tokens: number | null
+  cache_creation_input_tokens: number | null
+  subscription_runs?: number
+  estimated_cost_runs: number
+  reported_cost_runs: number
+  cost_provenance_unknown_runs: number
+  coverage: Coverage
 }
-
-interface ModelAggregate {
-  cost_usd: number
-  input_tokens: number
-  output_tokens: number
-  cache_read_input_tokens: number
-  cache_creation_input_tokens: number
+interface Breakdown {
+  totals: UsageAggregate
+  by_project: Record<string, UsageAggregate>
+  by_repo: Record<string, UsageAggregate>
+  by_role: Record<string, UsageAggregate>
+  by_profile: Record<string, UsageAggregate>
+  by_model: Record<string, UsageAggregate>
+  by_machine: Record<string, UsageAggregate>
+  by_operator: Record<string, UsageAggregate>
 }
-
-interface DailyPoint {
-  date: string
-  runs: number
-  total_cost_usd: number
-  input_tokens: number
-  output_tokens: number
-  by_operator?: Record<string, UsageAggregate>
-  by_repo?: Record<string, UsageAggregate>
-  by_model?: Record<string, ModelAggregate>
-}
-
-interface PeriodSummary {
+interface Period extends Breakdown {
   period_start: string
   period_end: string
-  totals: UsageAggregate
-  by_operator: Record<string, UsageAggregate>
-  by_repo: Record<string, UsageAggregate>
-  by_model: Record<string, ModelAggregate>
-  daily_trend: DailyPoint[]
+  daily_trend: (UsageAggregate & { date: string })[]
 }
-
-interface UsageSummary {
+export interface UsageSummary extends Breakdown {
   generated_at: string
-  totals: UsageAggregate
-  by_operator: Record<string, UsageAggregate>
-  by_repo: Record<string, UsageAggregate>
-  by_model: Record<string, ModelAggregate>
-  periods?: PeriodSummary[]
+  range_start: string | null
+  range_end: string | null
+  periods: Period[]
+  history_limit: number
+  history: { started_at: string; repo: string; project: string; operator: string; status: string; href?: string }[]
 }
+const dimensions = [
+  ['project', '项目', 'by_project'], ['repo', '仓库', 'by_repo'], ['role', '角色', 'by_role'],
+  ['profile', '配置', 'by_profile'], ['model', '模型', 'by_model'], ['machine', '机器', 'by_machine'],
+] as const
+export type Filters = Partial<Record<typeof dimensions[number][0], string>>
+export const Route = createFileRoute('/_app/usage')({ component: UsagePage })
 
-interface Repo {
-  full_name: string
-  platform?: Platform
-  base_url?: string
-  enabled: boolean
+export function fmtCost(usd: number | null, subscriptions = 0): string {
+  if (usd == null) return subscriptions > 0 ? 'Subscription' : 'Not reported'
+  return `$${usd.toFixed(4)}${subscriptions > 0 ? ' + subscription' : ''}`
 }
-
-export const Route = createFileRoute('/_app/usage')({
-  component: UsagePage,
-})
-
-function timeAgo(iso: string): string {
-  if (!iso) return '—'
-  const t = new Date(iso).getTime()
-  if (!isFinite(t)) return '—'
-  const diff = Math.floor((Date.now() - t) / 1000)
-  if (diff < 0) return 'just now'
-  if (diff < 60) return `${diff}s ago`
-  if (diff < 3600) return `${Math.floor(diff / 60)}min ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  return `${Math.floor(diff / 86400)}d ago`
+function number(n: number | null | undefined) { return n == null ? '未报告' : n.toLocaleString() }
+export function coverage(reported: number | undefined, runs: number) {
+  if (reported == null) return '覆盖率未报告'
+  return `${reported}/${runs} 次报告 · ${runs - reported} 次缺失`
 }
-
-function durationStr(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m${s % 60}s`
-  const h = Math.floor(m / 60)
-  return `${h}h${m % 60}m`
+export function usageQuery(filters: Filters, period: string, day: string) {
+  const q = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters)) if (value) q.set(key, value)
+  if (day) {
+    q.set('from', day)
+    q.set('until', new Date(Date.parse(day + 'T00:00:00Z') + 86400000).toISOString())
+  } else q.set('period', period)
+  return q.toString()
 }
-
-function fmtCost(usd: number): string {
-  return `$${usd.toFixed(4)}`
+function useInitialSelection() {
+  const q = new URLSearchParams(window.location.search)
+  const filters: Filters = {}
+  for (const [key] of dimensions) if (q.get(key)) filters[key] = q.get(key)!
+  const period = q.get('period') || 'current'
+  const rawDay = q.get('day') || ''
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(rawDay) && Number.isFinite(Date.parse(rawDay + 'T00:00:00Z')) ? rawDay : ''
+  return { filters, period, day }
 }
-
-function fmtNum(n: number): string {
-  return n.toLocaleString()
-}
-
-function fmtPeriodLabel(start: string, end: string): string {
-  const s = new Date(start + 'T00:00:00')
-  const e = new Date(end + 'T00:00:00')
-  const fmt = (d: Date) =>
-    d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-  return `${fmt(s)} – ${fmt(e)}`
-}
-
 function UsagePage() {
   useDocumentTitle('Usage')
+  const [initial] = useState(useInitialSelection)
+  const [filters, setFilters] = useState<Filters>(initial.filters)
+  const [period, setPeriod] = useState(initial.period)
+  const [day, setDay] = useState(initial.day)
+  const [catalog, setCatalog] = useState<UsageSummary | null>(null)
   const [summary, setSummary] = useState<UsageSummary | null>(null)
-  const [repos, setRepos] = useState<Repo[]>([])
+  const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
-  const [selectedPeriod, setSelectedPeriod] = useState<string>('current')
-  const [selectedDay, setSelectedDay] = useState<string | null>(null)
-
+  const query = usageQuery(filters, period, day)
   useEffect(() => {
     let cancelled = false
-
-    const refetch = async (initial: boolean) => {
-      if (initial) setLoading(true)
-      const [u, rp] = await Promise.all([
-        fetch('/data/usage.json', { cache: 'no-store' })
-          .then(r => (r.ok ? r.json() : null))
-          .catch(() => null),
-        fetch('/data/repos.json', { cache: 'no-store' })
-          .then(r => (r.ok ? r.json() : []))
-          .catch(() => []),
-      ])
-      if (cancelled) return
-      setSummary(u)
-      setRepos(Array.isArray(rp) ? rp : [])
-      setLoading(false)
+    const load = async () => {
+      try {
+        const r = await fetch('/api/usage?period=all', { cache: 'no-store' })
+        if (!r.ok) throw new Error('读取失败')
+        const value = await r.json()
+        if (!cancelled) setCatalog(value)
+      } catch { /* The scoped request below owns the visible error state. */ }
     }
-
-    refetch(true)
-    const id = setInterval(() => refetch(false), 5000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
+    void load()
+    const timer = setInterval(load, 30000)
+    return () => { cancelled = true; clearInterval(timer) }
   }, [])
-
-  const repoMap = useMemo<RepoInfoMap>(() => {
-    const m: RepoInfoMap = {}
-    for (const r of repos) {
-      const platform: Platform = r.platform || 'github'
-      const defaultHost = platform === 'gitlab' ? 'https://gitlab.com' : 'https://github.com'
-      m[r.full_name] = {
-        platform,
-        host: (r.base_url || defaultHost).replace(/\/$/, ''),
-      }
+  useEffect(() => {
+    let cancelled = false
+    const url = new URL(window.location.href)
+    for (const [key] of dimensions) url.searchParams.delete(key)
+    for (const [key, value] of Object.entries(filters)) if (value) url.searchParams.set(key, value)
+    url.searchParams.set('period', period)
+    if (day) url.searchParams.set('day', day); else url.searchParams.delete('day')
+    window.history.replaceState(window.history.state, '', url)
+    setLoading(true)
+    setSummary(null)
+    const load = async () => {
+      try {
+        const r = await fetch(`/api/usage?${query}`, { cache: 'no-store' })
+        if (!r.ok) throw new Error('用量暂时不可用，请稍后重试。')
+        const value = await r.json()
+        if (!cancelled) { setSummary(value); setError('') }
+      } catch { if (!cancelled) { setSummary(null); setError('用量暂时不可用，请稍后重试。') } }
+      finally { if (!cancelled) setLoading(false) }
     }
-    return m
-  }, [repos])
-
-  const periods = summary?.periods ?? []
-
-  const activePeriod = useMemo<PeriodSummary | null>(() => {
-    if (selectedPeriod === 'all' || periods.length === 0) return null
-    if (selectedPeriod === 'current') return periods[0] ?? null
-    return periods.find(p => p.period_start === selectedPeriod) ?? null
-  }, [selectedPeriod, periods])
-
-  // When a day bar is clicked, drill down into that day's breakdowns
-  const activeDay = useMemo<DailyPoint | null>(() => {
-    if (!selectedDay || !activePeriod) return null
-    return activePeriod.daily_trend.find(d => d.date === selectedDay) ?? null
-  }, [selectedDay, activePeriod])
-
-  // Clear day selection when period changes
-  useEffect(() => { setSelectedDay(null) }, [selectedPeriod])
-
-  const viewTotals = activeDay
-    ? { runs: activeDay.runs, total_cost_usd: activeDay.total_cost_usd, input_tokens: activeDay.input_tokens, output_tokens: activeDay.output_tokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, duration_ms: 0 } as UsageAggregate
-    : activePeriod?.totals ?? summary?.totals
-  const viewByOperator = activeDay?.by_operator ?? activePeriod?.by_operator ?? summary?.by_operator ?? {}
-  const viewByRepo = activeDay?.by_repo ?? activePeriod?.by_repo ?? summary?.by_repo ?? {}
-  const viewByModel = activeDay?.by_model ?? activePeriod?.by_model ?? summary?.by_model ?? {}
-
-  // Pilot wakes are namespaced "pilot:<project>" by the backend (issue #321)
-  // so their cost — an order of magnitude above a single operator run — is
-  // visible instead of folded into an operator bucket.
-  const operatorRows = useMemo(() => {
-    return Object.entries(viewByOperator)
-      .map(([name, v]) => ({ name, isPilot: name.startsWith('pilot:'), ...v }))
-      .sort((a, b) => b.total_cost_usd - a.total_cost_usd)
-  }, [viewByOperator])
-
-  const modelRows = useMemo(() => {
-    return Object.entries(viewByModel)
-      .map(([name, v]) => ({ name, ...v }))
-      .sort((a, b) => b.cost_usd - a.cost_usd)
-  }, [viewByModel])
-
-  // Drop nameless buckets: a Pilot wake spans every repo in its project so
-  // it is intentionally not attributed to one. New summaries omit the key
-  // entirely; this also cleans up usage.json files written before the fix.
-  const repoRows = useMemo(() => {
-    return Object.entries(viewByRepo)
-      .filter(([name]) => name !== '')
-      .map(([name, v]) => ({ name, ...v }))
-      .sort((a, b) => b.total_cost_usd - a.total_cost_usd)
-  }, [viewByRepo])
-
-  const empty = !summary || summary.totals.runs === 0
-
-  return (
-    <div className="max-w-6xl mx-auto px-4 py-6">
-      <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-foreground">Usage &amp; billing</h1>
-          {summary && (
-            <p className="text-xs text-muted-foreground mt-1 tabular-nums">
-              last refresh {timeAgo(summary.generated_at)}
-            </p>
-          )}
-        </div>
-        {!empty && periods.length > 0 && (
-          <select
-            value={selectedPeriod}
-            onChange={e => setSelectedPeriod(e.target.value)}
-            className="text-sm bg-secondary border border-border rounded-lg px-3 py-1.5 text-foreground"
-          >
-            <option value="current">
-              Current period ({fmtPeriodLabel(periods[0].period_start, periods[0].period_end)})
-            </option>
-            {periods.slice(1).map(p => (
-              <option key={p.period_start} value={p.period_start}>
-                {fmtPeriodLabel(p.period_start, p.period_end)}
-              </option>
-            ))}
-            <option value="all">All time</option>
-          </select>
-        )}
-      </div>
-
-      {loading ? (
-        <p className="text-sm text-muted-foreground text-center py-8">Loading…</p>
-      ) : empty ? (
-        <div className="bg-card border border-border rounded-xl p-12 flex flex-col items-center text-center">
-          <Receipt className="w-12 h-12 text-muted-foreground/40 mb-4" />
-          <p className="text-base font-semibold text-foreground mb-1">No usage data yet</p>
-          <p className="text-sm text-muted-foreground">
-            No completed runs with usage data yet — run{' '}
-            <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">clawflow run</code>{' '}
-            first.
-          </p>
-        </div>
-      ) : (
-        <>
-          {viewTotals && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-5">
-              <StatCard label="Total runs" value={fmtNum(viewTotals.runs)} />
-              <StatCard
-                label="Total cost"
-                value={fmtCost(viewTotals.total_cost_usd)}
-                tone="brand"
-                hint="includes Pilot wakes"
-              />
-              <StatCard
-                label="Total tokens (in + out)"
-                value={fmtNum(viewTotals.input_tokens + viewTotals.output_tokens)}
-              />
-            </div>
-          )}
-
-          {activePeriod && activePeriod.daily_trend.length > 0 && (
-            <Section title={
-              selectedDay
-                ? `Daily cost trend — viewing ${selectedDay}`
-                : 'Daily cost trend'
-            }>
-              <DailyChart
-                data={activePeriod.daily_trend}
-                selectedDay={selectedDay}
-                onSelectDay={(day) => setSelectedDay(day === selectedDay ? null : day)}
-              />
-            </Section>
-          )}
-
-          <Section title="By operator (Pilot wakes listed as pilot:&lt;project&gt;)">
-            <table className="w-full text-sm">
-              <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
-                <tr>
-                  <Th align="left">Operator</Th>
-                  <Th align="right">Runs</Th>
-                  <Th align="right">Cost</Th>
-                  <Th align="right">Input</Th>
-                  <Th align="right">Output</Th>
-                  <Th align="right">Cache read</Th>
-                  <Th align="right">Duration</Th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border tabular-nums">
-                {operatorRows.map(r => (
-                  <tr key={r.name} className="hover:bg-secondary/20">
-                    <td className="px-4 py-2 font-mono text-foreground">
-                      {r.isPilot ? (
-                        <span className="inline-flex items-center gap-1.5">
-                          <Bot className="w-3.5 h-3.5 text-brand shrink-0" />
-                          <span>{r.name}</span>
-                        </span>
-                      ) : (
-                        r.name
-                      )}
-                    </td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{r.runs}</td>
-                    <td className="px-4 py-2 text-right text-foreground font-medium">
-                      {fmtCost(r.total_cost_usd)}
-                    </td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.input_tokens)}</td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.output_tokens)}</td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.cache_read_input_tokens)}</td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{durationStr(r.duration_ms)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Section>
-
-          <Section title="By model">
-            <table className="w-full text-sm">
-              <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
-                <tr>
-                  <Th align="left">Model</Th>
-                  <Th align="right">Cost</Th>
-                  <Th align="right">Input</Th>
-                  <Th align="right">Output</Th>
-                  <Th align="right">Cache read</Th>
-                  <Th align="right">Cache creation</Th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border tabular-nums">
-                {modelRows.map(r => (
-                  <tr key={r.name} className="hover:bg-secondary/20">
-                    <td className="px-4 py-2 font-mono text-foreground">{r.name}</td>
-                    <td className="px-4 py-2 text-right text-foreground font-medium">{fmtCost(r.cost_usd)}</td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.input_tokens)}</td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.output_tokens)}</td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.cache_read_input_tokens)}</td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{fmtNum(r.cache_creation_input_tokens)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Section>
-
-          <Section title="By repo">
-            <table className="w-full text-sm">
-              <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
-                <tr>
-                  <Th align="left">Repo</Th>
-                  <Th align="right">Runs</Th>
-                  <Th align="right">Cost</Th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border tabular-nums">
-                {repoRows.map(r => (
-                  <tr key={r.name} className="hover:bg-secondary/20">
-                    <td className="px-4 py-2">
-                      <div className="flex items-center gap-2">
-                        <VcsIcon
-                          repo={r.name}
-                          map={repoMap}
-                          className="w-3.5 h-3.5 text-muted-foreground shrink-0"
-                        />
-                        <span className="font-mono text-foreground">{r.name}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-2 text-right text-muted-foreground">{r.runs}</td>
-                    <td className="px-4 py-2 text-right text-foreground font-medium">
-                      {fmtCost(r.total_cost_usd)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Section>
-        </>
-      )}
-    </div>
-  )
-}
-
-function DailyChart({ data, selectedDay, onSelectDay }: { data: DailyPoint[]; selectedDay: string | null; onSelectDay: (day: string) => void }) {
-  const maxCost = Math.max(...data.map(d => d.total_cost_usd), 0.0001)
-  const barWidth = Math.max(4, Math.floor(600 / data.length) - 2)
-  const chartWidth = data.length * (barWidth + 2)
-  const chartHeight = 120
-  const [hovered, setHovered] = useState<number | null>(null)
-
-  return (
-    <div className="px-4 py-3">
-      <div className="overflow-x-auto">
-        <svg
-          width={Math.max(chartWidth, 200)}
-          height={chartHeight + 32}
-          className="block cursor-pointer"
-          viewBox={`0 0 ${Math.max(chartWidth, 200)} ${chartHeight + 32}`}
-        >
-          {data.map((d, i) => {
-            const h = (d.total_cost_usd / maxCost) * chartHeight
-            const x = i * (barWidth + 2)
-            const y = chartHeight - h
-            const isHovered = hovered === i
-            const isSelected = selectedDay === d.date
-            let fillClass = 'fill-brand/40'
-            if (isSelected) fillClass = 'fill-brand'
-            else if (isHovered) fillClass = 'fill-brand/70'
-            else if (selectedDay) fillClass = 'fill-brand/20'
-            return (
-              <g
-                key={d.date}
-                onMouseEnter={() => setHovered(i)}
-                onMouseLeave={() => setHovered(null)}
-                onClick={() => onSelectDay(d.date)}
-              >
-                <rect
-                  x={x}
-                  y={y}
-                  width={barWidth}
-                  height={Math.max(h, 1)}
-                  rx={1}
-                  className={fillClass}
-                />
-                {(isHovered || isSelected) && (
-                  <text
-                    x={x + barWidth / 2}
-                    y={y - 4}
-                    textAnchor="middle"
-                    className="fill-foreground text-[10px]"
-                  >
-                    {fmtCost(d.total_cost_usd)}
-                  </text>
-                )}
-              </g>
-            )
-          })}
-          {data.map((d, i) => {
-            if (data.length <= 15 || i % Math.ceil(data.length / 10) === 0 || i === data.length - 1) {
-              const x = i * (barWidth + 2) + barWidth / 2
-              const label = new Date(d.date + 'T00:00:00').getDate().toString()
-              return (
-                <text
-                  key={`label-${d.date}`}
-                  x={x}
-                  y={chartHeight + 14}
-                  textAnchor="middle"
-                  className="fill-muted-foreground text-[10px]"
-                >
-                  {label}
-                </text>
-              )
-            }
-            return null
-          })}
-        </svg>
-      </div>
-      {(hovered !== null || selectedDay) && (
-        <div className="text-xs text-muted-foreground mt-1 tabular-nums">
-          {(() => {
-            const d = selectedDay
-              ? data.find(p => p.date === selectedDay)
-              : hovered !== null ? data[hovered] : null
-            if (!d) return null
-            return (
-              <>
-                {d.date} — {d.runs} run{d.runs !== 1 ? 's' : ''},{' '}
-                {fmtCost(d.total_cost_usd)},{' '}
-                {fmtNum(d.input_tokens + d.output_tokens)} tokens
-                {selectedDay && <span className="ml-2 text-muted-foreground/60">(click again to deselect)</span>}
-              </>
-            )
-          })()}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function StatCard({
-  label,
-  value,
-  tone = 'neutral',
-  hint,
-}: {
-  label: string
-  value: string
-  tone?: 'neutral' | 'brand'
-  hint?: string
-}) {
-  const valueCls = tone === 'brand' ? 'text-brand' : 'text-foreground'
-  return (
-    <div className="bg-card border border-border rounded-xl p-3">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={`text-2xl font-bold mt-0.5 tabular-nums ${valueCls}`}>{value}</div>
-      {hint && <div className="text-[11px] text-muted-foreground mt-0.5">{hint}</div>}
-    </div>
-  )
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="mb-5">
-      <h2 className="text-sm font-semibold text-foreground mb-2">{title}</h2>
-      <div className="bg-card border border-border rounded-xl overflow-hidden">{children}</div>
+    void load()
+    const timer = setInterval(load, 30000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [query, filters, period, day])
+  return <div className="w-full px-4 sm:px-6 py-6 space-y-5">
+    <header className="space-y-2">
+      <h1 className="text-2xl font-semibold">Usage &amp; billing</h1>
+      <p className="text-sm text-muted-foreground">仅统计 ClawFlow 已结束尝试的已存用量（包含失败和取消）。不包含个人 Offload 全局任务；重试按本次用量分别记录。</p>
+    </header>
+    <section aria-label="用量筛选" className="bg-card border rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <label className="text-sm">计费周期（UTC）
+        <select aria-label="计费周期" className="block w-full bg-secondary border rounded p-2 mt-1" value={period} onChange={e => { setPeriod(e.target.value); setDay('') }}>
+          <option value="current">当前计费周期</option><option value="all">全部时间</option>
+          {(catalog?.periods || []).map(p => <option key={p.period_start} value={p.period_start}>{p.period_start} – {p.period_end}</option>)}
+        </select>
+      </label>
+      {dimensions.map(([key, label, group]) => <label key={key} className="text-sm min-w-0">{label}
+        <select aria-label={label} className="block w-full min-w-0 bg-secondary border rounded p-2 mt-1" value={filters[key] || ''} onChange={e => setFilters({ ...filters, [key]: e.target.value })}>
+          <option value="">全部{label}</option>
+          {Array.from(new Set([...(Object.keys(catalog?.[group] || {})), ...(filters[key] ? [filters[key]!] : [])])).sort().map(name => <option key={name} value={name}>{name === 'unknown' ? '未归属 / 未报告' : name}</option>)}
+        </select>
+      </label>)}
+      <button className="border rounded p-2 self-end" onClick={() => { setFilters({}); setPeriod('current'); setDay('') }}>重置筛选</button>
     </section>
-  )
+    {day && <p>正在查看 {day}（UTC） <button className="underline" onClick={() => setDay('')}>返回整个周期</button></p>}
+    {filters.model && <p className="text-sm text-muted-foreground">模型筛选选择包含该模型的完整尝试；总量包含这些尝试中其他模型的用量。模型分组显示各自已存用量。</p>}
+    {loading ? <p role="status">正在读取用量…</p> : error ? <p role="alert">{error}</p> : summary && <UsageReport summary={summary} onFilter={(key, value) => setFilters({ ...filters, [key]: value })} onDay={setDay} />}
+  </div>
 }
-
-function Th({ children, align }: { children: React.ReactNode; align: 'left' | 'right' }) {
-  return (
-    <th className={`px-4 py-2 font-semibold ${align === 'right' ? 'text-right' : 'text-left'}`}>
-      {children}
-    </th>
-  )
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  return <section className="bg-card border rounded-xl p-4 min-w-0 space-y-3"><h2 className="text-lg font-semibold">{title}</h2>{children}</section>
+}
+function Metric({ label, value, count, runs }: { label: string; value: string; count: number | undefined; runs: number }) {
+  return <div className="border rounded-lg p-3 min-w-0"><h3 className="text-sm text-muted-foreground">{label}</h3><p className="text-xl font-semibold break-words">{value}</p><p className="text-xs text-muted-foreground">{coverage(count, runs)}</p></div>
+}
+export function UsageReport({ summary: s, onFilter, onDay }: { summary: UsageSummary; onFilter: (key: keyof Filters, value: string) => void; onDay: (day: string) => void }) {
+  const a = s.totals
+  const trend = s.periods.flatMap(p => p.daily_trend).filter(d => {
+    const start = Date.parse(d.date + 'T00:00:00Z')
+    return (!s.range_end || start < Date.parse(s.range_end)) && (!s.range_start || start + 86400000 > Date.parse(s.range_start))
+  }).sort((a, b) => a.date.localeCompare(b.date))
+  const max = Math.max(0.0001, ...trend.map(d => d.total_cost_usd ?? 0))
+  return <div className="space-y-5">
+    <div className="flex flex-wrap gap-3 justify-between text-sm">
+      <p>时间范围（UTC，结束不含）：{s.range_start || '无数据'} → {s.range_end || '无数据'}</p>
+      <a className="underline" href="#run-history">查看筛选后的运行历史</a>
+    </div>
+    <p className="text-2xl font-semibold">{a.runs} 次已结束尝试</p>
+    {a.runs === 0 && <p>此范围没有已结束尝试；缺失用量不会被当作零。</p>}
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+      <Metric label="已报告费用（USD，可能含估算）" value={fmtCost(a.total_cost_usd, a.subscription_runs)} count={a.coverage?.cost} runs={a.runs} />
+      <Metric label="完整 token 总量（含缓存输入和输出）" value={number(a.total_tokens)} count={a.coverage?.tokens} runs={a.runs} />
+      <Metric label="非缓存输入" value={number(a.input_tokens)} count={a.coverage?.input} runs={a.runs} />
+      <Metric label="输出" value={number(a.output_tokens)} count={a.coverage?.output} runs={a.runs} />
+      <Metric label="缓存读取输入" value={number(a.cache_read_input_tokens)} count={a.coverage?.cache_read} runs={a.runs} />
+      <Metric label="缓存写入输入" value={number(a.cache_creation_input_tokens)} count={a.coverage?.cache_write} runs={a.runs} />
+    </div>
+    <p className="text-sm text-muted-foreground">{provenance(a)}。Subscription 表示订阅计费，不代表免费；Not reported 表示未报告。费用为运行记录中的金额，不是账单。缓存读取/写入是总输入的子集；完整总量只累加组件齐全的尝试，部分报告保留在各指标中。</p>
+    {trend.length > 0 && <Section title="每日已报告费用">
+      <p className="text-sm text-muted-foreground">仅绘制已报告金额；部分覆盖不是全天费用。虚线表示未报告，订阅不折算为美元。选择日期查看当天。</p>
+      <div className="overflow-x-auto"><div className="flex items-end gap-2 min-w-max py-2">
+        {trend.map(d => <button key={d.date} onClick={() => onDay(d.date)} className="w-28 shrink-0 text-xs text-left rounded border p-2 focus-visible:ring-2" aria-label={`${d.date} ${fmtCost(d.total_cost_usd, d.subscription_runs)} ${coverage(d.coverage?.cost, d.runs)}`}>
+          <span className="block h-20 relative border-b" aria-hidden="true"><span className={`absolute bottom-0 w-full rounded-t ${d.total_cost_usd == null ? 'border border-dashed' : 'bg-brand/60'}`} style={{ height: d.total_cost_usd == null ? 8 : Math.max(2, d.total_cost_usd / max * 80) }} /></span>
+          <span className="block mt-2">{d.date}</span><span className="block break-words">{fmtCost(d.total_cost_usd, d.subscription_runs)}</span><span className="block text-muted-foreground">{coverage(d.coverage?.cost, d.runs)}</span>
+        </button>)}
+      </div></div>
+    </Section>}
+    {dimensions.map(([key, label, group]) => <Section key={key} title={`按${label}`}>
+      {key === 'model' && <p className="text-sm text-muted-foreground">一次尝试可使用多个模型；模型的尝试次数不可相加。</p>}
+      <div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead><tr><th className="p-2">{label}</th><th className="p-2">尝试次数</th><th className="p-2">已报告费用</th><th className="p-2">完整 token 总量</th><th className="p-2">费用来源</th></tr></thead>
+        <tbody>{Object.entries(s[group] || {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, row]) => <tr key={name} className="border-t align-top">
+          <td className="p-2 break-all max-w-64"><button className="underline text-left" onClick={() => onFilter(key, name)}>{name === 'unknown' ? '未归属 / 未报告' : name}</button></td>
+          <td className="p-2">{row.runs}</td><td className="p-2">{fmtCost(row.total_cost_usd, row.subscription_runs)}<small className="block text-muted-foreground">{coverage(row.coverage?.cost, row.runs)}</small></td>
+          <td className="p-2">{number(row.total_tokens)}<small className="block text-muted-foreground">{coverage(row.coverage?.tokens, row.runs)}</small></td><td className="p-2 min-w-40">{provenance(row)}</td>
+        </tr>)}</tbody>
+      </table></div>
+    </Section>)}
+    <section id="run-history" className="bg-card border rounded-xl p-4 space-y-3 scroll-mt-20">
+      <h2 className="text-lg font-semibold">筛选后的运行历史</h2>
+      <p className="text-sm text-muted-foreground">与上方时间和全部筛选一致，最近 {s.history?.length || 0}/{a.runs} 次（最多 {s.history_limit} 次）；汇总包含全部匹配尝试。详情链接复用现有记录页。</p>
+      <ul className="space-y-3">{(s.history || []).map((r, i) => <li key={i} className="border-t pt-2 text-sm break-words">
+        <span>{r.started_at} · {r.repo || r.project || '未归属'} · {r.operator} · {r.status} </span>
+        {r.href ? <a className="underline" href={r.href}>{r.repo ? '运行详情' : '项目 Steward 历史'}</a> : <span className="text-muted-foreground">旧记录无可用详情链接</span>}
+      </li>)}</ul>
+    </section>
+    <p className="text-xs text-muted-foreground">数据生成时间：{s.generated_at}</p>
+  </div>
+}
+function provenance(a: UsageAggregate) {
+  return `${a.estimated_cost_runs ?? 0} 次明确估算 · ${a.reported_cost_runs ?? 0} 次报告金额 · ${a.cost_provenance_unknown_runs ?? 0} 次估算性质未报告 · ${a.subscription_runs ?? 0} 次订阅`
 }

@@ -321,15 +321,16 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 		return vcs.Issue{}, fmt.Errorf("gitlab create issue: HTTP %d: %s", status, data)
 	}
 	var raw struct {
-		ID    int64  `json:"id"`
-		IID   int    `json:"iid"`
-		Title string `json:"title"`
-		Body  string `json:"description"`
+		ID     int64  `json:"id"`
+		IID    int    `json:"iid"`
+		Title  string `json:"title"`
+		Body   string `json:"description"`
+		WebURL string `json:"web_url"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.Issue{}, err
 	}
-	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body}, nil
+	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body, URL: raw.WebURL}, nil
 }
 
 func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdate) (vcs.Issue, error) {
@@ -512,6 +513,14 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 		TargetBranch    string `json:"target_branch"`
 		SourceProjectID int    `json:"source_project_id"`
 		TargetProjectID int    `json:"target_project_id"`
+		SHA             string `json:"sha"`
+		MergeCommitSHA  string `json:"merge_commit_sha"`
+		SquashCommitSHA string `json:"squash_commit_sha"`
+		Draft           bool   `json:"draft"`
+		WorkInProgress  bool   `json:"work_in_progress"`
+		DiffRefs        struct {
+			BaseSHA string `json:"base_sha"`
+		} `json:"diff_refs"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.PR{}, err
@@ -524,7 +533,17 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 	if raw.SourceProjectID > 0 && raw.SourceProjectID == raw.TargetProjectID {
 		headRepo = repo
 	}
-	return vcs.PR{HeadRepo: headRepo, Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, BaseBranch: raw.TargetBranch, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.WebURL}, nil
+	mergeSHA := raw.MergeCommitSHA
+	if mergeSHA == "" {
+		mergeSHA = raw.SquashCommitSHA
+	}
+	return vcs.PR{HeadSHA: raw.SHA, BaseSHA: raw.DiffRefs.BaseSHA, MergeCommitSHA: mergeSHA, Draft: raw.Draft || raw.WorkInProgress, HeadRepo: headRepo, Number: raw.IID, Title: raw.Title, Body: raw.Description, State: s, HeadBranch: raw.SourceBranch, BaseBranch: raw.TargetBranch, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, URL: raw.WebURL}, nil
+}
+
+// PostPRCommentIdempotent reconciles the MR note marker before retrying.
+func (c *Client) PostPRCommentIdempotent(repo string, n int, body, runID string) error {
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), n)
+	return c.postComment(path, body, runID, runID != "")
 }
 
 func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
@@ -533,31 +552,7 @@ func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
 }
 
 func (c *Client) GetCIStatus(repo string, prNumber int) (vcs.CIStatus, error) {
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d/pipelines?per_page=1", projectID(repo), prNumber)
-	data, status, err := c.doJSON("GET", path, nil)
-	if err != nil {
-		return vcs.CIStatusNone, err
-	}
-	if status != 200 {
-		return vcs.CIStatusNone, fmt.Errorf("gitlab get MR pipelines: HTTP %d", status)
-	}
-	var raw []struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return vcs.CIStatusNone, err
-	}
-	if len(raw) == 0 {
-		return vcs.CIStatusNone, nil
-	}
-	switch raw[0].Status {
-	case "success":
-		return vcs.CIStatusSuccess, nil
-	case "failed", "canceled":
-		return vcs.CIStatusFailure, nil
-	default:
-		return vcs.CIStatusPending, nil
-	}
+	return c.GetCIStatusAtHead(repo, prNumber, "")
 }
 
 // SearchIssues runs GitLab's project-scoped issue search via the
@@ -976,3 +971,45 @@ func (c *Client) CreatePR(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
 }
 
 func randomCommentID() []byte { id := make([]byte, 16); _, _ = rand.Read(id); return id }
+
+// PublishAcceptanceComment uses MR notes, never issue notes.
+func (c *Client) PublishAcceptanceComment(repo string, pr int, report vcs.AcceptanceComment) error {
+	data, _, err := c.do("GET", "/user", nil)
+	if err != nil {
+		return err
+	}
+	var actor struct {
+		Username string `json:"username"`
+	}
+	if err := json.Unmarshal(data, &actor); err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), pr)
+	return vcs.UpsertAcceptanceComment(report, actor.Username,
+		func() ([]vcs.IssueComment, error) {
+			data, err := c.allPages(path + "?per_page=100")
+			if err != nil {
+				return nil, err
+			}
+			var notes []struct {
+				ID     int64  `json:"id"`
+				Body   string `json:"body"`
+				Author struct {
+					Username string `json:"username"`
+				} `json:"author"`
+			}
+			if err := json.Unmarshal(data, &notes); err != nil {
+				return nil, err
+			}
+			out := make([]vcs.IssueComment, len(notes))
+			for i, n := range notes {
+				out[i] = vcs.IssueComment{ID: n.ID, Body: n.Body, Author: n.Author.Username}
+			}
+			return out, nil
+		},
+		func(body string) error { _, _, e := c.do("POST", path, url.Values{"body": {body}}); return e },
+		func(id int64, body string) error {
+			_, _, e := c.do("PUT", fmt.Sprintf("%s/%d", path, id), url.Values{"body": {body}})
+			return e
+		})
+}

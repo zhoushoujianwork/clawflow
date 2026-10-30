@@ -79,8 +79,58 @@ func TestParseDependsOn(t *testing.T) {
 	if len(deps) != MaxDependencies || len(w) != 2 || deps[9].Number != 10 {
 		t.Fatalf("cap: %d deps, warns=%v", len(deps), w)
 	}
-	if _, w = ParseDependsOn("Depends on: #1\nDepends on: #2", "o/r"); len(w) != 1 {
-		t.Fatalf("second line warns=%v", w)
+}
+
+func TestParseDependsOnMultipleLines(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		want  []Key
+		warns []string
+	}{
+		{
+			name: "union",
+			body: "Depends on: #1\nDepends on: #2, owner/repo#3",
+			want: []Key{k("o/r#1"), k("o/r#2"), k("owner/repo#3")},
+		},
+		{
+			name: "deduplicate in first-seen order",
+			body: "Depends on: #2, owner/repo#3\r\ntext\nDepends on: o/r#2, #1, owner/repo#3\nDepends on: #1, #4",
+			want: []Key{k("o/r#2"), k("owner/repo#3"), k("o/r#1"), k("o/r#4")},
+		},
+		{
+			name:  "empty first line and invalid later tokens",
+			body:  "Depends on: \nDepends on: #1, junk\nDepends on: #x, #2",
+			want:  []Key{k("o/r#1"), k("o/r#2")},
+			warns: []string{`dependency "junk" ignored: not #N or owner/repo#N`, `dependency "#x" ignored: not #N or owner/repo#N`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, warns := ParseDependsOn(tc.body, "o/r")
+			if !reflect.DeepEqual(deps, tc.want) || !reflect.DeepEqual(warns, tc.warns) {
+				t.Fatalf("deps=%v warns=%v; want %v %v", deps, warns, tc.want, tc.warns)
+			}
+		})
+	}
+}
+
+func TestParseDependsOnCapAcrossLines(t *testing.T) {
+	var lines []string
+	var want []Key
+	for i := 1; i <= MaxDependencies+2; i++ {
+		lines = append(lines, fmt.Sprintf("Depends on: #%d, o/r#1", i))
+		if i <= MaxDependencies {
+			want = append(want, Key{Repo: "o/r", Number: i})
+		}
+	}
+	deps, warns := ParseDependsOn(strings.Join(lines, "\n"), "o/r")
+	wantWarns := []string{
+		fmt.Sprintf(`more than %d dependencies; extra "#%d" ignored`, MaxDependencies, MaxDependencies+1),
+		fmt.Sprintf(`more than %d dependencies; extra "#%d" ignored`, MaxDependencies, MaxDependencies+2),
+	}
+	if !reflect.DeepEqual(deps, want) || !reflect.DeepEqual(warns, wantWarns) {
+		t.Fatalf("deps=%v warns=%v; want %v %v", deps, warns, want, wantWarns)
 	}
 }
 
@@ -220,27 +270,5 @@ func TestMove(t *testing.T) {
 	}
 	if _, err := Move(base, a, Placement{Before: &a}); err == nil {
 		t.Error("self anchor must fail")
-	}
-}
-
-func TestEffectiveScope(t *testing.T) {
-	cases := []struct {
-		repo, def    string
-		hadQueue     bool
-		want         string
-		wantFellBack bool
-	}{
-		{"", "", false, ScopeAll, false},
-		{"", "", true, ScopeRanked, false},
-		{"", ScopeLabeled, true, ScopeLabeled, false},
-		{ScopeAll, "", true, ScopeAll, false},
-		{"bogus", "", true, ScopeRanked, true},
-		{"bogus", "", false, ScopeAll, true},
-	}
-	for _, c := range cases {
-		got, fell := EffectiveScope(c.repo, c.def, c.hadQueue)
-		if got != c.want || fell != c.wantFellBack {
-			t.Errorf("EffectiveScope(%q, %q, %v) = %q, %v; want %q, %v", c.repo, c.def, c.hadQueue, got, fell, c.want, c.wantFellBack)
-		}
 	}
 }

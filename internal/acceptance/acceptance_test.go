@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -160,6 +161,10 @@ func TestStore(t *testing.T) {
 	if err != nil || p.Digest != r.Plan.Digest {
 		t.Fatalf("load plan: %v", err)
 	}
+	// A worker and the coordinator sharing one store save the same plan twice.
+	if err := s.SavePlan(c, r.Plan); err != nil {
+		t.Fatalf("identical plan resave: %v", err)
+	}
 	p.Text = "replacement"
 	p.Digest = digest(p.Text)
 	if s.SavePlan(c, p) == nil {
@@ -168,6 +173,9 @@ func TestStore(t *testing.T) {
 	if err := s.SaveRecord(r); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.SaveRecord(r); err != nil {
+		t.Fatalf("identical record resave: %v", err)
+	}
 	loaded, err := s.LoadRecord(c, r.AttemptID)
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +183,9 @@ func TestStore(t *testing.T) {
 	if err := Evaluate(c, loaded); err != nil {
 		t.Fatal(err)
 	}
-	if s.SaveRecord(r) == nil {
+	changed := r
+	changed.BinaryID = "different-binary"
+	if s.SaveRecord(changed) == nil {
 		t.Fatal("overwrote immutable record")
 	}
 	name, _ := planName(c, r.Plan.AttemptID)
@@ -314,6 +324,7 @@ func TestStoreBoundsAndContentDigests(t *testing.T) {
 
 func setupRunner(t *testing.T) (Runner, string, string) {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 	s := openTestStore(t)
 	scratch := t.TempDir()
 	workspace := t.TempDir()
@@ -324,7 +335,7 @@ func setupRunner(t *testing.T) (Runner, string, string) {
 		return Source{c.HeadSHA, c.BaseSHA, c.IntegrationSHA, true}, nil
 	}}
 	r.Execute = func(_ context.Context, prompt string, o execution.Options) (execution.Result, error) {
-		if o.Role != "acceptance" || o.Resume || o.SessionKey != "" {
+		if o.Role != "acceptance" || (o.Resume && o.SessionKey != "reviewer") || (!o.Resume && o.SessionKey != "") {
 			t.Fatal("unsafe execution options")
 		}
 		if o.Workspace == scratch {
@@ -344,10 +355,13 @@ func setupRunner(t *testing.T) (Runner, string, string) {
 			t.Fatal("reviewer workspace/tools/policy mismatch")
 		}
 		p := savedTestPlan(t, s, c)
-		if !strings.Contains(prompt, p.Text) || !strings.Contains(prompt, c.HeadSHA) || strings.Contains(prompt, c.Development.SessionID) {
+		if !o.Resume && (!strings.Contains(prompt, p.Text) || !strings.Contains(prompt, c.HeadSHA) || strings.Contains(prompt, c.Development.SessionID)) {
 			t.Fatal("review input mismatch")
 		}
 		result := reviewerResult("reviewer", "review-run")
+		if o.Resume {
+			result.RunID = "correction-run"
+		}
 		result.Text = `{"status":"passed","summary":"verified","evidence":["behavior check passed","` + testCommandEvidence + `"]}`
 		return result, nil
 	}
@@ -696,8 +710,8 @@ func TestReviewerFindingPolicy(t *testing.T) {
 		{"requirement", Failed, []Finding{{Kind: "requirement", Summary: "retry absent", Requirement: "retry on transient failure", Evidence: "TestRetry fails: got one attempt"}}, Failed, false},
 		{"unplanned-defect", Passed, []Finding{{Kind: "defect", Summary: "race outside plan", Defect: "concurrent map writes in changed handler", Evidence: "race detector points to handler.go:42"}}, Failed, false},
 		{"no-findings", Failed, nil, Blocked, true},
-		{"no-requirement", Failed, []Finding{{Kind: "requirement", Summary: "more tests", Evidence: "plan gap"}}, Blocked, true},
-		{"no-defect-evidence", Failed, []Finding{{Kind: "defect", Summary: "possible race", Defect: "race"}}, Blocked, true},
+		{"no-requirement", Failed, []Finding{{Kind: "requirement", Summary: "more tests", Evidence: "plan gap"}}, Failed, false},
+		{"no-defect-evidence", Failed, []Finding{{Kind: "defect", Summary: "possible race", Defect: "race"}}, Failed, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, scratch, workspace := setupRunner(t)
@@ -706,7 +720,7 @@ func TestReviewerFindingPolicy(t *testing.T) {
 				result, err := base(ctx, prompt, opts)
 				if !opts.ToolsDisabled {
 					for _, rule := range []string{"review aid, not a requirement source", "advisory only", "Each failing finding", "limitation, not grounds for blocked"} {
-						if !strings.Contains(prompt, rule) {
+						if !opts.Resume && !strings.Contains(prompt, rule) {
 							t.Fatalf("missing prompt rule %q", rule)
 						}
 					}
@@ -772,6 +786,9 @@ func TestRunnerCIReviewMode(t *testing.T) {
 			base := r.Execute
 			r.Execute = func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
 				if opts.Workspace == workspace {
+					if !strings.Contains(prompt, "Authoritative exact-head Web render status: blocked") || !strings.Contains(prompt, "Do not launch Chromium") {
+						t.Fatal("review prompt lacks render evidence mapping")
+					}
 					verified := strings.Contains(prompt, "Review mode: ci-verified")
 					if verified != (tc.want == CIVerified) || strings.Contains(prompt, r.fullSuiteInstruction()) == verified {
 						t.Fatalf("wrong review instructions: %s", prompt)
@@ -812,5 +829,90 @@ func TestEvaluateCIReviewEvidence(t *testing.T) {
 	r.ReviewMode = "unknown"
 	if Evaluate(contract(), r) == nil {
 		t.Fatal("accepted unknown review mode")
+	}
+}
+
+func TestRecordsAtHeadIndependentOfContract(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r := passing()
+	if err := s.SaveRecord(r); err != nil {
+		t.Fatal(err)
+	}
+	records, err := s.RecordsAtHead(r.Contract.Repository, r.Contract.PRNumber, r.Contract.HeadSHA)
+	if err != nil || len(records) != 1 || records[0].Verdict != Passed {
+		t.Fatalf("%+v %v", records, err)
+	}
+	records, err = s.RecordsAtHead(r.Contract.Repository, r.Contract.PRNumber, "other-head")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("%+v %v", records, err)
+	}
+	// An unreadable record cannot be dismissed as belonging to some other head.
+	if err := os.WriteFile(filepath.Join(s.path, "unreadable.record"), []byte("bad"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordsAtHead(r.Contract.Repository, r.Contract.PRNumber, "other-head"); err == nil {
+		t.Fatal("unreadable record treated as absent")
+	}
+}
+
+func TestRunnerRecordsCheckoutSetup(t *testing.T) {
+	for _, want := range []string{"ok", "fallback", "failed"} {
+		t.Run(want, func(t *testing.T) {
+			r, scratch, workspace := setupRunner(t)
+			cmd := exec.Command("git", "init", "--quiet", workspace)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git init: %s %v", out, err)
+			}
+			r.SetupCommand = "mkdir -p web/dist && : > web/dist/index.html"
+			if want == "fallback" {
+				r.SetupCommand = "exit 1"
+			}
+			base := r.Execute
+			setupDone, reviewSeen := false, false
+			r.Execute = func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
+				if strings.HasPrefix(prompt, "Run only this prerequisite script") {
+					if opts.Workspace != workspace || opts.Role != "acceptance" || opts.PermissionMode != "bypassPermissions" || opts.ToolsDisabled {
+						t.Fatal("setup escaped review policy")
+					}
+					setupDone = true
+					if want == "failed" {
+						return execution.Result{}, errors.New("private failure")
+					}
+					scripts, _ := filepath.Glob(filepath.Join(workspace, ".clawflow-checkout-setup", "*.sh"))
+					if len(scripts) != 1 {
+						t.Fatal("missing setup script")
+					}
+					cmd := exec.CommandContext(ctx, "sh", scripts[0])
+					cmd.Dir = workspace
+					if out, err := cmd.CombinedOutput(); err != nil || len(out) != 0 {
+						t.Fatalf("setup output=%q err=%v", out, err)
+					}
+					return execution.Result{Text: "private setup output"}, nil
+				}
+				if opts.Workspace == workspace {
+					reviewSeen = true
+					if !setupDone || !strings.Contains(prompt, "setup status: "+want) || !strings.Contains(prompt, "instead of returning infrastructure_error") {
+						t.Fatal("review missing setup/CI guidance")
+					}
+				}
+				return base(ctx, prompt, opts)
+			}
+			record, err := r.Run(context.Background(), contract(), scratch, workspace)
+			if err != nil || !reviewSeen || record.Verdict != Passed {
+				t.Fatalf("review: %s %v", record.Verdict, err)
+			}
+			saved, err := r.Store.LoadRecord(contract(), record.AttemptID)
+			if err != nil || len(saved.EnvironmentNotes) != 1 || saved.EnvironmentNotes[0] != "checkout_setup: "+want {
+				t.Fatalf("notes=%v err=%v", saved.EnvironmentNotes, err)
+			}
+			encoded, _ := json.Marshal(saved)
+			if strings.Contains(string(encoded), "private setup output") || strings.Contains(string(encoded), "private failure") {
+				t.Fatal("setup output persisted in acceptance record")
+			}
+		})
 	}
 }

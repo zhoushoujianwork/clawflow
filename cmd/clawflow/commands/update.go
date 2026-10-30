@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/githubauth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,9 +58,9 @@ Older or unknown releases also require --allow-downgrade.`,
 				u := newSelfUpgrader()
 				result := u.Upgrade(ctx, repo)
 				if result.Result == selfUpgradeFailed {
-					return fmt.Errorf("source upgrade: %s", result.Reason)
+					return fmt.Errorf("source upgrade: %s", result.description())
 				}
-				fmt.Println(result.Result + ": " + result.Reason)
+				fmt.Println(result.Result + ": " + result.description())
 				return nil
 			}
 			return downloadReleaseBinary(release, allowDowngrade)
@@ -171,7 +172,26 @@ func (u *selfUpgrader) downloadReleaseBinary(explicitRelease, allowDowngrade boo
 	if version == tag && channel == "release" {
 		return nil
 	}
-	return atomicReplace(dest, staged)
+	// Close the writable descriptor before executing the downloaded candidate
+	// (Linux rejects executing a file still open for writing).
+	if err := staged.Chmod(0o755); err != nil {
+		return err
+	}
+	if err := staged.Close(); err != nil {
+		return err
+	}
+	if err := codesignIfDarwin(staged.Name()); err != nil {
+		fmt.Printf("  [warn] codesign step skipped: %v\n", err)
+	}
+	if err := u.migrateCandidate(context.Background(), staged.Name()); err != nil {
+		return fmt.Errorf("release upgrade aborted: %w", err)
+	}
+	candidate, err := os.Open(staged.Name())
+	if err != nil {
+		return err
+	}
+	defer candidate.Close()
+	return atomicReplace(dest, candidate)
 }
 
 // latestReleaseAsset finds the download URL for the current OS/arch binary
@@ -208,14 +228,18 @@ func fetchLatestRelease(client *http.Client) (githubRelease, error) {
 	if err != nil {
 		return release, fmt.Errorf("load GitHub credentials: %w", err)
 	}
+	identity, err := githubauth.Resolve(context.Background(), githubRepo, creds.GHToken, "")
+	if err != nil {
+		return release, err
+	}
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return release, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if creds.GHToken != "" {
-		req.Header.Set("Authorization", "Bearer "+creds.GHToken)
+	if identity.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+identity.Token)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -253,7 +277,7 @@ func rebuildFromSource(repoDir string) error {
 	defer cancel()
 	result := newSelfUpgrader().Upgrade(ctx, config.Repo{LocalPath: repoDir, BaseBranch: trackedBranch()})
 	if result.Result == selfUpgradeFailed {
-		return fmt.Errorf("source upgrade: %s", result.Reason)
+		return fmt.Errorf("source upgrade: %s", result.description())
 	}
 	return nil
 }

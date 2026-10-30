@@ -1,7 +1,12 @@
 package api
 
 import (
+	"context"
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -27,17 +32,17 @@ func TestPlanScheduledRuns(t *testing.T) {
 		only   map[string]bool
 		want   []string
 	}{
-		{"all eligible, bound elsewhere and disabled skipped", schedCfg(10, false, repos), nil, nil,
-			[]string{"o/a", "o/b", "o/c", "o/mine", "o/zunset"}},
+		{"all eligible, disabled skipped", schedCfg(10, false, repos), nil, nil,
+			[]string{"o/a", "o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
 		{"active repo skipped", schedCfg(10, false, repos), map[string]bool{"o/a": true}, nil,
-			[]string{"o/b", "o/c", "o/mine", "o/zunset"}},
-		{"cap counts active passes", schedCfg(3, false, repos), map[string]bool{"o/a": true}, nil,
-			[]string{"o/b", "o/c"}},
-		{"default cap is 4", schedCfg(0, false, repos), nil, nil,
-			[]string{"o/a", "o/b", "o/c", "o/mine"}},
-		{"cap full", schedCfg(2, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, nil},
-		{"over cap never negative", schedCfg(1, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, nil},
-		{"require_binding drops unbound", schedCfg(10, true, repos), nil, nil, []string{"o/mine"}},
+			[]string{"o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
+		{"agent cap does not count active passes", schedCfg(3, false, repos), map[string]bool{"o/a": true}, nil,
+			[]string{"o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
+		{"default capacity does not limit passes", schedCfg(0, false, repos), nil, nil,
+			[]string{"o/a", "o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
+		{"active passes do not consume slots", schedCfg(2, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, []string{"o/c", "o/mine", "o/other", "o/zunset"}},
+		{"passes can exceed agent slots", schedCfg(1, false, repos), map[string]bool{"o/a": true, "o/b": true}, nil, []string{"o/c", "o/mine", "o/other", "o/zunset"}},
+		{"require_binding ignored", schedCfg(10, true, repos), nil, nil, []string{"o/a", "o/b", "o/c", "o/mine", "o/other", "o/zunset"}},
 		{"unscoped pass blocks all", schedCfg(10, false, repos), map[string]bool{unscopedKey: true}, nil, nil},
 		{"only filter", schedCfg(10, false, repos), nil, map[string]bool{"o/b": true, "o/off": true}, []string{"o/b"}},
 	}
@@ -94,5 +99,71 @@ func TestCurrentRunStatusReportsActiveRepos(t *testing.T) {
 	runMu.Unlock()
 	if st := currentRunStatus(); st.Status != "running" || len(st.ActiveRepos) != 0 {
 		t.Fatalf("unscoped status = %+v", st)
+	}
+}
+
+func TestCurrentRunStatusAgentSlots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Settings: config.Settings{MaxConcurrentAgents: 2}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	release, err := agentcapacity.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	st := currentRunStatus()
+	if st.AgentSlotsUsed != 1 || st.AgentSlotsTotal != 2 {
+		t.Fatalf("status=%+v", st)
+	}
+	release()
+	if st := currentRunStatus(); st.AgentSlotsUsed != 0 {
+		t.Fatalf("released status=%+v", st)
+	}
+}
+
+func TestClientNeverSchedules(t *testing.T) {
+	cfg := schedCfg(4, false, map[string]config.Repo{"o/r": {Enabled: true}})
+	cfg.Settings.Platform.URL = "https://platform.example"
+	if got := PlanScheduledRuns(cfg, "", map[string]bool{}, nil); len(got) != 0 {
+		t.Fatalf("client scheduled %v", got)
+	}
+	started, _ := TriggerScheduledRuns(cfg, "", nil)
+	if len(started) != 0 {
+		t.Fatalf("client started %v", started)
+	}
+}
+
+func TestClientManualWebRunRefused(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Settings: config.Settings{Platform: config.PlatformSettings{URL: "https://platform.example"}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	HandleRun(response, httptest.NewRequest(http.MethodPost, "/api/run", strings.NewReader(`{}`)))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), cfg.Settings.Platform.URL) {
+		t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+	}
+	if TriggerRun("o/r", 1) {
+		t.Fatal("client started a subprocess")
+	}
+}
+
+func TestClientWebLocalEnableRefused(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {}}, Settings: config.Settings{Platform: config.PlatformSettings{URL: "https://platform.example"}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	HandleRepoConfig(response, httptest.NewRequest(http.MethodPost, "/api/repo/config", strings.NewReader(`{"repo":"o/r","enabled":true}`)))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), cfg.Settings.Platform.URL) {
+		t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+	}
+	loaded, err := config.Load()
+	if err != nil || loaded.Repos["o/r"].Enabled {
+		t.Fatalf("local config changed: %v", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -34,6 +36,7 @@ var acceptanceNativeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$
 
 // These narrow boundaries allow isolated tests without network or live agents.
 var acceptanceClientFactory = newVCSClient
+var acceptanceEvidenceSchema = 1
 var acceptanceNativeRun = execution.Run
 var acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "core.fsmonitor=false"}, args...)...)
@@ -123,6 +126,7 @@ func newAcceptanceCmd() *cobra.Command {
 		}
 		root.AddCommand(cmd)
 	}
+	root.AddCommand(newHarvestReviewCmd())
 	return root
 }
 
@@ -135,11 +139,16 @@ func acceptanceConfiguration(repo string) (config.Repo, execution.Config, error)
 	}
 	rc, ok := cfg.Repos[repo]
 	parts := strings.Split(repo, "/")
-	if !ok || len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.ContainsAny(repo, "\\\x00\r\n") || strings.Contains(repo, "..") {
+	if !ok || len(parts) < 2 || (rc.Platform != "gitlab" && len(parts) != 2) || strings.ContainsAny(repo, "\\\x00\r\n") || strings.Contains(repo, "..") {
 		return rc, execution.Config{}, errors.New("acceptance requires a registered owner/repository")
 	}
-	if rc.Platform != "" && rc.Platform != "github" {
-		return rc, execution.Config{}, errors.New("independent acceptance currently supports GitHub only")
+	for _, part := range parts {
+		if part == "" {
+			return rc, execution.Config{}, errors.New("acceptance requires a registered owner/repository")
+		}
+	}
+	if rc.Platform != "" && rc.Platform != "github" && rc.Platform != "gitlab" {
+		return rc, execution.Config{}, errors.New("independent acceptance requires GitHub or GitLab")
 	}
 	c := execution.WithEnvironment(cfg.Settings.Execution)
 	if p := c.RoleProfiles["acceptance"]; p != "" {
@@ -175,7 +184,8 @@ func acceptancePolicy(repo string, rc config.Repo, ec execution.Config) string {
 		Repository, Platform, BaseURL, BaseBranch, LocalPath string
 		CIRequired, AcceptanceRequired                       bool
 		Command, Profile, CodexSandbox                       string
-	}{1, repo, rc.Platform, rc.BaseURL, rc.BaseBranch, rc.LocalPath, rc.CIRequired, rc.AcceptanceRequired, ec.Command, ec.Profile, ec.CodexSandbox})
+		SetupCommand                                         string
+	}{1, repo, rc.Platform, rc.BaseURL, rc.BaseBranch, rc.LocalPath, rc.CIRequired, rc.AcceptanceRequired, ec.Command, ec.Profile, ec.CodexSandbox, rc.AcceptanceSetupCommand})
 }
 
 func acceptanceSHA(s string) bool {
@@ -190,29 +200,72 @@ func acceptanceSHA(s string) bool {
 	return true
 }
 
+// acceptanceLocalDir resolves the repository's configured local clone, or "".
+func acceptanceLocalDir(rc config.Repo) string {
+	path := rc.LocalPath
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		path = filepath.Join(home, path[2:])
+	}
+	dir, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
 func acceptanceOrigin(ctx context.Context, rc config.Repo, repo string) (string, error) {
 	if rc.LocalPath == "" {
 		return "", errors.New("acceptance requires a configured local checkout")
 	}
-	if strings.HasPrefix(rc.LocalPath, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", errors.New("acceptance local checkout unavailable")
-		}
-		rc.LocalPath = filepath.Join(home, rc.LocalPath[2:])
-	}
-	dir, err := filepath.Abs(rc.LocalPath)
-	if err != nil {
+	dir := acceptanceLocalDir(rc)
+	if dir == "" {
 		return "", errors.New("acceptance local checkout unavailable")
 	}
 	origin, err := acceptanceGit(ctx, dir, "config", "--get", "remote.origin.url")
-	if err != nil || !(strings.HasPrefix(origin, "https://github.com/") || strings.HasPrefix(origin, "git@github.com:")) || !strings.EqualFold(extractOwnerRepo(origin), repo) {
+	if err != nil || !acceptanceOriginMatches(origin, rc, repo) {
 		return "", errors.New("acceptance checkout origin does not match repository")
 	}
 	return origin, nil
 }
 
+// acceptanceOriginMatches binds the checkout to the configured provider instance.
+func acceptanceOriginMatches(origin string, rc config.Repo, repo string) bool {
+	if rc.Platform != "gitlab" {
+		return (strings.HasPrefix(origin, "https://github.com/") || strings.HasPrefix(origin, "git@github.com:")) && strings.EqualFold(extractOwnerRepo(origin), repo)
+	}
+	base, err := url.Parse(rc.BaseURL)
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return false
+	}
+	expectedPath := strings.Trim(strings.TrimRight(base.Path, "/")+"/"+repo, "/")
+	if strings.HasPrefix(origin, "git@") {
+		host, path, ok := strings.Cut(strings.TrimPrefix(origin, "git@"), ":")
+		return ok && strings.EqualFold(host, base.Hostname()) && strings.TrimSuffix(path, ".git") == expectedPath
+	}
+	remote, err := url.Parse(origin)
+	return err == nil && (remote.Scheme == "https" || remote.Scheme == "http") && remote.User == nil &&
+		strings.EqualFold(remote.Host, base.Host) && remote.RawQuery == "" && remote.Fragment == "" &&
+		strings.TrimSuffix(remote.Path, ".git") == strings.TrimRight(base.Path, "/")+"/"+repo
+}
+
+// acceptanceReadError marks a failed VCS read, as opposed to a contract that
+// was read successfully but is not valid. Board builders treat it as a
+// transient repository failure rather than a blocked item.
+type acceptanceReadError struct{ msg string }
+
+func (e acceptanceReadError) Error() string { return e.msg }
+
 func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Contract, config.Repo, execution.Config, vcs.PR, error) {
+	if pinned, ok := ctx.Value(workerAcceptanceKey{}).(*coordinatorPayload); ok {
+		return workerAcceptanceContract(ctx, client, repo, prNumber, pinned)
+	}
 	var c acceptance.Contract
 	rc, ec, err := acceptanceConfiguration(repo)
 	if err != nil {
@@ -226,14 +279,17 @@ func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prN
 	}
 	pr, err := client.GetPR(repo, prNumber)
 	if err != nil {
-		return c, rc, ec, pr, errors.New("acceptance PR unavailable")
+		return c, rc, ec, pr, acceptanceReadError{"acceptance PR unavailable"}
 	}
 	issueNum := extractClosesIssue(pr.Body)
 	if pr.Number != prNumber || pr.State != "open" || pr.IsMerged() || pr.Draft || isDraftPR(pr.Title) || !strings.EqualFold(pr.HeadRepo, repo) || issueNum <= 0 || !acceptanceSHA(pr.HeadSHA) || !acceptanceSHA(pr.BaseSHA) || pr.BaseBranch == "" || pr.HeadBranch == "" || (rc.BaseBranch != "" && pr.BaseBranch != rc.BaseBranch) {
 		return c, rc, ec, pr, errors.New("acceptance requires an open same-repository non-draft PR with immutable head/base and a closing issue")
 	}
 	issue, err := client.GetIssue(repo, issueNum)
-	if err != nil || issue == nil || issue.Number != issueNum || issue.State != "open" || strings.TrimSpace(issue.Title+issue.Body) == "" {
+	if err != nil {
+		return c, rc, ec, pr, acceptanceReadError{"acceptance requirements issue unavailable or closed"}
+	}
+	if issue == nil || issue.Number != issueNum || issue.State != "open" || strings.TrimSpace(issue.Title+issue.Body) == "" {
 		return c, rc, ec, pr, errors.New("acceptance requirements issue unavailable or closed")
 	}
 	requirements := issue.Title + "\n\n" + issue.Body
@@ -241,6 +297,9 @@ func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prN
 		return c, rc, ec, pr, errors.New("acceptance requirements exceed size limit")
 	}
 	dev, err := acceptanceDevelopment(repo, issueNum, pr.HeadSHA, pr.Number)
+	if errors.Is(err, errDevelopmentHeadMissing) {
+		dev, err = acceptanceInheritedDevelopment(ctx, rc, repo, issueNum, pr)
+	}
 	if err != nil {
 		return c, rc, ec, pr, err
 	}
@@ -251,7 +310,7 @@ func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prN
 		generation = 1
 	}
 	policy := acceptanceHash(struct{ Policy, TargetBranch string }{acceptancePolicy(repo, rc, ec), pr.BaseBranch})
-	c = acceptance.Contract{Version: acceptance.Version, TaskID: repo + ":issue:" + strconv.Itoa(issueNum), Generation: generation, Repository: repo, PRNumber: prNumber, HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, PolicyDigest: policy, Requirements: requirements, Development: dev}
+	c = acceptance.Contract{EvidenceSchema: acceptanceEvidenceSchema, Version: acceptance.Version, TaskID: repo + ":issue:" + strconv.Itoa(issueNum), Generation: generation, Repository: repo, PRNumber: prNumber, HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, PolicyDigest: policy, Requirements: requirements, Development: dev}
 	// IntegrationSHA stays empty: GitHub's merge_commit_sha is not test evidence.
 	return c, rc, ec, pr, c.Validate()
 }
@@ -311,8 +370,10 @@ func acceptanceEvent(raw []byte) (execution.Event, error) {
 	return e, nil
 }
 
+var errDevelopmentHeadMissing = errors.New("latest development run is absent, incomplete or unsuccessful")
+
 // Only ClawFlow's completed local run metadata and sanitized native event
-// sequence supply developer identity for the current published head.
+// sequence supply developer identity for the requested head.
 func acceptanceDevelopment(repo string, issue int, head string, prNumbers ...int) (acceptance.Identity, error) {
 	parent := filepath.Dir(snapshot.RunDir(repo, issue, time.Now()))
 	entries, err := os.ReadDir(parent)
@@ -372,8 +433,11 @@ func acceptanceDevelopment(repo string, issue int, head string, prNumbers ...int
 			latest, latestDir = m, filepath.Join(parent, entry.Name())
 		}
 	}
-	if latestDir == "" || latest.Status != "success" || latest.EndedAt == nil || latest.EndedAt.Before(latest.StartedAt) {
-		return acceptance.Identity{}, errors.New("latest development run is absent, incomplete or unsuccessful")
+	if latestDir == "" {
+		return acceptance.Identity{}, errDevelopmentHeadMissing
+	}
+	if latest.Status != "success" || latest.EndedAt == nil || latest.EndedAt.Before(latest.StartedAt) {
+		return acceptance.Identity{}, errors.New("latest development run is incomplete or unsuccessful")
 	}
 	return developmentIdentity(latestDir)
 }
@@ -382,6 +446,13 @@ func developmentIdentity(dir string) (acceptance.Identity, error) {
 	b, err := acceptanceRead(filepath.Join(dir, "events.jsonl"), acceptanceFileLimit)
 	if err != nil {
 		return acceptance.Identity{}, err
+	}
+	return developmentIdentityBytes(b)
+}
+
+func developmentIdentityBytes(b []byte) (acceptance.Identity, error) {
+	if len(b) > acceptanceFileLimit {
+		return acceptance.Identity{}, errors.New("development evidence exceeds limit")
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(b))
 	scanner.Buffer(make([]byte, 4096), execution.MaxEventBytes)
@@ -520,6 +591,11 @@ func conditionalAcceptedMerge(ctx context.Context, client vcs.Client, repo strin
 var acceptanceMergeClient = newVCSClientForRepo
 
 func explicitAcceptanceMerge(ctx context.Context, client vcs.Client, repo string, pr int) error {
+	releaseMerge, err := mergeRepoLock(repo)
+	if err != nil {
+		return err
+	}
+	defer releaseMerge()
 	required, err := acceptanceEnrollment(repo)
 	if err != nil {
 		return err
@@ -595,6 +671,82 @@ func acceptanceRemoveRemotes(ctx context.Context, dir string) error {
 	return nil
 }
 
+// acceptancePrepareCheckout makes the pinned comparison history available offline.
+// Planning still runs in an empty scratch directory before this checkout exists.
+func acceptancePrepareCheckout(ctx context.Context, workspace, local, origin, headBranch, headSHA, baseSHA string) error {
+	// An independent detached Git workspace avoids mutating the user's checkout
+	// or sharing FETCH_HEAD with implement/repair. Only these temp dirs are removed.
+	if _, err := acceptanceGit(ctx, workspace, "init", "--quiet"); err != nil {
+		return err
+	}
+	// Implement and repair worktrees live in the local clone, so the pinned
+	// head and base are normally already there: borrow those objects read-only
+	// instead of downloading the history again (concurrent reviews timed out).
+	if local != "" && acceptanceBorrowLocalObjects(ctx, workspace, local, headSHA, baseSHA) {
+		if _, err := acceptanceGit(ctx, workspace, "merge-base", baseSHA, headSHA); err != nil {
+			return err
+		}
+		_, err := acceptanceGit(ctx, workspace, "checkout", "--detach", headSHA)
+		return err
+	}
+	for _, args := range [][]string{{"remote", "add", "origin", origin}, {"check-ref-format", "refs/heads/" + headBranch}, {"fetch", "--no-tags", "origin", "refs/heads/" + headBranch}} {
+		if _, err := acceptanceGit(ctx, workspace, args...); err != nil {
+			return err
+		}
+	}
+	fetched, err := acceptanceGit(ctx, workspace, "rev-parse", "FETCH_HEAD")
+	if err != nil || fetched != headSHA {
+		return errors.New("acceptance fetched PR head changed")
+	}
+	// Fetch only the pinned base and its ancestry, without creating a ref. The
+	// full head/base histories are needed for offline three-dot comparisons.
+	if _, err := acceptanceGit(ctx, workspace, "fetch", "--no-tags", "origin", baseSHA); err != nil {
+		return err
+	}
+	if _, err := acceptanceGit(ctx, workspace, "merge-base", baseSHA, headSHA); err != nil {
+		return err
+	}
+	if _, err := acceptanceGit(ctx, workspace, "checkout", "--detach", headSHA); err != nil {
+		return err
+	}
+	// The reviewer may run arbitrary commands here, so leave it nothing to push to.
+	if err := acceptanceRemoveRemotes(ctx, workspace); err != nil {
+		return err
+	}
+	return nil
+}
+
+// acceptanceBorrowLocalObjects points the review repository at the local
+// clone's object store when it already holds both pinned commits. It reports
+// false (leaving no alternates behind) when anything is missing.
+func acceptanceBorrowLocalObjects(ctx context.Context, workspace, local, headSHA, baseSHA string) bool {
+	// Only a real repository created by init can take alternates.
+	if info, err := os.Stat(filepath.Join(workspace, ".git", "objects")); err != nil || !info.IsDir() {
+		return false
+	}
+	common, err := acceptanceGit(ctx, local, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return false
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(local, common)
+	}
+	alternates := filepath.Join(workspace, ".git", "objects", "info", "alternates")
+	if err := os.MkdirAll(filepath.Dir(alternates), 0o755); err != nil {
+		return false
+	}
+	if err := os.WriteFile(alternates, []byte(filepath.Join(common, "objects")+"\n"), 0o644); err != nil {
+		return false
+	}
+	for _, sha := range []string{headSHA, baseSHA} {
+		if _, err := acceptanceGit(ctx, workspace, "cat-file", "-e", sha+"^{commit}"); err != nil {
+			os.Remove(alternates)
+			return false
+		}
+	}
+	return true
+}
+
 // acceptanceReviewerEnv returns env without VCS or ClawFlow token variables.
 func acceptanceReviewerEnv(env []string) []string {
 	out := make([]string, 0, len(env))
@@ -608,13 +760,31 @@ func acceptanceReviewerEnv(env []string) []string {
 		if strings.HasPrefix(upper, "CLAWFLOW_") && strings.Contains(upper, "TOKEN") {
 			continue
 		}
+		if upper == "GOCACHE" || upper == "GOTMPDIR" {
+			continue
+		}
 		out = append(out, kv)
 	}
-	return out
+	// Sandboxed reviewers cannot write the user's Go build cache, which made
+	// `go test` fail during setup and turned reviews into infrastructure
+	// errors. Use a per-machine cache under the temp dir instead.
+	cache := filepath.Join(os.TempDir(), "clawflow-review-go")
+	return append(out, "GOCACHE="+filepath.Join(cache, "build"), "GOTMPDIR="+filepath.Join(cache, "tmp"))
 }
 
 func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Record, error) {
+	releaseMaintenance, maintenanceErr := housekeeping.Gate(ctx, os.TempDir(), false)
+	if maintenanceErr != nil {
+		return acceptance.Record{}, maintenanceErr
+	}
+	defer releaseMaintenance()
+
 	ctx = gitexec.WithRepo(ctx, repo)
+	releaseSlot, err := configuredAgentSlot(ctx)
+	if err != nil {
+		return acceptance.Record{}, err
+	}
+	defer releaseSlot()
 	unlock, err := acceptanceLock(repo, prNumber)
 	if err != nil {
 		return acceptance.Record{}, err
@@ -622,6 +792,9 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 	defer unlock()
 	c, rc, ec, pr, err := acceptanceContract(ctx, client, repo, prNumber)
 	if err != nil {
+		return acceptance.Record{}, err
+	}
+	if err := issueWorkAllowed(client, repo, extractClosesIssue(pr.Body)); err != nil {
 		return acceptance.Record{}, err
 	}
 	origin, err := acceptanceOrigin(ctx, rc, repo)
@@ -644,22 +817,7 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		if err != nil {
 			return "", err
 		}
-		// An independent detached Git workspace avoids mutating the user's checkout
-		// or sharing FETCH_HEAD with implement/repair. Only these temp dirs are removed.
-		for _, args := range [][]string{{"init", "--quiet"}, {"remote", "add", "origin", origin}, {"check-ref-format", "refs/heads/" + pr.HeadBranch}, {"fetch", "--no-tags", "origin", "refs/heads/" + pr.HeadBranch}} {
-			if _, err := acceptanceGit(ctx, workspace, args...); err != nil {
-				return "", err
-			}
-		}
-		fetched, err := acceptanceGit(ctx, workspace, "rev-parse", "FETCH_HEAD")
-		if err != nil || fetched != c.HeadSHA {
-			return "", errors.New("acceptance fetched PR head changed")
-		}
-		if _, err := acceptanceGit(ctx, workspace, "checkout", "--detach", c.HeadSHA); err != nil {
-			return "", err
-		}
-		// The reviewer may run arbitrary commands here, so leave it nothing to push to.
-		if err := acceptanceRemoveRemotes(ctx, workspace); err != nil {
+		if err := acceptancePrepareCheckout(ctx, workspace, acceptanceLocalDir(rc), origin, pr.HeadBranch, c.HeadSHA, c.BaseSHA); err != nil {
 			return "", err
 		}
 		return workspace, nil
@@ -669,6 +827,15 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		return acceptance.Record{}, errors.New("cannot open private acceptance store")
 	}
 	defer store.Close()
+	attempts, err := store.InfrastructureAttempts(c)
+	if err != nil {
+		return acceptance.Record{}, err
+	}
+	if attempts.LatestIsInfra && attempts.Count >= harvestMaxInfra {
+		info := harvestInfraInfo{attempts: attempts.Count, digest: acceptanceInfraKey(c)}
+		autoMergeAttempt{ctx: ctx, client: client, repo: repo, repoCfg: rc, prNum: prNumber, issueNum: extractClosesIssue(pr.Body)}.notify(harvestInfraComment(repo, prNumber, info), harvestInfraMarker(info.digest))
+		return acceptance.Record{}, errors.New("acceptance-infra: infrastructure retry limit reached")
+	}
 	inspect := func(ctx context.Context, workspace string) (acceptance.Source, error) {
 		current, _, _, _, err := acceptanceContract(ctx, client, repo, prNumber)
 		if err != nil {
@@ -691,21 +858,30 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 		}
 		return acceptance.Source{HeadSHA: head, BaseSHA: current.BaseSHA, Clean: head == c.HeadSHA && extra == ""}, nil
 	}
-	execute := func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
-		timeout := 30 * time.Minute
-		if deadline, ok := ctx.Deadline(); ok {
-			timeout = time.Until(deadline)
-		}
-		if timeout <= 0 {
-			return execution.Result{}, context.DeadlineExceeded
-		}
-		return acceptanceNativeRun(ctx, ec, execution.Request{Version: 1, RequestID: execution.NewSessionKey(), Workspace: opts.Workspace, Prompt: prompt, Instructions: opts.Instructions, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: max(1, timeout.Milliseconds())}, acceptanceReviewerEnv(os.Environ()), opts.Events, nil)
+	execute := acceptanceExecutor(ec)
+	planStore, err := acceptance.OpenStore(acceptancePlanStorePath(repo))
+	if err != nil {
+		return acceptance.Record{}, err
+	}
+	defer planStore.Close()
+	var savedPlan *acceptance.Plan
+	if pinned, ok := ctx.Value(workerAcceptanceKey{}).(*coordinatorPayload); ok {
+		savedPlan = pinned.AcceptancePlan
+	}
+	planPolicy := acceptancePlanningPolicy(repo, rc, ec)
+	if savedPlan != nil {
+		planPolicy = savedPlan.PlanningPolicyDigest
 	}
 	var ci func() (vcs.CIEvidence, error)
 	if provider, ok := client.(vcs.CIEvidenceProvider); ok {
 		ci = func() (vcs.CIEvidence, error) { return provider.GetCIEvidence(repo, prNumber) }
 	}
-	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand}).Run(ctx, c, scratch, workspace)
+	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, PlanStore: planStore, PlanPolicy: planPolicy, SavedPlan: savedPlan, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand, SetupCommand: rc.AcceptanceSetupCommand}).Run(ctx, c, scratch, workspace)
+	if r.Completed {
+		if publishErr := publishAcceptanceReport(ctx, client, r); publishErr != nil {
+			return r, errors.Join(err, publishErr)
+		}
+	}
 	if err == nil {
 		// Run returns nil only after the reviewer report was parsed and the
 		// record was saved, so a failed/blocked verdict reaching here is a

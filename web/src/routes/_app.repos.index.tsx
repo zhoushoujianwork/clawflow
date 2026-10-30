@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
+import { ContextWorkLinks } from '../components/ContextWorkLinks'
 import { createPortal } from 'react-dom'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { FolderOpen, FolderKanban, Plus, Trash2, Link2, Link2Off, Search, X, Check, Loader2, AlertTriangle } from 'lucide-react'
@@ -23,24 +24,7 @@ interface Repo {
   base_branch_hint?: string
 }
 
-interface RunEntry {
-  repo: string
-  started_at: string
-}
-
 const PROVIDER_KEY = 'clawflow.repos.provider'
-
-function timeAgo(iso: string): string {
-  if (!iso) return '—'
-  const t = new Date(iso).getTime()
-  if (!isFinite(t)) return '—'
-  const diff = Math.floor((Date.now() - t) / 1000)
-  if (diff < 0) return 'just now'
-  if (diff < 60) return `${diff}s ago`
-  if (diff < 3600) return `${Math.floor(diff / 60)}min ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  return `${Math.floor(diff / 86400)}d ago`
-}
 
 type RepoSearch = { provider?: string }
 
@@ -57,7 +41,6 @@ function RepoList() {
   const navigate = Route.useNavigate()
 
   const [repos, setRepos] = useState<Repo[]>([])
-  const [runs, setRuns] = useState<RunEntry[]>([])
   // Git sync status keyed by repo full_name. Seeded from the cached
   // /api/repo/git-status (instant) then refreshed in the background (the
   // Hook: git fetch + recompute) so the user sees ahead/behind without
@@ -79,9 +62,6 @@ function RepoList() {
       fetch('/data/repos.json', { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : []))
         .catch(() => []),
-      fetch('/data/runs.json', { cache: 'no-store' })
-        .then(r => (r.ok ? r.json() : []))
-        .catch(() => []),
       fetch('/api/settings', { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : null))
         .catch(() => null),
@@ -91,9 +71,8 @@ function RepoList() {
       fetch('/data/projects.json', { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : []))
         .catch(() => []),
-    ]).then(([rp, rn, settings, gs, proj]) => {
+    ]).then(([rp, settings, gs, proj]) => {
       setRepos(Array.isArray(rp) ? rp : [])
-      setRuns(Array.isArray(rn) ? rn : [])
       if (Array.isArray(gs)) {
         const m: Record<string, GitStatus> = {}
         for (const s of gs as GitStatus[]) if (s?.repo) m[s.repo] = s
@@ -109,7 +88,7 @@ function RepoList() {
         }
         setIdeScheme(schemeMap[ide] ?? 'vscode://file/')
       }
-      if (settings?.global?.hostname) setHostname(settings.global.hostname as string)
+      if (settings?.global?.hostname) setHostname((settings.global.hostname as string).toLowerCase().replace(/\.local$/, ''))
       setProjects(Array.isArray(proj) ? proj as ProjectEntry[] : [])
       setLoading(false)
     })
@@ -178,18 +157,6 @@ function RepoList() {
     navigate({ search: { provider: next } })
   }
 
-  // Build a map of repo → most recent run timestamp
-  const lastActivityMap = useMemo<Record<string, string>>(() => {
-    const m: Record<string, string> = {}
-    for (const r of runs) {
-      if (!r.repo || !r.started_at) continue
-      if (!m[r.repo] || r.started_at > m[r.repo]) {
-        m[r.repo] = r.started_at
-      }
-    }
-    return m
-  }, [runs])
-
   // Known machines = union of every non-empty bound_machine seen across
   // all repos. Powers the bind-dropdown so users can reassign a repo to
   // another box without typing the hostname.
@@ -213,14 +180,9 @@ function RepoList() {
         (r.bound_machine || '').toLowerCase().includes(q),
       )
     }
-    list.sort((a, b) => {
-      const ta = lastActivityMap[a.full_name] || ''
-      const tb = lastActivityMap[b.full_name] || ''
-      if (ta !== tb) return tb.localeCompare(ta)
-      return a.full_name.localeCompare(b.full_name)
-    })
+    list.sort((a, b) => a.full_name.localeCompare(b.full_name))
     return list
-  }, [repos, active, lastActivityMap, query])
+  }, [repos, active, query])
 
   const showTabs = repos.length > 0 && platformKeys.length > 1
 
@@ -415,7 +377,7 @@ function RepoList() {
             <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
               <tr>
                 <th className="text-left px-4 py-2 font-semibold">Repo</th>
-                <th className="text-left px-4 py-2 font-semibold">Last activity</th>
+                <th className="text-left px-4 py-2 font-semibold">工作与用量</th>
                 <th className="text-left px-4 py-2 font-semibold">Base</th>
                 <th className="text-left px-4 py-2 font-semibold">Sync</th>
                 <th className="text-left px-4 py-2 font-semibold">Enabled</th>
@@ -469,7 +431,7 @@ function RepoList() {
                     </div>
                   </td>
                   <td className="px-4 py-2 text-muted-foreground text-xs tabular-nums">
-                    {lastActivityMap[r.full_name] ? timeAgo(lastActivityMap[r.full_name]) : '—'}
+                    <ContextWorkLinks repo={r.full_name} compact />
                   </td>
                   <td className="px-4 py-2 font-mono text-xs">
                     {r.base_branch_valid === false ? (

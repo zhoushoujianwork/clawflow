@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,6 +252,7 @@ func TestLatestRecordExactContractAndNoComplete(t *testing.T) {
 	}
 	other := passing()
 	other.Contract.Generation++
+	other.Contract.HeadSHA = strings.Repeat("d", 40)
 	other.ContractDigest, _ = other.Contract.Digest()
 	other.Plan.ContractDigest = other.ContractDigest
 	if err := s.SaveRecord(other); err != nil {
@@ -321,6 +323,7 @@ func TestInfrastructureAttempts(t *testing.T) {
 	incomplete.Completed = false
 	other := infraRecord(first, "other", 60*time.Second)
 	other.Contract.Generation++
+	other.Contract.HeadSHA = strings.Repeat("d", 40)
 	other.ContractDigest, _ = other.Contract.Digest()
 	other.Plan.ContractDigest = other.ContractDigest
 	for _, r := range []Record{first, failed, gated, infra1, infra2, incomplete, other} {
@@ -346,7 +349,7 @@ func TestInfrastructureAttempts(t *testing.T) {
 		}
 	}
 	got, err = s.InfrastructureAttempts(c)
-	if err != nil || got.Count != 2 || got.LatestIsInfra {
+	if err != nil || got.Count != 0 || got.LatestIsInfra {
 		t.Fatalf("verdict after infra: %+v %v", got, err)
 	}
 }
@@ -375,5 +378,109 @@ func TestInfrastructureAttemptsFailsClosedOnCorruptionAndAmbiguity(t *testing.T)
 				t.Fatal("accepted corrupt or ambiguous references")
 			}
 		})
+	}
+}
+
+func TestCompleteRecordsAtHeadUsesLatestCompletedContract(t *testing.T) {
+	s := openTestStore(t)
+	first := passing()
+	if err := s.SaveRecord(first); err != nil {
+		t.Fatal(err)
+	}
+	second := laterRecord(first, "second", time.Hour)
+	second.Verdict, second.Report = Failed, "latest failure"
+	if err := s.SaveRecord(second); err != nil {
+		t.Fatal(err)
+	}
+	incomplete := laterRecord(second, "incomplete", time.Hour)
+	incomplete.Completed = false
+	if err := s.SaveRecord(incomplete); err != nil {
+		t.Fatal(err)
+	}
+	c := first.Contract
+	records, err := s.CompleteRecordsAtHead(c.Repository, c.PRNumber, c.HeadSHA)
+	if err != nil || len(records) != 2 || records[1].Verdict != Failed {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	for _, query := range []struct {
+		repo string
+		pr   int
+		head string
+	}{{"other", c.PRNumber, c.HeadSHA}, {c.Repository, c.PRNumber + 1, c.HeadSHA}, {c.Repository, c.PRNumber, "other"}} {
+		rows, err := s.CompleteRecordsAtHead(query.repo, query.pr, query.head)
+		if err != nil || len(rows) != 0 {
+			t.Fatalf("unrelated query: rows=%+v err=%v", rows, err)
+		}
+	}
+	// A new requirements generation at the same head has its own retry ledger.
+	newer := second
+	newer.Contract.Generation++
+	newer.ContractDigest, _ = newer.Contract.Digest()
+	newer.AttemptID = "new-contract"
+	newer.Plan = Plan{}
+	newer.ReviewStartedAt = time.Time{}
+	newer.StartedAt = second.CompletedAt.Add(time.Hour)
+	newer.CompletedAt = newer.StartedAt.Add(time.Minute)
+	if err := s.SaveRecord(newer); err != nil {
+		t.Fatal(err)
+	}
+	records, err = s.CompleteRecordsAtHead(c.Repository, c.PRNumber, c.HeadSHA)
+	if err != nil || len(records) != 1 || records[0].AttemptID != "new-contract" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+}
+
+func TestCompleteRecordsAtHeadRejectsCorruptRecord(t *testing.T) {
+	s := openTestStore(t)
+	r := passing()
+	r.ContractDigest = "wrong"
+	name, err := recordName(r.Contract, r.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.write(name, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CompleteRecordsAtHead(r.Contract.Repository, r.Contract.PRNumber, r.Contract.HeadSHA); err == nil {
+		t.Fatal("corrupt record accepted")
+	}
+}
+
+func TestInfrastructureBinaryReset(t *testing.T) {
+	first := passing()
+	a := infraRecord(first, "a", 10*time.Second)
+	b := infraRecord(first, "b", 20*time.Second)
+	a.BinaryID, b.BinaryID = "previous-binary", "previous-binary"
+	if got := ConsecutiveInfrastructure([]Record{a, b}); got.Count != 0 || !got.LatestIsInfra {
+		t.Fatalf("binary reset: %+v", got)
+	}
+	b.BinaryID = BinaryID()
+	if got := ConsecutiveInfrastructure([]Record{a, b}); got.Count != 1 {
+		t.Fatalf("new binary attempt: %+v", got)
+	}
+}
+
+func TestInfrastructureBudgetSurvivesBaseChange(t *testing.T) {
+	s := openTestStore(t)
+	first := passing()
+	a := infraRecord(first, "base-a", 10*time.Second)
+	b := infraRecord(first, "base-b", 20*time.Second)
+	b.Contract.BaseSHA = strings.Repeat("e", 40)
+	b.ContractDigest, _ = b.Contract.Digest()
+	b.Plan.ContractDigest = b.ContractDigest
+	for _, r := range []Record{a, b} {
+		if err := s.SaveRecord(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.InfrastructureAttempts(b.Contract)
+	if err != nil || got.Count != 2 {
+		t.Fatalf("base reset budget: %+v %v", got, err)
+	}
+	changed := b.Contract
+	changed.Requirements += " changed"
+	got, err = s.InfrastructureAttempts(changed)
+	if err != nil || got.Count != 0 {
+		t.Fatalf("body did not reset: %+v %v", got, err)
 	}
 }

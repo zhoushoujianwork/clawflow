@@ -186,3 +186,95 @@
     mask-composite: exclude;
   }
 }
+
+/* Shared work shell. Keep content sizing independent of navigation/tool labels. */
+.app-shell {
+  font-size: 1rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.app-header {
+  position: relative;
+  z-index: 50;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+  padding: 0.75rem clamp(1rem, 3vw, 2.5rem);
+}
+.app-navigation, .primary-nav, .app-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  max-width: 100%;
+}
+.app-navigation { gap: 1.5rem; }
+.app-tools { margin-left: auto; justify-content: flex-end; }
+.app-tools > * { min-width: 0; max-width: 100%; }
+.app-tools button { white-space: normal; }
+.app-tools :is(button, a) { min-height: 2.25rem; min-width: 2.25rem; }
+.shell-link {
+  display: block;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: hsl(var(--text-low));
+  cursor: pointer;
+}
+.shell-link:hover { background: hsl(var(--bg-secondary)); color: hsl(var(--text-high)); }
+.shell-link[aria-current="page"], .shell-link[data-active] {
+  color: hsl(var(--text-high));
+  background: hsl(var(--brand) / 0.12);
+  box-shadow: inset 0 -3px hsl(var(--brand));
+}
+.nav-group { position: relative; }
+.nav-group > summary { display: list-item; list-style-position: inside; }
+.nav-group-links {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  width: 12rem;
+  max-width: calc(100vw - 2rem);
+  padding: 0.375rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.5rem;
+  background: hsl(var(--bg-primary));
+  box-shadow: 0 8px 24px #0002;
+}
+.nav-group:last-child .nav-group-links { left: auto; right: 0; }
+.app-shell :is(a, button, summary, input, select, textarea):focus-visible {
+  outline: 2px solid hsl(var(--brand-secondary));
+  outline-offset: 3px;
+}
+.skip-link {
+  position: absolute;
+  top: 0.5rem;
+  left: 1rem;
+  z-index: 60;
+  padding: 0.5rem 1rem;
+  background: hsl(var(--bg-primary));
+  transform: translateY(-200%);
+}
+.skip-link:focus { transform: translateY(0); }
+.app-content { min-width: 0; }
+.app-content > div { padding: 1.5rem clamp(1rem, 3vw, 2.5rem); }
+.app-content:is([data-page="/pipeline"], [data-page="/usage"], [data-page="/repos"], [data-page="/projects"]) > div {
+  max-width: none;
+  width: 100%;
+}
+.app-content h1 { font-size: clamp(1.5rem, 2vw, 2rem); line-height: 1.25; }
+.app-content .text-sm { font-size: 0.9375rem; line-height: 1.6; }
+.app-content .text-xs { font-size: 0.875rem; line-height: 1.6; }
+.app-content :where(.flex > *, .grid > *) { min-width: 0; }
+.app-content .truncate { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .app-navigation { width: 100%; gap: 0.5rem; }
+  .primary-nav { width: 100%; gap: 0.25rem; }
+  .shell-link { padding: 0.5rem; }
+  .app-tools { width: 100%; }
+  .nav-group-links { position: static; margin-top: 0.25rem; width: auto; box-shadow: none; }
+}

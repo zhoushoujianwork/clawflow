@@ -1,9 +1,21 @@
+import { ActivityTimeline } from '../components/ActivityTimeline'
+export { EventTimeline, foldEvents, importantEvent } from '../components/ActivityTimeline'
+import { ExecutionCapacity } from '../components/ExecutionCapacity'
+import { Attention } from '../components/Attention'
+export { Attention } from '../components/Attention'
+import { WorkSummary, type WorkFilter, type WorkItem, type SourceHealth } from '../components/WorkSummary'
+import { WorkDetail, workDetailKey, type ExecutionAttempt } from '../components/WorkDetail'
+import { WorkSearchControls } from '../components/WorkSearchControls'
+import { workSearch, type WorkSearch } from '../lib/workSearch'
+import type { ProjectEntry } from '../lib/projectMembership'
+import { WorkList } from '../components/WorkList'
+import { ScheduledChecksPanel, useScheduledChecks } from "../components/ScheduledChecksPanel"
 import { createFileRoute } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronRight, ExternalLink, Loader2, RefreshCw } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { ExternalLink, Loader2, RefreshCw } from 'lucide-react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { cn } from '../lib/utils'
-import { issueUrl, repoUrl, useRepoInfoMap, type RepoInfoMap } from '../lib/vcsUrls'
+import { useRepoInfoMap } from '../lib/vcsUrls'
 
 type Stage =
   | 'queued'
@@ -36,6 +48,7 @@ interface PRInfo {
   state: string
   draft?: boolean
   head_branch?: string
+  updated_at?: string
   head_sha?: string
   ci?: string
   ci_error?: string
@@ -43,6 +56,7 @@ interface PRInfo {
 }
 
 interface AcceptanceInfo {
+  unstructured?: boolean
   required: boolean
   running?: boolean
   verdict?: string
@@ -66,7 +80,10 @@ interface Delivery {
   merged_at?: string
 }
 
-interface Item {
+export interface Item extends WorkItem {
+  executions?: ExecutionAttempt[]
+  state?: string
+  attention?: string[]
   issue: number
   title: string
   stage: Stage
@@ -81,43 +98,21 @@ interface Item {
   delivery?: Delivery
 }
 
-interface QueueDecision {
-  action: 'pick' | 'wait' | 'blocked'
-  issue?: number
-  reason?: string
-  at: string
-}
-
-interface QueueEntry {
-  position: number
-  number: number
-  title: string
-  state: string
-  action?: string
-  reason?: string
-}
-
-interface Queue {
-  issue: number
-  entries: QueueEntry[]
-  decision?: QueueDecision
-  error?: string
-}
-
-interface RepoBoard {
+export interface RepoBoard {
+  hosting_platform?: string
   repo: string
   enabled: boolean
   platform: string
   auto_merge: boolean
   ci_required: boolean
   acceptance_required: boolean
-  queue_issue?: number
-  queue?: Queue
+  max_in_flight: number
+  stale?: boolean
   items: Item[]
   error?: string
 }
 
-interface PipelineEvent {
+export interface PipelineEvent {
   time: string
   level: string
   event: string
@@ -135,61 +130,74 @@ interface GlobalQueueEntry {
   state: string
 }
 
-interface Board {
+export interface PilotAction {
+  created_issue?: number
+  run_id: string
+  actor: string
+  action: { id: string; type: string; repo: string; issue?: number; pr?: number; body?: string; head?: string; followups?: string[] }
+  outcome: string
+  at: string
+  reason?: string
+}
+
+export interface WorkerPool {
+  generated_at: string
+  workers: { name: string; tags: string[]; roles: string[]; live: boolean; last_seen: string | null; last_heartbeat: string | null; running_tasks: string[] }[]
+  tasks: { id: string; repo: string; issue: number; pr: number; kind: string; state: string; stage: string; waiting_reason?: string; application_error?: string; application_attempts: number; tags: string[]; priority: number; worker: string; lease_expires_at: string | null; attempt: number }[]
+  throughput: { since: string; done: number; failed: number }
+}
+
+interface APIUsage {
+ captured_at: string
+ calls_by_stage: Record<string, number>
+ budgets: Record<string, {limit: number; remaining: number; reset: string; backoff: string}>
+}
+export interface Board {
+  sources?: SourceHealth[]
+ vcs_usage?: APIUsage
+  worker_pool?: WorkerPool | null
+  worker_pool_error?: string
+  pilot_actions?: PilotAction[]
+  pilot_error?: string
+  stale: boolean
+  refreshing: boolean
+  error?: string
   generated_at: string
   repos: RepoBoard[]
   global_queue?: GlobalQueueEntry[]
   events: PipelineEvent[]
   runtime: {
     version: string
-    scheduler: { status: string; interval_minutes: number; paused: boolean; next_fire_unix_ms?: number }
-    execution: { ready: boolean; error?: string }
+    scheduler: { status: string; interval_minutes: number; paused: boolean; next_fire_unix_ms?: number; started_at?: string; last_result?: string; last_ended_at?: string; agent_slots_used: number; agent_slots_total: number }
+    execution: { ready: boolean; error?: string; profile?: string; backend?: string; model?: string; service_tier?: string }
   }
 }
 
+type Preferences = WorkSearch & { detail?: string; work?: WorkFilter; tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string; activityIssue?: string }
+export function preferences(s: Record<string, unknown>): Preferences {
+  // The router JSON-decodes hand-written deep links before search validation.
+  const detail = Array.isArray(s.detail) && s.detail.length === 2 && typeof s.detail[0] === 'string' && Number.isInteger(s.detail[1]) && s.detail[1] > 0
+    ? workDetailKey(s.detail[0], s.detail[1]) : s.detail
+  return {
+    ...workSearch(s),
+    detail: typeof detail === 'string' && detail.length < 512 ? detail : undefined,
+    work: ['running', 'waiting', 'attention', 'delivered'].includes(String(s.work)) ? s.work as WorkFilter : undefined,
+    tab: s.tab === 'active' || s.tab === 'delivered' || s.tab === 'all' ? s.tab : undefined,
+    expanded: typeof s.expanded === 'string' ? s.expanded : undefined,
+    events: s.events === 'important' || s.events === 'all' ? s.events : undefined,
+    repo: typeof s.repo === 'string' ? s.repo : undefined,
+    activityIssue: typeof s.activityIssue === 'string' && /^\d{1,10}$/.test(s.activityIssue) ? s.activityIssue : undefined,
+  }
+}
+// Visible tab labels double as accessible names, so they are real words, not CSS-capitalized ids.
+const PIPELINE_TAB_LABELS = { active: 'Active', running: 'Running', waiting: 'Waiting', delivered: 'Delivered' } as const
+
 export const Route = createFileRoute('/_app/pipeline')({
   component: PipelinePage,
+  validateSearch: preferences,
 })
 
 const REFRESH_MS = 30_000
-
-const STAGE_LABEL: Record<Stage, string> = {
-  queued: 'Queued',
-  implementing: 'Implementing',
-  pr_open: 'PR open',
-  ci_pending: 'CI pending',
-  ci_failed: 'CI failed',
-  acceptance_pending: 'Acceptance pending',
-  acceptance_running: 'Acceptance running',
-  accepted: 'Accepted',
-  rejected: 'Rejected',
-  infra_retry: 'Infra retry',
-  merged: 'Merged',
-  failed: 'Failed',
-  blocked: 'Blocked',
-}
-
-const GREEN = 'bg-green-100 text-green-800 border-green-200'
-const RED = 'bg-red-100 text-red-800 border-red-200'
-const AMBER = 'bg-amber-100 text-amber-800 border-amber-200'
-const BLUE = 'bg-blue-100 text-blue-800 border-blue-200'
-const GREY = 'bg-secondary text-muted-foreground border-border'
-
-const STAGE_TONE: Record<Stage, string> = {
-  queued: GREY,
-  implementing: BLUE,
-  pr_open: BLUE,
-  ci_pending: AMBER,
-  ci_failed: RED,
-  acceptance_pending: AMBER,
-  acceptance_running: BLUE,
-  accepted: GREEN,
-  rejected: RED,
-  infra_retry: AMBER,
-  merged: GREEN,
-  failed: RED,
-  blocked: RED,
-}
 
 function timeAgo(iso?: string): string {
   if (!iso) return '—'
@@ -212,24 +220,42 @@ function shortSha(sha?: string): string {
   return sha ? sha.slice(0, 7) : '—'
 }
 
-function StageChip({ stage }: { stage: Stage }) {
-  return (
-    <span
-      data-stage={stage}
-      className={cn('inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-medium whitespace-nowrap', STAGE_TONE[stage] ?? GREY)}
-    >
-      {STAGE_LABEL[stage] ?? stage}
-    </span>
-  )
-}
-
 function PipelinePage() {
-  useDocumentTitle('Pipeline')
+  const scheduled = useScheduledChecks()
+  useDocumentTitle('Work')
+  const search = Route.useSearch()
+  const navigate = Route.useNavigate()
+  function update(next: Preferences) {
+    void navigate({ search: { ...search, ...next }, resetScroll: false })
+  }
+  const [projects, setProjects] = useState<ProjectEntry[]>([])
+  const [projectError, setProjectError] = useState(false)
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/data/projects.json', { cache: 'no-store', signal: controller.signal })
+      .then(async r => { if (!r.ok) throw new Error('Projects unavailable'); return r.json() })
+      .then(data => {
+        if (!Array.isArray(data)) throw new Error('Invalid projects')
+        setProjects(data.filter((p: ProjectEntry) => typeof p?.name === 'string' && Array.isArray(p.repos)))
+      })
+      .catch(() => { if (!controller.signal.aborted) setProjectError(true) })
+    return () => controller.abort()
+  }, [])
+
   const repoInfo = useRepoInfoMap()
   const [board, setBoard] = useState<Board | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+
+  const scrollAnchor = useRef<{ key?: string; top: number; y: number }>()
+  useLayoutEffect(() => {
+    const anchor = scrollAnchor.current
+    if (!anchor) return
+    scrollAnchor.current = undefined
+    const row = [...document.querySelectorAll<HTMLElement>('[data-work-key]')].find(el => el.dataset.workKey === anchor.key)
+    window.scrollTo(0, row ? window.scrollY + row.getBoundingClientRect().top - anchor.top : anchor.y)
+  }, [board])
 
   const load = useCallback(async () => {
     setRefreshing(true)
@@ -239,8 +265,11 @@ function PipelinePage() {
         const body = await r.json().catch(() => null)
         throw new Error(body?.error || `HTTP ${r.status}`)
       }
-      setBoard((await r.json()) as Board)
-      setError(null)
+      const next = (await r.json()) as Board
+      const row = [...document.querySelectorAll<HTMLElement>('[data-work-key]')].find(el => el.getBoundingClientRect().bottom > 0)
+      scrollAnchor.current = { key: row?.dataset.workKey, top: row?.getBoundingClientRect().top || 0, y: window.scrollY }
+      setBoard(next)
+      setError(next.error ?? null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -255,17 +284,23 @@ function PipelinePage() {
     return () => window.clearInterval(id)
   }, [load])
 
+  const selected = (() => {
+    try {
+      const [repo, issue] = JSON.parse(search.detail || 'null')
+      return typeof repo === 'string' && Number.isInteger(issue) && issue > 0 ? { repo, issue } : null
+    } catch { return null }
+  })()
+  const selectedItem = board?.repos.find(r => r.repo === selected?.repo)?.items.find(i => i.issue === selected?.issue)
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">Delivery pipeline</h1>
+          <h1 id="work-page-title" tabIndex={-1} className="text-2xl font-bold text-foreground">Work</h1>
           <p className="text-xs text-muted-foreground mt-1">
-            Issue → PR → CI → acceptance → merge, per repository with auto-merge or a work queue. Read-only.
+            Execution and delivery across tracked repositories. Read-only.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground tabular-nums">
-          {board && <span>updated {timeAgo(board.generated_at)}</span>}
           <button
             onClick={() => void load()}
             disabled={refreshing}
@@ -278,11 +313,12 @@ function PipelinePage() {
         </div>
       </div>
 
-      {error && (
-        <div role="alert" className="mb-4 px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-sm text-red-800">
-          Could not load the pipeline: {error}
-        </div>
-      )}
+      {selected && <WorkDetail key={search.detail} repo={selected.repo} issue={selected.issue} item={selectedItem} onClose={() => update({ detail: undefined })}>
+        <p className="text-xs my-2">Pipeline snapshot: {board?.generated_at || 'unknown'}{board?.stale ? ' · stale' : ''}</p>
+        {selectedItem && <><ItemDetail item={selectedItem} /><PilotTimeline actions={itemPilotActions(board?.pilot_actions || [], selected.repo, selectedItem)} /></>}
+      </WorkDetail>}
+      <WorkSummary repos={board?.repos} sources={board?.sources} generatedAt={board?.generated_at} stale={board?.stale} refreshing={refreshing || board?.refreshing} failed={!!error} filter={search.work} onFilter={work => update({ work, tab: work === 'delivered' ? 'delivered' : 'active' })} />
+      <ScheduledChecksPanel data={scheduled.data} error={scheduled.error} />
 
       {loading && !board ? (
         <p className="text-sm text-muted-foreground text-center py-8 flex items-center justify-center gap-2">
@@ -290,261 +326,65 @@ function PipelinePage() {
         </p>
       ) : board ? (
         <>
-          <RuntimeHeader runtime={board.runtime} />
-          <GlobalQueuePanel entries={board.global_queue ?? []} />
+          <details className="mb-4 border rounded-lg p-3 text-sm">
+            <summary className="cursor-pointer">System status</summary>
+            {error && <p role="alert" className="text-red-800 break-words">Could not refresh work: {error}</p>}
+            <RuntimeHeader runtime={board.runtime} />
+            <APIUsagePanel usage={board.vcs_usage} />
+            {!board.worker_pool && <p>{board.worker_pool_error || (board.worker_pool === null ? 'Coordinator disabled' : 'Worker source unavailable')}</p>}
+          </details>
+          <ExecutionCapacity board={board} failed={!!error} />
+          <Attention board={board} schedules={scheduled.data} repoInfo={repoInfo} />
+          <div className="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Pipeline items">
+            {(['active', 'running', 'waiting', 'delivered'] as const).map(tab => {
+              const selected = search.work || (search.tab === 'delivered' ? 'delivered' : 'active')
+              return <button key={tab} role="tab" aria-selected={selected === tab} onClick={() => update({ tab: tab === 'delivered' ? 'delivered' : 'active', work: tab === 'active' ? undefined : tab })} className={cn('px-3 py-1 rounded border text-sm', selected === tab && 'bg-secondary')}>{PIPELINE_TAB_LABELS[tab]}</button>
+            })}
+          </div>
+          <WorkSearchControls search={search} repos={board.repos} projects={projects} projectError={projectError} update={update} />
           {board.repos.length === 0 ? (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
-              <p className="text-base font-semibold text-foreground mb-1">No repository is tracked yet</p>
-              <p className="text-sm text-muted-foreground">
-                Enable <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">auto_merge</code> or set a{' '}
-                <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">queue_issue</code> with{' '}
-                <code className="px-1.5 py-0.5 bg-secondary rounded text-xs font-mono">clawflow repo set</code>.
-              </p>
+              <p role="status" className="text-sm">0 results</p>
+              <p className="text-base font-semibold text-foreground mb-1">{board.generated_at ? 'No repository is tracked yet' : 'Preparing pipeline snapshot…'}</p>
+              {board.generated_at && <p className="text-sm text-muted-foreground">
+                Enable a repository with <code>clawflow repo enable</code> to see its eligible work.
+              </p>}
             </div>
           ) : (
-            board.repos.map(r => <RepoSection key={r.repo} board={r} repoInfo={repoInfo} />)
+            <WorkList repos={board.repos} queue={board.global_queue || []} repoInfo={repoInfo}
+              query={search} projects={projects}
+              filter={search.work || (search.tab === 'delivered' ? 'delivered' : 'active')}
+              onOpen={(item, repo) => update({ detail: workDetailKey(repo, item.issue) })}
+              renderDetails={(item, repo) => <><ItemDetail item={item} /><PilotTimeline actions={itemPilotActions(board.pilot_actions || [], repo, item)} /></>} />
           )}
-          <EventTimeline events={board.events} />
+          <ActivityTimeline board={board} filter={search.events || 'important'} repo={search.repo || ''} issue={search.activityIssue || ''} update={update} />
         </>
       ) : null}
     </div>
   )
 }
 
-function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
+export function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
   const s = runtime.scheduler
-  const next = s.next_fire_unix_ms ? new Date(s.next_fire_unix_ms).toISOString() : undefined
-  const schedulerText = s.status === 'running' ? 'run in progress' : s.paused ? 'paused' : s.interval_minutes > 0 ? `every ${s.interval_minutes}m` : 'manual only'
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-5" aria-label="Runtime">
-      <Stat label="Version" value={runtime.version || '—'} mono />
-      <Stat
-        label="Scheduler"
-        value={schedulerText}
-        hint={next && !s.paused && s.status !== 'running' ? `next ${timeAgo(next)}` : undefined}
-      />
-      <Stat
-        label="Execution"
-        value={runtime.execution.ready ? 'ready' : 'not ready'}
-        tone={runtime.execution.ready ? 'ok' : 'bad'}
-        hint={runtime.execution.ready ? undefined : runtime.execution.error}
-      />
-    </div>
-  )
+  return <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs border rounded-lg px-3 py-2 mb-4" aria-label="Runtime">
+    <span>{runtime.version || 'Version unavailable'}</span>
+    <span>Latest recorded executor (one execution only): profile {runtime.execution.profile || 'unavailable'} · backend: {runtime.execution.backend || 'unavailable'}{runtime.execution.model && <> · model: {runtime.execution.model}</>}{runtime.execution.service_tier && <> · tier: {runtime.execution.service_tier}</>}</span>
+    <span>Agent slots: {s.agent_slots_used ?? 'unknown'} / {s.agent_slots_total ?? 'unknown'}</span>
+    <span>{s.paused ? 'paused' : s.status} {s.status === 'running' ? (s.started_at ? '· started ' + timeAgo(s.started_at) : '· age unavailable') : ''}</span>
+    <span>Last pass: {s.last_result || 'unavailable'} {s.last_ended_at && timeAgo(s.last_ended_at)}</span>
+    <span className="rounded bg-secondary px-1">Read-only</span>
+    {!runtime.execution.ready && <span className="text-red-700">{runtime.execution.error}</span>}
+  </div>
 }
 
-function Stat({ label, value, hint, mono, tone }: { label: string; value: string; hint?: string; mono?: boolean; tone?: 'ok' | 'bad' }) {
-  return (
-    <div className="bg-card border border-border rounded-xl p-3">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div
-        className={cn(
-          'text-lg font-semibold mt-0.5 break-all',
-          mono && 'font-mono text-base',
-          tone === 'ok' && 'text-green-700',
-          tone === 'bad' && 'text-red-700',
-          !tone && 'text-foreground',
-        )}
-      >
-        {value}
-      </div>
-      {hint && <div className="text-[11px] text-muted-foreground mt-0.5">{hint}</div>}
-    </div>
-  )
-}
-
-function RepoSection({ board, repoInfo }: { board: RepoBoard; repoInfo: RepoInfoMap }) {
-  const flags = [
-    board.auto_merge && 'auto-merge',
-    board.ci_required && 'CI required',
-    board.acceptance_required && 'acceptance required',
-  ].filter(Boolean) as string[]
-  return (
-    <section className="mb-6">
-      <div className="flex items-center gap-2 flex-wrap mb-2">
-        <a
-          href={repoUrl(board.repo, repoInfo)}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="text-sm font-semibold text-foreground hover:underline font-mono"
-        >
-          {board.repo}
-        </a>
-        {!board.enabled && <span className="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground border border-border">disabled</span>}
-        {flags.map(f => (
-          <span key={f} className="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">
-            {f}
-          </span>
-        ))}
-      </div>
-
-      {board.error && (
-        <div role="alert" className="mb-2 px-3 py-2 rounded-lg border border-amber-200 bg-amber-50 text-xs text-amber-900">
-          {board.error}
-        </div>
-      )}
-
-      {board.queue && <QueuePanel queue={board.queue} repo={board.repo} repoInfo={repoInfo} />}
-
-      {board.items.length === 0 ? (
-        <div className="bg-card border border-border rounded-xl p-4 text-sm text-muted-foreground">
-          Nothing in flight. Items appear here when an issue is queued, has a managed PR, or ran recently.
-        </div>
-      ) : (
-        <div className="bg-card border border-border rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-secondary/30 text-xs uppercase text-muted-foreground">
-              <tr>
-                <th className="w-8" aria-label="Expand" />
-                <th className="px-3 py-2 text-left font-semibold">Issue</th>
-                <th className="px-3 py-2 text-left font-semibold">Stage</th>
-                <th className="px-3 py-2 text-left font-semibold">Why</th>
-                <th className="px-3 py-2 text-right font-semibold">Updated</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {board.items.map(it => (
-                <ItemRows key={it.issue} item={it} repo={board.repo} repoInfo={repoInfo} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  )
-}
-
-function GlobalQueuePanel({ entries }: { entries: GlobalQueueEntry[] }) {
-  if (entries.length === 0) return null
-  return (
-    <div className="bg-card border border-border rounded-xl p-4 mb-4">
-      <p className="text-sm font-semibold text-foreground mb-2">Work queue (all repositories)</p>
-      <ol className="text-xs space-y-1">
-        {entries.map(e => (
-          <li key={e.key} className="flex items-center gap-2">
-            <span className="tabular-nums text-muted-foreground w-6 text-right">{e.position}.</span>
-            <span className="font-mono text-foreground">{e.key}</span>
-            <span className="px-1.5 rounded bg-secondary text-muted-foreground">{e.tier}</span>
-            {e.rank ? <span className="text-muted-foreground tabular-nums">rank {e.rank}</span> : null}
-            <span className="text-muted-foreground">{e.state}</span>
-            {e.title ? <span className="truncate text-muted-foreground">{e.title}</span> : null}
-          </li>
-        ))}
-      </ol>
-    </div>
-  )
-}
-
-function QueuePanel({ queue, repo, repoInfo }: { queue: Queue; repo: string; repoInfo: RepoInfoMap }) {
-  const d = queue.decision
-  const open = queue.entries.filter(e => e.state === 'open')
-  return (
-    <div className="bg-card border border-border rounded-xl p-3 mb-2">
-      <div className="flex items-center gap-2 flex-wrap text-xs">
-        <span className="font-semibold text-foreground">Queue</span>
-        <a href={issueUrl(repo, queue.issue, repoInfo)} target="_blank" rel="noreferrer noopener" className="text-brand hover:underline font-mono">
-          #{queue.issue}
-        </a>
-        <span className="text-muted-foreground">{open.length} open</span>
-        {d ? (
-          <span
-            data-decision={d.action}
-            className={cn(
-              'px-1.5 py-0.5 rounded border font-medium',
-              d.action === 'pick' ? GREEN : d.action === 'blocked' ? RED : AMBER,
-            )}
-          >
-            {d.action}
-            {d.issue ? ` #${d.issue}` : ''}
-            {d.reason ? `: ${d.reason}` : ''}
-          </span>
-        ) : (
-          <span className="text-muted-foreground">no decision logged yet</span>
-        )}
-        {d && <span className="text-muted-foreground">{timeAgo(d.at)}</span>}
-      </div>
-      {queue.error && <p className="text-xs text-red-700 mt-1">Queue unreadable: {queue.error}</p>}
-      {open.length > 0 && (
-        <ol className="mt-2 space-y-0.5 text-xs">
-          {open.map(e => (
-            <li key={e.number} className="flex items-center gap-2">
-              <span className="w-5 text-right text-muted-foreground tabular-nums">{e.position}.</span>
-              <a href={issueUrl(repo, e.number, repoInfo)} target="_blank" rel="noreferrer noopener" className="font-mono text-brand hover:underline">
-                #{e.number}
-              </a>
-              <span className="truncate text-foreground">{e.title}</span>
-              {e.action && (
-                <span className="text-muted-foreground shrink-0">
-                  {e.action}
-                  {e.reason ? `: ${e.reason}` : ''}
-                </span>
-              )}
-            </li>
-          ))}
-        </ol>
-      )}
-    </div>
-  )
-}
-
-function ItemRows({ item, repo, repoInfo }: { item: Item; repo: string; repoInfo: RepoInfoMap }) {
-  const [open, setOpen] = useState(false)
-  const panelId = `pipeline-${repo.replace(/\W+/g, '-')}-${item.issue}`
-  return (
-    <>
-      <tr className="hover:bg-secondary/20">
-        <td className="pl-2">
-          <button
-            onClick={() => setOpen(o => !o)}
-            aria-expanded={open}
-            aria-controls={panelId}
-            aria-label={`${open ? 'Collapse' : 'Expand'} details for issue ${item.issue}`}
-            className="p-1 rounded hover:bg-secondary"
-          >
-            <ChevronRight className={cn('w-4 h-4 transition-transform', open && 'rotate-90')} />
-          </button>
-        </td>
-        <td className="px-3 py-2 align-top">
-          <div className="flex items-center gap-2">
-            {item.in_queue && item.queue_position ? (
-              <span className="text-[11px] text-muted-foreground tabular-nums" title="queue position">
-                {item.queue_position}.
-              </span>
-            ) : null}
-            <a href={issueUrl(repo, item.issue, repoInfo)} target="_blank" rel="noreferrer noopener" className="font-mono text-brand hover:underline">
-              #{item.issue}
-            </a>
-            <span className="text-foreground truncate max-w-[22rem]" title={item.title}>
-              {item.title}
-            </span>
-          </div>
-        </td>
-        <td className="px-3 py-2 align-top">
-          <StageChip stage={item.stage} />
-        </td>
-        <td className="px-3 py-2 align-top text-muted-foreground">{item.why}</td>
-        <td className="px-3 py-2 align-top text-right text-muted-foreground tabular-nums whitespace-nowrap">{timeAgo(item.updated_at)}</td>
-      </tr>
-      {open && (
-        <tr id={panelId} className="bg-secondary/10">
-          <td />
-          <td colSpan={4} className="px-3 py-3">
-            <ItemDetail item={item} />
-          </td>
-        </tr>
-      )}
-    </>
-  )
-}
-
-function ItemDetail({ item }: { item: Item }) {
+export function ItemDetail({ item }: { item: Item }) {
   const { pr, acceptance: a, delivery, run } = item
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
       <DetailBlock title="Evidence">
-        {item.evidence.length === 0 ? <span className="text-muted-foreground">none</span> : (
+        {!item.evidence?.length ? <span className="text-muted-foreground">none</span> : (
           <ul className="list-disc pl-4 space-y-0.5">
-            {item.evidence.map((e, i) => <li key={i}>{e}</li>)}
+            {(item.evidence || []).map((e, i) => <li key={i}>{e}</li>)}
           </ul>
         )}
         {run && (
@@ -557,6 +397,7 @@ function ItemDetail({ item }: { item: Item }) {
       </DetailBlock>
 
       <DetailBlock title="Pull request">
+        <p>Source: VCS PR/CI · observed PR update: {pr?.updated_at || 'unknown'} · CI observation time: unknown</p>
         {pr ? (
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5">
             <dt className="text-muted-foreground">PR</dt>
@@ -580,10 +421,12 @@ function ItemDetail({ item }: { item: Item }) {
 
       {a && (
         <DetailBlock title="Acceptance">
+          <p>Source: ClawFlow independent acceptance · completed: {a.completed_at || 'unknown'}</p>
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5">
             <dt className="text-muted-foreground">Verdict</dt>
             <dd>
               {a.running ? 'reviewing…' : a.latest_is_infra ? 'no verdict (infrastructure error)' : a.verdict || 'none yet'}
+              {a.unstructured ? ' (unstructured findings)' : ''}
               {a.verdict === 'passed' && !a.valid ? ' (stale)' : ''}
             </dd>
             <dt className="text-muted-foreground">Attempts</dt>
@@ -612,8 +455,11 @@ function ItemDetail({ item }: { item: Item }) {
         </DetailBlock>
       )}
 
+      {!a && <DetailBlock title="Acceptance">Source: ClawFlow independent acceptance · verdict and timestamp unknown</DetailBlock>}
+      {!delivery && <DetailBlock title="Delivery">Source: VCS merge evidence · No merge recorded. Timestamp unknown.</DetailBlock>}
       {delivery && (
         <DetailBlock title="Delivery">
+          <p>Source: VCS merge evidence · timestamp: {delivery.merged_at || 'unknown'}</p>
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5">
             <dt className="text-muted-foreground">Merge commit</dt>
             <dd className="font-mono">{shortSha(delivery.merge_commit_sha)}</dd>
@@ -635,33 +481,33 @@ function DetailBlock({ title, children }: { title: string; children: React.React
   )
 }
 
-function EventTimeline({ events }: { events: PipelineEvent[] }) {
-  // Newest first, as a reader scans from the top.
-  const rows = useMemo(() => [...events].reverse(), [events])
-  return (
-    <section className="mb-5">
-      <h2 className="text-sm font-semibold text-foreground mb-2">Recent runner events</h2>
-      <div className="bg-card border border-border rounded-xl overflow-hidden">
-        {rows.length === 0 ? (
-          <p className="p-4 text-sm text-muted-foreground">No pipeline events in run.log yet.</p>
-        ) : (
-          <ol className="divide-y divide-border text-xs max-h-96 overflow-y-auto">
-            {rows.map((e, i) => (
-              <li key={`${e.time}-${i}`} className="px-3 py-1.5 flex gap-3">
-                <time dateTime={e.time} title={e.time} className="text-muted-foreground tabular-nums whitespace-nowrap w-16 shrink-0">
-                  {timeAgo(e.time)}
-                </time>
-                <span className={cn('font-mono shrink-0', e.level === 'warn' || e.level === 'error' ? 'text-amber-700' : 'text-foreground')}>
-                  {e.event.replace(/^run\//, '')}
-                </span>
-                <span className="text-muted-foreground break-all">
-                  {Object.entries(e.fields).map(([k, v]) => `${k}=${v}`).join(' ')}
-                </span>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-    </section>
-  )
+function pilotSummary(a: PilotAction) {
+  return `Pilot ${a.action.type} · ${a.outcome}${a.action.body ? ': ' + a.action.body : ''}${a.reason ? ' · ' + a.reason : ''}`
+}
+
+export function PilotTimeline({ actions }: { actions: PilotAction[] }) {
+  if (!actions.length) return null
+  return <DetailBlock title="Pilot timeline"><ol className="space-y-2">
+    {actions.map(a => <li key={a.run_id + '/' + a.action.id} className="whitespace-pre-wrap break-words">
+      <time>{a.at}</time> · {pilotSummary(a)}
+      <div className="text-muted-foreground">{a.actor} · run {a.run_id}{a.action.head && <> · reviewed head <code>{a.action.head}</code></>}{a.action.followups?.length ? ' · follow-ups: ' + a.action.followups.join(', ') : ''}</div>
+    </li>)}
+  </ol></DetailBlock>
+}
+
+export function itemPilotActions(actions: PilotAction[], repo: string, item: Item) {
+  return actions.filter(a => a.action.repo === repo &&
+    ((a.action.issue && a.action.issue === item.issue) || (a.created_issue && a.created_issue === item.issue) || (a.action.pr && a.action.pr === item.pr?.number)))
+}
+
+export function APIUsagePanel({ usage }: { usage?: APIUsage }) {
+  if (!usage) return null
+  return <section aria-label="GitHub API budget" className="border rounded p-3 mb-3 text-sm">
+    <p>GitHub API · 最近调度轮次 {new Date(usage.captured_at).toLocaleString()}</p>
+    {Object.entries(usage.budgets).map(([host, b]) => <p key={host}>
+      {host} · 剩余 {b.remaining}/{b.limit} · 重置 {new Date(b.reset).toLocaleString()}
+      {Date.parse(b.backoff) > Date.now() && ` · 退避至 ${new Date(b.backoff).toLocaleString()}`}
+    </p>)}
+    <p>各阶段请求：{Object.entries(usage.calls_by_stage).map(([stage, calls]) => `${stage}: ${calls}`).join(' · ') || '0'}</p>
+  </section>
 }

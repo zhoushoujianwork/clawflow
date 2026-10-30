@@ -948,3 +948,18 @@ func TestRunDeliveryJournalAndNativeFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnerSkipCannotBeWrittenOrConsumed(t *testing.T) {
+	for _, outcomes := range [][]string{nil, {"clawflow-skip"}} {
+		op := &Operator{Name: "custom", Outcomes: outcomes}
+		op.Trigger.LabelsConsumed = []string{"clawflow-skip", "ready-for-agent"}
+		v := newFakeVCS()
+		v.labels[7] = []string{"clawflow-skip", "ready-for-agent"}
+		_, _, err := Run(context.Background(), op, &Subject{Number: 7}, v, RunOptions{Repo: "r", RunFunc: func(context.Context, string, string, time.Duration, io.Writer, string, ...string) (string, error) {
+			return "finished\n<!-- clawflow:outcome=clawflow-skip -->", nil
+		}})
+		if !errors.Is(err, ErrDisallowedOutcome) || v.addLabelCalls != 0 || !slices.Contains(v.labels[7], "clawflow-skip") || slices.Contains(v.labels[7], "ready-for-agent") || len(v.comments) != 1 {
+			t.Fatalf("owner label changed or result lost: labels=%v comments=%v err=%v", v.labels, v.comments, err)
+		}
+	}
+}

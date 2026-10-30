@@ -1,6 +1,6 @@
 # Independent acceptance
 
-ClawFlow can require an independent review before merging a managed GitHub PR. Development and acceptance use separate native sessions. Acceptance first records a plan from the requirements without source access, then reviews a disposable detached checkout of the submitted commit with command-capable permissions.
+ClawFlow can require an independent review before merging a managed GitHub PR. Development and acceptance use separate native sessions. For acceptance-enrolled repositories, ClawFlow records a plan from the requirements before implementation without source access, then independently reviews a disposable detached checkout of the submitted commit with command-capable permissions.
 
 This is a local reference implementation for [platform issue #349](https://github.com/zhoushoujianwork/clawflow/issues/349). The broader [platform design](managed-development-design.md) describes the distributed workflow target. [Technical details](independent-acceptance-detail.md) describe evidence and limits.
 
@@ -8,9 +8,19 @@ This is a local reference implementation for [platform issue #349](https://githu
 
 默认使用 `tools-disabled`：空 scratch 目录、`ToolsDisabled: true` 和 `PermissionMode: "default"`。仅当执行器返回 `unsupported_tools` 错误时，在同一次 attempt 内重试一次 `isolated-readonly`：不传工具限制，使用空 scratch 和 `default` 只读策略（Codex 为无网络只读 sandbox）。其他错误仍终止验收。
 
+实现前的计划保存在私有的 `acceptance-plans/` 数据目录，按仓库、issue、需求摘要（标题和正文）及 planner 策略区分。实现者和 CI、验收、冲突修复均收到同一份清单，须逐项自检并在 PR 正文说明覆盖方式、执行的检查及限制。自检不能作为验收证据。需求未变时，验收复用已保存的计划；正文或 planner 策略改变后重新规划。协调器将计划随任务传给 worker，跨机器执行仍使用同一份计划。未启用 `acceptance_required` 的仓库不增加规划调用。
+
+复用计划时保留 planner 的原始会话和时间，将计划副本绑定当前 PR 契约及验收 attempt。审查仍使用独立的新会话，校验其与开发者及 planner 的身份不同，并独立获取提交对应的证据。旧的逐 attempt 计划仍可读取。
+
 计划持久化后才创建、fetch 和 checkout 审查工作区。计划及记录中的 `plan.planner_isolation`（独立计划文件中为 `planner_isolation`）、status 输出和 harvest pass/non-pass 日志记录实际模式。两种模式均要求 native policy 为 `default`；缺失或未知模式的旧计划不能通过 gate，需重新验收。
 
 `isolated-readonly` 仍有残余风险：只读 sandbox 可以读取其他本地文件，无法由后端强制保证不看源码。隔离依赖空工作目录、延迟创建 checkout，以及禁止读取工作目录外文件或任何仓库的 planner 提示词；它不是完整的文件读取隔离边界。
+
+## 报告格式纠正
+
+reviewer 执行成功且源码检查通过后，若报告解析或校验失败，同一验收 attempt 最多续接原生 reviewer 会话一次。纠正提示包含原始校验错误与报告结构，仅要求返回完整修正 JSON，禁止重新审查或补跑检查。纠正使用相同工作区、profile 和 session，记录新的 native run；源码在纠正前后重新核对。执行失败和 `infrastructure_error` 不进入纠正，第二份报告仍无效则按原有错误路径保存，不产生有效 verdict。
+
+验收记录的可选 `correction` 保存 `validation_error` 和纠正轮的 `reviewer` 原生身份，原始 `reviewer` 字段保留首次审查身份。纠正轮用量通过 `acceptance-review-correction` 执行记录单独保存，不另建验收 attempt；未提供的用量仍为未知。
 
 ## Usage
 
@@ -24,14 +34,25 @@ clawflow acceptance status --repo owner/repo --pr 123 --json
 
 Enrollment preserves monitoring and automatic-merge settings. The scan sweep never launches a reviewer; it only reports missing evidence. `clawflow acceptance run` stays available for explicit runs.
 
+仓库可声明 checkout 构建准备命令；实现、修复和独立审阅使用同一准备流程。例如：
+
+```bash
+clawflow repo set zhoushoujianwork/clawflow --acceptance-setup-command 'cd web && pnpm install --frozen-lockfile && pnpm build'
+```
+
+对应配置字段为 `acceptance_setup_command`，空值关闭。计划保存并创建审阅 checkout 后、reviewer 启动前执行；每个 checkout 的相同命令只尝试一次。准备脚本通过与后续执行相同的 profile、sandbox 和网络策略运行，最多十分钟，不保留命令输出或原生回答。命令失败时，在同一 sandbox 内尝试创建空 `web/dist/index.html`；不覆盖已跟踪文件，也不沿资产路径的符号链接写入。占位文件和私有准备状态加入本地 Git exclude，脚本运行后删除，均不提交。
+
+私有验收记录的 `environment_notes` 保存 `checkout_setup: ok|fallback|failed`。准备执行本身不可用或占位失败时记录 `failed`，仍允许 reviewer 使用已有证据。占位仅解决 Go embed 编译，不证明前端功能；本地检查因环境不可用时，应使用覆盖对应标准的可信 exact-head CI，不能把这种环境问题当成代码缺陷，也不能在已有充分 CI 证据时返回 `infrastructure_error`。
+
 ## Automatic harvest
 
-`clawflow run` has an acceptance phase after the operator phase. It needs `auto_merge` on and `acceptance_required` on, and it only runs for the whole pass or a [targeted run](#targeted-run).
+`clawflow run` 在 operator 执行前调度独立验收。需要开启 `auto_merge` 和 `acceptance_required`，支持整轮扫描或 [targeted run](#targeted-run)。
 
-- Per repo and pass, at most one acceptance runs, for the first open PR that passes the sweep's filters, has successful required CI and has no evidence for its current contract.
-- A passing result goes straight to the conditional merge path with the accepted head SHA.
-- A failed or blocked verdict posts one comment on the issue with the status and reviewer summary. Later passes find the recorded verdict and stay silent.
-- Setup or provider errors post nothing, are logged, and make `clawflow run` exit non-zero. They are retried after 15 minutes, up to 3 attempts per head. After that one comment points to `clawflow acceptance run`.
+- 每轮按仓库轮转启动符合条件的 PR 验收，每仓库最多同时运行 `acceptance_max_parallel` 个（默认 3）。通过 `clawflow repo set owner/repo --acceptance-max-parallel 3` 设置；所有后台验收与实现共享本机 `max_concurrent_agents` 限额。
+- 本地验收在独立后台进程中运行，调度轮次启动后即返回，不在审查期间持有仓库运行锁。日志见 `~/.clawflow/logs/acceptance-background.log` 和 `run.log`。
+- 验收通过后，由后续 sweep 串行合并；每次合并前重新检查当前 head、base 和证据。一个 PR 合并导致 base 变化后，其他 PR 的旧验收不能用于合并。
+- 每次完成审查后更新 PR 上由当前认证账号拥有的一条验收评论，包含提交、结论、逐项证据、未解决问题与下一步负责人；旧 attempt 保留在私有审计记录中。发布失败可由后续 harvest 重试。
+- 启动失败使 `clawflow run` 返回非零；后台审查中的基础设施错误（包括提供者失败和无效评审报告）记录在日志和验收记录中，不改变已经返回的调度命令退出码，15 分钟后可重试。同一 PR head 最多连续失败 2 次，随后以一条评论和看板原因 `acceptance-infra` 暂停。新 head、issue 正文变化或新 ClawFlow 二进制会重置计数；手动验收命令也遵守此上限。这些错误不消耗产品修复次数。
 - A `failed` verdict is repaired on the same PR, see [Repair after a failed verdict](#repair-after-a-failed-verdict). A `blocked` verdict is not: the comment says a human decision is needed.
 
 The PR must be open, non-draft, from the same repository, and reference an open issue with a closing keyword. A successful managed development run must have captured that issue's requirements and trustworthy native execution events. Historical runs missing the requirements snapshot need a new managed development run. The configured acceptance profile must support the existing Offload execution protocol.
@@ -46,7 +67,7 @@ The latest completed acceptance attempt must pass for the current requirements, 
 clawflow repo set owner/repo --acceptance-overlap-ci off
 ```
 
-审查开始前，若仓库要求 CI，且 GitHub 现有检查聚合确认全部检查在合约 head 上成功，审查者会收到 head 和 check-run ID，执行需求针对性测试及源码审查，不再重复全量测试。证据的 `review_mode` 为 `ci-verified`，`ci` 保存该次检查身份；其他情况使用 `full-suite`，仍要求标准或配置的全量测试命令。无法提供精确提交与检查身份的适配器也使用全量模式。独立计划阶段不接收 CI 或源码证据。
+审查开始前，若仓库要求 CI，且现有检查聚合确认全部检查在合约 head 上成功，审查者会收到 head 和检查身份。`review_mode` 为 `ci-verified`，`ci` 保存该次检查身份；未满足条件时保留兼容字段 `full-suite`，但新证据协议不再据此强制全量执行。是否运行测试取决于需求证据缺口。独立计划阶段不接收 CI 或源码证据。
 
 看板在并行执行时显示 “acceptance running (CI pending)”。通过验收不会绕过 CI 门禁：同一 head 的 CI 成功后才能合并；CI 后续失败时保留验收记录并进入现有修复路径。新 head 仍需重新验收。这里复用已有 check-run 聚合，不新增分支保护规则发现或 workflow-run 身份证明。
 
@@ -74,3 +95,17 @@ clawflow run --repo owner/repo --issue 123
 This gate reviews the submitted head and rechecks the base. It does not establish tested integration-commit provenance, an atomic merge queue, target-branch verification, distributed fencing, or 10,000-worker capacity. GitHub Actions evidence integration remains [#350](https://github.com/zhoushoujianwork/clawflow/issues/350); durable scheduling remains [#351](https://github.com/zhoushoujianwork/clawflow/issues/351).
 
 Local fixture tests do not establish a live provider or GitHub Actions result. See the [pilot execution record](platform-pilot-report.md) for earlier work and recorded validation.
+
+## 按需求验收（证据协议 1）
+
+新合约包含 `evidence_schema: 1`，因此历史自由文本验收记录不能替代新验收。规划阶段从已批准需求提取逐项标准，以需求原文、稳定 ID 和所需最小证明（源码、执行或 live）组成清单，持久化后才读取源码。需求覆盖的语义判断仍由独立 reviewer 负责；结构校验保证计划清单全部有对应结果，不宣称能自动理解需求全文。
+
+每项 `checks` 记录检查内容、证据类型（source/unit/integration/live）、引用、适用提交、观察结果（inspected/exists/passed/failed/unverified）及缺失证明。已有测试在提交 head 上的可信成功结果可以复用，无须重复执行；测试文件存在、源码推断和实际执行结果分别报告。无关测试不能覆盖需求。没有成功 CI 也不默认要求全量测试，只补有意义的证据缺口。保留原有 CI 和合并门禁；此变更不实现 #350 的 workflow/job 来源认证。
+
+`passed` 要求每项证据与提交及所需证明一致且没有未解决缺口。`failed` 要求有结构化、精确提交上的具体缺陷证据，进入既有有界修复。`blocked` 要求明确的缺失证明、人工负责人及下一步行动，不进入修复。工具/基础设施错误按既有重试政策处理。审查建议不扩展需求；仅在批准标准有要求且明确授权的窗口内做 visual/live 验证。
+
+PR 评论只更新当前认证账号拥有的 `clawflow:acceptance-report` 评论；同一 attempt 重发无副作用，较旧或时间顺序冲突的结果被拒绝。发布前重新核对当前合约及最新 attempt；本机使用现有 PR 锁，分布式 worker 由 coordinator 接收 fenced 结果后发布。它不是跨多个独立 coordinator 的远端原子 CAS；继续遵循现有单 authority 部署边界。旧 issue 评论不删除。私有 store 保留每次审查；不会把未经清理的原始 transcript 发布到 PR。
+
+## 特殊真实测试环境
+
+独立 review 在选择报告模式后读取执行机器上主项目的 `testing.md`，与开发共享 SOP 段落；不向 requirements-only planner 注入 SOP，也不向 review 注入项目开发上下文。无项目或无文档保持兼容输入。跨机器文档分发、环境门禁和共享宿主租约尚未实现；真实需求缺环境证据时不能降级为离线通过。通用声明、负例与实现边界见 [测试环境就绪契约](testing-environment-contract.md)。

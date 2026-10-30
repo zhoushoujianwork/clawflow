@@ -253,10 +253,8 @@ settings:
 	}
 }
 
-// TestMarshalForGist_IncludesBoundMachine verifies that bound_machine IS
-// included in the Gist payload — it's a fleet-wide directive about which
-// machine should run a repo, not a per-machine local fact.
-func TestMarshalForGist_IncludesBoundMachine(t *testing.T) {
+// Legacy host affinity is synced as worker_tags, never as bound_machine.
+func TestMarshalForGist_MigratesBoundMachine(t *testing.T) {
 	cfg := &config.Config{
 		Repos: map[string]config.Repo{
 			"owner/repo": {
@@ -274,11 +272,11 @@ func TestMarshalForGist_IncludesBoundMachine(t *testing.T) {
 	}
 
 	payload := string(data)
-	if !strings.Contains(payload, "bound_machine") {
-		t.Error("bound_machine key should appear in Gist payload")
+	if strings.Contains(payload, "bound_machine") {
+		t.Error("bound_machine key must not appear in Gist payload")
 	}
-	if !strings.Contains(payload, "my-laptop") {
-		t.Error("bound_machine value should appear in Gist payload")
+	if !strings.Contains(payload, "host-my-laptop") {
+		t.Error("migrated host tag should appear in Gist payload")
 	}
 }
 
@@ -312,7 +310,7 @@ repos:
 	}
 
 	repo := merged.Repos["owner/repo"]
-	if repo.BoundMachine != "new-laptop" {
+	if strings.Join(repo.WorkerTags, ",") != "host-new-laptop" {
 		t.Errorf("bound_machine should follow remote: got %q, want %q", repo.BoundMachine, "new-laptop")
 	}
 	// local_path is still the one preserved-locally field.
@@ -622,53 +620,11 @@ func TestMigrateTimestamps(t *testing.T) {
 	}
 }
 
-// TestQueueIssueRoundTrip verifies queue_issue survives YAML save/load and the
-// Gist sync path, and is omitted when unset.
-func TestQueueIssueRoundTrip(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cfg := &config.Config{Repos: map[string]config.Repo{
-		"o/queued": {BaseBranch: "main", QueueIssue: 42},
-		"o/plain":  {BaseBranch: "main"},
-	}}
-	if err := cfg.Save(); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(config.ConfigPath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(raw), "queue_issue") != 1 {
-		t.Fatalf("queue_issue must be written once and omitted when 0:\n%s", raw)
-	}
-	loaded, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Repos["o/queued"].QueueIssue != 42 || loaded.Repos["o/plain"].QueueIssue != 0 {
-		t.Fatalf("round trip lost queue_issue: %+v", loaded.Repos)
-	}
-
-	data, err := config.MarshalForGist(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "queue_issue: 42") {
-		t.Fatalf("gist payload missing queue_issue:\n%s", data)
-	}
-	merged, err := config.MergeConfigs(&config.Config{Repos: map[string]config.Repo{}}, data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if merged.Repos["o/queued"].QueueIssue != 42 {
-		t.Fatalf("merge lost queue_issue: %+v", merged.Repos["o/queued"])
-	}
-}
-
-// TestQueueScopeAndMaxInFlightSync verifies the unified queue repo settings
+// TestMaxInFlightSync verifies the unified queue repo settings
 // survive YAML save/load and the Gist sync path.
-func TestQueueScopeAndMaxInFlightSync(t *testing.T) {
+func TestMaxInFlightSync(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := &config.Config{Repos: map[string]config.Repo{"o/q": {BaseBranch: "main", QueueScope: "ranked", MaxInFlight: 3}}}
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/q": {BaseBranch: "main", MaxInFlight: 3}}}
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -676,7 +632,7 @@ func TestQueueScopeAndMaxInFlightSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := loaded.Repos["o/q"]; r.QueueScope != "ranked" || r.MaxInFlight != 3 {
+	if r := loaded.Repos["o/q"]; r.MaxInFlight != 3 {
 		t.Fatalf("round trip: %+v", r)
 	}
 	data, err := config.MarshalForGist(loaded)
@@ -687,7 +643,7 @@ func TestQueueScopeAndMaxInFlightSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := merged.Repos["o/q"]; r.QueueScope != "ranked" || r.MaxInFlight != 3 {
+	if r := merged.Repos["o/q"]; r.MaxInFlight != 3 {
 		t.Fatalf("sync lost queue settings: %+v", r)
 	}
 }
@@ -704,5 +660,50 @@ func TestSelfUpgradeSurvivesGistRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "self_upgrade: true") {
 		t.Fatalf("self_upgrade missing from payload: %s", data)
+	}
+}
+
+func TestPilotOverrideMergeSync(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {PilotOverrideMerge: enabled}}}
+		data, err := config.MarshalForGist(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		merged, err := config.MergeConfigs(&config.Config{Repos: map[string]config.Repo{}}, data)
+		if err != nil || merged.Repos["o/r"].PilotOverrideMerge != enabled {
+			t.Fatalf("sync: %+v %v", merged, err)
+		}
+	}
+}
+
+func TestMarshalForGist_OmitsDatabaseDSN(t *testing.T) {
+	cfg := &config.Config{Repos: map[string]config.Repo{}}
+	cfg.Settings.Database.DSN = "postgres://u:topsecret@h/db"
+	data, err := config.MarshalForGist(cfg)
+	if err != nil {
+		t.Fatalf("MarshalForGist error: %v", err)
+	}
+	if s := string(data); strings.Contains(s, "topsecret") || strings.Contains(s, "dsn") {
+		t.Errorf("gist payload must not contain the DSN:\n%s", s)
+	}
+	if cfg.Settings.Database.DSN == "" {
+		t.Error("MarshalForGist must not mutate the caller's config")
+	}
+}
+
+func TestAcceptanceWorkerSyncRoundTrip(t *testing.T) {
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/r": {AcceptanceWorker: "different", WorkerTagsByKind: map[string][]string{"acceptance": {"review"}}}}}
+	raw, err := config.MarshalForGist(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := config.MergeConfigs(&config.Config{Repos: map[string]config.Repo{}}, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := merged.Repos["o/r"]
+	if r.AcceptanceWorker != "different" || len(r.WorkerTagsByKind["acceptance"]) != 1 {
+		t.Fatalf("policy lost in sync: %+v", r)
 	}
 }

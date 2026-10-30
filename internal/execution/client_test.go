@@ -3,8 +3,10 @@ package execution
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 )
 
@@ -19,7 +23,20 @@ func TestOffloadHelper(t *testing.T) {
 	if os.Getenv("CLAWFLOW_OFFLOAD_TEST_HELPER") != "1" {
 		return
 	}
+	if os.Getenv("CLAWFLOW_EXPECT_SLOT") == "1" && agentcapacity.Used() != 1 {
+		os.Exit(3)
+	}
 	args := offloadtest.Args()
+	if expected := os.Getenv("OFFLOAD_TEST_DSN_HASH"); expected != "" {
+		dsn := os.Getenv("CLAWFLOW_TEST_DATABASE_DSN")
+		if fmt.Sprintf("%x", sha256.Sum256([]byte(dsn))) != expected {
+			os.Exit(4)
+		}
+		raw, _ := json.Marshal(args)
+		_ = os.WriteFile(os.Getenv("OFFLOAD_TEST_CAPTURE"), raw, 0600)
+		offloadtest.Emit(args, "database environment verified: "+dsn, "", "")
+		return
+	}
 	if args["-w"] != "" {
 		offloadtest.Helper(t)
 		return
@@ -257,5 +274,157 @@ func TestOffloadExplicitModelToolsAndInstructions(t *testing.T) {
 	_ = json.Unmarshal(raw, &call)
 	if call.Args["-m"] != "explicit-model" || call.Args["-allowed-tools"] != "Read,Grep" || !strings.Contains(call.Instructions, "Project-specific rule") || len(call.Instructions) < 16000 {
 		t.Fatal("explicit execution input lost")
+	}
+}
+
+func TestPilotExecutionProfile(t *testing.T) {
+	for _, tc := range []struct{ name, env, want string }{
+		{"mapped", "", "supervisor"},
+		{"fallback", "", "base"},
+		{"environment", "explicit", "explicit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, req := fixture(t)
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "")
+			os.Unsetenv("CLAWFLOW_OFFLOAD_PROFILE")
+			if tc.env != "" {
+				t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", tc.env)
+			}
+			cfg := &config.Config{Settings: config.Settings{Execution: config.ExecutionSettings{Profile: "base", RoleProfiles: map[string]string{}}}}
+			if tc.name == "fallback" {
+				cfg.Settings.Execution.RoleProfiles[config.RoleOperator] = "implementer"
+			} else {
+				cfg.Settings.Execution.RoleProfiles[config.RolePilot] = "supervisor"
+			}
+			if err := cfg.Save(); err != nil {
+				t.Fatal(err)
+			}
+			capture := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+			_, err := Execute(context.Background(), "task", Options{Workspace: req.Workspace, Role: config.RolePilot})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var call struct{ Args map[string]string }
+			if err := json.Unmarshal(raw, &call); err != nil {
+				t.Fatal(err)
+			}
+			if call.Args["-p"] != tc.want {
+				t.Fatalf("args=%v, want %s", call.Args, tc.want)
+			}
+		})
+	}
+}
+
+// All operator roles and the direct acceptance runner share Run's launch gate.
+func TestOffloadSharedCapacity(t *testing.T) {
+	for _, mode := range []string{"implement", "repair-ci", "acceptance"} {
+		t.Run(mode, func(t *testing.T) {
+			c, req := fixture(t)
+			if mode == "acceptance" {
+				req.PermissionMode = "default"
+			}
+			cfg := &config.Config{Settings: config.Settings{MaxConcurrentAgents: 1}}
+			if err := cfg.Save(); err != nil {
+				t.Fatal(err)
+			}
+			release, err := agentcapacity.Acquire(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			capture := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if _, err := Run(ctx, c, req, nil, nil, nil); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("full capacity: %v", err)
+			}
+			if _, err := os.Stat(capture); !os.IsNotExist(err) {
+				t.Fatal("Offload started without a slot")
+			}
+			release()
+			if agentcapacity.Used() != 0 {
+				t.Fatal("cancelled waiter leaked a slot")
+			}
+			t.Setenv("CLAWFLOW_EXPECT_SLOT", "1")
+			if _, err := Run(context.Background(), c, req, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if agentcapacity.Used() != 0 {
+				t.Fatal("execution leaked a slot")
+			}
+		})
+	}
+}
+
+func TestResultModelAndUsage(t *testing.T) {
+	for _, mode := range []string{"result-model", "result-model-different", "result-model-final-empty", "event-model", "final-model-empty"} {
+		t.Run(mode, func(t *testing.T) {
+			c, req := fixture(t)
+			t.Setenv("OFFLOAD_TEST_MODE", mode)
+			r, err := Run(context.Background(), c, req, nil, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(mode, "result-model") {
+				var usage TokenUsage
+				if err := json.Unmarshal(r.Usage, &usage); err != nil {
+					t.Fatal(err)
+				}
+				if r.Model != "gpt-test" || r.Usage == nil || usage.InputTokens == nil || *usage.InputTokens != 1000 || r.CostBasis != "subscription" || r.CostUSD != nil {
+					t.Fatalf("%+v", r)
+				}
+			} else if r.Model != "profile-model" {
+				t.Fatalf("%+v", r)
+			}
+		})
+	}
+}
+
+func TestConfiguredTestDatabaseReachesManagedAgentAndIsRedacted(t *testing.T) {
+	for _, role := range []string{"operator", "repair-ci"} {
+		t.Run(role, func(t *testing.T) {
+			_, req := fixture(t)
+			const dsn = "postgres://tester:private-password@localhost/tests?sslmode=disable"
+			cfg := &config.Config{Settings: config.Settings{Execution: Config{Profile: "test-profile", TestDatabaseDSN: dsn}}}
+			if err := cfg.Save(); err != nil {
+				t.Fatal(err)
+			}
+			// The configured setting wins over an inherited value, without mutating the parent.
+			t.Setenv("CLAWFLOW_TEST_DATABASE_DSN", "inherited")
+			t.Setenv("OFFLOAD_TEST_DSN_HASH", fmt.Sprintf("%x", sha256.Sum256([]byte(dsn))))
+			capture := filepath.Join(t.TempDir(), "command.json")
+			t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+			var logs bytes.Buffer
+			result, err := Execute(context.Background(), "task", Options{Workspace: req.Workspace, Role: role, PermissionMode: "bypassPermissions", Events: &logs})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Text != "database environment verified: [redacted]" {
+				t.Fatal("missing redacted agent response")
+			}
+			command, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persisted, _ := json.Marshal(result)
+			for _, output := range []string{string(command), logs.String(), string(persisted), redactEvidence([]byte(`{"command":"echo `+dsn+`"}`), []string{"CLAWFLOW_TEST_DATABASE_DSN=" + dsn})} {
+				if strings.Contains(output, dsn) || strings.Contains(output, "private-password") {
+					t.Fatal("DSN leaked")
+				}
+			}
+			public, _ := json.Marshal(cfg.Settings.Execution)
+			if strings.Contains(string(public), dsn) {
+				t.Fatal("DSN leaked in public config")
+			}
+			if os.Getenv("CLAWFLOW_TEST_DATABASE_DSN") != "inherited" {
+				t.Fatal("parent environment mutated")
+			}
+		})
 	}
 }

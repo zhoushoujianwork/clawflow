@@ -22,6 +22,19 @@ func envOrFile(envKey, fileVal string) string {
 
 // Repo holds per-repository settings.
 type Repo struct {
+	// Testing declarations contain public requirements, never machine-local SOP text.
+	TestingSOPRequired   bool     `yaml:"testing_sop_required,omitempty" json:"testing_sop_required,omitempty"`
+	TestingSOPDigest     string   `yaml:"testing_sop_digest,omitempty" json:"testing_sop_digest,omitempty"`
+	RequiredCapabilities []string `yaml:"required_capabilities,omitempty" json:"required_capabilities,omitempty"`
+	AcceptanceWorker     string   `yaml:"acceptance_worker,omitempty" json:"acceptance_worker,omitempty"`
+	// CoordinatorMode and CoordinatorActive are pass-local scheduling inputs.
+	CoordinatorActive map[int]bool        `yaml:"-" json:"-"`
+	CoordinatorMode   bool                `yaml:"-" json:"-"`
+	WorkerTags        []string            `yaml:"worker_tags,omitempty" json:"worker_tags,omitempty"`
+	WorkerTagsByKind  map[string][]string `yaml:"worker_tags_by_kind,omitempty" json:"worker_tags_by_kind,omitempty"`
+	Priority          int                 `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	PilotOverrideMerge bool              `yaml:"pilot_override_merge,omitempty" json:"pilot_override_merge,omitempty"`
 	Enabled            bool              `yaml:"enabled"`
 	Platform           string            `yaml:"platform,omitempty"` // "github" (default) or "gitlab"
 	BaseURL            string            `yaml:"base_url,omitempty"` // GitLab self-hosted instance URL
@@ -37,6 +50,13 @@ type Repo struct {
 	CITimeout          int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
+
+	// AcceptanceSetupCommand prepares generated prerequisites in disposable checkouts.
+	AcceptanceSetupCommand string `yaml:"acceptance_setup_command,omitempty" json:"acceptance_setup_command,omitempty"`
+
+	// AcceptanceMaxParallel caps simultaneous independent reviews; zero defaults to 3.
+	AcceptanceMaxParallel int `yaml:"acceptance_max_parallel,omitempty" json:"acceptance_max_parallel,omitempty"`
+
 	// AcceptanceOverlapCI defaults to CIRequired when omitted.
 	AcceptanceOverlapCI *bool `yaml:"acceptance_overlap_ci,omitempty" json:"acceptance_overlap_ci,omitempty"`
 	// SelfUpgrade, when true, makes a `clawflow run` pass that confirmed a
@@ -44,37 +64,13 @@ type Repo struct {
 	// installed binary from the fetched base (see selfupgrade.go). Intended
 	// only for the repository that contains this binary's source.
 	SelfUpgrade bool `yaml:"self_upgrade,omitempty" json:"self_upgrade,omitempty"`
-	// QueueIssue, when > 0, names a parent issue whose direct open sub-issues
-	// form an ordered work queue: the runner dispatches implement only for the
-	// first eligible item, one at a time. 0 = no queue (every eligible leaf
-	// issue is dispatched). GitHub only.
-	//
-	// Deprecated: the unified cross-repo queue ignores it for dispatch. Its
-	// open sub-issues are imported into the rank file once (see
-	// internal/queue); the field is kept so old configs stay readable.
-	QueueIssue int `yaml:"queue_issue,omitempty" json:"queue_issue,omitempty"`
-
 	// MaxInFlight caps how many issues of this repo the unified queue lets
 	// run or await review at once (each has its own worktree and PR).
 	// 0 = default 2. Negative values are rejected by Validate.
 	MaxInFlight int `yaml:"max_in_flight,omitempty" json:"max_in_flight,omitempty"`
 
-	// QueueScope selects which open issues of this repo are queue
-	// candidates: "all", "labeled" (label clawflow) or "ranked" (listed in
-	// the rank file, or labeled clawflow and enrolled on sight). Empty falls
-	// back to settings.queue.scope, then "all". Migrating a repo's
-	// queue_issue sets "ranked" so unlisted work is never picked up.
-	QueueScope string `yaml:"queue_scope,omitempty" json:"queue_scope,omitempty"`
-
-	// BoundMachine, when non-empty, restricts processing of this repo to the
-	// machine whose hostname matches this value. Repos with no BoundMachine
-	// (or whose BoundMachine matches the current hostname) are processed
-	// normally. This allows multiple machines sharing a synced config to each
-	// own a subset of repos without stepping on each other.
-	//
-	// Like local_path, this field is machine-specific and is intentionally
-	// excluded from cloud sync (see syncableRepo in sync.go).
-	BoundMachine string `yaml:"bound_machine,omitempty"`
+	// BoundMachine is a deprecated Go input alias; serialization migrates it to WorkerTags.
+	BoundMachine string `yaml:"-"`
 
 	// PrimaryProject names the authoritative project for this repo when it
 	// belongs to more than one project (multi-membership, issue #267). The
@@ -99,26 +95,107 @@ type Repo struct {
 
 // ExecutionSettings selects machine-local Offload profiles. Profiles own model authentication.
 type ExecutionSettings struct {
-	Command      string            `yaml:"command,omitempty" json:"command"`
-	Profile      string            `yaml:"profile,omitempty" json:"profile"`
-	RoleProfiles map[string]string `yaml:"role_profiles,omitempty" json:"role_profiles,omitempty"`
-	CodexSandbox string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
+	// TestDatabaseDSN is a machine-local secret passed only through the agent environment.
+	TestDatabaseDSN string            `yaml:"test_database_dsn,omitempty" json:"-"`
+	Command         string            `yaml:"command,omitempty" json:"command"`
+	Profile         string            `yaml:"profile,omitempty" json:"profile"`
+	RoleProfiles    map[string]string `yaml:"role_profiles,omitempty" json:"role_profiles,omitempty"`
+	CodexSandbox    string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
+}
+
+// DatabaseSettings configures the required PostgreSQL store. The DSN is a
+// secret: it is never synced (see MarshalForGist) and must be masked when
+// printed. CLAWFLOW_DATABASE_DSN overrides it.
+type DatabaseSettings struct {
+	DSN string `yaml:"dsn,omitempty"`
 }
 
 // QueueSettings tunes the unified work queue.
 type QueueSettings struct {
-	// Scope is the default candidate scope for repos without queue_scope:
-	// "all" (default), "labeled" (only issues carrying the label
-	// "clawflow") or "ranked" (only issues in the rank file or labeled).
-	Scope string `yaml:"scope,omitempty"`
 	// ParkAfter is how long an in-flight item may stay blocked before it
 	// stops counting toward max_in_flight (Go duration, default 45m).
 	ParkAfter string `yaml:"park_after,omitempty"`
 }
 
+// PilotSettings tunes event-driven supervision.
+type PilotSettings struct {
+	// StallAfter is the minimum quiet period for a live repository pass.
+	StallAfter string `yaml:"stall_after,omitempty"`
+}
+
+// CoordinatorSettings reserves the optional worker API listener configuration.
+type CoordinatorSettings struct {
+	Enabled     bool                `yaml:"enabled,omitempty"`
+	Listen      string              `yaml:"listen,omitempty"`
+	LocalWorker LocalWorkerSettings `yaml:"local_worker,omitempty"`
+}
+
+// LocalWorkerSettings opts the coordinator host into the normal worker pool.
+type LocalWorkerSettings struct {
+	Enabled     bool     `yaml:"enabled,omitempty"`
+	MaxParallel int      `yaml:"max_parallel,omitempty"`
+	Tags        []string `yaml:"tags,omitempty"`
+}
+
+// SchedulingError prevents clients from mutating their local execution queue.
+func (s Settings) SchedulingError() error {
+	if s.Platform.URL != "" {
+		return fmt.Errorf("此客户端由平台 %s 调度；禁止本地调度，请在平台操作（调试可使用 clawflow run --local）", s.Platform.URL)
+	}
+	return nil
+}
+
+func (s CoordinatorSettings) ListenAddress() string {
+	if s.Listen == "" {
+		return ":8093"
+	}
+	return s.Listen
+}
+
+// PlatformSettings selects the remote admin API; credentials remain in a local file.
+type PlatformSettings struct {
+	URL         string `yaml:"url" json:"url"`
+	TokenFile   string `yaml:"token_file" json:"token_file"`
+	Fingerprint string `yaml:"fingerprint,omitempty" json:"fingerprint,omitempty"`
+}
+
+// HousekeepingSettings bounds resource use on the scheduler host. Zero selects defaults.
+type HousekeepingSettings struct {
+	Disabled            bool    `yaml:"disabled,omitempty"`
+	TempMaxAgeHours     int     `yaml:"temp_max_age_hours,omitempty"`
+	ReviewCacheMaxBytes int64   `yaml:"review_cache_max_bytes,omitempty"`
+	MinFreeBytes        uint64  `yaml:"min_free_bytes,omitempty"`
+	DiskWarningPercent  float64 `yaml:"disk_warning_percent,omitempty"`
+}
+
+func (s HousekeepingSettings) Limits() HousekeepingSettings {
+	if s.TempMaxAgeHours <= 0 || int64(s.TempMaxAgeHours) > int64((1<<63-1)/time.Hour) {
+		s.TempMaxAgeHours = 24
+	}
+	if s.ReviewCacheMaxBytes <= 0 {
+		s.ReviewCacheMaxBytes = 2 << 30
+	}
+	if s.MinFreeBytes == 0 {
+		s.MinFreeBytes = 2 << 30
+	}
+	if !(s.DiskWarningPercent > 0 && s.DiskWarningPercent <= 100) {
+		s.DiskWarningPercent = 85
+	}
+	return s
+}
+
 // Settings holds global ClawFlow settings.
 type Settings struct {
-	Execution ExecutionSettings `yaml:"execution,omitempty"`
+	Housekeeping HousekeepingSettings `yaml:"housekeeping,omitempty"`
+
+	GitHubApp   GitHubAppSettings   `yaml:"github_app,omitempty" json:"-"`
+	Platform    PlatformSettings    `yaml:"platform,omitempty"`
+	Pilot       PilotSettings       `yaml:"pilot,omitempty"`
+	Coordinator CoordinatorSettings `yaml:"coordinator,omitempty"`
+	Execution   ExecutionSettings   `yaml:"execution,omitempty"`
+
+	// Database holds the PostgreSQL connection settings (machine-local secret).
+	Database DatabaseSettings `yaml:"database,omitempty"`
 
 	PollInterval int `yaml:"poll_interval"`
 
@@ -186,11 +263,8 @@ type Settings struct {
 	// to stop retrying. 0 or unset defaults to 3.
 	MaxConsecutiveFailures int `yaml:"max_consecutive_failures,omitempty"`
 
-	// RequireBinding, when true, causes `clawflow run` to skip repos
-	// whose BoundMachine is empty. This prevents newly synced repos from
-	// being processed by all machines simultaneously — they must be
-	// explicitly bound first. Synced via Gist as a shared fleet policy.
-	RequireBinding bool `yaml:"require_binding,omitempty"`
+	// RequireBinding is retained for source compatibility and is ignored.
+	RequireBinding bool `yaml:"-"`
 
 	// Queue tunes the unified cross-repo work queue.
 	Queue QueueSettings `yaml:"queue,omitempty"`
@@ -494,7 +568,8 @@ type Credentials struct {
 const (
 	RoleChat     = "chat"     // `clawflow chat` REPL + project-gen
 	RoleEval     = "eval"     // operators whose name starts with "evaluate-"
-	RoleOperator = "operator" // every other operator + project Pilot
+	RoleOperator = "operator" // every other operator
+	RolePilot    = "pilot"    // project Pilot wakes
 	RoleLight    = "light"    // lightweight operators: reply-comment, reply-question, track-progress
 )
 
@@ -926,6 +1001,9 @@ func Load() (*Config, error) {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("cannot parse config: %w", err)
 		}
+		if err := cfg.Settings.GitHubApp.Validate(); err != nil {
+			return nil, err
+		}
 		if err := cfg.Save(); err != nil {
 			return nil, fmt.Errorf("cannot migrate config to %s: %w", path, err)
 		}
@@ -939,6 +1017,9 @@ func Load() (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("cannot parse config: %w", err)
 	}
+	if err := cfg.Settings.GitHubApp.Validate(); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -948,21 +1029,11 @@ func ConfigPath() string {
 	return filepath.Join(home, ".clawflow", "config", "config.yaml")
 }
 
-// EnabledRepos returns only the repos with enabled: true.
-// RunsOnHost reports whether a repo is processed by the machine named
-// hostname: bound_machine must match when set, and require_binding rejects
-// unbound repos. An empty hostname (unresolvable) conservatively accepts all.
-// Shared by `clawflow run` and the web auto-run scheduler.
-func (s Settings) RunsOnHost(r Repo, hostname string) bool {
-	if r.BoundMachine != "" && hostname != "" && r.BoundMachine != hostname {
-		return false
-	}
-	if s.RequireBinding && r.BoundMachine == "" && hostname != "" {
-		return false
-	}
-	return true
-}
+// RunsOnHost accepts all repositories. Host affinity is enforced by worker
+// task-tag matching, never by independent scan or harvest loops.
+func (s Settings) RunsOnHost(r Repo, hostname string) bool { return true }
 
+// EnabledRepos returns only the repos with enabled: true.
 func (c *Config) EnabledRepos() map[string]Repo {
 	out := make(map[string]Repo)
 	for k, v := range c.Repos {
@@ -991,14 +1062,22 @@ func RepoSlugFS(ownerRepo string) string {
 	return strings.ReplaceAll(ownerRepo, "/", "__")
 }
 
+// StateDir resolves runtime state independently of config and credentials.
+func StateDir() string {
+	if dir := os.Getenv("CLAWFLOW_STATE_DIR"); dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".clawflow")
+}
+
 // WorktreePath returns the standard worktree path for an issue.
 // All worktrees live under ~/.clawflow/worktrees/<owner__repo>/issue-<N>
 // so they are user-scoped, survive reboots, and match the path the
 // automated runner (setupWorktree in run.go) uses — enabling
 // clawflow worktree remove to clean up what the runner created.
 func WorktreePath(ownerRepo string, issueNumber int) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "worktrees", RepoSlugFS(ownerRepo), fmt.Sprintf("issue-%d", issueNumber))
+	return filepath.Join(StateDir(), "worktrees", RepoSlugFS(ownerRepo), fmt.Sprintf("issue-%d", issueNumber))
 }
 
 // BranchName returns the standard branch name for an issue.
@@ -1203,4 +1282,12 @@ func (r Repo) AcceptanceOverlapsCI() bool {
 		return *r.AcceptanceOverlapCI
 	}
 	return r.CIRequired
+}
+
+// AcceptanceParallelLimit returns the per-repository review limit (default 3).
+func (r Repo) AcceptanceParallelLimit() int {
+	if r.AcceptanceMaxParallel > 0 {
+		return r.AcceptanceMaxParallel
+	}
+	return 3
 }

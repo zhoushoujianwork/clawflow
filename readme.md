@@ -4,9 +4,7 @@
 >
 > ClawFlow polls the repositories you configure, matches each open issue/PR against a set of **operators** (self-contained `SKILL.md` files), and runs the matching operator through `agent-host execute`. VCS labels and comments expose progress; local files retain run history, execution locks and bounded CI-repair attempts. There is no SaaS backend. Run it once, run it on cron, run it from your editor — it's the same binary either way.
 
-![ClawFlow dashboard](dashbroad.png)
-
-The local dashboard (`clawflow web`) gives you a filterable timeline of every operator run across every monitored repo — status, duration, PR links, and a replay of the raw AGH event stream (usage is currently unknown) for any past run.
+The native macOS dashboard provides **Tasks, Workers and Projects** in one window, plus a menu-bar status summary. LAN workers continue running behind the independent `clawflow controller` service. Build with `make native`; see the [native setup and migration guide](docs/native-macos.md). Default builds no longer require a Web toolchain; the old interface is available with `make legacy-web` during migration.
 
 ---
 
@@ -85,61 +83,65 @@ You also need Agent-Host with the execution CLI and explicitly configured execut
 
 ## Setup
 
-### 1. Store tokens
+### 1. Connect to the hosting platform
 
-**GitHub:**
-```bash
-clawflow config set-token ghp_xxxxxxxxxxxx
-```
-Required scopes: `repo` (full), `read:org`.
+One **platform** owns repository registration, scheduling, leases and merge policy.
+A **client** submits repositories and inspects platform status; it does not schedule
+work locally. A **worker** contributes execution capacity using its own Offload
+profile and VCS credentials, and reports results to the platform.
 
-**GitLab:**
-```bash
-clawflow config set-gitlab-token glpat-xxxxxxxxxxxx
-```
-Required scopes: `api`.
-
-Tokens are saved to `~/.clawflow/config/credentials.yaml` (mode 0600). Environment variables take priority: `GH_TOKEN`, `GITLAB_TOKEN`.
-
-### 2. Add repositories to monitor
-
-`repo add` auto-detects the platform from the input — no flags needed in most cases:
+Ask the platform administrator for its HTTPS URL and a private **admin token file**:
 
 ```bash
-# GitHub — URL, SSH, or short form
-clawflow repo add https://github.com/owner/repo
-clawflow repo add git@github.com:owner/repo.git
-clawflow repo add owner/repo
-
-# GitLab self-hosted — full URL (nested namespaces supported)
-clawflow repo add https://gitlab.company.com/ns/group/repo
-
-# Local directory — reads .git/config origin automatically
-clawflow repo add .
-clawflow repo add ~/github/my-repo
+clawflow platform login --url https://platform.example.com:8093 \
+  --token-file /private/path/admin.token --fingerprint <SHA-256>
+clawflow platform status
 ```
 
-Override platform or instance URL manually:
-```bash
-clawflow repo add ns/repo --platform gitlab --base-url https://gitlab.company.com
-```
+Login verifies the connection before saving it. The fingerprint is optional for
+platform login when system CA trust is used. Admin tokens manage registrations;
+worker tokens only register, claim and report work. Keep both private and separate.
+See [platform and worker setup](docs/worker-pool-design.md) for host setup and tokens.
 
-Manage repos:
+### 2. Enroll repositories on the platform
+
+Before any enrollment, run `clawflow platform status`. If no platform is configured,
+stop: this machine is not connected to a platform. If status fails, resolve the
+connection error; do not fall back to local enablement or start `clawflow run` or
+the web scheduler.
+
 ```bash
+clawflow platform status
 clawflow repo list
-clawflow repo set owner/repo --auto-merge on --ci-required on
-clawflow repo enable  owner/repo
-clawflow repo disable owner/repo
-clawflow repo remove  owner/repo
+clawflow repo add https://github.com/owner/repo --disabled
+clawflow repo set owner/repo --auto-merge off --ci-required on
+clawflow repo enable owner/repo
+# GitLab supports full URLs with nested namespaces:
+# clawflow repo add https://gitlab.company.com/ns/group/repo --disabled
 ```
 
-### 3. Initialize labels
+Client `repo add/list/set/enable/disable` commands route to the connected platform.
+Report the platform URL printed by the successful add/enable response. Do not send
+local directories or `--local-path`; platform enrollment requires no client checkout.
+Platform registration skips label initialization; it does not create remote labels.
+Only enable auto-merge when separately authorized.
 
-Labels are created automatically on `repo add`. To (re)create them manually:
+### 3. Add a worker machine (only when requested)
+
+Install ClawFlow and configure an explicit Offload profile plus the worker's VCS
+credentials. Obtain a dedicated worker token file and the platform certificate
+fingerprint from the administrator, then start:
 
 ```bash
-clawflow label init owner/repo
+clawflow worker --coordinator https://platform.example.com:8093 \
+  --token-file /private/path/worker.token --fingerprint <SHA-256> \
+  --tags github --max-parallel 1
 ```
+
+Choose tags matching the platform's tasks (`gitlab` or a self-hosted hostname when
+applicable). A worker does not require admin login or locally enabled repositories.
+Do not start a second scheduler to add capacity. Detailed host configuration,
+credential tags and token revocation are in the [worker setup details](docs/worker-pool-design-detail.md).
 
 Eligible open leaf issues enter implementation automatically. Questions retain their reply path; `agent-mentioned` triggers comment replies, and `progress-check` is the operational trigger for parent tracking.
 
@@ -158,13 +160,9 @@ Reopened issues can start another implementation cycle when lifecycle history pr
 clawflow issue history 7 --repo owner/repo --json
 ```
 
-### 4. Run
-
-```bash
-clawflow run
-```
-
-Scans every enabled repo once, runs any matching operators, exits. Schedule it with cron, launchd, or your editor's agent; local history persists between invocations.
+The existing platform scheduler dispatches enrolled work. Clients must not start
+`clawflow run` or `clawflow web` to get it processed. Legacy single-machine operation
+remains available for existing installations, but is not the hosted enrollment path.
 
 ---
 
@@ -172,19 +170,19 @@ Scans every enabled repo once, runs any matching operators, exits. Schedule it w
 
 ![ClawFlow architecture](docs/images/architecture.jpg)
 
-A single CLI binary scans enabled, machine-bound repositories and runs eligible work through `agent-host execute`:
+The platform scans enabled repositories and dispatches execution through workers using Offload:
 
 1. Route ordinary open leaf issues directly to `implement`; keep question/comment replies and parent tracking on their own paths.
 2. Acquire a local execution lock and prepare an isolated implementation worktree.
 3. Analyze, plan, implement, run focused tests and repair inside the implementation attempt.
 4. Publish the result and PR, then release the lock. Required CI must succeed before configured auto-merge; missing, pending, failed or unreadable checks block merging.
 
-For unattended delivery:
+For authorized unattended delivery on the connected platform:
 
 ```bash
+clawflow platform status
 clawflow repo set owner/repo --auto-merge on --ci-required on
 clawflow repo enable owner/repo
-clawflow run --repo owner/repo
 ```
 
 源码渠道可启用自动升级：`clawflow repo set zhoushoujianwork/clawflow --self-upgrade on`。每轮 run 通过 `ls-remote` 检查构建时记录的分支（默认 main），包括在 ClawFlow 之外合并的提交。仅当已安装提交是目标的祖先时，才在临时 detached worktree 构建前端和二进制，验证版本和 `execution check --json`，原子替换并保留 `<path>.prev`。沿用 `web restart` 的 launchd/独立进程重启路径；替换后验证失败会回滚。未知或分叉提交只记录警告，不升级。需要本地源码路径、git、pnpm 和 Go。
@@ -243,31 +241,25 @@ GitLab does not have a native sub-issue API — `add-sub` and `list-sub` return 
 
 ### Work queue (one queue for all repositories)
 
-All enabled repositories, GitHub and GitLab, share one ClawFlow-native queue. Candidates are the open leaf issues `implement` would accept, narrowed by the repo's `queue_scope` (`clawflow repo set owner/repo --queue-scope all|labeled|ranked`; empty falls back to `settings.queue.scope`, then `all`):
-
-- `all`: every eligible issue.
-- `labeled`: only issues labeled `clawflow`.
-- `ranked`: only issues listed in the rank file, plus issues labeled `clawflow`, which are appended to the rank on the pass that sees them (`queue/enroll`).
-
-An unknown value falls back to `ranked` for repos that ever had `queue_issue` (unlisted work is never picked up), else `all`. `clawflow repo set` rejects unknown values. Issues already in flight always count, whatever the scope.
+All enabled repositories, GitHub and GitLab, share one ClawFlow-native queue. Every open leaf issue is selected by default if it meets the existing eligibility rules, unless the owner applies `clawflow-skip`. The old `clawflow` label is ignored and preserved. Priority labels and manual rank control order, never eligibility. Existing in-flight work still counts toward concurrency limits.
 
 Order is `(priority, rank, created_at, key)`:
 
 - Priority is the label `P0`..`P3` (exact, case-sensitive; the highest wins; none = `P2`). Look-alikes such as `p1` or `priority:1` are ignored and reported once in `queue/format_warning`.
 - Rank is the manual order in `~/.clawflow/data/queue.json` within a tier. Change it with `clawflow queue move owner/repo#12 --top | --bottom | --before K | --after K`.
-- Dependencies: one body line `Depends on: #12, owner/repo#34` (max 10). Items wait while a dependency is open; a cycle blocks all its members (`dependency_cycle`).
+- Dependencies: body lines starting with `Depends on: #12, owner/repo#34` are combined in first-seen order and deduplicated (max 10 total; invalid and excess tokens are ignored with warnings). Items wait while a dependency is open; a cycle blocks all its members (`dependency_cycle`).
 
 ```bash
-clawflow queue list [--repo R] [--json]   # global order: key, tier, rank, scope, state
+clawflow queue list [--repo R] [--json]   # global order: key, tier, rank, state
 clawflow queue move owner/repo#12 --top
-clawflow queue add owner/repo#13 [--top | --before K | --after K]   # enroll (default: bottom)
-clawflow queue remove owner/repo#13                                 # drop from the rank
+clawflow queue add owner/repo#13 [--top | --before K | --after K]   # rank (default: bottom)
+clawflow queue remove owner/repo#13                                 # remove manual rank only
 clawflow repo set owner/repo --max-in-flight 3   # per repo, default 2
 ```
 
-Each pass walks the order for its repositories and dispatches while the repo's `max_in_flight` and the global `settings.max_concurrent_agents` allow. An item is in flight while it holds a local lock, or carries `agent-implemented` with an open PR that references it. Blocked items (`agent-failed`, red CI without repair, no acceptance verdict, open dependency) are skipped with a recorded reason and never stall the queue. An in-flight item blocked longer than `settings.queue.park_after` (default `45m`) is parked and stops counting toward `max_in_flight` (at most 2 per repo). Logs: `queue/pick`, `queue/skip`, `queue/park`, `queue/unpark`, `queue/format_warning`, `queue/import`. Targeted runs (`clawflow run --repo R --issue N`) bypass the queue.
+`queue add/remove/move` only change manual rank. To exclude work, the owner applies `clawflow-skip` directly in GitHub/GitLab; only the owner removes it to resume eligibility. ClawFlow never changes this label. It prevents new issue work and managed-PR CI/acceptance/conflict repair, acceptance and auto-merge. Already running work finishes and writes back normally. `agent-skipped` remains the agent’s blocked outcome. `queue list` reports skipped open issues per repository; the Board lists them separately, and they never wake Pilot. See [queue behavior](docs/queue.md).
 
-`queue_issue` is deprecated. On the first pass its open sub-issues are imported into the rank (`clawflow queue import --repo R --from-issue N` does the same by hand), the repo is set to `queue_scope: ranked` unless it already has an explicit scope, and the field is then ignored. If the config write fails, implement is held back for that repo and the migration retries next pass. The old queue issue is left untouched.
+Each pass walks the order for its repositories and dispatches while the repo's `max_in_flight` and the global `settings.max_concurrent_agents` allow. An item is in flight while it holds a local lock, or carries `agent-implemented` with an open PR that references it. Blocked items (`agent-failed`, red CI without repair, no acceptance verdict, open dependency) are skipped with a recorded reason and never stall the queue. An in-flight item blocked longer than `settings.queue.park_after` (default `45m`) is parked and stops counting toward `max_in_flight` (at most 2 per repo). Logs: `queue/pick`, `queue/skip`, `queue/park`, `queue/unpark`, `queue/format_warning`, `queue/import`. Targeted runs (`clawflow run --repo R --issue N`) bypass the queue.
 
 ---
 
@@ -402,6 +394,8 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 | **Dashboard** | `clawflow web` — serve the local dashboard at http://127.0.0.1:8080 |
 | **Update** | `clawflow update` — 按安装渠道安全升级 |
 | **Operator helpers** *(invoked from SKILL.md bodies)* | `clawflow worktree` — create/remove per-issue git worktrees · `clawflow pr-check` — has an open PR for this issue? · `clawflow lang` — detect build/test commands for changed files · `clawflow status` — per-repo health summary |
+
+`clawflow issue create` prints `created issue #N: <title>` and, when the API returns one, the issue's canonical URL on the next line. `clawflow pr create` prints the PR/MR URL the same way. The URL is the provider's `html_url` (GitHub) or `web_url` (GitLab), passed through unchanged, so GitLab shows the legacy `/issues/N` or the `/-/issues/N` form the server returns.
 
 > **Tool discipline:** return comments and outcome markers through stdout for runner write-back. Implementation has its documented Git/PR exception. Use `clawflow` for permitted VCS actions, never `gh`; see `CLAUDE.md`.
 

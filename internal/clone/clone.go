@@ -19,6 +19,7 @@ import (
 // Token holds the VCS credentials used for clone authentication.
 // Passed in by the caller so clone doesn't need to load credentials itself.
 type Token struct {
+	githubApp   bool
 	GHToken     string
 	GitLabToken string
 }
@@ -42,10 +43,22 @@ type Token struct {
 // `clone_protocol: https` is set. The token is always still used for the VCS
 // API regardless of transport.
 func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo, progress io.Writer, token *Token) (string, error) {
+	return EnsureLocalCloneContext(context.Background(), cfg, ownerRepo, repoCfg, progress, token)
+}
+
+// EnsureLocalCloneContext cancels clone preparation when an execution lease ends.
+func EnsureLocalCloneContext(ctx context.Context, cfg *config.Config, ownerRepo string, repoCfg config.Repo, progress io.Writer, token *Token) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if progress == nil {
 		progress = io.Discard
 	}
 	protocol := cfg.Settings.ResolveCloneProtocol()
+	if cfg.Settings.GitHubApp.Enabled() && repoCfg.Platform != "gitlab" {
+		protocol = "https"
+		token = &Token{githubApp: true}
+	}
 
 	if repoCfg.LocalPath != "" {
 		expanded := ExpandHome(repoCfg.LocalPath)
@@ -53,7 +66,7 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 			return expanded, nil
 		}
 		fmt.Fprintf(progress, "local path %q not found, cloning %s ...\n", expanded, ownerRepo)
-		if err := cloneRepo(ownerRepo, expanded, repoCfg, progress, token, protocol); err != nil {
+		if err := cloneRepoContext(ctx, ownerRepo, expanded, repoCfg, progress, token, protocol); err != nil {
 			return "", fmt.Errorf("auto-clone failed: %w", err)
 		}
 		return expanded, nil
@@ -99,7 +112,7 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 			return "", fmt.Errorf("directory %s exists but is not a clone of %s (also tried %s)", candidate, ownerRepo, fallback)
 		}
 		fmt.Fprintf(progress, "path %s is occupied by another repo, cloning %s to %s instead ...\n", candidate, ownerRepo, fallback)
-		if err := cloneRepo(ownerRepo, fallback, repoCfg, progress, token, protocol); err != nil {
+		if err := cloneRepoContext(ctx, ownerRepo, fallback, repoCfg, progress, token, protocol); err != nil {
 			return "", fmt.Errorf("auto-clone failed: %w", err)
 		}
 		saveLocalPath(cfg, ownerRepo, fallback)
@@ -107,7 +120,7 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 	}
 
 	fmt.Fprintf(progress, "local clone not found, cloning %s to %s ...\n", ownerRepo, candidate)
-	if err := cloneRepo(ownerRepo, candidate, repoCfg, progress, token, protocol); err != nil {
+	if err := cloneRepoContext(ctx, ownerRepo, candidate, repoCfg, progress, token, protocol); err != nil {
 		return "", fmt.Errorf("auto-clone failed: %w", err)
 	}
 	saveLocalPath(cfg, ownerRepo, candidate)
@@ -125,6 +138,10 @@ func EnsureLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo,
 // GIT_TERMINAL_PROMPT=0 is always set to prevent git from hanging on
 // interactive credential prompts when running headless.
 func cloneRepo(ownerRepo, dest string, repoCfg config.Repo, progress io.Writer, token *Token, protocol string) error {
+	return cloneRepoContext(context.Background(), ownerRepo, dest, repoCfg, progress, token, protocol)
+}
+
+func cloneRepoContext(ctx context.Context, ownerRepo, dest string, repoCfg config.Repo, progress io.Writer, token *Token, protocol string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
@@ -143,7 +160,7 @@ func cloneRepo(ownerRepo, dest string, repoCfg config.Repo, progress io.Writer, 
 	// git-over-SSH. Without the SSH guard a clone over SSH can hang
 	// indefinitely on a key passphrase prompt (same class as issue #216).
 	c.Env = gitexec.Env(nil)
-	return gitexec.Run(gitexec.WithRepo(context.Background(), ownerRepo), c)
+	return gitexec.Run(gitexec.WithRepo(ctx, ownerRepo), c)
 }
 
 // buildCloneURL constructs the clone URL for the given transport.
@@ -199,6 +216,9 @@ func buildCloneURL(ownerRepo string, repoCfg config.Repo, token *Token, protocol
 	}
 
 	// GitHub
+	if token != nil && token.githubApp {
+		return "https://github.com/" + ownerRepo + ".git"
+	}
 	if effectiveToken != "" {
 		// https://x-access-token:<token>@github.com/owner/repo.git
 		return "https://x-access-token:" + effectiveToken + "@github.com/" + ownerRepo + ".git"

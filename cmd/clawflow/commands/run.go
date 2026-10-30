@@ -25,16 +25,21 @@ import (
 
 	"github.com/spf13/cobra"
 	rootmod "github.com/zhoushoujianwork/clawflow"
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
-	"github.com/zhoushoujianwork/clawflow/internal/pilot"
+	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
+	"github.com/zhoushoujianwork/clawflow/internal/resourcelease"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // runLog is the package-level run.log handle, set by NewRunCmd's RunE
@@ -66,6 +71,7 @@ func roleForOperator(opName string) string {
 // or invoke ad-hoc; the CLI holds no long-running state.
 func NewRunCmd() *cobra.Command {
 	var (
+		localRun  bool
 		onlyRepo  string
 		onlyIssue int
 		timeout   time.Duration
@@ -80,9 +86,9 @@ func NewRunCmd() *cobra.Command {
   - for each issue, match against registered operators
   - on first match: execute through Offload, post the result, apply the outcome label
 
-Concurrency is gated by an in-process per-issue mutex; up to
-settings.max_concurrent_agents (default 4) operators run in parallel
-across issues. The "implement" operator is additionally serialized
+Concurrency is gated by an in-process per-issue mutex and machine-wide
+agent slots: settings.max_concurrent_agents (default 4) is shared by all
+passes, including implement, repair and acceptance. The "implement" operator is additionally serialized
 per-repo because it shares a local git clone. Pass --repo and/or
 --issue to narrow the scan.
 
@@ -90,14 +96,32 @@ Targeted run: --repo owner/repo --issue N works on a configured repo even
 when it is disabled (so the web auto-run scheduler never sees it). Only that
 issue is dispatched, and only PRs that close it are considered by the
 acceptance harvest and the auto-merge sweep. Unknown repos still fail, and
-bound_machine / require_binding apply as usual.`,
+Host affinity is enforced by worker task tags.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if onlyIssue != 0 && onlyRepo == "" {
 				return fmt.Errorf("--issue requires --repo")
 			}
-			return runOnce(cmd.Context(), onlyRepo, onlyIssue, timeout)
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+			if localRun {
+				fmt.Fprintln(cmd.ErrOrStderr(), "[warn] --local：绕过平台调度，执行一次本地调试运行")
+				ctx = context.WithValue(ctx, localRunKey{}, true)
+			} else if err := cfg.Settings.SchedulingError(); err != nil {
+				return err
+			}
+			// PostgreSQL is required: fail fast before any work.
+			release, err := gateStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer release()
+			return runOnce(ctx, onlyRepo, onlyIssue, timeout)
 		},
 	}
+	cmd.Flags().BoolVar(&localRun, "local", false, "绕过平台调度，仅用于一次本地调试运行")
 	cmd.Flags().StringVar(&onlyRepo, "repo", "", "Restrict to a single repo (owner/repo); default: all enabled repos (with --issue the repo may be disabled)")
 	cmd.Flags().IntVar(&onlyIssue, "issue", 0, "Restrict to a single issue number (requires --repo)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator Offload execution timeout")
@@ -252,9 +276,7 @@ func lockUnscopedRepos(lg *clog.Logger, pl *passLocks, candidates []string) []st
 	return got
 }
 
-// repoRunsHere reports whether this machine processes the repo: bound_machine
-// and require_binding rules shared by the scan loop and the web scheduler.
-// An unresolvable hostname (empty) conservatively processes everything.
+// repoRunsHere shares scan eligibility with the web scheduler.
 func repoRunsHere(settings config.Settings, repoCfg config.Repo, hostname string) bool {
 	return settings.RunsOnHost(repoCfg, hostname)
 }
@@ -271,6 +293,8 @@ func syncLocked(fn func() bool) bool {
 	return ok
 }
 
+type localRunKey struct{}
+
 func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.Duration) error {
 	// Global collection for all issues from all repos
 	var globalIssues []snapshot.IssueEntry
@@ -280,6 +304,17 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		ctx = context.Background()
 	}
 
+	// Reject clients before locks, sync, reconciliation or any scheduling side effects.
+	if local, _ := ctx.Value(localRunKey{}).(bool); !local {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		if err := cfg.Settings.SchedulingError(); err != nil {
+			return err
+		}
+	}
+
 	// Open the run.log sink. nil-safe — if Open fails (read-only home,
 	// disk full) the rest of the command still runs; only the file
 	// trail is missing. Install it as the snapshot.ReconcileLog sink so
@@ -287,12 +322,15 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	lg, _ := clog.Open("run")
 	defer lg.Close()
 	runLog = lg
+	if local, _ := ctx.Value(localRunKey{}).(bool); local {
+		lg.Warn("run/local_override", "msg", "explicit --local debugging run bypasses platform scheduling")
+	}
 	if lg != nil {
 		snapshot.ReconcileLog = lg
 	}
 
 	// Per-repo run locks: a pass locks only the repositories it processes, so
-	// a long pass for repo A (operators, 7-12 min acceptance harvest) does not
+	// a long operator pass for repo A does not
 	// block repos B and C. A repo-scoped pass (--repo R) locks R here; an
 	// unscoped pass locks its candidates once the config is loaded below. On
 	// contention an untargeted pass logs run/skip and exits cleanly so
@@ -344,21 +382,18 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	// process-level watchdog.
 	overall := overallRunBudget(timeout)
 	// watchdogDeadline is the wall-clock moment the self-watchdog below force-
-	// exits the process. Threaded into pilot.Schedule (Phase 4) so it can
-	// refuse to start a wake that plainly won't fit in what's left — see the
-	// call site below and issue #325.
+	// exits the process. Harvest also uses it to bound acceptance work.
 	watchdogDeadline := time.Now().Add(overall)
 	selfWatchdog := time.AfterFunc(overall, func() {
 		lg.Warn("run/watchdog", "pid", os.Getpid(), "msg", "overall run budget exceeded — likely a hung git/network call; dumping stacks and exiting", "budget", overall.String())
 		fmt.Fprintf(os.Stderr, "\n⚠ clawflow run exceeded its overall budget %s — likely a hung git/network call.\n  Dumping goroutine stacks and exiting (issue #216 safeguard).\n", overall)
 		dumpGoroutineStacks(lg)
-		// Kill whatever claude subprocess is still in flight (operator or
-		// Pilot wake) BEFORE exiting. Without this, os.Exit orphans it: it
+		// Kill any operator subprocess still in flight BEFORE exiting. Without this, os.Exit orphans it: it
 		// keeps running, keeps spending, and keeps writing to the VCS with
 		// no meta.json ever reaching a terminal status because the parent
 		// that would write it is already gone (issue #325). The budget
-		// tripping here does not mean the child is hung — a Pilot wake is
-		// often a legitimate long-running claude call that simply didn't
+		// tripping here does not mean the child is hung — an operator is
+		// often a legitimate long-running Offload call that simply didn't
 		// fit in what was left of the overall budget; killing it is about
 		// making sure it doesn't run and write unrecorded, not about it
 		// having misbehaved.
@@ -394,14 +429,31 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	if local, _ := ctx.Value(localRunKey{}).(bool); local {
+		cfg.Settings.Coordinator.Enabled = false
+	} else if err := cfg.Settings.SchedulingError(); err != nil {
+		return err
+	}
+
+	ctx, apiPass := github.BeginPass(ctx)
+
+	// Publish on every exit after configuration is available, including failed passes.
+	defer func() {
+		apiPass.Save(filepath.Join(snapshot.DataDir(), "vcs-usage.json"))
+		if err := writePassPipeline(); err != nil {
+			fmt.Fprintf(os.Stderr, "snapshot pipeline: %v\n", err)
+		}
+	}()
+
+	hk := runHousekeeping(ctx, cfg, false)
+	lg.Info("run/housekeeping", "removed", len(hk.Paths), "bytes", hk.Bytes, "skipped", hk.Skipped, "errors", hk.Errors)
+
 	allRepos, hiddenRepo, err := resolveRunRepos(cfg, onlyRepo, onlyIssue)
 	if err != nil {
 		return err
 	}
-	// Resolve the current machine's hostname once. Used to skip repos that
-	// are bound to a different machine (BoundMachine field). Errors are
-	// non-fatal: an empty hostname means no repos will be skipped by the
-	// bound_machine check (safe default).
+	// Resolve the hostname for shared scheduler compatibility. Host affinity
+	// is enforced only by worker task tags.
 	hostname, _ := os.Hostname()
 
 	// Narrow the pass to the repos whose run lock it holds. A repo-scoped
@@ -467,30 +519,6 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		lg.Warn("run/reconcile", "err", err.Error())
 	}
 
-	// GC analysis worktrees for repos that are no longer in config. When a
-	// repo is removed from clawflow config the persistent analysis worktree
-	// it created would otherwise remain registered in the source clone's
-	// .git/worktrees/ forever (issue #211). This is cheap (just a directory
-	// scan) and idempotent.
-	if n := pruneOrphanedAnalysisWorktrees(cfg); n > 0 {
-		fmt.Fprintf(os.Stderr, "✓ pruned %d orphaned analysis worktree(s)\n", n)
-		lg.Info("run/prune_analysis_worktrees", "pruned", n)
-	}
-
-	// GC empty issue-* implement worktrees left behind by early-exit
-	// failures that used to be preserved on status alone regardless of
-	// content (issue #329). Covers both new accumulation (going forward,
-	// runOneOperator's cleanup decision now checks content too) and the
-	// pre-existing pile of empty shells from before this fix.
-	// Limited to repos this pass holds the run lock for: another pass may be
-	// about to write into an empty-looking worktree of a repo it holds.
-	pruneCfg := *cfg
-	pruneCfg.Repos = allRepos
-	if n := pruneEmptyIssueWorktrees(&pruneCfg); n > 0 {
-		fmt.Fprintf(os.Stderr, "✓ pruned %d empty issue worktree(s)\n", n)
-		lg.Info("run/prune_empty_issue_worktrees", "pruned", n)
-	}
-
 	// Snapshot the static state so the dashboard can render it even if no
 	// operator fires this run. Failures are best-effort logged, not fatal.
 	if err := snapshot.WriteRepos(cfg); err != nil {
@@ -528,17 +556,22 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	lg.Info("run/scan_phase", "pid", os.Getpid(), "repos", len(allRepos), "budget", scanBudget.String())
 
 	var pending []snapshot.PendingEntry
+	var activeTasks map[string]map[int]bool
+	if cfg.Settings.Coordinator.Enabled {
+		activeTasks, err = activeCoordinatorIssues(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	var jobs []*runJob
 	upgradeRepos := make(map[string]config.Repo)
-	depOpen := queueDepResolver(cfg)
+	depOpen := queueDepResolver(github.WithStage(ctx, "scan"), cfg)
 	for fullName, repoCfg := range allRepos {
-		// Skip repos bound to a different machine. A repo with no BoundMachine
-		// (empty string) is processed by every machine — the common case.
-		// When hostname resolution failed (empty string), we conservatively
-		// process all repos so a misconfigured machine doesn't silently drop work.
+		repoCfg.CoordinatorMode = cfg.Settings.Coordinator.Enabled
+		repoCfg.CoordinatorActive = activeTasks[fullName]
+		// Apply shared scheduling eligibility.
 		if !repoRunsHere(cfg.Settings, repoCfg, hostname) {
-			debugf("repo %s is not processed on this machine (bound_machine=%q, require_binding=%v, current machine: %s), skipping",
-				fullName, repoCfg.BoundMachine, cfg.Settings.RequireBinding, hostname)
+			debugf("repo %s is not eligible for scheduling, skipping", fullName)
 			continue
 		}
 		// Check base_branch before dispatching anything. When the remote has
@@ -566,7 +599,11 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		}
 		repoPending, repoJobs, err := scanRepoOnceQ(scanCtx, reg, fullName, repoCfg, executeHere, onlyIssue, issueSink, queueRuntime{Settings: cfg.Settings.Queue, DepOpen: depOpen})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
+			if errors.Is(err, vcs.ErrPollingDeferred) {
+				preserveRepos[fullName] = true
+			} else {
+				fmt.Fprintf(os.Stderr, "error on %s: %v\n", fullName, err)
+			}
 		}
 		// Drop the queue, keep the scan. The issue snapshot still reaches the
 		// dashboard, which already renders this repo's base_branch hint
@@ -603,15 +640,23 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	//     git clone (worktree add + fetch are not safe in parallel).
 	//     Read-only operators (custom assessments, reply-comment) skip
 	//     the per-repo lock and run freely.
-	fired, failed := runJobsParallel(ctx, jobs, workers, timeout)
-
-	// Phase 2b (sequential): automatic acceptance harvest. Independent
-	// acceptance can take ~30 minutes, so it cannot live in the scan sweep
-	// (scanCtx is 5-15 min). Failures join the exit-status accounting below.
-	// Only repos this pass holds the run lock for are harvested.
+	// Harvest shares the worker budget and is queued first so long operator
+	// jobs cannot occupy every worker before acceptance gets a turn.
+	// Only repos whose run locks this pass holds are included.
 	harvestCfg := *cfg
 	harvestCfg.Repos = allRepos
-	failed = append(failed, runHarvestPhase(ctx, &harvestCfg, onlyRepo, onlyIssue, timeout, watchdogDeadline)...)
+	jobs = append([]*runJob{{harvest: func(ctx context.Context) []firedKey {
+		return runHarvestPhase(ctx, &harvestCfg, onlyRepo, onlyIssue, timeout, watchdogDeadline)
+	}}}, jobs...)
+	var fired, failed []firedKey
+	if cfg.Settings.Coordinator.Enabled {
+		fired, failed, err = enqueueCoordinatorJobs(ctx, jobs, timeout)
+		if err != nil {
+			return err
+		}
+	} else {
+		fired, failed = runJobsParallel(ctx, jobs, workers, timeout)
+	}
 
 	// Phase 3 (sequential): drop pending entries that fired, then write
 	// the snapshots so the dashboard reflects the post-run state.
@@ -650,6 +695,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 				delete(rerunRepos, repo)
 				continue
 			}
+			setVCSContext(client, github.WithStage(ctx, "snapshot"))
 			fresh := captureIssuesSnapshot(client, repo)
 			if fresh == nil { // ListIssues failed — fall back to scan-time data
 				delete(rerunRepos, repo)
@@ -666,51 +712,11 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		globalIssues = append(kept, recaptured...)
 	}
 
-	// Refresh the runs index so the dashboard shows this run at the top.
-	// WriteRunsIndex returns the FULL entry set so we can hand it to
-	// WriteUsageSummary without re-walking the runs tree.
-	allEntries, err := snapshot.WriteRunsIndex(50)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "snapshot runs index: %v\n", err)
-	}
-	// Pilot wakes live in a parallel tree (data/pilot-runs/) and are the most
-	// expensive class of run, so they must be merged in or usage.json
-	// under-reports total spend by ~3x (issue #321).
-	if err := snapshot.WriteUsageSummary(snapshot.UsageEntriesWithPilot(allEntries), cfg.Settings.BillingCycleDay); err != nil {
-		fmt.Fprintf(os.Stderr, "snapshot usage summary: %v\n", err)
-	}
 	if err := snapshot.WritePendingMerged(pending, preserveRepos); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot pending: %v\n", err)
 	}
 	if err := snapshot.WriteIssuesMerged(globalIssues, preserveRepos); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot issues: %v\n", err)
-	}
-
-	// Phase 4 (sequential): wake the project-manager for every project
-	// with automation enabled and past its cooldown. PMs run AFTER
-	// operators so they see the post-pass state — any issue an
-	// operator just updated is visible to the PM
-	// scheduling decision. PM failures are non-fatal: the run as a
-	// whole is reported successful as long as the operator phase
-	// completed.
-	//
-	// Ad-hoc single-issue runs (--issue) shouldn't wake every project's PM.
-	// Every other pass may: the web scheduler now runs one repo-scoped pass
-	// per repository, so gating on onlyRepo would stop scheduled Pilot wakes.
-	// Passes overlap, so pilot.Schedule is guarded by a try-lock; a pass that
-	// loses the race leaves the wake to the holder, and pilot.Schedule's own
-	// per-project interval prevents repeated wakes across passes.
-	if onlyIssue == 0 {
-		if snapshot.TryAcquirePilotScheduleLock() {
-			if n, err := pilot.Schedule(ctx, timeout, watchdogDeadline); err != nil {
-				fmt.Fprintf(os.Stderr, "[pilot] schedule: %v\n", err)
-			} else if n > 0 {
-				fmt.Fprintf(os.Stderr, "[pilot] woke %d project(s)\n", n)
-			}
-			snapshot.ReleasePilotScheduleLock()
-		} else {
-			lg.Info("run/pilot_skip", "reason", "another_pass_scheduling")
-		}
 	}
 
 	// Auto-push: sync config to Gist after the run so any label/config
@@ -750,15 +756,19 @@ func failedRunsError(failed []firedKey) error {
 // runJob is one (issue, operator) pair that scanRepoOnce decided is
 // eligible to fire. The worker pool in runJobsParallel consumes these.
 type runJob struct {
-	repair   *ciRepairContext
-	reopen   *reopenContext
-	comments []vcs.IssueComment
-	op       *operator.Operator
-	sub      *operator.Subject
-	repo     string
-	repoCfg  config.Repo
-	client   vcs.Client
-	language string // Settings.Language propagated from cfg at job creation time
+	acceptancePlan *acceptance.Plan
+	hooks          *jobHooks
+	result         *jobResult
+	harvest        func(context.Context) []firedKey // acceptance phase, using one pool worker
+	repair         *ciRepairContext
+	reopen         *reopenContext
+	comments       []vcs.IssueComment
+	op             *operator.Operator
+	sub            *operator.Subject
+	repo           string
+	repoCfg        config.Repo
+	client         vcs.Client
+	language       string // Settings.Language propagated from cfg at job creation time
 }
 
 // firedKey identifies a (repo, issue, operator) triple that ran to a
@@ -786,7 +796,7 @@ func deterministicSkip(op *operator.Operator, repoCfg config.Repo) bool {
 	if op == nil {
 		return false
 	}
-	if op.Name == "implement" && repoCfg.LocalPath == "" {
+	if op.Name == "implement" && repoCfg.LocalPath == "" && !repoCfg.CoordinatorMode {
 		return true
 	}
 	return false
@@ -880,6 +890,14 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 		}
 	}
 
+	if !pollingAllowed(client) {
+		// Only pending delivery may spend reserved quota on the identity guard.
+		paths, _ := filepath.Glob(filepath.Join(snapshot.DataDir(), "runs", strings.ReplaceAll(fullName, "/", "__"), "issue-*", "*", "writeback.json"))
+		if !executeHere || len(paths) == 0 {
+			return nil, nil, vcs.ErrPollingDeferred
+		}
+	}
+
 	// Same-name recreation guard: owner/name is reused after delete+recreate
 	// on both platforms but the numeric repo ID is not, and issue numbering
 	// restarts at #1 — so without this check the new repo's runs land in (and
@@ -900,6 +918,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	if executeHere {
 		pendingWriteBacks = replayRepoWriteBacks(client, fullName, onlyIssue)
 	}
+	if !pollingAllowed(client) {
+		return nil, nil, vcs.ErrPollingDeferred
+	}
+	setVCSContext(client, github.WithStage(ctx, "scan"))
+
 	issues, err := client.ListOpenIssues(fullName)
 	if err != nil {
 		runLog.Warn("run/scan", "repo", fullName, "phase", "list_issues_err", "elapsed", time.Since(scanStart).Round(time.Millisecond), "err", err.Error())
@@ -961,6 +984,9 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	capturedAt := time.Now().UTC()
 	targetMatch := "" // operator matched for the --issue target, if any
 	for _, iss := range issues {
+		if iss.HasLabel("clawflow-skip") {
+			continue
+		}
 		sub := &operator.Subject{
 			Number:   iss.Number,
 			Title:    iss.Title,
@@ -1001,6 +1027,15 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			}
 			matchSub := sub
 			if op.Name == "implement" {
+				// Targeted runs bypass queue ordering, but must still leave
+				// already delivered issues to harvest/repair.
+				if onlyIssue == sub.Number {
+					exists, err := client.PRExistsForIssue(fullName, sub.Number)
+					if err != nil || exists {
+						implementState[sub.Number] = "open_pr_or_lookup_failed"
+						continue
+					}
+				}
 				if reopenErr != nil {
 					implementState[sub.Number] = "reopen_check_failed: " + reopenErr.Error()
 					continue
@@ -1058,6 +1093,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 				firstMatch = op
 			}
 		}
+		if reason := implementState[sub.Number]; reason != "" {
+			debugf("  ✗ implement #%d: %s", sub.Number, reason)
+		} else {
+			debugf("  ✓ implement #%d: eligible", sub.Number)
+		}
 		if firstMatch == nil {
 			debugf("  → no eligible operator matched #%d (check terminal labels, issue structure and custom triggers)", sub.Number)
 		}
@@ -1083,7 +1123,7 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 				continue
 			}
 			// Skip issues already locked by another process.
-			if snapshot.IsLocked(fullName, iss.Number) {
+			if snapshot.IsLocked(fullName, iss.Number) || repoCfg.CoordinatorActive[iss.Number] {
 				debugf("  · skipping #%d: locked by another process", iss.Number)
 				continue
 			}
@@ -1104,16 +1144,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 		if stateErr != nil {
 			runLog.Warn("queue/state_unreadable", "repo", fullName, "err", stateErr.Error())
 		}
-		migrated := migrateQueueIssue(client, fullName, repoCfg.QueueIssue, repoCfg.QueueScope != "",
-			func() error { return persistRepoQueueScope(fullName, queue.ScopeRanked) }, &state)
-		if migrated && repoCfg.QueueIssue > 0 && repoCfg.QueueScope == "" {
-			repoCfg.QueueScope = queue.ScopeRanked // just persisted
-		}
 		rank, rankErr := queue.LoadRank()
 		if rankErr != nil {
 			runLog.Warn("queue/rank_unreadable", "repo", fullName, "err", rankErr.Error())
 		}
-		maxInFlight, parkAfter, scope := queueRepoParams(repoCfg, qrt.Settings)
+		maxInFlight, parkAfter := queueRepoParams(repoCfg, qrt.Settings)
 		implementJobs := map[int]bool{}
 		for _, j := range jobs {
 			if j.op != nil && j.op.Name == "implement" && j.sub != nil {
@@ -1121,22 +1156,34 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			}
 		}
 		plan := planRepoQueue(repoQueueInput{
+			PRFiles: func(n int) ([]string, error) {
+				if p, ok := client.(vcs.PRFileProvider); ok {
+					return p.ListPRFiles(fullName, n)
+				}
+				return nil, vcs.ErrNotSupported
+			},
 			Repo:           fullName,
 			ImplementJobs:  implementJobs,
 			Issues:         issues,
 			HasChildren:    hasChildren,
 			ImplementState: implementState,
-			Locked:         func(n int) bool { return snapshot.IsLocked(fullName, n) },
-			OpenPRs:        func() ([]vcs.PR, error) { return client.ListOpenPRs(fullName) },
+			Locked:         func(n int) bool { return snapshot.IsLocked(fullName, n) || repoCfg.CoordinatorActive[n] },
+			OpenPRs: func() ([]vcs.PR, error) {
+				prs, err := client.ListOpenPRs(fullName)
+				if err == nil {
+					if e := snapshot.WritePipelinePRs(fullName, prs); e != nil {
+						runLogWarn("pipeline PR snapshot", e)
+					}
+				}
+				return prs, err
+			},
 			FlightBlocked: func(_ vcs.Issue, pr *vcs.PR) string {
 				return flightBlockedReason(ctx, client, fullName, repoCfg, pr, now)
 			},
-			Scope: scope, MaxInFlight: maxInFlight, ParkAfter: parkAfter,
+			MaxInFlight: maxInFlight, ParkAfter: parkAfter,
 			Rank: rank, DepOpen: qrt.DepOpen, State: state, Now: now,
 		})
-		if !migrated {
-			plan.Err = "queue_issue_import_pending"
-		}
+
 		jobs = applyUnifiedQueue(fullName, jobs, plan)
 		pruneRepoRank(fullName, issues)
 	}
@@ -1173,6 +1220,9 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	// Operator matching above keeps using ListOpenIssues so the
 	// per_page=100 budget for open issues is independent of any closed
 	// noise.
+	if !pollingAllowed(client) {
+		return pending, jobs, vcs.ErrPollingDeferred
+	}
 	*allIssues = append(*allIssues, captureIssuesSnapshot(client, fullName)...)
 
 	runLog.Info("run/scan", "repo", fullName, "phase", "done", "issues", len(issues), "pending", len(pending), "jobs", len(jobs), "elapsed", time.Since(scanStart).Round(time.Millisecond))
@@ -1254,6 +1304,8 @@ func captureIssuesSnapshot(client vcs.Client, fullName string) []snapshot.IssueE
 			Repo:         fullName,
 			IssueNumber:  iss.Number,
 			IssueTitle:   iss.Title,
+			HasDecided:   pipeline.DecidedSection(iss.Body),
+			UpdatedAt:    iss.UpdatedAt,
 			Labels:       append([]string(nil), iss.Labels...),
 			State:        iss.State,
 			CapturedAt:   capturedAt,
@@ -1322,6 +1374,20 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 		go func() {
 			defer wg.Done()
 			for j := range jobCh {
+				if ctx.Err() != nil {
+					continue
+				}
+				if j.harvest != nil {
+					if rateLimited.Load() {
+						runLog.Info("run/harvest_skip", "reason", "provider_limit")
+						continue
+					}
+					failures := j.harvest(ctx)
+					firedMu.Lock()
+					failed = append(failed, failures...)
+					firedMu.Unlock()
+					continue
+				}
 				// If a previous worker hit a rate limit, skip remaining
 				// jobs so they aren't permanently marked as failed. They
 				// keep their trigger labels and will be retried next pass.
@@ -1377,18 +1443,61 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 // All log lines are prefixed with "[<repo>#<issue> <op>]" so output
 // from concurrent workers stays disentangleable.
 func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool, failed bool) {
+	j.result = &jobResult{Status: "skipped"}
+	releaseMaintenance, maintenanceErr := housekeeping.Gate(ctx, os.TempDir(), false)
+	if maintenanceErr != nil {
+		return false, false, true
+	}
+	defer releaseMaintenance()
+	releaseSlot, slotErr := configuredAgentSlot(ctx)
+	if slotErr != nil {
+		runLog.Info("run/agent_slot_busy", "repo", j.repo, "err", slotErr.Error())
+		return false, false, false
+	}
+	defer releaseSlot()
+	originalClient, originalCfg := j.client, j.repoCfg
+	if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
+		rc.SetRequestContext(ctx)
+	}
+	if j.hooks != nil {
+		j.repoCfg.AutoMerge = false
+		j.client = &fencedClient{Client: j.client, ctx: ctx, result: j.result}
+	}
+	defer func() {
+		if ctx.Err() != nil {
+			j.result.Status, j.result.Error = "lease-lost", ctx.Err().Error()
+			didFire, hitRateLimit, failed = false, false, false
+		}
+		if j.repair != nil {
+			j.result.PRNumber = j.repair.PR.Number
+			j.result.PRURL = j.repair.PR.URL
+			j.result.Branch = j.repair.PR.HeadBranch
+			if j.result.HeadSHA == "" {
+				j.result.HeadSHA = j.repair.PR.HeadSHA
+			}
+		}
+		j.client, j.repoCfg = originalClient, originalCfg
+		if j.hooks != nil && j.hooks.AfterRun != nil {
+			j.hooks.AfterRun(j.result)
+		}
+	}()
+	if ctx.Err() != nil {
+		return false, false, false
+	}
+
 	prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
 	fmt.Printf("%s → start\n", prefix)
 
 	// Cross-process lock: acquire a local lockfile so other clawflow run
 	// processes (cron, web scheduler) skip this issue. If the lock is
 	// already held by a live process, bail out.
-	if err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name); err != nil {
+	if err := j.acquireLock(ctx); err != nil {
+		j.result.Error = err.Error()
 		fmt.Fprintf(os.Stderr, "%s ⚠ lock failed (another process owns it): %v\n", prefix, err)
 		runLog.Warn("run/lock_failed", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "err", err.Error())
 		return false, false, false
 	}
-	defer snapshot.ReleaseLock(j.repo, j.sub.Number)
+	defer j.releaseLock()
 	runLog.Info("run/lock", "pid", os.Getpid(), "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name)
 	defer runLog.Info("run/unlock", "repo", j.repo, "issue", j.sub.Number)
 
@@ -1398,7 +1507,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rc.SetRequestContext(ctx)
 	}
 	if j.repair != nil {
-		if err := prepareCIRepair(j, time.Now().UTC()); err != nil {
+		if err := prepareCIRepairContext(ctx, j, time.Now().UTC()); err != nil {
+			j.result.Error = err.Error()
 			fmt.Fprintf(os.Stderr, "%s → repair skipped: %v\n", prefix, err)
 			runLog.Warn("run/ci_repair_skip", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
 			return false, false, false
@@ -1408,6 +1518,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	if j.op.Name == "implement" {
 		if err := prepareImplementation(j); err != nil {
+			j.result.Error = err.Error()
 			fmt.Fprintf(os.Stderr, "%s → implementation skipped: %v\n", prefix, err)
 			runLog.Warn("run/implementation_skip", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
 			return false, false, false
@@ -1470,7 +1581,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	runDir := snapshot.RunDir(j.repo, j.sub.Number, startedAt)
 	_ = os.MkdirAll(runDir, 0o755)
 
+	machine, _ := os.Hostname()
 	runningMeta := snapshot.RunMeta{
+		Machine:     machine,
+		Profile:     configuredDevelopmentProfile(roleForOperator(j.op.Name)),
 		Operator:    j.op.Name,
 		Repo:        j.repo,
 		IssueNumber: j.sub.Number,
@@ -1481,26 +1595,24 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Status:      "running",
 		Stage:       "lock-acquired",
 	}
+	defer func() {
+		if j.result.Status == "skipped" {
+			j.result.Status, j.result.Error = runningMeta.Status, runningMeta.Error
+		}
+	}()
 	if err := snapshot.WriteRunMeta(runDir, runningMeta); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ✗ initial run meta: %v\n", prefix, err)
-	}
-	if _, err := snapshot.WriteRunsIndex(50); err != nil {
-		fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (running): %v\n", prefix, err)
+		runningMeta.Status = "failed"
+		runningMeta.Error = err.Error()
+		return false, false, false
 	}
 
-	// emitStage persists a fine-grained lifecycle transition while the run is
-	// still in flight: it advances runningMeta.Stage and rewrites BOTH meta.json
-	// AND runs.json. Rewriting runs.json on every stage is the crux of issue
-	// #199 — the dashboard polls runs.json (not meta.json), so without this the
-	// frontend was frozen on the start-of-run snapshot and intermediate stages
-	// were invisible. Status stays "running" throughout; Stage is advisory.
+	// Each lifecycle transition persists metadata and upserts its SQL row, so
+	// polling and SSE readers observe the same current stage.
 	emitStage := func(stage string) {
 		runningMeta.Stage = stage
 		if err := snapshot.WriteRunMeta(runDir, runningMeta); err != nil {
 			fmt.Fprintf(os.Stderr, "%s ⚠ stage meta (%s): %v\n", prefix, stage, err)
-		}
-		if _, err := snapshot.WriteRunsIndex(50); err != nil {
-			fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (%s): %v\n", prefix, stage, err)
 		}
 	}
 
@@ -1541,22 +1653,61 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// failures once this line and the real run/end converge on the same slug.
 		runLog.Warn("run/end", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name,
 			"status", "failed", "stage", runningMeta.Stage, "err", overrideErr.Error(), "cost", "0.0000")
-		checkCircuitBreaker(j, prefix)
+		if ctx.Err() == nil && j.hooks == nil {
+			checkCircuitBreaker(j, prefix)
+		}
 		return false, false, true
 	}
 	if hasOverride {
 		fmt.Fprintf(os.Stderr, "%s → base-branch override: %q (from %s)\n", prefix, overrideBranch, overrideSource)
 	}
 
+	plan, planErr := prepareImplementationPlan(ctx, j)
+	if planErr != nil {
+		runningMeta.Status, runningMeta.Error = "failed", planErr.Error()
+		_ = snapshot.WriteRunMeta(runDir, runningMeta)
+		fmt.Fprintf(os.Stderr, "%s acceptance planning failed: %v\n", prefix, planErr)
+		if j.repair != nil {
+			_ = j.releaseRepair("setup", time.Now().UTC())
+		}
+		return false, false, true
+	}
+	j.acceptancePlan = plan
+
+	var previousRun snapshot.RunMeta
+	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
+		previousRun = previousDevelopmentRun(j.repo, j.sub.Number, startedAt)
+	}
+	var repairInput string
 	var wtResult worktreeResult
 	var cleanup func()
 	var err error
 	if j.repair != nil {
-		wtResult, cleanup, err = setupCIRepairWorkdir(ctx, j.repoCfg, j.repo, j.repair.PR)
+		var reused bool
+		wtResult, reused = reusableRepairWorktree(ctx, previousRun, j.repo, j.repair.PR)
+		if reused {
+			cleanup = resumedWorktreeCleanup(j.repoCfg.LocalPath, wtResult.Path)
+		} else {
+			wtResult, cleanup, err = setupCIRepairWorkdir(ctx, j.repoCfg, j.repo, j.repair.PR)
+		}
+		if err == nil {
+			err = refreshRepairBase(ctx, wtResult.Path, j)
+		}
+		if err == nil {
+			repairInput, err = buildRepairInput(ctx, wtResult.Path, j)
+		}
 	} else if j.reopen != nil {
-		wtResult, cleanup, err = setupReopenWorktree(j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch, j.reopen)
+		wtResult, cleanup, err = setupReopenWorktreeContext(ctx, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch, j.reopen)
 	} else {
-		wtResult, cleanup, err = resolveWorkdir(j.op, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch)
+		reused := false
+		if j.op.Name == "implement" {
+			wtResult, reused = reusableDevelopmentWorktree(ctx, previousRun, j.repo)
+		}
+		if reused {
+			cleanup = resumedWorktreeCleanup(j.repoCfg.LocalPath, wtResult.Path)
+		} else {
+			wtResult, cleanup, err = resolveWorkdir(ctx, j.op, j.repoCfg, j.repo, j.sub.Number, startedAt, overrideBranch)
+		}
 	}
 	if err != nil {
 		// Failure path: do NOT post a comment to the issue. The full
@@ -1568,6 +1719,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		fmt.Fprintf(os.Stderr, "%s ✗ workdir: %v\n", prefix, err)
 		runningMeta.Status = "failed"
 		runningMeta.Error = err.Error()
+		if ctx.Err() != nil {
+			runningMeta.Status = "lease-lost"
+		}
 		now := time.Now().UTC()
 		runningMeta.EndedAt = &now
 		_ = snapshot.WriteRunMeta(runDir, runningMeta)
@@ -1585,7 +1739,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			if errors.Is(err, gitexec.ErrTimeout) {
 				kind = "git_timeout"
 			}
-			if rerr := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, kind, now); rerr == nil {
+			if rerr := j.releaseRepair(kind, now); rerr == nil {
 				runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "attempt", j.repair.Attempt, "kind", kind)
 				logAcceptanceRepair(j, "end", "status", "failed", "kind", kind, "attempt_consumed", false)
 				return false, false, true
@@ -1596,11 +1750,19 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			_ = j.client.PostIssueComment(j.repo, j.sub.Number, j.repair.label()+" repair setup failed: "+err.Error())
 			logAcceptanceRepair(j, "end", "status", "failed", "err", err.Error())
 		} else {
-			checkCircuitBreaker(j, prefix)
+			if ctx.Err() == nil && j.hooks == nil {
+				checkCircuitBreaker(j, prefix)
+			}
 		}
 		return false, false, true
 	}
 	workdir := wtResult.Path
+	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
+		status := execution.PrepareCheckout(ctx, j.repoCfg.AcceptanceSetupCommand, execution.Options{Workspace: workdir, Role: roleForOperator(j.op.Name)}, nil)
+		if status != "" {
+			fmt.Fprintf(os.Stderr, "%s checkout_setup: %s\n", prefix, status)
+		}
+	}
 	if wtResult.Resumed {
 		fmt.Fprintf(os.Stderr, "%s ✓ workdir RESUMED: %s (branch: %s)\n", prefix, workdir, wtResult.BranchName)
 	} else {
@@ -1623,12 +1785,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	runStart := time.Now()
 
 	// Build resume context for the operator prompt when reusing a worktree.
-	var resumeCtx string
-	if wtResult.Resumed {
-		resumeCtx = buildResumeContext(wtResult)
+	resumeCtx := implementationChecklist(j.acceptancePlan)
+	if wtResult.Resumed && j.repair == nil {
+		resumeCtx += buildResumeContext(wtResult)
 	}
 	if j.repair != nil {
-		resumeCtx = j.repair.prompt(j.repoCfg.TestCommand)
+		comments = nil
+		resumeCtx += repairInput
 	}
 
 	// Rebind the VCS client's request context before execution + write-back.
@@ -1655,8 +1818,28 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 	}
 
+	var sessionOpts operator.RunOptions
+	if j.op.Name == "implement" || j.op.Name == "repair-ci" {
+		sessionOpts = developmentResumeOptions(ctx, j, previousRun, wtResult, detailComments, resumeCtx, &runningMeta, func() { _ = snapshot.WriteRunMeta(runDir, runningMeta) })
+	}
+	ctx = operator.WithExecutionResultObserver(ctx, func(r execution.Result) {
+		runningMeta.Profile = r.Profile
+		runningMeta.Backend = r.Backend
+		runningMeta.Model = r.Model
+		runningMeta.Usage = snapshot.UsageFromResult(r)
+		runningMeta.ExecutionMetadata = snapshot.ExecutionFromResult(r)
+		if r.Machine != "" {
+			runningMeta.Machine = r.Machine
+		}
+		j.result.Provenance = provenanceFromRun(runningMeta)
+	})
 	confirmedHead := ""
-	output, outcome, runErr := operator.Run(ctx, j.op, j.sub, j.client, operator.RunOptions{
+	output, outcome, runErr := runJobOperator(ctx, j.op, j.sub, j.client, operator.RunOptions{
+		SessionKey:          sessionOpts.SessionKey,
+		ResumePrompt:        sessionOpts.ResumePrompt,
+		OnExecutionResult:   sessionOpts.OnExecutionResult,
+		OnSessionResume:     sessionOpts.OnSessionResume,
+		PrepareFreshSession: func() error { return archiveRejectedResume(runDir, eventsFile) },
 		ValidateOutcome: func(outcome, body string) error {
 			var err error
 			confirmedHead, err = validateRepairOutcome(ctx, workdir, j, outcome, body)
@@ -1701,6 +1884,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	}
 	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
 		finalizingMeta := snapshot.RunMeta{
+			ExecutionMetadata:  runningMeta.ExecutionMetadata,
+			DevelopmentSession: runningMeta.DevelopmentSession,
+			Usage:              runningMeta.Usage,
+			Profile:            runningMeta.Profile, Backend: runningMeta.Backend, Model: runningMeta.Model, Machine: runningMeta.Machine,
 			HeadSHA:     confirmedHead,
 			Outcome:     outcome,
 			Operator:    j.op.Name,
@@ -1713,6 +1900,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			Status:      "finalizing",
 			Stage:       "finalizing",
 			Summary:     output,
+		}
+		if j.repair != nil {
+			finalizingMeta.RepairReason = j.repair.reason()
 		}
 		if outcome == "no-change" {
 			finalizingMeta.OutcomeReason = output
@@ -1768,14 +1958,24 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// only path that applied no label, left the trigger labels in place, and
 	// produced no greppable failure signal (issue #326).
 	isDisallowedOutcome := runErr != nil && errors.Is(runErr, operator.ErrDisallowedOutcome)
+	var resourceBusy *resourcelease.Blocked
+	isResourceBusy := errors.As(runErr, &resourceBusy)
 
 	// CI repair infrastructure outcomes (provider capacity/rate limit, launch,
 	// transport, timeout before any tool activity) release the reserved attempt
 	// so only real repair work consumes the three-attempt budget (issue #356).
 	repairInfra := false
+	if isResourceBusy && j.repair != nil {
+		if rerr := j.releaseRepair("resource-busy", time.Now().UTC()); rerr != nil {
+			fmt.Fprintf(os.Stderr, "%s resource lease reservation release failed: %v\n", prefix, rerr)
+		}
+	}
+	if kind, ok := classifyRepairInfra(runErr, filepath.Join(runDir, "events.jsonl")); ok {
+		j.result.InfraKind = kind
+	}
 	if j.repair != nil && runErr != nil {
 		if kind, ok := classifyRepairInfra(runErr, filepath.Join(runDir, "events.jsonl")); ok {
-			if rerr := releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, kind, time.Now().UTC()); rerr != nil {
+			if rerr := j.releaseRepair(kind, time.Now().UTC()); rerr != nil {
 				fmt.Fprintf(os.Stderr, "%s ⚠ repair attempt release failed (attempt stays consumed): %v\n", prefix, rerr)
 				runLog.Warn("run/ci_repair_release_failed", "repo", j.repo, "issue", j.sub.Number, "err", rerr.Error())
 			} else {
@@ -1814,6 +2014,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	endedAt := time.Now().UTC()
 	rm := snapshot.RunMeta{
+		ExecutionMetadata:  runningMeta.ExecutionMetadata,
+		DevelopmentSession: runningMeta.DevelopmentSession,
+		Usage:              runningMeta.Usage,
+		Profile:            runningMeta.Profile, Backend: runningMeta.Backend, Model: runningMeta.Model, Machine: runningMeta.Machine,
 		Operator:    j.op.Name,
 		Repo:        j.repo,
 		IssueNumber: j.sub.Number,
@@ -1824,6 +2028,11 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Summary:     output,
 	}
 	switch {
+	case ctx.Err() != nil:
+		rm.Status, rm.Error = "lease-lost", ctx.Err().Error()
+	case isResourceBusy:
+		// Host contention is scheduling blockage, not an implementation failure.
+		rm.Status, rm.Error = "blocked", runErr.Error()
 	case isCostLimit:
 		// Record as "cost-limit" — deliberately distinct from "rate-limited"
 		// because the two need different operator responses: a rate limit
@@ -1893,6 +2102,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rm.Status = "success"
 	}
 
+	if j.repair != nil {
+		rm.RepairReason = j.repair.reason()
+	}
 	if rm.Status == "success" && (j.op.Name == "implement" || j.op.Name == "repair-ci") {
 		rm.HeadSHA = confirmedHead
 	}
@@ -1937,9 +2149,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		if base == "" {
 			base = "main"
 		}
-		hasPartialWork, _, _ = detectPartialWork(workdir, base)
+		hasPartialWork, _, _ = detectPartialWorkContext(ctx, workdir, base)
 	}
-	if repairInfra || ((j.repair == nil || (rm.Status == "success" && (outcome == "agent-implemented" || outcome == "no-change"))) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork))) {
+	// Completed work only needs native retention when repair is enabled or
+	// delivery is incomplete. Other successful runs retain normal cleanup.
+	pendingDevelopment := rm.Status != "success" || rm.WritebackError != "" || outcome == "agent-failed" || ciRepairEnabled(j.repoCfg) || acceptanceRepairEnabled(j.repoCfg)
+	keepSessionWorktree := pendingDevelopment && rm.DevelopmentSession.SessionID != "" && rm.DevelopmentSession.ErrorKind != "output_limit" && rm.Status != "auth-error" && rm.Status != "cost-limit" && rm.Status != "output-limit"
+	if !keepSessionWorktree && (repairInfra || ((j.repair == nil || (rm.Status == "success" && (outcome == "agent-implemented" || outcome == "no-change"))) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork)))) {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree evidence: %s\n", prefix, workdir)
@@ -1950,17 +2166,34 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil && u != nil {
 		rm.Usage = u
 	}
+	if j.hooks != nil && rm.Status == "success" && ctx.Err() == nil && (j.op.Name == "implement" || j.repair != nil) {
+		if events, err := acceptanceRead(filepath.Join(runDir, "events.jsonl"), acceptanceFileLimit); err == nil {
+			j.result.DevelopmentEvents = string(events)
+		}
+	}
+	j.result.Status, j.result.Error = rm.Status, rm.Error
+	j.result.Outcome, j.result.Output = outcome, output
+	j.result.Usage, j.result.HeadSHA = rm.Usage, rm.HeadSHA
+	j.result.RateLimited, j.result.CostLimited = isRateLimit, isCostLimit
+	j.result.Branch = wtResult.BranchName
+	j.result.PRNumber = extractPRNumber(output)
+	j.result.PRURL = rm.PRUrl
+	if j.result.PRNumber > 0 && ctx.Err() == nil {
+		if pr, err := j.client.GetPR(j.repo, j.result.PRNumber); err == nil {
+			j.result.PRURL, j.result.Branch = pr.URL, pr.HeadBranch
+			if j.result.HeadSHA == "" {
+				j.result.HeadSHA = pr.HeadSHA
+			}
+		}
+	}
+	if rm.Usage != nil {
+		j.result.Cost = rm.Usage.TotalCostUSD
+	}
+	if writebackErr != nil {
+		j.result.Error = writebackErr.Error()
+	}
 	if err := snapshot.WriteRunMeta(runDir, rm); err != nil {
 		fmt.Fprintf(os.Stderr, "%s ⚠ run meta: %v\n", prefix, err)
-	}
-	// Rewrite runs.json on the terminal transition too. The dashboard's Running
-	// list reads runs.json (not meta.json), and until now the only post-run
-	// rebuild was the end-of-pass Phase 3 write — so a finished operator kept
-	// showing "running" until every sibling in the pass also finished (or a
-	// sibling's emitStage incidentally re-walked the metas). Refreshing here
-	// flips this row to its final status immediately on completion.
-	if _, err := snapshot.WriteRunsIndex(50); err != nil {
-		fmt.Fprintf(os.Stderr, "%s ⚠ snapshot runs index (%s): %v\n", prefix, rm.Status, err)
 	}
 	// Upgrade to WARN for non-success statuses so deployment.md patrol's
 	// "grep -E ERROR|WARN" actively catches failures (issue #204).
@@ -2009,7 +2242,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	logAcceptanceRepair(j, "end", "status", rm.Status, "outcome", outcome, "infra", repairInfra)
 
 	// Apply successful lifecycle follow-up.
-	if rm.Status == "success" {
+	if rm.Status == "success" && j.hooks == nil {
 		runPostAutomation(ctx, j, outcome, output, prefix)
 	}
 
@@ -2046,23 +2279,36 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// write-back defect, not an unprocessable issue (issue #323).
 		fmt.Printf("%s ✗ no outcome marker (not counted toward circuit breaker)\n", prefix)
 		return false, false, true
+	case "blocked":
+		fmt.Printf("%s blocked: %s\n", prefix, rm.Error)
+		return false, false, true
 	case "disallowed-outcome":
 		fmt.Printf("%s ✗ disallowed outcome label %q (comment landed, no terminal label; circuit breaker counting)\n", prefix, outcome)
-		checkCircuitBreaker(j, prefix)
+		if ctx.Err() == nil && j.hooks == nil {
+			checkCircuitBreaker(j, prefix)
+		}
 		return false, false, true
 	case "output-limit":
 		fmt.Printf("%s ✗ output token limit (raise max_output_tokens; circuit breaker counting)\n", prefix)
-		checkCircuitBreaker(j, prefix)
+		if ctx.Err() == nil && j.hooks == nil {
+			checkCircuitBreaker(j, prefix)
+		}
 		return false, false, true
 	case "skipped-empty":
 		fmt.Printf("%s ✗ empty output (circuit breaker counting)\n", prefix)
-		checkCircuitBreaker(j, prefix)
+		if ctx.Err() == nil && j.hooks == nil {
+			checkCircuitBreaker(j, prefix)
+		}
 		return false, false, true
 	default:
-		checkCircuitBreaker(j, prefix)
+		if ctx.Err() == nil && j.hooks == nil {
+			checkCircuitBreaker(j, prefix)
+		}
 		return false, false, true
 	}
 }
+
+var runJobOperator = operator.Run
 
 var prURLRE = regexp.MustCompile(`(?:pull|merge_requests)/(\d+)`)
 
@@ -2213,14 +2459,17 @@ func waitForCI(client vcs.Client, repo string, prNum int, timeoutSec int, prefix
 //   - all other operators with local_path → persistent analysis worktree
 //     (ensureAnalysisWorktree) reset to origin/<base> before each run
 //   - all other operators without local_path → ephemeral tempdir + warning
-func resolveWorkdir(op *operator.Operator, repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time, overrideBranch string) (worktreeResult, func(), error) {
+func resolveWorkdir(ctx context.Context, op *operator.Operator, repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time, overrideBranch string) (worktreeResult, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return worktreeResult{}, func() {}, err
+	}
 	// implement and pr-target operators need a mutable per-issue worktree.
 	needsRepo := op.Name == "implement" || op.Trigger.Target == "pr"
 	if needsRepo {
 		if repoCfg.LocalPath == "" {
 			return worktreeResult{}, func() {}, fmt.Errorf("operator %q needs repo local_path but it's empty in config", op.Name)
 		}
-		return setupWorktree(repoCfg, fullName, issueNum, startedAt, overrideBranch)
+		return setupWorktree(ctx, repoCfg, fullName, issueNum, startedAt, overrideBranch)
 	}
 
 	// Analysis operators need read access to the repo source so the LLM can
@@ -2228,7 +2477,7 @@ func resolveWorkdir(op *operator.Operator, repoCfg config.Repo, fullName string,
 	// Use a persistent analysis worktree that is always reset to origin/<base>
 	// before use so the operator sees the latest committed code.
 	if repoCfg.LocalPath != "" {
-		return ensureAnalysisWorktree(repoCfg, fullName)
+		return ensureAnalysisWorktreeContext(ctx, repoCfg, fullName)
 	}
 
 	// No local_path configured: fall back to an empty tempdir. Analysis quality
@@ -2262,8 +2511,14 @@ func getAnalysisWorktreeLock(slug, base string) *sync.Mutex {
 // offline, custom setup) we log a warning and allow the operation to proceed
 // rather than blocking the operator entirely.
 func validateLocalPathOrigin(localPath, fullName string) error {
-	out, err := exec.Command("git", "-C", localPath, "remote", "get-url", "origin").Output()
+	return validateLocalPathOriginContext(context.Background(), localPath, fullName)
+}
+func validateLocalPathOriginContext(ctx context.Context, localPath, fullName string) error {
+	out, err := exec.CommandContext(ctx, "git", "-C", localPath, "remote", "get-url", "origin").Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		// Can't validate (no remote, offline, non-git dir) — allow with warning.
 		fmt.Fprintf(os.Stderr, "  ⚠ cannot verify local_path origin for %s (get-url failed: %v); proceeding\n", fullName, err)
 		return nil
@@ -2332,11 +2587,7 @@ func extractOwnerRepo(rawURL string) string {
 //
 // Returns the number of worktrees removed.
 func pruneOrphanedAnalysisWorktrees(cfg *config.Config) int {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return 0
-	}
-	wtRoot := filepath.Join(home, ".clawflow", "worktrees")
+	wtRoot := filepath.Join(snapshot.StateDir(), "worktrees")
 
 	// Build set of active slug directories from current config.
 	activeSlugs := make(map[string]struct{}, len(cfg.Repos))
@@ -2401,11 +2652,7 @@ var issueWorktreeDirRE = regexp.MustCompile(`^issue-(\d+)-`)
 //
 // Returns the number of worktrees removed.
 func pruneEmptyIssueWorktrees(cfg *config.Config) int {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return 0
-	}
-	wtRoot := filepath.Join(home, ".clawflow", "worktrees")
+	wtRoot := filepath.Join(snapshot.StateDir(), "worktrees")
 
 	removed := 0
 	for fullName, repoCfg := range cfg.Repos {
@@ -2443,6 +2690,10 @@ func pruneEmptyIssueWorktrees(cfg *config.Config) int {
 			candidate := filepath.Join(slugDir, e.Name())
 			if _, err := os.Stat(filepath.Join(candidate, ".git")); err != nil {
 				continue
+			}
+			previous := previousDevelopmentRun(fullName, issueNum, time.Now())
+			if sessionResumeReason(previous, config.RoleOperator, configuredDevelopmentProfile(config.RoleOperator), candidate, 0, false) == "" {
+				continue // Native context is useful even before the first edit.
 			}
 			if hasWork, _, _ := detectPartialWork(candidate, base); hasWork {
 				continue // real WIP — leave it for resume
@@ -2517,9 +2768,11 @@ func removeAnalysisWorktree(wtPath string) bool {
 //
 // The returned cleanup is a no-op: the worktree persists for future runs.
 func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResult, func(), error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return worktreeResult{}, func() {}, fmt.Errorf("home dir: %w", err)
+	return ensureAnalysisWorktreeContext(context.Background(), repoCfg, fullName)
+}
+func ensureAnalysisWorktreeContext(ctx context.Context, repoCfg config.Repo, fullName string) (worktreeResult, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return worktreeResult{}, func() {}, err
 	}
 
 	base := repoCfg.BaseBranch
@@ -2528,7 +2781,7 @@ func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResul
 	}
 	slug := strings.ReplaceAll(fullName, "/", "__")
 	localPath := repoCfg.LocalPath
-	wtPath := filepath.Join(home, ".clawflow", "worktrees", slug, "analysis-"+base)
+	wtPath := filepath.Join(snapshot.StateDir(), "worktrees", slug, "analysis-"+base)
 
 	// Validate that localPath's git origin matches fullName before we
 	// register any worktree against it. A misconfigured local_path (e.g.
@@ -2536,14 +2789,20 @@ func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResul
 	// git to register the worktree entry inside the wrong repository's
 	// .git/worktrees/, producing the cross-project contamination described
 	// in issue #211.
-	if err := validateLocalPathOrigin(localPath, fullName); err != nil {
+	if err := validateLocalPathOriginContext(ctx, localPath, fullName); err != nil {
 		return worktreeResult{}, func() {}, err
 	}
 
 	// Serialize setup/refresh within this process so concurrent analysis
 	// operators on the same repo don't race on fetch+reset.
 	mu := getAnalysisWorktreeLock(slug, base)
-	mu.Lock()
+	for !mu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return worktreeResult{}, func() {}, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	defer mu.Unlock()
 
 	// Check whether the worktree already exists (has a .git pointer file).
@@ -2558,21 +2817,24 @@ func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResul
 
 		fmt.Fprintf(os.Stderr, "  → analysis worktree: initializing at %s\n", wtPath)
 		fmt.Fprintf(os.Stderr, "  → analysis worktree: fetching origin/%s\n", base)
-		if out, err := runGitWithRetryOutput(func() *exec.Cmd {
-			return exec.Command("git", "-C", localPath, "fetch", "origin", base)
+		if out, err := runGitWithRetryOutputContext(ctx, func() *exec.Cmd {
+			return exec.CommandContext(ctx, "git", "-C", localPath, "fetch", "origin", base)
 		}); err != nil {
+			if ctx.Err() != nil {
+				return worktreeResult{}, func() {}, ctx.Err()
+			}
 			return worktreeResult{}, func() {}, describeGitFetchFailure(
 				base, localPath, out, branch.RemoteDefaultBranch(localPath), err)
 		}
 
-		if err := runGitWithRetry(func() *exec.Cmd {
-			return exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
+		if err := runGitWithRetryContext(ctx, func() *exec.Cmd {
+			return exec.CommandContext(ctx, "git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
 		}); err != nil {
 			// Fall back to the local base branch ref (e.g. brand-new clone
 			// that hasn't pushed yet and has no origin/<base> remote ref).
 			fmt.Fprintf(os.Stderr, "  ⚠ worktree add origin/%s failed, falling back to local %s\n", base, base)
-			if err2 := runGitWithRetry(func() *exec.Cmd {
-				return exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
+			if err2 := runGitWithRetryContext(ctx, func() *exec.Cmd {
+				return exec.CommandContext(ctx, "git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
 			}); err2 != nil {
 				return worktreeResult{}, func() {}, fmt.Errorf("git worktree add failed (origin/%s: %v; %s: %w)", base, err, base, err2)
 			}
@@ -2581,21 +2843,24 @@ func ensureAnalysisWorktree(repoCfg config.Repo, fullName string) (worktreeResul
 	} else {
 		// Existing worktree: fetch + reset to latest origin/<base>.
 		fmt.Fprintf(os.Stderr, "  → analysis worktree: refreshing to origin/%s\n", base)
-		if out, err := runGitWithRetryOutput(func() *exec.Cmd {
-			return exec.Command("git", "-C", localPath, "fetch", "origin", base)
+		if out, err := runGitWithRetryOutputContext(ctx, func() *exec.Cmd {
+			return exec.CommandContext(ctx, "git", "-C", localPath, "fetch", "origin", base)
 		}); err != nil {
+			if ctx.Err() != nil {
+				return worktreeResult{}, func() {}, ctx.Err()
+			}
 			return worktreeResult{}, func() {}, describeGitFetchFailure(
 				base, localPath, out, branch.RemoteDefaultBranch(localPath), err)
 		}
 
-		resetCmd := exec.Command("git", "-C", wtPath, "reset", "--hard", "origin/"+base)
+		resetCmd := exec.CommandContext(ctx, "git", "-C", wtPath, "reset", "--hard", "origin/"+base)
 		resetCmd.Stdout = os.Stderr
 		resetCmd.Stderr = os.Stderr
 		if err := resetCmd.Run(); err != nil {
 			return worktreeResult{}, func() {}, fmt.Errorf("git reset --hard origin/%s: %w", base, err)
 		}
 
-		cleanCmd := exec.Command("git", "-C", wtPath, "clean", "-fdx")
+		cleanCmd := exec.CommandContext(ctx, "git", "-C", wtPath, "clean", "-fdx")
 		cleanCmd.Stdout = os.Stderr
 		cleanCmd.Stderr = os.Stderr
 		if err := cleanCmd.Run(); err != nil {
@@ -2631,17 +2896,20 @@ type worktreeResult struct {
 // Returns hasWork plus a diff summary and the checked-out branch name for
 // callers that want to log/report on the discovered work.
 func detectPartialWork(candidate, base string) (hasWork bool, diffStat, branch string) {
+	return detectPartialWorkContext(context.Background(), candidate, base)
+}
+func detectPartialWorkContext(ctx context.Context, candidate, base string) (hasWork bool, diffStat, branch string) {
 	// Check for uncommitted changes
-	diffCmd := exec.Command("git", "-C", candidate, "diff", "--stat", "HEAD")
+	diffCmd := exec.CommandContext(ctx, "git", "-C", candidate, "diff", "--stat", "HEAD")
 	diffOut, _ := diffCmd.Output()
 	// Check for staged changes
-	stagedCmd := exec.Command("git", "-C", candidate, "diff", "--stat", "--cached")
+	stagedCmd := exec.CommandContext(ctx, "git", "-C", candidate, "diff", "--stat", "--cached")
 	stagedOut, _ := stagedCmd.Output()
 	// Check for untracked files
-	untrackedCmd := exec.Command("git", "-C", candidate, "ls-files", "--others", "--exclude-standard")
+	untrackedCmd := exec.CommandContext(ctx, "git", "-C", candidate, "ls-files", "--others", "--exclude-standard")
 	untrackedOut, _ := untrackedCmd.Output()
 	// Check current branch
-	branchCmd := exec.Command("git", "-C", candidate, "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd := exec.CommandContext(ctx, "git", "-C", candidate, "rev-parse", "--abbrev-ref", "HEAD")
 	branchOut, _ := branchCmd.Output()
 	currentBranch := strings.TrimSpace(string(branchOut))
 
@@ -2652,7 +2920,7 @@ func detectPartialWork(candidate, base string) (hasWork bool, diffStat, branch s
 	// Check for commits ahead of origin/base (branch was created and committed to)
 	hasCommitsAhead := false
 	if currentBranch != "" && currentBranch != "HEAD" {
-		aheadCmd := exec.Command("git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
+		aheadCmd := exec.CommandContext(ctx, "git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
 		aheadOut, _ := aheadCmd.Output()
 		hasCommitsAhead = len(strings.TrimSpace(string(aheadOut))) > 0
 	}
@@ -2673,7 +2941,7 @@ func detectPartialWork(candidate, base string) (hasWork bool, diffStat, branch s
 		statParts = append(statParts, "(untracked)\n"+s)
 	}
 	if hasCommitsAhead {
-		aheadCmd := exec.Command("git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
+		aheadCmd := exec.CommandContext(ctx, "git", "-C", candidate, "log", "--oneline", "origin/"+base+"..HEAD")
 		aheadOut, _ := aheadCmd.Output()
 		statParts = append(statParts, "(commits ahead of origin/"+base+")\n"+strings.TrimSpace(string(aheadOut)))
 	}
@@ -2684,12 +2952,18 @@ func detectPartialWork(candidate, base string) (hasWork bool, diffStat, branch s
 // worktree that has uncommitted changes or commits ahead of origin/<base>.
 // Returns the path and a short diff summary if found, or ("", "", "") if none.
 func findExistingWorktree(parent string, issueNum int, localPath, base string) (wtPath, diffStat, branch string) {
+	return findExistingWorktreeContext(context.Background(), parent, issueNum, localPath, base)
+}
+func findExistingWorktreeContext(ctx context.Context, parent string, issueNum int, localPath, base string) (wtPath, diffStat, branch string) {
 	prefix := fmt.Sprintf("issue-%d-", issueNum)
 	entries, err := os.ReadDir(parent)
 	if err != nil {
 		return "", "", ""
 	}
 	for _, e := range entries {
+		if ctx.Err() != nil {
+			return "", "", ""
+		}
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
 			continue
 		}
@@ -2698,7 +2972,7 @@ func findExistingWorktree(parent string, issueNum int, localPath, base string) (
 		if _, err := os.Stat(filepath.Join(candidate, ".git")); err != nil {
 			continue
 		}
-		if hasWork, stat, currentBranch := detectPartialWork(candidate, base); hasWork {
+		if hasWork, stat, currentBranch := detectPartialWorkContext(ctx, candidate, base); hasWork {
 			return candidate, stat, currentBranch
 		}
 	}
@@ -2804,7 +3078,7 @@ func isGitLockError(output string) bool {
 // overallRunBudget returns the wall-clock budget for a whole `clawflow
 // run` process before the self-watchdog force-exits it. The per-operator
 // timeout already bounds each claude/operator; this bounds everything
-// else (scan, git fetch/push, pilot waves, snapshot writes) as a whole.
+// else (scan, git fetch/push, snapshot writes) as a whole.
 // It is 2× the per-operator budget, floored at per-op + 30 minutes, so a
 // healthy multi-operator run never trips it. Kept strictly below
 // api.TriggerRun's watchdog so a slow run self-terminates (with a stack
@@ -2892,6 +3166,12 @@ var gitAttemptTimeout = 3 * time.Minute
 // completion, or a descriptive timeout error if the ceiling was hit.
 // timeout <= 0 means "no ceiling" (delegates straight to cmd.Run).
 func runBoundedGit(cmd *exec.Cmd, timeout time.Duration) error {
+	return runBoundedGitContext(context.Background(), cmd, timeout)
+}
+func runBoundedGitContext(ctx context.Context, cmd *exec.Cmd, timeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if timeout <= 0 {
 		return cmd.Run()
 	}
@@ -2912,6 +3192,12 @@ func runBoundedGit(cmd *exec.Cmd, timeout time.Duration) error {
 	select {
 	case err := <-done:
 		return err
+	case <-ctx.Done():
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		<-done
+		return ctx.Err()
 	case <-timer.C:
 		if cmd.Process != nil {
 			// Negative PID targets the whole process group.
@@ -2923,7 +3209,10 @@ func runBoundedGit(cmd *exec.Cmd, timeout time.Duration) error {
 }
 
 func runGitWithRetry(makeCmd func() *exec.Cmd) error {
-	_, err := runGitWithRetryOutput(makeCmd)
+	return runGitWithRetryContext(context.Background(), makeCmd)
+}
+func runGitWithRetryContext(ctx context.Context, makeCmd func() *exec.Cmd) error {
+	_, err := runGitWithRetryOutputContext(ctx, makeCmd)
 	return err
 }
 
@@ -2933,10 +3222,16 @@ func runGitWithRetry(makeCmd func() *exec.Cmd) error {
 // alone is exit 128 for all three, which is what made the base_branch
 // misconfiguration in issue #300 read as a network outage for three weeks.
 func runGitWithRetryOutput(makeCmd func() *exec.Cmd) (string, error) {
+	return runGitWithRetryOutputContext(context.Background(), makeCmd)
+}
+func runGitWithRetryOutputContext(ctx context.Context, makeCmd func() *exec.Cmd) (string, error) {
 	const maxGitRetries = 5
 	const baseGitDelay = 100 * time.Millisecond
 
 	for attempt := 0; attempt <= maxGitRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		cmd := makeCmd()
 		var buf bytes.Buffer
 		// Tee output: observable on stderr AND captured for error classification.
@@ -2945,10 +3240,10 @@ func runGitWithRetryOutput(makeCmd func() *exec.Cmd) (string, error) {
 		cmd.Stderr = mw
 		var err error
 		if gitexec.IsNetwork(cmd.Args[1:]...) {
-			err = gitexec.Run(context.Background(), cmd)
+			err = gitexec.Run(ctx, cmd)
 		} else {
 			cmd.Env = hardenedGitEnv(cmd.Env)
-			err = runBoundedGit(cmd, gitAttemptTimeout)
+			err = runBoundedGitContext(ctx, cmd, gitAttemptTimeout)
 		}
 		if err == nil {
 			return buf.String(), nil
@@ -2976,7 +3271,11 @@ func runGitWithRetryOutput(makeCmd func() *exec.Cmd) (string, error) {
 
 		fmt.Fprintf(os.Stderr, "  ⚠ git lock conflict (attempt %d/%d), retrying in %v\n",
 			attempt+1, maxGitRetries, delay.Round(time.Millisecond))
-		time.Sleep(delay)
+		select {
+		case <-ctx.Done():
+			return output, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
 	return "", nil // unreachable
 }
@@ -3002,13 +3301,12 @@ func runGitWithRetryOutput(makeCmd func() *exec.Cmd) (string, error) {
 // Analysis worktrees are long-lived and shared across all issues for the same
 // (repo, branch) pair; a per-issue override would either pollute that shared
 // worktree or require a separate per-issue analysis worktree (out of scope).
-func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time, overrideBranch string) (worktreeResult, func(), error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return worktreeResult{}, func() {}, fmt.Errorf("home dir: %w", err)
+func setupWorktree(ctx context.Context, repoCfg config.Repo, fullName string, issueNum int, startedAt time.Time, overrideBranch string) (worktreeResult, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return worktreeResult{}, func() {}, err
 	}
 	slug := strings.ReplaceAll(fullName, "/", "__")
-	parent := filepath.Join(home, ".clawflow", "worktrees", slug)
+	parent := filepath.Join(snapshot.StateDir(), "worktrees", slug)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return worktreeResult{}, func() {}, fmt.Errorf("mkdir worktree parent: %w", err)
 	}
@@ -3025,7 +3323,7 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 	localPath := repoCfg.LocalPath
 
 	// Resume: check for an existing worktree with work-in-progress.
-	if existingPath, diffStat, branch := findExistingWorktree(parent, issueNum, localPath, base); existingPath != "" {
+	if existingPath, diffStat, branch := findExistingWorktreeContext(ctx, parent, issueNum, localPath, base); existingPath != "" {
 		fmt.Fprintf(os.Stderr, "  ✓ resuming existing worktree: %s (branch: %s)\n", existingPath, branch)
 		result := worktreeResult{
 			Path:       existingPath,
@@ -3040,7 +3338,7 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 			// These are NOT cleaned up by claude -p itself when run non-interactively,
 			// causing git to refuse branch deletion later (issue #297).
 			cleanClaudeWorktrees(localPath, existingPath)
-			rm := exec.Command("git", "-C", localPath, "worktree", "remove", "--force", existingPath)
+			rm := exec.CommandContext(ctx, "git", "-C", localPath, "worktree", "remove", "--force", existingPath)
 			rm.Stdout = os.Stderr
 			rm.Stderr = os.Stderr
 			if err := rm.Run(); err != nil {
@@ -3062,9 +3360,12 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 	// runGitWithRetry handles transient git lock conflicts from concurrent
 	// parallel implement jobs on the same repo.
 	fmt.Fprintf(os.Stderr, "  → setup: fetching origin/%s\n", base)
-	if out, err := runGitWithRetryOutput(func() *exec.Cmd {
-		return exec.Command("git", "-C", localPath, "fetch", "origin", base)
+	if out, err := runGitWithRetryOutputContext(ctx, func() *exec.Cmd {
+		return exec.CommandContext(ctx, "git", "-C", localPath, "fetch", "origin", base)
 	}); err != nil {
+		if ctx.Err() != nil {
+			return worktreeResult{}, func() {}, ctx.Err()
+		}
 		// Non-fatal here (we can still start from a cached origin/<base>),
 		// but name the cause so a misconfigured base_branch is visible in
 		// the implement path too, not just the analysis path.
@@ -3073,15 +3374,15 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 	}
 
 	fmt.Fprintf(os.Stderr, "  → setup: creating worktree at %s\n", wtPath)
-	if err := runGitWithRetry(func() *exec.Cmd {
-		return exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
+	if err := runGitWithRetryContext(ctx, func() *exec.Cmd {
+		return exec.CommandContext(ctx, "git", "-C", localPath, "worktree", "add", "--detach", wtPath, "origin/"+base)
 	}); err != nil {
 		// Fall back to the local base branch ref. Brand-new clones may
 		// not have origin/<base> yet (e.g. the user just `git init`'d
 		// and added a remote without pushing anything).
 		fmt.Fprintf(os.Stderr, "  ⚠ worktree add origin/%s failed, falling back to local %s\n", base, base)
-		if err2 := runGitWithRetry(func() *exec.Cmd {
-			return exec.Command("git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
+		if err2 := runGitWithRetryContext(ctx, func() *exec.Cmd {
+			return exec.CommandContext(ctx, "git", "-C", localPath, "worktree", "add", "--detach", wtPath, base)
 		}); err2 != nil {
 			return worktreeResult{}, func() {}, fmt.Errorf("git worktree add failed (origin/%s: %v; %s: %w)", base, err, base, err2)
 		}
@@ -3096,7 +3397,7 @@ func setupWorktree(repoCfg config.Repo, fullName string, issueNum int, startedAt
 		// These are NOT cleaned up by claude -p itself when run non-interactively,
 		// causing git to refuse branch deletion later (issue #297).
 		cleanClaudeWorktrees(localPath, wtPath)
-		rm := exec.Command("git", "-C", localPath, "worktree", "remove", "--force", wtPath)
+		rm := exec.CommandContext(ctx, "git", "-C", localPath, "worktree", "remove", "--force", wtPath)
 		rm.Stdout = os.Stderr
 		rm.Stderr = os.Stderr
 		if err := rm.Run(); err != nil {

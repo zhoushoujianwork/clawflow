@@ -8,8 +8,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -46,6 +48,7 @@ func newUpgradeHarness(t *testing.T) *upgradeHarness {
 		t.Fatal(err)
 	}
 	u := newSelfUpgrader()
+	u.DiskProbe = func(string) (housekeeping.Disk, error) { return housekeeping.Disk{Available: 100 << 30}, nil }
 	u.Version = "oldver"
 	u.Commit = strings.Repeat("a", 40)
 	u.Executable = func() (string, error) { return h.dest, nil }
@@ -505,7 +508,7 @@ func TestSelfUpgradePhaseIgnoresReposWithoutOptIn(t *testing.T) {
 func TestSelfUpgradePhaseFailureCountsTowardExitStatus(t *testing.T) {
 	h := newUpgradeHarness(t)
 	phaseUpgrader(t, h)
-	h.failOn = "go build"
+	h.failOn = "db migrate"
 	confirmedMerges.reset()
 	t.Cleanup(confirmedMerges.reset)
 	confirmedMerges.note("o/r")
@@ -518,7 +521,7 @@ func TestSelfUpgradePhaseFailureCountsTowardExitStatus(t *testing.T) {
 		t.Fatalf("exit error = %v", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".clawflow", "logs", "run.log"))
-	if !strings.Contains(string(data), "WARN  run/self_upgrade") || !strings.Contains(string(data), "result=failed") {
+	if !strings.Contains(string(data), "WARN  run/self_upgrade") || !strings.Contains(string(data), "result=failed") || !strings.Contains(string(data), "reason=migrate") || !strings.Contains(string(data), "boom") {
 		t.Errorf("run.log lacks WARN run/self_upgrade: %q", data)
 	}
 	if h.installed() != "OLD" {
@@ -591,5 +594,104 @@ func TestSelfUpgradeSkipsWithoutLocalPath(t *testing.T) {
 	out := h.u.Upgrade(context.Background(), config.Repo{SelfUpgrade: true, BaseBranch: "main"})
 	if out.Result != selfUpgradeSkipped || len(h.calls) != 0 {
 		t.Fatalf("outcome = %+v calls=%v", out, h.calls)
+	}
+}
+
+func TestSelfUpgradeMigrationBeforeSwap(t *testing.T) {
+	for _, state := range []string{"pending", "current", "failed", "cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			h := newUpgradeHarness(t)
+			h.web = true
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pending := state == "pending"
+			calls := 0
+			h.u.Run = func(c context.Context, dir, name string, args ...string) ([]byte, error) {
+				if strings.Join(args, " ") == "db migrate" {
+					calls++
+					if name == h.dest || h.installed() != "OLD" {
+						t.Fatal("migration must precede replacement and use candidate")
+					}
+					deadline, ok := c.Deadline()
+					if !ok || time.Until(deadline) > upgradeMigrationTimeout {
+						t.Fatal("missing migration timeout")
+					}
+					if state == "failed" {
+						return nil, errors.New("migration failed")
+					}
+					if state == "cancelled" {
+						cancel()
+						return nil, c.Err()
+					}
+					pending = false
+					return []byte("database is up to date"), nil
+				}
+				return h.run(c, dir, name, args...)
+			}
+			out := h.u.Upgrade(ctx, selfUpgradeRepo(t))
+			if calls != 1 || pending {
+				t.Fatalf("calls=%d pending=%v", calls, pending)
+			}
+			if state == "failed" || state == "cancelled" {
+				if out.Result != selfUpgradeFailed || out.Reason != "migrate" || out.Detail == "" || h.installed() != "OLD" || len(h.restarts) != 0 {
+					t.Fatalf("outcome=%+v restarts=%v", out, h.restarts)
+				}
+				if _, err := os.Stat(h.dest + ".prev"); !os.IsNotExist(err) {
+					t.Fatal("backup changed before migration succeeded")
+				}
+			} else if out.Result != selfUpgradeUpgraded || h.installed() != "NEW" || len(h.restarts) != 1 {
+				t.Fatalf("outcome=%+v restarts=%v", out, h.restarts)
+			}
+		})
+	}
+}
+
+func TestCandidateMigrationDeadline(t *testing.T) {
+	u := newSelfUpgrader()
+	u.Run = func(ctx context.Context, _, _ string, _ ...string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	err := u.migrateCandidate(ctx, "/candidate")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestSelfUpgradeInsufficientDisk(t *testing.T) {
+	h := newUpgradeHarness(t)
+	calls, cleaned := 0, 0
+	h.u.DiskProbe = func(string) (housekeeping.Disk, error) { calls++; return housekeeping.Disk{Available: 1}, nil }
+	h.u.Housekeeping = func(context.Context) { cleaned++ }
+	out := h.u.Upgrade(context.Background(), selfUpgradeRepo(t))
+	if out.Result != selfUpgradeSkipped || out.Reason != "insufficient_disk" || cleaned != 1 || calls != 2 {
+		t.Fatalf("outcome=%+v, probes=%d, cleanup=%d", out, calls, cleaned)
+	}
+	for _, call := range h.calls {
+		if strings.Contains(call, "go build") || strings.Contains(call, "pnpm") {
+			t.Fatal("build started with insufficient disk:", call)
+		}
+	}
+}
+
+func TestSelfUpgradeDiskVolumesAndRecovery(t *testing.T) {
+	h := newUpgradeHarness(t)
+	cleaned := false
+	var paths []string
+	h.u.DiskProbe = func(path string) (housekeeping.Disk, error) {
+		paths = append(paths, path)
+		if path == "temp" && !cleaned {
+			return housekeeping.Disk{}, nil
+		}
+		return housekeeping.Disk{Available: 100 << 30}, nil
+	}
+	h.u.Housekeeping = func(context.Context) { cleaned = true }
+	if err := h.u.ensureDisk(context.Background(), "build", "temp"); err != nil {
+		t.Fatal(err)
+	}
+	if !cleaned || strings.Join(paths, ",") != "build,temp,build,temp" {
+		t.Fatalf("probes=%v cleaned=%v", paths, cleaned)
 	}
 }

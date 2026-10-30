@@ -13,6 +13,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
 
 // closesIssueRE extracts the issue number a PR body claims to close.
@@ -212,6 +213,22 @@ func attemptAutoMergeResult(a autoMergeAttempt) mergeResult {
 	if err := a.ctx.Err(); err != nil {
 		return blocked(mergeReasonCanceled, err)
 	}
+	releaseMerge, mergeErr := mergeRepoLock(a.repo)
+	if mergeErr != nil {
+		return blocked("repo_merge_busy", mergeErr)
+	}
+	defer releaseMerge()
+	if a.repoCfg.CoordinatorMode {
+		if err := coordinatorPRAllowedFn(a.ctx, a.repo, a.prNum); err != nil {
+			return blocked("coordinator_head_mismatch", err)
+		}
+	}
+	if a.issueNum > 0 {
+		labels, err := a.client.GetIssueLabels(a.repo, a.issueNum)
+		if err != nil || hasLabel(labels, "clawflow-skip") {
+			return blocked("issue_skipped_or_unreadable", err)
+		}
+	}
 	required, err := acceptanceEnrollment(a.repo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s merge blocked: %v\n", a.prefix, err)
@@ -268,6 +285,11 @@ func attemptAutoMergeResult(a autoMergeAttempt) mergeResult {
 		return blocked(mergeReasonNotMergeable, fmt.Errorf("status: %s", mergeStatus))
 	}
 
+	if a.issueNum > 0 {
+		if err := issueWorkAllowed(a.client, a.repo, a.issueNum); err != nil {
+			return blocked("issue_skipped_or_unreadable", err)
+		}
+	}
 	if err := mergeWithRetry(a.prefix,
 		merge,
 		func() (vcs.MergeStatus, error) { return a.client.GetPRMergeability(a.repo, a.prNum) },
@@ -359,10 +381,17 @@ func autoMergeCandidate(client vcs.Client, fullName string, pr vcs.PR) (issueNum
 	if issueNum == 0 {
 		return 0, false, &prSkip{reason: "no_closing_keyword", fields: []any{"reason", "no_closing_keyword"}}
 	}
+	labels, err := client.GetIssueLabels(fullName, issueNum)
+	if err != nil || hasLabel(labels, "clawflow-skip") {
+		return issueNum, true, &prSkip{reason: "issue_skipped_or_unreadable"}
+	}
 	status, mErr := client.GetPRMergeability(fullName, pr.Number)
 	if mErr != nil {
 		fmt.Fprintf(os.Stderr, "[%s] ⚠ auto-merge sweep: mergeability of PR #%d: %v\n", fullName, pr.Number, mErr)
 		return issueNum, true, &prSkip{reason: "mergeability_error", warn: true, fields: []any{"issue", issueNum, "reason", "mergeability_error", "err", mErr.Error()}}
+	}
+	if status == vcs.MergeStatusConflict {
+		return issueNum, true, &prSkip{reason: "conflict", warn: true, fields: []any{"issue", issueNum, "reason", "conflict", "status", string(status)}}
 	}
 	if status != vcs.MergeStatusClean {
 		return issueNum, true, &prSkip{reason: "not_clean", warn: true, fields: []any{"issue", issueNum, "reason", "not_clean", "status", string(status)}}
@@ -385,9 +414,11 @@ func autoMergeCandidate(client vcs.Client, fullName string, pr vcs.PR) (issueNum
 // spend zero API calls here. A non-zero onlyIssue restricts the sweep to PRs
 // whose closing keyword names that issue (targeted runs); 0 considers all.
 func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, repoCfg config.Repo, onlyIssue int) {
-	if !repoCfg.AutoMerge {
+	if !repoCfg.AutoMerge || !pollingAllowed(client) {
 		return
 	}
+	setVCSContext(client, github.WithStage(ctx, "automerge"))
+	defer setVCSContext(client, github.WithStage(ctx, "scan"))
 	prefix := fmt.Sprintf("[%s]", fullName)
 	prs, err := client.ListOpenPRs(fullName)
 	if err != nil {
@@ -453,7 +484,7 @@ func sweepAutoMergePRs(ctx context.Context, client vcs.Client, fullName string, 
 // sweepSkipReasons lists, in report order, every skip reason the sweep breaks
 // out as skip_<reason> on its aggregate run/automerge_sweep line.
 var sweepSkipReasons = []string{
-	"draft", "no_closing_keyword", "mergeability_error", "not_clean", "locked",
+	"draft", "no_closing_keyword", "mergeability_error", "conflict", "not_clean", "locked",
 	mergeReasonCanceled, mergeReasonPolicyUnreadable, mergeReasonAcceptanceBusy,
 	mergeReasonAcceptanceMissing, mergeReasonAcceptanceStale,
 	mergeReasonCIFailed, mergeReasonCIPending, mergeReasonCINotSuccessful,

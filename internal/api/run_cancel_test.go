@@ -90,8 +90,8 @@ func TestRunCancel_StaleLockOwnerDead(t *testing.T) {
 	if resp.Status != "already_dead" {
 		t.Errorf("status = %q, want %q (body=%s)", resp.Status, "already_dead", rr.Body.String())
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("lock file still present after cancel: %v", err)
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("persistent lock file missing after cancel: %v", err)
 	}
 }
 
@@ -142,8 +142,8 @@ func TestRunCancel_LiveProcess(t *testing.T) {
 	if processAlive(pid) {
 		t.Errorf("PID %d still alive after cancel", pid)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("lock file still present after cancel: %v", err)
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("persistent lock file missing after cancel: %v", err)
 	}
 }
 
@@ -201,3 +201,35 @@ func findDeadPID(t *testing.T) int {
 // downstream rely on this. If the field type changes the test compile will
 // catch it instead of silently breaking the dashboard contract.
 var _ = strconv.Itoa(cancelResponse{}.PID)
+
+// A historical owner may still be alive after releasing its operation.
+func TestRunCancel_ReleasedLockDoesNotKillOwner(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	path := writeLock(t, "o/r", 1, snapshot.LockInfo{PID: cmd.Process.Pid, StartedAt: time.Now()})
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	record["protocol"] = "flock"
+	data, _ = json.Marshal(record)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	rr := postCancel(t, "o/r", 1)
+	var response cancelResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != "already_dead" || !processAlive(cmd.Process.Pid) {
+		t.Fatalf("released record signalled live owner: %+v", response)
+	}
+}

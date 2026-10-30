@@ -21,7 +21,8 @@ import (
 //  3. Helper syscall.Execs `clawflow web --host H --port P`, which now
 //     runs the freshly-replaced binary.
 func NewRespawnCmd() *cobra.Command {
-	var addr string
+	var addr, remote string
+	var cidrs []string
 	cmd := &cobra.Command{
 		Use:    "__respawn",
 		Hidden: true,
@@ -48,9 +49,11 @@ func NewRespawnCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return syscall.Exec(self, []string{"clawflow", "web", "--host", host, "--port", portStr}, os.Environ())
+			return syscall.Exec(self, append([]string{"clawflow", "web", "--host", host, "--port", portStr}, remoteArgs(remote, cidrs)...), os.Environ())
 		},
 	}
+	cmd.Flags().StringVar(&remote, "remote", "off", "remote access mode")
+	cmd.Flags().StringArrayVar(&cidrs, "allow-cidr", nil, "allowed remote CIDR")
 	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8090", "host:port the parent web is bound to (and that the new web will rebind)")
 	return cmd
 }

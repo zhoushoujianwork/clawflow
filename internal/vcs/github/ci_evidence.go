@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 const NoJobEvidence = "no evidence (logs unavailable or no matching failed jobs)"
@@ -19,10 +21,10 @@ const evidenceDownloadBytes = 4 << 20
 var evidenceSHA = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 var evidenceANSI = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 var evidenceSecrets = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(?:gh[pousr]_[a-z0-9_]+|github_pat_[a-z0-9_]+|glpat-[a-z0-9_-]+|AKIA[A-Z0-9]{16})`),
+	regexp.MustCompile(`(?i)(?:gh[pousr]_[a-z0-9_.-]+|github_pat_[a-z0-9_]+|glpat-[a-z0-9_-]+|AKIA[A-Z0-9]{16})`),
 	regexp.MustCompile(`(?i)(?:authorization|password|passwd|secret|token|api[_-]?key|credential)[a-z0-9_-]*["']?\s*[:=]\s*[^\r\n]+`),
 	regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[a-z0-9+/=._-]+`),
-	regexp.MustCompile(`https?://[^\s/@]+:[^\s/@]+@`),
+	regexp.MustCompile(`(?i)(?:https?|postgres(?:ql)?)://[^\s/@]+:[^\s/@]+@`),
 	regexp.MustCompile(`(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)`),
 }
 
@@ -41,15 +43,18 @@ func (c *Client) evidenceText(s string, limit int) string {
 		}
 		return r
 	}, s)
-	if len(s) > limit {
-		s = "[truncated]\n" + s[len(s)-limit:]
-	}
+	s = vcs.FailureExcerpt(s, limit)
 	return strings.ToValidUTF8(s, "")
 }
 
 // evidenceGET bounds downloads and never forwards API credentials to signed log URLs.
 // Errors intentionally omit response bodies and URLs (which can contain secrets).
 func (c *Client) evidenceGET(path string, logs bool) ([]byte, error) {
+	selected, err := c.authenticated(path)
+	if err != nil {
+		return nil, err
+	}
+	c = selected
 	target := c.baseURL + path
 	client := *c.http
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -114,6 +119,11 @@ type evidenceJob struct {
 // Zero jobID selects up to three failed jobs. A positive ID restricts the same
 // revision-bound query, rather than bypassing run/attempt/repository validation.
 func (c *Client) GetFailedJobEvidence(repo, sha string, jobID int64) (string, error) {
+	selected, authErr := c.authenticated("/repos/" + repo + "/")
+	if authErr != nil {
+		return "", authErr
+	}
+	c = selected
 	if !evidenceSHA.MatchString(sha) || jobID < 0 {
 		return NoJobEvidence, fmt.Errorf("full head SHA and nonnegative job ID required")
 	}
