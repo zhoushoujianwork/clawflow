@@ -302,12 +302,31 @@ func TestCoordinatorApplicationErrorsMigrationAfterExecutionEvidence(t *testing.
 	if _, err := s.Migrate(ctx, store.Migrations[:8]); err != nil {
 		t.Fatal(err)
 	}
-	applied, err := s.Migrate(ctx, store.Migrations)
+	applied, err := s.Migrate(ctx, store.Migrations[:9])
 	if err != nil || len(applied) != 1 || applied[0] != 9 {
 		t.Fatalf("application errors upgrade: applied=%v err=%v", applied, err)
 	}
 	var columns int64
 	if err := s.DB().Raw("SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tasks' AND column_name IN ('application_attempts', 'application_error')").Scan(&columns).Error; err != nil || columns != 2 {
 		t.Fatalf("application error columns: count=%d err=%v", columns, err)
+	}
+}
+
+func TestNativeWorkerMigrationPreservesExistingEligibility(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	if _, err := s.Migrate(ctx, store.Migrations[:9]); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().Exec("INSERT INTO coordinator_workers (id,max_parallel,created_at,updated_at) VALUES ('existing',2,now(),now())").Error; err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.Migrate(ctx, store.Migrations[:10])
+	if err != nil || len(applied) != 1 || applied[0] != 10 {
+		t.Fatal(applied, err)
+	}
+	var paused bool
+	if err := s.DB().Raw("SELECT paused FROM coordinator_workers WHERE id = 'existing'").Scan(&paused).Error; err != nil || paused {
+		t.Fatal("existing eligibility changed", err)
 	}
 }

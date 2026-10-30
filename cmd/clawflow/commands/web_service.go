@@ -20,6 +20,7 @@ import (
 const webServiceLabel = "com.zhoushoujianwork.clawflow.web"
 
 type webService struct {
+	controller                 bool
 	home, binary, path, domain string
 	run                        func(string, ...string) ([]byte, error)
 }
@@ -82,9 +83,15 @@ func webServicePATH(current, execution string, lookup func(string) (string, erro
 	return strings.Join(dirs, string(os.PathListSeparator))
 }
 
-func (s webService) target() string { return s.domain + "/" + webServiceLabel }
+func (s webService) label() string {
+	if s.controller {
+		return "com.zhoushoujianwork.clawflow.controller"
+	}
+	return webServiceLabel
+}
+func (s webService) target() string { return s.domain + "/" + s.label() }
 func (s webService) plistPath() string {
-	return filepath.Join(s.home, "Library", "LaunchAgents", webServiceLabel+".plist")
+	return filepath.Join(s.home, "Library", "LaunchAgents", s.label()+".plist")
 }
 func (s webService) call(name string, args ...string) ([]byte, error) {
 	out, err := s.run(name, args...)
@@ -135,19 +142,34 @@ func (s webService) plist(host string, port int) ([]byte, error) {
 		_ = xml.EscapeText(&b, []byte(value))
 		return b.String()
 	}
-	log := filepath.Join(s.home, ".clawflow", "logs", "web.launchd.log")
+	logDir := filepath.Join(s.home, ".clawflow", "logs")
+	if info, err := os.Lstat(filepath.Join(s.home, ".clawflow")); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if resolved, err := filepath.EvalSymlinks(logDir); err == nil {
+			logDir = resolved
+		}
+	}
+	log := filepath.Join(logDir, "web.launchd.log")
+	arguments := fmt.Sprintf("<string>web</string><string>--host</string><string>%s</string><string>--port</string><string>%d</string>", quote(host), port)
+	if s.controller {
+		arguments = "<string>controller</string>"
+		log = filepath.Join(logDir, "controller.launchd.log")
+	}
+	keepAlive := "<dict><key>SuccessfulExit</key><false/></dict>"
+	if s.controller {
+		keepAlive = "<true/>"
+	}
 	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>%s</string>
-<key>ProgramArguments</key><array><string>%s</string><string>web</string><string>--host</string><string>%s</string><string>--port</string><string>%d</string></array>
+<key>ProgramArguments</key><array><string>%s</string>%s</array>
 <key>EnvironmentVariables</key><dict><key>HOME</key><string>%s</string><key>PATH</key><string>%s</string></dict>
 <key>StandardOutPath</key><string>%s</string><key>StandardErrorPath</key><string>%s</string>
 <key>RunAtLoad</key><true/>
-<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>KeepAlive</key>%s
 <key>ThrottleInterval</key><integer>30</integer>
 </dict></plist>
-`, webServiceLabel, quote(s.binary), quote(host), port, quote(s.home), quote(s.path), quote(log), quote(log))), nil
+`, s.label(), quote(s.binary), arguments, quote(s.home), quote(s.path), quote(log), quote(log), keepAlive)), nil
 }
 
 func (s webService) install(host string, port int) error {
@@ -214,6 +236,10 @@ func (s webService) uninstall() error {
 }
 
 func newWebServiceCmd() *cobra.Command {
+	return newServiceCmd(false)
+}
+
+func newServiceCmd(controller bool) *cobra.Command {
 	cmd := &cobra.Command{Use: "service", Short: "Manage the macOS dashboard LaunchAgent"}
 	var host string
 	var port int
@@ -222,6 +248,7 @@ func newWebServiceCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		s.controller = controller
 		cfg, err := config.Load()
 		if err != nil {
 			return err
@@ -236,12 +263,14 @@ func newWebServiceCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		s.controller = controller
 		return s.uninstall()
 	}}, &cobra.Command{Use: "status", Short: "Show launchd state, PID and last exit", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := newWebService()
 		if err != nil {
 			return err
 		}
+		s.controller = controller
 		status, err := s.status()
 		if err != nil {
 			return err

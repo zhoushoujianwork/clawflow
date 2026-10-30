@@ -19,23 +19,23 @@ web:
 run: install
 	clawflow web restart
 
-# 构建并替换本地二进制（含前端）
-install: web
+# Build and replace the local CLI without a frontend toolchain.
+install:
 	@mkdir -p $(BIN_DIR)
 	go build $(LDFLAGS) -o $(BINARY) $(SRC)
 	@echo "installed → $(BINARY) ($(VERSION))"
 
-# 仅构建，不安装（含前端，否则 //go:embed all:web/dist 会失败）
-build: web
+# Build without installing or starting any service.
+build:
 	go build $(LDFLAGS) -o clawflow $(SRC)
 	@echo "built → ./clawflow ($(VERSION))"
 
 # tidy + build，开发日常用
-dev: tidy install
+cli-dev: tidy install
 
-# 构建所有平台发版二进制（含前端）
+# Build release CLIs. The native app is built on macOS with `make native`.
 release: CHANNEL = release
-release: web
+release:
 	GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o clawflow_darwin_arm64  $(SRC)
 	GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o clawflow_darwin_amd64  $(SRC)
 	GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o clawflow_linux_amd64   $(SRC)
@@ -59,3 +59,24 @@ tidy:
 
 clean:
 	rm -f clawflow clawflow_darwin_arm64 clawflow_darwin_amd64 clawflow_linux_amd64
+
+.PHONY: native native-test legacy-web
+native: build
+	./macos/build-app.sh
+
+native-test:
+	swift test --package-path macos
+
+legacy-web: web
+	go build -tags legacyweb $(LDFLAGS) -o clawflow $(SRC)
+
+# Native development: build, install, and restart only the dashboard app.
+.PHONY: dev dev-build native-install cli-dev
+export CLAWFLOW_DEV_INSTALL_DIR
+dev:
+	./macos/dev-app.sh --install-restart
+
+dev-build:
+	./macos/dev-app.sh
+
+native-install: dev

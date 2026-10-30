@@ -1,5 +1,7 @@
 # 运行独立 Worker
 
+Native macOS onboarding is available through **Workers → Add Worker**. It creates an expiring invitation; `clawflow worker join` exchanges it for a private worker token. New invited workers start with assignments paused until resumed in the app. Existing token-based workers below retain their behavior. The independent `clawflow controller` service replaces Web lifecycle ownership; see the [native setup guide](native-macos.md).
+
 Worker 使用本机 `~/.clawflow/config/` 中的 VCS 凭据和 Offload execution profile，
 不从 coordinator 接收凭据。先在 worker 上配置需要执行的仓库及其 `local_path`。
 若映射中没有 `local_path`，worker 会在状态目录的 `clones/` 下自动克隆；

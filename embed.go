@@ -20,12 +20,3 @@ var EmbeddedSkills embed.FS
 //
 //go:embed all:agent-skills
 var EmbeddedAgentSkills embed.FS
-
-// EmbeddedDashboard holds the static dashboard assets produced by
-// `pnpm build` under web/dist/. `clawflow web` extracts this into
-// ~/.clawflow/dashboard/ on first launch, then serves the directory via
-// http.FileServer. Shipping it in the binary means `curl | bash` users
-// get the UI without a separate Node/pnpm build.
-//
-//go:embed all:web/dist
-var EmbeddedDashboard embed.FS

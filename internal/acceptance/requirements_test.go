@@ -140,6 +140,10 @@ func TestCriterionMinimumProofAndVerdictAgreement(t *testing.T) {
 					t.Fatal("unit test substituted for required live proof")
 				}
 				r.Checks[0].Evidence[0].Type = "live"
+				p, b, l := environmentFixture()
+				p.Candidate, p.LoadedCandidate = r.Contract.HeadSHA, r.Contract.HeadSHA
+				environment := NewEnvironmentEvidence(p, b, l)
+				r.Checks[0].Evidence[0].Environment = &environment
 			}
 			if err := Evaluate(r.Contract, r); err != nil {
 				t.Fatal(err)

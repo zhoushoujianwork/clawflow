@@ -15,11 +15,12 @@ type Criterion struct {
 }
 
 type RequirementEvidence struct {
-	Type      string `json:"type"` // source, unit, integration, live
-	Check     string `json:"check"`
-	Reference string `json:"reference"`
-	Commit    string `json:"commit"`
-	Result    string `json:"result"` // inspected, exists, passed, failed, unverified
+	Environment *EnvironmentEvidence `json:"environment,omitempty"`
+	Type        string               `json:"type"` // source, unit, integration, live
+	Check       string               `json:"check"`
+	Reference   string               `json:"reference"`
+	Commit      string               `json:"commit"`
+	Result      string               `json:"result"` // inspected, exists, passed, failed, unverified
 }
 
 type RequirementCheck struct {
@@ -95,6 +96,14 @@ func ValidateChecks(c Contract, r Record) error {
 			}
 			if e.Commit != c.HeadSHA {
 				return errors.New("evidence commit differs from submitted head")
+			}
+			if e.Type == "live" && e.Result == "passed" {
+				if e.Environment == nil {
+					return errors.New("live evidence requires runtime identity and five evidence layers")
+				}
+				if missing := e.Environment.missingText(c.HeadSHA); missing != "" {
+					return errors.New("live evidence missing: " + missing)
+				}
 			}
 			if e.Result == "failed" {
 				defect = true
@@ -225,3 +234,5 @@ func DeduplicateFindings(in []Finding) []Finding {
 
 const criteriaInstruction = " Return raw JSON only: a nonempty array of {id, requirement, proof}. Derive criteria only from deliverable statements (outcomes, acceptance checks and required behavior) that the exact head can satisfy or violate. Implementer process instructions, baselines and authorization boundaries are not criteria and require no historical evidence. For example, exclude \"Inspect current main before editing; baseline reviewed: <sha>\", \"No deployment is authorized\", \"no deployment or coordinator enablement is authorized\" and \"dependencies must land first\". A boundary is eligible only in its explicit diff-checkable form, for example \"no deployment files changed\" or \"the PR changes no deployment or config files\"; do not invent that requirement from an authorization instruction. Cover every approved deliverable acceptance requirement; requirement must be an exact quote from the supplied requirements. Use stable unique IDs. proof is source, execution, or live, choosing the minimum evidence justified by the requirement. Do not add reviewer preferences or new requirements. Recorded decisions remain authoritative within their accepted scope. Live/visual validation is required only where approved criteria justify it. "
 const checksInstruction = " Return checks (one per saved criterion): {id, status: passed|failed|blocked, evidence: [{type: source|unit|integration|live, check, reference, commit, result: inspected|exists|passed|failed|unverified}], missing: string}. Reference an observed execution result, command output or CI job/test result, not just a test file. Reuse relevant successful existing tests and trustworthy CI on the exact submitted commit when coverage is established; do not rerun or add tests without a meaningful gap. Unrelated successful tests cannot cover a requirement. Source-only conclusions and test existence are not execution proof. Checks and verdict must agree. Failed requires a demonstrated code defect, never merely missing evidence. A finding stating no demonstrated defect and citing only missing historical or implementer process evidence is an advisory informational note; the remaining deliverable criteria decide the verdict. Blocked identifies human-only validation or an unresolved scope decision, with missing proof and a specific next action. Infrastructure/tool failures are execution errors, never code defects. When a local check cannot run only because of the review environment (sandbox limits, missing generated build assets, caches) and trustworthy CI on the exact submitted commit covers that criterion, use that CI result as the execution proof and continue. Report status infrastructure_error only when no trustworthy evidence can establish a criterion, so existing retries handle it. Each failed checklist item must have a finding naming its exact requirement. Each failing finding also includes observation with the same typed evidence fields and result failed on the exact head. Include next_action and next_owner. Do not perform live/visual validation without an explicitly authorized testing window. Do not turn reviewer advice into requirements. "
+
+const environmentInstruction = " For live evidence, include environment with candidate (submitted head), loaded_candidate (observed build provenance), cli_match (actual executed CLI, PATH-resolved CLI and host-selected CLI all agree), daemon_version, connector_version, logged_in, target_count, current and binding ({target_id: fresh opaque alias, generation: connection nonce}), and layers {environment-ready, candidate-loaded, offline, live-write, save-reload}, each {status: passed|failed|blocked|not-run, evidence: sanitized observation, binding: {target_id, generation} for live-write and save-reload}. Obtain fresh observations from the authorized environment probe; never infer matches from a build or offline pass. A reconnect invalidates all earlier window/document bindings. Retain failed and not-run layers. Missing identity or any required layer prevents live-verified; report blocked and identify missing evidence. Keep actual CLI paths in private machine evidence only; public reports use the match result and opaque references, never paths, application identities or secrets. This evidence does not authorize live actions or replace resource leases. "

@@ -1,12 +1,12 @@
 # 特殊真实测试环境：声明与就绪契约
 
-状态：设计契约及 SOP 模板。#559 共享机器本地主项目 `testing.md`；#603 增加 coordinator SOP 摘要和能力声明的 readiness 检查（见末节）；#602 增加机器本地共享资源租约。不实现 coordinator 文档传输、实时环境探测或跨机器权威租约服务。以下协议中的后续设计不表示已有运行时能力。未完成的执行验收项继续保留，不能因 SOP 注入完成关闭整个需求。
+状态：设计契约及 SOP 模板。#559 共享机器本地主项目 `testing.md`；#603 增加 coordinator SOP 摘要和能力声明的 readiness 检查（见末节）；#601 实现验收报告的运行时身份证据门禁与五层报告校验；#602 增加机器本地共享资源租约。宿主探测由获授权的环境适配器提供，尚无通用桌面探测器；不实现 coordinator 私有文档传输或跨机器权威租约服务。其余协议中的后续设计不表示已有运行时能力。未完成的执行验收项继续保留，不能因 SOP 注入完成关闭整个需求。
 
 ## 当前边界与共同输入
 
 开发通过 `project.HeaderForRepo`、独立验收通过 `project.TestingHeaderForRepo` 读取执行机器上的同一主项目 `testing.md`，使用相同的 SOP 段落格式。主项目遵循仓库 `primary_project`，未配置时按项目名排序选择。验收只读取测试程序，不注入 `context.md` 或 `deployment.md` 中的开发结论。requirements-only planner 不读取这些机器文档，也不读取开发答案。
 
-文档不存在、为空或仓库无项目时，保持旧提示输入行为。这是向后兼容，不是证明真实环境可用。若批准的需求要求真实测试而文档或能力缺失，审核者必须报告 `blocked`、缺失证据、就绪步骤和 `next_owner`，不得用离线通过替代。声明了需求的 coordinator 任务现在执行末节所述结构化前置检查；实时探测仍依赖独立证据。
+文档不存在、为空或仓库无项目时，保持旧提示输入行为。这是向后兼容，不是证明真实环境可用。若批准的需求要求真实测试而文档或能力缺失，审核者必须报告 `blocked`、缺失证据、就绪步骤和 `next_owner`，不得用离线通过替代。声明了需求的 coordinator 任务执行末节所述结构化前置检查；结构化报告中声明通过的 live 证据还须校验运行时身份和五层结果。实时探测仍依赖独立证据。
 
 本机单 worker 需要有正确项目映射和私有文件。跨机器 coordinator 不分发私有文档或资源锁；#603 随任务携带公开能力需求和 SOP 摘要，worker 仍须具备自己的本地文件。配置同步也不证明候选 worker 已具备能力。不得假定 coordinator 上的文件存在于 worker。后续调度协议须携带公开环境 ID、SOP 版本摘要、所需能力和租约键，worker 解析私有绑定后验证摘要，一致才可执行。缺少映射、文件、版本匹配或能力时返回 `blocked`；项目维护者负责 SOP，机器维护者负责绑定/登录/connector，调度者负责重新分派。不能自动把私有文档复制进公共任务或评论。
 
@@ -77,7 +77,7 @@ shared_resource_keys: [shared-editor-host]
 
 ## 证据分层与脱敏示例
 
-`live-verified` 是本契约的语义结果，不是现有 acceptance schema 新增的状态。现有报告仍使用 `passed|failed|blocked`、checks、next_action、next_owner；未来结构化门禁需要单独实现。真实需求只有取得对应真实证据才可通过，环境 ready 本身不能通过真实写入或保存重载需求。
+`live-verified` 是环境证据的计算结果，不是 acceptance 顶层状态。报告仍使用 `passed|failed|blocked`、checks、next_action、next_owner。结构化 checks 中 `type: live, result: passed` 必须携带 `environment`，由 `ValidateChecks` 再次计算门禁，不能仅提交通过字符串。真实需求只有取得对应真实证据才可通过，环境 ready 本身不能通过真实写入或保存重载需求。
 
 每项证据保存：SOP 版本/摘要、固定 head、独立 attempt/session 引用、采集时间、层级、操作、预期/实际结果、运行时匹配结果、generation、租约关联及 fence。私有完整证据与公开脱敏摘要分开存储。失败与未运行项同样保留。
 
@@ -101,9 +101,17 @@ next_owner: developer
 next_action: 在已批准独占窗口加载候选构建后重新探测；不能复用连通基线作为候选证据
 ```
 
-## 可复现负例与并发验收矩阵
+## 运行时证据接口与已实现的负例
 
-以下整体为执行测试规范；本机资源互斥、busy 持有者诊断、开发/验收交接和崩溃进程接管已有 `internal/resourcelease` 与 `internal/acceptance/resource_lease_test.go` fixture，其余不是已运行测试。fixture 需要模拟执行链身份、连接 generation、私有绑定解析和权威租约执行端；不应依赖实际桌面或账户。
+`internal/acceptance/environment.go` 的 `RuntimeProbe` 保存机器私有观测：固定候选 head、已加载构建的提交来源、实际执行/PATH/宿主选择的 CLI 路径、daemon/connector 版本、登录状态、目标数量、目标随机别名和每次连接更新的 nonce。调用方在操作前重新探测；同一目标重连也必须更新 nonce，不能使用可重复的窗口名称或版本号作为连接身份。探测器负责将构建来源解析到提交 head。
+
+`NewEnvironmentEvidence` 将私有观测投影成公开 `EnvironmentEvidence`，只输出 CLI 路径一致性，不输出路径。实际路径由环境适配器保存在机器私有证据中；公开证据引用使用无敏感信息的逻辑别名。五层固定字段始终序列化，每层保存 status 与脱敏 evidence。真实写入和保存重载还须记录各自操作时的 binding；重新绑定不能把旧连接的操作结果变成新连接的证据。`Missing(head)` 返回具体缺项，`Result(head)` 仅在身份匹配且五层均通过时返回 `live-verified`。
+
+这些接口消费探测观测，不会自动登录、操作桌面、加载候选或获取租约，也不能证明调用方提供的观测真实。独立审核者仍须检查原始观测引用、候选来源和授权窗口。`environment_test.go` 的合成 fixture 覆盖 CLI 不匹配、缺登录/connector/daemon、零或多个目标、重连/文档切换、候选未加载、跨 head、失败/未运行层保留及旧操作证据失效；并验证现有验收入口拒绝缺失或无效 live 环境证据。
+
+## 负例与待实现的并发验收矩阵
+
+运行时身份及分层负例已有上述合成测试；本机资源互斥、busy 持有者诊断、开发/验收交接和崩溃进程接管已有 `internal/resourcelease` 与 `internal/acceptance/resource_lease_test.go` fixture。以下矩阵中的跨机器 SOP/能力和权威资源租约执行端仍是待实现规范，不表示已通过。fixture 需要模拟执行链身份、连接 generation、私有绑定解析和权威租约执行端；不应依赖实际桌面或账户。
 
 | fixture 注入 | 必须观察到的结果 | 就绪步骤 / next_owner |
 | --- | --- | --- |
@@ -143,8 +151,8 @@ coordinator 没有 SOP 时，须通过以上配置声明需求，不能从未声
 注册时作为 `capability:fixture-runtime` 标签公开；本机 worker 可在
 `settings.coordinator.local_worker.tags` 配置相同的能力标签。
 原有 `--tags`、主机标签和仓库 `worker_tags` 路由保持不变。
-能力声明不代表实时探测通过，更不代表真实写入获准；#601 的实时身份与证据分层、
-#602 的共享资源租约仍是独立工作。
+能力声明不代表实时探测通过，更不代表真实写入获准；#601 的运行时身份证据门禁与五层报告校验、
+#602 的共享资源租约是独立检查。
 
 worker 在 checkout 或启动算子/验收前读取自己的主项目 SOP。
 缺文件/映射、摘要不匹配、未固定必需版本或缺能力时，上传结构化
