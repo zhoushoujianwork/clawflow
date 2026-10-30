@@ -11,11 +11,13 @@ struct ConnectionView: View {
             Section { LocalServiceControls(services: model.localServices) }
             Section("Controller connection") {
                 TextField("HTTPS address", text: $draft.url, prompt: Text("https://controller.local:8093"))
-                TextField("Admin token file", text: $draft.tokenFile, prompt: Text("~/.clawflow/dashboard.token"))
+                TextField("Admin token file", text: $draft.tokenFile, prompt: Text("~/Library/Application Support/ClawFlow/native-local-admin.token"))
                 TextField("Certificate SHA-256", text: $draft.fingerprint)
                 Text("Use the address and fingerprint supplied by your controller administrator. Secrets stay in the existing private token file; they are never stored in app preferences.").font(.caption).foregroundStyle(.secondary)
             }
             Section("Application") {
+                Text("Configuration: ~/Library/Application Support/ClawFlow/config/config.yaml").font(.caption).textSelection(.enabled)
+                Text("Opening this app starts missing installed local host services. Running services are reused.").font(.caption).foregroundStyle(.secondary)
                 TextField("CLI path (optional)", text: $draft.executable)
                 Text("Uses the bundled CLI by default. An empty controller address uses existing clawflow platform settings.").font(.caption).foregroundStyle(.secondary)
             }
@@ -28,7 +30,7 @@ struct ConnectionView: View {
             Section("Host a controller") {
                 Text("On the host, configure PostgreSQL and enable settings.coordinator.enabled, then run:").font(.caption)
                 Text("clawflow controller service install\nclawflow worker token create --name dashboard --scope admin").font(.caption.monospaced()).textSelection(.enabled)
-                Text("Save the admin token to a private file and enter its path above. Stop the legacy web service before installing the controller. No service starts when you open this app.").font(.caption).foregroundStyle(.secondary)
+                Text("Save the admin token to a private file and enter its path above. Stop the legacy web service before installing the controller. Install host services once; future app launches start missing installed local services.").font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped).frame(width: 580, height: 560).onAppear { draft = model.connection }
     }
@@ -56,11 +58,11 @@ struct AddWorkerView: View {
             if let offer {
                 Text("Invitation for \(offer.name) · expires \(offer.expiresAt, style: .time)")
                 Text("1. Run on the worker host:").font(.headline)
-                command(model.connection.joinCommand())
+                command(model.connection.joinCommand(workerName: offer.name))
                 Text("2. Paste this invitation at the prompt:").font(.headline)
                 Text(offer.secret).font(.caption.monospaced()).textSelection(.enabled)
                 Text("3. Start the worker with its local Offload profile and project tag:").font(.headline)
-                command(model.connection.startCommand())
+                command(model.connection.startCommand(workerName: offer.name))
                 Text("The worker appears with assignments paused. Check its tags and roles, then select Resume assignments. This invitation works once; keep the saved worker token private.").font(.callout).foregroundStyle(.secondary)
             } else {
                 TextField("Worker name", text: $name, prompt: Text("linux-builder"))

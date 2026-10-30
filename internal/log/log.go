@@ -45,7 +45,13 @@ type Logger struct {
 // LogsDir returns ~/.clawflow/logs/. Created on demand by Open.
 func LogsDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "logs")
+	dir := filepath.Join(home, ".clawflow", "logs")
+	if info, err := os.Lstat(filepath.Join(home, ".clawflow")); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if canonical, err := filepath.EvalSymlinks(dir); err == nil {
+			return canonical
+		}
+	}
+	return dir
 }
 
 // Open opens (or creates) ~/.clawflow/logs/<name>.log for append. Use

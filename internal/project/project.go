@@ -40,8 +40,7 @@ type Automation struct {
 
 // ProjectsRoot returns ~/.clawflow/projects.
 func ProjectsRoot() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "projects")
+	return filepath.Join(config.RootDir(), "projects")
 }
 
 // ProjectDir returns the directory for a named project — i.e.

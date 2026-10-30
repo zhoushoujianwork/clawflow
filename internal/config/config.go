@@ -712,8 +712,7 @@ func (c *Credentials) envRoleOverride(role string) string {
 
 // CredentialsPath returns the path to the credentials file.
 func CredentialsPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "config", "credentials.yaml")
+	return filepath.Join(RootDir(), "config", "credentials.yaml")
 }
 
 // DefaultProviderName is the display name of the built-in OAuth fallback
@@ -1025,8 +1024,7 @@ func Load() (*Config, error) {
 
 // ConfigPath returns the canonical config file path.
 func ConfigPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "config", "config.yaml")
+	return filepath.Join(RootDir(), "config", "config.yaml")
 }
 
 // RunsOnHost accepts all repositories. Host affinity is enforced by worker
@@ -1067,8 +1065,7 @@ func StateDir() string {
 	if dir := os.Getenv("CLAWFLOW_STATE_DIR"); dir != "" {
 		return dir
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow")
+	return RootDir()
 }
 
 // WorktreePath returns the standard worktree path for an issue.
@@ -1104,8 +1101,7 @@ func TouchRepo(cfg *Config, name string, mutFn func(r Repo) Repo) {
 
 // ConflictPath returns the path to the conflict artifact file.
 func ConflictPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".clawflow", "config", "config.conflict.yaml")
+	return filepath.Join(RootDir(), "config", "config.conflict.yaml")
 }
 
 // RepoInfo is the result of ParseRepoInput.

@@ -1,6 +1,6 @@
 # Native macOS dashboard
 
-ClawFlow.app is a SwiftUI/AppKit status viewer for macOS 14 or later. One window contains **Tasks**, **Workers** and **Projects**; a menu-bar summary shares the same status stream. It does not start a worker or scheduler when opened. Closing or quitting it leaves the controller running.
+ClawFlow.app is a SwiftUI/AppKit status viewer for macOS 14 or later. One window contains **Tasks**, **Workers** and **Projects**; a menu-bar summary shares the same status stream. When configured for localhost, it ensures installed local host services are started once at app launch. Closing or quitting it leaves the controller running.
 
 ## Build
 
@@ -9,6 +9,25 @@ make native
 ```
 
 The app is at `macos/dist/ClawFlow.app`, with a bundled CLI. The build signs it locally and validates its plist; it does not open, install or replace an app. Swift and Go are required; Node is not. This is a locally signed build, not a notarized distribution.
+
+## Standard macOS host directories
+
+After building, preview migration with `python3 macos/install-host.py`; apply it to an idle host with `python3 macos/install-host.py --apply`. The installer refuses active coordinator tasks or conflicting destination directories. It stops the app and installed host agents, moves the existing data rather than copying a second configuration, updates agent paths and app connection preferences, installs the app/CLI, and reloads services. An interrupted installation can be inspected and rerun; it does not merge conflicting data directories. LaunchAgent backups are saved alongside the originals.
+
+| Content | Installed location |
+|---|---|
+| Shared configuration | `~/Library/Application Support/ClawFlow/config/config.yaml` |
+| Controller state, projects, PostgreSQL and independent worker state | `~/Library/Application Support/ClawFlow/` |
+| Stable service CLI | `~/Library/Application Support/ClawFlow/bin/clawflow` |
+| Service logs | `~/Library/Logs/ClawFlow/` |
+| Login startup definitions | `~/Library/LaunchAgents/com.zhoushoujianwork.clawflow.*.plist` |
+| App executable and bundled helper | `/Applications/ClawFlow.app` |
+
+The old `~/.clawflow` path remains a compatibility symlink to Application Support, and its `logs` entry points to Library/Logs. Existing historical paths and CLI scripts remain usable. Config, runtime and credential lookup resolve the same migrated root; explicit independent-worker state overrides remain supported. Non-migrated CLI installations retain their existing paths. Credentials required by unattended CLI workers remain in protected files inside the private data directory; this migration does not convert them to Keychain items.
+
+Opening the app with an explicit localhost controller connection starts missing installed database, controller and worker agents once, in that order. Loaded agents are reused, and readiness failures are retried by launchd. Remote viewer connections do not start local services. Stopping a service in the current app session keeps it stopped until explicitly started, the app is reopened, or the next login starts its agent. Quitting the app leaves services running. Host installation still requires database/execution configuration; app startup does not invent credentials or install unknown services.
+
+Validated on 2026-10-30: the existing idle host was migrated, all four LaunchAgent path references were updated, both workers reconnected, and app preferences matched the CLI token path. Unloading the controller and reopening the app started it again without creating a second worker identity. The PostgreSQL-backed full Go race suite, 14 Swift tests, vet, build and app signature checks passed. No computer reboot was performed.
 
 ## Controller setup
 
@@ -34,7 +53,7 @@ For a foreground controller on macOS or Linux, use `clawflow controller`. A shar
 
 On macOS, installed user LaunchAgents start after login following a reboot. They do not run before login. Install the controller from a stable CLI location such as `~/.clawflow/bin/clawflow`; avoid a temporary worktree binary. The controller uses `RunAtLoad` and unconditional `KeepAlive`, so launchd restarts it after an unexpected process exit, including a clean exit. Explicit Stop unloads the agent and prevents that restart for the current login session; its plist remains for the next login. Database and worker agents need their own startup entries. Database readiness failures cause controller startup to fail and retry; no dependency ordering is assumed. The menu-bar app can be launched at login independently, and closing it never stops scheduling.
 
-Create a separate admin identity for the viewer, saving its output to a private file:
+Create a separate admin identity for the viewer, saving its output to a private file (the compatibility path resolves to Application Support after migration):
 
 ```sh
 (umask 077; clawflow worker token create --name native-viewer --scope admin > ~/.clawflow/native-viewer.token)

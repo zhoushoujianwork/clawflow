@@ -1,10 +1,18 @@
 import Foundation
 
+struct BridgeFailure: LocalizedError {
+    let diagnostic: String
+    var errorDescription: String? {
+        diagnostic.components(separatedBy: .newlines).first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? diagnostic
+    }
+}
+
 struct Connection: Codable, Equatable {
     var executable = ""
     var url = ""
     var tokenFile = ""
     var fingerprint = ""
+    var isLocalHost: Bool { ["localhost", "127.0.0.1", "::1"].contains(URL(string: url)?.host ?? "") }
     static func load() -> Self {
         guard let data = UserDefaults.standard.data(forKey: "controllerConnection"), let value = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
         return value
@@ -16,18 +24,18 @@ struct Connection: Codable, Equatable {
             let candidate = helpers.appendingPathComponent("Helpers/clawflow").path
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
         }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clawflow/bin/clawflow").path
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clawflow/bin/clawflow").resolvingSymlinksInPath().path
     }
     func arguments(_ command: [String]) -> [String] {
         var args = ["dashboard"] + command
         if !url.isEmpty { args += ["--url", url, "--token-file", NSString(string: tokenFile).expandingTildeInPath, "--fingerprint", fingerprint] }
         return args
     }
-    func joinCommand() -> String {
+    func joinCommand(workerName: String = "native-worker") -> String {
         func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        return "clawflow worker join --coordinator \(quote(url)) --fingerprint \(quote(fingerprint)) --token-file ~/.clawflow/native-worker.token"
+        return "clawflow worker join --coordinator \(quote(url)) --fingerprint \(quote(fingerprint)) --token-file ~/.clawflow/workers/\(workerName).token"
     }
-    func startCommand() -> String { joinCommand().replacingOccurrences(of: "worker join", with: "worker") + " --state-dir ~/.clawflow-native-worker --roles operator --run-untagged=false --tags YOUR_PROJECT_TAG" }
+    func startCommand(workerName: String = "native-worker") -> String { joinCommand(workerName: workerName).replacingOccurrences(of: "worker join", with: "worker") + " --state-dir ~/.clawflow/workers/\(workerName)/state --roles operator --run-untagged=false --tags YOUR_PROJECT_TAG" }
 }
 
 /// Each bridge invocation is bounded, executes an argument array without a shell,
@@ -89,8 +97,7 @@ final class BridgeProcess: @unchecked Sendable {
                         if cancelled { throw DashboardError.message("Controller request timed out or was cancelled. Refresh before repeating a change.") }
                         guard process.terminationStatus == 0 else {
                             let raw = String(data: errors.prefix(2048), encoding: .utf8) ?? "Controller request failed."
-                            let message = raw.components(separatedBy: .newlines).first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? raw
-                            throw DashboardError.message(message)
+                            throw BridgeFailure(diagnostic: raw)
                         }
                         continuation.resume(returning: data)
                     } catch { continuation.resume(throwing: error) }

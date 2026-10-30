@@ -142,11 +142,17 @@ func (s webService) plist(host string, port int) ([]byte, error) {
 		_ = xml.EscapeText(&b, []byte(value))
 		return b.String()
 	}
-	log := filepath.Join(s.home, ".clawflow", "logs", "web.launchd.log")
+	logDir := filepath.Join(s.home, ".clawflow", "logs")
+	if info, err := os.Lstat(filepath.Join(s.home, ".clawflow")); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if resolved, err := filepath.EvalSymlinks(logDir); err == nil {
+			logDir = resolved
+		}
+	}
+	log := filepath.Join(logDir, "web.launchd.log")
 	arguments := fmt.Sprintf("<string>web</string><string>--host</string><string>%s</string><string>--port</string><string>%d</string>", quote(host), port)
 	if s.controller {
 		arguments = "<string>controller</string>"
-		log = filepath.Join(s.home, ".clawflow", "logs", "controller.launchd.log")
+		log = filepath.Join(logDir, "controller.launchd.log")
 	}
 	keepAlive := "<dict><key>SuccessfulExit</key><false/></dict>"
 	if s.controller {

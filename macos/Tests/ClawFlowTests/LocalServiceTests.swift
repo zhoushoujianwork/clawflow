@@ -2,6 +2,19 @@ import XCTest
 @testable import ClawFlow
 
 final class LocalServiceTests: XCTestCase {
+    func testMissingServiceDiagnosticSurvivesConcisePresentation() {
+        let error = BridgeFailure(diagnostic: "Bad request.\nCould not find service test")
+        XCTAssertEqual(error.localizedDescription, "Bad request.")
+        XCTAssertTrue(error.diagnostic.contains("Could not find service"))
+    }
+    func testOnlyExplicitLocalConnectionStartsHostServices() {
+        var connection = Connection()
+        XCTAssertFalse(connection.isLocalHost)
+        connection.url = "https://192.168.17.4:8093"
+        XCTAssertFalse(connection.isLocalHost)
+        connection.url = "https://127.0.0.1:8093"
+        XCTAssertTrue(connection.isLocalHost)
+    }
     func testStatusIgnoresNestedProcessesAndSupportsStoppedService() {
         var service = LocalService(id: "com.zhoushoujianwork.clawflow.controller", path: "/tmp/controller.plist")
         service.apply("gui/501/controller = {\n state = waiting\n child = {\n state = running\n pid = 99\n }\n}")

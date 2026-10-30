@@ -7,10 +7,10 @@ struct LocalService: Identifiable {
     var running = false
     var pid: String?
     var error: String?
-    var title: String { id.hasSuffix(".controller") ? "Local controller" : "Worker · " + id.replacingOccurrences(of: "com.zhoushoujianwork.clawflow.worker-", with: "") }
+    var title: String { id.hasSuffix(".postgres") ? "Local database" : id.hasSuffix(".controller") ? "Local controller" : "Worker · " + id.replacingOccurrences(of: "com.zhoushoujianwork.clawflow.worker-", with: "") }
     var status: String { error != nil ? "Status unavailable" : running ? "Running · PID \(pid ?? "—")" : loaded ? "Loaded · not running" : "Stopped" }
     static func accepts(_ label: String) -> Bool {
-        label == "com.zhoushoujianwork.clawflow.controller" || label.hasPrefix("com.zhoushoujianwork.clawflow.worker-")
+        label == "com.zhoushoujianwork.clawflow.postgres" || label == "com.zhoushoujianwork.clawflow.controller" || label.hasPrefix("com.zhoushoujianwork.clawflow.worker-")
     }
     mutating func apply(_ text: String) {
         loaded = true; running = false; pid = nil; error = nil
@@ -41,14 +41,26 @@ struct LocalService: Identifiable {
     @Published var message: String?
     private var refreshing = false
     private var loop: Task<Void, Never>?
-    func start() {
+    func start(ensureRunning: Bool = false) {
         guard loop == nil else { return }
         loop = Task { [weak self] in
+            if ensureRunning { await self?.ensureHostRunning() }
             while !Task.isCancelled {
                 await self?.refresh()
                 try? await Task.sleep(for: .seconds(5))
             }
         }
+    }
+    private func ensureHostRunning() async {
+        await refresh()
+        guard rows.contains(where: { $0.id.hasSuffix(".controller") }) else { return }
+        let ordered = rows.sorted { priority($0) < priority($1) }
+        for row in ordered where !row.loaded && row.error == nil {
+            await perform("start", service: row)
+        }
+    }
+    private func priority(_ service: LocalService) -> Int {
+        service.id.hasSuffix(".postgres") ? 0 : service.id.hasSuffix(".controller") ? 1 : 2
     }
     func refresh() async {
         guard !refreshing else { return }; refreshing = true; defer { refreshing = false }
@@ -63,7 +75,7 @@ struct LocalService: Identifiable {
                 let data = try await BridgeProcess().run(executable: "/bin/launchctl", arguments: ["print", "gui/\(getuid())/\(label)"], timeout: 5)
                 row.apply(String(decoding: data, as: UTF8.self))
             } catch {
-                let text = error.localizedDescription
+                let text = (error as? BridgeFailure)?.diagnostic ?? error.localizedDescription
                 if !text.localizedCaseInsensitiveContains("could not find service") { row.error = text }
             }
             next.append(row)
