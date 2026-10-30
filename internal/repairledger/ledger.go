@@ -43,12 +43,17 @@ type Ledger struct {
 	NotBefore time.Time `json:"not_before,omitempty"`
 }
 
+// ReleaseOffloadUnavailable marks a reservation released because the Offload
+// dependency was missing. It consumes neither a repair nor an infrastructure
+// attempt; only the usual cooldown applies.
+const ReleaseOffloadUnavailable = "offload-unavailable"
+
 // Counts returns (consumed repair attempts, released infrastructure outcomes).
 func (l Ledger) Counts() (consumed, infra int) {
 	for _, a := range l.Attempts {
 		if a.Released == "" {
 			consumed++
-		} else if a.Released != "no-change" && a.Released != "resource-busy" {
+		} else if a.Released != "no-change" && a.Released != "resource-busy" && a.Released != ReleaseOffloadUnavailable {
 			infra++
 		}
 	}

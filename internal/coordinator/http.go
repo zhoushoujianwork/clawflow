@@ -25,6 +25,7 @@ type WorkerStore interface {
 	Heartbeat(context.Context, string, string, int64) error
 	Complete(context.Context, string, string, int64, json.RawMessage) error
 	Fail(context.Context, string, string, int64, json.RawMessage) error
+	Release(context.Context, string, string, int64, string) error
 	AppendAudit(context.Context, string, string, string) error
 }
 
@@ -49,7 +50,7 @@ func NewHandler(store WorkerStore) http.Handler {
 			}
 			if len(parts) == 3 && parts[0] == "tasks" && len(parts[1]) <= 128 && parts[1] != "" {
 				switch parts[2] {
-				case "heartbeat", "complete", "fail", "recover":
+				case "heartbeat", "complete", "fail", "recover", "release":
 					action = parts[2]
 					task = parts[1]
 				}
@@ -164,6 +165,8 @@ func NewHandler(store WorkerStore) http.Handler {
 					err = store.Complete(ctx, task, worker, input.FencingToken, input.Result)
 				case "fail":
 					err = store.Fail(ctx, task, worker, input.FencingToken, input.Result)
+				case "release":
+					err = store.Release(ctx, task, worker, input.FencingToken, "offload-unavailable")
 				}
 			}
 			return err

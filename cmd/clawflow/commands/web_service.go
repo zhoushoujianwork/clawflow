@@ -254,6 +254,7 @@ func newServiceCmd(controller bool) *cobra.Command {
 			return err
 		}
 		s.path = webServicePATH(os.Getenv("PATH"), cfg.Settings.Execution.Command, exec.LookPath)
+		warnOffloadForService(cmd.ErrOrStderr(), s.path)
 		return s.install(host, port)
 	}}
 	install.Flags().StringVar(&host, "host", "127.0.0.1", "dashboard bind host")
