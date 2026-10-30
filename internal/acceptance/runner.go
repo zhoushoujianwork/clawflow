@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -225,6 +226,8 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 			prompt += " Configured test command, use only as needed: " + runner.TestCommand
 		}
 	}
+	// Add environment procedures after selecting the report mode, never to planning.
+	prompt += project.TestingHeaderForRepo(c.Repository)
 	prompt += renderReviewInstruction(c.HeadSHA, renderCI)
 	execute := runner.Execute
 	if execute == nil {
