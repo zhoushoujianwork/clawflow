@@ -1845,6 +1845,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		if r.Machine != "" {
 			runningMeta.Machine = r.Machine
 		}
+		j.result.Provenance = provenanceFromRun(runningMeta)
 	})
 	confirmedHead := ""
 	output, outcome, runErr := runJobOperator(ctx, j.op, j.sub, j.client, operator.RunOptions{

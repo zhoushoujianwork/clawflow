@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -299,5 +300,31 @@ func TestWorkerWorktreeFetchCancellation(t *testing.T) {
 	_, _, err := setupWorktree(ctx, config.Repo{LocalPath: t.TempDir()}, "o/r", 1, time.Now(), "")
 	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
 		t.Fatalf("setup cancellation: %v (%s)", err, time.Since(start))
+	}
+}
+
+func TestWorkerJobOffloadProvenance(t *testing.T) {
+	withRunLog(t)
+	offloadtest.Setup(t)
+	t.Setenv("OFFLOAD_TEST_MODE", "result-model")
+	t.Setenv("OFFLOAD_TEST_TEXT", "body")
+	original := runJobOperator
+	t.Cleanup(func() { runJobOperator = original })
+	// Use the isolated protocol helper, never a live Offload provider.
+	runJobOperator = func(ctx context.Context, _ *operator.Operator, _ *operator.Subject, _ operator.VCS, opts operator.RunOptions) (string, string, error) {
+		text, err := operator.RunOffload(ctx, "fixture", "", time.Second*10, opts.EventWriter, "dev", "fixture instructions")
+		return text, "done", err
+	}
+	j := &runJob{repo: "o/r", client: &commentsFake{}, op: &operator.Operator{Name: "inspect", Trigger: operator.Trigger{Target: "issue"}}, sub: &operator.Subject{Number: 1, State: "open"}, hooks: &jobHooks{SkipIndex: true}}
+	_, _, failed := runOneOperator(context.Background(), j, time.Second*10)
+	p := j.result.Provenance
+	if failed || p == nil {
+		t.Fatalf("missing provenance: %+v", j.result)
+	}
+	if p.Machine == "" || p.Profile != "test-profile" || p.Backend != "claude" || p.Model != "gpt-test" || p.OffloadRunID != "run-actual" || p.CallerRunID == "" || p.SessionID != "native-actual" || p.ExitCode == nil || *p.ExitCode != 0 || p.ExecutionStatus != "ok" || !p.valid() {
+		t.Fatalf("provenance %+v", p)
+	}
+	if j.result.Usage == nil || !j.result.Usage.CostUnavailable || j.result.Usage.TokensUnavailable {
+		t.Fatalf("usage %+v", j.result.Usage)
 	}
 }

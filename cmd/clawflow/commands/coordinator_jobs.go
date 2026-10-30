@@ -282,6 +282,9 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	if err := acceptance.DecodeExact(raw, &wire); err != nil {
 		return coordinator.ErrInvalid
 	}
+	if !wire.Result.Provenance.valid() {
+		return coordinator.ErrInvalid
+	}
 	// Usage contains a dynamic model-name map, unlike the fixed evidence schema.
 	if len(wire.Usage) > 0 && json.Unmarshal(wire.Usage, &wire.Result.Usage) != nil {
 		return coordinator.ErrInvalid
@@ -418,6 +421,14 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 		}
 	}
 	meta := snapshot.RunMeta{Repo: t.Repo, IssueNumber: t.Issue, Operator: t.Operator, StartedAt: t.CreatedAt, EndedAt: &now, Status: status, Outcome: r.Outcome, Error: r.Error, Usage: r.Usage, HeadSHA: r.HeadSHA, PRUrl: r.PRURL, PRNumber: r.PRNumber, Summary: r.Output}
+	meta.Machine = t.LeaseOwner
+	if p := r.Provenance; p != nil {
+		if p.Machine != "" {
+			meta.Machine = p.Machine
+		}
+		meta.Profile, meta.Backend, meta.Model = p.Profile, p.Backend, p.Model
+		meta.ExecutionMetadata = snapshot.ExecutionMetadata{OffloadRunID: p.OffloadRunID, CallerRunID: p.CallerRunID, SessionID: p.SessionID, ExitCode: p.ExitCode, ErrorKind: p.ErrorKind, ElapsedMs: p.ElapsedMs, ExecutionStatus: p.ExecutionStatus}
+	}
 	dir := snapshot.RunDir(t.Repo, t.Issue, t.CreatedAt) + "-task-" + t.ID
 	if err := persistDevelopmentEvents(ctx, t, j, r, dir); err != nil {
 		return err
