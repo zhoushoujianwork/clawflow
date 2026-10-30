@@ -31,6 +31,8 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewDBCmd())
 	root.AddCommand(NewWorkerCmd())
 	root.AddCommand(NewPlatformCmd())
+	root.AddCommand(NewDashboardCmd())
+	root.AddCommand(NewControllerCmd())
 	root.AddCommand(NewRunCmd())
 	root.AddCommand(NewWebCmd())
 	root.AddCommand(NewChatCmd())

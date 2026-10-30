@@ -1,0 +1,70 @@
+import XCTest
+@testable import ClawFlow
+
+final class ModelTests: XCTestCase {
+    private func snapshot(stage: String = "running", state: String = "leased", at: Date = Date()) throws -> DashboardSnapshot {
+        let time = ISO8601DateFormatter().string(from: at)
+        let json = """
+        {"schema_version":1,"version":"test","controller":"mini","board":{"generated_at":"\(time)","workers":[],"tasks":[{"id":"t1","repo":"o/r","issue":42,"pr":0,"kind":"implement","state":"\(state)","stage":"\(stage)","worker":"linux","attempt":0,"updated_at":"\(time)","tags":[]}]},"projects":[{"name":"App","repos":[{"name":"o/r","url":"https://github.com/o/r","platform":"github","enabled":true,"ci_required":true,"acceptance_required":true,"auto_merge":false,"worker_tags":[]}]}]}
+        """
+        return try DashboardSnapshot.decode(Data(json.utf8))
+    }
+    func testUnknownNeverLooksIdle() {
+        let state = StatusSummary.reduce(snapshot: nil, received: nil, error: nil)
+        XCTAssertFalse(state.connected); XCTAssertEqual(state.count, "–")
+    }
+    func testFreshnessAndFailureKeepDataButDisableActions() throws {
+        let now = Date(), value = try snapshot()
+        XCTAssertTrue(StatusSummary.reduce(snapshot: value, received: now, error: nil, now: now).connected)
+        XCTAssertFalse(StatusSummary.reduce(snapshot: value, received: now, error: "offline", now: now).connected)
+        XCTAssertFalse(StatusSummary.reduce(snapshot: value, received: now, error: nil, now: now.addingTimeInterval(21)).connected)
+        XCTAssertFalse(StatusSummary.reduce(snapshot: try snapshot(at: now.addingTimeInterval(-60)), received: now, error: nil, now: now).connected)
+    }
+    func testPastFailureIsHistoryNotCurrentAttention() throws {
+        let value = try snapshot(stage: "failed", state: "failed")
+        XCTAssertEqual(value.board.tasks[0].group, .history)
+        XCTAssertEqual(StatusSummary.reduce(snapshot: value, received: Date(), error: nil).title, "Idle")
+    }
+    func testLeaseLossAndWaitingHaveDifferentMeaning() throws {
+        XCTAssertEqual(try snapshot(stage: "lease_expired").board.tasks[0].group, .attention)
+        let value = try snapshot(stage: "pending", state: "pending")
+        XCTAssertEqual(value.board.tasks[0].group, .waiting)
+        XCTAssertEqual(StatusSummary.reduce(snapshot: value, received: Date(), error: nil).count, "0")
+    }
+    func testDoneDoesNotMeanDeliveredAndLinksStayOnRepoHost() throws {
+        let value = try snapshot(stage: "done", state: "done")
+        XCTAssertEqual(value.board.tasks[0].status, "Attempt completed")
+        XCTAssertEqual(value.board.tasks[0].link(in: value)?.absoluteString, "https://github.com/o/r/issues/42")
+        XCTAssertNil(safeWebURL("file:///etc/passwd"))
+        XCTAssertNil(safeWebURL("https://user:secret@example.com"))
+    }
+    func testBridgeUsesArgumentsAndQuotesJoinCommand() {
+        var c = Connection(); c.url = "https://example.com"; c.tokenFile = "/tmp/a b"; c.fingerprint = "abc'xyz"
+        XCTAssertTrue(c.arguments(["drain", "worker name"]).contains("worker name"))
+        XCTAssertTrue(c.arguments(["snapshot"]).contains("/tmp/a b"))
+        XCTAssertTrue(c.joinCommand().contains("'abc'\\''xyz'"))
+        XCTAssertFalse(c.joinCommand().contains("secret"))
+    }
+    func testUnsupportedSchemaFails() {
+        XCTAssertThrowsError(try DashboardSnapshot.decode(Data("{}".utf8)))
+    }
+}
+
+final class BridgeTests: XCTestCase {
+    func testDrainsBothStreamsAndReturnsJSONOnly() async throws {
+        let data = try await BridgeProcess().run(executable: "/bin/sh", arguments: ["-c", "printf diagnostic >&2; printf '{\"ok\":true}'"])
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "{\"ok\":true}")
+    }
+    func testTimeoutStopsOnlyHelper() async {
+        do {
+            _ = try await BridgeProcess().run(executable: "/bin/sleep", arguments: ["30"], timeout: 0.1)
+            XCTFail("expected timeout")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("timed out")) }
+    }
+    func testNonzeroStatusSurfacesError() async {
+        do {
+            _ = try await BridgeProcess().run(executable: "/bin/sh", arguments: ["-c", "printf 'denied' >&2; exit 2"])
+            XCTFail("expected failure")
+        } catch { XCTAssertEqual(error.localizedDescription, "denied") }
+    }
+}

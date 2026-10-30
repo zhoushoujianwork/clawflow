@@ -23,6 +23,9 @@ type Throughput struct {
 	Failed int       `json:"failed"`
 }
 type BoardWorker struct {
+	Revoked       bool       `json:"revoked"`
+	Paused        bool       `json:"paused"`
+	MaxParallel   int        `json:"max_parallel"`
 	Name          string     `json:"name"`
 	Tags          []string   `json:"tags"`
 	Roles         []string   `json:"roles"`
@@ -32,6 +35,7 @@ type BoardWorker struct {
 	RunningTasks  []string   `json:"running_tasks"`
 }
 type BoardTask struct {
+	Subject string `json:"subject"`
 	// Routing contains only private acceptance routing fields, never the full payload.
 	Routing             json.RawMessage `json:"-" gorm:"column:acceptance_routing;type:jsonb"`
 	ApplicationAttempts int             `json:"application_attempts"`
@@ -61,7 +65,7 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			return err
 		}
 		var workers []Worker
-		if err := tx.Select("id, tags, roles, run_untagged").Order("id").Find(&workers).Error; err != nil {
+		if err := tx.Select("id, tags, roles, run_untagged, max_parallel, paused").Order("id").Find(&workers).Error; err != nil {
 			return err
 		}
 		var tokens []Token
@@ -80,7 +84,7 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			heartbeats[beat.Worker] = beat.At
 		}
 		tasks := []BoardTask{}
-		if err := tx.Model(&Task{}).Select("id, repo, issue, pr, kind, state, tags, jsonb_build_object('acceptance_worker', payload->'acceptance_worker', 'development_worker', payload->'development_worker') AS acceptance_routing, priority, lease_owner, lease_expires_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
+		if err := tx.Model(&Task{}).Select("id, COALESCE(payload->>'title', '') AS subject, repo, issue, pr, kind, state, tags, jsonb_build_object('acceptance_worker', payload->'acceptance_worker', 'development_worker', payload->'development_worker') AS acceptance_routing, priority, lease_owner, lease_expires_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
 			return err
 		}
 		out = deriveBoard(now, workers, tokens, heartbeats, tasks)
@@ -127,8 +131,9 @@ func deriveBoard(now time.Time, workers []Worker, tokens []Token, heartbeats map
 	}
 	for _, w := range workers {
 		token := seen[w.ID]
-		row := BoardWorker{Name: w.ID, Tags: w.Tags, Roles: w.Roles, LastSeen: token.LastSeen, RunningTasks: running[w.ID]}
+		row := BoardWorker{Name: w.ID, Tags: w.Tags, Roles: w.Roles, LastSeen: token.LastSeen, RunningTasks: running[w.ID], Paused: w.Paused, MaxParallel: w.MaxParallel}
 		row.Live = !token.Revoked && token.LastSeen != nil && token.LastSeen.After(now.Add(-LeaseTTL)) && !token.LastSeen.After(now)
+		row.Revoked = token.Revoked
 		if beat, ok := heartbeats[w.ID]; ok {
 			row.LastHeartbeat = &beat
 		}
@@ -150,7 +155,7 @@ func deriveBoard(now time.Time, workers []Worker, tokens []Token, heartbeats map
 		}
 		matched := false
 		for j, w := range workers {
-			if out.Workers[j].Live && eligible(task.Tags, w) && acceptanceAllowed(Task{Kind: task.Kind, Tags: task.Tags, Payload: task.Routing}, w) {
+			if out.Workers[j].Live && !w.Paused && eligible(task.Tags, w) && acceptanceAllowed(Task{Kind: task.Kind, Tags: task.Tags, Payload: task.Routing}, w) {
 				matched = true
 				break
 			}

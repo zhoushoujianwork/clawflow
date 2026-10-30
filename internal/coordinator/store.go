@@ -49,6 +49,7 @@ type Task struct {
 func (Task) TableName() string { return "coordinator_tasks" }
 
 type Worker struct {
+	Paused      bool
 	ID          string   `gorm:"primaryKey"`
 	Tags        []string `gorm:"serializer:json;type:jsonb"`
 	RunUntagged bool
@@ -256,6 +257,9 @@ func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 		var w Worker
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&w, "id = ?", worker).Error; err != nil {
 			return err
+		}
+		if w.Paused {
+			return ErrNoTask
 		}
 		var n int64
 		if err := tx.Model(&Task{}).Where("state = 'leased' AND lease_owner = ?", worker).Count(&n).Error; err != nil {

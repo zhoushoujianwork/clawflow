@@ -43,6 +43,10 @@ var Migrations = []Migration{
 	{Version: 9, Name: "coordinator_application_errors", Up: func(tx *gorm.DB) error {
 		return tx.Exec("ALTER TABLE coordinator_tasks ADD COLUMN application_attempts integer NOT NULL DEFAULT 0, ADD COLUMN application_error text NOT NULL DEFAULT ''").Error
 	}},
+	{Version: 10, Name: "native_worker_onboarding", Up: func(tx *gorm.DB) error {
+		return tx.Exec(`ALTER TABLE coordinator_workers ADD COLUMN paused boolean NOT NULL DEFAULT false;
+CREATE TABLE coordinator_invitations (name text PRIMARY KEY, hash bytea NOT NULL, expires_at timestamptz NOT NULL, consumed boolean NOT NULL DEFAULT false);`).Error
+	}},
 }
 
 type schemaMigration struct {

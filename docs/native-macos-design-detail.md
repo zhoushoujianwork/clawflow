@@ -1,12 +1,12 @@
 # Native macOS dashboard — implementation notes
 
-Companion to the [product and interaction design](native-macos-design.md), which controls scope. Proposed contracts below are not existing commands or APIs.
+Companion to the [product and interaction design](native-macos-design.md). The [implementation guide](native-macos.md) records current commands, boundaries and migration. Contracts below describe the direction unless identified as implemented there.
 
 ## Reference and current baseline
 
 Reference inspected in the adjacent Offload checkout: `docs/menubar-status-design.md`, `macos/Sources/OffloadMonitor/DashboardWindow.swift` and the Swift source layout. Reuse its status hierarchy, explicit freshness, native window lifecycle and shared model pattern. Do not carry over its chat, cost views or multiple auxiliary windows. This is reference reading only; no Offload worker is launched.
 
-ClawFlow currently has Go CLI/application modules, a React interface, local run/history/lock data, Offload execution profiles and `bound_machine` configuration. The managed-development design proposes durable distributed execution. This inspection did not establish a working LAN registration/lease protocol; retain the worker requirement while implementing the missing service rather than presenting local hostname binding as remote registration.
+The initial design inspection used an older local checkout. Refreshing to `origin/main` at `df62382f` established an existing PostgreSQL coordinator, authenticated/pinned HTTPS worker and admin APIs, worker registration, fenced leases and tag-based eligibility. The implementation reuses those mechanisms and adds invitations and drain/resume; it does not replace the existing execution engine. The native app uses the existing Go platform client through a bounded JSON CLI bridge, avoiding duplicate TLS/credential logic in Swift.
 
 ## Ownership and transport
 

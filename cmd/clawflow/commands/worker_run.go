@@ -108,6 +108,14 @@ type workerAPI struct {
 }
 
 func newWorkerAPI(o workerOptions) (*workerAPI, error) {
+	token, err := os.ReadFile(o.TokenFile)
+	if err != nil {
+		return nil, err
+	}
+	return newWorkerAPIWithSecret(o, strings.TrimSpace(string(token)))
+}
+
+func newWorkerAPIWithSecret(o workerOptions, secret string) (*workerAPI, error) {
 	u, err := url.Parse(o.Coordinator)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, fmt.Errorf("coordinator 必须为 HTTPS 源地址")
@@ -116,11 +124,6 @@ func newWorkerAPI(o workerOptions) (*workerAPI, error) {
 	if err != nil || len(pin) != sha256.Size {
 		return nil, fmt.Errorf("fingerprint 必须为 SHA-256 指纹")
 	}
-	token, err := os.ReadFile(o.TokenFile)
-	if err != nil {
-		return nil, err
-	}
-	secret := strings.TrimSpace(string(token))
 	if secret == "" {
 		return nil, fmt.Errorf("token 文件为空")
 	}

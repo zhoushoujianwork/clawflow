@@ -22,6 +22,7 @@ import (
 	rootmod "github.com/zhoushoujianwork/clawflow"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 	"github.com/zhoushoujianwork/clawflow/internal/gitsync"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot"
@@ -59,6 +60,11 @@ previous 'clawflow run' invocations (repos.json, operators.json,
 PostgreSQL run history, plus per-run events.jsonl for replay). No VCS calls happen
 here — run 'clawflow run' first if you want fresh data.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			lock, err := controllerLock()
+			if err != nil {
+				return err
+			}
+			defer filelock.Release(lock)
 			remotePolicy, err := webguard.NewRemotePolicy(remote, allowCIDRs)
 			if err != nil {
 				return err
@@ -270,7 +276,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// disk extraction. fs.Sub strips the `web/dist/` prefix so
 			// requests for `/assets/foo.js` map to `web/dist/assets/foo.js`
 			// inside the embed.
-			spaFS, err := fs.Sub(rootmod.EmbeddedDashboard, "web/dist")
+			spaFS, err := fs.Sub(rootmod.EmbeddedDashboard, rootmod.DashboardRoot)
 			if err != nil {
 				return fmt.Errorf("embedded SPA fs: %w", err)
 			}
@@ -556,6 +562,10 @@ here — run 'clawflow run' first if you want fresh data.`,
 // fancy ticker reset logic. 30s is also fine-grained enough that the
 // dashboard countdown (`next in M:SS`) never lags noticeably.
 func runPeriodicScheduler() {
+	runPeriodicSchedulerContext(context.Background())
+}
+
+func runPeriodicSchedulerContext(ctx context.Context) {
 	const checkEvery = 30 * time.Second
 	tick := time.NewTicker(checkEvery)
 	defer tick.Stop()
@@ -563,7 +573,7 @@ func runPeriodicScheduler() {
 	hostname, _ := os.Hostname()
 	// lastFire is per repo so a repo whose pass is still running (or that
 	// finished early) never makes the others wait or fire again.
-	checkStore, err := pilot.OpenCheckStore(context.Background())
+	checkStore, err := pilot.OpenCheckStore(ctx)
 	if err != nil {
 		webLog.Info("web/scheduled_checks_unavailable")
 	}
@@ -574,15 +584,20 @@ func runPeriodicScheduler() {
 	}()
 	lastFire := map[string]time.Time{}
 	lastCheckMinute := time.Now().Truncate(time.Minute)
-	for range tick.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
 		now := time.Now()
 		if minute := now.Truncate(time.Minute); minute.After(lastCheckMinute) {
 			lastCheckMinute = minute
 			if checkStore == nil {
-				checkStore, err = pilot.OpenCheckStore(context.Background())
+				checkStore, err = pilot.OpenCheckStore(ctx)
 			}
 			if checkStore != nil {
-				if err := pilot.TickChecks(context.Background(), checkStore, now); err != nil {
+				if err := pilot.TickChecks(ctx, checkStore, now); err != nil {
 					webLog.Info("web/scheduled_checks_error")
 				}
 			}

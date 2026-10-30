@@ -70,6 +70,59 @@ func NewPlatformHandler(store WorkerStore, admin AdminService) http.Handler {
 				return ErrToken
 			}
 			switch r.URL.Path {
+			case "/admin/v1/dashboard":
+				action = "dashboard"
+				if r.Method != "GET" {
+					status = 405
+					return nil
+				}
+				dashboard, ok := admin.(DashboardService)
+				if !ok {
+					status = 404
+					return nil
+				}
+				out, err = dashboard.Dashboard(ctx)
+			case "/admin/v1/dashboard/action":
+				action = "dashboard-action"
+				if r.Method != "POST" {
+					status = 405
+					return nil
+				}
+				dashboard, ok := admin.(DashboardService)
+				if !ok {
+					status = 404
+					return nil
+				}
+				var input DashboardRequest
+				d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+				d.DisallowUnknownFields()
+				if err = d.Decode(&input); err != nil {
+					status = 400
+					return err
+				}
+				var extra any
+				if d.Decode(&extra) != io.EOF {
+					status = 400
+					return ErrInvalid
+				}
+				switch input.Action {
+				case "invite", "drain", "resume", "remove", "events":
+				default:
+					status = 400
+					return ErrInvalid
+				}
+				if len(input.Name) == 0 || len(input.Name) > 128 {
+					status = 400
+					return ErrInvalid
+				}
+				action = "dashboard-" + input.Action
+				if err = store.AppendAudit(ctx, actor, "", "admin:"+action+":attempt"); err != nil {
+					return err
+				}
+				out, err = dashboard.DashboardAction(ctx, input)
+				if err != nil {
+					status = 400
+				}
 			case "/admin/v1/status":
 				action = "status"
 				if r.Method != "GET" {
@@ -135,6 +188,7 @@ func NewPlatformHandler(store WorkerStore, admin AdminService) http.Handler {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(out)
 	})

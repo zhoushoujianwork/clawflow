@@ -29,19 +29,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-
-      - name: Build web bundle
-        run: cd web && pnpm install --frozen-lockfile && pnpm build
-
       - name: Unit tests
         env:
           CLAWFLOW_TEST_DATABASE_DSN: postgres://clawflow:clawflow@localhost:5432/clawflow_test?sslmode=disable
@@ -67,6 +54,26 @@ jobs:
           ./clawflow pr-check --help
           ./clawflow update --help
           ./clawflow web --help
+          ./clawflow controller --help
+          ./clawflow dashboard --help
+          ./clawflow worker join --help
+
+  native:
+    name: Native macOS
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Headless native tests
+        run: swift test --package-path macos
+      - name: Build app without opening it
+        run: make native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClawFlow-macOS
+          path: macos/dist/ClawFlow.app
 
   web-render:
     name: Web render

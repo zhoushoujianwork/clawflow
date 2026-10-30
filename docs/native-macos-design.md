@@ -1,6 +1,8 @@
 # Native macOS dashboard
 
-Status: Proposed interaction redesign · 2026-10-30
+Status: First native implementation available · 2026-10-30
+
+The [implementation and migration guide](native-macos.md) records the delivered scope: native status views, independent controller, LAN invitations and worker drain/resume. It uses the latest existing worker protocol, a shared five-second polling bridge and repository monitoring controls. Manual task retry/cancel, notifications, raw execution-log streaming and advanced policy editors remain outside this first release. Desktop acceptance remains pending.
 
 ClawFlow becomes a small native macOS app for answering three questions: **What is running? What needs me? Which workers are available?** The Go service continues scheduling work independently. LAN workers remain part of the product; closing or quitting the dashboard does not stop them.
 
@@ -60,7 +62,7 @@ Worker details contain its identity, version, capabilities, assigned projects an
 
 First launch offers **Connect to controller** or **Set up on this Mac**. Remote setup takes an address and pairing credential; local setup explicitly installs/starts the background service. Show connection/readiness results before opening Tasks. Settings holds the controller connection, notifications and launch-at-login. One controller is active at a time in the first release.
 
-Project sheets retain independent monitoring, Pilot, required CI, acceptance and merge controls. Compact presentation must not combine these permissions into one switch. Advanced operator/profile configuration stays in the existing CLI initially. No new workflow editor, analytics suite or cloud account.
+Project information retains independent monitoring, required CI, acceptance and merge settings. Compact presentation must not combine these permissions into one switch. Advanced operator/profile configuration stays in the existing CLI initially. The retired per-project Pilot controls are not reintroduced. No new workflow editor, analytics suite or cloud account.
 
 Delivery order:
 
@@ -69,4 +71,4 @@ Delivery order:
 3. Complete LAN invitation, registration, heartbeat and safe dispatch; add Workers and compact Projects controls.
 4. Validate reconnect/recovery and native accessibility, then retire the Web UI and its build dependency. Keep its compatibility entry point only for migration; never run two schedulers.
 
-The first complete release includes LAN worker onboarding. Native screen checks require an agreed desktop testing window; headless model and service checks run first. This document proposes the redesign; it does not claim the app or remote worker protocol is implemented.
+The first complete release includes LAN worker onboarding. Native screen checks require an agreed desktop testing window; headless model and service checks run first. The interaction direction below includes later refinements; use the implementation guide above for current capabilities.

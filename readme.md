@@ -4,9 +4,7 @@
 >
 > ClawFlow polls the repositories you configure, matches each open issue/PR against a set of **operators** (self-contained `SKILL.md` files), and runs the matching operator through `agent-host execute`. VCS labels and comments expose progress; local files retain run history, execution locks and bounded CI-repair attempts. There is no SaaS backend. Run it once, run it on cron, run it from your editor — it's the same binary either way.
 
-![ClawFlow dashboard](dashbroad.png)
-
-The local dashboard (`clawflow web`) gives you a filterable timeline of every operator run across every monitored repo — status, duration, PR links, and a replay of the raw AGH event stream (usage is currently unknown) for any past run.
+The native macOS dashboard provides **Tasks, Workers and Projects** in one window, plus a menu-bar status summary. LAN workers continue running behind the independent `clawflow controller` service. Build with `make native`; see the [native setup and migration guide](docs/native-macos.md). Default builds no longer require a Web toolchain; the old interface is available with `make legacy-web` during migration.
 
 ---
 

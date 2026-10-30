@@ -55,7 +55,15 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 	}
 	results := &coordinatorResults{WorkerStore: tasks, tasks: tasks, loadJob: loadCoordinatorJob, apply: applyCoordinatorReport}
 	server := coordinator.NewServer(settings.ListenAddress(), results, cert)
-	server.Handler = coordinator.NewPlatformHandler(results, &platformAdmin{board: tasks.Board})
+	adminHandler := coordinator.NewPlatformHandler(results, &platformAdmin{board: tasks.Board, workers: tasks})
+	joinHandler := coordinator.JoinHandler(tasks)
+	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/worker/v1/join" {
+			joinHandler.ServeHTTP(w, r)
+			return
+		}
+		adminHandler.ServeHTTP(w, r)
+	})
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		db.Close()
