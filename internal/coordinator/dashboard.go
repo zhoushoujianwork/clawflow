@@ -3,6 +3,8 @@ package coordinator
 import (
 	"context"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
 )
 
 // Dashboard is the native viewer's versioned, credential-free read model.
@@ -18,14 +20,18 @@ type DashboardProject struct {
 	Repos []DashboardRepo `json:"repos"`
 }
 type DashboardRepo struct {
-	Name               string   `json:"name"`
-	URL                string   `json:"url"`
-	Platform           string   `json:"platform"`
-	Enabled            bool     `json:"enabled"`
-	CIRequired         bool     `json:"ci_required"`
-	AcceptanceRequired bool     `json:"acceptance_required"`
-	AutoMerge          bool     `json:"auto_merge"`
-	WorkerTags         []string `json:"worker_tags"`
+	IssueQueue         []queue.ListEntry `json:"issue_queue"`
+	QueueUpdatedAt     *time.Time        `json:"queue_updated_at,omitempty"`
+	QueueError         string            `json:"queue_error,omitempty"`
+	SkippedIssues      int               `json:"skipped_issues"`
+	Name               string            `json:"name"`
+	URL                string            `json:"url"`
+	Platform           string            `json:"platform"`
+	Enabled            bool              `json:"enabled"`
+	CIRequired         bool              `json:"ci_required"`
+	AcceptanceRequired bool              `json:"acceptance_required"`
+	AutoMerge          bool              `json:"auto_merge"`
+	WorkerTags         []string          `json:"worker_tags"`
 }
 type DashboardRequest struct {
 	Action string `json:"action"`

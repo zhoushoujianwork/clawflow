@@ -1,14 +1,14 @@
 import SwiftUI
 
 enum Destination: String, CaseIterable, Identifiable {
-    case tasks = "Tasks", workers = "Workers", projects = "Projects"
+    case issues = "Issue Queue", tasks = "Tasks", workers = "Workers", projects = "Projects"
     var id: String { rawValue }
-    var symbol: String { switch self { case .tasks: return "checklist"; case .workers: return "desktopcomputer"; case .projects: return "folder" } }
+    var symbol: String { switch self { case .issues: return "list.number"; case .tasks: return "checklist"; case .workers: return "desktopcomputer"; case .projects: return "folder" } }
 }
 
 struct DashboardView: View {
     @ObservedObject var model: DashboardModel
-    @State private var destination: Destination? = .tasks
+    @State private var destination: Destination? = .issues
     @State private var search = ""
     @State private var projectFilter = ""
     var body: some View {
@@ -43,10 +43,11 @@ struct DashboardView: View {
                 }
                 if let snapshot = model.snapshot {
                     switch destination ?? .tasks {
+                    case .issues: IssueQueueView(snapshot: snapshot, search: search, projectFilter: $projectFilter)
                     case .tasks: TasksView(model: model, snapshot: snapshot, search: search, projectFilter: $projectFilter)
                     case .workers: WorkersView(model: model, snapshot: snapshot, search: search)
                     case .projects: ProjectsView(model: model, snapshot: snapshot, search: search) { name in
-                        projectFilter = name; destination = .tasks; search = ""
+                        projectFilter = name; destination = .issues; search = ""
                     }
                     }
                 } else {
@@ -262,7 +263,61 @@ struct ProjectsView: View {
                         }.padding(.vertical, 8)
                     }
                 } header: {
-                    HStack { Text(project.name); Spacer(); Button("View tasks") { showTasks(project.name) }.buttonStyle(.plain) }
+                    HStack { Text(project.name); Spacer(); Button("View issue queue") { showTasks(project.name) }.buttonStyle(.plain) }
+                }
+            }
+        }
+    }
+}
+
+struct IssueQueueView: View {
+    let snapshot: DashboardSnapshot
+    let search: String
+    @Binding var projectFilter: String
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Open issues · scheduler order per repository").font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Picker("Project", selection: $projectFilter) {
+                    Text("All projects").tag("")
+                    ForEach(snapshot.projects) { Text($0.name).tag($0.name) }
+                }.frame(maxWidth: 240)
+            }.padding(12)
+            Divider()
+            List {
+                ForEach(snapshot.projects.filter { projectFilter.isEmpty || $0.name == projectFilter }) { project in
+                    ForEach(project.repos) { repo in
+                        Section {
+                            if let error = repo.queueError { Text(error).foregroundStyle(.orange) }
+                            if let updated = repo.queueUpdatedAt {
+                                Text("Last evaluated \(updated.formatted()) · \(repo.skippedIssues ?? 0) explicitly skipped")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else if repo.queueError == nil {
+                                Text(repo.issueQueue == nil ? "Update the controller to view issue queues." : "Not evaluated yet.").foregroundStyle(.secondary)
+                            }
+                            ForEach((repo.issueQueue ?? []).filter { search.isEmpty || "\($0.key) \($0.title ?? "") \($0.state)".localizedCaseInsensitiveContains(search) }) { issue in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text("\(issue.position)").monospacedDigit().foregroundStyle(.secondary).frame(width: 28)
+                                        Text("#\(issue.number) \(issue.title ?? "")").fontWeight(.medium)
+                                        Spacer()
+                                        Text(issue.tier).font(.caption.monospaced())
+                                        Text(issue.status).font(.caption).foregroundStyle(issue.state.hasPrefix("blocked") ? .orange : .secondary)
+                                    }
+                                    Text(issue.state).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                                    if let base = safeWebURL(repo.url) {
+                                        Link("Open issue", destination: base.appendingPathComponent(repo.platform == "gitlab" ? "-/issues/\(issue.number)" : "issues/\(issue.number)" )).font(.caption)
+                                    }
+                                }.padding(.vertical, 5)
+                            }
+                            if repo.queueUpdatedAt != nil && (repo.issueQueue ?? []).isEmpty {
+                                Text("No queued issues at the last evaluation.").foregroundStyle(.secondary)
+                            }
+                        } header: {
+                            Text("\(project.name) / \(repo.name) · \(repo.enabled ? "Monitoring" : "Paused") · \((repo.issueQueue ?? []).count) issues")
+                        }
+                    }
                 }
             }
         }

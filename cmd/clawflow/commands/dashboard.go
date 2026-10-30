@@ -13,6 +13,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
 )
 
 // NewDashboardCmd is a JSON-only bridge for the native app. TLS, token-file
@@ -118,7 +119,26 @@ func dashboardRepo(name string, r config.Repo) coordinator.DashboardRepo {
 	if tags == nil {
 		tags = []string{}
 	}
-	return coordinator.DashboardRepo{Name: name, URL: link, Platform: r.Platform, Enabled: r.Enabled, CIRequired: r.CIRequired, AcceptanceRequired: r.AcceptanceRequired, AutoMerge: r.AutoMerge, WorkerTags: tags}
+	row := coordinator.DashboardRepo{Name: name, URL: link, Platform: r.Platform, Enabled: r.Enabled, CIRequired: r.CIRequired, AcceptanceRequired: r.AcceptanceRequired, AutoMerge: r.AutoMerge, WorkerTags: tags}
+	row.IssueQueue = []queue.ListEntry{}
+	state, err := queue.LoadState(name)
+	if err != nil {
+		row.QueueError = "Unable to read scheduler queue"
+		return row
+	}
+	rank, err := queue.LoadRank()
+	if err != nil {
+		row.QueueError = "Unable to read queue order"
+		return row
+	}
+	if !state.UpdatedAt.IsZero() {
+		row.QueueUpdatedAt = &state.UpdatedAt
+	}
+	row.SkippedIssues = state.Skipped
+	if entries := queue.BuildList([]queue.RepoState{state}, rank, name); entries != nil {
+		row.IssueQueue = entries
+	}
+	return row
 }
 
 func (a *platformAdmin) DashboardAction(ctx context.Context, input coordinator.DashboardRequest) (any, error) {

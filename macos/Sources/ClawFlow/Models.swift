@@ -123,7 +123,30 @@ struct ProjectRow: Decodable, Identifiable {
     let name: String
     let repos: [RepoRow]
 }
+struct IssueQueueRow: Decodable, Identifiable {
+    var id: String { key }
+    let key: String
+    let position: Int
+    let number: Int
+    let title: String?
+    let tier: String
+    let state: String
+    var status: String {
+        switch state.split(separator: ":").first.map(String.init) {
+        case "in_flight": return "In progress"
+        case "eligible": return "Ready / waiting for capacity"
+        case "blocked": return "Blocked"
+        case "parked": return "Parked"
+        case "waiting": return "Waiting"
+        default: return "Unknown"
+        }
+    }
+}
 struct RepoRow: Decodable, Identifiable {
+    let issueQueue: [IssueQueueRow]?
+    let queueUpdatedAt: Date?
+    let queueError: String?
+    let skippedIssues: Int?
     var id: String { name }
     let name: String
     let url: String

@@ -2,6 +2,14 @@ import XCTest
 @testable import ClawFlow
 
 final class ModelTests: XCTestCase {
+    func testIssueQueueKeepsSchedulingReason() throws {
+        let data = Data(#"{"key":"o/r#7","position":1,"number":7,"title":"Feature","tier":"P1","state":"eligible:max_in_flight"}"#.utf8)
+        let row = try decoder().decode(IssueQueueRow.self, from: data)
+        XCTAssertEqual(row.id, "o/r#7")
+        XCTAssertEqual(row.status, "Ready / waiting for capacity")
+        XCTAssertEqual(row.state, "eligible:max_in_flight")
+    }
+
     func testActivityLabelsDistinguishExecutionPurpose() {
         XCTAssertEqual(TaskActivity(kind: "implement").title, "Development")
         XCTAssertEqual(TaskActivity(kind: "acceptance").title, "PR Review")
