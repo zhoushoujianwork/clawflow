@@ -2,7 +2,7 @@
 
 Status: Proposed, with incremental implementation · 2026-10-26
 
-This extends the [managed development design](managed-development-design.md). The CLI is the primary control surface for both users and external AI skills; the Web interface should call the same application services. [Contract details](cli-interaction-design-detail.md) define output and validation boundaries.
+This extends the [managed development design](managed-development-design.md). The CLI is the automation control surface for users and external AI skills; the proposed [native macOS dashboard](native-macos-design.md) is the human status interface and shares the same application services. It supersedes the Web-first interface direction; the existing Web implementation remains during migration. [Contract details](cli-interaction-design-detail.md) define output and validation boundaries.
 
 ## User journey
 
