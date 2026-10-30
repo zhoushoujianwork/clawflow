@@ -62,7 +62,10 @@ try {
     await panel.waitFor()
     assert.equal(await panel.locator('[data-attempt-id]').count(), 2)
     // Both recorded attempts remain visible in the new detail panel.
-    assert.deepEqual(await panel.locator('[data-attempt-id]').evaluateAll(nodes => nodes.map(n => n.dataset.attemptId)), ['49-a', '49-b'])
+    // Which repository's row is first depends on list ordering, which this check does not assert.
+    const ids = await panel.locator('[data-attempt-id]').evaluateAll(nodes => nodes.map(n => n.dataset.attemptId))
+    assert.match(ids[0], /^\d+-a$/)
+    assert.deepEqual(ids, [ids[0], ids[0].replace(/-a$/, '-b')])
     await panel.getByRole('button', { name: 'Close details', exact: true }).click()
     await panel.waitFor({ state: 'hidden' })
     assert.equal(await open.evaluate(el => el === document.activeElement), true)
