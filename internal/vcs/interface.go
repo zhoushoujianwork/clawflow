@@ -121,6 +121,7 @@ type CIEvidence struct {
 
 // CICheck carries suite provenance from the same exact-head aggregation.
 type CICheck struct {
+	Name       string  `json:"name"`
 	ID         int64   `json:"id"`
 	HeadSHA    string  `json:"head_sha"`
 	Status     string  `json:"status"`
