@@ -19,6 +19,10 @@ func TestFailedJobEvidence(t *testing.T) {
 		want           bool
 	}{
 		{"matching", run, job, 200, "FAIL TestRace", true},
+		{"failed job in cancelled workflow", strings.ReplaceAll(run, "failure", "cancelled"), job, 200, "FAIL TestRace", true},
+		{"cancelled job", strings.ReplaceAll(run, "failure", "cancelled"), strings.ReplaceAll(job, "failure", "cancelled"), 200, "FAIL", false},
+		{"successful workflow", strings.ReplaceAll(run, "failure", "success"), job, 200, "FAIL", false},
+		{"pending workflow", strings.ReplaceAll(strings.ReplaceAll(run, "failure", "cancelled"), "completed", "in_progress"), job, 200, "FAIL", false},
 		{"wrong run SHA", strings.ReplaceAll(run, sha, strings.Repeat("b", 40)), job, 200, "FAIL", false},
 		{"fork", strings.ReplaceAll(run, "o/r", "fork/r"), job, 200, "FAIL", false},
 		{"wrong job SHA", run, strings.ReplaceAll(job, sha, strings.Repeat("b", 40)), 200, "FAIL", false},
