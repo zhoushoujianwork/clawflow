@@ -9,7 +9,6 @@ import {
   XCircle,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { Markdown } from './Markdown'
 
 /**
  * Content block inside an assistant or user message. The shapes we care about:
@@ -38,6 +37,11 @@ export interface ContentBlock {
  */
 export interface RawEvent {
   type: string
+  timestamp?: string
+  run_id?: string
+  caller_run_id?: string
+  session?: string
+  exit_code?: number | null
   subtype?: string
   schema_version?: number
   status?: string
@@ -70,7 +74,7 @@ type ToolStep = {
   result?: { body: string; isError: boolean }
 }
 
-type TraceStep =
+type TraceStep = (
   | { kind: 'thinking'; text: string }
   | { kind: 'reply'; text: string }
   | ToolStep
@@ -81,7 +85,7 @@ type TraceStep =
       durationMs?: number
       costUsd?: number
       text?: string
-    }
+    }) & { source?: string; timestamp?: string; runID?: string }
 
 function resultBody(content: unknown): string {
   if (typeof content === 'string') return content
@@ -89,7 +93,7 @@ function resultBody(content: unknown): string {
     return content
       .map(p =>
         p && typeof p === 'object' && 'text' in p
-          ? String((p as { text: unknown }).text)
+          ? prettyValue((p as { text: unknown }).text)
           : prettyValue(p)
       )
       .join('\n')
@@ -103,22 +107,40 @@ function resultBody(content: unknown): string {
  * so a call and its output read as one expandable row instead of two
  * disconnected lines.
  */
-function buildSteps(events: RawEvent[]): TraceStep[] {
+export function buildSteps(events: RawEvent[]): TraceStep[] {
   const steps: TraceStep[] = []
   const pendingTools = new Map<string, ToolStep>()
 
   for (const ev of events) {
-    if (ev.schema_version === 1) {
-      if (ev.type === 'progress') steps.push({ kind: 'reply', text: `[Offload ${ev.tool_category || ev.native_type || 'progress'}]` })
-      else if (ev.type === 'final') steps.push({ kind: 'final', isError: ev.status !== 'ok', subtype: `Offload ${ev.status || 'unknown'}`, text: ev.error_kind || 'Final answer is recorded in the run result.' })
+    if (!ev || typeof ev !== 'object' || typeof ev.type !== 'string') continue
+    if (ev.schema_version != null) {
+      const timestamp = typeof ev.timestamp === 'string' && Number.isFinite(Date.parse(ev.timestamp)) ? ev.timestamp : undefined
+      const text = (value: unknown) => typeof value === 'string' ? value : ''
+      const context = { source: 'Offload', timestamp, runID: text(ev.run_id) }
+      if (ev.schema_version !== 1) {
+        steps.push({kind: 'reply', text: 'Unsupported Offload event version', ...context})
+        continue
+      }
+      if (ev.type === 'start') steps.push({ kind: 'reply', text: 'Execution started', ...context })
+      else if (ev.type === 'progress') steps.push({ kind: 'reply', text: `Progress · ${text(ev.native_type) || 'activity'}${text(ev.tool_category) ? ` · tool: ${ev.tool_category}` : ''}`, ...context })
+      else if (ev.type === 'final') steps.push({ kind: 'final', isError: ev.status !== 'ok', subtype: `Execution finished · ${text(ev.status) || 'unknown'} · exit: ${typeof ev.exit_code === 'number' ? ev.exit_code : 'unknown'}`, text: text(ev.error_kind) || 'Final answer is recorded in the run result.', ...context })
+      else steps.push({kind: 'reply', text: `Unknown event · ${text(ev.type)}`, ...context})
       continue
     }
+    const text = (value: unknown) => typeof value === 'string' ? value : ''
+    if (ev.version != null && ev.version !== 1) {
+      steps.push({kind: 'reply', source: 'Unknown historical source', text: 'Unsupported historical event version'})
+      continue
+    }
+    if (ev.type === 'system' || ev.type === 'result') pendingTools.clear()
+    const first = steps.length
+    const source = ev.version === 1 ? 'Legacy AGH' : 'Legacy Claude'
     if (ev.version === 1) {
       if (ev.type === 'observation' && ev.observation) {
         const o = ev.observation
-        if (o.delta) {
+        if (typeof o.delta === 'string' && o.delta) {
           const last = steps[steps.length - 1]
-          if (last?.kind === 'reply') last.text += o.delta
+          if (last?.kind === 'reply' && last.source === source) last.text += o.delta
           else steps.push({ kind: 'reply', text: o.delta })
         }
         if (o.tool) {
@@ -127,30 +149,33 @@ function buildSteps(events: RawEvent[]): TraceStep[] {
           if (prior && tool.stage !== 'call') {
             prior.result = { body: resultBody(tool.output), isError: !!tool.is_error }
           } else {
-            const step: ToolStep = { kind: 'tool', name: tool.name || o.type, input: tool.input }
+            const step: ToolStep = { kind: 'tool', name: text(tool.name) || text(o.type) || 'tool', input: tool.input }
             steps.push(step)
             if (tool.id) pendingTools.set(tool.id, step)
           }
-        } else if (o.message && !o.delta) steps.push({ kind: 'reply', text: `[AGH ${o.type}] ${o.message}` })
+        } else if (o.message && !o.delta) steps.push({ kind: 'reply', text: `[AGH ${text(o.type)}] ${text(o.message)}` })
       } else if (ev.type === 'result' && ev.result && typeof ev.result === 'object') {
-        steps.push({ kind: 'final', isError: ev.result.status !== 'completed', subtype: `AGH ${ev.result.status} · usage unknown`, text: ev.result.text || ev.result.error })
+        steps.push({ kind: 'final', isError: ev.result.status !== 'completed', subtype: `AGH ${text(ev.result.status) || 'unknown'} · usage unknown`, text: text(ev.result.text) || text(ev.result.error) })
       }
+      for (const step of steps.slice(first)) { step.source = source; step.timestamp = typeof ev.timestamp === 'string' ? ev.timestamp : undefined }
       continue
     }
-    if (ev.type === 'assistant' && ev.message?.content) {
-      for (const c of ev.message.content) {
-        if (c.type === 'thinking' && c.thinking?.trim()) {
+    if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
+      for (const c of ev.message!.content!) {
+        if (!c || typeof c !== 'object') continue
+        if (c.type === 'thinking' && typeof c.thinking === 'string' && c.thinking.trim()) {
           steps.push({ kind: 'thinking', text: c.thinking.trim() })
-        } else if (c.type === 'text' && c.text) {
+        } else if (c.type === 'text' && typeof c.text === 'string') {
           steps.push({ kind: 'reply', text: c.text })
         } else if (c.type === 'tool_use') {
-          const step: ToolStep = { kind: 'tool', name: c.name || 'tool', input: c.input ?? {} }
+          const step: ToolStep = { kind: 'tool', name: text(c.name) || 'tool', input: c.input ?? {} }
           steps.push(step)
           if (c.id) pendingTools.set(c.id, step)
         }
       }
-    } else if (ev.type === 'user' && ev.message?.content) {
-      for (const c of ev.message.content) {
+    } else if (ev.type === 'user' && Array.isArray(ev.message?.content)) {
+      for (const c of ev.message!.content!) {
+        if (!c || typeof c !== 'object') continue
         if (c.type !== 'tool_result') continue
         const body = resultBody(c.content)
         const target = c.tool_use_id ? pendingTools.get(c.tool_use_id) : undefined
@@ -165,12 +190,13 @@ function buildSteps(events: RawEvent[]): TraceStep[] {
       steps.push({
         kind: 'final',
         isError: !!ev.is_error,
-        subtype: ev.subtype,
-        durationMs: ev.duration_ms,
-        costUsd: ev.total_cost_usd,
+        subtype: `Claude ${text(ev.subtype) || 'result'}`,
+        durationMs: typeof ev.duration_ms === 'number' ? ev.duration_ms : undefined,
+        costUsd: typeof ev.total_cost_usd === 'number' ? ev.total_cost_usd : undefined,
         text: typeof ev.result === 'string' ? ev.result : undefined,
       })
     }
+    for (const step of steps.slice(first)) { step.source = source; step.timestamp = typeof ev.timestamp === 'string' ? ev.timestamp : undefined }
   }
   return steps
 }
@@ -182,7 +208,7 @@ function buildSteps(events: RawEvent[]): TraceStep[] {
 function prettyValue(v: unknown): string {
   if (typeof v === 'string') return v
   try {
-    return JSON.stringify(v, null, 2)
+    return JSON.stringify(v, null, 2) ?? ''
   } catch {
     return String(v)
   }
@@ -217,7 +243,7 @@ function prettyInput(v: unknown): string {
   }
 
   try {
-    return JSON.stringify(v, null, 2).replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+    return (JSON.stringify(v, null, 2) ?? '').replace(/\\n/g, '\n').replace(/\\t/g, '\t')
   } catch {
     return String(v)
   }
@@ -283,7 +309,7 @@ export function TraceView({
     <details open={openByDefault} className="group min-w-0">
       <summary className="cursor-pointer select-none flex items-center gap-2 text-sm font-semibold text-foreground hover:text-foreground/80">
         <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90" />
-        Trace
+        Execution events / legacy transcript
         <span className="font-normal text-muted-foreground">({steps.length} steps)</span>
       </summary>
       <div
@@ -328,12 +354,14 @@ export function TraceView({
             <p className="text-sm px-2 py-3" style={{ color: 'hsl(var(--text-low))' }}>No trace yet.</p>
           ) : (
             steps.map((step, i) => (
-              <StepRow
-                key={i}
-                step={step}
-                isLast={i === steps.length - 1}
-                running={running}
-              />
+              <div key={i} className="min-w-0 [overflow-wrap:anywhere]">
+                <p className="text-xs text-muted-foreground px-2">{step.source} · {step.timestamp && Number.isFinite(Date.parse(step.timestamp)) ? <time dateTime={step.timestamp}>{step.timestamp}</time> : 'timestamp not recorded'}{step.runID && ` · run: ${step.runID}`}</p>
+                <StepRow
+                  step={step}
+                  isLast={i === steps.length - 1}
+                  running={running}
+                />
+              </div>
             ))
           )}
         </div>
@@ -390,7 +418,7 @@ function StepRow({ step, isLast, running }: { step: TraceStep; isLast: boolean; 
                 className="rounded p-3 text-sm"
                 style={{ background: 'hsl(var(--bg-secondary))', border: '1px solid hsl(var(--border))' }}
               >
-                <Markdown>{step.text}</Markdown>
+                <pre className="whitespace-pre-wrap [overflow-wrap:anywhere] min-w-0">{step.text}</pre>
               </div>
             ) : (
               <p className="text-xs italic" style={{ color: 'hsl(var(--text-low))' }}>
@@ -437,7 +465,7 @@ function StepRow({ step, isLast, running }: { step: TraceStep; isLast: boolean; 
                 className="rounded p-3 text-sm"
                 style={{ background: 'hsl(var(--bg-secondary))', border: '1px solid hsl(var(--border))' }}
               >
-                <Markdown>{step.text}</Markdown>
+                <pre className="whitespace-pre-wrap [overflow-wrap:anywhere] min-w-0">{step.text}</pre>
               </div>
             )}
           </div>
