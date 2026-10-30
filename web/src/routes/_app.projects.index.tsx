@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { FolderKanban, ChevronRight, Plus, Loader2, X } from 'lucide-react'
+import { ContextWorkLinks } from '../components/ContextWorkLinks'
 import { cn } from '../lib/utils'
 import { useConfigChanged } from '../lib/configEvents'
 
@@ -162,12 +163,14 @@ function ProjectList() {
                 <th className="text-left px-4 py-2 font-semibold">Project</th>
                 <th className="text-left px-4 py-2 font-semibold">Repos</th>
                 <th className="text-left px-4 py-2 font-semibold">Created</th>
+                <th className="text-left px-4 py-2 font-semibold">工作与用量</th>
                 <th className="w-8" />
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
               {projects.map(p => (
                 <tr key={p.name} className="hover:bg-secondary/20">
+                  <td className="px-4 py-2"><ContextWorkLinks project={p.name} compact /></td>
                   <td className="px-4 py-2">
                     <Link
                       to="/projects/$name"
@@ -185,6 +188,7 @@ function ProjectList() {
                     {p.created_at ? timeAgo(p.created_at) : '—'}
                   </td>
 
+                  <td className="px-4 py-2"><ContextWorkLinks project={p.name} compact /></td>
                   <td className="px-4 py-2">
                     <Link
                       to="/projects/$name"

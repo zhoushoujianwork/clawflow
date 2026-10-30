@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, RotateCw, Link2, Link2Off, FolderOpen, FolderKanban, AlertTriangle } from 'lucide-react'
+import { ChevronLeft, ExternalLink, MessageSquare, Download, Loader2, Link2, Link2Off, FolderOpen, FolderKanban, AlertTriangle } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { repoUrl, type RepoInfoMap, type Platform } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
@@ -9,15 +9,7 @@ import { useChatDrawer } from '../lib/chatContext'
 import { useConfigChanged } from '../lib/configEvents'
 import { findProjectsForRepo, type ProjectEntry } from '../lib/projectMembership'
 import { GitSyncCell, type GitStatus } from '../components/GitSyncCell'
-import {
-  IssueList,
-  REPO_SECTIONS,
-  useIssueGroups,
-  rowKey,
-  type IssueEntry,
-  type PendingEntry,
-  type Run,
-} from '../components/IssueList'
+import { ContextWorkLinks } from '../components/ContextWorkLinks'
 
 interface Repo {
   full_name: string
@@ -45,19 +37,11 @@ function RepoDetail() {
   const chatDrawer = useChatDrawer()
 
   const [repo, setRepo] = useState<Repo | null>(null)
-  const [runs, setRuns] = useState<Run[]>([])
-  const [pending, setPending] = useState<PendingEntry[]>([])
   const [loading, setLoading] = useState(true)
-  // expanded keys are `repo:issue_number` strings — single-repo on this
-  // page but the renderer is shared with the project-level list which
-  // is multi-repo, so the key shape is the union.
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
   const [cloning, setCloning] = useState(false)
   const [cloneError, setCloneError] = useState<string | null>(null)
-  const [syncing, setSyncing] = useState(false)
   const [binding, setBinding] = useState(false)
-  const [allIssues, setAllIssues] = useState<IssueEntry[]>([])
   const [hostname, setHostname] = useState<string>('')
   const [ideScheme, setIdeScheme] = useState('vscode://file/')
   const [owningProjects, setOwningProjects] = useState<string[]>([])
@@ -94,18 +78,12 @@ function RepoDetail() {
   const refreshData = useCallback(() => {
     return Promise.all([
       fetch('/data/repos.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-      fetch('/api/runs', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-      fetch('/data/pending.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-      fetch('/data/issues.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
       fetch('/api/settings', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
       fetch('/data/projects.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
       fetch('/api/repo/git-status', { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).catch(() => []),
-    ]).then(([repos, allRuns, allPending, allIssuesData, settings, projects, gitStatuses]) => {
+    ]).then(([repos, settings, projects, gitStatuses]) => {
       const match = (Array.isArray(repos) ? repos : []).find((x: Repo) => x.full_name === fullName) || null
       setRepo(match)
-      setRuns((Array.isArray(allRuns) ? allRuns : []).filter((r: Run) => r.repo === fullName))
-      setPending((Array.isArray(allPending) ? allPending : []).filter((p: PendingEntry) => p.repo === fullName))
-      setAllIssues((Array.isArray(allIssuesData) ? allIssuesData : []).filter((i: IssueEntry) => i.repo === fullName))
       if (settings?.global?.hostname) setHostname((settings.global.hostname as string).toLowerCase().replace(/\.local$/, ''))
       if (settings?.global?.default_ide) {
         const ide = settings.global.default_ide as string
@@ -129,25 +107,6 @@ function RepoDetail() {
     if (s?.repo !== fullName) return
     setGitStatus(s)
   }, [fullName])
-
-  const syncNow = useCallback(() => {
-    if (syncing) return
-    setSyncing(true)
-    // Refresh just this repo's issue states (open/closed/labels/title).
-    // Cheap synchronous endpoint — no operator runs are triggered, no
-    // 10-most-recent cap on closed issues. The endpoint rewrites this
-    // repo's slice of issues.json and returns; we then re-read it.
-    fetch('/api/repo/refresh-issues', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: fullName }),
-    })
-      .catch(() => {})
-      .finally(() => {
-        refreshData().finally(() => setSyncing(false))
-      })
-  }, [fullName, syncing, refreshData])
-
 
   const toggleBind = useCallback(() => {
     if (!repo || binding) return
@@ -226,69 +185,11 @@ function RepoDetail() {
 
   const repoVcsUrl = repo ? repoUrl(repo.full_name, repoMap) : null
 
-  const slug = fullName.replace(/\//g, '__')
-
   // "Mine" = bound to the hostname this dashboard is running on. Until
   // hostname has loaded we err on "mine" so the page doesn't briefly
   // flash a disabled state for repos that are in fact bound here.
   const boundToMe = !hostname || (!!repo?.bound_machine && repo.bound_machine === hostname)
-  const claimedByOther = !!repo?.bound_machine && !!hostname && repo.bound_machine !== hostname
   const inactive = !boundToMe
-
-  // Merge runs / pending / issues into per-issue groups via the shared
-  // hook. Single-repo page → no extra filtering needed (the `setX`
-  // callers in refreshData already scope to this repo).
-  const issueGroups = useIssueGroups({ issues: allIssues, runs, pending })
-
-  // Auto-expand parent (tracking) issues so their sub-issues are visible by
-  // default — a tracking issue with unopened sub-issues collapsed looks like
-  // dead-end progress, and the ring alone doesn't show *what* is in flight.
-  // Tracked per-key so a user who deliberately collapses a parent isn't
-  // fought on the next data refresh: each parent only gets auto-expanded
-  // once, the first time it's seen.
-  const autoExpandedParents = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    const toAdd = issueGroups
-      .filter(g => (g.sub_total ?? 0) > 0)
-      .map(rowKey)
-      .filter(k => !autoExpandedParents.current.has(k))
-    if (toAdd.length === 0) return
-    for (const k of toAdd) autoExpandedParents.current.add(k)
-    setExpanded(prev => {
-      const next = new Set(prev)
-      for (const k of toAdd) next.add(k)
-      return next
-    })
-  }, [issueGroups])
-
-  // Same 4-bucket layout the page has shipped with for months — Running,
-  // Pending, Done, Closed (capped at 10 most recent). Encoded in
-  // REPO_SECTIONS so the project-level list can swap in its own.
-  // Pre-bucketed counts are derived for the section header summary.
-  const sectionCounts = useMemo(() => {
-    let running = 0,
-      pendingI = 0,
-      done = 0,
-      closed = 0
-    for (const g of issueGroups) {
-      if (g.state === 'closed') closed++
-      else if (g.runs[0]?.status === 'running') running++
-      else if (g.pending.length > 0) pendingI++
-      else if (g.state === 'open') done++
-      // state === 'unknown': run exists but no issues.json entry — not counted
-      // in any bucket to match the Done section's explicit state === 'open' filter.
-    }
-    return { running, pending: pendingI, done, closed }
-  }, [issueGroups])
-
-  function toggle(k: string) {
-    setExpanded(prev => {
-      const next = new Set(prev)
-      if (next.has(k)) next.delete(k)
-      else next.add(k)
-      return next
-    })
-  }
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
@@ -473,92 +374,9 @@ function RepoDetail() {
             </button>
           </div>
 
-          {inactive ? (
-            <div className="bg-card border border-dashed border-border rounded-xl p-6 text-center">
-              <Link2Off className="w-5 h-5 text-muted-foreground/60 mx-auto mb-2" />
-              <p className="text-sm text-foreground font-medium">
-                {claimedByOther
-                  ? `This repo is bound to ${repo.bound_machine}.`
-                  : 'This repo is not bound to any machine.'}
-              </p>
-              <p className="text-xs text-muted-foreground mt-1 mb-4">
-                {claimedByOther
-                  ? `Issue activity is hidden here so it doesn't compete with ${repo.bound_machine}.`
-                  : `Bind it to ${hostname || 'this machine'} to start running operators on it from here.`}
-              </p>
-              <button
-                onClick={toggleBind}
-                disabled={binding}
-                className={cn(
-                  'inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors',
-                  binding
-                    ? 'bg-secondary text-muted-foreground cursor-not-allowed'
-                    : 'bg-blue-600 text-white hover:bg-blue-700',
-                )}
-              >
-                {binding ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" /> Binding…
-                  </>
-                ) : (
-                  <>
-                    <Link2 className="w-4 h-4" />
-                    {claimedByOther
-                      ? `Take over (bind to ${hostname || 'this machine'})`
-                      : `Bind to ${hostname || 'this machine'}`}
-                  </>
-                )}
-              </button>
-            </div>
-          ) : (
-            <section>
-              <div className="flex items-baseline gap-2 mb-2">
-                <h2 className="text-sm font-semibold text-foreground">
-                  Issues <span className="font-normal text-muted-foreground">({issueGroups.length})</span>
-                </h2>
-                <span className="text-xs text-muted-foreground">
-                  {sectionCounts.running} running · {sectionCounts.pending} pending · {sectionCounts.done} done · {sectionCounts.closed} closed
-                </span>
-                <button
-                  onClick={syncNow}
-                  disabled={syncing}
-                  title="Sync all issues including pending"
-                  className={cn(
-                    'ml-auto inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border transition-colors',
-                    syncing
-                      ? 'border-border text-muted-foreground bg-secondary/30'
-                      : 'border-border text-foreground hover:bg-secondary/50',
-                  )}
-                >
-                  {syncing ? (
-                    <>
-                      <Loader2 className="w-3 h-3 animate-spin" /> syncing…
-                    </>
-                  ) : (
-                    <>
-                      <RotateCw className="w-3 h-3" /> Sync
-                    </>
-                  )}
-                </button>
-              </div>
+          <ContextWorkLinks repo={fullName} />
+          <RepositoryPolicy fullName={fullName} />
 
-              {issueGroups.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-4">
-                  No activity yet for this repo. Run <code className="px-1 py-0.5 bg-secondary rounded font-mono">clawflow run --repo {repo.full_name}</code>.
-                </p>
-              ) : (
-                <IssueList
-                  groups={issueGroups}
-                  sections={REPO_SECTIONS}
-                  showRepo={false}
-                  repoMap={repoMap}
-                  slug={slug}
-                  expanded={expanded}
-                  onToggle={toggle}
-                />
-              )}
-            </section>
-          )}
         </>
       )}
     </div>
@@ -603,4 +421,24 @@ function ToggleCard({ label, enabled, onToggle, disabled }: {
       </div>
     </button>
   )
+}
+
+// Read the existing pipeline contract; absent evidence stays unknown.
+function RepositoryPolicy({ fullName }: { fullName: string }) {
+  const [policy, setPolicy] = useState<{ ci_required?: boolean; acceptance_required?: boolean } | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setPolicy(null)
+    fetch('/api/pipeline', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (!cancelled) setPolicy(data?.repos?.find((r: { repo: string }) => r.repo === fullName) ?? null) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [fullName])
+  const status = (value?: boolean) => value === undefined ? '未报告' : value ? '必需' : '非必需'
+  return <section aria-label="交付策略" className="border rounded-xl p-4 mt-4 text-sm">
+    <h2 className="font-semibold mb-2">交付策略</h2>
+    <p>CI：{status(policy?.ci_required)} · 独立验收：{status(policy?.acceptance_required)}</p>
+    <p className="text-muted-foreground mt-2">使用 clawflow repo set 管理 CI / 验收策略；自动合并开关保留在上方。</p>
+  </section>
 }
