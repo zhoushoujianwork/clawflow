@@ -12,12 +12,14 @@ struct DashboardView: View {
     @State private var search = ""
     @State private var projectFilter = ""
     var body: some View {
-        NavigationSplitView {
-            List(Destination.allCases, selection: $destination) { item in
-                Label(item.rawValue, systemImage: item.symbol).tag(item)
-            }.navigationSplitViewColumnWidth(min: 130, ideal: 150, max: 190)
-            SettingsLink().padding()
-        } detail: {
+        HStack(spacing: 0) {
+            VStack {
+                List(Destination.allCases, selection: $destination) { item in
+                    Label(item.rawValue, systemImage: item.symbol).tag(item)
+                }
+                SettingsLink().padding()
+            }.frame(width: 150)
+            Divider()
             VStack(spacing: 0) {
                 HStack {
                     Label(model.summary.title, systemImage: model.summary.symbol)
