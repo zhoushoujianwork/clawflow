@@ -276,6 +276,7 @@ type DevelopmentSession struct {
 }
 
 type RunMeta struct {
+	Warnings []string `json:"warnings,omitempty"`
 	ExecutionMetadata
 	Profile string `json:"profile,omitempty"`
 	Backend string `json:"backend,omitempty"`
