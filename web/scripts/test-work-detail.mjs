@@ -18,8 +18,14 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { WorkDetail, AttemptList, workDetailKey, chronologicalAttempts } from './src/components/WorkDetail'
 import { preferences, ItemDetail } from './src/routes/_app.pipeline'
 import { runDetailUrl } from './src/lib/runDetailUrl'
+import { workRows } from './src/components/WorkList'
 import { workDetailFixture } from './scripts/work-detail-fixture.mjs'
-const {item,history} = workDetailFixture()
+const {item,history,board} = workDetailFixture()
+// The browser fixture opens this row through the waiting filter.
+assert.deepEqual(workRows(board.repos, [], 'waiting').map(row=>row.item.issue), [541])
+// Unfinished unknown executions must still be excluded from waiting.
+const unfinished = {...item, executions:item.executions.map(a=>a.attempt_id === 'legacy' ? {...a, ended_at:undefined} : a)}
+assert.equal(workRows([{...board.repos[0], items:[unfinished]}], [], 'waiting').length, 0)
 const ordered = chronologicalAttempts(item.executions)
 assert.deepEqual(ordered.map(a=>a.attempt_id),['legacy','failed-first','repair-success','review'])
 assert.notDeepEqual(item.executions,ordered) // selector does not mutate the polled snapshot
