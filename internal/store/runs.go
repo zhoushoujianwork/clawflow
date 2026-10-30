@@ -51,7 +51,7 @@ type Run struct {
 	UsageReported            bool
 	EventsPath               string
 	LogPath                  string
-	Payload                  string `gorm:"type:jsonb"`
+	Payload                  string
 }
 
 type PilotRun Run
@@ -72,18 +72,27 @@ type RunModelUsage struct {
 func (RunModelUsage) TableName() string { return "run_model_usage" }
 
 func migrateRuns(tx *gorm.DB) error {
-	// AutoMigrate is limited to this versioned, transactional migration.
-	if err := tx.AutoMigrate(&Run{}, &RunModelUsage{}); err != nil {
-		return err
+	for _, table := range []string{"runs", "pilot_runs"} {
+		if err := execAll(tx, `CREATE TABLE `+table+` (
+ run_dir text PRIMARY KEY, repo text, project text, issue_number integer, pr_url text, operator text, status text,
+ started_at timestamp, ended_at timestamp, duration_ms integer, summary text, error text,
+ profile text, backend text, model text, machine text,
+ cost_usd real, input_tokens integer, output_tokens integer, cache_read_input_tokens integer, cache_creation_input_tokens integer,
+ usage_reported boolean, events_path text, log_path text, payload text CHECK (payload IS NULL OR json_valid(payload))
+)`,
+			`CREATE INDEX idx_`+table+`_repo_started ON `+table+` (repo, started_at)`,
+			`CREATE INDEX idx_`+table+`_started ON `+table+` (started_at)`,
+			`CREATE INDEX idx_`+table+`_machine ON `+table+` (machine)`,
+			`CREATE INDEX idx_`+table+`_profile ON `+table+` (profile)`,
+			`CREATE INDEX idx_`+table+`_project_started ON `+table+` (project, started_at)`); err != nil {
+			return err
+		}
 	}
-	// A separate table uses distinct index names, including the project index.
-	return tx.Exec(`CREATE TABLE pilot_runs (LIKE runs INCLUDING DEFAULTS INCLUDING CONSTRAINTS);
- ALTER TABLE pilot_runs ADD PRIMARY KEY (run_dir);
- CREATE INDEX idx_pilot_runs_repo_started ON pilot_runs (repo, started_at);
- CREATE INDEX idx_pilot_runs_started ON pilot_runs (started_at);
- CREATE INDEX idx_pilot_runs_machine ON pilot_runs (machine);
- CREATE INDEX idx_pilot_runs_profile ON pilot_runs (profile);
- CREATE INDEX idx_pilot_runs_project_started ON pilot_runs (project, started_at);`).Error
+	return execAll(tx, `CREATE TABLE run_model_usage (
+ run_dir text NOT NULL, kind text NOT NULL, model text NOT NULL,
+ cost_usd real, input_tokens integer, output_tokens integer, cache_read_input_tokens integer, cache_creation_input_tokens integer,
+ PRIMARY KEY (run_dir, kind, model)
+)`)
 }
 
 func unknown(s string) string {
@@ -247,10 +256,7 @@ func (s *Store) UpsertRun(ctx context.Context, dir, kind string, raw []byte) (st
 		// Serialize attributed replays across import paths, never by session.
 		attributed := r.OffloadRunID != "" && r.Machine != "unknown"
 		if attributed {
-			key := kind + ":attempt:" + r.Machine + ":" + r.OffloadRunID
-			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", key).Error; err != nil {
-				return err
-			}
+			// The immediate transaction already serializes attributed replays.
 			var existing Run
 			err := tx.Table(table).Where("machine = ? AND offload_run_id = ?", r.Machine, r.OffloadRunID).Take(&existing).Error
 			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -262,9 +268,6 @@ func (s *Store) UpsertRun(ctx context.Context, dir, kind string, raw []byte) (st
 					models[i].RunDir = r.RunDir
 				}
 			}
-		}
-		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", kind+":"+r.RunDir).Error; err != nil {
-			return err
 		}
 		var old Run
 		err := tx.Table(table).Where("run_dir = ?", r.RunDir).Take(&old).Error
@@ -445,17 +448,12 @@ func RunPayloads(rows []Run, root string) ([]map[string]any, error) {
 // migrateExecutionEvidence adds nullable evidence without backfilling success.
 func migrateExecutionEvidence(tx *gorm.DB) error {
 	for _, table := range []string{"runs", "pilot_runs"} {
-		if err := tx.Exec("ALTER TABLE " + table + `
- ADD COLUMN IF NOT EXISTS offload_run_id text,
- ADD COLUMN IF NOT EXISTS caller_run_id text,
- ADD COLUMN IF NOT EXISTS session_id text,
- ADD COLUMN IF NOT EXISTS exit_code bigint,
- ADD COLUMN IF NOT EXISTS error_kind text,
- ADD COLUMN IF NOT EXISTS elapsed_ms bigint,
- ADD COLUMN IF NOT EXISTS execution_status text`).Error; err != nil {
-			return err
+		for _, column := range []string{"offload_run_id text", "caller_run_id text", "session_id text", "exit_code integer", "error_kind text", "elapsed_ms integer", "execution_status text"} {
+			if err := tx.Exec("ALTER TABLE " + table + " ADD COLUMN " + column).Error; err != nil {
+				return err
+			}
 		}
-		if err := tx.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + table + "_offload_attempt ON " + table + " (machine, offload_run_id) WHERE offload_run_id <> '' AND machine <> '' AND machine <> 'unknown'").Error; err != nil {
+		if err := tx.Exec("CREATE UNIQUE INDEX idx_" + table + "_offload_attempt ON " + table + " (machine, offload_run_id) WHERE offload_run_id <> '' AND machine <> '' AND machine <> 'unknown'").Error; err != nil {
 			return err
 		}
 	}

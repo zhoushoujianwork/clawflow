@@ -100,7 +100,7 @@ func TestLocalWorkerDisabled(t *testing.T) {
 	stop()
 }
 
-// The coordinator and worker use real TLS and PostgreSQL; only operator work
+// The coordinator and worker use real TLS and SQLite; only operator work
 // and the external VCS/native reviewer are fixtures. Each result is recovered by
 // a new applier to exercise the persisted protocol rather than an in-memory path.
 func TestCoordinatorWorkerLifecycle(t *testing.T) {

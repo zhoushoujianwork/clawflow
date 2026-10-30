@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type Invitation struct {
@@ -72,7 +71,7 @@ func (s *Store) Exchange(ctx context.Context, secret string) (map[string]string,
 	credentialHash := sha256.Sum256([]byte(credential))
 	var invitation Invitation
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("hash = ? AND consumed = false AND expires_at > clock_timestamp()", hash[:]).First(&invitation).Error; err != nil {
+		if err := tx.Where("hash = ? AND consumed = false AND expires_at > ?", hash[:], controllerNow()).First(&invitation).Error; err != nil {
 			return ErrToken
 		}
 		if err := tx.Create(&storedToken{Token: Token{Name: invitation.Name, Scope: ScopeWorker, CreatedAt: time.Now().UTC()}, Hash: credentialHash[:]}).Error; err != nil {
@@ -95,7 +94,7 @@ func (s *Store) Exchange(ctx context.Context, secret string) (map[string]string,
 func (s *Store) SetWorkerPaused(ctx context.Context, name string, paused bool) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var worker Worker
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&worker, "id = ?", name).Error; err != nil {
+		if err := tx.First(&worker, "id = ?", name).Error; err != nil {
 			return ErrInvalid
 		}
 		if !paused {
@@ -120,7 +119,7 @@ func (s *Store) SetWorkerPaused(ctx context.Context, name string, paused bool) e
 func (s *Store) RemoveWorker(ctx context.Context, name string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var worker Worker
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&worker, "id = ?", name).Error; err != nil {
+		if err := tx.First(&worker, "id = ?", name).Error; err != nil {
 			return ErrInvalid
 		}
 		if !worker.Paused {

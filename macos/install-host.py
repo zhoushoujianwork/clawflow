@@ -18,10 +18,49 @@ def run(*args, check=True):
     return subprocess.run(args, capture_output=True, check=check)
 
 
+POSTGRES_LABEL = 'com.zhoushoujianwork.clawflow.postgres'
+
+
+def retire_postgres(apply):
+    """Unload ClawFlow's dedicated PostgreSQL LaunchAgent after a completed cutover.
+
+    Touches only com.zhoushoujianwork.clawflow.postgres. The plist is renamed (not
+    deleted) and the PostgreSQL data directory is left alone, so `clawflow db
+    rollback` and manual recovery stay possible. Other PostgreSQL services are
+    never inspected or stopped.
+    """
+    home = Path.home()
+    root = home / 'Library/Application Support/ClawFlow'
+    record = root / 'data/cutover.json'
+    database = root / 'data/clawflow.sqlite3'
+    if not record.is_file() or not database.is_file():
+        raise SystemExit('No completed cutover found; run clawflow db cutover and the acceptance checks first')
+    info = json.loads(record.read_text())
+    if info.get('rolled_back'):
+        raise SystemExit('The cutover was rolled back; PostgreSQL is still the active store')
+    plist = home / 'Library/LaunchAgents' / (POSTGRES_LABEL + '.plist')
+    domain = f'gui/{os.getuid()}'
+    loaded = run('launchctl', 'print', f'{domain}/{POSTGRES_LABEL}', check=False).returncode == 0
+    print(f'Cutover: {info.get("cutover_at")}\nSQLite: {database}\nPostgreSQL agent loaded: {loaded}; plist present: {plist.exists()}')
+    if not apply:
+        print('Preview only. Use --apply to unload the dedicated PostgreSQL agent.')
+        return
+    if loaded:
+        run('launchctl', 'bootout', f'{domain}/{POSTGRES_LABEL}')
+    if plist.exists():
+        plist.rename(plist.with_suffix('.plist.retired'))
+    print('Retired. The PostgreSQL data directory and the pre-cutover config backup were left untouched.')
+
+
 def install():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true', help='apply migration and reload services')
+    parser.add_argument('--retire-postgres', action='store_true',
+                        help="after a completed cutover, unload only ClawFlow's dedicated PostgreSQL LaunchAgent")
     args = parser.parse_args()
+    if args.retire_postgres:
+        retire_postgres(args.apply)
+        return
     if sys.platform != 'darwin':
         raise SystemExit('macOS is required')
     home = Path.home()
@@ -34,7 +73,7 @@ def install():
     plists = []
     for path in agents.glob('com.zhoushoujianwork.clawflow.*.plist'):
         data = plistlib.loads(path.read_bytes())
-        if data['Label'].endswith(('.postgres', '.controller', '.app')) or '.worker-' in data['Label']:
+        if data['Label'].endswith(('.controller', '.app')) or '.worker-' in data['Label']:
             plists.append((path, data))
     if legacy.is_symlink() and legacy.resolve() != root:
         raise SystemExit('Legacy path points to an unexpected destination')
@@ -69,7 +108,7 @@ def install():
     app = run('pgrep', '-f', '^/Applications/ClawFlow.app/Contents/MacOS/ClawFlow$', check=False)
     for pid in app.stdout.split():
         os.kill(int(pid), 15)
-    for path, data in sorted(plists, key=lambda pair: pair[1]['Label'].endswith('.postgres')):
+    for path, data in plists:
         status = run('launchctl', 'print', domain + '/' + data['Label'], check=False)
         if status.returncode == 0:
             run('launchctl', 'bootout', domain + '/' + data['Label'])
@@ -115,8 +154,9 @@ def install():
         data = plistlib.loads(rewrite(plistlib.dumps(data).decode()).encode())
         path.write_bytes(plistlib.dumps(data))
         run('plutil', '-lint', str(path))
-    # Dependencies may start in any order at login. KeepAlive retries readiness failures.
-    for path, data in sorted(plists, key=lambda pair: 0 if pair[1]['Label'].endswith('.postgres') else 2 if pair[1]['Label'].endswith('.app') else 1):
+    # The controller owns an embedded SQLite file, so there is no database to order
+    # before it. KeepAlive retries readiness failures at login.
+    for path, data in sorted(plists, key=lambda pair: 2 if pair[1]['Label'].endswith('.app') else 1):
         run('launchctl', 'bootstrap', domain, str(path))
     print('Migration applied. Legacy aliases retained; verify controller and worker readiness.')
 
