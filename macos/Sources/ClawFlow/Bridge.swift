@@ -88,7 +88,8 @@ final class BridgeProcess: @unchecked Sendable {
                         lock.lock(); let cancelled = stopped; let data = output; let errors = diagnostic; lock.unlock()
                         if cancelled { throw DashboardError.message("Controller request timed out or was cancelled. Refresh before repeating a change.") }
                         guard process.terminationStatus == 0 else {
-                            let message = String(data: errors.prefix(2048), encoding: .utf8) ?? "Controller request failed."
+                            let raw = String(data: errors.prefix(2048), encoding: .utf8) ?? "Controller request failed."
+                            let message = raw.components(separatedBy: .newlines).first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? raw
                             throw DashboardError.message(message)
                         }
                         continuation.resume(returning: data)

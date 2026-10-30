@@ -1,6 +1,7 @@
 import SwiftUI
 
 @MainActor final class DashboardModel: ObservableObject {
+    let localServices = LocalServices()
     @Published var connection = Connection.load()
     @Published private(set) var snapshot: DashboardSnapshot?
     @Published private(set) var received: Date?
@@ -16,6 +17,7 @@ import SwiftUI
 
     func start() {
         guard polling == nil else { return }
+        localServices.start()
         freshnessTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.now = Date() }
         }

@@ -40,10 +40,13 @@ struct MenuSummary: View {
             }
             Button("Open Dashboard") { openWindow(id: "dashboard"); NSApp.activate(ignoringOtherApps: true) }
                 .buttonStyle(.borderedProminent)
+            Divider()
+            LocalServiceControls(services: model.localServices)
+            Divider()
             HStack {
                 SettingsLink()
                 Spacer()
-                Button("Quit") { NSApp.terminate(nil) }
+                Button("Quit App") { NSApp.terminate(nil) }
             }
         }.padding(16).frame(width: 340)
     }

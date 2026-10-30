@@ -8,6 +8,7 @@ struct ConnectionView: View {
     @State private var message: String?
     var body: some View {
         Form {
+            Section { LocalServiceControls(services: model.localServices) }
             Section("Controller connection") {
                 TextField("HTTPS address", text: $draft.url, prompt: Text("https://controller.local:8093"))
                 TextField("Admin token file", text: $draft.tokenFile, prompt: Text("~/.clawflow/dashboard.token"))

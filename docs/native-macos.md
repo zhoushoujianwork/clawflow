@@ -44,6 +44,8 @@ The app stores connection metadata, not token contents, in preferences. The CLI 
 
 ## Daily use
 
+The menu-bar panel and Settings show **On this Mac** with installed ClawFlow worker/controller LaunchAgents, process status and Start / Restart / Stop shortcuts. Stop unloads the selected service but retains its plist so Start can load it again. Restart/Stop require confirmation because they interrupt local work. These controls never manage the remote controller. Quit App closes only the viewer. Service commands report acceptance; the next status refresh confirms the process state.
+
 - Tasks shows active attempts first, with attention before running and waiting; History contains settled attempts. Search and project filtering do not change execution. Select a row for its reason, worker, issue/PR link and on-demand coordinator activity log. Attempt completion does not imply CI, acceptance or merge passed.
 - Workers shows identity, tags, roles, active/capacity and last contact. Stop new assignments drains a worker; it keeps renewing and completing existing leases. Removal requires a paused worker with no unsettled leases and revokes its credential while retaining history.
 - Projects groups repositories and displays independent CI, acceptance and merge settings. Pause/Resume changes repository monitoring only. Queued or active worker tasks are unaffected; use worker drain when you need to stop new assignments. Advanced policy editing stays in the CLI.
