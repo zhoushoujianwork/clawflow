@@ -48,7 +48,27 @@ struct WorkerRow: Decodable, Identifiable {
     var state: String { revoked ? "Removed" : !live ? "Offline" : paused ? "Assignments paused" : "Ready" }
 }
 enum TaskGroup: Int { case attention, running, waiting, history }
+enum TaskActivity {
+    case development, review, repair, reply, unknown
+    init(kind: String) {
+        switch kind { case "implement": self = .development; case "acceptance": self = .review; case "repair": self = .repair; case "reply": self = .reply; default: self = .unknown }
+    }
+    var title: String {
+        switch self { case .development: return "Development"; case .review: return "PR Review"; case .repair: return "PR Repair"; case .reply: return "Issue Reply"; case .unknown: return "Unknown activity" }
+    }
+    var symbol: String {
+        switch self { case .development: return "hammer"; case .review: return "checkmark.shield"; case .repair: return "wrench.and.screwdriver"; case .reply: return "text.bubble"; case .unknown: return "questionmark.circle" }
+    }
+}
 struct TaskRow: Decodable, Identifiable {
+    let startedAt: Date?
+    let endedAt: Date?
+    func elapsed(at now: Date) -> String {
+        guard let startedAt else { return "Duration unavailable" }
+        let seconds = max(0, Int((endedAt ?? now).timeIntervalSince(startedAt)))
+        return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    }
+
 	let subject: String?
     let id: String
     let repo: String
@@ -63,9 +83,10 @@ struct TaskRow: Decodable, Identifiable {
     let waitingReason: String?
     let applicationError: String?
     let tags: [String]
+    var activity: TaskActivity { TaskActivity(kind: kind) }
     var group: TaskGroup {
         if ["done", "failed", "cancelled"].contains(state) { return .history }
-        if stage == "lease_expired" || !(applicationError ?? "").isEmpty { return .attention }
+        if stage == "lease_expired" || stage == "recovery_pending" || !(applicationError ?? "").isEmpty { return .attention }
         if stage == "running" || stage == "finalizing" { return .running }
         if state == "pending" { return .waiting }
         return .attention
@@ -74,6 +95,7 @@ struct TaskRow: Decodable, Identifiable {
     var status: String {
         switch stage {
         case "lease_expired": return "Connection lost"
+        case "recovery_pending": return "Needs recovery"
         case "running": return "Running"
         case "finalizing": return "Finalizing result"
         case "pending": return "Waiting"
@@ -100,13 +122,44 @@ struct TaskRow: Decodable, Identifiable {
         guard pr > 0 else { return nil }
         return base.appendingPathComponent(repo.platform == "gitlab" ? "-/merge_requests/\(pr)" : "pull/\(pr)")
     }
+    func prLink(in snapshot: DashboardSnapshot) -> URL? {
+        guard pr > 0, let repo = snapshot.repository(repo), let base = safeWebURL(repo.url) else { return nil }
+        return base.appendingPathComponent(repo.platform == "gitlab" ? "-/merge_requests/\(pr)" : "pull/\(pr)")
+    }
 }
 struct ProjectRow: Decodable, Identifiable {
     var id: String { name }
     let name: String
     let repos: [RepoRow]
 }
+struct IssueQueueRow: Decodable, Identifiable {
+    var id: String { key }
+    let key: String
+    let position: Int
+    let number: Int
+    let title: String?
+    let tier: String
+    let state: String
+    var status: String {
+        if state.hasPrefix("waiting:needs-confirmation") || state.hasPrefix("waiting:coordination_needs_confirmation") { return "Needs confirmation" }
+        if state.hasPrefix("closed:superseded") { return "Superseded" }
+        if state.hasPrefix("closed:already-delivered") { return "Already delivered" }
+        if state.hasPrefix("eligible:coordination checked") { return "Ready / coordination checked" }
+        switch state.split(separator: ":").first.map(String.init) {
+        case "in_flight": return "In progress"
+        case "eligible": return "Ready / waiting for capacity"
+        case "blocked": return "Blocked"
+        case "parked": return "Parked"
+        case "waiting": return "Waiting"
+        default: return "Unknown"
+        }
+    }
+}
 struct RepoRow: Decodable, Identifiable {
+    let issueQueue: [IssueQueueRow]?
+    let queueUpdatedAt: Date?
+    let queueError: String?
+    let skippedIssues: Int?
     var id: String { name }
     let name: String
     let url: String

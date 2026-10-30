@@ -49,7 +49,7 @@ func NewHandler(store WorkerStore) http.Handler {
 			}
 			if len(parts) == 3 && parts[0] == "tasks" && len(parts[1]) <= 128 && parts[1] != "" {
 				switch parts[2] {
-				case "heartbeat", "complete", "fail":
+				case "heartbeat", "complete", "fail", "recover":
 					action = parts[2]
 					task = parts[1]
 				}
@@ -103,6 +103,7 @@ func NewHandler(store WorkerStore) http.Handler {
 			switch action {
 			case "register":
 				input := struct {
+					Durable     bool     `json:"durable"`
 					Tags        []string `json:"tags"`
 					RunUntagged bool     `json:"run_untagged"`
 					MaxParallel int      `json:"max_parallel"`
@@ -114,15 +115,28 @@ func NewHandler(store WorkerStore) http.Handler {
 					status = 400
 					return err
 				}
-				err = store.RegisterWorker(ctx, Worker{ID: worker, Tags: input.Tags, RunUntagged: input.RunUntagged, MaxParallel: input.MaxParallel, Roles: input.Roles, Backend: input.Backend, Model: input.Model})
+				err = store.RegisterWorker(ctx, Worker{Durable: input.Durable, ID: worker, Tags: input.Tags, RunUntagged: input.RunUntagged, MaxParallel: input.MaxParallel, Roles: input.Roles, Backend: input.Backend, Model: input.Model})
 				output = map[string]string{"worker_id": worker}
 			case "claim":
-				if err := decode(&struct{}{}); err != nil {
+				var request struct {
+					ClaimID string `json:"claim_id"`
+				}
+				if err := decode(&request); err != nil {
 					status = 400
 					return err
 				}
 				var claimed *Task
-				claimed, err = store.Claim(ctx, worker)
+				if request.ClaimID != "" {
+					claimer, ok := store.(interface {
+						ClaimWithID(context.Context, string, string) (*Task, error)
+					})
+					if !ok {
+						return ErrInvalid
+					}
+					claimed, err = claimer.ClaimWithID(ctx, worker, request.ClaimID)
+				} else {
+					claimed, err = store.Claim(ctx, worker)
+				}
 				output = map[string]any{"task": claimed}
 			default:
 				var input struct {
@@ -134,6 +148,16 @@ func NewHandler(store WorkerStore) http.Handler {
 					return err
 				}
 				switch action {
+				case "recover":
+					recovery, ok := store.(interface {
+						RecoverExecution(context.Context, string, string, int64) (*Task, error)
+					})
+					if !ok {
+						return ErrInvalid
+					}
+					var recovered *Task
+					recovered, err = recovery.RecoverExecution(ctx, task, worker, input.FencingToken)
+					output = map[string]any{"task": recovered}
 				case "heartbeat":
 					err = store.Heartbeat(ctx, task, worker, input.FencingToken)
 				case "complete":

@@ -21,6 +21,13 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+python3 - "$app/Contents/Info.plist" "${CLAWFLOW_APP_VERSION:-$(git describe --tags --always)}" "${CLAWFLOW_APP_CHANNEL:-source}" <<'PYMETA'
+import plistlib, sys, time
+path, version, channel = sys.argv[1:]
+with open(path, 'rb') as f: info = plistlib.load(f)
+info.update(CFBundleShortVersionString=version.removeprefix('v'), CFBundleVersion=str(int(time.time())), ClawFlowBuildChannel=channel)
+with open(path, 'wb') as f: plistlib.dump(info, f)
+PYMETA
 codesign --force --sign - "$app/Contents/Helpers/clawflow"
 codesign --force --sign - "$app"
 plutil -lint "$app/Contents/Info.plist"

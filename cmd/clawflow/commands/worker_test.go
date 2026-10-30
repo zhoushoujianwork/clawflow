@@ -22,6 +22,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/clone"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
@@ -110,7 +111,7 @@ func TestCoordinatorDisabled(t *testing.T) {
 
 // Exercise the wire protocol with the same pinned TLS client used by the CLI.
 func TestWorkerClaimExecuteReport(t *testing.T) {
-	for _, mode := range []string{"success", "lease-lost", "heartbeat-error", "tags", "untagged", "digest"} {
+	for _, mode := range []string{"success", "lease-lost", "heartbeat-error", "tags", "untagged", "digest", "coordination-stale"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
 			ctx, cancel := context.WithCancel(context.Background())
@@ -163,7 +164,9 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 						t.Error("missing fencing token")
 					}
 					if strings.HasSuffix(r.URL.Path, "heartbeat") {
-						if mode == "success" {
+						// Rejection tests must not race an unintended lease
+						// loss while preparing their completion report.
+						if mode != "lease-lost" && mode != "heartbeat-error" {
 							select {
 							case renewed <- struct{}{}:
 							default:
@@ -235,6 +238,9 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 				return true, false, false
 			}
 			build := func(ctx context.Context, task *coordinator.Task) (*runJob, time.Duration, error) {
+				if mode == "coordination-stale" {
+					return nil, 0, errCoordinationChanged
+				}
 				if mode == "digest" {
 					return buildWorkerJob(ctx, task, operator.NewRegistry())
 				}
@@ -251,6 +257,10 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 				case "success":
 					if result.Status != "success" || len(result.Effects) != 1 {
 						t.Fatalf("bad result: %+v", result)
+					}
+				case "coordination-stale":
+					if executed.Load() || result.Status != "blocked" || result.NextOwner != "scheduling" || result.InfraKind != "launch" || len(result.Effects) > 0 {
+						t.Fatalf("stale context reached execution or terminal outcome: %+v", result)
 					}
 				case "lease-lost", "heartbeat-error":
 					t.Fatalf("lost lease uploaded a result: %+v", result)
@@ -399,7 +409,7 @@ func TestWorkerCommandRegistration(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 				t.Error(err)
 			}
-			if !slices.Contains(input.Tags, "github") || !slices.Contains(input.Tags, "host-"+strings.TrimSuffix(strings.ToLower(hostname), ".local")) || input.MaxParallel != 2 {
+			if !slices.Contains(input.Tags, coordination.WorkerTag) || !slices.Contains(input.Tags, "github") || !slices.Contains(input.Tags, "host-"+strings.TrimSuffix(strings.ToLower(hostname), ".local")) || input.MaxParallel != 2 {
 				t.Errorf("bad capabilities: %+v", input)
 			}
 			if snapshot.StateDir() != flagState {

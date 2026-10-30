@@ -22,6 +22,9 @@ func TestExecutionEventsHelper(t *testing.T) {
 		return
 	}
 	args := offloadtest.Args()
+	if expected := os.Getenv("CLAWFLOW_EXPECT_RESUME"); expected != "" && args["-r"] != expected {
+		os.Exit(3)
+	}
 	_, _ = io.Copy(io.Discard, os.Stdin)
 	f, err := os.OpenFile(args["-events-file"], os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {

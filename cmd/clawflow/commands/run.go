@@ -29,6 +29,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/branch"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
@@ -655,7 +656,21 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 			return err
 		}
 	} else {
-		fired, failed = runJobsParallel(ctx, jobs, workers, timeout)
+		var ready []*runJob
+		for _, j := range jobs {
+			if j.harvest != nil {
+				ready = append(ready, j)
+				continue
+			}
+			allowed, checkErr := coordinateDispatch(ctx, j, nil)
+			if checkErr != nil {
+				runLog.Warn("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", checkErr.Error())
+			}
+			if allowed && checkErr == nil {
+				ready = append(ready, j)
+			}
+		}
+		fired, failed = runJobsParallel(ctx, ready, workers, timeout)
 	}
 
 	// Phase 3 (sequential): drop pending entries that fired, then write
@@ -756,6 +771,8 @@ func failedRunsError(failed []firedKey) error {
 // runJob is one (issue, operator) pair that scanRepoOnce decided is
 // eligible to fire. The worker pool in runJobsParallel consumes these.
 type runJob struct {
+	coordination *coordination.Snapshot
+
 	acceptancePlan *acceptance.Plan
 	hooks          *jobHooks
 	result         *jobResult
@@ -1156,6 +1173,9 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			}
 		}
 		plan := planRepoQueue(repoQueueInput{
+			CoordinationHold: func(issue vcs.Issue, prs []vcs.PR) string {
+				return coordinationHold(fullName, issue, issues, prs, repoCfg.CoordinatorActive)
+			},
 			PRFiles: func(n int) ([]string, error) {
 				if p, ok := client.(vcs.PRFileProvider); ok {
 					return p.ListPRFiles(fullName, n)
@@ -1682,7 +1702,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	var wtResult worktreeResult
 	var cleanup func()
 	var err error
-	if j.repair != nil {
+	if recovered, ok := execution.RecoveryWorkspace(ctx); ok {
+		wtResult = worktreeResult{Path: recovered, Resumed: true}
+		cleanup = func() {}
+		if j.repair != nil {
+			repairInput, err = buildRepairInput(ctx, recovered, j)
+		}
+	} else if j.repair != nil {
 		var reused bool
 		wtResult, reused = reusableRepairWorktree(ctx, previousRun, j.repo, j.repair.PR)
 		if reused {
@@ -1835,6 +1861,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	})
 	confirmedHead := ""
 	output, outcome, runErr := runJobOperator(ctx, j.op, j.sub, j.client, operator.RunOptions{
+		CoordinationChecked: j.coordination != nil,
+		CoordinationContext: coordinationPrompt(j.coordination),
 		SessionKey:          sessionOpts.SessionKey,
 		ResumePrompt:        sessionOpts.ResumePrompt,
 		OnExecutionResult:   sessionOpts.OnExecutionResult,
@@ -2155,7 +2183,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// delivery is incomplete. Other successful runs retain normal cleanup.
 	pendingDevelopment := rm.Status != "success" || rm.WritebackError != "" || outcome == "agent-failed" || ciRepairEnabled(j.repoCfg) || acceptanceRepairEnabled(j.repoCfg)
 	keepSessionWorktree := pendingDevelopment && rm.DevelopmentSession.SessionID != "" && rm.DevelopmentSession.ErrorKind != "output_limit" && rm.Status != "auth-error" && rm.Status != "cost-limit" && rm.Status != "output-limit"
-	if !keepSessionWorktree && (repairInfra || ((j.repair == nil || (rm.Status == "success" && (outcome == "agent-implemented" || outcome == "no-change"))) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork)))) {
+	if j.hooks == nil && !keepSessionWorktree && (repairInfra || ((j.repair == nil || (rm.Status == "success" && (outcome == "agent-implemented" || outcome == "no-change"))) && (rm.Status == "success" || rm.Status == "skipped-empty" || rm.Status == "no-marker" || rm.Status == "disallowed-outcome" || rm.Status == "auth-error" || rm.Status == "output-limit" || rm.Status == "cost-limit" || (rm.Status == "failed" && !hasPartialWork)))) {
 		cleanup()
 	} else {
 		fmt.Fprintf(os.Stderr, "%s → preserving worktree evidence: %s\n", prefix, workdir)

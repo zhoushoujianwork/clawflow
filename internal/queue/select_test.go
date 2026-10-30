@@ -185,3 +185,17 @@ func TestStateRoundTripAndWarnings(t *testing.T) {
 		t.Fatalf("ListStates = %+v", all)
 	}
 }
+
+func TestCoordinationWaitingDoesNotConsumeCapacity(t *testing.T) {
+	in := SelectInput{Now: time.Now(), MaxInFlight: 1, Candidates: []Candidate{
+		{Item: Item{Key: Key{Repo: "o/r", Number: 1}}, Ineligible: "coordination_waiting — active task"},
+		{Item: Item{Key: Key{Repo: "o/r", Number: 2}}},
+	}}
+	r := Select(in)
+	if len(r.Picks()) != 1 || r.Picks()[0].Number != 2 {
+		t.Fatalf("waiting starved compatible work: %+v", r)
+	}
+	if r.Entries[0].State != StateWaiting {
+		t.Fatalf("not presented as waiting: %+v", r.Entries[0])
+	}
+}

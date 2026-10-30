@@ -17,6 +17,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
@@ -27,6 +28,8 @@ import (
 )
 
 type coordinatorPayload struct {
+	Coordination *coordination.Snapshot `json:"coordination,omitempty"`
+
 	Title             string               `json:"title,omitempty"`
 	Testing           testingRequirements  `json:"testing,omitempty"`
 	AcceptancePlan    *acceptance.Plan     `json:"acceptance_plan,omitempty"`
@@ -123,6 +126,9 @@ func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordi
 			priority++
 		}
 	}
+	if j.coordination != nil {
+		tags = append(tags, coordination.WorkerTag)
+	}
 	sort.Strings(tags)
 	unique := tags[:0]
 	for _, tag := range tags {
@@ -131,6 +137,7 @@ func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordi
 		}
 	}
 	p := coordinatorPayload{Testing: declaredTesting(j.repo, j.repoCfg), Kind: kind, Operator: j.op.Name, SkillDigest: skillDigest(j.op), Repo: j.repo, Platform: platform, BaseURL: j.repoCfg.BaseURL, Issue: j.sub.Number, Role: roleForOperator(j.op.Name), Language: j.language, TimeoutSec: int64(timeout / time.Second), Tags: unique}
+	p.Coordination = j.coordination
 	p.Title = j.sub.Title
 	p.RepoPolicy.AcceptanceSetupCommand = j.repoCfg.AcceptanceSetupCommand
 	p.RepoPolicy.BaseBranch, p.RepoPolicy.TestCommand, p.RepoPolicy.CIRequired = j.repoCfg.BaseBranch, j.repoCfg.TestCommand, j.repoCfg.CIRequired
@@ -200,6 +207,15 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 		if blocked {
 			continue
 		}
+		if source, ok := s.(coordinationTasks); ok {
+			allowed, checkErr := coordinateDispatch(ctx, j, source)
+			if checkErr != nil {
+				runLog.Warn("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", checkErr.Error())
+			}
+			if !allowed || checkErr != nil {
+				continue
+			}
+		}
 		plan, err := prepareImplementationPlan(ctx, j)
 		if err != nil {
 			return fired, failed, err
@@ -216,7 +232,20 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 		}
 		reserved := false
 		var repairPreparationErr error
+		var coordinationPreparationErr error
 		_, err = s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
+			if j.coordination != nil {
+				fresh, e := collectCoordination(ctx, j, nil, "")
+				if e != nil {
+					coordinationPreparationErr = e
+					return e
+				}
+				fresh.Tasks = j.coordination.Tasks
+				if coordination.Digest(fresh) != coordination.Digest(*j.coordination) {
+					coordinationPreparationErr = errCoordinationChanged
+					return coordinationPreparationErr
+				}
+			}
 			if j.repair != nil {
 				repairPreparationErr = prepareCIRepairContext(ctx, j, time.Now().UTC())
 				if repairPreparationErr != nil {
@@ -232,6 +261,17 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 			return err
 		})
 		if err != nil {
+			if errors.Is(err, coordinator.ErrCoordinationChanged) {
+				if reserved {
+					_ = j.releaseRepair("coordination-changed", time.Now().UTC())
+				}
+				runLog.Info("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
+				continue
+			}
+			if coordinationPreparationErr != nil {
+				runLog.Info("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", coordinationPreparationErr.Error())
+				continue
+			}
 			// Match local execution: a repair preparation failure skips only
 			// this job. Store failures and pass cancellation remain fatal.
 			if repairPreparationErr != nil && errors.Is(err, repairPreparationErr) && ctx.Err() == nil {
@@ -300,13 +340,28 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	default:
 		return coordinator.ErrInvalid
 	}
+	ctx = coordinator.WithReportDigest(ctx, raw, failed)
 	t, err := s.tasks.Task(ctx, id)
 	if err != nil {
 		return err
 	}
+	if coordinator.MatchingReport(t, worker, fence, raw, failed) {
+		return nil
+	}
+	if receipts, ok := s.tasks.(interface {
+		ReportAcknowledged(context.Context, string, string, int64, json.RawMessage, bool) (bool, error)
+	}); ok {
+		acknowledged, err := receipts.ReportAcknowledged(ctx, id, worker, fence, raw, failed)
+		if err != nil {
+			return err
+		}
+		if acknowledged {
+			return nil
+		}
+	}
 	// Fast rejection before loading config or creating a VCS client. The store
 	// checks again under a row lock when sealing, including lease expiry.
-	if t.State != "leased" || t.LeaseOwner != worker || t.FencingToken != fence || t.LeaseExpiresAt == nil || !t.LeaseExpiresAt.After(time.Now()) {
+	if t.State != "leased" || t.LeaseOwner != worker || t.FencingToken != fence || t.LeaseExpiresAt == nil || (!coordinator.DurableTask(t) && !t.LeaseExpiresAt.After(time.Now())) {
 		return coordinator.ErrStaleLease
 	}
 	if r.Status == "blocked" {
@@ -549,4 +604,24 @@ func persistDevelopmentEvents(ctx context.Context, t *coordinator.Task, j *runJo
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(r.DevelopmentEvents), 0600)
+}
+
+func (s *coordinatorResults) RecoverExecution(ctx context.Context, id, worker string, epoch int64) (*coordinator.Task, error) {
+	recovery, ok := s.WorkerStore.(interface {
+		RecoverExecution(context.Context, string, string, int64) (*coordinator.Task, error)
+	})
+	if !ok {
+		return nil, coordinator.ErrInvalid
+	}
+	return recovery.RecoverExecution(ctx, id, worker, epoch)
+}
+
+func (s *coordinatorResults) ClaimWithID(ctx context.Context, worker, id string) (*coordinator.Task, error) {
+	claimer, ok := s.WorkerStore.(interface {
+		ClaimWithID(context.Context, string, string) (*coordinator.Task, error)
+	})
+	if !ok {
+		return nil, coordinator.ErrInvalid
+	}
+	return claimer.ClaimWithID(ctx, worker, id)
 }

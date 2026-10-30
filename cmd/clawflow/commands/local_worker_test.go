@@ -104,6 +104,7 @@ func TestLocalWorkerDisabled(t *testing.T) {
 // and the external VCS/native reviewer are fixtures. Each result is recovered by
 // a new applier to exercise the persisted protocol rather than an in-memory path.
 func TestCoordinatorWorkerLifecycle(t *testing.T) {
+	stubDispatchCoordination(t)
 	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
 	db := storetest.New(t)
 	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {

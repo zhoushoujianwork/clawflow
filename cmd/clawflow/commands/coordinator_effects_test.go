@@ -161,8 +161,12 @@ func testCoordinatorDurableReportRecovery(t *testing.T, mode string) {
 	if c.creates != 0 || c.commentWrites != 0 {
 		t.Fatal("worker report performed remote I/O")
 	}
-	if err := service.Complete(ctx, task.ID, "w", task.FencingToken, raw); !errors.Is(err, coordinator.ErrStaleLease) {
-		t.Fatal(err)
+	if err := service.Complete(ctx, task.ID, "w", task.FencingToken, raw); err != nil {
+		t.Fatal("duplicate committed report must acknowledge without replay", err)
+	}
+	conflicting := json.RawMessage(`{"status":"failed"}`)
+	if err := service.Complete(ctx, task.ID, "w", task.FencingToken, conflicting); !errors.Is(err, coordinator.ErrStaleLease) {
+		t.Fatal("conflicting report acknowledged", err)
 	}
 	for i := 0; i < 2; i++ {
 		if err := service.recoverResults(ctx, tasks); err != nil {
