@@ -21,3 +21,9 @@
 - Duration belongs to the current execution attempt and starts at the controller-recorded claim/start time, never the latest heartbeat or app launch. Retries reset to the new attempt; unknown timestamps are explicitly unavailable. Completed durations stop at the recorded end time.
 - Keep connection freshness visible. On stale/disconnected snapshots, stop presenting live animation and advancing elapsed time; retain last-known data. Task completion must not imply CI, review, or merge completion.
 - Follow this reference in the native macOS app; keep the interaction simple and avoid adding a web dashboard dependency.
+
+## Execution lifecycle architecture
+
+- Follow [restart-safe execution design](docs/resilient-execution-design.md) for controller/worker lifecycle changes. This is a target architecture, not a claim that the current service already supports uninterrupted upgrades.
+- Support independent local/LAN workers, durable result replay after controller recovery, and rolling worker generations that drain active tasks without terminating them or increasing shared capacity.
+- Preserve worktrees, journals and Offload session lineage for interrupted attempts. Verify authority, ownership and backend recovery capability before reconnecting/resuming; never equate heartbeat loss with safe reassignment or silently launch duplicate execution.
