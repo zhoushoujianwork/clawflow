@@ -2,10 +2,13 @@ import { Attention } from '../components/Attention'
 export { Attention } from '../components/Attention'
 import { WorkSummary, type WorkFilter, type WorkItem, type SourceHealth } from '../components/WorkSummary'
 import { WorkDetail, workDetailKey, type ExecutionAttempt } from '../components/WorkDetail'
+import { WorkSearchControls } from '../components/WorkSearchControls'
+import { workSearch, type WorkSearch } from '../lib/workSearch'
+import type { ProjectEntry } from '../lib/projectMembership'
 import { WorkList } from '../components/WorkList'
 import { ScheduledChecksPanel } from "../components/ScheduledChecksPanel"
 import { createFileRoute } from '@tanstack/react-router'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ExternalLink, Loader2, RefreshCw } from 'lucide-react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { cn } from '../lib/utils'
@@ -167,12 +170,13 @@ export interface Board {
   }
 }
 
-type Preferences = { detail?: string; work?: WorkFilter; tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string }
+type Preferences = WorkSearch & { detail?: string; work?: WorkFilter; tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string }
 export function preferences(s: Record<string, unknown>): Preferences {
   // The router JSON-decodes hand-written deep links before search validation.
   const detail = Array.isArray(s.detail) && s.detail.length === 2 && typeof s.detail[0] === 'string' && Number.isInteger(s.detail[1]) && s.detail[1] > 0
     ? workDetailKey(s.detail[0], s.detail[1]) : s.detail
   return {
+    ...workSearch(s),
     detail: typeof detail === 'string' && detail.length < 512 ? detail : undefined,
     work: ['running', 'waiting', 'attention', 'delivered'].includes(String(s.work)) ? s.work as WorkFilter : undefined,
     tab: s.tab === 'active' || s.tab === 'delivered' || s.tab === 'all' ? s.tab : undefined,
@@ -181,7 +185,6 @@ export function preferences(s: Record<string, unknown>): Preferences {
     repo: typeof s.repo === 'string' ? s.repo : undefined,
   }
 }
-const STORAGE_KEY = 'clawflow.pipeline'
 // Visible tab labels double as accessible names, so they are real words, not CSS-capitalized ids.
 const PIPELINE_TAB_LABELS = { active: 'Active', running: 'Running', waiting: 'Waiting', delivered: 'Delivered' } as const
 
@@ -217,30 +220,37 @@ function PipelinePage() {
   useDocumentTitle('Work')
   const search = Route.useSearch()
   const navigate = Route.useNavigate()
-  const [restored, setRestored] = useState(false)
-  useEffect(() => {
-    if (restored) return
-    setRestored(true)
-    try {
-      const stored = preferences(JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'))
-      delete stored.detail
-      if (stored.tab === 'all') stored.tab = 'active'
-      if (stored.events === 'all') stored.events = 'important'
-      const next = Object.fromEntries(Object.entries({ ...stored, ...Object.fromEntries(Object.entries(search).filter(([, v]) => v !== undefined)) }))
-      void navigate({ search: next, replace: true })
-    } catch { /* Storage may be disabled. URL remains usable. */ }
-  }, [restored, search, navigate])
   function update(next: Preferences) {
-    const value = { ...search, ...next }
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...value, detail: undefined, tab: value.tab === 'all' ? 'active' : value.tab, events: value.events === 'all' ? 'important' : value.events })) } catch { /* URL still persists. */ }
-    void navigate({ search: value })
+    void navigate({ search: { ...search, ...next }, resetScroll: false })
   }
+  const [projects, setProjects] = useState<ProjectEntry[]>([])
+  const [projectError, setProjectError] = useState(false)
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/data/projects.json', { cache: 'no-store', signal: controller.signal })
+      .then(async r => { if (!r.ok) throw new Error('Projects unavailable'); return r.json() })
+      .then(data => {
+        if (!Array.isArray(data)) throw new Error('Invalid projects')
+        setProjects(data.filter((p: ProjectEntry) => typeof p?.name === 'string' && Array.isArray(p.repos)))
+      })
+      .catch(() => { if (!controller.signal.aborted) setProjectError(true) })
+    return () => controller.abort()
+  }, [])
 
   const repoInfo = useRepoInfoMap()
   const [board, setBoard] = useState<Board | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+
+  const scrollAnchor = useRef<{ key?: string; top: number; y: number }>()
+  useLayoutEffect(() => {
+    const anchor = scrollAnchor.current
+    if (!anchor) return
+    scrollAnchor.current = undefined
+    const row = [...document.querySelectorAll<HTMLElement>('[data-work-key]')].find(el => el.dataset.workKey === anchor.key)
+    window.scrollTo(0, row ? window.scrollY + row.getBoundingClientRect().top - anchor.top : anchor.y)
+  }, [board])
 
   const load = useCallback(async () => {
     setRefreshing(true)
@@ -251,6 +261,8 @@ function PipelinePage() {
         throw new Error(body?.error || `HTTP ${r.status}`)
       }
       const next = (await r.json()) as Board
+      const row = [...document.querySelectorAll<HTMLElement>('[data-work-key]')].find(el => el.getBoundingClientRect().bottom > 0)
+      scrollAnchor.current = { key: row?.dataset.workKey, top: row?.getBoundingClientRect().top || 0, y: window.scrollY }
       setBoard(next)
       setError(next.error ?? null)
     } catch (e) {
@@ -323,8 +335,10 @@ function PipelinePage() {
               return <button key={tab} role="tab" aria-selected={selected === tab} onClick={() => update({ tab: tab === 'delivered' ? 'delivered' : 'active', work: tab === 'active' ? undefined : tab })} className={cn('px-3 py-1 rounded border text-sm', selected === tab && 'bg-secondary')}>{PIPELINE_TAB_LABELS[tab]}</button>
             })}
           </div>
+          <WorkSearchControls search={search} repos={board.repos} projects={projects} projectError={projectError} update={update} />
           {board.repos.length === 0 ? (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
+              <p role="status" className="text-sm">0 results</p>
               <p className="text-base font-semibold text-foreground mb-1">{board.generated_at ? 'No repository is tracked yet' : 'Preparing pipeline snapshot…'}</p>
               {board.generated_at && <p className="text-sm text-muted-foreground">
                 Enable a repository with <code>clawflow repo enable</code> to see its eligible work.
@@ -332,6 +346,7 @@ function PipelinePage() {
             </div>
           ) : (
             <WorkList repos={board.repos} queue={board.global_queue || []} repoInfo={repoInfo}
+              query={search} projects={projects}
               filter={search.work || (search.tab === 'delivered' ? 'delivered' : 'active')}
               onOpen={(item, repo) => update({ detail: workDetailKey(repo, item.issue) })}
               renderDetails={(item, repo) => <><ItemDetail item={item} /><PilotTimeline actions={itemPilotActions(board.pilot_actions || [], repo, item)} /></>} />
