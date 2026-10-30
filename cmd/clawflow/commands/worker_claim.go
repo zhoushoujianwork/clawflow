@@ -139,28 +139,39 @@ func recoverWorkerClaims(ctx context.Context, api *workerAPI, o workerOptions) e
 		return err
 	}
 	for _, path := range paths {
-		raw, err := os.ReadFile(path)
-		if err != nil {
+		err := recoverWorkerClaim(ctx, api, o, path)
+		if workerFatal(err) || ctx.Err() != nil {
 			return err
 		}
-		var request map[string]string
-		if json.Unmarshal(raw, &request) != nil || request["claim_id"] == "" {
-			return fmt.Errorf("invalid pending claim journal")
-		}
-		var result struct {
-			Task *coordinator.Task `json:"task"`
-		}
-		if err := api.post(ctx, "claim", request, &result); err != nil {
-			return err
-		}
-		if result.Task != nil {
-			if err := acceptWorkerClaim(o, result.Task); err != nil {
-				return err
-			}
-		}
-		if err := os.Remove(path); err != nil {
-			return err
+		if diagnosticErr := recordWorkerRecovery(o, path, err); diagnosticErr != nil {
+			return diagnosticErr
 		}
 	}
 	return nil
+}
+
+func recoverWorkerClaim(ctx context.Context, api *workerAPI, o workerOptions, path string) error {
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var request map[string]string
+	if json.Unmarshal(raw, &request) != nil || request["claim_id"] == "" {
+		return fmt.Errorf("invalid pending claim journal; restore the retained claim before retrying")
+	}
+	var result struct {
+		Task *coordinator.Task `json:"task"`
+	}
+	if err := api.postOnce(ctx, "claim", request, &result); err != nil {
+		return err
+	}
+	if result.Task != nil {
+		if err := reconcileWorkerClaim(ctx, api, o, result.Task); err != nil {
+			return err
+		}
+	}
+	return os.Remove(path)
 }

@@ -191,56 +191,75 @@ func recoverWorkerExecutors(o workerOptions) error {
 		return err
 	}
 	for _, path := range paths {
-		if filelock.Held(path + ".lock") {
-			continue
+		err := recoverWorkerExecutor(o, path)
+		if workerFatal(err) {
+			return err
 		}
-		j, err := readWorkerJournal(path)
+		if err := recordWorkerRecovery(o, path, err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func recoverWorkerExecutor(o workerOptions, path string) error {
+	if filelock.Held(path + ".lock") {
+		return nil
+	}
+	j, err := readWorkerJournal(path)
+	if err != nil {
+		return err
+	}
+	switch j.State {
+	case "prepared", "pending_sync":
+		if j.State == "prepared" && expiredWorkerAuthority(&j.Task) {
+			return reconcileRetainedWorkerJournal(o, path)
+		}
+		if err := spawnWorkerExecutor(path, j); err != nil {
+			return err
+		}
+	case "acknowledged":
+		if len(j.Report) > 0 {
+			return reconcileRetainedWorkerJournal(o, path)
+		}
+	case "needs_recovery":
+		if j.Task.LeaseExpiresAt != nil && !j.Task.LeaseExpiresAt.After(time.Now()) {
+			api, err := newWorkerAPI(o)
+			if err != nil {
+				return err
+			}
+			recoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err = prepareWorkerRecovery(recoveryCtx, api, path)
+			cancel()
+			api.client.CloseIdleConnections()
+			if err != nil {
+				return err
+			}
+			recovered, readErr := readWorkerJournal(path)
+			if readErr != nil {
+				return readErr
+			}
+			if err := spawnWorkerExecutor(path, recovered); err != nil {
+				return err
+			}
+		}
+	case "running":
+		// Serialize against an executor that is still entering its critical section.
+		lock, err := filelock.Try(path+".lock", map[string]any{"PID": os.Getpid()})
+		if errors.Is(err, filelock.ErrHeld) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		switch j.State {
-		case "prepared", "pending_sync":
-			if err := spawnWorkerExecutor(path, j); err != nil {
-				return err
-			}
-		case "needs_recovery":
-			if j.Task.LeaseExpiresAt != nil && !j.Task.LeaseExpiresAt.After(time.Now()) {
-				api, err := newWorkerAPI(o)
-				if err != nil {
-					return err
-				}
-				recoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				err = prepareWorkerRecovery(recoveryCtx, api, path)
-				cancel()
-				api.client.CloseIdleConnections()
-				if err == nil {
-					recovered, readErr := readWorkerJournal(path)
-					if readErr != nil {
-						return readErr
-					}
-					if err := spawnWorkerExecutor(path, recovered); err != nil {
-						return err
-					}
-				}
-			}
-		case "running":
-			// Serialize against an executor that is still entering its critical section.
-			lock, err := filelock.Try(path+".lock", map[string]any{"PID": os.Getpid()})
-			if errors.Is(err, filelock.ErrHeld) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			current, err := readWorkerJournal(path)
-			if err == nil && current.State == "running" {
-				current.State, current.Error = "needs_recovery", "Executor interrupted; retained worktree/session requires verified recovery"
-				err = writeWorkerJournal(path, current)
-			}
-			filelock.Release(lock)
-			if err != nil {
-				return err
-			}
+		current, err := readWorkerJournal(path)
+		if err == nil && current.State == "running" {
+			current.State, current.Error = "needs_recovery", "Executor interrupted; retained worktree/session requires verified recovery"
+			err = writeWorkerJournal(path, current)
+		}
+		filelock.Release(lock)
+		if err != nil {
+			return err
 		}
 	}
 	return nil

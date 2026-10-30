@@ -309,6 +309,10 @@ type coordinatorReport struct {
 	Events []json.RawMessage `json:"events,omitempty"`
 }
 
+func (s *coordinatorResults) Task(ctx context.Context, id string) (*coordinator.Task, error) {
+	return s.tasks.Task(ctx, id)
+}
+
 func (s *coordinatorResults) Complete(ctx context.Context, id, worker string, fence int64, raw json.RawMessage) error {
 	return s.finish(ctx, id, worker, fence, raw, false)
 }

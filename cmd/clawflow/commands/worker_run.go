@@ -34,6 +34,7 @@ import (
 )
 
 type workerOptions struct {
+	receiptCache                                  map[string][32]byte // Manager-local verified receipts; never persisted.
 	KeepAliveOwner                                bool
 	Executable                                    string
 	Coordinator, TokenFile, Fingerprint, StateDir string
@@ -203,12 +204,7 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 		return err
 	}
 	if o.Durable {
-		if err := recoverWorkerClaims(ctx, api, o); err != nil {
-			return err
-		}
-		if err := recoverWorkerExecutors(o); err != nil {
-			return err
-		}
+		return runDurableWorker(ctx, api, o, poll)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -223,22 +219,7 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 					Task *coordinator.Task `json:"task"`
 				}
 				request := any(struct{}{})
-				claimPath := ""
-				if o.Durable {
-					var err error
-					claimPath, request, err = prepareWorkerClaim(o)
-					if err != nil {
-						errors <- err
-						cancel()
-						return
-					}
-				}
 				if err := api.post(ctx, "claim", request, &claim); err != nil {
-					if o.Durable {
-						errors <- err
-						cancel()
-						return
-					}
 					if workerFatal(err) {
 						errors <- err
 						cancel()
@@ -256,35 +237,10 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 					continue
 				}
 				if claim.Task == nil {
-					if claimPath != "" {
-						if err := os.Remove(claimPath); err != nil {
-							errors <- err
-							cancel()
-							return
-						}
-					}
-					if o.Durable {
-						if err := recoverWorkerExecutors(o); err != nil {
-							slog.Warn("worker/recovery", "err", err)
-						}
-					}
 					select {
 					case <-ctx.Done():
 						return
 					case <-time.After(poll):
-					}
-					continue
-				}
-				if o.Durable {
-					if err := acceptWorkerClaim(o, claim.Task); err != nil {
-						errors <- err
-						cancel()
-						return
-					}
-					if err := os.Remove(claimPath); err != nil {
-						errors <- err
-						cancel()
-						return
 					}
 					continue
 				}
