@@ -220,12 +220,15 @@ func TestCIEvidenceIdentity(t *testing.T) {
 					fmt.Fprintf(w, `{"head":{"sha":%q}}`, sha)
 				},
 				"GET /repos/o/r/commits/captured-sha/check-runs": func(w http.ResponseWriter, r *http.Request) {
-					fmt.Fprint(w, ciPage(2, ciRun(21, "completed", `"success"`), ciRun(22, "completed", `"success"`)))
+					fmt.Fprint(w, ciPage(2, strings.Replace(ciRun(21, "completed", `"success"`), `"id":21`, `"id":21,"name":"Web render"`, 1), ciRun(22, "completed", `"success"`)))
 				},
 			})
 			e, err := c.GetCIEvidence("o/r", 11)
 			if err != nil || e.HeadSHA != "captured-sha" || len(e.CheckIDs) != 2 || e.CheckIDs[0] != 21 || e.CheckIDs[1] != 22 {
 				t.Fatalf("%+v %v", e, err)
+			}
+			if len(e.Checks) != 2 || e.Checks[0].Name != "Web render" {
+				t.Fatalf("missing named job provenance: %+v", e.Checks)
 			}
 			if (e.Status == vcs.CIStatusSuccess) != (head == "captured-sha") {
 				t.Fatalf("wrong status: %+v", e)

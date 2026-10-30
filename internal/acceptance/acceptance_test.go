@@ -786,6 +786,9 @@ func TestRunnerCIReviewMode(t *testing.T) {
 			base := r.Execute
 			r.Execute = func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
 				if opts.Workspace == workspace {
+					if !strings.Contains(prompt, "Authoritative exact-head Web render status: blocked") || !strings.Contains(prompt, "Do not launch Chromium") {
+						t.Fatal("review prompt lacks render evidence mapping")
+					}
 					verified := strings.Contains(prompt, "Review mode: ci-verified")
 					if verified != (tc.want == CIVerified) || strings.Contains(prompt, r.fullSuiteInstruction()) == verified {
 						t.Fatalf("wrong review instructions: %s", prompt)

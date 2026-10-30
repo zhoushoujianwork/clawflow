@@ -67,3 +67,41 @@ jobs:
           ./clawflow pr-check --help
           ./clawflow update --help
           ./clawflow web --help
+
+  web-render:
+    name: Web render
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build web bundle
+        run: pnpm --dir web install --frozen-lockfile && pnpm --dir web build
+
+      - name: Install isolated headless Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/render-tools" --no-package-lock playwright@1.56.1
+          "$RUNNER_TEMP/render-tools/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Run all render fixtures
+        working-directory: web
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/render-tools/node_modules/playwright/index.mjs
+        run: |
+          for fixture in scripts/check-*-render.mjs; do
+            echo "Running $fixture"
+            node "$fixture"
+          done
