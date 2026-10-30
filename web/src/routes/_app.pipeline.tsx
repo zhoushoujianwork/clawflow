@@ -1,3 +1,5 @@
+import { ActivityTimeline } from '../components/ActivityTimeline'
+export { EventTimeline, foldEvents, importantEvent } from '../components/ActivityTimeline'
 import { ExecutionCapacity } from '../components/ExecutionCapacity'
 import { Attention } from '../components/Attention'
 export { Attention } from '../components/Attention'
@@ -171,7 +173,7 @@ export interface Board {
   }
 }
 
-type Preferences = WorkSearch & { detail?: string; work?: WorkFilter; tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string }
+type Preferences = WorkSearch & { detail?: string; work?: WorkFilter; tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string; activityIssue?: string }
 export function preferences(s: Record<string, unknown>): Preferences {
   // The router JSON-decodes hand-written deep links before search validation.
   const detail = Array.isArray(s.detail) && s.detail.length === 2 && typeof s.detail[0] === 'string' && Number.isInteger(s.detail[1]) && s.detail[1] > 0
@@ -184,6 +186,7 @@ export function preferences(s: Record<string, unknown>): Preferences {
     expanded: typeof s.expanded === 'string' ? s.expanded : undefined,
     events: s.events === 'important' || s.events === 'all' ? s.events : undefined,
     repo: typeof s.repo === 'string' ? s.repo : undefined,
+    activityIssue: typeof s.activityIssue === 'string' && /^\d{1,10}$/.test(s.activityIssue) ? s.activityIssue : undefined,
   }
 }
 // Visible tab labels double as accessible names, so they are real words, not CSS-capitalized ids.
@@ -353,7 +356,7 @@ function PipelinePage() {
               onOpen={(item, repo) => update({ detail: workDetailKey(repo, item.issue) })}
               renderDetails={(item, repo) => <><ItemDetail item={item} /><PilotTimeline actions={itemPilotActions(board.pilot_actions || [], repo, item)} /></>} />
           )}
-          <EventTimeline events={board.events || []} filter={search.events || 'important'} repo={search.repo || ''} repos={board.repos.map(r => r.repo)} update={update} />
+          <ActivityTimeline board={board} filter={search.events || 'important'} repo={search.repo || ''} issue={search.activityIssue || ''} update={update} />
         </>
       ) : null}
     </div>
@@ -475,40 +478,6 @@ function DetailBlock({ title, children }: { title: string; children: React.React
       {children}
     </div>
   )
-}
-
-export function foldEvents(events: PipelineEvent[]) {
-  const folded: (PipelineEvent & { count: number; since: string })[] = []
-  for (const e of events) {
-    const prev = folded[folded.length - 1]
-    const identity = (event: PipelineEvent) => JSON.stringify([event.event, event.level, Object.entries(event.fields).sort(([a], [b]) => a.localeCompare(b))])
-    if (prev && identity(prev) === identity(e)) { prev.count++; prev.time = e.time }
-    else folded.push({ ...e, count: 1, since: e.time })
-  }
-  return folded
-}
-
-export function importantEvent(e: PipelineEvent) {
-  return e.level === 'warn' || e.level === 'error' || /harvest_end|automerge_merged|automerge_success|self_upgrade|lock_timeout|queue_(pick|wait|blocked)|queue\/(pick|wait|blocked|skip|park|unpark)/.test(e.event) || ['failed', 'error', 'merged'].includes(e.fields.status) || Number(e.fields.merged) > 0
-}
-
-export function EventTimeline({ events, filter, repo, repos, update }: { events: PipelineEvent[]; filter: string; repo: string; repos: string[]; update: (p: Preferences) => void }) {
-  const rows = foldEvents(events).filter(e => (!repo || e.fields.repo === repo) && (filter === 'all' || importantEvent(e))).reverse()
-  return <details className="border rounded-xl p-3 mb-4">
-    <summary className="text-sm font-semibold cursor-pointer">Events ({rows.length})</summary>
-    <div className="flex flex-wrap gap-2 my-3 text-xs">
-      <label>Show <select aria-label="Event importance" value={filter} onChange={e => update({ events: e.target.value as Preferences['events'] })} className="bg-card border rounded p-1"><option value="important">Important</option><option value="all">All</option></select></label>
-      <label>Repo <select aria-label="Event repository" className="max-w-full bg-card border rounded p-1" value={repo} onChange={e => update({ repo: e.target.value })}><option value="">All repositories</option>{repos.map(r => <option key={r}>{r}</option>)}</select></label>
-    </div>
-    <ol className="divide-y max-h-96 overflow-auto text-xs">
-      {rows.map((e, i) => <li key={i} className="py-2 flex flex-wrap gap-2 break-all">
-        <time className="text-muted-foreground">{timeAgo(e.time)}</time>
-        <span className={cn('font-mono', ['warn', 'error'].includes(e.level) && 'text-amber-700')}>{e.event.replace(/^run\//, '')}{e.fields.issue ? ' #' + e.fields.issue : ''}{e.count > 1 ? ` ×${e.count} since ${new Date(e.since).toLocaleTimeString()}` : ''}</span>
-        <span className="text-muted-foreground">{Object.entries(e.fields).map(([k, v]) => `${k}=${v}`).join(' ')}</span>
-      </li>)}
-    </ol>
-    {!rows.length && <p className="text-xs text-muted-foreground">No matching events.</p>}
-  </details>
 }
 
 function pilotSummary(a: PilotAction) {
