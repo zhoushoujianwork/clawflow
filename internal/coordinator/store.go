@@ -9,6 +9,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/coordination"
+
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -16,9 +18,10 @@ import (
 const LeaseTTL = 120 * time.Second
 
 var (
-	ErrNoTask     = errors.New("no eligible task or worker at capacity")
-	ErrStaleLease = errors.New("stale or expired task lease")
-	ErrInvalid    = errors.New("invalid coordinator input")
+	ErrCoordinationChanged = errors.New("coordination context changed")
+	ErrNoTask              = errors.New("no eligible task or worker at capacity")
+	ErrStaleLease          = errors.New("stale or expired task lease")
+	ErrInvalid             = errors.New("invalid coordinator input")
 )
 
 type Task struct {
@@ -191,6 +194,30 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 		}
 		if !json.Valid(t.Payload) {
 			return ErrInvalid
+		}
+		// The repository advisory lock above makes this check atomic with
+		// enqueue. Two concurrent assessments of an empty queue cannot both
+		// enqueue from the same stale snapshot.
+		var envelope struct {
+			Coordination *coordination.Snapshot `json:"coordination"`
+		}
+		if err := json.Unmarshal(t.Payload, &envelope); err != nil {
+			return ErrInvalid
+		}
+		if envelope.Coordination != nil {
+			s := envelope.Coordination
+			if s.Version != coordination.Version || s.Repository != t.Repo || s.Issue.Number != t.Issue || s.Operation != t.Operator {
+				return ErrInvalid
+			}
+			var active []coordination.Task
+			if err := tx.Model(&Task{}).Select("id, issue, pr, kind, state, priority").Where("repo = ? AND state IN ?", t.Repo, []string{"pending", "leased"}).Find(&active).Error; err != nil {
+				return err
+			}
+			expected := coordination.Normalize(coordination.Snapshot{Tasks: envelope.Coordination.Tasks})
+			actual := coordination.Normalize(coordination.Snapshot{Tasks: active})
+			if coordination.Digest(expected) != coordination.Digest(actual) {
+				return ErrCoordinationChanged
+			}
 		}
 		r := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&t)
 		if r.Error != nil {

@@ -26,6 +26,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/clone"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -183,6 +184,9 @@ func (a *workerAPI) postOnce(ctx context.Context, path string, in, out any) erro
 type workerBuilder func(context.Context, *coordinator.Task) (*runJob, time.Duration, error)
 
 func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, poll time.Duration, build workerBuilder) error {
+	if !slices.Contains(o.Tags, coordination.WorkerTag) {
+		o.Tags = append(o.Tags, coordination.WorkerTag)
+	}
 	for _, capability := range o.Capabilities {
 		o.Tags = append(o.Tags, "capability:"+capability)
 	}
@@ -381,6 +385,11 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 		if err != nil {
 			result.Error = err.Error()
 			result.InfraKind = "launch"
+			if errors.Is(err, errCoordinationChanged) {
+				result.Status = "blocked"
+				result.NextAction = "Reassess current issue, PRs and active work on the next scheduler pass"
+				result.NextOwner = "scheduling"
+			}
 		} else {
 			spool, spoolErr := os.CreateTemp("", "clawflow-effects-"+t.ID+"-*")
 			if spoolErr != nil {
@@ -484,6 +493,16 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	if issue == nil {
 		return nil, 0, fmt.Errorf("worker issue no longer exists")
 	}
+	if p.Coordination != nil {
+		probe := &runJob{op: op, repo: p.Repo, sub: &operator.Subject{Number: p.Issue}, client: client}
+		if p.Repair != nil {
+			probe.repair = &ciRepairContext{PR: vcs.PR{Number: p.Repair.PR}}
+		}
+		if err = validateWorkerCoordination(ctx, probe, p.Coordination); err != nil {
+			return nil, 0, err
+		}
+	}
+
 	if rc.LocalPath == "" {
 		sum := sha256.Sum256([]byte(platform + "/" + rc.BaseURL + "/" + p.Repo))
 		rc.LocalPath = filepath.Join(snapshot.StateDir(), "clones", hex.EncodeToString(sum[:12]))
@@ -506,6 +525,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	rc.AutoMerge = false
 	rc.AcceptanceRequired = p.RepoPolicy.AcceptanceRequired
 	j := &runJob{op: op, repo: p.Repo, repoCfg: rc, client: client, language: p.Language, sub: &operator.Subject{Number: issue.Number, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State, SubTotal: issue.SubIssuesTotal, URL: issue.URL, IsPR: op.Trigger.Target == "pr"}}
+	j.coordination = p.Coordination
 	j.acceptancePlan = p.AcceptancePlan
 	if p.ReopenEventID != "" {
 		j.reopen = &reopenContext{Event: vcs.IssueEvent{ID: p.ReopenEventID}}

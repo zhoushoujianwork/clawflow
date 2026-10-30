@@ -141,6 +141,10 @@ struct IssueQueueRow: Decodable, Identifiable {
     let tier: String
     let state: String
     var status: String {
+        if state.hasPrefix("waiting:needs-confirmation") || state.hasPrefix("waiting:coordination_needs_confirmation") { return "Needs confirmation" }
+        if state.hasPrefix("closed:superseded") { return "Superseded" }
+        if state.hasPrefix("closed:already-delivered") { return "Already delivered" }
+        if state.hasPrefix("eligible:coordination checked") { return "Ready / coordination checked" }
         switch state.split(separator: ":").first.map(String.init) {
         case "in_flight": return "In progress"
         case "eligible": return "Ready / waiting for capacity"

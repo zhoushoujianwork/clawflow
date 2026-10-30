@@ -2,6 +2,7 @@ package queue
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -179,6 +180,8 @@ func Select(in SelectInput) SelectResult {
 		}
 		e := &entries[index[it.Key]]
 		switch {
+		case strings.HasPrefix(c.Ineligible, "coordination_"):
+			e.State, e.Reason = StateWaiting, c.Ineligible
 		case c.Ineligible != "":
 			e.State, e.Reason = StateBlocked, c.Ineligible
 		case cycles[it.Key]:
