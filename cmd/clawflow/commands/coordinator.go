@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
+
 	"github.com/zhoushoujianwork/clawflow/internal/actions"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -64,6 +66,12 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		}
 		adminHandler.ServeHTTP(w, r)
 	})
+	if devmode.Active() {
+		if err := devmode.CheckListen(server.Addr); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		db.Close()

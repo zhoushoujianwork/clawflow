@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 )
 
 var Version = "dev"
@@ -16,6 +17,23 @@ func NewRootCmd() *cobra.Command {
 SKILL.md files) and runs the matching operator through Offload. State lives
 entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 		Version: Version,
+		// A development candidate may not run commands that change the host,
+		// and every outbound request is limited to loopback fixtures.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if !devmode.Active() {
+				return nil
+			}
+			for c := cmd; c != nil && c.HasParent(); c = c.Parent() {
+				if err := devmode.CheckCommand(c.Name()); err != nil {
+					return err
+				}
+			}
+			if devmode.ID() == "" {
+				return fmt.Errorf("%w: %s is set but not a valid candidate id", devmode.ErrBlocked, devmode.EnvID)
+			}
+			devmode.Install()
+			return nil
+		},
 	}
 
 	// --debug is a verbosity switch: when set, commands emit additional
@@ -33,6 +51,7 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewPlatformCmd())
 	root.AddCommand(NewDashboardCmd())
 	root.AddCommand(NewControllerCmd())
+	root.AddCommand(NewCandidateCmd())
 	root.AddCommand(NewRunCmd())
 	root.AddCommand(NewWebCmd())
 	root.AddCommand(NewChatCmd())

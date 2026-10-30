@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
@@ -318,6 +319,11 @@ func (u *selfUpgrader) Upgrade(ctx context.Context, repoCfg config.Repo) (out se
 	// The lock may have been held by an upgrade from another process. Read the
 	// destination now: this process's build metadata may already be obsolete.
 	dest, err := u.Executable()
+	if err == nil && devmode.Active() {
+		if guard := devmode.CheckWritePath(dest); guard != nil {
+			return fail("%v", guard)
+		}
+	}
 	if err != nil {
 		return fail("locate running executable: %v", err)
 	}
