@@ -13,7 +13,7 @@ export function WorkSearchControls({ search, repos, projects, projectError, upda
   function select(label: string, key: 'workRepo' | 'project' | 'stage' | 'role', options: string[]) {
     const value = search[key] || ''
     return <label className="flex flex-col gap-1 min-w-0">{label}
-      <select className="border rounded p-2 bg-card max-w-full" value={value} onChange={e => update({ [key]: e.target.value || undefined })}>
+      <select aria-label={label} className="border rounded p-2 bg-card max-w-full" value={value} onChange={e => update({ [key]: e.target.value || undefined })}>
         <option value="">Any {label.toLowerCase()}</option>
         {value && !options.includes(value) && <option value={value}>{value} (unavailable)</option>}
         {options.map(option => <option key={option} value={option}>{option}</option>)}
@@ -30,7 +30,7 @@ export function WorkSearchControls({ search, repos, projects, projectError, upda
       {select('Stage', 'stage', [...WORK_STAGES])}
       {select('Role', 'role', roles)}
       <label className="flex flex-col gap-1">Order
-        <select className="border rounded p-2 bg-card" value={search.sort || 'queue'} onChange={e => update({ sort: e.target.value === 'queue' ? undefined : e.target.value as 'updated' | 'age' })}>
+        <select aria-label="Order" className="border rounded p-2 bg-card" value={search.sort || 'queue'} onChange={e => update({ sort: e.target.value === 'queue' ? undefined : e.target.value as 'updated' | 'age' })}>
           <option value="queue">Dispatch order</option><option value="updated">Last update · newest first</option><option value="age">Age since last update · oldest first</option>
         </select>
       </label>

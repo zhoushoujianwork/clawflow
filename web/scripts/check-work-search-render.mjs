@@ -82,9 +82,14 @@ try {
     await list.getByRole('button',{name:'Details · 2 execution attempts'}).first().click()
     await panel.waitFor()
     const removedDetail = new URL(page.url()).searchParams.get('detail')
-    const [repo,issue] = JSON.parse(removedDetail)
+    // The router JSON-encodes search values, so the stored key may be a JSON string of a JSON array.
+    let decoded = JSON.parse(removedDetail)
+    if (typeof decoded === 'string') decoded = JSON.parse(decoded)
+    const [repo,issue] = decoded
     board = {...board,repos:board.repos.map(r=>({...r,items:r.repo===repo?r.items.filter(i=>i.issue!==issue):r.items}))}
+    const removedRefresh = page.waitForResponse(r=>new URL(r.url()).pathname==='/api/pipeline')
     await page.clock.fastForward(31_000)
+    await removedRefresh
     await panel.getByText(/not in the current snapshot/).waitFor()
     assert.equal(new URL(page.url()).searchParams.get('detail'),removedDetail)
     await panel.getByRole('button',{name:'Close details'}).click()
