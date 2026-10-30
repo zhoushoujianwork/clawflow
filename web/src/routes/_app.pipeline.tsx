@@ -175,6 +175,9 @@ export function preferences(s: Record<string, unknown>): Preferences {
   }
 }
 const STORAGE_KEY = 'clawflow.pipeline'
+// Visible tab labels double as accessible names, so they are real words, not CSS-capitalized ids.
+const PIPELINE_TAB_LABELS = { active: 'Active', running: 'Running', waiting: 'Waiting', delivered: 'Delivered' } as const
+
 export const Route = createFileRoute('/_app/pipeline')({
   component: PipelinePage,
   validateSearch: preferences,
@@ -298,7 +301,7 @@ function PipelinePage() {
           <div className="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Pipeline items">
             {(['active', 'running', 'waiting', 'delivered'] as const).map(tab => {
               const selected = search.work || (search.tab === 'delivered' ? 'delivered' : 'active')
-              return <button key={tab} role="tab" aria-selected={selected === tab} onClick={() => update({ tab: tab === 'delivered' ? 'delivered' : 'active', work: tab === 'active' ? undefined : tab })} className={cn('px-3 py-1 rounded border text-sm capitalize', selected === tab && 'bg-secondary')}>{tab}</button>
+              return <button key={tab} role="tab" aria-selected={selected === tab} onClick={() => update({ tab: tab === 'delivered' ? 'delivered' : 'active', work: tab === 'active' ? undefined : tab })} className={cn('px-3 py-1 rounded border text-sm', selected === tab && 'bg-secondary')}>{PIPELINE_TAB_LABELS[tab]}</button>
             })}
           </div>
           {board.repos.length === 0 ? (
