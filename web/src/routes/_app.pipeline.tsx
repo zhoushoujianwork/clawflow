@@ -1,6 +1,7 @@
 import { Attention } from '../components/Attention'
 export { Attention } from '../components/Attention'
 import { WorkSummary, type WorkFilter, type WorkItem, type SourceHealth } from '../components/WorkSummary'
+import { WorkDetail, workDetailKey, type ExecutionAttempt } from '../components/WorkDetail'
 import { WorkList } from '../components/WorkList'
 import { ScheduledChecksPanel } from "../components/ScheduledChecksPanel"
 import { createFileRoute } from '@tanstack/react-router'
@@ -41,6 +42,7 @@ interface PRInfo {
   state: string
   draft?: boolean
   head_branch?: string
+  updated_at?: string
   head_sha?: string
   ci?: string
   ci_error?: string
@@ -73,6 +75,7 @@ interface Delivery {
 }
 
 export interface Item extends WorkItem {
+  executions?: ExecutionAttempt[]
   state?: string
   attention?: string[]
   issue: number
@@ -164,9 +167,13 @@ export interface Board {
   }
 }
 
-type Preferences = { work?: WorkFilter; tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string }
+type Preferences = { detail?: string; work?: WorkFilter; tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string }
 export function preferences(s: Record<string, unknown>): Preferences {
+  // The router JSON-decodes hand-written deep links before search validation.
+  const detail = Array.isArray(s.detail) && s.detail.length === 2 && typeof s.detail[0] === 'string' && Number.isInteger(s.detail[1]) && s.detail[1] > 0
+    ? workDetailKey(s.detail[0], s.detail[1]) : s.detail
   return {
+    detail: typeof detail === 'string' && detail.length < 512 ? detail : undefined,
     work: ['running', 'waiting', 'attention', 'delivered'].includes(String(s.work)) ? s.work as WorkFilter : undefined,
     tab: s.tab === 'active' || s.tab === 'delivered' || s.tab === 'all' ? s.tab : undefined,
     expanded: typeof s.expanded === 'string' ? s.expanded : undefined,
@@ -216,6 +223,7 @@ function PipelinePage() {
     setRestored(true)
     try {
       const stored = preferences(JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'))
+      delete stored.detail
       if (stored.tab === 'all') stored.tab = 'active'
       if (stored.events === 'all') stored.events = 'important'
       const next = Object.fromEntries(Object.entries({ ...stored, ...Object.fromEntries(Object.entries(search).filter(([, v]) => v !== undefined)) }))
@@ -224,7 +232,7 @@ function PipelinePage() {
   }, [restored, search, navigate])
   function update(next: Preferences) {
     const value = { ...search, ...next }
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...value, tab: value.tab === 'all' ? 'active' : value.tab, events: value.events === 'all' ? 'important' : value.events })) } catch { /* URL still persists. */ }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...value, detail: undefined, tab: value.tab === 'all' ? 'active' : value.tab, events: value.events === 'all' ? 'important' : value.events })) } catch { /* URL still persists. */ }
     void navigate({ search: value })
   }
 
@@ -259,11 +267,18 @@ function PipelinePage() {
     return () => window.clearInterval(id)
   }, [load])
 
+  const selected = (() => {
+    try {
+      const [repo, issue] = JSON.parse(search.detail || 'null')
+      return typeof repo === 'string' && Number.isInteger(issue) && issue > 0 ? { repo, issue } : null
+    } catch { return null }
+  })()
+  const selectedItem = board?.repos.find(r => r.repo === selected?.repo)?.items.find(i => i.issue === selected?.issue)
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">Work</h1>
+          <h1 id="work-page-title" tabIndex={-1} className="text-2xl font-bold text-foreground">Work</h1>
           <p className="text-xs text-muted-foreground mt-1">
             Execution and delivery across tracked repositories. Read-only.
           </p>
@@ -281,6 +296,10 @@ function PipelinePage() {
         </div>
       </div>
 
+      {selected && <WorkDetail key={search.detail} repo={selected.repo} issue={selected.issue} item={selectedItem} onClose={() => update({ detail: undefined })}>
+        <p className="text-xs my-2">Pipeline snapshot: {board?.generated_at || 'unknown'}{board?.stale ? ' · stale' : ''}</p>
+        {selectedItem && <><ItemDetail item={selectedItem} /><PilotTimeline actions={itemPilotActions(board?.pilot_actions || [], selected.repo, selectedItem)} /></>}
+      </WorkDetail>}
       <WorkSummary repos={board?.repos} sources={board?.sources} generatedAt={board?.generated_at} stale={board?.stale} refreshing={refreshing || board?.refreshing} failed={!!error} filter={search.work} onFilter={work => update({ work, tab: work === 'delivered' ? 'delivered' : 'active' })} />
       <ScheduledChecksPanel />
 
@@ -314,6 +333,7 @@ function PipelinePage() {
           ) : (
             <WorkList repos={board.repos} queue={board.global_queue || []} repoInfo={repoInfo}
               filter={search.work || (search.tab === 'delivered' ? 'delivered' : 'active')}
+              onOpen={(item, repo) => update({ detail: workDetailKey(repo, item.issue) })}
               renderDetails={(item, repo) => <><ItemDetail item={item} /><PilotTimeline actions={itemPilotActions(board.pilot_actions || [], repo, item)} /></>} />
           )}
           <EventTimeline events={board.events || []} filter={search.events || 'important'} repo={search.repo || ''} repos={board.repos.map(r => r.repo)} update={update} />
@@ -336,7 +356,7 @@ export function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
   </div>
 }
 
-function ItemDetail({ item }: { item: Item }) {
+export function ItemDetail({ item }: { item: Item }) {
   const { pr, acceptance: a, delivery, run } = item
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
@@ -356,6 +376,7 @@ function ItemDetail({ item }: { item: Item }) {
       </DetailBlock>
 
       <DetailBlock title="Pull request">
+        <p>Source: VCS PR/CI · observed PR update: {pr?.updated_at || 'unknown'} · CI observation time: unknown</p>
         {pr ? (
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5">
             <dt className="text-muted-foreground">PR</dt>
@@ -379,6 +400,7 @@ function ItemDetail({ item }: { item: Item }) {
 
       {a && (
         <DetailBlock title="Acceptance">
+          <p>Source: ClawFlow independent acceptance · completed: {a.completed_at || 'unknown'}</p>
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5">
             <dt className="text-muted-foreground">Verdict</dt>
             <dd>
@@ -412,8 +434,11 @@ function ItemDetail({ item }: { item: Item }) {
         </DetailBlock>
       )}
 
+      {!a && <DetailBlock title="Acceptance">Source: ClawFlow independent acceptance · verdict and timestamp unknown</DetailBlock>}
+      {!delivery && <DetailBlock title="Delivery">Source: VCS merge evidence · No merge recorded. Timestamp unknown.</DetailBlock>}
       {delivery && (
         <DetailBlock title="Delivery">
+          <p>Source: VCS merge evidence · timestamp: {delivery.merged_at || 'unknown'}</p>
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5">
             <dt className="text-muted-foreground">Merge commit</dt>
             <dd className="font-mono">{shortSha(delivery.merge_commit_sha)}</dd>

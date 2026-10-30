@@ -1,3 +1,4 @@
+import { runDetailUrl } from '../lib/runDetailUrl'
 import { useState } from 'react'
 import type { Board, Item, PipelineEvent } from '../routes/_app.pipeline'
 import { issueUrl, repoUrl, type RepoInfoMap } from '../lib/vcsUrls'
@@ -52,8 +53,7 @@ export function attentionIncidents(board: Board): Incident[] {
       if (repo.error && item.pr?.ci_error && repo.error.includes(item.pr.ci_error) && [...reasons].every(r => r.startsWith('CI status could not be read'))) continue
       const latestRun = item.executions?.filter(e => e.run_path).sort((a, b) => (Date.parse(b.started_at || '') || 0) - (Date.parse(a.started_at || '') || 0))[0]
       // Only the existing local run route is supported. Never link arbitrary paths.
-      const path = latestRun?.run_path?.match(/^(?:\.\/data\/)?runs\/([^/]+)\/(issue-\d+)\/([^/]+)\/?$/)
-      const runUrl = path ? '/runs/' + path.slice(1).map(encodeURIComponent).join('/') : undefined
+      const runUrl = runDetailUrl(latestRun?.run_path)
       const exhausted = [...reasons].some(r => /repair exhausted|repair blocked|retries stopped|budget exhausted/.test(r))
       const retry = !exhausted && repo.enabled && item.stage === 'infra_retry' && !!validTime(item.acceptance?.next_retry_at) && !item.acceptance?.running
       const repairing = !exhausted && item.run?.live && item.run.operator === 'repair-ci'
