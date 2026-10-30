@@ -19,11 +19,12 @@ import (
 
 // Project is the in-memory representation of project.yaml.
 type Project struct {
-	Name       string     `yaml:"name"`
-	Repos      []string   `yaml:"repos"`
-	Automation Automation `yaml:"-"`
-	CreatedAt  string     `yaml:"created_at"`
-	UpdatedAt  string     `yaml:"updated_at"`
+	Name               string     `yaml:"name"`
+	Repos              []string   `yaml:"repos"`
+	Automation         Automation `yaml:"-"`
+	SharedResourceKeys []string   `yaml:"shared_resource_keys,omitempty"`
+	CreatedAt          string     `yaml:"created_at"`
+	UpdatedAt          string     `yaml:"updated_at"`
 }
 
 // Automation is retained as a zero-valued compatibility view for old API clients.

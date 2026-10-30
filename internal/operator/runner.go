@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
+	"github.com/zhoushoujianwork/clawflow/internal/project"
+	"github.com/zhoushoujianwork/clawflow/internal/resourcelease"
 )
 
 // Lifecycle stages emitted via RunOptions.StageFunc as Run progresses. These
@@ -275,6 +277,15 @@ var writeBackTimeout = 5 * time.Minute
 // Run executes one operator against one subject and returns the operator's
 // final stdout text, the outcome label (empty if none), or an error.
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
+	if op.Name == "implement" || op.Name == "repair-ci" {
+		release, err := project.AcquireResources(opts.Repo, resourcelease.Holder{
+			Task: fmt.Sprintf("#%d", sub.Number), Phase: op.Name, Attempt: opts.RunID,
+		})
+		if err != nil {
+			return err.Error(), "", err
+		}
+		defer release()
+	}
 	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language, ctx)
 	userMessage := BuildUserMessage(sub, opts.Repo, opts.Comments)
 	if opts.ResumeContext != "" {

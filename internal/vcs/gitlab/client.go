@@ -321,15 +321,16 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 		return vcs.Issue{}, fmt.Errorf("gitlab create issue: HTTP %d: %s", status, data)
 	}
 	var raw struct {
-		ID    int64  `json:"id"`
-		IID   int    `json:"iid"`
-		Title string `json:"title"`
-		Body  string `json:"description"`
+		ID     int64  `json:"id"`
+		IID    int    `json:"iid"`
+		Title  string `json:"title"`
+		Body   string `json:"description"`
+		WebURL string `json:"web_url"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.Issue{}, err
 	}
-	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body}, nil
+	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body, URL: raw.WebURL}, nil
 }
 
 func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdate) (vcs.Issue, error) {

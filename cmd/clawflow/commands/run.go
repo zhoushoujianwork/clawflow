@@ -36,6 +36,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
+	"github.com/zhoushoujianwork/clawflow/internal/resourcelease"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
@@ -1957,11 +1958,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// only path that applied no label, left the trigger labels in place, and
 	// produced no greppable failure signal (issue #326).
 	isDisallowedOutcome := runErr != nil && errors.Is(runErr, operator.ErrDisallowedOutcome)
+	var resourceBusy *resourcelease.Blocked
+	isResourceBusy := errors.As(runErr, &resourceBusy)
 
 	// CI repair infrastructure outcomes (provider capacity/rate limit, launch,
 	// transport, timeout before any tool activity) release the reserved attempt
 	// so only real repair work consumes the three-attempt budget (issue #356).
 	repairInfra := false
+	if isResourceBusy && j.repair != nil {
+		if rerr := j.releaseRepair("resource-busy", time.Now().UTC()); rerr != nil {
+			fmt.Fprintf(os.Stderr, "%s resource lease reservation release failed: %v\n", prefix, rerr)
+		}
+	}
 	if kind, ok := classifyRepairInfra(runErr, filepath.Join(runDir, "events.jsonl")); ok {
 		j.result.InfraKind = kind
 	}
@@ -2022,6 +2030,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	switch {
 	case ctx.Err() != nil:
 		rm.Status, rm.Error = "lease-lost", ctx.Err().Error()
+	case isResourceBusy:
+		// Host contention is scheduling blockage, not an implementation failure.
+		rm.Status, rm.Error = "blocked", runErr.Error()
 	case isCostLimit:
 		// Record as "cost-limit" — deliberately distinct from "rate-limited"
 		// because the two need different operator responses: a rate limit
@@ -2267,6 +2278,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// Do NOT call checkCircuitBreaker: a missing marker line is a
 		// write-back defect, not an unprocessable issue (issue #323).
 		fmt.Printf("%s ✗ no outcome marker (not counted toward circuit breaker)\n", prefix)
+		return false, false, true
+	case "blocked":
+		fmt.Printf("%s blocked: %s\n", prefix, rm.Error)
 		return false, false, true
 	case "disallowed-outcome":
 		fmt.Printf("%s ✗ disallowed outcome label %q (comment landed, no terminal label; circuit breaker counting)\n", prefix, outcome)

@@ -187,6 +187,58 @@ func TestCreateIssue(t *testing.T) {
 	}
 }
 
+func TestCreateIssuePreservesAPIURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"legacy path", "https://gitlab.example.com/ns/group/repo/issues/1"},
+		{"modern path", "https://gitlab.example.com/ns/group/repo/-/issues/1"},
+		{"nonstandard host and subpath", "https://git.corp.example:8443/gitlab/ns/group/repo/-/issues/1"},
+		{"empty url stays empty", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			posts := 0
+			client := newTestClient(t, map[string]http.HandlerFunc{
+				"POST " + projectPath + "/issues": func(w http.ResponseWriter, r *http.Request) {
+					posts++
+					resp := map[string]any{"iid": 1, "title": "t"}
+					if tt.url != "" {
+						resp["web_url"] = tt.url
+					}
+					jsonResp(w, 201, resp)
+				},
+			})
+			issue, err := client.CreateIssue("ns/group/repo", "t", "b")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if issue.URL != tt.url || issue.Number != 1 || posts != 1 {
+				t.Errorf("URL=%q number=%d posts=%d, want URL %q with one POST", issue.URL, issue.Number, posts, tt.url)
+			}
+		})
+	}
+}
+
+func TestCreateMRPreservesAPIURL(t *testing.T) {
+	for _, want := range []string{
+		"https://gitlab.example.com/ns/group/repo/merge_requests/7",
+		"https://gitlab.example.com/ns/group/repo/-/merge_requests/7",
+		"https://git.corp.example:8443/gitlab/ns/group/repo/-/merge_requests/7",
+	} {
+		c := newTestClient(t, map[string]http.HandlerFunc{
+			"POST " + projectPath + "/merge_requests": func(w http.ResponseWriter, r *http.Request) {
+				jsonResp(w, 201, map[string]any{"iid": 7, "title": "t", "state": "opened", "source_branch": "fix", "web_url": want})
+			},
+		})
+		pr, err := c.CreatePR("ns/group/repo", vcs.PRCreateOpts{Head: "fix", Base: "main"})
+		if err != nil || pr.URL != want {
+			t.Fatalf("want %q: pr=%+v err=%v", want, pr, err)
+		}
+	}
+}
+
 func TestUpdateIssue(t *testing.T) {
 	client := newTestClient(t, map[string]http.HandlerFunc{
 		"PUT " + projectPath + "/issues/42": func(w http.ResponseWriter, r *http.Request) {
@@ -370,11 +422,11 @@ func TestCreateMRLostResponseIgnoresForeignSource(t *testing.T) {
 			jsonResp(w, 200, map[string]any{"iid": 3, "source_branch": "fix", "target_branch": "main", "source_project_id": 99, "target_project_id": 1})
 		},
 		"GET " + projectPath + "/merge_requests/2": func(w http.ResponseWriter, r *http.Request) {
-			jsonResp(w, 200, map[string]any{"iid": 2, "source_branch": "fix", "target_branch": "main", "source_project_id": 1, "target_project_id": 1})
+			jsonResp(w, 200, map[string]any{"iid": 2, "source_branch": "fix", "target_branch": "main", "source_project_id": 1, "target_project_id": 1, "web_url": "https://gitlab.example.com/ns/group/repo/-/merge_requests/2"})
 		},
 	})
 	pr, err := c.CreatePR("ns/group/repo", vcs.PRCreateOpts{Head: "fix", Base: "main"})
-	if err != nil || pr.Number != 2 || posts != 1 {
+	if err != nil || pr.Number != 2 || pr.URL != "https://gitlab.example.com/ns/group/repo/-/merge_requests/2" || posts != 1 {
 		t.Fatalf("pr=%+v posts=%d err=%v", pr, posts, err)
 	}
 }
