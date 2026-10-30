@@ -69,3 +69,19 @@ Test 检查 `124234340438` 也失败，Web render 通过。ClawFlow 的有界日
 随后自动重试进入 epoch 2/3，但在模型启动前被 testing SOP 摘要不一致拦截：任务固定 `800afdfb709f5445c55ed84774ce89a726836f3862530828c377a0a8fb956bfa`，而本轮为 #611 追加的共享 SOP 已改变。这是本轮操作引入的失误，不能通过改任务摘要或清空重试历史解决。
 
 已从原始备份恢复共享 `testing.md`，SHA-256 精确匹配上述固定版本。补充原生资料说明移至 `acceptance-inputs/clawflow-pr611/testing.native-evidence-procedure.md`，只在项目 context 中提供只读定位；它不替代原 SOP、原有验收要求或独立判断。临时证据写入脚本也已改为只更新独立说明文件，避免新提交验收时再次改共享 SOP。调度器已重新选取 #612；是否进入新会话、修复与合并仍需按后续真实记录判断。
+
+## 自动退避后的真实修复与独立复核
+
+#611 在自动退避后进入任务 `9ba86bf06ed206f49807ce2381981d0322c865f05723c058836ccece55463c63`、epoch 1。原生 CC session 为 `87728782-1d1c-4816-83c2-7c565b31fe0b`，profile `claude-claude-sonnet-5-1m-inherit-inherit`。19:14:41 UTC 的只读证据确认 worker 本地队列仍为 `not json`，共享 SOP 已恢复为 800afdfb…，模型已真实启动。这证明部署修复让自动重试越过原阻塞，未靠清空损坏文件或账本。产物 `/tmp/clawflow-pr611-auto-recovery-proof.json`。
+
+协助诊断新回归夹具时，仅对其 `commands.test` 子进程 PID 80944（19:18:09 UTC）、84359（19:20:54 UTC）发送 SIGQUIT。外层 Offload/native CC/worker executor 保持运行；原 Bash 链完成正常 stash pop。两次人工诊断终止不能作为测试通过或旧实现回归失败证明，已在 issue 讨论中明确。CC 后续修正夹具读取请求 body，并重新执行正常检查。
+
+该真实 repair-ci 会话正常结束、journal acknowledged，SOP 摘要精确为 800afdfb…，普通推送产生提交 `17b92f515234737ae1f9fdf8e17187a306267a4d`。它修正重新注册在上下文关闭时误报故障，保留 fatal 信任错误行为。没有修改 CI 配置。
+
+主代理随后在准确提交 17b92f5 的独立 checkout 进行 Go overlay 复核：保留修复后的回归夹具，仅替换为父提交的 worker_run.go，3 次均以 context canceled 触发目标断言，退出 1；无超时、无 SIGQUIT、无 no-tests 情况。修复版相邻 worker gate/claim/durable race 检查通过，退出 0。产物 `/tmp/clawflow-pr611-cancel-regression-5dhbfk82/`。该复核与修复器自报分开，不将缺少本地 PostgreSQL或旧的 4666c027 原生截图说成 17b92f5 的完整验收。
+
+## 公共 CI 维护改走正常实现
+
+17b92f5 的真实 CI run `41115045367` 中 Native macOS job `124266946772` 仍被取消。仓库 `skills/repair-ci/SKILL.md` 明确禁止修改 CI configuration，故不能继续让受限修复器承担镜像迁移。未修改这项权限边界。
+
+创建独立需求 [#620](https://github.com/zhoushoujianwork/clawflow/issues/620)“恢复 PR 必需 CI：更新停用的 macOS 镜像，修复 worker 退出误报”，由现有平台走正常实现、CI、独立验收。范围是 macos-15 和仅复用 17b92f5 的两个 Go 文件，保留作者来源；不携带 #611 菜单栏或 #612 存储功能。#610 临时设置 clawflow-skip，避免重复受限修复；原预算账本保留。公共维护合入 main 后，正常同步 main 回 #611、解除临时 hold，再做准确新提交的原生及独立验收。没有将额外需求伪装成 #611 已合并。
