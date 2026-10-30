@@ -44,7 +44,7 @@ func WithReportDigest(ctx context.Context, raw json.RawMessage, failed bool) con
 // MatchingReport acknowledges only the exact committed report from its original owner.
 // It remains valid after finalization but cannot accept another attempt or payload.
 func MatchingReport(t *Task, worker string, epoch int64, raw json.RawMessage, failed bool) bool {
-	return t.ResultDigest != "" && t.ResultDigest == reportDigest(raw, failed) && t.LeaseOwner == worker && t.FencingToken == epoch
+	return len(t.Result) > 0 && t.ResultDigest != "" && t.ResultDigest == reportDigest(raw, failed) && t.LeaseOwner == worker && t.FencingToken == epoch
 }
 
 // Historical receipts survive infrastructure retries advancing the task epoch.

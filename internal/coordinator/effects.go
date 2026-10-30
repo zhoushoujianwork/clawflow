@@ -301,6 +301,7 @@ func (s *Store) FinalizeApplication(ctx context.Context, id string, epoch int64,
 			if t.Attempt < MaxInfrastructureAttempts && t.Kind != "repair" {
 				values["state"] = "pending"
 				values["result"] = nil
+				values["result_digest"] = ""
 				values["lease_owner"] = ""
 				values["fencing_token"] = gorm.Expr("fencing_token + 1")
 			}

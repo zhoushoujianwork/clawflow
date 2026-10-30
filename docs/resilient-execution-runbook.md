@@ -36,6 +36,8 @@ States include `prepared`, `running`, `pending_sync`, `acknowledged`, `rejected`
 
 A controller-authorized infrastructure retry can reuse a task ID with a newer epoch. When replaying its saved claim, the worker archives an acknowledged prior attempt under `history/<task-id>/epoch-<epoch>/` before preparing the new attempt. The archive retains the report, checkpoint/session reference and executor output. Executor and session locks must both be free; their original lock files remain in place. Unacknowledged, rejected, expired or identity-mismatched claims still require reconciliation. Do not delete retained journals to clear an epoch mismatch, and do not use session recovery for an already acknowledged attempt.
 
+The controller clears the current report digest when preparing an infrastructure retry. A current receipt requires a committed result; historical receipts remain scoped to their recorded attempt epoch. If an older controller falsely acknowledged a report while the current task still has no result, verify the journal's task, owner and epoch against controller state before replaying that exact retained report through the authenticated worker API. Do not manufacture a successful result or reset retry limits.
+
 Execution has a fixed deadline based on the task timeout, plus ten minutes for reporting. Heartbeats do not extend execution authority indefinitely. If the controller remains unavailable, the executor stops at the execution deadline and preserves its result. Expired durable tasks retain their reservation rather than being blindly reassigned. This trades automatic replacement availability for duplicate-execution safety.
 
 ## Interrupted execution recovery
