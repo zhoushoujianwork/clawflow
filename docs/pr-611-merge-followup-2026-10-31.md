@@ -33,3 +33,17 @@ Test 检查 `124234340438` 也失败，Web render 通过。ClawFlow 的有界日
 现有调度器于 2026-10-30 18:34 UTC 派发任务 `204276758f4759feb2268826020319b68931fde33c6cc03210f3ef1203e3f730`。启动前检测到协调快照已变化，因此在调用开发模型前中止，账本将其记录为已释放的 launch 故障，并保留到 18:44:52 UTC 的基础设施退避。只读对比确认 PR 说明刚被本轮改写：派发时为旧版本，worker 读取时为新版本。该拒绝符合保护要求，不放宽快照校验、不重置共享账本。
 
 已冻结相关 PR/issue 描述等待现有调度器重试。本机项目 context 追加中文、先讲问题与使用效果的说明要求，原文件备份在同一 acceptance-inputs 目录。运行日志和被中止的 journal 均保留。后续需追加真实 repair、CI、独立验收和合并结果；当前尚未宣称 #611 合并。
+
+## worker 本地队列损坏导致的再次启动失败
+
+第二次派发 `8f3263b4cf4ab85de22546055a6dbce599c40280eb10a2ec9e3f45850d71b66e` 于 18:48 UTC 在调用开发模型前失败。实际原因是 worker 的 `local-worker/data/queue.json` 内容为 `not json`，mtime 为 18:45:25 UTC；这与 `internal/queue` 测试的损坏夹具相同。测试只改 HOME、未清除继承的 `CLAWFLOW_STATE_DIR`，因此可写入 worker 状态。该路径不是 controller 的人工排序来源，controller 自身队列文件不存在。
+
+修复 `f82243844cb131097a934df980d6dd1e264696a3` 让 worker 刷新远端协调事实时直接沿用已批准的 controller 排序，不再预先读取无权决定排序的本地文件；controller 路径仍拒绝损坏的人工排序。队列测试辅助函数清除继承的状态目录。新增损坏文件回归在旧实现真实失败；修复后协调相关 race 检查、队列 race 检查通过，继承目录中的哨兵内容保持不变。远端需求变化仍被拒绝。
+
+该版本已滚动部署为 `dev-coordination-f8224384`，摘要 `246e2f84f1a946dfe19d545f28752a5d45a6825b7805625bc0924cdac639d036`，两个 worker generation 匹配。活动 executor PID 59667、2876，epoch 1 与固定执行器均保持；PostgreSQL PID 61176 保持。备份为 `~/Library/Application Support/ClawFlow/backups/coordination-primary-20261031-t13nihq5/`，含原样保留的损坏队列文件。本轮没有删除或用空状态覆盖损坏文件。账本记录第二次 launch 释放并退避到 19:08:06 UTC，没有手工清除。
+
+## 读取被取消 workflow 中的实际测试失败
+
+公开 API 确认 run `41105570205` 的总体结论为 `cancelled`，但其中 Test job 为 `failure`。日志层原先仅查看 failure/timed_out workflow，故漏掉真实失败。修复 `e8eac262` 接受已完成且取消的 workflow，同时仍只读取准确 SHA、同仓库、最新 run/attempt 的 failure/timed_out job；取消/成功 job 不成为失败证据。新增回归在旧实现失败，GitHub VCS 包完整 race 检查通过。此提交目前在源码中，服务仍为上述 f822 版本。
+
+用修复后的 CLI 取到准确 Test job 日志，产物为 `/tmp/clawflow-pr611-ci-log-cancelled-workflow.txt`。摘录显示 `TestBlockedWorkerNeverClaimsButStaysRegistered` 在 400ms 内未完成 TLS 注册而失败，后一项 `TestHealthyGateStillClaims` 通过。已在下一次派发前补充需求讨论，要求修复 worker 在慢 CI 下的测试同步/超时，保留“仍注册但绝不 claim”断言；不能删除测试或改变生产门禁。日志为有界摘录，不保证覆盖全部失败。
