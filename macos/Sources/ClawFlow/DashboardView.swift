@@ -13,19 +13,24 @@ struct DashboardView: View {
     @State private var projectFilter = ""
     var body: some View {
         HStack(spacing: 0) {
-            VStack {
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(nsImage: BrandMark.menuBar)
+                    Text("ClawFlow").font(.headline)
+                    Spacer()
+                }.padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
                 List(Destination.allCases, selection: $destination) { item in
                     Label(item.rawValue, systemImage: item.symbol).tag(item)
                 }
                 SettingsLink().padding()
-            }.frame(width: 150)
+            }.frame(width: 160).background(.bar)
             Divider()
             VStack(spacing: 0) {
                 HStack {
                     Label(model.summary.title, systemImage: model.summary.symbol)
                     Spacer()
                     Text(model.snapshot?.controller ?? "Connect in Settings").foregroundStyle(.secondary)
-                }.font(.callout).padding(12)
+                }.font(.callout).padding(.horizontal, 18).padding(.vertical, 12).fixedSize(horizontal: false, vertical: true)
                 Divider()
                 if let error = model.error {
                     Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding(10)
@@ -92,8 +97,9 @@ struct TasksView: View {
                     Text("All projects").tag("")
                     ForEach(snapshot.projects) { Text($0.name).tag($0.name) }
                 }.frame(maxWidth: 260)
-            }.padding(12)
-            HSplitView {
+            }.padding(.horizontal, 18).padding(.vertical, 12).fixedSize(horizontal: false, vertical: true)
+            Divider()
+            HStack(spacing: 0) {
                 List(rows, selection: $selected) { row in
                     HStack(alignment: .top) {
                         Image(systemName: row.symbol).frame(width: 20).foregroundStyle(row.group == .attention ? .orange : .secondary)
@@ -102,14 +108,15 @@ struct TasksView: View {
                             Text("\(row.status) · \(row.worker.isEmpty ? "Unassigned" : row.worker)").font(.caption).foregroundStyle(.secondary)
                         }
                     }.padding(.vertical, 5).tag(row.id)
-                }.frame(minWidth: 250, idealWidth: 380)
+                }.frame(width: 280).frame(maxHeight: .infinity)
                     .overlay { if rows.isEmpty { ContentUnavailableView("No matching tasks", systemImage: "checklist") } }
+                Divider()
                 if let row = rows.first(where: { $0.id == selected }) {
                     TaskDetail(model: model, snapshot: snapshot, row: row).id(row.id).frame(minWidth: 280, idealWidth: 380)
                 } else {
-                    ContentUnavailableView("Select a task", systemImage: "sidebar.right").frame(minWidth: 280)
+                    ContentUnavailableView("Select a task", systemImage: "sidebar.right").frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-            }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -170,14 +177,16 @@ struct WorkersView: View {
                 Text("\(snapshot.board.workers.filter(\.live).count) online").foregroundStyle(.secondary)
                 Spacer()
                 Button("Add Worker") { adding = true }.disabled(!model.summary.connected || model.busy)
-            }.padding(12)
-            HSplitView {
+            }.padding(.horizontal, 18).padding(.vertical, 12).fixedSize(horizontal: false, vertical: true)
+            Divider()
+            HStack(spacing: 0) {
                 List(snapshot.board.workers.filter { search.isEmpty || "\($0.name) \($0.tags.joined(separator: " "))".localizedCaseInsensitiveContains(search) }, selection: $selected) { row in
                     VStack(alignment: .leading, spacing: 5) {
                         Label(row.name, systemImage: row.live ? "desktopcomputer" : "wifi.slash")
                         Text("\(row.state) · \(row.runningTasks.count)/\(row.maxParallel) active").font(.caption).foregroundStyle(.secondary)
                     }.padding(.vertical, 5).tag(row.id)
-                }.frame(minWidth: 240)
+                }.frame(width: 280).frame(maxHeight: .infinity)
+                Divider()
                 if let row = snapshot.board.workers.first(where: { $0.id == selected }) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 16) {
@@ -202,8 +211,8 @@ struct WorkersView: View {
                                 } message: { Text("Historical tasks remain. This worker credential will no longer authenticate.") }
                         }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
                     }.frame(minWidth: 300)
-                } else { ContentUnavailableView("Select a worker", systemImage: "desktopcomputer").frame(minWidth: 300) }
-            }
+                } else { ContentUnavailableView("Select a worker", systemImage: "desktopcomputer").frame(maxWidth: .infinity, maxHeight: .infinity) }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }.sheet(isPresented: $adding) { AddWorkerView(model: model) }
     }
 }
