@@ -26,6 +26,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/clone"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -33,19 +34,23 @@ import (
 )
 
 type workerOptions struct {
+	KeepAliveOwner                                bool
+	Executable                                    string
 	Coordinator, TokenFile, Fingerprint, StateDir string
 	Tags, Roles                                   []string
 	Capabilities                                  []string
+	Durable                                       bool
 	RunUntagged                                   bool
 	MaxParallel                                   int
 	// Gate withholds task claims while this worker's own Offload environment
 	// is not ready. Nil disables gating (coordinator-only tests, viewers).
-	Gate *workerGate
+	Gate *workerGate `json:"-"`
 }
 
 func configureWorker(cmd *cobra.Command) {
 	o := workerOptions{}
 	f := cmd.Flags()
+	f.BoolVar(&o.Durable, "durable", true, "Run tasks in independent restart-safe executors (requires updated controller)")
 	f.StringVar(&o.Coordinator, "coordinator", "", "Coordinator HTTPS 地址")
 	f.StringVar(&o.TokenFile, "token-file", "", "Worker token 文件")
 	f.StringVar(&o.Fingerprint, "fingerprint", "", "Coordinator SHA-256 指纹")
@@ -97,7 +102,8 @@ func configureWorker(cmd *cobra.Command) {
 		o.Gate = workerGateFactory(hostname, o.Roles)
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return runWorker(ctx, api, o, 30*time.Second, 5*time.Second, func(ctx context.Context, t *coordinator.Task) (*runJob, time.Duration, error) {
+		o.KeepAliveOwner = true
+		return runManagedWorker(ctx, api, o, func(ctx context.Context, t *coordinator.Task) (*runJob, time.Duration, error) {
 			return buildWorkerJob(ctx, t, reg)
 		})
 	}
@@ -181,14 +187,37 @@ func (a *workerAPI) postOnce(ctx context.Context, path string, in, out any) erro
 
 type workerBuilder func(context.Context, *coordinator.Task) (*runJob, time.Duration, error)
 
+// Apply intrinsic protocol tags before either registration path. Durable
+// managers register before entering runWorker and must advertise the same set.
+func coordinationWorkerOptions(o workerOptions) workerOptions {
+	if !slices.Contains(o.Tags, coordination.WorkerTag) {
+		o.Tags = append(slices.Clone(o.Tags), coordination.WorkerTag)
+	}
+	return o
+}
+
 func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, poll time.Duration, build workerBuilder) error {
+	o = coordinationWorkerOptions(o)
 	for _, capability := range o.Capabilities {
 		o.Tags = append(o.Tags, "capability:"+capability)
 	}
-	registration := map[string]any{"tags": o.Tags, "roles": o.Roles, "max_parallel": o.MaxParallel, "run_untagged": o.RunUntagged}
+	registration := map[string]any{"durable": o.Durable, "tags": o.Tags, "roles": o.Roles, "max_parallel": o.MaxParallel, "run_untagged": o.RunUntagged}
 	api.registration = registration
 	if err := api.post(ctx, "register", registration, nil); err != nil {
 		return err
+	}
+	if o.Durable {
+
+		// Saved, unstarted claims remain durable while this environment cannot
+		// prepare an executor. Pending reports can still recover independently.
+		if o.Gate == nil || o.Gate.ready(ctx) {
+			if err := recoverWorkerClaims(ctx, api, o); err != nil {
+				return err
+			}
+		}
+		if err := recoverWorkerExecutors(o); err != nil {
+			return err
+		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -205,7 +234,11 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 				if o.Gate != nil && !o.Gate.ready(ctx) {
 					// Keep the worker visible while it waits; nothing is claimed,
 					// so no attempt, reservation or label is touched.
-					_ = api.post(ctx, "register", registration, nil)
+					if err := api.post(ctx, "register", registration, nil); err != nil {
+						errors <- err
+						cancel()
+						return
+					}
 					select {
 					case <-ctx.Done():
 						return
@@ -213,7 +246,23 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 					}
 					continue
 				}
-				if err := api.post(ctx, "claim", struct{}{}, &claim); err != nil {
+				request := any(struct{}{})
+				claimPath := ""
+				if o.Durable {
+					var err error
+					claimPath, request, err = prepareWorkerClaim(o)
+					if err != nil {
+						errors <- err
+						cancel()
+						return
+					}
+				}
+				if err := api.post(ctx, "claim", request, &claim); err != nil {
+					if o.Durable {
+						errors <- err
+						cancel()
+						return
+					}
 					if workerFatal(err) {
 						errors <- err
 						cancel()
@@ -231,10 +280,35 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 					continue
 				}
 				if claim.Task == nil {
+					if claimPath != "" {
+						if err := os.Remove(claimPath); err != nil {
+							errors <- err
+							cancel()
+							return
+						}
+					}
+					if o.Durable {
+						if err := recoverWorkerExecutors(o); err != nil {
+							slog.Warn("worker/recovery", "err", err)
+						}
+					}
 					select {
 					case <-ctx.Done():
 						return
 					case <-time.After(poll):
+					}
+					continue
+				}
+				if o.Durable {
+					if err := acceptWorkerClaim(o, claim.Task); err != nil {
+						errors <- err
+						cancel()
+						return
+					}
+					if err := os.Remove(claimPath); err != nil {
+						errors <- err
+						cancel()
+						return
 					}
 					continue
 				}
@@ -294,7 +368,11 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 				done <- true
 				return
 			case <-tick.C:
-				renewCtx, renewCancel := context.WithTimeout(heartbeatCtx, coordinator.LeaseTTL-interval)
+				renewTimeout := coordinator.LeaseTTL - interval
+				if coordinator.DurableTask(t) && t.LeaseExpiresAt != nil {
+					renewTimeout = time.Until(*t.LeaseExpiresAt)
+				}
+				renewCtx, renewCancel := context.WithTimeout(heartbeatCtx, renewTimeout)
 				err := api.post(renewCtx, path+"heartbeat", fence, nil)
 				renewCancel()
 				if err != nil {
@@ -348,6 +426,11 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 		if err != nil {
 			result.Error = err.Error()
 			result.InfraKind = "launch"
+			if errors.Is(err, errCoordinationChanged) {
+				result.Status = "blocked"
+				result.NextAction = "Reassess current issue, PRs and active work on the next scheduler pass"
+				result.NextOwner = "scheduling"
+			}
 		} else {
 			spool, spoolErr := os.CreateTemp("", "clawflow-effects-"+t.ID+"-*")
 			if spoolErr != nil {
@@ -385,7 +468,11 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 	close(stop)
 	lost := <-done
 	if lost || parent.Err() != nil {
-		return nil
+		if _, durable := parent.Value(workerJournalKey{}).(string); !durable {
+			return nil
+		}
+		// Preserve interrupted evidence as a result; never silently discard it.
+		result.Status, result.InfraKind = "failed", "execution-interrupted"
 	}
 	action := "fail"
 	if result.Status == "success" || result.Status == "skipped" {
@@ -393,7 +480,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 	}
 	reportCtx, reportCancel := context.WithCancel(parent)
 	defer reportCancel()
-	err := api.post(reportCtx, path+action, map[string]any{"fencing_token": t.FencingToken, "result": result}, nil)
+	err := persistWorkerReport(reportCtx, api, t, action, result)
 	if lost || parent.Err() != nil {
 		return nil
 	}
@@ -447,6 +534,16 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	if issue == nil {
 		return nil, 0, fmt.Errorf("worker issue no longer exists")
 	}
+	if p.Coordination != nil {
+		probe := &runJob{op: op, repo: p.Repo, sub: &operator.Subject{Number: p.Issue}, client: client}
+		if p.Repair != nil {
+			probe.repair = &ciRepairContext{PR: vcs.PR{Number: p.Repair.PR}}
+		}
+		if err = validateWorkerCoordination(ctx, probe, p.Coordination); err != nil {
+			return nil, 0, err
+		}
+	}
+
 	if rc.LocalPath == "" {
 		sum := sha256.Sum256([]byte(platform + "/" + rc.BaseURL + "/" + p.Repo))
 		rc.LocalPath = filepath.Join(snapshot.StateDir(), "clones", hex.EncodeToString(sum[:12]))
@@ -469,6 +566,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	rc.AutoMerge = false
 	rc.AcceptanceRequired = p.RepoPolicy.AcceptanceRequired
 	j := &runJob{op: op, repo: p.Repo, repoCfg: rc, client: client, language: p.Language, sub: &operator.Subject{Number: issue.Number, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State, SubTotal: issue.SubIssuesTotal, URL: issue.URL, IsPR: op.Trigger.Target == "pr"}}
+	j.coordination = p.Coordination
 	j.acceptancePlan = p.AcceptancePlan
 	if p.ReopenEventID != "" {
 		j.reopen = &reopenContext{Event: vcs.IssueEvent{ID: p.ReopenEventID}}

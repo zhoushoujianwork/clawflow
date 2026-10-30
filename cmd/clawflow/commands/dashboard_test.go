@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
@@ -173,5 +175,37 @@ func TestControllerLaunchAgentHasNoWebArguments(t *testing.T) {
 	}
 	if !strings.HasSuffix(s.target(), ".controller") || !strings.HasSuffix(s.plistPath(), ".controller.plist") {
 		t.Fatal("controller service aliases legacy web")
+	}
+}
+
+func TestDashboardRepoIssueQueue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	repo := "owner/repo"
+	empty := dashboardRepo(repo, config.Repo{})
+	if empty.QueueUpdatedAt != nil || empty.IssueQueue == nil {
+		t.Fatal(empty)
+	}
+	now := time.Now().UTC()
+	err := queue.SaveState(queue.RepoState{Repo: repo, UpdatedAt: now, Skipped: 2, Entries: []queue.EntryRecord{
+		{Number: 7, Title: "Waiting issue", Priority: "P1", State: "eligible", Reason: "max_in_flight"},
+		{Number: 8, Title: "Blocked issue", Priority: "P0", State: "blocked", Reason: "dependency"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := dashboardRepo(repo, config.Repo{})
+	if row.QueueUpdatedAt == nil || !row.QueueUpdatedAt.Equal(now) || row.SkippedIssues != 2 || len(row.IssueQueue) != 2 {
+		t.Fatal(row)
+	}
+	if row.IssueQueue[0].Number != 8 || row.IssueQueue[1].State != "eligible:max_in_flight" {
+		t.Fatal(row.IssueQueue)
+	}
+	if err := os.WriteFile(queue.StatePath(repo), []byte("invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	broken := dashboardRepo(repo, config.Repo{})
+	if broken.QueueError == "" || broken.QueueUpdatedAt != nil {
+		t.Fatal(broken)
 	}
 }

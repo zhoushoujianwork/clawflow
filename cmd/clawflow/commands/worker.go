@@ -69,6 +69,8 @@ func NewWorkerCmd() *cobra.Command {
 		token.AddCommand(sub)
 	}
 	configureWorker(cmd)
-	cmd.AddCommand(token, newWorkerJoinCmd())
+	cmd.AddCommand(token, newWorkerJoinCmd(), newWorkerExecuteCmd())
+	cmd.AddCommand(newWorkerGenerationCommands()...)
+	cmd.AddCommand(newWorkerRecoveryCommands()...)
 	return cmd
 }

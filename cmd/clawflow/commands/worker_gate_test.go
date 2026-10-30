@@ -2,10 +2,15 @@ package commands
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,5 +99,92 @@ func TestClaimedTaskIsReleasedWithoutResultWhenOffloadLost(t *testing.T) {
 	// No result is reported, so no comment, label or failure can be produced.
 	if bodies[0] != `{"fencing_token":5}`+"\n" && bodies[0] != `{"fencing_token":5}` {
 		t.Fatalf("body=%q", bodies[0])
+	}
+}
+
+func TestDurableGateIsRebuiltAndReleaseSurvivesRestart(t *testing.T) {
+	for _, status := range []int{200, 409} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			o := workerOptions{StateDir: t.TempDir(), Executable: "/fixture/clawflow", Roles: []string{"operator"}, Durable: true}
+			t.Setenv("CLAWFLOW_STATE_DIR", o.StateDir)
+			until := time.Now().Add(time.Hour)
+			task := &coordinator.Task{ID: "task", State: "leased", LeaseOwner: "worker", FencingToken: 4, LeaseExpiresAt: &until, Payload: json.RawMessage(`{"durable_execution":true}`)}
+			var calls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/worker/v1/tasks/task/release" {
+					t.Error("unexpected task execution", r.URL.Path)
+				}
+				calls.Add(1)
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			token := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(token, []byte("fixture"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			o.Coordinator = server.URL
+			o.TokenFile = token
+			o.Fingerprint = fmt.Sprintf("%x", sha256.Sum256(server.Certificate().Raw))
+			o.Gate = blockedGate()
+			path := filepath.Join(workerJournalRoot(o), task.ID, "journal.json")
+			j := &workerJournal{Version: 1, Task: *task, Options: o, Executable: o.Executable, State: "prepared"}
+			if err := writeWorkerJournal(path, j); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := os.ReadFile(path)
+			if strings.Contains(string(raw), `"Gate"`) {
+				t.Fatal("process-local gate persisted")
+			}
+			old := workerGateFactory
+			defer func() { workerGateFactory = old }()
+			workerGateFactory = func(string, []string) *workerGate { return blockedGate() }
+			command := newWorkerExecuteCmd()
+			command.SetArgs([]string{"--journal", path})
+			if err := command.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			released, err := readWorkerJournal(path)
+			if err != nil || released.State != "released" || released.Action != "release" || calls.Load() != 1 {
+				t.Fatal("release not retained", released, calls.Load(), err)
+			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(path), "execution.json")); !os.IsNotExist(err) {
+				t.Fatal("unavailable runtime started execution", err)
+			}
+			// Simulate losing the HTTP reply before persisting the local receipt.
+			released.State = "pending_release"
+			if err := writeWorkerJournal(path, released); err != nil {
+				t.Fatal(err)
+			}
+			command = newWorkerExecuteCmd()
+			command.SetArgs([]string{"--journal", path})
+			if err := command.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			final, _ := readWorkerJournal(path)
+			if final.State != "released" || calls.Load() != 2 {
+				t.Fatal("release replay failed", final, calls.Load())
+			}
+			for _, mode := range []string{"resume", "checkpoint"} {
+				final.State = "prepared"
+				final.Resume = mode == "resume"
+				if mode == "checkpoint" {
+					if err := os.WriteFile(filepath.Join(filepath.Dir(path), "execution.json"), []byte(`{}`), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := writeWorkerJournal(path, final); err != nil {
+					t.Fatal(err)
+				}
+				command = newWorkerExecuteCmd()
+				command.SetArgs([]string{"--journal", path})
+				if err := command.Execute(); err == nil {
+					t.Fatal("retained session released without runtime", mode)
+				}
+				retained, _ := readWorkerJournal(path)
+				if retained.State != "prepared" || calls.Load() != 2 {
+					t.Fatal("retained session changed", mode, retained, calls.Load())
+				}
+			}
+		})
 	}
 }

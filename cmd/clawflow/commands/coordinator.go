@@ -98,7 +98,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 			onError(err)
 		}
 	}()
-	stopWorker, err := startLocalWorker(reconcileCtx, settings.LocalWorker, listener.Addr(), pin, tasks, onError)
+	stopWorker, err := startIndependentLocalWorker(reconcileCtx, settings.LocalWorker, listener.Addr(), pin, tasks, onError)
 	if err != nil {
 		reconcileCancel()
 		_ = server.Close()
@@ -177,3 +177,50 @@ func startLocalWorker(ctx context.Context, settings config.LocalWorkerSettings, 
 	}()
 	return func() { cancel(); <-done }, nil
 }
+
+// Local execution has an independent process lifetime; controller shutdown only
+// closes its listener. On recovery, the next manager generation reuses journals.
+func startIndependentLocalWorker(ctx context.Context, settings config.LocalWorkerSettings, addr net.Addr, pin string, tasks *coordinator.Store, onError func(error)) (func(), error) {
+	if !settings.Enabled {
+		return func() {}, nil
+	}
+	parallel := settings.MaxParallel
+	if parallel == 0 {
+		parallel = 1
+	}
+	if parallel < 1 {
+		return nil, fmt.Errorf("invalid local worker capacity")
+	}
+	tokenPath := filepath.Join(snapshot.DataDir(), "coordinator", "local-worker.token")
+	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
+		secret, err := tasks.CreateToken(ctx, "local-worker", "worker")
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(tokenPath, []byte(secret), 0600); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return nil, err
+	}
+	if host == "" || net.ParseIP(host).IsUnspecified() {
+		host = "localhost"
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	o := workerOptions{Coordinator: "https://" + net.JoinHostPort(host, port), TokenFile: tokenPath, Fingerprint: pin, MaxParallel: parallel, Tags: append(append([]string{}, settings.Tags...), config.HostTag(hostname)), Roles: []string{"operator", "acceptance"}, RunUntagged: true}
+	o.Durable = true
+	o.StateDir = filepath.Join(config.StateDir(), "local-worker")
+	if err := startLocalWorkerProcess(o, ""); err != nil {
+		return nil, err
+	}
+	return func() {}, nil
+}
+
+var startLocalWorkerProcess = startWorkerGeneration

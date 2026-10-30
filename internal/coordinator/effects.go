@@ -40,6 +40,7 @@ type EffectIntent struct {
 	UpdatedAt        time.Time
 }
 type TaskAttempt struct {
+	ResultDigest  string
 	TaskID        string `gorm:"primaryKey"`
 	AttemptNumber int64  `gorm:"primaryKey"`
 	LeaseEpoch    int64

@@ -31,7 +31,7 @@ build:
 	@echo "built → ./clawflow ($(VERSION))"
 
 # tidy + build，开发日常用
-dev: tidy install
+cli-dev: tidy install
 
 # Build release CLIs. The native app is built on macOS with `make native`.
 release: CHANNEL = release
@@ -69,3 +69,14 @@ native-test:
 
 legacy-web: web
 	go build -tags legacyweb $(LDFLAGS) -o clawflow $(SRC)
+
+# Native development: build, install, and restart only the dashboard app.
+.PHONY: dev dev-build native-install cli-dev
+export CLAWFLOW_DEV_INSTALL_DIR
+dev:
+	./macos/dev-app.sh --install-restart
+
+dev-build:
+	./macos/dev-app.sh
+
+native-install: dev

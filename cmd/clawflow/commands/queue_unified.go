@@ -36,6 +36,8 @@ func (q queueRuntime) now() time.Time {
 
 // repoQueueInput is everything planRepoQueue needs as plain data/callbacks.
 type repoQueueInput struct {
+	CoordinationHold func(vcs.Issue, []vcs.PR) string
+
 	Repo           string
 	Issues         []vcs.Issue
 	HasChildren    map[int]bool
@@ -160,6 +162,9 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 			case !in.ImplementJobs[is.Number]:
 				continue // another operator owns the issue this pass
 			}
+		}
+		if !c.InFlight && c.Ineligible == "" && in.CoordinationHold != nil {
+			c.Ineligible = in.CoordinationHold(is, prs)
 		}
 		if !c.InFlight && c.Ineligible == "" && in.PRFiles != nil {
 			savedPlan, err := queueAcceptancePlan(in.Repo, is)

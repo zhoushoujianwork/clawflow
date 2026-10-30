@@ -180,7 +180,7 @@ func (t *eventTail) accept(raw []byte) error {
 		t.final = &copy
 	}
 	if e.Type == "progress" && t.observe != nil {
-		t.observe(Observation{Type: redact(e.NativeType, t.env), Model: redact(e.Model, t.env), NativeSessionID: redact(e.Session, t.env)})
+		t.observe(Observation{Backend: e.Backend, RunID: e.RunID, Type: redact(e.NativeType, t.env), Model: redact(e.Model, t.env), NativeSessionID: redact(e.Session, t.env)})
 	}
 	return nil
 }

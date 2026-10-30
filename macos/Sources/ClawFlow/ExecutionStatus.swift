@@ -131,7 +131,7 @@ enum Notifier {
             let content = UNMutableNotificationContent()
             content.title = title; content.body = body
             // A fixed identifier replaces an earlier delivery instead of stacking.
-            center.add(UNNotificationRequest(identifier: "clawflow.offload-unavailable", content: content, trigger: nil))
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "clawflow.offload-unavailable", content: content, trigger: nil))
         }
     }
 }

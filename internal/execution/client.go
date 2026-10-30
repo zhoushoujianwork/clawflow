@@ -136,6 +136,8 @@ type Request struct {
 
 type Observation struct {
 	Type            string          `json:"type"`
+	Backend         string          `json:"backend,omitempty"`
+	RunID           string          `json:"run_id,omitempty"`
 	Message         string          `json:"message,omitempty"`
 	Delta           string          `json:"delta,omitempty"`
 	Model           string          `json:"model,omitempty"`
@@ -348,6 +350,47 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, err
 	}
 	req.Workspace = canonical
+	checkpointPath, checkpoint, err := recoveryCheckpoint(ctx, c, &req)
+	if err != nil {
+		return result, err
+	}
+	if err := validateRequest(req); err != nil {
+		return result, err
+	}
+	var checkpointFile *os.File
+	var checkpointErr error
+	if checkpoint != nil {
+		checkpointFile, err = checkpointLock(checkpointPath)
+		if err != nil {
+			return result, err
+		}
+		defer checkpointFile.Close()
+		if err := writeCheckpoint(checkpointPath, *checkpoint); err != nil {
+			return result, err
+		}
+		originalObserve := observe
+		observe = func(o Observation) {
+			if o.NativeSessionID != "" {
+				checkpoint.Session = o.NativeSessionID
+			}
+			if o.Backend != "" {
+				if checkpoint.Backend != "" && checkpoint.Backend != o.Backend {
+					checkpointErr = &Error{Kind: "backend_mismatch"}
+					return
+				}
+				checkpoint.Backend = o.Backend
+			}
+			if o.RunID != "" {
+				checkpoint.RunID = o.RunID
+			}
+			if err := writeCheckpoint(checkpointPath, *checkpoint); err != nil {
+				checkpointErr = err
+			}
+			if originalObserve != nil {
+				originalObserve(o)
+			}
+		}
+	}
 	releaseSlot, err := agentcapacity.Acquire(ctx)
 	if err != nil {
 		return result, fmt.Errorf("acquire agent capacity: %w", err)
@@ -367,7 +410,14 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if err != nil {
 		return result, err
 	}
-	defer os.RemoveAll(dir)
+	if checkpoint == nil {
+		defer os.RemoveAll(dir)
+	} else {
+		checkpoint.ArtifactDir = dir
+		if err := writeCheckpoint(checkpointPath, *checkpoint); err != nil {
+			return result, err
+		}
+	}
 	instructions := filepath.Join(dir, "instructions.md")
 	if err := os.WriteFile(instructions, []byte(req.Instructions), 0600); err != nil {
 		return result, err
@@ -423,6 +473,9 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, &UnavailableError{Reason: ReasonMissing, Message: "Offload executable path unavailable"}
 	}
 	cmd := exec.Command(command, args...)
+	if checkpointFile != nil {
+		cmd.ExtraFiles = []*os.File{checkpointFile}
+	}
 	cmd.Dir = req.Workspace
 	if req.PermissionMode == "bypassPermissions" {
 		env, err = gitexec.AppEnvironment(env)
@@ -487,6 +540,9 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		case <-ticker.C:
 			if eventErr == nil {
 				eventErr = tail.poll()
+				if eventErr == nil {
+					eventErr = checkpointErr
+				}
 				if eventErr != nil {
 					cancel()
 				}
@@ -505,10 +561,19 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	// Drain only newly completed records, even on timeout or invalid stdout.
 	if eventErr == nil {
 		eventErr = tail.poll()
+		if eventErr == nil {
+			eventErr = checkpointErr
+		}
 	}
 	// Preserve validated stream identity even if interruption prevents a final
 	// event or stdout. Never recover answer text/outcomes from events.
 	if tail.runID != "" {
+		if checkpoint != nil {
+			checkpoint.Session, checkpoint.Backend, checkpoint.RunID = tail.session, tail.backend, tail.runID
+			if err := writeCheckpoint(checkpointPath, *checkpoint); err != nil {
+				return result, err
+			}
+		}
 		result = Result{NativeSessionID: tail.session, SessionKey: tail.session, Profile: c.Profile, Backend: tail.backend, Model: tail.model, RunID: tail.runID, CallerRunID: req.RequestID}
 	}
 	if tail.final != nil {
@@ -580,6 +645,13 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	}
 	if req.PermissionMode == "default" && result.ExecutionPolicy != "default" {
 		return result, &Error{Kind: "protocol_policy_mismatch"}
+	}
+	if checkpoint != nil {
+		checkpoint.Session, checkpoint.Backend, checkpoint.RunID = result.NativeSessionID, result.Backend, result.RunID
+		checkpoint.Completed = result.Status == "ok"
+		if err := writeCheckpoint(checkpointPath, *checkpoint); err != nil {
+			return result, err
+		}
 	}
 	if result.Status != "ok" {
 		kind := safeKind(result.ErrorKind)

@@ -60,6 +60,7 @@ func targetedIssue(n int, labels ...string) map[string]any {
 // recordDispatch stubs the executor and returns the sorted issue numbers it saw.
 func recordDispatch(t *testing.T) func() []int {
 	t.Helper()
+	stubDispatchCoordination(t)
 	var mu sync.Mutex
 	var got []int
 	old := runOneOperatorFn
@@ -355,4 +356,13 @@ func TestSweepAutoMergePRsTargetedOnlyMergesTargetPR(t *testing.T) {
 	if len(f.merged) != 1 || f.merged[0] != 20 {
 		t.Fatalf("untargeted sweep merged %v, want [20]", f.merged)
 	}
+}
+
+// Selection and legacy wire-protocol fixtures stub the new execution preflight;
+// its real collection, model, effects and DB path have dedicated tests.
+func stubDispatchCoordination(t *testing.T) {
+	t.Helper()
+	old := coordinateDispatch
+	coordinateDispatch = func(context.Context, *runJob, coordinationTasks) (bool, error) { return true, nil }
+	t.Cleanup(func() { coordinateDispatch = old })
 }

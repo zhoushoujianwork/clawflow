@@ -34,7 +34,7 @@ import SwiftUI
             }
         }
         freshnessTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.now = Date() }
+            Task { @MainActor [weak self] in self?.now = Date() }
         }
         polling = Task { [weak self] in
             while !Task.isCancelled {
