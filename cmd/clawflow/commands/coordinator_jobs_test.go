@@ -378,7 +378,7 @@ func TestCoordinatorRejectsExpiredAndCrossRepoResults(t *testing.T) {
 
 func TestCoordinatorRunOnceEnqueuesAndPreservesCapacity(t *testing.T) {
 	stubDispatchCoordination(t)
-	db, dsn := storetest.NewWithDSN(t)
+	db, dsn := storetest.NewWithPath(t)
 	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
 		t.Fatal(err)
 	}

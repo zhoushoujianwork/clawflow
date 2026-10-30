@@ -46,35 +46,36 @@ func gateStore(ctx context.Context) (release func(), err error) {
 	}, nil
 }
 
-// NewDBCmd wires `clawflow db`: PostgreSQL schema management.
+// NewDBCmd wires `clawflow db`: the embedded SQLite store and the one-time
+// PostgreSQL import.
 func NewDBCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "db",
-		Short: "Manage the PostgreSQL store (migrate, status)",
-		Long: `ClawFlow keeps durable state in PostgreSQL. Configure the DSN with
-settings.database.dsn or the CLAWFLOW_DATABASE_DSN environment variable.
-See docs/storage-design.md.`,
+		Short: "Manage the embedded SQLite store (status, migrate, backup, PostgreSQL import)",
+		Long: `ClawFlow keeps durable state in an embedded SQLite file owned by the
+controller (<state dir>/data/clawflow.sqlite3). A fresh host needs no database
+server or DSN. Hosts that still use PostgreSQL move over once with
+plan, import, verify and cutover; see docs/sqlite-host-runbook.md.`,
 	}
-	cmd.AddCommand(newDBMigrateCmd(), newDBStatusCmd(), newDBImportRunsCmd())
+	cmd.AddCommand(newDBMigrateCmd(), newDBStatusCmd(), newDBImportRunsCmd(), newDBBackupCmd(),
+		newDBPlanCmd(), newDBImportCmd(), newDBVerifyCmd(), newDBCutoverCmd(), newDBRollbackCmd())
 	return cmd
 }
 
-func openDB(cmd *cobra.Command) (*store.Store, string, error) {
+// openDB opens the host database without requiring a completed migration, for
+// `db migrate`, `db status` and `db backup`.
+func openDB(cmd *cobra.Command) (*store.Store, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, "", fmt.Errorf("load config: %w", err)
+		return nil, fmt.Errorf("load config: %w", err)
 	}
-	dsn, err := store.ResolveDSN(cfg)
+	path, err := store.ResolvePath(cfg)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
-	s, err := store.Open(ctx, dsn)
-	if err != nil {
-		return nil, "", err
-	}
-	return s, dsn, nil
+	return store.Open(ctx, path)
 }
 
 func newDBMigrateCmd() *cobra.Command {
@@ -84,21 +85,21 @@ func newDBMigrateCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			s, dsn, err := openDB(cmd)
+			s, err := openDB(cmd)
 			if err != nil {
 				return err
 			}
 			defer s.Close()
-			fmt.Printf("Database: %s\n", store.MaskDSN(dsn))
+			fmt.Fprintf(cmd.OutOrStdout(), "Database: %s\n", s.Path())
 			applied, err := s.Migrate(cmd.Context(), store.Migrations)
 			for _, v := range applied {
-				fmt.Printf("applied migration %d\n", v)
+				fmt.Fprintf(cmd.OutOrStdout(), "applied migration %d\n", v)
 			}
 			if err != nil {
 				return err
 			}
 			if len(applied) == 0 {
-				fmt.Println("database is up to date")
+				fmt.Fprintln(cmd.OutOrStdout(), "database is up to date")
 			}
 			return importRunHistoryIfEmpty(cmd, s)
 		},
@@ -108,33 +109,35 @@ func newDBMigrateCmd() *cobra.Command {
 func newDBStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:          "status",
-		Short:        "Show database connectivity and migration state",
+		Short:        "Show database location, integrity and migration state",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			s, err := openDB(cmd)
 			if err != nil {
-				return fmt.Errorf("load config: %w", err)
-			}
-			dsn, err := store.ResolveDSN(cfg)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("DSN:          %s\n", store.MaskDSN(dsn))
-			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-			defer cancel()
-			s, err := store.Open(ctx, dsn)
-			if err != nil {
-				fmt.Println("Connectivity: failed")
+				fmt.Fprintln(cmd.OutOrStdout(), "Database:     unavailable")
 				return err
 			}
 			defer s.Close()
-			fmt.Println("Connectivity: ok")
+			ctx := cmd.Context()
+			fmt.Fprintf(cmd.OutOrStdout(), "Database:     SQLite %s\n", s.Path())
+			if err := s.IntegrityCheck(ctx); err != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Integrity:    failed: %v\n", err)
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Integrity:    ok")
+			if rec, err := store.LoadCutover(); err == nil && rec != nil {
+				state := "active"
+				if rec.RolledBack {
+					state = "rolled back"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Cutover:      %s at %s (source %s)\n", state, rec.CutoverAt.Format(time.RFC3339), rec.SourceDSN)
+			}
 			statuses, err := s.Status(ctx, store.Migrations)
 			if err != nil {
 				return err
 			}
-			fmt.Println("Migrations:")
+			fmt.Fprintln(cmd.OutOrStdout(), "Migrations:")
 			for _, st := range statuses {
 				state := "pending"
 				if st.Applied {
@@ -143,15 +146,36 @@ func newDBStatusCmd() *cobra.Command {
 						state += " " + st.AppliedAt.UTC().Format(time.RFC3339)
 					}
 				}
-				fmt.Printf("  %03d %-24s %s\n", st.Version, st.Name, state)
+				fmt.Fprintf(cmd.OutOrStdout(), "  %03d %-24s %s\n", st.Version, st.Name, state)
 			}
 			return nil
 		},
 	}
 }
 
+func newDBBackupCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:          "backup <destination>",
+		Short:        "Write a consistent backup (WAL included) of the live database",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := openDB(cmd)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			if err := s.Backup(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "backup written to %s\n", args[0])
+			return nil
+		},
+	}
+}
+
 func newDBImportRunsCmd() *cobra.Command {
-	return &cobra.Command{Use: "import-runs", Short: "Import existing run metadata into PostgreSQL", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "import-runs", Short: "Import existing run metadata files into the database", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		release, err := gateStore(cmd.Context())
 		if err != nil {
 			return err

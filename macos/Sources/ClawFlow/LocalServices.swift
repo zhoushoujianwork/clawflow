@@ -7,10 +7,10 @@ struct LocalService: Identifiable {
     var running = false
     var pid: String?
     var error: String?
-    var title: String { id.hasSuffix(".postgres") ? "Local database" : id.hasSuffix(".controller") ? "Local controller" : "Worker · " + id.replacingOccurrences(of: "com.zhoushoujianwork.clawflow.worker-", with: "") }
+    var title: String { id.hasSuffix(".controller") ? "Local controller" : "Worker · " + id.replacingOccurrences(of: "com.zhoushoujianwork.clawflow.worker-", with: "") }
     var status: String { error != nil ? "Status unavailable" : running ? "Running · PID \(pid ?? "—")" : loaded ? "Loaded · not running" : "Stopped" }
     static func accepts(_ label: String) -> Bool {
-        label == "com.zhoushoujianwork.clawflow.postgres" || label == "com.zhoushoujianwork.clawflow.controller" || label.hasPrefix("com.zhoushoujianwork.clawflow.worker-")
+        label == "com.zhoushoujianwork.clawflow.controller" || label.hasPrefix("com.zhoushoujianwork.clawflow.worker-")
     }
     mutating func apply(_ text: String) {
         loaded = true; running = false; pid = nil; error = nil
@@ -60,7 +60,7 @@ struct LocalService: Identifiable {
         }
     }
     private func priority(_ service: LocalService) -> Int {
-        service.id.hasSuffix(".postgres") ? 0 : service.id.hasSuffix(".controller") ? 1 : 2
+        service.id.hasSuffix(".controller") ? 0 : 1
     }
     func refresh() async {
         guard !refreshing else { return }; refreshing = true; defer { refreshing = false }

@@ -38,12 +38,18 @@ type ScheduledCheckRun struct {
 	Deadline  time.Time       `json:"deadline"`
 	Status    string          `json:"status"`
 	Summary   string          `json:"summary"`
-	Actions   json.RawMessage `json:"actions" gorm:"type:jsonb"`
-	Usage     json.RawMessage `json:"usage" gorm:"type:jsonb"`
+	Actions   json.RawMessage `json:"actions" gorm:"serializer:json"`
+	Usage     json.RawMessage `json:"usage" gorm:"serializer:json"`
 }
 
 func migrateSchedules(tx *gorm.DB) error {
-	return tx.AutoMigrate(&ScheduledCheck{}, &ScheduledCheckRun{})
+	return execAll(tx, `CREATE TABLE scheduled_checks (
+ id text PRIMARY KEY, cron text, timezone text, prompt text, ops integer, timeout_seconds integer, enabled boolean, owner text,
+ created_at timestamp, updated_at timestamp, last_run_at timestamp, last_status text, last_summary text, failures integer, last_tick timestamp
+)`, `CREATE TABLE scheduled_check_runs (
+ id text PRIMARY KEY, check_id text, started_at timestamp, ended_at timestamp, deadline timestamp, status text, summary text,
+ actions text CHECK (actions IS NULL OR json_valid(actions)), usage text CHECK (usage IS NULL OR json_valid(usage))
+)`, `CREATE INDEX idx_scheduled_check_runs_check_id ON scheduled_check_runs (check_id)`)
 }
 
 func (j ScheduledCheck) Validate() error {
@@ -183,7 +189,7 @@ func (s *Store) FinishScheduledCheck(ctx context.Context, id, status, summary st
 			return err
 		}
 		// A deleted job retains its run history.
-		result := tx.Model(&ScheduledCheckRun{}).Where("id = ? AND status = ?", id, "running").Updates(map[string]any{"status": status, "summary": summary, "actions": actions, "usage": usage, "ended_at": time.Now().UTC()})
+		result := tx.Model(&ScheduledCheckRun{}).Where("id = ? AND status = ?", id, "running").Updates(map[string]any{"status": status, "summary": summary, "actions": jsonText(actions), "usage": jsonText(usage), "ended_at": time.Now().UTC()})
 		if result.Error != nil {
 			return result.Error
 		}

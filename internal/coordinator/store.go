@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/schema"
 )
 
 const LeaseTTL = 120 * time.Second
@@ -36,8 +39,8 @@ type Task struct {
 	Issue               int             `json:"issue"`
 	PR                  int             `json:"pr"`
 	Operator            string          `json:"operator"`
-	Payload             json.RawMessage `gorm:"type:jsonb" json:"payload"`
-	Tags                []string        `gorm:"serializer:json;type:jsonb" json:"tags"`
+	Payload             json.RawMessage `gorm:"serializer:rawjson" json:"payload"`
+	Tags                []string        `gorm:"serializer:json" json:"tags"`
 	Priority            int             `json:"priority"`
 	QueuePosition       int64           `json:"queue_position"`
 	State               string          `json:"state"`
@@ -45,7 +48,7 @@ type Task struct {
 	LeaseOwner          string          `json:"lease_owner"`
 	LeaseExpiresAt      *time.Time      `json:"lease_expires_at"`
 	FencingToken        int64           `json:"fencing_token"`
-	Result              json.RawMessage `gorm:"type:jsonb" json:"result"`
+	Result              json.RawMessage `gorm:"serializer:rawjson" json:"result"`
 	CreatedAt           time.Time       `json:"created_at"`
 	UpdatedAt           time.Time       `json:"updated_at"`
 }
@@ -56,10 +59,10 @@ type Worker struct {
 	Durable     bool
 	Paused      bool
 	ID          string   `gorm:"primaryKey"`
-	Tags        []string `gorm:"serializer:json;type:jsonb"`
+	Tags        []string `gorm:"serializer:json"`
 	RunUntagged bool
 	MaxParallel int
-	Roles       []string `gorm:"serializer:json;type:jsonb"`
+	Roles       []string `gorm:"serializer:json"`
 	Backend     string
 	Model       string
 	CreatedAt   time.Time
@@ -124,7 +127,8 @@ func (s *Store) Enqueue(ctx context.Context, input Task) (*Task, error) {
 }
 
 // EnqueuePrepared prepares a new payload only after active-task deduplication.
-// The repository advisory lock serializes producers across coordinator processes.
+// Every write transaction is BEGIN IMMEDIATE, so producers are serialized across
+// coordinator and CLI processes by the database writer lock.
 func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*Task) error) (*Task, error) {
 	if input.Repo == "" || input.Issue < 0 || input.PR < 0 || (input.Issue == 0 && input.PR == 0) || input.Operator == "" {
 		return nil, ErrInvalid
@@ -153,9 +157,6 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 			if input.EventSource == "" {
 				return ErrInvalid
 			}
-			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", input.EventSource+"/"+input.ExternalID).Error; err != nil {
-				return err
-			}
 			var event InboxEvent
 			if err := tx.First(&event, "source = ? AND external_id = ?", input.EventSource, input.ExternalID).Error; err == nil {
 				t = Task{}
@@ -170,9 +171,6 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 			}
 			now := time.Now().UTC()
 			return tx.Create(&InboxEvent{Source: input.EventSource, ExternalID: input.ExternalID, TaskID: t.ID, ReceivedAt: now, ProcessedAt: now}).Error
-		}
-		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", t.Repo).Error; err != nil {
-			return err
 		}
 		q := tx.Where("repo = ? AND kind = ? AND state IN ?", t.Repo, t.Kind, []string{"pending", "leased"})
 		if t.PR > 0 {
@@ -195,7 +193,7 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 		if !json.Valid(t.Payload) {
 			return ErrInvalid
 		}
-		// The repository advisory lock above makes this check atomic with
+		// The writer lock held by this transaction makes this check atomic with
 		// enqueue. Two concurrent assessments of an empty queue cannot both
 		// enqueue from the same stale snapshot.
 		var envelope struct {
@@ -269,10 +267,8 @@ func (s *Store) claim(ctx context.Context, worker, claimID string) (*Task, error
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var repoLimits map[string]int
 		if s.LeaseLimits != nil {
-			// Serialize platform-wide checks across all workers and API processes.
-			if err := tx.Exec("SELECT pg_advisory_xact_lock(500387)").Error; err != nil {
-				return err
-			}
+			// The immediate transaction already serializes platform-wide
+			// capacity checks across all workers and API processes.
 			total, limits, err := s.LeaseLimits()
 			if err != nil {
 				return err
@@ -287,7 +283,7 @@ func (s *Store) claim(ctx context.Context, worker, claimID string) (*Task, error
 			}
 		}
 		var w Worker
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&w, "id = ?", worker).Error; err != nil {
+		if err := tx.First(&w, "id = ?", worker).Error; err != nil {
 			return err
 		}
 		if w.Paused {
@@ -303,7 +299,7 @@ func (s *Store) claim(ctx context.Context, worker, claimID string) (*Task, error
 		// Walk one row at a time so unrelated eligible tasks are not all locked by one claimant.
 		var skipped []string
 		for {
-			q := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("state = 'pending'").Order("priority ASC, queue_position ASC, created_at ASC, id ASC")
+			q := tx.Where("state = 'pending'").Order("priority ASC, queue_position ASC, created_at ASC, id ASC")
 			if len(skipped) > 0 {
 				q = q.Where("id NOT IN ?", skipped)
 			}
@@ -333,10 +329,7 @@ func (s *Store) claim(ctx context.Context, worker, claimID string) (*Task, error
 				skipped = append(skipped, t.ID)
 				continue
 			}
-			var now time.Time
-			if err := tx.Raw("SELECT clock_timestamp()").Scan(&now).Error; err != nil {
-				return err
-			}
+			now := controllerNow()
 			expires := now.Add(LeaseTTL)
 			if w.Durable {
 				var payload map[string]json.RawMessage
@@ -376,17 +369,20 @@ func (s *Store) leaseUpdate(ctx context.Context, id, worker string, fence int64,
 		// Lock first so expiry is checked after any wait, even if the other
 		// transaction only locked the row without modifying it.
 		var current Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, "id = ?", id).Error; err != nil {
+		if err := tx.First(&current, "id = ?", id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrStaleLease
 			}
 			return err
 		}
+		// Controller time owns leases: the comparison uses the controller's
+		// clock, never a worker-supplied time.
+		now := controllerNow()
 		query := tx.Model(&Task{}).Where("id = ? AND lease_owner = ? AND fencing_token = ? AND state = 'leased' AND lease_expires_at IS NOT NULL", id, worker, fence)
 		if action == "result-accepted" {
-			query = query.Where("(lease_expires_at > clock_timestamp() OR payload->>'durable_execution' = 'true')")
+			query = query.Where("(lease_expires_at > ? OR json_extract(payload, '$.durable_execution') = 1)", now)
 		} else {
-			query = query.Where("lease_expires_at > clock_timestamp()")
+			query = query.Where("lease_expires_at > ?", now)
 		}
 		r := query.Updates(values)
 		if r.Error != nil {
@@ -417,7 +413,7 @@ func (s *Store) leaseUpdate(ctx context.Context, id, worker string, fence int64,
 	})
 }
 func (s *Store) Heartbeat(ctx context.Context, id, worker string, fence int64) error {
-	return s.leaseUpdate(ctx, id, worker, fence, "heartbeat", map[string]interface{}{"lease_expires_at": gorm.Expr("CASE WHEN payload->>'durable_execution' = 'true' THEN lease_expires_at ELSE clock_timestamp() + interval '120 seconds' END")})
+	return s.leaseUpdate(ctx, id, worker, fence, "heartbeat", map[string]interface{}{"lease_expires_at": gorm.Expr("CASE WHEN json_extract(payload, '$.durable_execution') = 1 THEN lease_expires_at ELSE ? END", controllerNow().Add(LeaseTTL))})
 }
 func (s *Store) finish(ctx context.Context, id, worker string, fence int64, state string, result json.RawMessage) error {
 	if len(result) == 0 {
@@ -441,7 +437,7 @@ const MaxInfrastructureAttempts = 3
 func (s *Store) ExpireLeases(ctx context.Context, now time.Time) ([]Task, error) {
 	var tasks []Task
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("state = 'leased' AND lease_expires_at <= ?", now).Find(&tasks).Error; err != nil {
+		if err := tx.Where("state = 'leased' AND lease_expires_at <= ?", now.UTC()).Find(&tasks).Error; err != nil {
 			return err
 		}
 		expired := tasks[:0]
@@ -519,3 +515,36 @@ func (s *Store) FinishResult(ctx context.Context, id, worker string, fence int64
 		return audit(tx, worker, id, "result-applied")
 	})
 }
+
+// controllerNow is the single clock for lease authority. Worker clocks never
+// extend a lease; every comparison and expiry is computed here, in UTC.
+var controllerNow = func() time.Time { return time.Now().UTC() }
+
+// rawJSONSerializer stores json.RawMessage as TEXT (never BLOB, which SQLite's
+// JSON functions would treat as JSONB) and returns NULL for an empty value so
+// "no result yet" stays distinguishable from "{}".
+type rawJSONSerializer struct{}
+
+func (rawJSONSerializer) Scan(ctx context.Context, field *schema.Field, dst reflect.Value, dbValue interface{}) error {
+	var out json.RawMessage
+	switch v := dbValue.(type) {
+	case nil:
+	case []byte:
+		out = append(json.RawMessage(nil), v...)
+	case string:
+		out = json.RawMessage(v)
+	default:
+		return fmt.Errorf("unsupported JSON column type %T", dbValue)
+	}
+	return field.Set(ctx, dst, out)
+}
+
+func (rawJSONSerializer) Value(_ context.Context, _ *schema.Field, _ reflect.Value, fieldValue interface{}) (interface{}, error) {
+	raw, _ := fieldValue.(json.RawMessage)
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	return string(raw), nil
+}
+
+func init() { schema.RegisterSerializer("rawjson", rawJSONSerializer{}) }
