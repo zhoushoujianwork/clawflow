@@ -17,3 +17,15 @@ This extends the [claim recovery repair](worker-claim-recovery-validation-2026-1
 - Worker race suite (`TestWorker`, `TestDurableWorker`, `TestRollingManagers`): 89 passed. Final focused race checks after receipt caching: 23 passed, including epoch-change invalidation and manager restart reinspection.
 - Focused corruption/status check verifies both a healthy saved claim and a healthy interrupted journal progress alongside corrupt files. Expiration/report tests cover held executor and session locks, stale ownership, retained checkpoints, resumed sessions, lost upload responses and report-epoch mismatch.
 - `gofmt` and `git diff --check` pass. These checks invoke neither a paid provider nor the desktop dashboard.
+
+## Local service deployment
+
+At approximately 23:37 +08, built and installed source commit `6516902` as `dev-auto-recovery-6516902` in the independently installed service executable (`~/Library/Application Support/ClawFlow/bin/clawflow`). The preceding binary is retained under `backups/auto-recovery-6516902-_m11_3wb/`.
+
+- Graceful SIGTERM of the durable controller loaded the new executable through launchd, PID 41494 → 91217. Its controller-managed local worker moved to the new pinned generation, admissions PID 91221.
+- Graceful SIGTERM of the launchd admissions manager loaded the new executable, PID 35581 → 91406. Both generation descriptors report source commit `6516902`; logical capacities remain one and four, with durable registration enabled.
+- Issue #615 task `db3a314ea9b839bb8b8d254cbf6e375f9915ead974d3329dbbd69d4066be5208` remained running at epoch 1. Executor PID 88489, native session `7edf8d01-7cb5-44bd-84de-7c7e3027f2f3`, pinned older executor binary, and retained worktree were unchanged. Its checkpoint advanced and the controller accepted a heartbeat at 23:37:27 after both manager updates. No active task was terminated or duplicated for deployment.
+- The pinned, authenticated receipt endpoint returned HTTP 200 with `state=leased` and `report_committed=false` for that active task. The native dashboard's read-only JSON snapshot was available; no desktop interaction occurred.
+- Both managers' `worker executions` status was readable and reported zero `recovery_blocked` diagnostics. PostgreSQL retained PID 61176 and launchd run count 1. The dashboard app and database were not restarted.
+
+Live acceptance verifies deployed protocol availability, registration and continuity. Recovery faults were injected only in isolated fixtures; no production session was intentionally crashed. Prior issue attempts include deadline failures and coordination blockers; healthy service operation does not establish CI, acceptance, merge or issue completion.
