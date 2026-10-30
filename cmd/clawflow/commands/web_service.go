@@ -148,6 +148,10 @@ func (s webService) plist(host string, port int) ([]byte, error) {
 		arguments = "<string>controller</string>"
 		log = filepath.Join(s.home, ".clawflow", "logs", "controller.launchd.log")
 	}
+	keepAlive := "<dict><key>SuccessfulExit</key><false/></dict>"
+	if s.controller {
+		keepAlive = "<true/>"
+	}
 	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -156,10 +160,10 @@ func (s webService) plist(host string, port int) ([]byte, error) {
 <key>EnvironmentVariables</key><dict><key>HOME</key><string>%s</string><key>PATH</key><string>%s</string></dict>
 <key>StandardOutPath</key><string>%s</string><key>StandardErrorPath</key><string>%s</string>
 <key>RunAtLoad</key><true/>
-<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>KeepAlive</key>%s
 <key>ThrottleInterval</key><integer>30</integer>
 </dict></plist>
-`, s.label(), quote(s.binary), arguments, quote(s.home), quote(s.path), quote(log), quote(log))), nil
+`, s.label(), quote(s.binary), arguments, quote(s.home), quote(s.path), quote(log), quote(log), keepAlive)), nil
 }
 
 func (s webService) install(host string, port int) error {

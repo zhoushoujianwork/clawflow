@@ -32,6 +32,8 @@ clawflow controller service status
 
 For a foreground controller on macOS or Linux, use `clawflow controller`. A shared process lock prevents the new controller and the compatibility Web server from owning the scheduler simultaneously. Existing worker tokens, bindings/tags and active task records remain. Migration 10 adds invitations and a paused flag; existing workers keep their previous eligibility.
 
+On macOS, installed user LaunchAgents start after login following a reboot. They do not run before login. Install the controller from a stable CLI location such as `~/.clawflow/bin/clawflow`; avoid a temporary worktree binary. The controller uses `RunAtLoad` and unconditional `KeepAlive`, so launchd restarts it after an unexpected process exit, including a clean exit. Explicit Stop unloads the agent and prevents that restart for the current login session; its plist remains for the next login. Database and worker agents need their own startup entries. Database readiness failures cause controller startup to fail and retry; no dependency ordering is assumed. The menu-bar app can be launched at login independently, and closing it never stops scheduling.
+
 Create a separate admin identity for the viewer, saving its output to a private file:
 
 ```sh
