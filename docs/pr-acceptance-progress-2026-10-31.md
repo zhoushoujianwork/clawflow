@@ -71,3 +71,5 @@
 #611 的 `clawflow-skip` 已成功恢复，并通过 ClawFlow CLI 发布中文澄清评论。#617 在巡检释放锁后再次进入正式入口，退出 1，原因 `latest development run is absent, incomplete or unsuccessful`；没有启动模型审核。此次只是前置锁冲突后的来源核对，不是第二轮模型验收。#609 和 #617 均未更改来源记录或合并门禁。
 
 本轮结束时稳定 controller PID 91217、worker PID 91406、local worker PID 91221、PostgreSQL PID 61176 保持原值；未执行服务重启或部署。#618 的源码合并不表示新服务代码已经部署。
+
+用户随后明确要求部署；已完成本地服务和 App 更新，实际版本、兼容修复、连续性与验证结果见[本地部署记录](local-readiness-deployment-2026-10-31.md)。
