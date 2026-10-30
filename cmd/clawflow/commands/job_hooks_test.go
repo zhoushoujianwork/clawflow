@@ -321,7 +321,7 @@ func TestWorkerJobOffloadProvenance(t *testing.T) {
 	if failed || p == nil {
 		t.Fatalf("missing provenance: %+v", j.result)
 	}
-	if p.Machine == "" || p.Profile != "test-profile" || p.Backend != "claude" || p.Model != "gpt-test" || p.OffloadRunID != "run-actual" || p.CallerRunID == "" || p.SessionID != "native-actual" || p.ExitCode == nil || *p.ExitCode != 0 || p.ExecutionStatus != "ok" || !p.valid() {
+	if p.Machine == "" || p.Profile != "test-profile" || p.Backend != "claude" || p.Model != "gpt-test" || p.OffloadRunID != "run-actual" || p.CallerRunID == "" || p.SessionID != "native-actual" || p.ExitCode == nil || *p.ExitCode != 0 || p.ExecutionStatus != "ok" || len(p.normalize()) != 0 {
 		t.Fatalf("provenance %+v", p)
 	}
 	if j.result.Usage == nil || !j.result.Usage.CostUnavailable || j.result.Usage.TokensUnavailable {

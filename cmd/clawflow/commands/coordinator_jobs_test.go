@@ -670,18 +670,105 @@ func TestCoordinatorProvenance(t *testing.T) {
 	}
 }
 
-func TestCoordinatorRejectsInvalidProvenance(t *testing.T) {
+func TestCoordinatorRejectsUnknownProvenance(t *testing.T) {
 	for _, block := range []string{
 		`{"machine":"laptop","prompt":"secret"}`, `{"workdir":"/private"}`,
-		`{"machine":"` + strings.Repeat("x", 257) + `"}`,
-		`{"model":"` + strings.Repeat("x", 257) + `"}`,
-		`{"elapsed_ms":-1}`, `{"session_id":"line\nbreak"}`,
 	} {
 		t.Run(block[:min(len(block), 40)], func(t *testing.T) {
 			s, _, c, svc := resultFixture(t)
 			err := svc.Complete(context.Background(), "task", "w", 3, json.RawMessage(`{"status":"success","provenance":`+block+`}`))
 			if !errors.Is(err, coordinator.ErrInvalid) || len(s.task.Result) != 0 || len(c.calls) != 0 {
 				t.Fatalf("accepted invalid report: %v", err)
+			}
+		})
+	}
+}
+
+func TestCoordinatorNormalizesAdvisoryProvenance(t *testing.T) {
+	negative := int64(-1)
+	for _, tc := range []struct {
+		name     string
+		input    jobProvenance
+		want     jobProvenance
+		warnings int
+	}{
+		{
+			name:     "localized display",
+			input:    jobProvenance{Machine: "  张三的电脑\n ", Model: " GPT 6\t Pro ", Profile: " 开发 环境 ", Backend: " codex ", ErrorKind: " \x00无错误 ", ExecutionStatus: " ok "},
+			want:     jobProvenance{Machine: "张三的电脑", Model: "GPT 6 Pro", Profile: "开发 环境", Backend: "codex", ErrorKind: "无错误", ExecutionStatus: "ok"},
+			warnings: 6,
+		},
+		{
+			name:     "rune limits",
+			input:    jobProvenance{Machine: strings.Repeat("机", 257), Model: strings.Repeat("型", 256)},
+			want:     jobProvenance{Machine: strings.Repeat("机", 256), Model: strings.Repeat("型", 256)},
+			warnings: 1,
+		},
+		{
+			name:     "unsafe links",
+			input:    jobProvenance{OffloadRunID: "../unsafe?token=secret", CallerRunID: "caller/name", SessionID: "line\nbreak", ElapsedMs: &negative, Model: "valid model"},
+			want:     jobProvenance{Model: "valid model"},
+			warnings: 4,
+		},
+		{
+			name:     "oversized links",
+			input:    jobProvenance{OffloadRunID: strings.Repeat("x", 257), CallerRunID: "有害", SessionID: "id with spaces"},
+			want:     jobProvenance{},
+			warnings: 3,
+		},
+		{
+			name:     "safe links",
+			input:    jobProvenance{OffloadRunID: "run-123", CallerRunID: " caller_123.abc:1 ", SessionID: strings.Repeat("x", 256)},
+			want:     jobProvenance{OffloadRunID: "run-123", CallerRunID: "caller_123.abc:1", SessionID: strings.Repeat("x", 256)},
+			warnings: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, c, svc := resultFixture(t)
+			report := jobResult{
+				Status: "success", Provenance: &tc.input, PRNumber: 42, PRURL: "https://example.test/o/r/pull/42",
+				Effects: []jobEffect{{Kind: "issue-comment", Repo: "o/r", Number: 7, Body: "finished"}},
+			}
+			raw, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := svc.Complete(context.Background(), "task", "w", 3, raw); err != nil {
+				t.Fatal(err)
+			}
+			if s.task.State != "done" || !reflect.DeepEqual(c.calls, []string{"comment"}) {
+				t.Fatalf("result not applied: state=%s effects=%v", s.task.State, c.calls)
+			}
+			var sealed coordinatorReport
+			if err := json.Unmarshal(s.task.Result, &sealed); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(sealed.Provenance, &tc.want) || len(sealed.ProvenanceWarnings) != tc.warnings {
+				t.Fatalf("sealed provenance=%+v warnings=%v", sealed.Provenance, sealed.ProvenanceWarnings)
+			}
+			dir := snapshot.RunDir(s.task.Repo, s.task.Issue, s.task.CreatedAt) + "-task-" + s.task.ID
+			payload, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got snapshot.RunMeta
+			if err := json.Unmarshal(payload, &got); err != nil {
+				t.Fatal(err)
+			}
+			want := tc.want
+			if want.Machine == "" {
+				want.Machine = "w"
+			}
+			if !reflect.DeepEqual(provenanceFromRun(got), &want) || got.Status != "success" || got.PRNumber != 42 || got.PRUrl != report.PRURL {
+				t.Fatalf("run provenance/result lost: %+v", got)
+			}
+			if !reflect.DeepEqual(got.Warnings, sealed.ProvenanceWarnings) {
+				t.Fatalf("warnings lost: %v", got.Warnings)
+			}
+			for _, warning := range got.Warnings {
+				if !strings.HasPrefix(warning, "provenance.") || strings.Contains(warning, "secret") {
+					t.Fatalf("unsafe warning: %s", warning)
+				}
 			}
 		})
 	}

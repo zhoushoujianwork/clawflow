@@ -259,8 +259,9 @@ type coordinatorResults struct {
 }
 
 type coordinatorReport struct {
-	TerminalState string             `json:"coordinator_state,omitempty"`
-	Acceptance    *acceptance.Record `json:"acceptance,omitempty"`
+	ProvenanceWarnings []string           `json:"provenance_warnings,omitempty"`
+	TerminalState      string             `json:"coordinator_state,omitempty"`
+	Acceptance         *acceptance.Record `json:"acceptance,omitempty"`
 	jobResult
 	Events []json.RawMessage `json:"events,omitempty"`
 }
@@ -282,14 +283,12 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	if err := acceptance.DecodeExact(raw, &wire); err != nil {
 		return coordinator.ErrInvalid
 	}
-	if !wire.Result.Provenance.valid() {
-		return coordinator.ErrInvalid
-	}
+	warnings := wire.Result.Provenance.normalize()
 	// Usage contains a dynamic model-name map, unlike the fixed evidence schema.
 	if len(wire.Usage) > 0 && json.Unmarshal(wire.Usage, &wire.Result.Usage) != nil {
 		return coordinator.ErrInvalid
 	}
-	r := coordinatorReport{jobResult: wire.Result, Acceptance: wire.Acceptance, Events: wire.Events, TerminalState: "done"}
+	r := coordinatorReport{ProvenanceWarnings: warnings, jobResult: wire.Result, Acceptance: wire.Acceptance, Events: wire.Events, TerminalState: "done"}
 	if failed {
 		r.TerminalState = "failed"
 	}
@@ -421,6 +420,7 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 		}
 	}
 	meta := snapshot.RunMeta{Repo: t.Repo, IssueNumber: t.Issue, Operator: t.Operator, StartedAt: t.CreatedAt, EndedAt: &now, Status: status, Outcome: r.Outcome, Error: r.Error, Usage: r.Usage, HeadSHA: r.HeadSHA, PRUrl: r.PRURL, PRNumber: r.PRNumber, Summary: r.Output}
+	meta.Warnings = r.ProvenanceWarnings
 	meta.Machine = t.LeaseOwner
 	if p := r.Provenance; p != nil {
 		if p.Machine != "" {
