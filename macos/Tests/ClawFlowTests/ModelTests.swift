@@ -2,6 +2,17 @@ import XCTest
 @testable import ClawFlow
 
 final class ModelTests: XCTestCase {
+    func testCoordinationQueueStatuses() throws {
+        for (state, expected) in [
+            ("waiting:coordination_needs_confirmation — conflicting requirements", "Needs confirmation"),
+            ("closed:superseded — replacement", "Superseded"),
+            ("eligible:coordination checked", "Ready / coordination checked")
+        ] {
+            let data = Data("{\"key\":\"o/r#7\",\"position\":1,\"number\":7,\"tier\":\"P2\",\"state\":\"\(state)\"}".utf8)
+            XCTAssertEqual(try decoder().decode(IssueQueueRow.self, from: data).status, expected)
+        }
+    }
+
     func testAttemptElapsedUsesStartAndStopsAtEnd() throws {
         let value = try snapshot()
         let original = value.board.tasks[0]
