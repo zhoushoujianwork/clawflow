@@ -45,6 +45,9 @@ try {
         } else {
           await panel.getByRole('link', { name: 'Latest result', exact: true }).click()
         }
+        // The link opens the matching details block through a hash-change handler, so wait for it
+        // to open instead of counting immediately after the click.
+        await panel.locator('details[open]').first().waitFor()
         assert.equal(await panel.locator('details[open]').count(), 1)
         if (kind === 'overlap') await panel.getByText('previous invocation still running', { exact: true }).waitFor()
         if (kind === 'stale') assert.ok((await panel.innerText()).includes('Stale result'))
