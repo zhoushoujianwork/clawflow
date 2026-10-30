@@ -34,12 +34,12 @@ type webServiceStatus struct {
 }
 
 func newWebService() (webService, error) {
-	if runtime.GOOS != "darwin" {
-		return webService{}, fmt.Errorf("web service is only supported on macOS")
-	}
 	// The stable LaunchAgent labels belong to the installed host.
 	if devmode.Active() {
 		return webService{}, fmt.Errorf("%w: launchd services of the installed host are unavailable to a candidate", devmode.ErrBlocked)
+	}
+	if runtime.GOOS != "darwin" {
+		return webService{}, fmt.Errorf("web service is only supported on macOS")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

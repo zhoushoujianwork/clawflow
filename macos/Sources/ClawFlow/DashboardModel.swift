@@ -19,7 +19,7 @@ import SwiftUI
         guard polling == nil else { return }
         localServices.start(ensureRunning: connection.isLocalHost)
         freshnessTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.now = Date() }
+            Task { @MainActor [weak self] in self?.now = Date() }
         }
         polling = Task { [weak self] in
             while !Task.isCancelled {
