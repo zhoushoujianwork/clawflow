@@ -128,3 +128,27 @@ func TestLockTimeoutIsBoardEvent(t *testing.T) {
 		t.Fatalf("events=%+v", events)
 	}
 }
+
+func TestRelevantRetainsTerminalEvidenceBeyondPolls(t *testing.T) {
+	failed := Event{Time: "2026-10-30T00:00:00Z", Event: "run/harvest_end", Fields: map[string]string{"repo": "o/r", "status": "failed"}}
+	events := []Event{failed}
+	for i := 0; i < 100; i++ {
+		events = append(events, Event{Event: "run/automerge_sweep", Fields: map[string]string{"repo": "o/r"}})
+	}
+	got := Relevant(events, map[string]bool{"o/r": true})
+	if len(got) != MaxEvents+1 || got[0].Fields["status"] != "failed" {
+		t.Fatalf("terminal evidence lost: %+v", got)
+	}
+	if len(events) != 101 || events[0].Fields["status"] != "failed" {
+		t.Fatal("projection changed input")
+	}
+	for i := 0; i < 200; i++ {
+		events = append(events, failed)
+	}
+	if got := Relevant(events, map[string]bool{"o/r": true}); len(got) != 2*MaxEvents {
+		t.Fatalf("unbounded evidence: %d", len(got))
+	}
+	if got := Relevant(events, map[string]bool{"other": true}); len(got) != 0 {
+		t.Fatal("untracked evidence leaked")
+	}
+}

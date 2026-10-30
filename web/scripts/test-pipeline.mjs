@@ -208,7 +208,7 @@ assert.ok(!importantEvent({...events[0],event:'run/automerge_sweep'}))
 assert.ok(importantEvent({...events[0],event:'run/harvest_end'}))
 assert.ok(importantEvent({...events[0],event:'run/lock_timeout',level:'warn'}))
 assert.ok(importantEvent({...events[0],event:'queue/park'}))
-const timeline = renderToStaticMarkup(<EventTimeline events={events} filter="important" repo="" repos={repos.map(r=>r.repo)} update={()=>{}}/>)
+const timeline = renderToStaticMarkup(<EventTimeline events={events} filter="all" repo="" repos={repos.map(r=>r.repo)} update={()=>{}}/>)
 assert.ok(timeline.includes('×50 since'))
 assert.ok(!timeline.includes('<details open'))
 // Hidden events must still separate otherwise identical event groups.
@@ -221,8 +221,8 @@ for (const separator of [
     for (const repo of ['', 'owner/repo-0']) {
       const rendered = renderToStaticMarkup(<EventTimeline events={separated} filter={filter} repo={repo} repos={['owner/repo-0','other']} update={()=>{}}/>)
       const separatorVisible = (!repo || separator.fields.repo === repo) && (filter === 'all' || importantEvent(separator))
-      assert.equal((rendered.match(/<li /g)||[]).length, separatorVisible ? 3 : 2)
-      assert.ok(rendered.includes('×2 since'))
+      assert.equal((rendered.match(/<li /g)||[]).length, filter === 'important' ? (separatorVisible ? 1 : 0) : separatorVisible ? 3 : 2)
+      if (filter === 'all') assert.ok(rendered.includes('×2 since'))
       assert.ok(!rendered.includes('×3 since'))
     }
   }

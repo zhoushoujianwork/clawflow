@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// MaxEvents is how many run.log events the board returns.
+// MaxEvents bounds each of the recent and retained-important log windows.
 const MaxEvents = 50
 
 const maxFieldLen = 300
@@ -154,12 +154,33 @@ func atoi(s string) int {
 	return n
 }
 
-// Relevant keeps the last MaxEvents events that concern one of the given
-// repositories (events without a repo field, such as run/exit, always count).
+// importantTransition protects terminal evidence from repetitive polling in the
+// bounded log tail. It is display-only and never feeds task state.
+func importantTransition(e Event) bool {
+	if e.Level == "error" || e.Level == "warn" || e.Fields["status"] == "failed" || e.Fields["status"] == "merged" || e.Fields["status"] == "error" {
+		return true
+	}
+	if strings.Contains(e.Event, "skip") || strings.Contains(e.Event, "sweep") || strings.Contains(e.Event, "poll") {
+		return false
+	}
+	return strings.Contains(e.Event, "harvest_end") || strings.Contains(e.Event, "automerge_merged") ||
+		strings.Contains(e.Event, "automerge_success") || strings.Contains(e.Event, "ci_repair")
+}
+
+// Relevant keeps the latest MaxEvents plus up to MaxEvents older important
+// transitions from the bounded tail. Repo-less events always count.
 func Relevant(events []Event, repos map[string]bool) []Event {
 	var out []Event
-	for i := len(events) - 1; i >= 0 && len(out) < MaxEvents; i-- {
+	recent, retained := 0, 0
+	for i := len(events) - 1; i >= 0; i-- {
 		if r := events[i].Fields["repo"]; r != "" && !repos[r] {
+			continue
+		}
+		if recent < MaxEvents {
+			recent++
+		} else if retained < MaxEvents && importantTransition(events[i]) {
+			retained++
+		} else {
 			continue
 		}
 		out = append(out, events[i])
