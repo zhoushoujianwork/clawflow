@@ -95,6 +95,7 @@ struct LocalService: Identifiable {
 
 struct LocalServiceControls: View {
     @ObservedObject var services: LocalServices
+    @ObservedObject var readiness: ExecutionReadiness
     @State private var pending: LocalService?
     @State private var action = ""
     @State private var confirming = false
@@ -106,6 +107,9 @@ struct LocalServiceControls: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(row.title).font(.callout)
                     Text(row.status).font(.caption).foregroundStyle(.secondary)
+                    if row.id.contains(".worker-"), let status = readiness.status, let worker = status.readiness(forService: row.id), worker.state != "ready" {
+                        Text(worker.summary).font(.caption).foregroundStyle(.orange)
+                    }
                     HStack {
                         Button("Start") { Task { await services.perform("start", service: row) } }.disabled(row.running)
                         Button("Restart") { pending = row; action = "restart"; confirming = true }.disabled(!row.loaded)

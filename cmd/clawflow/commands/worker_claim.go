@@ -56,10 +56,19 @@ func retryAcknowledgedWorkerClaim(o workerOptions, task *coordinator.Task, path 
 			return nil, err
 		}
 		old := existing.Task
-		if existing.State != "acknowledged" || old.ID != task.ID || old.FencingToken >= task.FencingToken ||
+		if (existing.State != "acknowledged" && existing.State != "released") || old.ID != task.ID || old.FencingToken >= task.FencingToken ||
 			old.LeaseOwner != task.LeaseOwner || old.Repo != task.Repo || old.Issue != task.Issue || old.PR != task.PR || old.Kind != task.Kind || old.Operator != task.Operator ||
 			!coordinator.DurableTask(task) || task.State != "leased" || task.LeaseExpiresAt == nil || !task.LeaseExpiresAt.Add(-coordinator.DurableReportGrace).After(time.Now()) {
 			return nil, fmt.Errorf("retained claim epoch mismatch: previous execution is not an acknowledged retry")
+		}
+
+		if existing.State == "released" {
+			if _, err := os.Stat(filepath.Join(filepath.Dir(path), "execution.json")); !os.IsNotExist(err) {
+				return nil, fmt.Errorf("released execution has an unexpected checkpoint")
+			}
+			if existing.Action != "release" {
+				return nil, fmt.Errorf("released execution has no release intent")
+			}
 		}
 		if err := archiveWorkerAttempt(o, path, old.FencingToken); err != nil {
 			return nil, err

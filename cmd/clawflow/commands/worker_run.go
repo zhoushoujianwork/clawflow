@@ -43,6 +43,9 @@ type workerOptions struct {
 	Durable                                       bool
 	RunUntagged                                   bool
 	MaxParallel                                   int
+	// Gate withholds task claims while this worker's own Offload environment
+	// is not ready. Nil disables gating (coordinator-only tests, viewers).
+	Gate *workerGate `json:"-"`
 }
 
 func configureWorker(cmd *cobra.Command) {
@@ -97,6 +100,7 @@ func configureWorker(cmd *cobra.Command) {
 			return err
 		}
 		o.Tags = append(o.Tags, config.HostTag(hostname))
+		o.Gate = workerGateFactory(hostname, o.Roles)
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		o.KeepAliveOwner = true
@@ -218,6 +222,21 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 				var claim struct {
 					Task *coordinator.Task `json:"task"`
 				}
+				if o.Gate != nil && !o.Gate.ready(ctx) {
+					// Keep the worker visible while it waits; nothing is claimed,
+					// so no attempt, reservation or label is touched.
+					if err := api.post(ctx, "register", registration, nil); err != nil {
+						errors <- err
+						cancel()
+						return
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(poll):
+					}
+					continue
+				}
 				request := any(struct{}{})
 				if err := api.post(ctx, "claim", request, &claim); err != nil {
 					if workerFatal(err) {
@@ -322,6 +341,16 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 		}
 	}()
 	result := &jobResult{Status: "failed"}
+	// A claim can race a just-lost Offload (cached readiness is short-lived).
+	// Hand the lease back untouched: no attempt, no result, no label.
+	if o.Gate != nil && !o.Gate.ready(ctx) {
+		close(stop)
+		<-done
+		if parent.Err() != nil {
+			return nil
+		}
+		return api.post(parent, path+"release", fence, nil)
+	}
 	eligible := len(t.Tags) > 0 || o.RunUntagged
 	for _, tag := range t.Tags {
 		if !slices.Contains(o.Tags, tag) {

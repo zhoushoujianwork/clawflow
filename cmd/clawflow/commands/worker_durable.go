@@ -211,7 +211,7 @@ func recoverWorkerExecutor(o workerOptions, path string) error {
 		return err
 	}
 	switch j.State {
-	case "prepared", "pending_sync":
+	case "prepared", "pending_sync", "pending_release":
 		if j.State == "prepared" && expiredWorkerAuthority(&j.Task) {
 			return reconcileRetainedWorkerJournal(o, path)
 		}
@@ -280,7 +280,7 @@ func newWorkerExecuteCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if j.State == "acknowledged" || j.State == "rejected" {
+		if j.State == "acknowledged" || j.State == "rejected" || j.State == "released" {
 			return nil
 		}
 		if j.Options.StateDir != "" {
@@ -303,6 +303,9 @@ func newWorkerExecuteCmd() *cobra.Command {
 		if j.State == "pending_sync" {
 			return deliverWorkerReport(ctx, api, path, j)
 		}
+		if j.State == "pending_release" {
+			return deliverWorkerRelease(ctx, api, path, j)
+		}
 		if j.State != "prepared" {
 			return fmt.Errorf("execution needs verified recovery, not replay")
 		}
@@ -315,6 +318,28 @@ func newWorkerExecuteCmd() *cobra.Command {
 		}
 		ctx, cancel := context.WithDeadline(ctx, deadline)
 		defer cancel()
+
+		host, err := os.Hostname()
+		if err != nil {
+			return err
+		}
+		gate := workerGateFactory(host, j.Options.Roles)
+		if gate != nil && !gate.ready(ctx) {
+			if j.Resume {
+				return fmt.Errorf("Offload unavailable for retained session; verified recovery required")
+			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(path), "execution.json")); !os.IsNotExist(err) {
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("Offload unavailable with retained checkpoint; verified recovery required")
+			}
+			j.State, j.Action = "pending_release", "release"
+			if err := writeWorkerJournal(path, j); err != nil {
+				return err
+			}
+			return deliverWorkerRelease(ctx, api, path, j)
+		}
 		j.State = "running"
 		if err := writeWorkerJournal(path, j); err != nil {
 			return err
@@ -375,4 +400,15 @@ func detachedWorkerAttributes() *syscall.SysProcAttr { return &syscall.SysProcAt
 func workerIdentity(o workerOptions) string {
 	token, _ := filepath.Abs(o.TokenFile)
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(o.Coordinator+"\n"+token)))[:24]
+}
+
+// No task code or native session has started. A stale release receipt also
+// retires this unstarted local attempt; its old epoch must never execute.
+func deliverWorkerRelease(ctx context.Context, api *workerAPI, path string, j *workerJournal) error {
+	err := api.post(ctx, "tasks/"+j.Task.ID+"/release", map[string]any{"fencing_token": j.Task.FencingToken}, nil)
+	if err != nil && !errors.Is(err, workerHTTPError(409)) {
+		return err
+	}
+	j.State, j.Error = "released", ""
+	return writeWorkerJournal(path, j)
 }

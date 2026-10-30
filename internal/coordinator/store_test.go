@@ -415,3 +415,38 @@ func TestPlatformLeaseLimitsAndCredentialTags(t *testing.T) {
 		t.Fatalf("wrong task: %+v", got)
 	}
 }
+
+// A worker that discovers it cannot run Offload hands the lease back: the task
+// stays pending, no attempt is consumed, and no result or failure is recorded.
+func TestReleaseReturnsTaskWithoutConsumingAttempt(t *testing.T) {
+	s, _, _ := setup(t)
+	register(t, s, "w1", 1)
+	register(t, s, "w2", 1)
+	task := enqueue(t, s, 1)
+	claimed := claim(t, s, "w1")
+	if claimed.ID != task.ID {
+		t.Fatal("claim mismatch")
+	}
+	if err := s.Release(ctx, task.ID, "w2", claimed.FencingToken, "offload-unavailable"); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("foreign release: %v", err)
+	}
+	if err := s.Release(ctx, task.ID, "w1", claimed.FencingToken, "offload-unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Task(ctx, task.ID)
+	if err != nil || got.State != "pending" || got.Attempt != 0 || got.LeaseOwner != "" || len(got.Result) != 0 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	var attempts int64
+	if err := s.db.Model(&TaskAttempt{}).Where("task_id = ?", task.ID).Count(&attempts).Error; err != nil || attempts != 0 {
+		t.Fatalf("attempts=%d err=%v", attempts, err)
+	}
+	if err := s.Release(ctx, task.ID, "w1", claimed.FencingToken, "x"); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("stale release: %v", err)
+	}
+	// A healthy worker can claim it next, with a fresh fencing token.
+	again := claim(t, s, "w2")
+	if again.ID != task.ID || again.FencingToken <= claimed.FencingToken {
+		t.Fatalf("%+v", again)
+	}
+}

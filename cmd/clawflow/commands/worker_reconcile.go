@@ -20,14 +20,33 @@ import (
 func runDurableWorker(ctx context.Context, api *workerAPI, o workerOptions, poll time.Duration) error {
 	o.receiptCache = make(map[string][32]byte)
 	for ctx.Err() == nil {
-		if err := recoverWorkerClaims(ctx, api, o); err != nil {
-			if ctx.Err() != nil {
-				return nil
+		ready := o.Gate == nil || o.Gate.ready(ctx)
+		if ready {
+			if err := recoverWorkerClaims(ctx, api, o); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				return err
 			}
-			return err
 		}
 		if err := recoverWorkerExecutors(o); err != nil {
 			return err
+		}
+		if !ready {
+			// 保留旧结果的回传和恢复；环境未就绪时不领取新任务。
+			err := api.post(ctx, "register", api.registration, nil)
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(poll):
+			}
+			continue
 		}
 		path, request, err := prepareWorkerClaim(o)
 		if err != nil {

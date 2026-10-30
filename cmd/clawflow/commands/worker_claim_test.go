@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -155,5 +156,41 @@ func TestWorkerClaimArchiveSurvivesManagerRestart(t *testing.T) {
 	}
 	if err := archiveWorkerAttempt(o, path, 2); err == nil {
 		t.Fatal("conflicting archive overwritten")
+	}
+}
+
+func TestWorkerClaimReplaysReleasedAttemptWithoutOldSession(t *testing.T) {
+	for _, checkpoint := range []bool{false, true} {
+		t.Run(fmt.Sprint(checkpoint), func(t *testing.T) {
+			o, task, path := workerClaimFixture(t)
+			j, _ := readWorkerJournal(path)
+			j.State, j.Action, j.Report = "released", "release", nil
+			if err := writeWorkerJournal(path, j); err != nil {
+				t.Fatal(err)
+			}
+			if checkpoint {
+				if err := os.WriteFile(filepath.Join(filepath.Dir(path), "execution.json"), []byte(`{}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := acceptWorkerClaim(o, task)
+			if checkpoint {
+				if err == nil {
+					t.Fatal("released session was reused")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			archived, err := readWorkerJournal(filepath.Join(workerJournalRoot(o), "history", task.ID, "epoch-2", "journal.json"))
+			if err != nil || archived.State != "released" || archived.Action != "release" {
+				t.Fatal("release evidence lost", archived, err)
+			}
+			prepared, err := readWorkerJournal(path)
+			if err != nil || prepared.Task.FencingToken != task.FencingToken || prepared.State != "prepared" {
+				t.Fatal(prepared, err)
+			}
+		})
 	}
 }

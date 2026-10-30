@@ -45,14 +45,18 @@ func LoadConfig() (Config, error) {
 	return WithEnvironment(c), nil
 }
 
-func WithEnvironment(c Config) Config {
+func WithEnvironment(c Config) Config { return WithEnvironmentFrom(c, os.LookupEnv) }
+
+// WithEnvironmentFrom applies the CLAWFLOW_OFFLOAD_* overrides visible to the
+// executing process. Readiness checks pass the worker's own environment here.
+func WithEnvironmentFrom(c Config, lookup func(string) (string, bool)) Config {
 	for _, v := range []struct {
 		key string
 		dst *string
 	}{
 		{"CLAWFLOW_OFFLOAD_COMMAND", &c.Command}, {"CLAWFLOW_OFFLOAD_PROFILE", &c.Profile}, {"CLAWFLOW_OFFLOAD_CODEX_SANDBOX", &c.CodexSandbox},
 	} {
-		if s, ok := os.LookupEnv(v.key); ok {
+		if s, ok := lookup(v.key); ok {
 			*v.dst = s
 		}
 	}
@@ -63,37 +67,47 @@ func WithEnvironment(c Config) Config {
 }
 
 // ProfileForRole resolves a role override with the same environment precedence as execution.
-func ProfileForRole(c Config, role string) string {
+func ProfileForRole(c Config, role string) string { return ProfileForRoleFrom(c, role, os.LookupEnv) }
+
+// ProfileForRoleFrom is ProfileForRole against an explicit environment.
+func ProfileForRoleFrom(c Config, role string, lookup func(string) (string, bool)) string {
 	profile := c.Profile
 	if override := c.RoleProfiles[role]; override != "" {
 		profile = override
 	}
-	if override, ok := os.LookupEnv("CLAWFLOW_OFFLOAD_PROFILE"); ok {
+	if override, ok := lookup("CLAWFLOW_OFFLOAD_PROFILE"); ok {
 		profile = override
 	}
 	return profile
 }
 
 func ValidateConfig(c Config) error {
+	_, err := validateConfigWith(c, exec.LookPath)
+	return err
+}
+
+// validateConfigWith returns a stable reason kind alongside the user message.
+func validateConfigWith(c Config, look func(string) (string, error)) (string, error) {
 	command := c.Command
 	if command == "" {
 		command = "offload"
 	}
-	if _, err := exec.LookPath(command); err != nil {
-		return errors.New("Offload unavailable: install offload or set settings.execution.command / CLAWFLOW_OFFLOAD_COMMAND")
+	if _, err := look(command); err != nil {
+		kind := lookupKind(err)
+		return kind, &UnavailableError{Reason: kind, Message: "Offload unavailable: install offload or set settings.execution.command / CLAWFLOW_OFFLOAD_COMMAND"}
 	}
 	if !validProfile(c.Profile) {
-		return errors.New("Offload readiness: configure an explicit settings.execution.profile / CLAWFLOW_OFFLOAD_PROFILE")
+		return ReasonProfileMissing, &UnavailableError{Reason: ReasonProfileMissing, Message: "Offload readiness: configure an explicit settings.execution.profile / CLAWFLOW_OFFLOAD_PROFILE"}
 	}
 	for _, profile := range c.RoleProfiles {
 		if !validProfile(profile) {
-			return errors.New("Offload readiness: invalid role profile")
+			return ReasonConfigInvalid, &UnavailableError{Reason: ReasonConfigInvalid, Message: "Offload readiness: invalid role profile"}
 		}
 	}
 	if c.CodexSandbox != "" && c.CodexSandbox != "workspace-write" && c.CodexSandbox != "danger-full-access" {
-		return errors.New("Offload readiness: codex_sandbox must be workspace-write or danger-full-access")
+		return ReasonConfigInvalid, &UnavailableError{Reason: ReasonConfigInvalid, Message: "Offload readiness: codex_sandbox must be workspace-write or danger-full-access"}
 	}
-	return nil
+	return "", nil
 }
 
 func validProfile(profile string) bool {
@@ -452,11 +466,11 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	}
 	resolved, err := exec.LookPath(command)
 	if err != nil {
-		return result, errors.New("Offload executable unavailable")
+		return result, &UnavailableError{Reason: lookupKind(err), Message: "Offload executable unavailable"}
 	}
 	command, err = filepath.Abs(resolved)
 	if err != nil {
-		return result, errors.New("Offload executable path unavailable")
+		return result, &UnavailableError{Reason: ReasonMissing, Message: "Offload executable path unavailable"}
 	}
 	cmd := exec.Command(command, args...)
 	if checkpointFile != nil {
