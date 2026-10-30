@@ -44,7 +44,7 @@ Test 检查 `124234340438` 也失败，Web render 通过。ClawFlow 的有界日
 
 ## 读取被取消 workflow 中的实际测试失败
 
-公开 API 确认 run `41105570205` 的总体结论为 `cancelled`，但其中 Test job 为 `failure`。日志层原先仅查看 failure/timed_out workflow，故漏掉真实失败。修复 `e8eac262` 接受已完成且取消的 workflow，同时仍只读取准确 SHA、同仓库、最新 run/attempt 的 failure/timed_out job；取消/成功 job 不成为失败证据。新增回归在旧实现失败，GitHub VCS 包完整 race 检查通过。此提交目前在源码中，服务仍为上述 f822 版本。
+公开 API 确认 run `41105570205` 的总体结论为 `cancelled`，但其中 Test job 为 `failure`。日志层原先仅查看 failure/timed_out workflow，故漏掉真实失败。修复 `e8eac262` 接受已完成且取消的 workflow，同时仍只读取准确 SHA、同仓库、最新 run/attempt 的 failure/timed_out job；取消/成功 job 不成为失败证据。新增回归在旧实现失败，GitHub VCS 包完整 race 检查通过。该修复先完成源码验证，随后随下述最终服务版本部署。
 
 用修复后的 CLI 取到准确 Test job 日志，产物为 `/tmp/clawflow-pr611-ci-log-cancelled-workflow.txt`。摘录显示 `TestBlockedWorkerNeverClaimsButStaysRegistered` 在 400ms 内未完成 TLS 注册而失败，后一项 `TestHealthyGateStillClaims` 通过。已在下一次派发前补充需求讨论，要求修复 worker 在慢 CI 下的测试同步/超时，保留“仍注册但绝不 claim”断言；不能删除测试或改变生产门禁。日志为有界摘录，不保证覆盖全部失败。
 
@@ -55,3 +55,9 @@ Test 检查 `124234340438` 也失败，Web render 通过。ClawFlow 的有界日
 对 #611 的 `4666c027` 预览补充 `disconnected.png/.ax.txt` 与 `unavailable.png/.ax.txt`：已有数据断连后保留 17/7 项目数及各 1 项 attention/running/queued，显示最后更新时间并禁用控制；首次连接失败则显示未知，不伪造零。独立预览已退出。证据清单增至 21 份文件，已重新核对摘要并复制到本机只读验收输入。保留真实菜单栏锚定、VoiceOver 和全部中间键盘路径未验证的限制。
 
 本轮修复与记录已正常推送至 `fix/worker-retry-journal` 分支，不表示已进入远端 main。#611 仍需真实 repair-ci、准确新提交 CI 和独立验收；#609/#617 的开发来源门禁保持。
+
+## 最终服务版本与记忆提交
+
+完整回归后，将源提交 `2106391aec4e9c4b4bf333bf311b57109039b927` 滚动部署为 `dev-merge-assist-2106391a`，摘要 `6f91518012a86fbbb4d21d59d45396d8161a9fd39fc7610b870e6559d8ee6482`。两个 worker generation 均匹配；#612 executor PID 59667、epoch 1、原固定执行器及 PostgreSQL PID 61176 保持。Offload #68 此时已自然完成，journal 为 acknowledged，不将其进程结束误报为部署中断。备份为 `~/Library/Application Support/ClawFlow/backups/coordination-primary-20261031-lxpdopu6/`。安装后的 CLI 已实际读回准确失败 job 日志，证明日志修复进入部署版本，结果在 `/tmp/clawflow-pr611-installed-ci-log-proof.txt`。
+
+按用户此前明确要求，将“现在已经改运行在本地了 更新一下你的记忆”原文及本机 ClawFlow/B0435.local 的只读证据提交到已配置的 Agent-Host 记忆连接 default，回执 `b9e6f395-4b3d-4b4b-a8f8-17f1f79dc9cf`、ingestion_status=received。这只证明已接收，未声称已完成选择或发布，不轮询处理状态。
