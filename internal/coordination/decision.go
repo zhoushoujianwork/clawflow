@@ -136,7 +136,9 @@ func Validate(s Snapshot, d Decision) error {
 		return fmt.Errorf("too many evidence references")
 	}
 	for _, n := range d.Issues {
-		if !slices.ContainsFunc(s.Issues, func(i vcs.Issue) bool { return i.Number == n }) {
+		// 当前 issue 与相关 issue 均来自同一份已读取的快照。
+		knownTarget := n > 0 && n == s.Issue.Number
+		if !knownTarget && !slices.ContainsFunc(s.Issues, func(i vcs.Issue) bool { return i.Number == n }) {
 			return fmt.Errorf("unknown issue #%d", n)
 		}
 	}
