@@ -23,6 +23,7 @@ import (
 // One immutable executable is retained per task. The manager may exit or be
 // upgraded; its detached executor owns heartbeat, work and durable delivery.
 type workerJournal struct {
+	LegacyReport   json.RawMessage `json:",omitempty"`
 	Resume         bool
 	Version        int
 	Task           coordinator.Task
