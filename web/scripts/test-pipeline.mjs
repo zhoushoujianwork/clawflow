@@ -18,7 +18,7 @@ try {
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import assert from 'node:assert/strict'
-import { itemPilotActions, PilotTimeline, RuntimeHeader, APIUsagePanel, RepoSection, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
+import { itemPilotActions, PilotTimeline, RuntimeHeader, APIUsagePanel, EventTimeline, Attention, foldEvents, importantEvent, preferences } from './src/routes/_app.pipeline'
 const runtime = { version:'test', scheduler:{status:'idle'}, execution:{ready:true,profile:'actual',backend:'codex'} }
 const noTier = renderToStaticMarkup(<RuntimeHeader runtime={runtime}/>)
 assert.ok(!noTier.includes('tier:'))
@@ -32,6 +32,7 @@ assert.ok(apiUsage.includes('scan: 8'))
 assert.ok(apiUsage.includes('harvest: 2'))
 assert.equal(renderToStaticMarkup(<APIUsagePanel/>), '')
 // Work summary fixtures share selectors with rendered repository rows.
+import { WorkList } from './src/components/WorkList'
 import { WorkSummary, selectWorkItems, unknownExecution } from './src/components/WorkSummary'
 const attempt = (profile, status = 'running', stale = false) => ({profile, status, provenance:{source:'offload_live', stale}})
 const workNow = Date.now()
@@ -52,12 +53,12 @@ const workRepo = {repo:'fixture/repo', enabled:true, items:workItems, max_in_fli
 const workProps = {repos:[workRepo],generatedAt:new Date(workNow).toISOString(),onFilter:()=>{}}
 for (const [filter, ids] of Object.entries({running:[1,2], waiting:[3,10], attention:[4,5], delivered:[7]})) {
   assert.deepEqual(selectWorkItems(workItems, filter, workNow).map(i=>i.issue),ids)
-  const rows = renderToStaticMarkup(<RepoSection board={workRepo} repoInfo={{}} queue={workItems.map((i,n)=>({repo:workRepo.repo,number:i.issue,position:n+1}))} tab="active" work={filter} open toggle={()=>{}}/>)
+  const rows = renderToStaticMarkup(<WorkList repos={[workRepo]} repoInfo={{}} queue={workItems.map((i,n)=>({repo:workRepo.repo,number:i.issue,position:n+1}))} filter={filter}/>)
   assert.equal((rows.match(/data-stage=/g)||[]).length,ids.length)
-  for (const i of workItems) assert.equal(rows.includes(i.title + '</span>'),ids.includes(i.issue))
+  for (const i of workItems) assert.equal(rows.includes(i.title + '</a>'),ids.includes(i.issue))
 }
 const manyWaiting = Array.from({length:8}, (_,n)=>({...baseItem,issue:n+1,title:'Waiting '+n}))
-const manyRows = renderToStaticMarkup(<RepoSection board={{...workRepo,items:manyWaiting}} repoInfo={{}} queue={manyWaiting.map((i,n)=>({repo:workRepo.repo,number:i.issue,position:n+1}))} tab="active" work="waiting" open toggle={()=>{}}/>)
+const manyRows = renderToStaticMarkup(<WorkList repos={[{...workRepo,items:manyWaiting}]} repoInfo={{}} queue={manyWaiting.map((i,n)=>({repo:workRepo.repo,number:i.issue,position:n+1}))} filter="waiting"/>)
 assert.equal((manyRows.match(/data-stage=/g)||[]).length,selectWorkItems(manyWaiting,'waiting').length)
 assert.ok(!manyRows.includes('+2 more'))
 assert.equal(selectWorkItems([{stage:'merged',delivery:{merged_at:new Date(workNow - 7*86400000).toISOString()}}],'delivered',workNow).length,1)
@@ -108,20 +109,13 @@ const repos = Array.from({length: 5}, (_, r) => ({
   }))
 }))
 const queue = repos.flatMap((r, ri) => r.items.slice(0,7).map((i, n) => ({repo:r.repo,number:i.issue,position:ri*7+n+1})))
-const props = {repoInfo:{}, queue, tab:'active', toggle:()=>{}}
-const collapsed = renderToStaticMarkup(<>{repos.map(r => <RepoSection key={r.repo} board={r} {...props} open={false}/>)}</>)
-assert.equal((collapsed.match(/<section/g)||[]).length,5)
-assert.equal((collapsed.match(/aria-expanded="false"/g)||[]).length,5)
-assert.ok(!collapsed.includes('Issue title'))
-const active = renderToStaticMarkup(<RepoSection board={repos[0]} {...props} open />)
-assert.equal((active.match(/data-stage=/g)||[]).length,6)
-assert.ok(active.includes('+1 more'))
+const active = renderToStaticMarkup(<WorkList repos={repos} repoInfo={{}} queue={queue}/>)
+assert.equal((active.match(/data-stage=/g)||[]).length,35)
+assert.ok(active.includes('Issue title'))
 assert.ok(!active.includes('abcdef0'))
-const delivered = renderToStaticMarkup(<RepoSection board={repos[0]} {...props} open tab="delivered"/>)
+const delivered = renderToStaticMarkup(<WorkList repos={repos} repoInfo={{}} queue={queue} filter="delivered" renderDetails={i=><span>{i.delivery?.merge_commit_sha}</span>}/>)
 assert.ok(delivered.includes('abcdef0'))
-assert.equal((delivered.match(/data-stage=/g)||[]).length,1)
-const all = renderToStaticMarkup(<RepoSection board={repos[0]} {...props} open tab="all"/>)
-assert.ok(all.includes('abcdef0'))
+assert.equal((delivered.match(/data-stage=/g)||[]).length,5)
 const attention = renderToStaticMarkup(<Attention board={{repos,events:[]}} repoInfo={{}}/>)
 assert.ok(attention.includes('Needs attention (5)'))
 const pilotActions = [
