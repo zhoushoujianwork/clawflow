@@ -8,3 +8,8 @@
 - App-only updates must not stop/restart the controller, workers, or database, replace their installed CLI executable, or run a host migration installer that reloads services. Updating the bundled dashboard CLI helper does not update the independently installed service executable.
 - Core service updates are a separate deployment step. Inspect active tasks and service state first, preserve running work, and use the service's supported drain/recovery process when a restart is needed. App restart authorization does not authorize interrupting active tasks.
 - On an explicit local connection, app startup may start installed services that are not loaded. Loaded services are reused. Account for this existing recovery behavior when validating app startup; do not describe app launch as having no possible service side effects.
+
+## Local native development
+
+- Use `make dev` to build a timestamped dev app, install it at `/Applications/ClawFlow.app`, and relaunch it. Use `make dev-build` for build-only validation; override `CLAWFLOW_DEV_INSTALL_DIR` for an isolated install. `make cli-dev` retains the separate CLI installation workflow.
+- Dev bundles label the app and bundled CLI with the same version. Settings exposes a read-only stable release check and release link; dev builds continue updating locally with `make dev`. Do not run CLI self-update against a signed app bundle or confuse app updates with controller upgrades.

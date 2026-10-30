@@ -2,6 +2,16 @@ import XCTest
 @testable import ClawFlow
 
 final class ModelTests: XCTestCase {
+    func testReleaseCheckKeepsDevChannelAndValidatesLink() throws {
+        let data = Data(#"{"tag_name":"v1.2.3","html_url":"https://github.com/zhoushoujianwork/clawflow/releases/tag/v1.2.3","draft":false,"prerelease":false}"#.utf8)
+        let release = try decoder().decode(AppRelease.self, from: data)
+        XCTAssertNotNil(release.url)
+        XCTAssertTrue(release.message(current: "1.2.4-dev.123", channel: "dev").contains("make dev"))
+        XCTAssertTrue(release.message(current: "1.2.2", channel: "release").contains("available"))
+        let invalid = AppRelease(tagName: "v9", htmlUrl: "https://example.com/release", draft: false, prerelease: false)
+        XCTAssertNil(invalid.url)
+    }
+
     func testIssueQueueKeepsSchedulingReason() throws {
         let data = Data(#"{"key":"o/r#7","position":1,"number":7,"title":"Feature","tier":"P1","state":"eligible:max_in_flight"}"#.utf8)
         let row = try decoder().decode(IssueQueueRow.self, from: data)

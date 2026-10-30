@@ -15,6 +15,7 @@ struct ConnectionView: View {
                 TextField("Certificate SHA-256", text: $draft.fingerprint)
                 Text("Use the address and fingerprint supplied by your controller administrator. Secrets stay in the existing private token file; they are never stored in app preferences.").font(.caption).foregroundStyle(.secondary)
             }
+            AppUpdatesView()
             Section("Application") {
                 Text("Configuration: ~/Library/Application Support/ClawFlow/config/config.yaml").font(.caption).textSelection(.enabled)
                 Text("Opening this app starts missing installed local host services. Running services are reused.").font(.caption).foregroundStyle(.secondary)
