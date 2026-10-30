@@ -579,15 +579,16 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 		return vcs.Issue{}, fmt.Errorf("github create issue: HTTP %d: %s", status, data)
 	}
 	var raw struct {
-		ID     int64  `json:"id"`
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		Body   string `json:"body"`
+		ID      int64  `json:"id"`
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.Issue{}, err
 	}
-	return vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Body: raw.Body}, nil
+	return vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Body: raw.Body, URL: raw.HTMLURL}, nil
 }
 
 func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdate) (vcs.Issue, error) {

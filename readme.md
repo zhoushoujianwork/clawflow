@@ -397,6 +397,8 @@ Commands are organized by category. Run `clawflow <cmd> --help` for flags.
 | **Update** | `clawflow update` — 按安装渠道安全升级 |
 | **Operator helpers** *(invoked from SKILL.md bodies)* | `clawflow worktree` — create/remove per-issue git worktrees · `clawflow pr-check` — has an open PR for this issue? · `clawflow lang` — detect build/test commands for changed files · `clawflow status` — per-repo health summary |
 
+`clawflow issue create` prints `created issue #N: <title>` and, when the API returns one, the issue's canonical URL on the next line. `clawflow pr create` prints the PR/MR URL the same way. The URL is the provider's `html_url` (GitHub) or `web_url` (GitLab), passed through unchanged, so GitLab shows the legacy `/issues/N` or the `/-/issues/N` form the server returns.
+
 > **Tool discipline:** return comments and outcome markers through stdout for runner write-back. Implementation has its documented Git/PR exception. Use `clawflow` for permitted VCS actions, never `gh`; see `CLAUDE.md`.
 
 ---
