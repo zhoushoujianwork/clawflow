@@ -6,7 +6,7 @@ Architecture: [restart-safe execution](resilient-execution-design.md).
 
 The new controller and worker use durable worker protocol 1. Migration 11 adds worker capability and an accepted-report digest; legacy workers retain their existing lease behavior. An old controller rejects the new registration fields instead of pretending to support durable execution. `worker --durable=false` is explicit legacy mode and does not provide restart safety.
 
-The first production cutover must drain tasks owned by the old embedded local worker before restarting that controller. The new architecture cannot retroactively detach already-running old processes. Deploy and migrate the controller first, then roll workers. Once migrated, controller shutdown no longer cancels the local worker manager or its independent task executors.
+The first production cutover must drain tasks owned by the old embedded local worker, or explicitly interrupt them gracefully and adopt their verified interruption records offline before restarting that controller. The new architecture cannot retroactively detach already-running old processes. Deploy and migrate the controller first, then roll workers. Once migrated, controller shutdown no longer cancels the local worker manager or its independent task executors.
 
 Do not roll back to a controller that lacks durable-task quarantine while durable tasks or pending results exist. Database rollback is not binary rollback. Candidate validation must use isolated state and database fixtures; never start another scheduler against production state.
 
@@ -53,3 +53,11 @@ This supports controller/manager restarts and retained development/repair sessio
 ## Validation boundary
 
 Headless fixtures exercise durable authority, fencing, late/duplicate reports, journal corruption, admission generation transfer, checkpoint resume and a real subprocess crash with an inherited recovery lock. These tests do not invoke a paid provider or restart production services. Record real backend and first-production-cutover acceptance separately.
+
+## Explicit legacy interruption import
+
+For an owner-authorized recovery test, capture task records, native session IDs, worktree paths and worker options before sending SIGTERM to legacy Offload processes. Stop controller and worker services, back up the database, and apply current migrations. Verify native history records the interruption and no original process survives.
+
+`clawflow worker import-legacy --manifest /private/captured-manifest.json` preflights worker credentials, repository/worktree identity and configured profile. `--apply` additionally requires the exact original task epoch, a sealed `failed` / `Offload execution: canceled` report, no effect intents, and no explicit task cancellation or successful result. It archives the interruption report in the journal, grants one new epoch, and prepares a same-session recovery without starting it. The controller ownership lock must be available throughout import. The private manifest contains token file paths, never token values.
+
+Start the new controller and managers only after reviewing the imported journals. Existing paused worker registration does not prevent recovery of its already-owned tasks. Keep new dispatch paused during the recovery test, then restore the previous dispatch/drain state after verifying resumed native session IDs and worktree identity. An interruption import consumes a bounded infrastructure attempt; it does not reset repair budgets, weaken provenance or replay previously queued effects.
