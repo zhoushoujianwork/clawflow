@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBarExtra {
             MenuSummary(model: model).task { model.start() }
         } label: {
-            MenuBarBrand(summary: model.summary)
+            MenuBarBrand(summary: model.summary, offloadAttention: model.offloadNeedsAttention)
         }
         .menuBarExtraStyle(.window)
     }
@@ -41,7 +41,12 @@ struct MenuSummary: View {
             Button("Open Dashboard") { openWindow(id: "dashboard"); NSApp.activate(ignoringOtherApps: true) }
                 .buttonStyle(.borderedProminent)
             Divider()
-            LocalServiceControls(services: model.localServices)
+            if model.offloadNeedsAttention, let status = model.executionReadiness.status {
+                Label(status.summary, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                Text("Open Settings for setup steps, then recheck.").font(.caption).foregroundStyle(.secondary)
+                Divider()
+            }
+            LocalServiceControls(services: model.localServices, readiness: model.executionReadiness)
             Divider()
             HStack {
                 SettingsLink()

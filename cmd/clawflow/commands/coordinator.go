@@ -159,6 +159,7 @@ func startLocalWorker(ctx context.Context, settings config.LocalWorkerSettings, 
 		return nil, err
 	}
 	o := workerOptions{Coordinator: "https://" + net.JoinHostPort(host, port), TokenFile: tokenPath, Fingerprint: pin, MaxParallel: parallel, Tags: append(append([]string{}, settings.Tags...), config.HostTag(hostname)), Roles: []string{"operator", "acceptance"}, RunUntagged: true}
+	o.Gate = workerGateFactory(hostname, o.Roles)
 	api, err := newWorkerAPI(o)
 	if err != nil {
 		return nil, err

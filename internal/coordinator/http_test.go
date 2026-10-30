@@ -100,6 +100,8 @@ func TestWorkerHTTPS(t *testing.T) {
 		{"tasks/task/heartbeat", "Bearer valid", `{"fencing_token":7}`, 200},
 		{"tasks/task/complete", "Bearer valid", `{"fencing_token":7,"result":{"output":"done"}}`, 200},
 		{"tasks/task/fail", "Bearer valid", `{"fencing_token":7,"result":{}}`, 200},
+		{"tasks/task/release", "Bearer valid", `{"fencing_token":7}`, 200},
+		{"tasks/task/release", "Bearer valid", `{"fencing_token":6}`, 409},
 		{"register", "", "{}", 401}, {"register", "Basic valid", "{}", 401},
 		{"register", "Bearer unknown", "{}", 401}, {"register", "Bearer revoked", "{}", 401},
 		{"register", "Bearer valid extra", "{}", 401},
@@ -303,4 +305,8 @@ func TestWorkerReportAllowsBoundedDevelopmentMetadata(t *testing.T) {
 	if status != 413 {
 		t.Fatalf("heartbeat accepted oversized body: %d", status)
 	}
+}
+
+func (s *apiStore) Release(c context.Context, id, w string, f int64, reason string) error {
+	return s.Heartbeat(c, id, w, f)
 }

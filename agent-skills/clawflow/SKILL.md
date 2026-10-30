@@ -87,7 +87,7 @@ Optional `codex_sandbox` accepts `workspace-write` or `danger-full-access`; the
 latter is an explicit trusted delivery choice. Machine-local overrides are
 `CLAWFLOW_OFFLOAD_COMMAND`, `CLAWFLOW_OFFLOAD_PROFILE`, and
 `CLAWFLOW_OFFLOAD_CODEX_SANDBOX`. These settings are excluded from config sync.
-There is no AGH/ACP dependency, credential migration, provider fallback or replay.
+Execution uses the Offload CLI directly; there is no credential migration, provider fallback or replay.
 
 Implement, CI repair, Pilot and explicit issue-edit chat opt into managed
 development delivery. Auxiliary/read-only and tools-disabled calls retain their

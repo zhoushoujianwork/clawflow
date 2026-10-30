@@ -8,7 +8,8 @@ struct ConnectionView: View {
     @State private var message: String?
     var body: some View {
         Form {
-            Section { LocalServiceControls(services: model.localServices) }
+            Section { ExecutionReadinessView(readiness: model.executionReadiness, cli: model.connection.cli) }
+            Section { LocalServiceControls(services: model.localServices, readiness: model.executionReadiness) }
             Section("Controller connection") {
                 TextField("HTTPS address", text: $draft.url, prompt: Text("https://controller.local:8093"))
                 TextField("Admin token file", text: $draft.tokenFile, prompt: Text("~/Library/Application Support/ClawFlow/native-local-admin.token"))
@@ -32,7 +33,7 @@ struct ConnectionView: View {
                 Text("clawflow controller service install\nclawflow worker token create --name dashboard --scope admin").font(.caption.monospaced()).textSelection(.enabled)
                 Text("Save the admin token to a private file and enter its path above. Stop the legacy web service before installing the controller. Install host services once; future app launches start missing installed local services.").font(.caption).foregroundStyle(.secondary)
             }
-        }.formStyle(.grouped).frame(width: 580, height: 560).onAppear { draft = model.connection }
+        }.formStyle(.grouped).frame(width: 580, height: 680).onAppear { draft = model.connection }
     }
     private func save() async {
         testing = true; message = nil; defer { testing = false }
