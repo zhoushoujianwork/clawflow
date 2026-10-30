@@ -34,14 +34,11 @@ struct MenuBarBrand: View {
     var body: some View {
         HStack(spacing: 3) {
             Image(nsImage: BrandMark.menuBar)
-            if !summary.connected || summary.title == "Needs attention" {
-                Image(systemName: summary.connected ? "exclamationmark" : "slash.circle")
-                    .font(.system(size: 9, weight: .semibold))
-            } else if summary.count != "0" {
-                Text(summary.count).font(.system(size: 11, weight: .medium)).monospacedDigit()
-            }
+            if let symbol = summary.menuSymbol { Image(systemName: symbol).font(.system(size: 9, weight: .semibold)) }
+            if let text = summary.menuText { Text(text).font(.system(size: 11, weight: .medium)).monospacedDigit() }
         }
-        .accessibilityLabel("ClawFlow: \(summary.title), \(summary.count) running")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(summary.accessibilityLabel)
         .help("ClawFlow · \(summary.title)")
     }
 }
