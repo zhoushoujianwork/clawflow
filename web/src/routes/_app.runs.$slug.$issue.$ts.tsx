@@ -6,24 +6,29 @@ import { cn } from '../lib/utils'
 import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 import { Markdown } from '../components/Markdown'
+import { workDetailKey } from '../components/WorkDetail'
 import { TraceView, type RawEvent } from '../components/TraceView'
 
 interface ModelUsage {
   input_tokens: number | null
   output_tokens: number | null
-  cache_read_input_tokens: number | null | null
-  cache_creation_input_tokens: number | null | null
+  cache_read_input_tokens: number | null
+  cache_creation_input_tokens: number | null
   cost_usd: number | null
 }
 
 interface Usage {
-  duration_ms: number
-  num_turns: number
+  cost_is_estimate?: boolean
+  cost_basis?: string
+  cost_unavailable?: boolean
+  tokens_unavailable?: boolean
+  duration_ms?: number | null
+  num_turns?: number | null
   total_cost_usd: number | null
   input_tokens: number | null
   output_tokens: number | null
-  cache_read_input_tokens: number | null | null
-  cache_creation_input_tokens: number | null | null
+  cache_read_input_tokens: number | null
+  cache_creation_input_tokens: number | null
   model_usage?: Record<string, ModelUsage>
   // Tokens summed from per-message usage because the run was killed before
   // claude's terminal result event. Cost is unknown on this path (issue #322).
@@ -31,7 +36,19 @@ interface Usage {
   estimated_reason?: string
 }
 
-interface RunMeta {
+export interface RunMeta {
+  attempt_id?: string
+  offload_run_id?: string
+  caller_run_id?: string
+  session_id?: string
+  profile?: string
+  model?: string
+  machine?: string
+  execution_status?: string
+  exit_code?: number | null
+  error_kind?: string
+  elapsed_ms?: number | null
+  availability?: { cost?: boolean; tokens?: boolean }
   operator: string
   repo: string
   issue_number: number
@@ -60,15 +77,22 @@ function RunDetail() {
   const [meta, setMeta] = useState<RunMeta | null>(null)
   const [events, setEvents] = useState<RawEvent[]>([])
   const [rawLoading, setRawLoading] = useState(true)
+  const [tracePath, setTracePath] = useState<string | null>(null)
+  const traceEnabled = tracePath === basePath
   const repoMap = useRepoInfoMap()
 
   useEffect(() => {
     let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const controller = new AbortController()
+    setMeta(null)
+    setEvents([])
+    setRawLoading(true)
 
     const refetch = async () => {
       const [metaRes, evRes] = await Promise.all([
-        fetch(`/api/runs?path=${encodeURIComponent(basePath.slice(6))}`, { cache: 'no-store' }).then(r => (r.ok ? r.json() : [])).then(rows => rows[0] ?? null).catch(() => null),
-        fetch(`${basePath}/events.jsonl`, { cache: 'no-store' }).then(r => (r.ok ? r.text() : '')).catch(() => ''),
+        fetch(`/api/runs?path=${encodeURIComponent(basePath.slice(6))}`, { cache: 'no-store', signal: controller.signal }).then(r => (r.ok ? r.json() : [])).then(rows => rows[0] ?? null).catch(() => null),
+        traceEnabled ? fetch(`${basePath}/events.jsonl`, { cache: 'no-store', signal: controller.signal }).then(r => (r.ok ? r.text() : '')).catch(() => '') : Promise.resolve(''),
       ])
       if (cancelled) return
 
@@ -76,7 +100,8 @@ function RunDetail() {
       const parsed: RawEvent[] = []
       for (const line of lines) {
         try {
-          parsed.push(JSON.parse(line))
+          const event = JSON.parse(line)
+          if (event && typeof event === 'object' && typeof event.type === 'string') parsed.push(event)
         } catch {
           // skip malformed lines
         }
@@ -90,21 +115,23 @@ function RunDetail() {
       // meta.json with a terminal status.
       const stillRunning = !metaRes || metaRes.status === 'running'
       if (stillRunning && !cancelled) {
-        setTimeout(refetch, 1500)
+        timer = setTimeout(refetch, 1500)
       }
     }
 
     refetch()
     return () => {
       cancelled = true
+      controller.abort()
+      clearTimeout(timer)
     }
-  }, [basePath])
+  }, [basePath, traceEnabled])
 
   const repo = slug.replace(/__/g, '/')
   const issueNum = issue.replace(/^issue-/, '')
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-6 min-w-0">
+    <div className="max-w-4xl mx-auto px-4 py-6 min-w-0 [overflow-wrap:anywhere]">
       <Link
         to="/repos/$"
         params={{ _splat: repo }}
@@ -146,7 +173,7 @@ function RunDetail() {
             {meta.ended_at && (
               <>
                 <span>·</span>
-                <span>{durationStr(meta.started_at, meta.ended_at)}</span>
+                <span>{elapsedEvidence(meta)}</span>
               </>
             )}
           </p>
@@ -191,18 +218,43 @@ function RunDetail() {
         </div>
       )}
 
+      <Link to="/pipeline" search={{ detail: workDetailKey(repo, Number(issueNum)) }} className="text-sm underline">Back to Work details</Link>
+      <ExecutionEvidence meta={meta} />
       <ConclusionPanel meta={meta} />
 
       <UsagePanel meta={meta} />
 
-      <TraceView
+      {!traceEnabled && <button className="border rounded p-2" onClick={() => setTracePath(basePath)}>Load execution events / legacy transcript</button>}
+      {traceEnabled && <TraceView
         events={events}
         loading={rawLoading}
         running={!meta || meta.status === 'running'}
-        openByDefault={!meta || meta.status === 'running'}
-      />
+        openByDefault={true}
+      />}
     </div>
   )
+}
+
+export function elapsedEvidence(meta: RunMeta): string {
+  if (meta.elapsed_ms != null && Number.isFinite(meta.elapsed_ms) && meta.elapsed_ms >= 0) return `${msToShort(meta.elapsed_ms)} (stored Offload elapsed)`
+  const start = Date.parse(meta.started_at), end = Date.parse(meta.ended_at || '')
+  if (!meta.started_at.startsWith('0001-') && Number.isFinite(start) && Number.isFinite(end) && end >= start) return `${msToShort(end - start)} (fallback: run timestamps)`
+  if (!meta.offload_run_id && !meta.execution_status && meta.usage?.duration_ms != null && Number.isFinite(meta.usage.duration_ms) && meta.usage.duration_ms >= 0) return `${msToShort(meta.usage.duration_ms)} (fallback: legacy usage)`
+  return 'Not reported'
+}
+
+export function ExecutionEvidence({ meta }: { meta: RunMeta | null }) {
+  if (!meta) return null
+  const known = (v: unknown) => v == null || v === '' ? 'Not reported' : String(v)
+  return <section aria-label="Execution evidence" className="my-4 border rounded p-3 min-w-0 [overflow-wrap:anywhere]">
+    <h2 className="font-semibold">Execution evidence · {meta.offload_run_id || meta.execution_status ? 'persisted Offload metadata' : 'historical record; source not recorded'}</h2>
+    <p>Attempt: {known(meta.attempt_id)} · Offload run: {known(meta.offload_run_id)} · caller: {known(meta.caller_run_id)}</p>
+    <p>Session: {known(meta.session_id)} · machine: {known(meta.machine)}</p>
+    <p>Profile: {known(meta.profile)} · model: {known(meta.model)}</p>
+    <p>Execution: {known(meta.execution_status)} · exit: {known(meta.exit_code)} · error: {known(meta.error_kind)}</p>
+    <p>Elapsed: {elapsedEvidence(meta)}</p>
+    <p className="text-xs">Per-attempt evidence; resumed sessions are not aggregated. Execution status is separate from ClawFlow outcome and delivery.</p>
+  </section>
 }
 
 /**
@@ -347,7 +399,7 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
             color: 'hsl(var(--text-low))',
           }}
         >
-          Claude exited cleanly but produced no output. No comment was posted and no label was applied. This run counts toward the circuit breaker.
+          The executor exited cleanly but produced no output. No comment was posted and no label was applied. This run counts toward the circuit breaker.
         </div>
       </section>
     )
@@ -406,7 +458,7 @@ function ConclusionPanel({ meta }: { meta: RunMeta | null }) {
  */
 export function UsagePanel({ meta }: { meta: RunMeta | null }) {
   if (!meta) return null
- if (!meta.usage) return <section className="mb-6 text-sm"><h2 className="font-semibold">Usage</h2><p>Cost: Not reported · Tokens: Not reported</p></section>
+  if (!meta.usage) return <section className="mb-6 text-sm"><h2 className="font-semibold">Usage</h2><p>Cost: Not reported · Tokens: Not reported</p></section>
   const u = meta.usage
 
   const models = u.model_usage
@@ -428,17 +480,18 @@ export function UsagePanel({ meta }: { meta: RunMeta | null }) {
         <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm tabular-nums">
           <Stat
             label="cost"
-            value={u.total_cost_usd == null || u.estimated ? 'Not reported' : `$${u.total_cost_usd.toFixed(4)}`}
+            value={u.total_cost_usd == null || u.estimated || u.cost_unavailable || meta.availability?.cost === false ? 'Not reported' : `$${u.total_cost_usd.toFixed(4)}${u.cost_is_estimate ? ' (estimate)' : ''}`}
             highlight
           />
-          <Stat label="duration" value={msToShort(u.duration_ms)} />
-          <Stat label="turns" value={String(u.num_turns)} />
-          <Stat label="input" value={(u.input_tokens?.toLocaleString() ?? "Not reported")} />
-          <Stat label="output" value={(u.output_tokens?.toLocaleString() ?? "Not reported")} />
+          <Stat label="duration" value={elapsedEvidence(meta)} />
+          <Stat label="turns" value={meta.offload_run_id || meta.execution_status || u.num_turns == null ? 'Not reported' : String(u.num_turns)} />
+          <Stat label="input" value={(u.tokens_unavailable || meta.availability?.tokens === false ? "Not reported" : u.input_tokens?.toLocaleString() ?? "Not reported")} />
+          <Stat label="output" value={(u.tokens_unavailable || meta.availability?.tokens === false ? "Not reported" : u.output_tokens?.toLocaleString() ?? "Not reported")} />
           {(u.cache_read_input_tokens ?? 0) > 0 && (
-            <Stat label="cache read" value={(u.cache_read_input_tokens?.toLocaleString() ?? "Not reported")} />
+            <Stat label="cache read" value={(u.tokens_unavailable || meta.availability?.tokens === false ? "Not reported" : u.cache_read_input_tokens?.toLocaleString() ?? "Not reported")} />
           )}
         </div>
+        {u.cost_basis && <p className="text-xs mt-2">Cost basis: {u.cost_basis}</p>}
         {models.length > 0 && (
           <div
             className="mt-3 pt-3"
@@ -498,7 +551,8 @@ function Stat({ label, value, highlight }: { label: string; value: string; highl
   )
 }
 
-function msToShort(ms: number): string {
+function msToShort(ms?: number | null): string {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return 'Not reported'
   if (ms < 1000) return `${ms}ms`
   const s = Math.floor(ms / 1000)
   if (s < 60) return `${s}s`
@@ -533,19 +587,3 @@ function StatusBadge({ status }: { status: RunMeta['status'] }) {
     </span>
   )
 }
-
-function durationStr(start: string, end: string) {
-  // See dashboard's durationStr — same defense against zero-time
-  // ended_at sneaking in from older snapshots.
-  const tStart = new Date(start).getTime()
-  const tEnd = new Date(end).getTime()
-  if (!isFinite(tStart) || !isFinite(tEnd) || tEnd < 946684800000) return ''
-  const ms = tEnd - tStart
-  if (ms < 0) return ''
-  if (ms < 1000) return `${ms}ms`
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  return `${m}m${s % 60}s`
-}
-
