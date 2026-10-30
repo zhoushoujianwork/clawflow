@@ -160,6 +160,49 @@ func TestCreateIssue(t *testing.T) {
 	}
 }
 
+func TestCreateIssuePreservesAPIURL(t *testing.T) {
+	tests := []struct {
+		name string
+		resp map[string]any
+		want string
+	}{
+		{"github.com", map[string]any{"number": 1, "html_url": "https://github.com/owner/repo/issues/1"}, "https://github.com/owner/repo/issues/1"},
+		{"enterprise host verbatim", map[string]any{"number": 1, "html_url": "https://ghe.example.com/owner/repo/issues/1"}, "https://ghe.example.com/owner/repo/issues/1"},
+		{"empty url stays empty", map[string]any{"number": 1}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			posts := 0
+			client := newTestClient(t, map[string]http.HandlerFunc{
+				"POST /repos/owner/repo/issues": func(w http.ResponseWriter, r *http.Request) {
+					posts++
+					jsonResp(w, 201, tt.resp)
+				},
+			})
+			issue, err := client.CreateIssue("owner/repo", "t", "b")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if issue.URL != tt.want || issue.Number != 1 || posts != 1 {
+				t.Errorf("URL=%q number=%d posts=%d, want URL %q with one POST", issue.URL, issue.Number, posts, tt.want)
+			}
+		})
+	}
+}
+
+func TestCreatePRPreservesAPIURL(t *testing.T) {
+	const want = "https://ghe.example.com/owner/repo/pull/7"
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"POST /repos/owner/repo/pulls": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 201, map[string]any{"number": 7, "title": "t", "state": "open", "html_url": want, "head": map[string]string{"ref": "fix"}})
+		},
+	})
+	pr, err := client.CreatePR("owner/repo", vcs.PRCreateOpts{Head: "fix", Base: "main"})
+	if err != nil || pr.URL != want {
+		t.Fatalf("pr=%+v err=%v", pr, err)
+	}
+}
+
 func TestUpdateIssue(t *testing.T) {
 	var got map[string]string
 	client := newTestClient(t, map[string]http.HandlerFunc{
