@@ -48,6 +48,33 @@ func TestBlockedWorkerNeverClaimsButStaysRegistered(t *testing.T) {
 	}
 }
 
+// Shutdown while a keep-visible re-registration is in flight must end the
+// worker cleanly, not surface the cancelled request as a coordinator failure.
+func TestBlockedWorkerShutdownDuringReregistrationIsClean(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var registers atomic.Int32
+	inflight := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/worker/v1/register" && registers.Add(1) > 1 {
+			_, _ = io.Copy(io.Discard, r.Body) // reading the body lets the server notice a closed connection
+			close(inflight)
+			<-r.Context().Done() // hang until the worker cancels the request
+			return
+		}
+		_, _ = io.WriteString(w, `{"task":null}`)
+	}))
+	defer server.Close()
+	go func() {
+		<-inflight
+		cancel()
+	}()
+	api := &workerAPI{base: server.URL, client: server.Client()}
+	if err := runWorker(ctx, api, workerOptions{MaxParallel: 1, Gate: blockedGate()}, time.Second, 10*time.Millisecond, nil); err != nil {
+		t.Fatalf("shutdown during re-registration returned %v", err)
+	}
+}
+
 func TestHealthyGateStillClaims(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
