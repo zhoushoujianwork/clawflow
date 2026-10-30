@@ -118,7 +118,7 @@ write-back are disabled by default.`}
 	prepare.Flags().StringSliceVar(&machineCaps, "machine-capability", nil, "capabilities this machine declares")
 	prepare.Flags().StringSliceVar(&fixtures, "fixture", nil, "loopback fixture repo as owner/repo=URL")
 
-	up := &cobra.Command{Use: "up", Short: "Build the pinned commit and start the dev controller and worker pair", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	up := &cobra.Command{Use: "up", Short: "Build the pinned commit and start the dev controller and worker pair", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 		p, err := load()
 		if err != nil {
 			return err
@@ -127,6 +127,33 @@ write-back are disabled by default.`}
 		if err != nil {
 			return fmt.Errorf("candidate %s is not prepared: run `clawflow candidate prepare` first", p.ID)
 		}
+		if m.Running() {
+			return fmt.Errorf("candidate %s is already running; stop its owned processes before another up", p.ID)
+		}
+		ev, err := beginCandidateAttempt(p)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if runErr == nil {
+				return
+			}
+			if ev.Layers["environment-ready"] != candidate.Passed {
+				ev.Layers["environment-ready"] = candidate.Blocked
+				ev.Readiness = candidate.Readiness{Status: candidate.Blocked, NextOwner: "environment-maintainer", Action: "resolve the startup failure and start a new candidate attempt"}
+			} else if ev.Layers["candidate-loaded"] != candidate.Passed {
+				ev.Layers["candidate-loaded"] = candidate.Failed
+			} else {
+				ev.Layers["lifecycle"] = candidate.Failed
+			}
+			ev.Command("up", []string{"candidate", "up"}, 1, runErr.Error())
+			ev.Finish()
+			for _, name := range []string{"evidence-partial.json", "evidence.json"} {
+				if err := ev.Write(filepath.Join(p.Root, name)); err != nil {
+					runErr = fmt.Errorf("%w; cannot persist failed attempt: %v", runErr, err)
+				}
+			}
+		}()
 		admin := strings.TrimSpace(os.Getenv(adminDSNEnv))
 		if admin == "" {
 			return fmt.Errorf("blocked (environment-maintainer): %s is not set; a PostgreSQL server is required to own the candidate schema", adminDSNEnv)
@@ -135,7 +162,6 @@ write-back are disabled by default.`}
 		if err != nil {
 			return err
 		}
-		ev := candidate.NewEvidence(p, "")
 		ev.Redact(admin, pinned)
 		ev.Layers["environment-ready"] = candidate.Passed
 		stableBefore, err := candidate.TakeStable(stableHost(), candidate.DefaultStableProbe(config.RootDir(), p.Base))
@@ -160,10 +186,6 @@ write-back are disabled by default.`}
 		ev.Layers["candidate-loaded"] = candidate.Passed
 		res, err := m.Up(cmd.Context(), binary, pinned)
 		if err != nil {
-			ev.Layers["lifecycle"] = candidate.Failed
-			ev.Command("up", []string{"candidate", "up"}, 1, err.Error())
-			ev.Finish()
-			_ = ev.Write(filepath.Join(p.Root, "evidence.json"))
 			return err
 		}
 		ev.Layers["lifecycle"] = candidate.Passed
@@ -203,7 +225,14 @@ write-back are disabled by default.`}
 		}
 		ev := candidate.NewEvidence(p, "")
 		if raw, rerr := os.ReadFile(filepath.Join(p.Root, "evidence-partial.json")); rerr == nil {
-			_ = json.Unmarshal(raw, ev)
+			if err := json.Unmarshal(raw, ev); err != nil {
+				return fmt.Errorf("candidate partial evidence is unreadable: %w", err)
+			}
+			if ev.Commit != p.Commit || ev.ID != p.ID {
+				return fmt.Errorf("candidate partial evidence belongs to another runtime")
+			}
+		} else if !os.IsNotExist(rerr) {
+			return rerr
 		}
 		ev.Layers["offline"] = offline
 		if err == nil {
@@ -283,4 +312,35 @@ func writeJSON0600(path string, v any) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o600)
+}
+
+// Every up attempt gets fresh evidence before setup can fail. Prior records
+// remain available for audit and can never supply this attempt's verdict.
+func beginCandidateAttempt(p candidate.Plan) (*candidate.Evidence, error) {
+	names := []string{"evidence.json", "evidence-partial.json", "stable-before.json"}
+	var existing []string
+	for _, name := range names {
+		_, err := os.Lstat(filepath.Join(p.Root, name))
+		if err == nil {
+			existing = append(existing, name)
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	if len(existing) > 0 {
+		archive, err := os.MkdirTemp(p.Root, "attempt-")
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range existing {
+			if err := os.Rename(filepath.Join(p.Root, name), filepath.Join(archive, name)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	ev := candidate.NewEvidence(p, "")
+	if err := ev.Write(filepath.Join(p.Root, "evidence-partial.json")); err != nil {
+		return nil, err
+	}
+	return ev, nil
 }

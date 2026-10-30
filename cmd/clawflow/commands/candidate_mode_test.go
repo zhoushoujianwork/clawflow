@@ -1,15 +1,20 @@
 package commands
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/candidate"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 )
@@ -211,5 +216,130 @@ func TestCandidatePrepareRefusesBeforeMutation(t *testing.T) {
 		if _, err := os.Stat(base); err == nil {
 			t.Fatalf("%v created %s before refusing", args, base)
 		}
+	}
+}
+
+func TestCandidateFailedRestartCannotReuseEarlierPassingEvidence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	t.Setenv(devmode.EnvID, "")
+	t.Setenv(adminDSNEnv, "")
+	p, err := candidate.NewPlan(strings.Repeat("a", 40), filepath.Join(t.TempDir(), "candidates"), 0, candidate.Pin{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := candidate.Prepare(p, stableHost(), func(int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	old := candidate.NewEvidence(p, "old-binary")
+	for _, layer := range []string{"offline", "environment-ready", "candidate-loaded", "lifecycle"} {
+		old.Layers[layer] = candidate.Passed
+	}
+	old.Finish()
+	for _, name := range []string{"evidence-partial.json", "evidence.json"} {
+		if err := old.Write(filepath.Join(p.Root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := candidate.TakeStable(stableHost(), candidate.DefaultStableProbe(config.RootDir(), p.Base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON0600(filepath.Join(p.Root, "stable-before.json"), before); err != nil {
+		t.Fatal(err)
+	}
+	up := NewCandidateCmd()
+	up.SetArgs([]string{"up", "--commit", p.Commit, "--base", p.Base, "--checkout", t.TempDir()})
+	up.SilenceErrors = true
+	if err := up.Execute(); err == nil {
+		t.Fatal("up unexpectedly succeeded without administrative DSN")
+	}
+	down := NewCandidateCmd()
+	down.SetArgs([]string{"down", "--commit", p.Commit, "--base", p.Base, "--offline", "passed"})
+	down.SilenceErrors = true
+	_ = down.Execute()
+	raw, err := os.ReadFile(filepath.Join(p.Root, "evidence.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got candidate.Evidence
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == candidate.Passed || got.Layers["lifecycle"] == candidate.Passed {
+		t.Fatal("failed restart reused old success", got.Status, got.Layers)
+	}
+	history, _ := filepath.Glob(filepath.Join(p.Root, "attempt-*", "evidence.json"))
+	if len(history) != 1 {
+		t.Fatal("previous evidence not preserved", history)
+	}
+}
+
+func TestCandidateUpRefusesRunningGenerationBeforeArchivingEvidence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(devmode.EnvID, "")
+	t.Setenv(adminDSNEnv, "")
+	p, err := candidate.NewPlan(strings.Repeat("b", 40), filepath.Join(t.TempDir(), "candidates"), 0, candidate.Pin{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := candidate.Prepare(p, stableHost(), func(int) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(p.Bin, "clawflow")
+	build := exec.Command("go", "build", "-o", binary, "../../../internal/candidate/testdata/fakecf")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	process := exec.Command(binary, "worker", "fixture")
+	if err := process.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = process.Process.Kill(); _ = process.Wait() }()
+	if err := m.Record("controller", process.Process.Pid, binary); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(time.Second); !m.Running() && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !m.Running() {
+		out, _ := exec.Command("ps", "-ww", "-p", fmt.Sprint(process.Process.Pid), "-o", "command=").Output()
+		t.Fatalf("fixture not owned: %q; expected %q", out, binary)
+	}
+	path := filepath.Join(p.Root, "evidence-partial.json")
+	if err := os.WriteFile(path, []byte("retained active evidence"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := NewCandidateCmd()
+	command.SetArgs([]string{"up", "--commit", p.Commit, "--base", p.Base, "--checkout", t.TempDir()})
+	command.SilenceErrors = true
+	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatal("running candidate admitted", err)
+	}
+	retained, err := os.ReadFile(path)
+	if err != nil || string(retained) != "retained active evidence" {
+		t.Fatal("active evidence changed", err)
+	}
+}
+
+func TestCandidateDownRejectsUnreadablePartialEvidence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(devmode.EnvID, "")
+	p, err := candidate.NewPlan(strings.Repeat("a", 40), filepath.Join(t.TempDir(), "candidates"), 0, candidate.Pin{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := candidate.Prepare(p, stableHost(), func(int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.Root, "evidence-partial.json"), []byte(`{"layers":7}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := NewCandidateCmd()
+	command.SetArgs([]string{"down", "--commit", p.Commit, "--base", p.Base, "--offline", "passed"})
+	command.SilenceErrors = true
+	if err := command.Execute(); err == nil {
+		t.Fatal("unreadable evidence silently accepted")
 	}
 }

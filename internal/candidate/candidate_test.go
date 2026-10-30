@@ -502,3 +502,67 @@ func TestStartRefusesBinaryOutsideCandidate(t *testing.T) {
 		t.Fatalf("foreign binary executed: %v", err)
 	}
 }
+
+func TestStableSnapshotChecksBytesRatherThanOnlyModificationTimes(t *testing.T) {
+	stable := testStable(t)
+	path := filepath.Join(stable.Root, "config", "config.yaml")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := TakeStable(stable, StableProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := strings.Replace(string(original), "repos", "other", 1)
+	if len(changed) != len(original) {
+		t.Fatal("fixture must preserve file size")
+	}
+	if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := TakeStable(stable, StableProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baseline.Diff(after)) == 0 {
+		t.Fatal("configuration content change hidden by preserved size and timestamp")
+	}
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime().Add(time.Hour), info.ModTime().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	after, err = TakeStable(stable, StableProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := baseline.Diff(after); len(diff) != 0 {
+		t.Fatal("unchanged bytes reported as a data mutation", diff)
+	}
+}
+
+func TestVerifyRejectsContradictoryPassingStatus(t *testing.T) {
+	p := plan(t, commitA, 0)
+	e := NewEvidence(p, "binary")
+	for _, layer := range []string{"offline", "environment-ready", "candidate-loaded", "lifecycle"} {
+		e.Layers[layer] = Passed
+	}
+	e.Finish()
+	e.Layers["lifecycle"] = Failed
+	path := filepath.Join(t.TempDir(), "evidence.json")
+	if err := e.Write(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(path, p.Commit); err == nil {
+		t.Fatal("claimed pass accepted despite failed lifecycle")
+	}
+}

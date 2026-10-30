@@ -141,3 +141,43 @@ func TestCandidateLifecycleIsolatedFromStableHost(t *testing.T) {
 		t.Fatal("stable root disturbed")
 	}
 }
+
+func TestBuildBinaryKeepsPinnedCheckoutReadOnly(t *testing.T) {
+	checkout := t.TempDir()
+	files := map[string]string{
+		"go.mod":               "module fixture\n\ngo 1.24.0\n\nrequire fixturedep v0.0.0 // indirect\n\nreplace fixturedep => ./dep\n",
+		"dep/go.mod":           "module fixturedep\n\ngo 1.24.0\n",
+		"dep/dep.go":           "package fixturedep\n",
+		"cmd/clawflow/main.go": "package main\nimport _ \"fixturedep\"\nfunc main(){}\n",
+	}
+	for name, body := range files {
+		path := filepath.Join(checkout, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"init"}, {"add", "go.mod", "dep/go.mod", "dep/dep.go", "cmd/clawflow/main.go"}, {"-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"}} {
+		cmd := exec.Command("git", append([]string{"-C", checkout}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatal(err, string(out))
+		}
+	}
+	head, err := gitOutput(context.Background(), checkout, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := plan(t, head, 0)
+	if _, err := Prepare(p, testStable(t), func(int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := BuildBinary(context.Background(), p, checkout); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := gitOutput(context.Background(), checkout, "status", "--porcelain")
+	if err != nil || dirty != "" {
+		t.Fatalf("pinned checkout was modified by build: %q: %v", dirty, err)
+	}
+}

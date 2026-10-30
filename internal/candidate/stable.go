@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -90,16 +91,22 @@ func digestTree(root string, skip func(rel string) bool) (string, error) {
 			fmt.Fprintf(h, "l %s %s\n", rel, target)
 			return nil
 		}
-		fmt.Fprintf(h, "f %s %d\n", rel, info.Size())
-		if strings.HasPrefix(rel, "config"+string(filepath.Separator)) || rel == "config" {
-			data, err := os.ReadFile(path)
+		fmt.Fprintf(h, "f %s %d %s\n", rel, info.Size(), info.Mode())
+		if info.Mode().IsRegular() {
+			file, err := os.Open(path)
 			if err != nil {
 				return err
 			}
-			sum := sha256.Sum256(data)
-			fmt.Fprintf(h, "c %s %s\n", rel, hex.EncodeToString(sum[:]))
-		} else {
-			fmt.Fprintf(h, "m %s %d\n", rel, info.ModTime().UnixNano())
+			content := sha256.New()
+			_, readErr := io.Copy(content, file)
+			closeErr := file.Close()
+			if readErr != nil {
+				return readErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			fmt.Fprintf(h, "c %s %s\n", rel, hex.EncodeToString(content.Sum(nil)))
 		}
 		return nil
 	})

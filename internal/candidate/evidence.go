@@ -171,5 +171,10 @@ func Verify(path, commit string) (*Evidence, error) {
 	case e.Status != Passed:
 		return nil, fmt.Errorf("evidence status is %s", e.Status)
 	}
+	computed := e
+	computed.Finish()
+	if computed.Status != Passed {
+		return nil, fmt.Errorf("evidence claims passed but its recorded layers produce %s", computed.Status)
+	}
 	return &e, nil
 }

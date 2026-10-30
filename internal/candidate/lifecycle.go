@@ -36,11 +36,18 @@ func BuildBinary(ctx context.Context, p Plan, checkout string) (path, sha string
 	cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", flags, "-o", path, "./cmd/clawflow")
 	cmd.Dir = checkout
 	cmd.Env = p.Env("")
-	cmd.Env = append(cmd.Env, "GOFLAGS=-mod=mod", "GOPATH="+filepath.Join(p.Cache, "gopath"))
+	cmd.Env = append(cmd.Env, "GOFLAGS=-mod=readonly", "GOPATH="+filepath.Join(p.Cache, "gopath"))
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {
 		return "", "", fmt.Errorf("build failed: %w: %s", err, tail(out.String(), 600))
+	}
+	if dirty, checkErr := gitOutput(ctx, checkout, "status", "--porcelain"); checkErr != nil || dirty != "" {
+		return "", "", fmt.Errorf("candidate checkout changed during build; refusing the resulting binary")
+	}
+	builtHead, checkErr := gitOutput(ctx, checkout, "rev-parse", "HEAD")
+	if checkErr != nil || builtHead != p.Commit {
+		return "", "", fmt.Errorf("candidate revision changed during build")
 	}
 	sha, err = FileSHA(path)
 	return path, sha, err

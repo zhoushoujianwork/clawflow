@@ -142,6 +142,16 @@ func (m *Manifest) owned(pr Process) bool {
 	return cmd != "" && strings.HasPrefix(cmd, pr.Command) && devmode.Within(m.Plan.Bin, pr.Command)
 }
 
+// Running reports whether a recorded candidate process still owns its executable.
+func (m *Manifest) Running() bool {
+	for _, process := range m.Processes {
+		if m.owned(process) {
+			return true
+		}
+	}
+	return false
+}
+
 // Record adds a started service to the manifest.
 func (m *Manifest) Record(role string, pid int, command string) error {
 	m.Processes = append(m.Processes, Process{Role: role, PID: pid, Command: command, Started: time.Now().UTC().Format(time.RFC3339)})

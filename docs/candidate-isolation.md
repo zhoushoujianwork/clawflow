@@ -1,6 +1,6 @@
 # 本地开发候选与独立验收的宿主隔离
 
-状态：已实现（#613）。范围：CLI 与后台服务；不涉及 Web UI。原生 App 仅提供独立的 bundle id 与产物路径，GUI 目视验收仍须在明确的测试窗口内另行执行。
+状态：实现位于 PR #617（#613），仍需独立验收。范围：CLI 与后台服务；不涉及 Web UI。原生 App 仅提供独立的 bundle id 与产物路径，GUI 目视验收仍须在明确的测试窗口内另行执行。
 
 ## 目标
 
@@ -48,6 +48,8 @@ clawflow candidate clean --commit <sha>
 
 `CLAWFLOW_CANDIDATE_ADMIN_DSN` 未设置时 `up` 返回 blocked（environment-maintainer），不会伪造通过。
 
+候选构建以只读模块模式执行，并在构建后再次核对提交和工作区。每次 `up` 都先归档旧证据，再创建本轮记录；启动失败不会沿用上轮成功。运行中的候选拒绝重复启动。`verify` 会根据各层结果重新计算结论，不只读取 `status`。
+
 ### 冲突与所有权检查（变更之前）
 
 `Plan.Validate` 与 `Prepare` 在创建任何目录之前拒绝：根目录与稳定根重叠、目录逃出候选根、稳定端口或已占用端口、同一基目录下其他候选已占用的端口/schema/bundle id、非候选 schema、稳定 bundle id、稳定 launchd 标签、已存在但不是候选的目录。每个候选根含 `manifest.json` 与随机令牌的 `.clawflow-candidate` 标记，二者一致才视为本候选所有。
@@ -92,7 +94,7 @@ clawflow candidate clean --commit <sha>
 
 `evidence.json`（权限 0600）绑定：候选提交、运行时身份（id、端口、schema、bundle id）、环境（OS、架构、Go 版本、候选二进制 SHA-256）、SOP 摘要与能力、各层结果、worker 身份、命令及结果、稳定宿主差异、状态。令牌、DSN 与密码在写入前脱敏。
 
-层级：`offline`、`environment-ready`、`candidate-loaded`、`lifecycle`、`live-write`、`save-reload`、`native-visual`。`live-write`/`save-reload` 默认 `not-run`，`native-visual` 默认 `pending`；任何一层都不由其他层推断。阻塞之后的步骤保持 `not-run`，整体状态为 `blocked`。稳定宿主的配置、数据（不含 `runs/` 历史）、监听端口或进程身份在运行前后不一致时，整体状态为 `failed`。
+层级：`offline`、`environment-ready`、`candidate-loaded`、`lifecycle`、`live-write`、`save-reload`、`native-visual`。`live-write`/`save-reload` 默认 `not-run`，`native-visual` 默认 `pending`；任何一层都不由其他层推断。阻塞之后的步骤保持 `not-run`，整体状态为 `blocked`。稳定宿主的配置、数据（不含 `runs/` 历史）、监听端口或进程身份在运行前后不一致时，整体状态为 `failed`。配置与数据比较实际内容和文件类型/权限；单纯触碰修改时间不会被误判为内容变更。旧记录保存在候选根下的 `attempt-*` 目录中。
 
 ## 原生 App 与 GUI
 
