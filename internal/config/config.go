@@ -46,6 +46,10 @@ type Repo struct {
 	CITimeout          int               `yaml:"ci_timeout,omitempty"`
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
+
+	// AcceptanceSetupCommand prepares generated prerequisites in disposable checkouts.
+	AcceptanceSetupCommand string `yaml:"acceptance_setup_command,omitempty" json:"acceptance_setup_command,omitempty"`
+
 	// AcceptanceMaxParallel caps simultaneous independent reviews; zero defaults to 3.
 	AcceptanceMaxParallel int `yaml:"acceptance_max_parallel,omitempty" json:"acceptance_max_parallel,omitempty"`
 
@@ -153,6 +157,7 @@ type PlatformSettings struct {
 
 // Settings holds global ClawFlow settings.
 type Settings struct {
+	GitHubApp   GitHubAppSettings   `yaml:"github_app,omitempty" json:"-"`
 	Platform    PlatformSettings    `yaml:"platform,omitempty"`
 	Pilot       PilotSettings       `yaml:"pilot,omitempty"`
 	Coordinator CoordinatorSettings `yaml:"coordinator,omitempty"`
@@ -965,6 +970,9 @@ func Load() (*Config, error) {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("cannot parse config: %w", err)
 		}
+		if err := cfg.Settings.GitHubApp.Validate(); err != nil {
+			return nil, err
+		}
 		if err := cfg.Save(); err != nil {
 			return nil, fmt.Errorf("cannot migrate config to %s: %w", path, err)
 		}
@@ -977,6 +985,9 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("cannot parse config: %w", err)
+	}
+	if err := cfg.Settings.GitHubApp.Validate(); err != nil {
+		return nil, err
 	}
 	return &cfg, nil
 }

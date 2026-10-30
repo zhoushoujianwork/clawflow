@@ -48,7 +48,7 @@ test('remote session hides write and sensitive navigation controls', () => {
   const html = renderLayout(true)
   assert.match(html, /Read-only/)
   assert.match(html, /PAGE_CONTENT/)
-  assert.doesNotMatch(html, /Report an issue|SYNC_CONTROL|CHAT_DRAWER|href="\/(settings|repos|projects|operators)"/)
+  assert.doesNotMatch(html, /Report an issue|Steward|Management|SYNC_CONTROL|CHAT_DRAWER|href="\/(settings|repos|projects|operators)"/)
 })
 test('loopback session keeps local controls', () => {
   const html = renderLayout(false)
@@ -56,6 +56,21 @@ test('loopback session keeps local controls', () => {
   assert.match(html, /SYNC_CONTROL/)
   assert.match(html, /CHAT_DRAWER/)
   assert.match(html, /href="\/settings"/)
+})
+test('Work and Usage lead the navigation; legacy routes stay grouped', () => {
+  const html = renderLayout(false, '/pipeline')
+  const nav = html.match(/<nav[^>]*>[\s\S]*?<\/nav>/)[0]
+  assert.match(nav, /^<nav[^>]*><a href="\/pipeline">Work<\/a><a href="\/usage">Usage<\/a>/)
+  for (const route of ['repos', 'projects', 'dashboard', 'operators', 'settings']) {
+    assert.match(nav, new RegExp('href="/' + route + '"'))
+  }
+  assert.doesNotMatch(nav, /data-active="true"/)
+  assert.match(html, /href="#main-content"/)
+  assert.match(html, /id="main-content"[^>]*tabindex="-1"/)
+})
+test('nested management routes mark their group active', () => {
+  assert.match(renderLayout(false, '/repos/owner/repo'), /data-active="true">Management/)
+  assert.match(renderLayout(false, '/settings'), /data-active="true">Administration/)
 })
 test('remote deep links cannot mount privileged pages', () => {
   const html = renderLayout(true, '/settings')

@@ -36,6 +36,14 @@ func applyUnstructuredReport(r *Record, text string, validationErr error) bool {
 			if field == "findings" && kind != "requirement" && kind != "defect" && status != "failed" || field == "checks" && status != "failed" {
 				continue
 			}
+			// Do not resurrect an informational process gap as an unstructured
+			// defect after a malformed report. Invalid reports still cannot pass.
+			if field == "findings" {
+				var finding Finding
+				if json.Unmarshal(raw, &finding) == nil && processOnlyFinding(finding) {
+					continue
+				}
+			}
 			var parts []string
 			for _, key := range []string{"summary", "requirement", "defect", "evidence", "missing", "text"} {
 				if value := read(item[key]); value != "" {

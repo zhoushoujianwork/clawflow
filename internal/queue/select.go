@@ -36,6 +36,9 @@ type Candidate struct {
 	// Ineligible, for a not-in-flight item, names why implement would not be
 	// dispatched (agent-failed, ...). Empty = eligible.
 	Ineligible string
+	// BlockingPR identifies the open managed PR occupying this area.
+	BlockingPR int
+	AreaPasses int // consecutive area holds caused by that PR
 }
 
 // SelectInput is everything Select needs, as plain data.
@@ -54,12 +57,14 @@ type SelectInput struct {
 
 // Entry is the scheduling verdict for one candidate, in global order.
 type Entry struct {
-	Key      Key
-	Priority Priority
-	Rank     int // position in the rank file, -1 when unranked
-	State    string
-	Reason   string
-	Pick     bool // dispatch implement this pass
+	Key        Key
+	Priority   Priority
+	Rank       int // position in the rank file, -1 when unranked
+	State      string
+	Reason     string
+	BlockingPR int
+	AreaPasses int
+	Pick       bool // dispatch implement this pass
 }
 
 // Label renders the state as shown by the CLI: "blocked:<reason>" etc.
@@ -180,11 +185,41 @@ func Select(in SelectInput) SelectResult {
 			e.State, e.Reason = StateBlocked, "dependency_cycle"
 		case hasOpenDep(it.Deps, in.DepOpen):
 			e.State, e.Reason = StateWaiting, "dependency"
+		case c.BlockingPR > 0 && slots > 0:
+			e.State, e.Reason, e.BlockingPR = StateParked, "area_busy", c.BlockingPR
+			e.AreaPasses = c.AreaPasses + 1
+			res.Parked[it.Key] = true
+			if !in.WasParked[it.Key] {
+				res.Newly.Parked = append(res.Newly.Parked, it.Key)
+			}
 		case slots > 0:
 			e.State, e.Pick = StateEligible, true
 			slots--
 		default:
 			e.State, e.Reason = StateEligible, "max_in_flight"
+		}
+	}
+	// Only bypass overlap after three holds when no independent work can start.
+	if slots > 0 {
+		anyPick := false
+		for _, e := range entries {
+			anyPick = anyPick || e.Pick
+		}
+		if !anyPick {
+			for i := range entries {
+				e := &entries[i]
+				if e.Reason == "area_busy" && byKey[e.Key].AreaPasses >= 3 {
+					e.State, e.Reason, e.Pick = StateEligible, "", true
+					e.BlockingPR, e.AreaPasses = 0, 0
+					delete(res.Parked, e.Key)
+					break
+				}
+			}
+		}
+	}
+	for _, e := range entries {
+		if !byKey[e.Key].InFlight && in.WasParked[e.Key] && e.State != StateParked {
+			res.Newly.Unparked = append(res.Newly.Unparked, e.Key)
 		}
 	}
 	res.Entries = entries

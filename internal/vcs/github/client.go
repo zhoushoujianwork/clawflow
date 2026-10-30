@@ -5,24 +5,35 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/githubauth"
 	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // Client calls the GitHub REST API v3.
 type Client struct {
-	token   string
-	baseURL string // default: https://api.github.com
-	http    *http.Client
-	ctx     context.Context // optional; bounds every request (see SetRequestContext)
+	identity   string
+	login      string
+	cacheRoot  string
+	repository *atomic.Pointer[string]
+	authorized bool
+	token      string
+	baseURL    string // default: https://api.github.com
+	http       *http.Client
+	state      *requestState
+	ctx        context.Context // optional; bounds every request (see SetRequestContext)
 }
 
 // SetRequestContext binds ctx to every subsequent request so the caller's
@@ -47,14 +58,84 @@ func New(token, baseURL string) *Client {
 		baseURL = "https://api.github.com"
 	}
 	return &Client{
-		token:   token,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Timeout: 30 * time.Second},
+		token:      token,
+		repository: &atomic.Pointer[string]{},
+		state:      &requestState{cache: map[string]cachedResponse{}},
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		http:       &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// SetRepository supplies scope for endpoints without a repository in their path.
+func (c *Client) SetRepository(repo string) {
+	if c.repository == nil {
+		c.repository = &atomic.Pointer[string]{}
+	}
+	c.repository.Store(&repo)
+}
+
+func (c *Client) authenticated(path string) (*Client, error) {
+	if c.authorized {
+		return c, nil
+	}
+	repo := ""
+	if c.repository != nil {
+		if value := c.repository.Load(); value != nil {
+			repo = *value
+		}
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "repos" {
+		repo = parts[1] + "/" + parts[2]
+		if c.repository != nil {
+			c.repository.CompareAndSwap(nil, &repo)
+		}
+	}
+	if repo == "" {
+		return c, nil
+	}
+	id, err := githubauth.Resolve(c.reqContext(), repo, c.token, c.baseURL)
+	if err != nil {
+		return nil, err
+	}
+	clone := *c
+	clone.token = id.Token
+	clone.login = id.Login
+	clone.identity = id.Name
+	clone.authorized = true
+	if id.Name != "personal" {
+		clone.state = accountState(id.Name, c.baseURL+"\x00"+c.cacheRoot)
+		if c.cacheRoot != "" {
+			clone.UseCacheDir(c.cacheRoot)
+		}
+	}
+	return &clone, nil
 }
 
 // doOnce sends a single HTTP request and returns the response body and status.
 func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
+	selected, authErr := c.authenticated(path)
+	if authErr != nil {
+		return nil, 0, authErr
+	}
+	c = selected
+	if err := c.deliveryLimit(); err != nil {
+		return nil, http.StatusTooManyRequests, err
+	}
+	stage, _ := c.reqContext().Value(stageKey{}).(string)
+	if method == http.MethodGet && (stage == "scan" || stage == "harvest" || stage == "automerge" || stage == "board" || stage == "snapshot") && !c.PollingAllowed() {
+		return nil, 0, vcs.ErrPollingDeferred
+	}
+
+	pass, _ := c.reqContext().Value(passKey{}).(*Pass)
+	key := fmt.Sprintf("%x:%s", sha256.Sum256([]byte(c.baseURL+"\x00"+c.accountIdentity())), path)
+	if pass != nil && method == "GET" && openList(path) {
+		pass.Lock()
+		defer pass.Unlock()
+		if v, ok := pass.responses[key]; ok {
+			return v.data, v.status, v.err
+		}
+	}
 	var bodyBytes []byte
 	if body != nil {
 		var err error
@@ -77,16 +158,66 @@ func (c *Client) doOnce(method, path string, body any) ([]byte, int, error) {
 	if bodyBytes != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	entry := cachedResponse{}
+	if method == "GET" {
+		entry = c.cached(path)
+		if entry.ETag != "" {
+			req.Header.Set("If-None-Match", entry.ETag)
+		} else if entry.Modified != "" {
+			req.Header.Set("If-Modified-Since", entry.Modified)
+		}
+	}
+	if pass != nil {
+		locked := method == "GET" && openList(path)
+		if !locked {
+			pass.Lock()
+		}
+		stage, _ := c.reqContext().Value(stageKey{}).(string)
+		if stage == "" {
+			stage = "other"
+		}
+		pass.Calls[stage]++
+		if !locked {
+			pass.Unlock()
+		}
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, c.rateLimitedTimeout(err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
+	status := resp.StatusCode
 	if err == nil {
-		err = retry.ResponseError(resp.StatusCode, resp.Header, data)
+		data, status, err = c.observe(path, method, resp, data)
+		if status == http.StatusNotModified && entry.Body != nil {
+			data, status = entry.Body, http.StatusOK
+		}
 	}
-	return data, resp.StatusCode, err
+	if pass != nil {
+		locked := method == "GET" && openList(path)
+		if !locked {
+			pass.Lock()
+		}
+		pass.Budgets[c.budgetKey()] = c.Budget()
+		if locked && err == nil && status == 200 {
+			pass.responses[key] = passResponse{data, status, err}
+		}
+		if !locked {
+			pass.Unlock()
+		}
+	}
+	return data, status, c.rateLimitedTimeout(err)
+}
+
+func (c *Client) rateLimitedTimeout(err error) error {
+	var timeout net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()) {
+		if limited := c.deliveryLimit(); limited != nil {
+			return errors.Join(err, limited)
+		}
+	}
+	return err
 }
 
 // isRetryableStatus reports whether an HTTP status code is worth retrying.
@@ -101,7 +232,12 @@ func isRetryableStatus(status int) bool {
 // are NOT retried here because they are not idempotent; callers that need
 // retry semantics on POST must handle idempotency themselves (see
 // PostIssueCommentIdempotent).
-func (c *Client) do(method, path string, body any) ([]byte, int, error) {
+func (c *Client) do(method, path string, body any) (data []byte, status int, err error) {
+	// The budget can become exhausted while a request is in flight, or the
+	// context can expire before retry.Do calls doOnce. Preserve both causes.
+	defer func() {
+		err = c.rateLimitedTimeout(err)
+	}()
 	// Retry idempotent methods and additive label POSTs automatically.
 	ctx, cancel := context.WithTimeout(c.reqContext(), 60*time.Second)
 	defer cancel()
@@ -112,14 +248,13 @@ func (c *Client) do(method, path string, body any) ([]byte, int, error) {
 		return c.doOnce(method, path, body)
 	}
 	cfg := retry.DefaultConfig
-	var (
-		data   []byte
-		status int
-	)
-	err := retry.Do(c.reqContext(), cfg, func() error {
+	err = retry.Do(c.reqContext(), cfg, func() error {
 		var e error
 		data, status, e = c.doOnce(method, path, body)
 		if e != nil {
+			if errors.Is(e, vcs.ErrPollingDeferred) {
+				return retry.Permanent(e)
+			}
 			return e // network error — retryable
 		}
 		if isRetryableStatus(status) {
@@ -921,6 +1056,11 @@ func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue
 	default:
 		return nil, fmt.Errorf("invalid state %q (want open|closed|all)", state)
 	}
+	selected, authErr := c.authenticated("/repos/" + repo + "/")
+	if authErr != nil {
+		return nil, authErr
+	}
+	c = selected
 	path := fmt.Sprintf("/search/issues?q=%s&per_page=%d", url.QueryEscape(q), limit)
 	data, status, err := c.do("GET", path, nil)
 	if err != nil {
@@ -1370,15 +1510,25 @@ func (c *Client) PublishAcceptanceComment(repo string, pr int, report vcs.Accept
 	if err != nil {
 		return err
 	}
-	data, _, err := c.do("GET", "/user", nil)
+	selected, err := c.authenticated("/repos/" + repo + "/")
 	if err != nil {
 		return err
 	}
-	var actor struct {
+	c = selected
+	actor := struct {
 		Login string `json:"login"`
+	}{Login: c.login}
+	if c.identity == "personal" || c.identity == "" {
+		data, _, err := c.do("GET", "/user", nil)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &actor); err != nil {
+			return err
+		}
 	}
-	if err := json.Unmarshal(data, &actor); err != nil {
-		return err
+	if actor.Login == "" || actor.Login == "[bot]" {
+		return fmt.Errorf("github: authenticated actor unavailable")
 	}
 	return vcs.UpsertAcceptanceComment(report, actor.Login,
 		func() ([]vcs.IssueComment, error) { return c.ListIssueCommentsDetail(repo, pr) },

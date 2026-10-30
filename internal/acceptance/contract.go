@@ -264,6 +264,8 @@ func (r Record) validateCorrection(c Contract) error {
 }
 
 type Record struct {
+	EnvironmentNotes []string `json:"environment_notes,omitempty"`
+
 	Unstructured    bool               `json:"unstructured,omitempty"`
 	ValidationError string             `json:"validation_error,omitempty"`
 	BinaryID        string             `json:"binary_id,omitempty"`

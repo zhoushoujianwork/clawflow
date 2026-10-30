@@ -322,7 +322,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 			}
 			defer os.Remove(spoolPath)
 			runCtx := workerEffectContext(ctx, spoolPath)
-			j.hooks = &jobHooks{SkipIndex: true, AfterRun: func(r *jobResult) { result = r }}
+			j.hooks = &jobHooks{SkipIndex: true, AfterRun: func(r *jobResult) { result = r }, AcquireLock: workerAcquireIssueLock, ReleaseLock: workerReleaseIssueLock}
 			_, _, failed := runOneOperatorFn(runCtx, j, timeout)
 			if j.result != nil {
 				result = j.result
@@ -421,6 +421,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	}
 	rc.LocalPath = local
 	rc.BaseBranch = p.RepoPolicy.BaseBranch
+	rc.AcceptanceSetupCommand = p.RepoPolicy.AcceptanceSetupCommand
 	rc.TestCommand = p.RepoPolicy.TestCommand
 	rc.CIRequired = p.RepoPolicy.CIRequired
 	rc.AutoMerge = false
@@ -498,4 +499,19 @@ func (a *workerAPI) post(ctx context.Context, path string, in, out any) error {
 		}
 		reconnect = true
 	}
+}
+
+// Worker runs hold the host issue lock so host maintenance, such as empty
+// worktree pruning, never removes a worktree an agent is still using.
+func workerAcquireIssueLock(_ context.Context, j *runJob) error {
+	err := snapshot.AcquireLock(j.repo, j.sub.Number, j.op.Name)
+	if err != nil && j.result != nil {
+		// Another run owns this issue on this host; retry under launch bounds.
+		j.result.Status, j.result.InfraKind = "failed", "launch"
+	}
+	return err
+}
+
+func workerReleaseIssueLock(j *runJob) {
+	snapshot.ReleaseLock(j.repo, j.sub.Number)
 }

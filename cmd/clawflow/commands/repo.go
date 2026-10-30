@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/githubauth"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -87,6 +88,17 @@ func newRepoShowCmd() *cobra.Command {
 			r, exists := cfg.Repos[ownerRepo]
 			if !exists {
 				return fmt.Errorf("repo %q not found", ownerRepo)
+			}
+			if r.Platform == "" || r.Platform == "github" {
+				creds, err := config.LoadCredentials()
+				if err != nil {
+					return err
+				}
+				identity, err := githubauth.Resolve(cmd.Context(), ownerRepo, creds.GHToken, r.BaseURL)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("github_identity: %s\npermissions: %v\nrepository_selection: %s\n", identity.Name, identity.Permissions, identity.Selection)
 			}
 			status := "disabled"
 			if r.Enabled {
@@ -338,7 +350,7 @@ func newRepoSetCmd() *cobra.Command {
 	var boundMachine string
 	var maxInFlight int
 	var acceptanceMaxParallel int
-	var testCommand string
+	var testCommand, acceptanceSetupCommand string
 
 	cmd := &cobra.Command{
 		Use:     "set <owner/repo>",
@@ -435,6 +447,9 @@ func newRepoSetCmd() *cobra.Command {
 				if cmd.Flags().Changed("acceptance-max-parallel") {
 					r.AcceptanceMaxParallel = acceptanceMaxParallel
 				}
+				if cmd.Flags().Changed("acceptance-setup-command") {
+					r.AcceptanceSetupCommand = acceptanceSetupCommand
+				}
 				if cmd.Flags().Changed("test-command") {
 					r.TestCommand = testCommand
 				}
@@ -471,6 +486,7 @@ func newRepoSetCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&acceptanceSetupCommand, "acceptance-setup-command", "", "checkout prerequisite command for implementation and acceptance (empty clears it)")
 	cmd.Flags().StringVar(&testCommand, "test-command", "", "repository test command (empty clears it)")
 	cmd.Flags().StringVar(&ciRequired, "ci-required", "", "require successful CI before auto-merge: on or off")
 	cmd.Flags().StringVar(&acceptanceOverlapCI, "acceptance-overlap-ci", "", "start acceptance during pending CI: on or off (default on when CI is required)")

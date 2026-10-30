@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -106,5 +107,40 @@ func TestBoardWaitingForCredentialWorker(t *testing.T) {
 	b = deriveBoard(now, workers, tokens, nil, []BoardTask{task})
 	if b.Tasks[0].WaitingReason != "" {
 		t.Fatalf("eligible live worker ignored: %+v", b)
+	}
+}
+
+func TestBoardWaitingForIndependentReviewer(t *testing.T) {
+	now := time.Now().UTC()
+	recent, stale := now.Add(-time.Second), now.Add(-LeaseTTL)
+	for _, tags := range [][]string{nil, {"review"}} {
+		for _, tc := range []struct {
+			name        string
+			reviewer    Worker
+			token       Token
+			wantWaiting bool
+		}{
+			{"developer only", Worker{}, Token{}, true},
+			{"wrong role", Worker{ID: "reviewer", Roles: []string{"operator"}, Tags: tags, RunUntagged: true}, Token{Name: "reviewer", LastSeen: &recent}, true},
+			{"stale", Worker{ID: "reviewer", Roles: []string{"acceptance"}, Tags: tags, RunUntagged: true}, Token{Name: "reviewer", LastSeen: &stale}, true},
+			{"revoked", Worker{ID: "reviewer", Roles: []string{"acceptance"}, Tags: tags, RunUntagged: true}, Token{Name: "reviewer", LastSeen: &recent, Revoked: true}, true},
+			{"missing tags or untagged opt out", Worker{ID: "reviewer", Roles: []string{"acceptance"}}, Token{Name: "reviewer", LastSeen: &recent}, true},
+			{"eligible", Worker{ID: "reviewer", Roles: []string{"acceptance"}, Tags: tags, RunUntagged: true}, Token{Name: "reviewer", LastSeen: &recent}, false},
+		} {
+			t.Run(fmt.Sprintf("%s/tags=%v", tc.name, tags), func(t *testing.T) {
+				task := BoardTask{Kind: "acceptance", State: "pending", Tags: tags, Routing: json.RawMessage(`{"development_worker":"dev"}`)}
+				workers := []Worker{{ID: "dev", Roles: []string{"acceptance"}, Tags: tags, RunUntagged: true}}
+				tokens := []Token{{Name: "dev", LastSeen: &recent}}
+				if tc.reviewer.ID != "" {
+					workers = append(workers, tc.reviewer)
+					tokens = append(tokens, tc.token)
+				}
+				b := deriveBoard(now, workers, tokens, nil, []BoardTask{task})
+				got := b.Tasks[0]
+				if (got.WaitingReason != "") != tc.wantWaiting || got.State != "pending" || got.Attempt != 0 {
+					t.Fatalf("board task: %+v", got)
+				}
+			})
+		}
 	}
 }

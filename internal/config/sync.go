@@ -29,6 +29,8 @@ type syncableRepo struct {
 	WorkerTagsByKind      map[string][]string `yaml:"worker_tags_by_kind,omitempty"`
 	Priority              int                 `yaml:"priority,omitempty"`
 
+	AcceptanceSetupCommand string `yaml:"acceptance_setup_command,omitempty"`
+
 	Enabled            bool              `yaml:"enabled"`
 	Platform           string            `yaml:"platform,omitempty"`
 	BaseURL            string            `yaml:"base_url,omitempty"`
@@ -55,7 +57,8 @@ type syncableRepo struct {
 // toSyncable converts a Repo to its syncable representation (strips local_path).
 func toSyncable(r Repo) syncableRepo {
 	return syncableRepo{
-		AcceptanceMaxParallel: r.AcceptanceMaxParallel, AcceptanceWorker: r.AcceptanceWorker, WorkerTags: r.WorkerTags, WorkerTagsByKind: r.WorkerTagsByKind, Priority: r.Priority,
+		AcceptanceSetupCommand: r.AcceptanceSetupCommand,
+		AcceptanceMaxParallel:  r.AcceptanceMaxParallel, AcceptanceWorker: r.AcceptanceWorker, WorkerTags: r.WorkerTags, WorkerTagsByKind: r.WorkerTagsByKind, Priority: r.Priority,
 		Enabled:            r.Enabled,
 		Platform:           r.Platform,
 		BaseURL:            r.BaseURL,
@@ -82,7 +85,8 @@ func toSyncable(r Repo) syncableRepo {
 // local_path (the only genuinely machine-local field).
 func fromSyncable(s syncableRepo, localPath string) Repo {
 	return Repo{
-		AcceptanceMaxParallel: s.AcceptanceMaxParallel, AcceptanceWorker: s.AcceptanceWorker, WorkerTags: s.WorkerTags, WorkerTagsByKind: s.WorkerTagsByKind, Priority: s.Priority,
+		AcceptanceSetupCommand: s.AcceptanceSetupCommand,
+		AcceptanceMaxParallel:  s.AcceptanceMaxParallel, AcceptanceWorker: s.AcceptanceWorker, WorkerTags: s.WorkerTags, WorkerTagsByKind: s.WorkerTagsByKind, Priority: s.Priority,
 		Enabled:            s.Enabled,
 		Platform:           s.Platform,
 		BaseURL:            s.BaseURL,
@@ -125,6 +129,7 @@ func MarshalForGist(cfg *Config) ([]byte, error) {
 		Repos:    make(map[string]syncableRepo, len(cfg.Repos)),
 		Settings: cfg.Settings,
 	}
+	payload.Settings.GitHubApp = GitHubAppSettings{}
 	payload.Settings.Platform = PlatformSettings{}   // platform credentials and trust are machine-local
 	payload.Settings.Execution = ExecutionSettings{} // execution runtime paths are machine-local
 	payload.Settings.Database = DatabaseSettings{}   // the DSN is a secret and never synced
@@ -178,6 +183,7 @@ func mergeConfigsInternal(local *Config, remoteYAML []byte, conflictFatal bool) 
 		Repos:    make(map[string]Repo, len(local.Repos)),
 	}
 
+	merged.Settings.GitHubApp = local.Settings.GitHubApp
 	merged.Settings.Platform = local.Settings.Platform
 	merged.Settings.Execution = local.Settings.Execution // never import remote execution paths
 	merged.Settings.Database = local.Settings.Database   // never import a remote DSN

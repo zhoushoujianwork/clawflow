@@ -121,6 +121,7 @@ type CIEvidence struct {
 
 // CICheck carries suite provenance from the same exact-head aggregation.
 type CICheck struct {
+	Name       string  `json:"name"`
 	ID         int64   `json:"id"`
 	HeadSHA    string  `json:"head_sha"`
 	Status     string  `json:"status"`
@@ -276,4 +277,10 @@ var ClawFlowLabels = []Label{
 	{"agent-implemented", "6E7681", "implement operator finished — PR opened"},
 	{"agent-failed", "FF0000", "An operator failed; see run history"},
 	{"agent-replied", "E99695", "reply-comment operator has responded to a mention"},
+}
+
+// PRFileProvider optionally exposes all changed paths, including rename sources.
+// An incomplete provider response must return an error rather than partial data.
+type PRFileProvider interface {
+	ListPRFiles(repo string, prNumber int) ([]string, error)
 }

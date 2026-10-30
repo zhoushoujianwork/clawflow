@@ -112,7 +112,7 @@ func resultFixture(t *testing.T) (*resultStoreFake, *runJob, *resultClientFake, 
 
 func TestCoordinatorPayloadAndDispatch(t *testing.T) {
 	withRunLog(t)
-	j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement", Prompt: "instructions", Source: "/private/path"}, sub: &operator.Subject{Number: 7, Labels: []string{"clawflow", "worker:heavy", "priority:high"}}, language: "zh", repoCfg: config.Repo{BaseBranch: "main", TestCommand: "go test ./...", CIRequired: true, WorkerTags: []string{"codex"}, Priority: 2}}
+	j := &runJob{repo: "o/r", op: &operator.Operator{Name: "implement", Prompt: "instructions", Source: "/private/path"}, sub: &operator.Subject{Number: 7, Labels: []string{"clawflow", "worker:heavy", "priority:high"}}, language: "zh", repoCfg: config.Repo{BaseBranch: "main", TestCommand: "go test ./...", AcceptanceSetupCommand: "make assets", CIRequired: true, WorkerTags: []string{"codex"}, Priority: 2}}
 	s := &resultStoreFake{}
 	old := runOneOperatorFn
 	runOneOperatorFn = func(context.Context, *runJob, time.Duration) (bool, bool, bool) {
@@ -135,7 +135,7 @@ func TestCoordinatorPayloadAndDispatch(t *testing.T) {
 	if err := json.Unmarshal(s.task.Payload, &p); err != nil {
 		t.Fatal(err)
 	}
-	if p.TaskID != "task" || p.Repo != "o/r" || p.Issue != 7 || p.Role != "operator" || p.Language != "zh" || p.TimeoutSec != 60 || p.Platform != "github" || p.RepoPolicy.BaseBranch != "main" || !p.RepoPolicy.CIRequired || p.RepoPolicy.TestCommand != "go test ./..." || p.Scan.ObservedAt.IsZero() {
+	if p.TaskID != "task" || p.Repo != "o/r" || p.Issue != 7 || p.Role != "operator" || p.Language != "zh" || p.TimeoutSec != 60 || p.Platform != "github" || p.RepoPolicy.BaseBranch != "main" || !p.RepoPolicy.CIRequired || p.RepoPolicy.TestCommand != "go test ./..." || p.RepoPolicy.AcceptanceSetupCommand != "make assets" || p.Scan.ObservedAt.IsZero() {
 		t.Fatalf("payload: %+v", p)
 	}
 	if !reflect.DeepEqual(p.Tags, []string{"codex", "heavy"}) || len(p.SkillDigest) != 64 {
@@ -354,7 +354,7 @@ func TestCoordinatorSchedulingIgnoresLocalExecutionRequirements(t *testing.T) {
 		t.Fatal("repair requires coordinator clone or worker hostname")
 	}
 	cfg.CoordinatorActive = map[int]bool{7: true}
-	plan := planRepoQueue(repoQueueInput{Repo: "o/r", Issues: []vcs.Issue{{Number: 7, State: "open", Labels: []string{"clawflow"}}, {Number: 8, State: "open", Labels: []string{"clawflow"}}}, ImplementState: map[int]string{7: "", 8: ""}, ImplementJobs: map[int]bool{8: true}, Locked: func(n int) bool { return cfg.CoordinatorActive[n] }, MaxInFlight: 1, Now: time.Now()})
+	plan := planRepoQueue(repoQueueInput{Repo: "o/r", Issues: []vcs.Issue{{Number: 7, State: "open", Labels: []string{"clawflow"}}, {Number: 8, State: "open", Labels: []string{"clawflow"}}}, ImplementState: map[int]string{7: "", 8: ""}, ImplementJobs: map[int]bool{8: true}, OpenPRs: func() ([]vcs.PR, error) { return nil, nil }, Locked: func(n int) bool { return cfg.CoordinatorActive[n] }, MaxInFlight: 1, Now: time.Now()})
 	if len(plan.Picks) != 0 {
 		t.Fatal("active coordinator task did not occupy queue slot")
 	}

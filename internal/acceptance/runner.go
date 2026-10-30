@@ -30,8 +30,9 @@ type Runner struct {
 	Prepare func(context.Context) (string, error)
 	// TestCommand is the repository's configured test command; the reviewer is
 	// told to run it. Empty means the reviewer discovers the standard command.
-	TestCommand string
-	CIRequired  bool
+	TestCommand  string
+	SetupCommand string
+	CIRequired   bool
 	// CI is queried immediately before review, after independent planning.
 	CI func() (vcs.CIEvidence, error)
 }
@@ -168,6 +169,10 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 			}
 		}
 	}
+	setupStatus := execution.PrepareCheckout(ctx, runner.SetupCommand, execution.Options{Workspace: workspace, Role: "acceptance"}, execution.SetupExecutor(runner.Execute))
+	if setupStatus != "" {
+		record.EnvironmentNotes = append(record.EnvironmentNotes, "checkout_setup: "+setupStatus)
+	}
 	record.Before, err = runner.Inspect(ctx, workspace)
 	if err != nil {
 		return record, err
@@ -178,9 +183,13 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if err = ctx.Err(); err != nil {
 		return record, err
 	}
-	if runner.CIRequired && runner.CI != nil {
+	var renderCI vcs.CIEvidence
+	if runner.CI != nil {
 		ci, ciErr := runner.CI()
-		if ciErr == nil && ci.SuccessfulFor(c.HeadSHA) {
+		if ciErr == nil {
+			renderCI = ci
+		}
+		if runner.CIRequired && ciErr == nil && ci.SuccessfulFor(c.HeadSHA) {
 			record.ReviewMode = CIVerified
 			record.CI = &ci
 		}
@@ -219,9 +228,13 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	}
 	// Add environment procedures after selecting the report mode, never to planning.
 	prompt += project.TestingHeaderForRepo(c.Repository)
+	prompt += renderReviewInstruction(c.HeadSHA, renderCI)
 	execute := runner.Execute
 	if execute == nil {
 		execute = execution.Execute
+	}
+	if setupStatus != "" {
+		prompt += " Checkout prerequisite setup status: " + setupStatus + ". Setup output is private; do not publish it. A fallback placeholder is compilation support only, never proof of frontend behavior. If setup did not succeed and local execution is unavailable, reuse trustworthy successful exact-head CI covering the criterion instead of returning infrastructure_error. "
 	}
 	prompt += "The contract base_sha and its merge base with HEAD are available locally. Use git diff <base_sha>...HEAD and git log <base_sha>..HEAD for offline comparisons; no remote or credentials are available. "
 	reviewed, reviewErr := runner.executeRecorded(ctx, c, "acceptance-review", execute, prompt+string(input),
@@ -325,6 +338,27 @@ func applyReviewReport(c Contract, record *Record, text string) error {
 	for _, f := range output.Findings {
 		if f.Kind == "unstructured" {
 			return errors.New("unstructured findings are runner-owned")
+		}
+	}
+	normalized := normalizeProcessFindings(output.Findings)
+	if normalized {
+		output.Summary += " Historical/process-only findings are informational; the verdict follows the remaining criteria."
+	}
+	if normalized && output.Status == Failed {
+		// Only the remaining checks and concrete findings may determine failure.
+		output.Status = Passed
+		output.NextOwner, output.NextAction = "runner", "Apply CI and merge gates"
+		for _, check := range output.Checks {
+			if check.Status == Blocked {
+				output.Status = Blocked
+				output.NextOwner, output.NextAction = "owner", string(check.Missing)
+			}
+		}
+		for _, f := range output.Findings {
+			if f.Failing() {
+				output.Status = Failed
+				output.NextOwner, output.NextAction = "implementation", "Repair the demonstrated defects, then run fresh acceptance"
+			}
 		}
 	}
 	failing, findingErr := validateFindings(output.Findings)

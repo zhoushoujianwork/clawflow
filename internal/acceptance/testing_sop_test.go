@@ -105,6 +105,9 @@ func TestDevelopmentAndReviewSharePrimaryTestingSOP(t *testing.T) {
 					} else {
 						reviews++
 						assertSOP(prompt)
+						if !strings.Contains(prompt, "Authoritative exact-head Web render status: blocked") || !strings.Contains(prompt, "Do not launch Chromium") {
+							t.Fatal("shared SOP displaced exact-head render policy")
+						}
 						if strings.Contains(prompt, "developer-answer") || strings.Contains(prompt, "deployment-do-not-share") {
 							t.Fatal("review received development context")
 						}

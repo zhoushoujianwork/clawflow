@@ -170,7 +170,8 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 		f.From = &start
 		f.Until = &end
 	}
-	sum, err := s.Usage(r.Context(), f, day)
+	f.Role, f.Profile = r.URL.Query().Get("role"), r.URL.Query().Get("profile")
+	sum, err := s.Usage(r.Context(), f, day, store.UsageSelection{Machine: r.URL.Query().Get("machine"), Model: r.URL.Query().Get("model")})
 	if err != nil {
 		http.Error(w, "read usage failed", 500)
 		return

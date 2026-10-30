@@ -18,6 +18,18 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err := node.Decode((*current)(c)); err != nil {
 		return err
 	}
+	for name, repo := range c.Repos {
+		switch repo.AcceptanceWorker {
+		case "":
+			if c.Settings.Coordinator.Enabled {
+				repo.AcceptanceWorker = "different"
+				c.Repos[name] = repo
+			}
+		case "any", "different":
+		default:
+			return fmt.Errorf("invalid acceptance_worker: expected any or different")
+		}
+	}
 	warnRetiredWorkflow(node)
 	warnRetiredQueue(node)
 	warnRetiredBinding(node)

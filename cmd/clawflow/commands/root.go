@@ -24,6 +24,7 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	// runs stay quiet enough to schedule via cron.
 	root.PersistentFlags().BoolVar(&Debug, "debug", false, "Print debug trace to stderr (matcher decisions, scan counts)")
 
+	root.AddCommand(newGitCredentialCmd())
 	root.AddCommand(NewLoginCmd())
 	root.AddCommand(NewSyncCmd())
 	root.AddCommand(NewResetCmd())
