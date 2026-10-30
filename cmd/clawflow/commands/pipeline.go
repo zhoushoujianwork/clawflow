@@ -484,7 +484,9 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 				if !rc.AutoMerge {
 					item.Attention = append(item.Attention, "waiting for review (manual merge)")
 				}
-				if err := checkRepairBudget(snapshot.DataDir(), repo, item.PR.Number, now); errors.Is(err, errRepairExhausted) || errors.Is(err, errRepairBlocked) {
+				// A spent ledger alone is historical once the failure has recovered.
+				repairRelevant := item.PR.CI == "failure" || item.PR.CI == "unknown" || item.Stage == pipeline.StageRejected || item.Stage == pipeline.StageInfraRetry
+				if err := checkRepairBudget(snapshot.DataDir(), repo, item.PR.Number, now); repairRelevant && (errors.Is(err, errRepairExhausted) || errors.Is(err, errRepairBlocked)) {
 					item.Attention = append(item.Attention, err.Error())
 				}
 			}
