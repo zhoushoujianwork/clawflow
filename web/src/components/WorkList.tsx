@@ -77,11 +77,12 @@ function timestamp(value?: string | null) {
   return value && Number.isFinite(Date.parse(value)) ? value : 'unknown'
 }
 
-export function WorkList<T extends ListItem>({ repos, queue, filter = 'active', repoInfo, renderDetails }: {
+export function WorkList<T extends ListItem>({ repos, queue, filter = 'active', repoInfo, renderDetails, onOpen }: {
   repos: ListRepo<T>[]
   queue: QueueEntry[]
   filter?: ListFilter
   repoInfo: RepoInfoMap
+  onOpen?: (item: T, repo: string) => void
   renderDetails?: (item: T, repo: string) => ReactNode
 }) {
   const [grouped, setGrouped] = useState(false)
@@ -121,7 +122,7 @@ export function WorkList<T extends ListItem>({ repos, queue, filter = 'active', 
               <span>Last progress: {timestamp(latest?.last_progress_at)}</span>
               <span>Updated: {timestamp(item.updated_at)}</span>
             </div>
-            <details className="mt-3 text-xs">
+            {onOpen ? <button className="mt-3 text-xs border rounded px-3 py-2" onClick={() => onOpen(item, row.repo)}>Details · {attempts.length} execution attempts</button> : <details className="mt-3 text-xs">
               <summary className="cursor-pointer">Details · {attempts.length} execution attempts</summary>
               <ul className="space-y-2 my-3" aria-label="Execution attempts">
                 {attempts.map((attempt, i) => <li key={attempt.attempt_id || i} className="break-words">
@@ -130,7 +131,7 @@ export function WorkList<T extends ListItem>({ repos, queue, filter = 'active', 
                 </li>)}
               </ul>
               {renderDetails?.(item, row.repo)}
-            </details>
+            </details>}
           </li>
         })}
       </ul>
