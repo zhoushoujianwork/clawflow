@@ -4,7 +4,7 @@ import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { Check, Loader2, AlertCircle, X, Eye, EyeOff, Folder, ChevronRight, Home, Copy, ExternalLink, RefreshCw, Upload, Download, LogOut } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { emitConfigChanged, useConfigChanged } from '../lib/configEvents'
-import { ProvidersSection } from '../components/ProvidersSection'
+import { ExecutionSection } from '../components/ProvidersSection'
 
 interface SettingsView {
   tokens: { gh_set: boolean; gh_hint?: string; gitlab_set: boolean; gitlab_hint?: string }
@@ -85,7 +85,7 @@ function SettingsPage() {
 
       {data && (
         <>
-          <ProvidersSection />
+          <ExecutionSection />
           <TokensSection view={data.tokens} onSaved={refresh} />
           <GlobalSection view={data.global} onSaved={refresh} />
           <SyncSection />
@@ -866,24 +866,6 @@ function PasswordInput({
     </div>
   )
 }
-
-// MODEL_PRESETS are the combobox suggestion entries (rendered into a
-// <datalist> by ModelSelect). We keep only the family aliases here:
-// they are the most portable (work on Anthropic direct, Kiro, cc-proxy)
-// and always resolve to the tier's latest model, so users default to the
-// newest version instead of pinning themselves to a stale dashed/dot ID.
-//
-// These are suggestions only — the combobox still accepts free input, so
-// users who need to pin a specific version (e.g. claude-opus-4-7) or
-// target a custom / non-Anthropic gateway can type any model ID. An empty
-// value keeps the "inherit default" semantics the backend expects.
-// Exported so ProvidersSection can reuse the same list.
-export const MODEL_PRESETS = [
-  'haiku',
-  'sonnet',
-  'opus',
-] as const
-
 
 function Status({ ok, text }: { ok: boolean; text: string }) {
   return (
