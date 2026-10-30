@@ -85,3 +85,36 @@ Test 检查 `124234340438` 也失败，Web render 通过。ClawFlow 的有界日
 17b92f5 的真实 CI run `41115045367` 中 Native macOS job `124266946772` 仍被取消。仓库 `skills/repair-ci/SKILL.md` 明确禁止修改 CI configuration，故不能继续让受限修复器承担镜像迁移。未修改这项权限边界。
 
 创建独立需求 [#620](https://github.com/zhoushoujianwork/clawflow/issues/620)“恢复 PR 必需 CI：更新停用的 macOS 镜像，修复 worker 退出误报”，由现有平台走正常实现、CI、独立验收。范围是 macos-15 和仅复用 17b92f5 的两个 Go 文件，保留作者来源；不携带 #611 菜单栏或 #612 存储功能。#610 临时设置 clawflow-skip，避免重复受限修复；原预算账本保留。公共维护合入 main 后，正常同步 main 回 #611、解除临时 hold，再做准确新提交的原生及独立验收。没有将额外需求伪装成 #611 已合并。
+
+## 独立验收计划修正与公共维护合并
+
+旧 #621 验收计划把 CI/API 观察标成需要完整运行时身份的 live 证明，还把未来合并／关闭流程列为合并前的行为前提，导致报告无法满足原有严格校验。保留旧 blocked 记录，修正计划生成说明：CI/API 使用 execution；只有明确运行目标才要求 live 的五层身份；交付动作不替代产品行为验收；passed 的 missing 必须为空。PlanningPolicyVersion 正常升为 3，旧缓存留存，已固定的运行计划不改写。提交 be88412b；报告校验器、CI 和合并门禁未放宽。
+
+同时修正并发计划写入测试夹具：不同内容冲突与相同内容幂等重放分开验证，生产 Store.write 未改动。冻结旧测试时钟可确定复现原夹具错误；修正后两种场景 race 各运行 100 次通过，完整 acceptance 包和相邻规划检查通过。首次新全量回归为 3233 通过、1 失败、0 跳过，失败即该夹具，不能描述为全量通过；修正后重新进行集成回归。
+
+be88412b 已滚动部署为 dev-acceptance-plan-be88412b，CLI SHA-256 为 f133ee138b42a54da848048b8e7b2c6c9a3240c1cb8ba2f0b17d581658104979；两个 generation 相符，部署时 #612 executor PID 77416、原生 CC 会话 eec02683-c7c0-4ec8-81ec-d5e0040c9d98、固定执行器和计划摘要均保留，正式 PostgreSQL PID 61176 未重启。
+
+#621 在新计划下由独立 CC 会话 ea5a5b46-4bbb-405e-8157-90a6b46a284c 完成 14 项验收，attempt dc0f13a9-69f9-4f0b-917e-d8bde16b3843；开发会话为不同的 7c8b7404-74f7-4921-b9b3-e4c8d78862a7。准确 head bb76d071442140bc8aa4ccd37ec505f8c7fa4bcb 的三个必需 CI 全部成功（run 41116955757）。现有 controller 于 20:08:13 UTC 自动合并，main 合并提交为 951508b01cb911b64b664fe70e93aee838aeb20a。已正常合并回恢复分支，提交 405a90a2，保留本地恢复修复；不代表恢复分支的其他改动已进入远端 main。
+
+## #611 当前提交与实际阻塞
+
+普通 merge main 产生 e1837c8a5016437654d88279bddd14b4e2b2a5e8，已普通推送原 fix/issue-610 分支，无强制推送。该提交 Swift 严格并发 39 项通过；独立 PostgreSQL NativeBridge race 契约 1 项通过、0 跳过，产物 /var/folders/64/xyvthqtj4xqb6xp70kw9hgf80000gq/T/clawflow-pr611-contract-oxdcpd9a，临时数据库已停止。
+
+当前提交的隔离预览已构建并签名，但 CUA 返回 cgWindowNotFound；只读系统会话确认 IOConsoleLocked=Yes、CGSSessionScreenIsLocked=Yes。另构建明确标注 regular/foreground activation 的预览入口仍无法取窗；未更改产品 Swift 源码。尚无 e1837c8a 新截图，旧 4666c027 资料保留原来源，不冒充新提交实测。#610 临时 hold 保留，等待真实视觉和独立验收。PR 正文已纠正为当前源码和检查状态，不再声称没有 Go/CI 变更或失败日志不可得。
+
+20:16 UTC 快照中两个 worker 均在线、未暂停、无运行任务。#612 的 d022... 会话达到原一小时执行期限后结束，后续 epoch 因协调上下文变化在启动前阻塞；没有重置重试账本、改写固定计划或终止原生会话。#609 仍缺可信开发来源；#617 的当前 head 也仍需满足来源门禁，未伪造开发记录。
+
+准确 head e1837c8a 的 acceptance status 已返回 `no current completed acceptance evidence`，没有开发来源错误；正常 merge 的可信来源继承路径有效。三项新 CI 已创建，检查 ID 为 124290165305、124290165242、124290164827，观察时均排队中，未重跑或绕过。#617 的实际返回为 `latest development run is absent, incomplete or unsuccessful`，#609 为 `trusted development provenance unavailable`。
+
+
+## 集成回归与本地服务交付
+
+提交 405a90a2 的完整独立 PostgreSQL race 回归退出 0：3236 通过、0 失败、0 跳过；产物 `/tmp/clawflow-runtime-recovery-suite-r08c4s8w/summary.json`，临时数据库已停止。它包括并发计划夹具修正后的最终全量结果，替代此前存在 1 个夹具失败的回归结论。
+
+第一次部署预检发现 #612 已自动启动新任务 40587e540602d93e7bb37c96ddc7a6e34be38b07be028e0e9cb18a6df6811355，故预检在替换 CLI 前退出并恢复原来的 admission 状态；只新增备份 4iwy7mf2，未停止该任务。随后核对其 durable 协议与完整执行身份，再使用受支持的滚动流程部署，未靠忽略活动任务继续。
+
+最终服务为 `dev-merge-assist-405a90a2`，源提交 `405a90a2b28567992fb5e9a9649153bee795ab36`，CLI SHA-256 `b1e030b2d91b3121b6529c92c14a32027d221d212ffae0caf8a4d82a9a2971df`，两个 generation 均匹配。备份和前后证据位于 `~/Library/Application Support/ClawFlow/backups/coordination-primary-20261031-rrojm7y3/`。先 drain 新 admission，正常 SIGTERM controller 和服务 admission manager，核对后恢复原未暂停状态；未发送 SIGKILL，未重启正式 PostgreSQL，未执行 SQLite 迁移。
+
+活动 #612 的 executor PID 62130、Offload PID 62369、native CC PID 62371、会话 750996d5-cbce-49d6-a05a-a4e84f6617a2、工作树、原 f133ee... 固定执行器、fencing_token=1、lease_owner=local-cli-worker 及固定计划 bfc25647... 在滚动前后逐项相同。两个 worker 在线、未暂停，容量仍为 1/4，PostgreSQL PID 61176 保持。App 仍为原安装版本；#611 界面未宣称已部署。桌面最后检查仍锁定。
+
+交付记录时，#611 的新 Native macOS 和 Web render 均已成功，Test 仍在运行；没有把 pending 当成通过。当前提交的界面实测及之后的独立验收仍待完成，#610 hold 未解除。
