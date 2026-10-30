@@ -235,6 +235,10 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 					// Keep the worker visible while it waits; nothing is claimed,
 					// so no attempt, reservation or label is touched.
 					if err := api.post(ctx, "register", registration, nil); err != nil {
+						// Shutdown during the keep-visible re-registration is not a worker failure.
+						if ctx.Err() != nil && !workerFatal(err) {
+							return
+						}
 						errors <- err
 						cancel()
 						return
