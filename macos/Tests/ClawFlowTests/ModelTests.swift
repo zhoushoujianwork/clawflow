@@ -2,12 +2,24 @@ import XCTest
 @testable import ClawFlow
 
 final class ModelTests: XCTestCase {
-    private func snapshot(stage: String = "running", state: String = "leased", at: Date = Date()) throws -> DashboardSnapshot {
+    func testActivityLabelsDistinguishExecutionPurpose() {
+        XCTAssertEqual(TaskActivity(kind: "implement").title, "Development")
+        XCTAssertEqual(TaskActivity(kind: "acceptance").title, "PR Review")
+        XCTAssertEqual(TaskActivity(kind: "repair").title, "PR Repair")
+        XCTAssertEqual(TaskActivity(kind: "reply").title, "Issue Reply")
+        XCTAssertEqual(TaskActivity(kind: "new_kind").title, "Unknown activity")
+    }
+    private func snapshot(stage: String = "running", state: String = "leased", at: Date = Date(), pr: Int = 0) throws -> DashboardSnapshot {
         let time = ISO8601DateFormatter().string(from: at)
         let json = """
-        {"schema_version":1,"version":"test","controller":"mini","board":{"generated_at":"\(time)","workers":[],"tasks":[{"id":"t1","repo":"o/r","issue":42,"pr":0,"kind":"implement","state":"\(state)","stage":"\(stage)","worker":"linux","attempt":0,"updated_at":"\(time)","tags":[]}]},"projects":[{"name":"App","repos":[{"name":"o/r","url":"https://github.com/o/r","platform":"github","enabled":true,"ci_required":true,"acceptance_required":true,"auto_merge":false,"worker_tags":[]}]}]}
+        {"schema_version":1,"version":"test","controller":"mini","board":{"generated_at":"\(time)","workers":[],"tasks":[{"id":"t1","repo":"o/r","issue":42,"pr":\(pr),"kind":"implement","state":"\(state)","stage":"\(stage)","worker":"linux","attempt":0,"updated_at":"\(time)","tags":[]}]},"projects":[{"name":"App","repos":[{"name":"o/r","url":"https://github.com/o/r","platform":"github","enabled":true,"ci_required":true,"acceptance_required":true,"auto_merge":false,"worker_tags":[]}]}]}
         """
         return try DashboardSnapshot.decode(Data(json.utf8))
+    }
+    func testIssueAndPRLinksRemainDistinct() throws {
+        let value = try snapshot(pr: 611)
+        XCTAssertEqual(value.board.tasks[0].link(in: value)?.absoluteString, "https://github.com/o/r/issues/42")
+        XCTAssertEqual(value.board.tasks[0].prLink(in: value)?.absoluteString, "https://github.com/o/r/pull/611")
     }
     func testUnknownNeverLooksIdle() {
         let state = StatusSummary.reduce(snapshot: nil, received: nil, error: nil)

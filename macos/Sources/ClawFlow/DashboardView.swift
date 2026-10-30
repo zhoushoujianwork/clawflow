@@ -28,6 +28,9 @@ struct DashboardView: View {
             VStack(spacing: 0) {
                 HStack {
                     Label(model.summary.title, systemImage: model.summary.symbol)
+                    if let snapshot = model.snapshot, model.summary.connected {
+                        Text("\(snapshot.board.tasks.filter { $0.group == .running }.count) running · \(snapshot.board.tasks.filter { $0.group == .waiting }.count) waiting").foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Text(model.snapshot?.controller ?? "Connect in Settings").foregroundStyle(.secondary)
                 }.font(.callout).padding(.horizontal, 18).padding(.vertical, 12).fixedSize(horizontal: false, vertical: true)
@@ -92,6 +95,7 @@ struct TasksView: View {
         VStack(spacing: 0) {
             HStack {
                 Picker("Tasks", selection: $history) { Text("Active").tag(false); Text("History").tag(true) }.pickerStyle(.segmented).frame(width: 180)
+                Text("\(rows.count) shown").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Picker("Project", selection: $projectFilter) {
                     Text("All projects").tag("")
@@ -104,8 +108,14 @@ struct TasksView: View {
                     HStack(alignment: .top) {
                         Image(systemName: row.symbol).frame(width: 20).foregroundStyle(row.group == .attention ? .orange : .secondary)
                         VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                ActivityBadge(activity: row.activity)
+                                Spacer(minLength: 4)
+                                if row.issue > 0 { Text("#\(row.issue)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                            }
                             Text(row.title).lineLimit(2)
                             Text("\(row.status) · \(row.worker.isEmpty ? "Unassigned" : row.worker)").font(.caption).foregroundStyle(.secondary)
+                            if row.pr > 0 { Text("PR #\(row.pr)").font(.caption).foregroundStyle(.secondary) }
                         }
                     }.padding(.vertical, 5).tag(row.id)
                 }.frame(width: 280).frame(maxHeight: .infinity)
@@ -132,6 +142,7 @@ struct TaskDetail: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                ActivityBadge(activity: row.activity)
                 Label(row.status, systemImage: row.symbol).font(.headline)
                 Text(row.title).font(.title3).textSelection(.enabled)
                 Text(row.reason).textSelection(.enabled)
@@ -140,6 +151,7 @@ struct TaskDetail: View {
                 LabeledContent("Last update") { Text(row.updatedAt, style: .relative) }
                 if !row.tags.isEmpty { LabeledContent("Required tags", value: row.tags.joined(separator: ", ")) }
                 if let link = row.link(in: snapshot) { Link(row.issue > 0 ? "Open issue" : "Open pull request", destination: link).buttonStyle(.bordered) }
+                if row.issue > 0, let pr = row.prLink(in: snapshot) { Link("Open PR #\(row.pr)", destination: pr).buttonStyle(.bordered) }
                 Divider()
                 DisclosureGroup("Activity log", isExpanded: $showEvents) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -161,6 +173,16 @@ struct TaskDetail: View {
         loading = true; eventError = nil; defer { loading = false }
         do { events = try decoder().decode([TaskEvent].self, from: await model.request(["events", row.id])) }
         catch { eventError = error.localizedDescription }
+    }
+}
+
+struct ActivityBadge: View {
+    let activity: TaskActivity
+    var body: some View {
+        Label(activity.title, systemImage: activity.symbol)
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(.quaternary, in: Capsule())
     }
 }
 

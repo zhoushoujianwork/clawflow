@@ -48,6 +48,18 @@ struct WorkerRow: Decodable, Identifiable {
     var state: String { revoked ? "Removed" : !live ? "Offline" : paused ? "Assignments paused" : "Ready" }
 }
 enum TaskGroup: Int { case attention, running, waiting, history }
+enum TaskActivity {
+    case development, review, repair, reply, unknown
+    init(kind: String) {
+        switch kind { case "implement": self = .development; case "acceptance": self = .review; case "repair": self = .repair; case "reply": self = .reply; default: self = .unknown }
+    }
+    var title: String {
+        switch self { case .development: return "Development"; case .review: return "PR Review"; case .repair: return "PR Repair"; case .reply: return "Issue Reply"; case .unknown: return "Unknown activity" }
+    }
+    var symbol: String {
+        switch self { case .development: return "hammer"; case .review: return "checkmark.shield"; case .repair: return "wrench.and.screwdriver"; case .reply: return "text.bubble"; case .unknown: return "questionmark.circle" }
+    }
+}
 struct TaskRow: Decodable, Identifiable {
 	let subject: String?
     let id: String
@@ -63,6 +75,7 @@ struct TaskRow: Decodable, Identifiable {
     let waitingReason: String?
     let applicationError: String?
     let tags: [String]
+    var activity: TaskActivity { TaskActivity(kind: kind) }
     var group: TaskGroup {
         if ["done", "failed", "cancelled"].contains(state) { return .history }
         if stage == "lease_expired" || !(applicationError ?? "").isEmpty { return .attention }
@@ -98,6 +111,10 @@ struct TaskRow: Decodable, Identifiable {
         guard let repo = snapshot.repository(repo), let base = safeWebURL(repo.url) else { return nil }
         if issue > 0 { return base.appendingPathComponent(repo.platform == "gitlab" ? "-/issues/\(issue)" : "issues/\(issue)") }
         guard pr > 0 else { return nil }
+        return base.appendingPathComponent(repo.platform == "gitlab" ? "-/merge_requests/\(pr)" : "pull/\(pr)")
+    }
+    func prLink(in snapshot: DashboardSnapshot) -> URL? {
+        guard pr > 0, let repo = snapshot.repository(repo), let base = safeWebURL(repo.url) else { return nil }
         return base.appendingPathComponent(repo.platform == "gitlab" ? "-/merge_requests/\(pr)" : "pull/\(pr)")
     }
 }
