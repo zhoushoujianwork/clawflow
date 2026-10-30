@@ -12,7 +12,7 @@
 | 项目 Latest Pilot wake、duty chips、issue digest、弹窗、wake 数量 | 同上 → `PilotRun`、`/api/project/pilot-runs` 轮询 | 保留到 `/projects/$name/pilot-runs` 的固定历史入口；Work 提供实时工作信息，管理页不再轮询摘要 |
 | 仓库列表 Last activity 列及按最近运行排序 | `_app.repos.index.tsx` → `/api/runs` | 仓库名稳定排序；每行提供仓库筛选 Work / Usage 链接 |
 | 上述页面的 `/api/runs`、`/data/issues.json`、`/data/pending.json` 数据读取 | 三个路由 | 删除仅服务重复摘要的状态和请求；未删除共享组件或 API，其他历史页面继续使用 |
-| 手动 `queue_issue` / `queue_scope` 控件 | 当前基线四个管理路由均无引用，本次未删除控件 | `internal/config/retired.go` 的 `warnRetiredQueue` 忽略并提示退役选择器；`retired_test.go` 覆盖旧输入及保存省略。开放叶子 issue 默认入选，rank 由队列管理 |
+| 已退役的手动队列选择控件（旧 issue/scope 选择器） | 当前基线四个管理路由均无引用，本次未删除控件 | `internal/config/retired.go` 的 `warnRetiredQueue` 忽略并提示退役选择器；`retired_test.go` 覆盖旧输入及保存省略。开放叶子 issue 默认入选，rank 由队列管理 |
 | classifier / workflow 控件 | 当前基线四个管理路由均无引用，本次未删除控件 | `internal/config/retired.go` 接受旧 workflow 输入并迁移为自主派发；`internal/operator/registry.go` 拒绝退役的 `classify` / `evaluate-bug` / `evaluate-feat` / `decompose` |
 
 ## 保留的工作配置与上下文
