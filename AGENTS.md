@@ -13,3 +13,11 @@
 
 - Use `make dev` to build a timestamped dev app, install it at `/Applications/ClawFlow.app`, and relaunch it. Use `make dev-build` for build-only validation; override `CLAWFLOW_DEV_INSTALL_DIR` for an isolated install. `make cli-dev` retains the separate CLI installation workflow.
 - Dev bundles label the app and bundled CLI with the same version. Settings exposes a read-only stable release check and release link; dev builds continue updating locally with `make dev`. Do not run CLI self-update against a signed app bundle or confuse app updates with controller upgrades.
+
+## Dashboard interaction and status reference
+
+- Use GitLab Runner/job monitoring as the reference for concise execution status: recognizable pending/running/success/failure states, a spinning indicator during live execution, and an elapsed duration alongside each running task and in its details.
+- Show the task activity (development, PR review, repair, reply), worker, issue/PR links, and queue/blocking reasons without requiring users to inspect logs.
+- Duration belongs to the current execution attempt and starts at the controller-recorded claim/start time, never the latest heartbeat or app launch. Retries reset to the new attempt; unknown timestamps are explicitly unavailable. Completed durations stop at the recorded end time.
+- Keep connection freshness visible. On stale/disconnected snapshots, stop presenting live animation and advancing elapsed time; retain last-known data. Task completion must not imply CI, review, or merge completion.
+- Follow this reference in the native macOS app; keep the interaction simple and avoid adding a web dashboard dependency.

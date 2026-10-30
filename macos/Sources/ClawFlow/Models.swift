@@ -61,6 +61,14 @@ enum TaskActivity {
     }
 }
 struct TaskRow: Decodable, Identifiable {
+    let startedAt: Date?
+    let endedAt: Date?
+    func elapsed(at now: Date) -> String {
+        guard let startedAt else { return "Duration unavailable" }
+        let seconds = max(0, Int((endedAt ?? now).timeIntervalSince(startedAt)))
+        return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    }
+
 	let subject: String?
     let id: String
     let repo: String

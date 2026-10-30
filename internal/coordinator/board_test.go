@@ -71,6 +71,9 @@ func TestBoardStoreProjection(t *testing.T) {
 	if len(b.Workers) != 1 || !b.Workers[0].Live || b.Workers[0].LastHeartbeat == nil || len(b.Tasks) != 1 || b.Tasks[0].Worker != "worker" || b.Tasks[0].Stage != "running" {
 		t.Fatalf("board: %+v", b)
 	}
+	if b.Tasks[0].StartedAt == nil || b.Tasks[0].EndedAt != nil {
+		t.Fatal("missing active attempt timing", b.Tasks[0])
+	}
 	data, _ := json.Marshal(b)
 	for _, forbidden := range []string{secret, "payload-secret", "payload", "result", "fencing_token", "Hash"} {
 		if strings.Contains(string(data), forbidden) {

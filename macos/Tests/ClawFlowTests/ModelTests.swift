@@ -2,6 +2,15 @@ import XCTest
 @testable import ClawFlow
 
 final class ModelTests: XCTestCase {
+    func testAttemptElapsedUsesStartAndStopsAtEnd() throws {
+        let value = try snapshot()
+        let original = value.board.tasks[0]
+        XCTAssertEqual(original.elapsed(at: Date()), "Duration unavailable")
+        let json = #"{"id":"t","repo":"o/r","issue":1,"pr":0,"kind":"implement","state":"leased","stage":"running","worker":"w","attempt":0,"updated_at":"2026-10-30T00:09:00Z","started_at":"2026-10-30T00:00:00Z","ended_at":"2026-10-30T00:01:05Z","tags":[]}"#
+        let row = try decoder().decode(TaskRow.self, from: Data(json.utf8))
+        XCTAssertEqual(row.elapsed(at: Date()), "00:01:05")
+    }
+
     func testReleaseCheckKeepsDevChannelAndValidatesLink() throws {
         let data = Data(#"{"tag_name":"v1.2.3","html_url":"https://github.com/zhoushoujianwork/clawflow/releases/tag/v1.2.3","draft":false,"prerelease":false}"#.utf8)
         let release = try decoder().decode(AppRelease.self, from: data)

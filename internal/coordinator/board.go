@@ -35,7 +35,9 @@ type BoardWorker struct {
 	RunningTasks  []string   `json:"running_tasks"`
 }
 type BoardTask struct {
-	Subject string `json:"subject"`
+	StartedAt *time.Time `json:"started_at,omitempty" gorm:"->"`
+	EndedAt   *time.Time `json:"ended_at,omitempty" gorm:"->"`
+	Subject   string     `json:"subject"`
 	// Routing contains only private acceptance routing fields, never the full payload.
 	Routing             json.RawMessage `json:"-" gorm:"column:acceptance_routing;type:jsonb"`
 	ApplicationAttempts int             `json:"application_attempts"`
@@ -84,7 +86,7 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			heartbeats[beat.Worker] = beat.At
 		}
 		tasks := []BoardTask{}
-		if err := tx.Model(&Task{}).Select("id, COALESCE(payload->>'title', '') AS subject, repo, issue, pr, kind, state, tags, jsonb_build_object('acceptance_worker', payload->'acceptance_worker', 'development_worker', payload->'development_worker') AS acceptance_routing, priority, lease_owner, lease_expires_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
+		if err := tx.Model(&Task{}).Select("(SELECT started_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS started_at, (SELECT ended_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS ended_at, id, COALESCE(payload->>'title', '') AS subject, repo, issue, pr, kind, state, tags, jsonb_build_object('acceptance_worker', payload->'acceptance_worker', 'development_worker', payload->'development_worker') AS acceptance_routing, priority, lease_owner, lease_expires_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
 			return err
 		}
 		out = deriveBoard(now, workers, tokens, heartbeats, tasks)

@@ -107,7 +107,11 @@ struct TasksView: View {
             HStack(spacing: 0) {
                 List(rows, selection: $selected) { row in
                     HStack(alignment: .top) {
-                        Image(systemName: row.symbol).frame(width: 20).foregroundStyle(row.group == .attention ? .orange : .secondary)
+                        if row.group == .running && model.summary.connected {
+                            ProgressView().controlSize(.small).frame(width: 20).accessibilityLabel("Task running")
+                        } else {
+                            Image(systemName: row.symbol).frame(width: 20).foregroundStyle(row.group == .attention ? .orange : .secondary)
+                        }
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
                                 ActivityBadge(activity: row.activity)
@@ -116,6 +120,9 @@ struct TasksView: View {
                             }
                             Text(row.title).lineLimit(2)
                             Text("\(row.status) · \(row.worker.isEmpty ? "Unassigned" : row.worker)").font(.caption).foregroundStyle(.secondary)
+                            if row.group == .running {
+                                Text(row.elapsed(at: model.summary.connected ? model.now : snapshot.board.generatedAt)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            }
                             if row.pr > 0 { Text("PR #\(row.pr)").font(.caption).foregroundStyle(.secondary) }
                         }
                     }.padding(.vertical, 5).tag(row.id)
@@ -148,6 +155,9 @@ struct TaskDetail: View {
                 Text(row.title).font(.title3).textSelection(.enabled)
                 Text(row.reason).textSelection(.enabled)
                 LabeledContent("Worker", value: row.worker.isEmpty ? "Unassigned" : row.worker)
+                if row.group == .running || row.startedAt != nil {
+                    LabeledContent("Elapsed", value: row.elapsed(at: model.summary.connected ? model.now : snapshot.board.generatedAt))
+                }
                 LabeledContent("Attempt", value: "\(row.attempt + 1)")
                 LabeledContent("Last update") { Text(row.updatedAt, style: .relative) }
                 if !row.tags.isEmpty { LabeledContent("Required tags", value: row.tags.joined(separator: ", ")) }
