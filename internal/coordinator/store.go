@@ -390,6 +390,11 @@ func (s *Store) ExpireLeases(ctx context.Context, now time.Time) ([]Task, error)
 			if t.Attempt >= MaxInfrastructureAttempts {
 				t.State = "failed"
 			}
+			if t.Kind == "repair" {
+				// Reconcile expiry through the shared ledger before rescheduling.
+				t.State = "leased"
+				t.Result = json.RawMessage(`{"status":"failed","infra_kind":"lease-expired","error":"worker lease expired before a result was accepted"}`)
+			}
 			if err := tx.Save(t).Error; err != nil {
 				return err
 			}

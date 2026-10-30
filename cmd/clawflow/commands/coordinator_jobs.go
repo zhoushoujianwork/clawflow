@@ -422,8 +422,12 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 		status = "cancelled"
 	}
 	if j.repair != nil {
+		j.repair.FailingCheck = r.FailingCheck
 		if err := repairledger.ApplyResult(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, t.ID, j.repair.reason(), r.InfraKind, now); err != nil {
 			return err
+		}
+		if r.InfraKind != "" {
+			runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "kind", r.InfraKind, "err", r.Error)
 		}
 		if r.InfraKind != "" && status == "failed" {
 			status = "skipped"
@@ -480,6 +484,12 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 	prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
 	if r.Status == "success" {
 		runPostAutomation(ctx, j, r.Outcome, r.Output, prefix)
+	}
+	if j.repair != nil {
+		if status != "success" && r.InfraKind == "" {
+			return finishRepairFailure(ctx, j, r.Error)
+		}
+		return nil
 	}
 	switch status {
 	case "failed", "disallowed-outcome", "skipped-empty", "output-limit":

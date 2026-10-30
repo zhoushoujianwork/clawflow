@@ -24,9 +24,10 @@ import (
 )
 
 type ciRepairContext struct {
-	PR       vcs.PR
-	Attempt  int
-	Evidence string
+	PR           vcs.PR
+	Attempt      int
+	FailingCheck string
+	Evidence     string
 	// Acceptance is set when the repair input is a failed independent
 	// acceptance verdict. MergeConflict takes precedence over CI/acceptance.
 	Acceptance    *acceptanceFindings
@@ -80,6 +81,9 @@ func ciRepairCandidate(repo string, pr vcs.PR, issue *vcs.Issue) error {
 	}
 	for _, l := range []string{"clawflow-skip", "agent-failed", "agent-skipped", "agent-running", "tracking", "question"} {
 		if issue.HasLabel(l) {
+			if l == "agent-failed" {
+				return fmt.Errorf("PR #%d: issue excluded by agent-failed; remove agent-failed from issue #%d to clear the label gate (spent repair budget still needs a person)", pr.Number, issue.Number)
+			}
 			return fmt.Errorf("issue excluded by %s", l)
 		}
 	}
@@ -194,7 +198,7 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 }
 
 // Called only while holding the existing cross-process issue lock. Reservation
-// precedes workdir/provider startup; a crash intentionally consumes the attempt.
+// precedes workdir/provider startup; coordinator expiry reconciles lost workers.
 func prepareCIRepair(j *runJob, now time.Time) error {
 	return prepareCIRepairContext(context.Background(), j, now)
 }
@@ -204,6 +208,10 @@ func prepareCIRepairContext(ctx context.Context, j *runJob, now time.Time) error
 	}
 	if err := reserveJobRepair(ctx, j, now); err != nil {
 		return err
+	}
+	j.repair.FailingCheck = repairFailingCheck(j.client, j.repo, j.repair.PR)
+	if j.result != nil {
+		j.result.FailingCheck = j.repair.FailingCheck
 	}
 	j.repair.Evidence = ""
 	if j.repair.Acceptance == nil && !j.repair.MergeConflict {
@@ -635,4 +643,79 @@ func (r *ciRepairContext) prURL() string {
 		return r.PR.URL
 	}
 	return fmt.Sprintf("https://github.com/%s/pull/%d", r.PR.HeadRepo, r.PR.Number)
+}
+
+// classifyRepairResult handles failures without an authoritative agent result.
+// Unknown or corrupt tool evidence remains consuming, to avoid retrying edits.
+func classifyRepairResult(err error, output, events string) (string, bool) {
+	if kind, ok := classifyRepairInfra(err, events); ok {
+		return kind, true
+	}
+	if strings.TrimSpace(output) == "" {
+		if active, readErr := repairToolActivity(events); readErr == nil && !active {
+			return "no-result", true
+		}
+	}
+	return "", false
+}
+
+// finishRepairFailure is shared by local execution and coordinator application.
+// Repair attempts never enter the issue-wide development circuit breaker.
+func finishRepairFailure(ctx context.Context, j *runJob, reason string) error {
+	err := checkRepairBudget(snapshot.DataDir(), j.repo, j.repair.PR.Number, time.Now().UTC())
+	if !errors.Is(err, errRepairExhausted) && !errors.Is(err, errRepairBlocked) {
+		return nil
+	}
+	check := j.repair.FailingCheck
+	if check == "" {
+		check = repairFailingCheck(j.client, j.repo, j.repair.PR)
+	}
+	marker := acceptanceRepairExhaustedMarker(j.repair.PR.Number)
+	body := fmt.Sprintf("Automatic repair for PR #%d needs a person: %s. Last repair failure: %s. Last failing check: %s. Remove agent-failed from issue #%d to clear the label gate; the spent repair budget requires manual intervention. The PR was not merged.\n\n%s", j.repair.PR.Number, err, reason, check, j.sub.Number, marker)
+	comments, e := j.client.ListIssueComments(j.repo, j.sub.Number)
+	if e != nil {
+		return e
+	}
+	posted := false
+	for _, comment := range comments {
+		if strings.Contains(comment, marker) {
+			posted = true
+			break
+		}
+	}
+	if !posted {
+		e := j.client.PostIssueCommentIdempotent(j.repo, j.sub.Number, body, "repair-exhausted-pr-"+fmt.Sprint(j.repair.PR.Number))
+		if errors.Is(e, vcs.ErrNotSupported) {
+			e = j.client.PostIssueComment(j.repo, j.sub.Number, body)
+		}
+		if e != nil {
+			return e
+		}
+	}
+	issue, e := j.client.GetIssue(j.repo, j.sub.Number)
+	if e != nil {
+		return e
+	}
+	if !issue.HasLabel("agent-failed") {
+		if e := j.client.AddLabel(j.repo, j.sub.Number, "agent-failed"); e != nil {
+			return e
+		}
+	}
+	runLog.Warn("run/ci_repair_stopped", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "reason", reason, "check", check, "err", err.Error())
+	return nil
+}
+
+// Preserve the triggering check before repair can move the published head.
+func repairFailingCheck(client vcs.Client, repo string, pr vcs.PR) string {
+	check := "unavailable"
+	if reader, ok := client.(vcs.CIEvidenceProvider); ok {
+		if evidence, err := reader.GetCIEvidence(repo, pr.Number); err == nil && evidence.HeadSHA == pr.HeadSHA {
+			for _, c := range evidence.Checks {
+				if c.Conclusion != nil && (*c.Conclusion == "failure" || *c.Conclusion == "timed_out" || *c.Conclusion == "action_required") {
+					check = c.Name
+				}
+			}
+		}
+	}
+	return check
 }
