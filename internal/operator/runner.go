@@ -275,7 +275,7 @@ var writeBackTimeout = 5 * time.Minute
 // Run executes one operator against one subject and returns the operator's
 // final stdout text, the outcome label (empty if none), or an error.
 func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions) (string, string, error) {
-	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language)
+	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language, ctx)
 	userMessage := BuildUserMessage(sub, opts.Repo, opts.Comments)
 	if opts.ResumeContext != "" {
 		userMessage += "\n---\n\n" + opts.ResumeContext

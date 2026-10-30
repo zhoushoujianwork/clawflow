@@ -5,6 +5,7 @@
 package project
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -417,13 +418,14 @@ func SetAutomationBoundMachine(_, _ string) error { return nil }
 // with no docs won't generate a noisy "_(empty)_" header. The
 // returned string ends with `\n---\n\n` so a caller can concatenate
 // it directly in front of an existing system prompt.
-func HeaderForRepo(repo string) string {
+func HeaderForRepo(repo string, contexts ...context.Context) string {
 	p, err := FindProjectByRepo(repo)
 	if err != nil || p == nil {
 		return ""
 	}
 	ctx, _ := ReadContext(p.Name)
 	testing, _ := ReadTesting(p.Name)
+	testing = pinnedTesting(testing, contexts)
 	deployment, _ := ReadDeployment(p.Name)
 	if strings.TrimSpace(ctx) == "" && strings.TrimSpace(testing) == "" && strings.TrimSpace(deployment) == "" {
 		return ""
@@ -450,12 +452,13 @@ func HeaderForRepo(repo string) string {
 // TestingHeaderForRepo shares only the primary project's environment SOP with
 // independent reviewers. Context and deployment documents may contain development
 // conclusions and must not enter the requirements-only planner or review input.
-func TestingHeaderForRepo(repo string) string {
+func TestingHeaderForRepo(repo string, contexts ...context.Context) string {
 	p, err := FindProjectByRepo(repo)
 	if err != nil || p == nil {
 		return ""
 	}
 	text, _ := ReadTesting(p.Name)
+	text = pinnedTesting(text, contexts)
 	section := testingSection(text)
 	if section == "" {
 		return ""
@@ -489,4 +492,21 @@ func save(p *Project) error {
 		fmt.Fprintf(os.Stderr, "[project] git commit skipped: %v\n", err)
 	}
 	return nil
+}
+
+// testingSnapshotKey is private to prevent SOP overrides from untrusted payloads.
+type testingSnapshotKey struct{}
+
+// WithTestingSnapshot pins locally verified SOP bytes for this execution only.
+func WithTestingSnapshot(ctx context.Context, text string) context.Context {
+	return context.WithValue(ctx, testingSnapshotKey{}, text)
+}
+
+func pinnedTesting(current string, contexts []context.Context) string {
+	if len(contexts) > 0 && contexts[0] != nil {
+		if text, ok := contexts[0].Value(testingSnapshotKey{}).(string); ok {
+			return text
+		}
+	}
+	return current
 }

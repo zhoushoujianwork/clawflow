@@ -22,7 +22,11 @@ func envOrFile(envKey, fileVal string) string {
 
 // Repo holds per-repository settings.
 type Repo struct {
-	AcceptanceWorker string `yaml:"acceptance_worker,omitempty" json:"acceptance_worker,omitempty"`
+	// Testing declarations contain public requirements, never machine-local SOP text.
+	TestingSOPRequired   bool     `yaml:"testing_sop_required,omitempty" json:"testing_sop_required,omitempty"`
+	TestingSOPDigest     string   `yaml:"testing_sop_digest,omitempty" json:"testing_sop_digest,omitempty"`
+	RequiredCapabilities []string `yaml:"required_capabilities,omitempty" json:"required_capabilities,omitempty"`
+	AcceptanceWorker     string   `yaml:"acceptance_worker,omitempty" json:"acceptance_worker,omitempty"`
 	// CoordinatorMode and CoordinatorActive are pass-local scheduling inputs.
 	CoordinatorActive map[int]bool        `yaml:"-" json:"-"`
 	CoordinatorMode   bool                `yaml:"-" json:"-"`
