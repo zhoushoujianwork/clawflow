@@ -21,8 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBarExtra {
             MenuSummary(model: model).task { model.start() }
         } label: {
-            Label("CF \(model.summary.count)", systemImage: model.summary.symbol)
-                .accessibilityLabel("ClawFlow: \(model.summary.title), \(model.summary.count) running")
+            MenuBarBrand(summary: model.summary)
         }
         .menuBarExtraStyle(.window)
     }
