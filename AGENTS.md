@@ -24,6 +24,6 @@
 
 ## Execution lifecycle architecture
 
-- Follow [restart-safe execution design](docs/resilient-execution-design.md) for controller/worker lifecycle changes. This is a target architecture, not a claim that the current service already supports uninterrupted upgrades.
+- Follow [restart-safe execution design](docs/resilient-execution-design.md) for controller/worker lifecycle changes. Read the [durable worker runbook](docs/resilient-execution-runbook.md) and verify the deployed protocol before relying on restart safety. Source support does not migrate an already-running legacy embedded worker; the first cutover must drain it.
 - Support independent local/LAN workers, durable result replay after controller recovery, and rolling worker generations that drain active tasks without terminating them or increasing shared capacity.
 - Preserve worktrees, journals and Offload session lineage for interrupted attempts. Verify authority, ownership and backend recovery capability before reconnecting/resuming; never equate heartbeat loss with safe reassignment or silently launch duplicate execution.

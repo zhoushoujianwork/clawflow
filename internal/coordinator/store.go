@@ -22,6 +22,7 @@ var (
 )
 
 type Task struct {
+	ResultDigest        string          `json:"-"`
 	ApplicationAttempts int             `json:"application_attempts"`
 	ApplicationError    string          `json:"application_error,omitempty"`
 	EventSource         string          `gorm:"-" json:"-"`
@@ -49,6 +50,7 @@ type Task struct {
 func (Task) TableName() string { return "coordinator_tasks" }
 
 type Worker struct {
+	Durable     bool
 	Paused      bool
 	ID          string   `gorm:"primaryKey"`
 	Tags        []string `gorm:"serializer:json;type:jsonb"`
@@ -105,7 +107,7 @@ func (s *Store) RegisterWorker(ctx context.Context, w Worker) error {
 		w.Roles = []string{}
 	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}}, DoUpdates: clause.AssignmentColumns([]string{"tags", "run_untagged", "max_parallel", "roles", "backend", "model", "updated_at"})}).Create(&w).Error
+		err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}}, DoUpdates: clause.AssignmentColumns([]string{"tags", "run_untagged", "max_parallel", "roles", "backend", "model", "durable", "updated_at"})}).Create(&w).Error
 		if err != nil {
 			return err
 		}
@@ -233,6 +235,9 @@ func eligible(tags []string, w Worker) bool {
 
 // Claim serializes capacity checks on the worker row, and skips tasks locked by other claimers.
 func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
+	return s.claim(ctx, worker, "")
+}
+func (s *Store) claim(ctx context.Context, worker, claimID string) (*Task, error) {
 	var result Task
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var repoLimits map[string]int
@@ -306,6 +311,22 @@ func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 				return err
 			}
 			expires := now.Add(LeaseTTL)
+			if w.Durable {
+				var payload map[string]json.RawMessage
+				if json.Unmarshal(t.Payload, &payload) != nil {
+					return ErrInvalid
+				}
+				var seconds int64
+				if json.Unmarshal(payload["timeout_sec"], &seconds) != nil || seconds < 1 || seconds > 86400 {
+					return ErrInvalid
+				}
+				expires = now.Add(time.Duration(seconds)*time.Second + DurableReportGrace)
+				payload["durable_execution"] = json.RawMessage("true")
+				if claimID != "" {
+					payload["worker_claim_id"], _ = json.Marshal(claimID)
+				}
+				t.Payload, _ = json.Marshal(payload)
+			}
 			t.State = "leased"
 			t.LeaseOwner = worker
 			t.LeaseExpiresAt = &expires
@@ -334,7 +355,13 @@ func (s *Store) leaseUpdate(ctx context.Context, id, worker string, fence int64,
 			}
 			return err
 		}
-		r := tx.Model(&Task{}).Where("id = ? AND lease_owner = ? AND fencing_token = ? AND state = 'leased' AND lease_expires_at > clock_timestamp()", id, worker, fence).Updates(values)
+		query := tx.Model(&Task{}).Where("id = ? AND lease_owner = ? AND fencing_token = ? AND state = 'leased' AND lease_expires_at IS NOT NULL", id, worker, fence)
+		if action == "result-accepted" {
+			query = query.Where("(lease_expires_at > clock_timestamp() OR payload->>'durable_execution' = 'true')")
+		} else {
+			query = query.Where("lease_expires_at > clock_timestamp()")
+		}
+		r := query.Updates(values)
 		if r.Error != nil {
 			return r.Error
 		}
@@ -347,6 +374,14 @@ func (s *Store) leaseUpdate(ctx context.Context, id, worker string, fence int64,
 			}
 		}
 		if action == "result-accepted" {
+			if digest, _ := ctx.Value(reportDigestKey{}).(string); digest != "" {
+				if err := tx.Model(&Task{}).Where("id = ?", id).Update("result_digest", digest).Error; err != nil {
+					return err
+				}
+				if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND lease_epoch = ?", id, fence).Update("result_digest", digest).Error; err != nil {
+					return err
+				}
+			}
 			if err := acceptIntents(tx, current, values["result"].(json.RawMessage)); err != nil {
 				return err
 			}
@@ -355,7 +390,7 @@ func (s *Store) leaseUpdate(ctx context.Context, id, worker string, fence int64,
 	})
 }
 func (s *Store) Heartbeat(ctx context.Context, id, worker string, fence int64) error {
-	return s.leaseUpdate(ctx, id, worker, fence, "heartbeat", map[string]interface{}{"lease_expires_at": gorm.Expr("clock_timestamp() + interval '120 seconds'")})
+	return s.leaseUpdate(ctx, id, worker, fence, "heartbeat", map[string]interface{}{"lease_expires_at": gorm.Expr("CASE WHEN payload->>'durable_execution' = 'true' THEN lease_expires_at ELSE clock_timestamp() + interval '120 seconds' END")})
 }
 func (s *Store) finish(ctx context.Context, id, worker string, fence int64, state string, result json.RawMessage) error {
 	if len(result) == 0 {
@@ -382,8 +417,13 @@ func (s *Store) ExpireLeases(ctx context.Context, now time.Time) ([]Task, error)
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("state = 'leased' AND lease_expires_at <= ?", now).Find(&tasks).Error; err != nil {
 			return err
 		}
+		expired := tasks[:0]
 		for i := range tasks {
 			t := &tasks[i]
+			// Durable execution is quarantined, never blindly requeued after a partition.
+			if DurableTask(t) {
+				continue
+			}
 			if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND lease_epoch = ?", t.ID, t.FencingToken).Updates(map[string]any{"kind": "infra", "status": "expired", "error_kind": "lease-expired", "ended_at": now}).Error; err != nil {
 				return err
 			}
@@ -403,7 +443,9 @@ func (s *Store) ExpireLeases(ctx context.Context, now time.Time) ([]Task, error)
 			if err := audit(tx, "", t.ID, "expire"); err != nil {
 				return err
 			}
+			expired = append(expired, *t)
 		}
+		tasks = expired
 		return nil
 	})
 	return tasks, err

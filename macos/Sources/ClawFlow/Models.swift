@@ -86,7 +86,7 @@ struct TaskRow: Decodable, Identifiable {
     var activity: TaskActivity { TaskActivity(kind: kind) }
     var group: TaskGroup {
         if ["done", "failed", "cancelled"].contains(state) { return .history }
-        if stage == "lease_expired" || !(applicationError ?? "").isEmpty { return .attention }
+        if stage == "lease_expired" || stage == "recovery_pending" || !(applicationError ?? "").isEmpty { return .attention }
         if stage == "running" || stage == "finalizing" { return .running }
         if state == "pending" { return .waiting }
         return .attention
@@ -95,6 +95,7 @@ struct TaskRow: Decodable, Identifiable {
     var status: String {
         switch stage {
         case "lease_expired": return "Connection lost"
+        case "recovery_pending": return "Needs recovery"
         case "running": return "Running"
         case "finalizing": return "Finalizing result"
         case "pending": return "Waiting"

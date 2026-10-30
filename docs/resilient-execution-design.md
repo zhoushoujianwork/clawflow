@@ -1,6 +1,6 @@
 # Restart-safe scheduling and worker upgrades
 
-Status: proposed. Current controller shutdown can cancel its embedded worker; this document defines the replacement architecture, not an existing guarantee.
+Status: local implementation in progress. Durable executors, result replay, rolling admissions and guarded development/repair session recovery are implemented for protocol-1 workers. Production cutover and full backend recovery acceptance remain separate. See [operations and current limits](resilient-execution-runbook.md).
 
 ## Goal
 

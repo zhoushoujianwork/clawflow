@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/url"
 	"os"
 	"slices"
 	"time"
@@ -195,7 +194,7 @@ func runWorkerAcceptanceTask(ctx, parent context.Context, api *workerAPI, o work
 	}
 	reportCtx, cancel := context.WithCancel(parent)
 	defer cancel()
-	return api.post(reportCtx, "tasks/"+url.PathEscape(t.ID)+"/"+action, map[string]any{"fencing_token": t.FencingToken, "result": report}, nil)
+	return persistWorkerReport(reportCtx, api, t, action, report)
 }
 
 func (s *coordinatorResults) finishAcceptance(ctx context.Context, t *coordinator.Task, worker string, fence int64, raw json.RawMessage, r *coordinatorReport, failed bool) error {

@@ -300,13 +300,28 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	default:
 		return coordinator.ErrInvalid
 	}
+	ctx = coordinator.WithReportDigest(ctx, raw, failed)
 	t, err := s.tasks.Task(ctx, id)
 	if err != nil {
 		return err
 	}
+	if coordinator.MatchingReport(t, worker, fence, raw, failed) {
+		return nil
+	}
+	if receipts, ok := s.tasks.(interface {
+		ReportAcknowledged(context.Context, string, string, int64, json.RawMessage, bool) (bool, error)
+	}); ok {
+		acknowledged, err := receipts.ReportAcknowledged(ctx, id, worker, fence, raw, failed)
+		if err != nil {
+			return err
+		}
+		if acknowledged {
+			return nil
+		}
+	}
 	// Fast rejection before loading config or creating a VCS client. The store
 	// checks again under a row lock when sealing, including lease expiry.
-	if t.State != "leased" || t.LeaseOwner != worker || t.FencingToken != fence || t.LeaseExpiresAt == nil || !t.LeaseExpiresAt.After(time.Now()) {
+	if t.State != "leased" || t.LeaseOwner != worker || t.FencingToken != fence || t.LeaseExpiresAt == nil || (!coordinator.DurableTask(t) && !t.LeaseExpiresAt.After(time.Now())) {
 		return coordinator.ErrStaleLease
 	}
 	if r.Status == "blocked" {
@@ -549,4 +564,24 @@ func persistDevelopmentEvents(ctx context.Context, t *coordinator.Task, j *runJo
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(r.DevelopmentEvents), 0600)
+}
+
+func (s *coordinatorResults) RecoverExecution(ctx context.Context, id, worker string, epoch int64) (*coordinator.Task, error) {
+	recovery, ok := s.WorkerStore.(interface {
+		RecoverExecution(context.Context, string, string, int64) (*coordinator.Task, error)
+	})
+	if !ok {
+		return nil, coordinator.ErrInvalid
+	}
+	return recovery.RecoverExecution(ctx, id, worker, epoch)
+}
+
+func (s *coordinatorResults) ClaimWithID(ctx context.Context, worker, id string) (*coordinator.Task, error) {
+	claimer, ok := s.WorkerStore.(interface {
+		ClaimWithID(context.Context, string, string) (*coordinator.Task, error)
+	})
+	if !ok {
+		return nil, coordinator.ErrInvalid
+	}
+	return claimer.ClaimWithID(ctx, worker, id)
 }
