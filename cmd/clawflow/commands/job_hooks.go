@@ -3,8 +3,11 @@ package commands
 import (
 	"context"
 	"errors"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -44,21 +47,55 @@ func provenanceFromRun(m snapshot.RunMeta) *jobProvenance {
 		ExitCode: m.ExitCode, ErrorKind: m.ErrorKind, ElapsedMs: m.ElapsedMs, ExecutionStatus: m.ExecutionStatus}
 }
 
-func (p *jobProvenance) valid() bool {
+var provenanceID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$`)
+
+// normalize keeps advisory metadata from invalidating completed work. Warnings
+// name fields only; never echo untrusted values into diagnostics.
+func (p *jobProvenance) normalize() []string {
 	if p == nil {
-		return true
+		return nil
 	}
-	for _, value := range []string{p.Machine, p.Profile, p.Backend, p.Model, p.OffloadRunID, p.CallerRunID, p.SessionID, p.ErrorKind, p.ExecutionStatus} {
-		if len(value) > 256 {
-			return false
-		}
-		for _, c := range value {
-			if c < 33 || c > 126 {
-				return false
+	var warnings []string
+	for _, field := range []struct {
+		name       string
+		value      *string
+		identifier bool
+	}{
+		{"machine", &p.Machine, false}, {"profile", &p.Profile, false},
+		{"backend", &p.Backend, false}, {"model", &p.Model, false},
+		{"offload_run_id", &p.OffloadRunID, true}, {"caller_run_id", &p.CallerRunID, true},
+		{"session_id", &p.SessionID, true}, {"error_kind", &p.ErrorKind, false},
+		{"execution_status", &p.ExecutionStatus, false},
+	} {
+		original := *field.value
+		value := strings.TrimSpace(original)
+		if field.identifier {
+			// Do not remove unsafe characters or truncate identifiers into other links.
+			if value != "" && !provenanceID.MatchString(value) {
+				value = ""
+			}
+		} else {
+			value = strings.TrimSpace(strings.Map(func(r rune) rune {
+				if unicode.IsControl(r) {
+					return -1
+				}
+				return r
+			}, value))
+			runes := []rune(value)
+			if len(runes) > 256 {
+				value = string(runes[:256])
 			}
 		}
+		*field.value = value
+		if value != original {
+			warnings = append(warnings, "provenance."+field.name+": normalized or dropped invalid metadata")
+		}
 	}
-	return p.ElapsedMs == nil || *p.ElapsedMs >= 0
+	if p.ElapsedMs != nil && *p.ElapsedMs < 0 {
+		p.ElapsedMs = nil
+		warnings = append(warnings, "provenance.elapsed_ms: dropped negative duration")
+	}
+	return warnings
 }
 
 type jobResult struct {
