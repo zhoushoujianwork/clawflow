@@ -262,7 +262,7 @@
 .skip-link:focus { transform: translateY(0); }
 .app-content { min-width: 0; }
 .app-content > div { padding: 1.5rem clamp(1rem, 3vw, 2.5rem); }
-.app-content:is([data-page="/pipeline"], [data-page="/usage"], [data-page="/dashboard"], [data-page="/repos"], [data-page="/projects"]) > div {
+.app-content:is([data-page="/pipeline"], [data-page="/usage"], [data-page="/repos"], [data-page="/projects"]) > div {
   max-width: none;
   width: 100%;
 }
