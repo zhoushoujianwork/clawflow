@@ -9,6 +9,30 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
+func TestResourceContentionDoesNotConsumeRepairBudgets(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	pr := vcs.PR{Number: 1, HeadSHA: "head"}
+	for i := 0; i < MaxInfra+MaxAttempts+1; i++ {
+		now = now.Add(24 * time.Hour)
+		n, err := Reserve(root, "o/r", pr, "ci", now)
+		if err != nil || n != 1 {
+			t.Fatalf("reserve: %d %v", n, err)
+		}
+		if err := Release(root, "o/r", pr, n, "resource-busy", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, path := Path(root, "o/r", 1)
+	l, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumed, infra := l.Counts(); consumed != 0 || infra != 0 {
+		t.Fatalf("busy consumed budgets: %d %d", consumed, infra)
+	}
+}
+
 func TestRerunReservationSharedBudgetAndConcurrency(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now()

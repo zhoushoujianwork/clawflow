@@ -15,9 +15,27 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/resourcelease"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
+
+func TestResourceBusyRecordsBlockedWithoutEffects(t *testing.T) {
+	withRunLog(t)
+	original := runJobOperator
+	t.Cleanup(func() { runJobOperator = original })
+	busy := &resourcelease.Blocked{Resource: "desktop", Holder: resourcelease.Holder{Repository: "other/repo", Task: "#7", Phase: "implement", Attempt: "holder-run"}}
+	runJobOperator = func(context.Context, *operator.Operator, *operator.Subject, operator.VCS, operator.RunOptions) (string, string, error) {
+		return busy.Error(), "", busy
+	}
+	j := &runJob{repo: "o/r", client: &commentsFake{}, repoCfg: config.Repo{},
+		op:  &operator.Operator{Name: "inspect", Trigger: operator.Trigger{Target: "issue"}},
+		sub: &operator.Subject{Number: 5, State: "open"}, hooks: &jobHooks{SkipIndex: true}}
+	fired, limited, _ := runOneOperator(context.Background(), j, time.Second)
+	if fired || limited || j.result.Status != "blocked" || j.result.Error != busy.Error() || len(j.result.Effects) != 0 {
+		t.Fatalf("busy not recorded as blocked: %+v", j.result)
+	}
+}
 
 func TestFencedClientEffectsAndCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
