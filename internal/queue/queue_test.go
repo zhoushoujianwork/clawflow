@@ -175,6 +175,7 @@ func TestCycles(t *testing.T) {
 
 func tempHome(t *testing.T) {
 	t.Helper()
+	t.Setenv("CLAWFLOW_STATE_DIR", "")
 	t.Setenv("HOME", t.TempDir())
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -251,6 +252,15 @@ func TestWorkerCoordinationRejectsChangesBeforeClone(t *testing.T) {
 		t.Fatal(e)
 	}
 	approved.ManualOrder = []int{1, 2}
+	if e = os.MkdirAll(filepath.Dir(queue.RankPath()), 0o700); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(queue.RankPath(), []byte("not json"), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = collectCoordination(context.Background(), j, nil, ""); e == nil {
+		t.Fatal("scheduler must reject corrupt coordinator ranking")
+	}
 	if e = validateWorkerCoordination(context.Background(), j, &approved); e != nil {
 		t.Fatalf("coordinator ranking read from worker state: %v", e)
 	}
