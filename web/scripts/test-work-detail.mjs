@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 const require = createRequire(import.meta.url)
+const { defaultParseSearch, defaultStringifySearch } = require('@tanstack/react-router')
 const { build } = createRequire(require.resolve('vite'))('esbuild')
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const dir = await mkdtemp(join(tmpdir(),'work-detail-test-'))
@@ -70,6 +71,10 @@ const params = new URLSearchParams(state)
 assert.deepEqual(preferences(Object.fromEntries(params)).detail,selection)
 assert.equal(preferences(Object.fromEntries(params)).work,'waiting')
 assert.equal(preferences({detail:123}).detail,undefined)
+// Exercise the real router codec, including manually composed JSON deep links.
+assert.equal(preferences(${JSON.stringify(defaultParseSearch('?detail=' + encodeURIComponent(JSON.stringify(['owner/repo', 999]))))}).detail,workDetailKey('owner/repo',999))
+assert.equal(preferences(${JSON.stringify(defaultParseSearch(defaultStringifySearch({detail:JSON.stringify(['owner/repo',541]),work:'waiting',events:'all',repo:'owner/repo'})))}).detail,selection)
+for(const detail of [[],['owner/repo'],['owner/repo',0],['owner/repo','999'],['owner/repo',999,'extra']]) assert.equal(preferences({detail}).detail,undefined)
 for(const path of ['/etc/passwd','https://evil.invalid/runs/a/issue-1/b','./data/runs/../issue-1/b/']) assert.equal(runDetailUrl(path),undefined)
 assert.equal(runDetailUrl('./data/runs/owner__repo/issue-541/failed-first/'),'/runs/owner__repo/issue-541/failed-first')
 const panel = renderToStaticMarkup(<WorkDetail repo="owner/repo" issue={541} item={item} onClose={()=>{}}/>)

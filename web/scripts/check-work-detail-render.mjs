@@ -86,6 +86,10 @@ try {
     await page.goto(missing.href)
     await panel.getByText(/not in the current snapshot/).waitFor()
     assert.equal(await panel.locator('[data-attempt-id]').count(),0)
+    await page.reload()
+    await panel.getByText(/not in the current snapshot/).waitFor()
+    assert.equal(await panel.locator('[data-attempt-id]').count(),0)
+    for(const [key,value] of [['work','waiting'],['events','all'],['repo','owner/repo']]) assert.equal(new URL(page.url()).searchParams.get(key),value)
     await context.close()
   }
   console.log('PASS: 1440/390px; keyboard focus/trap/close, URL reload/back/forward with filters, retries, independent review, legacy fields, changed head, no merge, bounded metadata pagination, no raw transcript requests')

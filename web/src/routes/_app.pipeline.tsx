@@ -169,8 +169,11 @@ export interface Board {
 
 type Preferences = { detail?: string; work?: WorkFilter; tab?: 'active' | 'delivered' | 'all'; expanded?: string; events?: 'important' | 'all'; repo?: string }
 export function preferences(s: Record<string, unknown>): Preferences {
+  // The router JSON-decodes hand-written deep links before search validation.
+  const detail = Array.isArray(s.detail) && s.detail.length === 2 && typeof s.detail[0] === 'string' && Number.isInteger(s.detail[1]) && s.detail[1] > 0
+    ? workDetailKey(s.detail[0], s.detail[1]) : s.detail
   return {
-    detail: typeof s.detail === 'string' && s.detail.length < 512 ? s.detail : undefined,
+    detail: typeof detail === 'string' && detail.length < 512 ? detail : undefined,
     work: ['running', 'waiting', 'attention', 'delivered'].includes(String(s.work)) ? s.work as WorkFilter : undefined,
     tab: s.tab === 'active' || s.tab === 'delivered' || s.tab === 'all' ? s.tab : undefined,
     expanded: typeof s.expanded === 'string' ? s.expanded : undefined,
