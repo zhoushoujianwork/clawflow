@@ -404,6 +404,7 @@ func TestPipelineRepairBudgetAttention(t *testing.T) {
 	f := newPipelineFake()
 	f.issues = []vcs.Issue{{Number: 1, State: "open"}}
 	f.open = []vcs.PR{{Number: 2, State: "open", HeadBranch: "fix/issue-1"}}
+	f.ci = map[int]vcs.CIStatus{2: vcs.CIStatusFailure}
 	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, AutoMerge: true}})
 	dir, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", 2)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -416,6 +417,18 @@ func TestPipelineRepairBudgetAttention(t *testing.T) {
 	item := itemFor(t, buildPipeline(context.Background(), d).Repos[0], 1)
 	if len(item.Attention) != 1 || !strings.Contains(item.Attention[0], "attempts") {
 		t.Fatalf("missing budget attention: %+v", item)
+	}
+	// A historical exhausted ledger is not an active incident after CI recovers.
+	f.ci[2] = vcs.CIStatusSuccess
+	item = itemFor(t, buildPipeline(context.Background(), d).Repos[0], 1)
+	if len(item.Attention) != 0 {
+		t.Fatalf("resolved repair still needs attention: %+v", item)
+	}
+	// Unreadable CI remains unknown, alongside the existing repair-budget symptom.
+	f.ciErr = map[int]error{2: errors.New("CI unavailable")}
+	item = itemFor(t, buildPipeline(context.Background(), d).Repos[0], 1)
+	if item.PR.CI != "unknown" || item.Stage == pipeline.StageCIFailed || len(item.Attention) != 1 {
+		t.Fatalf("unknown CI confused with failure: %+v", item)
 	}
 }
 

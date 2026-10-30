@@ -9,6 +9,8 @@ export interface WorkItem {
   delivery?: { merged_at?: string }
   executions?: {
     status: string
+    run_path?: string
+    started_at?: string
     ended_at?: string
     provenance: { source: string; stale: boolean }
   }[]
@@ -26,7 +28,7 @@ export interface SourceHealth {
 const active = (item: WorkItem) => item.stage !== 'merged' && item.state !== 'closed'
 const live = (item: WorkItem, status: string) => item.executions?.some(e =>
   e.status === status && e.provenance.source === 'offload_live' && !e.provenance.stale) || false
-const attention = (item: WorkItem) => !!item.attention?.length || live(item, 'stalled')
+const attention = (item: WorkItem) => active(item) && (!!item.attention?.length || live(item, 'stalled') || ['ci_failed', 'infra_retry'].includes(item.stage))
 export const unknownExecution = (item: WorkItem) => active(item) && !live(item, 'running') && !live(item, 'stalled') && (
   !!item.run?.live || !!item.acceptance?.running || ['implementing', 'acceptance_running'].includes(item.stage) || !!item.executions?.some(e => !e.ended_at && (e.status === 'unknown' || e.provenance.stale)))
 

@@ -1,3 +1,5 @@
+import { Attention } from '../components/Attention'
+export { Attention } from '../components/Attention'
 import { WorkSummary, type WorkFilter, type WorkItem, type SourceHealth } from '../components/WorkSummary'
 import { WorkList } from '../components/WorkList'
 import { ScheduledChecksPanel } from "../components/ScheduledChecksPanel"
@@ -6,7 +8,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ExternalLink, Loader2, RefreshCw } from 'lucide-react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { cn } from '../lib/utils'
-import { issueUrl, repoUrl, useRepoInfoMap, type RepoInfoMap } from '../lib/vcsUrls'
+import { useRepoInfoMap } from '../lib/vcsUrls'
 
 type Stage =
   | 'queued'
@@ -70,7 +72,7 @@ interface Delivery {
   merged_at?: string
 }
 
-interface Item extends WorkItem {
+export interface Item extends WorkItem {
   state?: string
   attention?: string[]
   issue: number
@@ -87,7 +89,7 @@ interface Item extends WorkItem {
   delivery?: Delivery
 }
 
-interface RepoBoard {
+export interface RepoBoard {
   hosting_platform?: string
   repo: string
   enabled: boolean
@@ -101,7 +103,7 @@ interface RepoBoard {
   error?: string
 }
 
-interface PipelineEvent {
+export interface PipelineEvent {
   time: string
   level: string
   event: string
@@ -119,7 +121,7 @@ interface GlobalQueueEntry {
   state: string
 }
 
-interface PilotAction {
+export interface PilotAction {
   created_issue?: number
   run_id: string
   actor: string
@@ -141,7 +143,7 @@ interface APIUsage {
  calls_by_stage: Record<string, number>
  budgets: Record<string, {limit: number; remaining: number; reset: string; backoff: string}>
 }
-interface Board {
+export interface Board {
   sources?: SourceHealth[]
  vcs_usage?: APIUsage
   worker_pool?: WorkerPool | null
@@ -329,26 +331,6 @@ export function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
     <span className="rounded bg-secondary px-1">Read-only</span>
     {!runtime.execution.ready && <span className="text-red-700">{runtime.execution.error}</span>}
   </div>
-}
-
-export function Attention({ board, repoInfo }: { board: Board; repoInfo: RepoInfoMap }) {
-  const rows = board.repos.flatMap(repo => repo.items.flatMap(item => (item.attention || []).map(reason => ({
-    repo: repo.repo, issue: item.issue, reason, time: item.updated_at, url: item.pr?.url || issueUrl(repo.repo, item.issue, repoInfo),
-  }))))
-  for (const repo of board.repos) if (repo.error) rows.push({ repo: repo.repo, issue: 0, reason: (repo.stale ? 'Stale snapshot: ' : '') + repo.error, time: board.generated_at, url: repoUrl(repo.repo, repoInfo) })
-  // Only the latest lock outcome for a repository is actionable.
-  const locks = new Map<string, PipelineEvent>()
-  for (const e of board.events || []) {
-    if (e.event === 'run/lock_timeout' || e.event === 'run/end') locks.set(e.fields.repo || '', e)
-  }
-  for (const [repo, e] of locks) if (e.event === 'run/lock_timeout') rows.push({ repo, issue: Number(e.fields.issue) || 0, reason: 'Lock wait timed out: ' + (e.fields.reason || ''), time: e.time, url: e.fields.issue ? issueUrl(repo, Number(e.fields.issue), repoInfo) : repoUrl(repo, repoInfo) })
-  for (const a of board.pilot_actions || []) rows.push({ repo: a.action.repo, issue: a.action.issue || a.action.pr || 0, reason: pilotSummary(a), time: a.at, url: a.action.pr ? board.repos.find(r => r.repo === a.action.repo)?.items.find(i => i.pr?.number === a.action.pr)?.pr?.url || repoUrl(a.action.repo, repoInfo) : a.action.issue ? issueUrl(a.action.repo, a.action.issue, repoInfo) : repoUrl(a.action.repo, repoInfo) })
-  return <section className="mb-4" aria-label="Needs attention">
-    {board.pilot_error && <p role="alert">{board.pilot_error}</p>}
-    {rows.length ? <><h2 className="font-semibold text-sm mb-2">Needs attention ({rows.length})</h2><ul className="border border-amber-200 rounded-lg divide-y">
-      {rows.map((row, i) => <li key={i} className="p-2 text-xs flex flex-wrap gap-2 break-words"><span className="font-mono break-all">{row.repo}{row.issue ? ' #' + row.issue : ''}</span><span>{row.reason}</span><span className="text-muted-foreground">{timeAgo(row.time)}</span>{row.url && <a className="text-brand underline" href={row.url} target="_blank" rel="noreferrer">Open</a>}</li>)}
-    </ul></> : <p className="text-sm text-muted-foreground">Nothing needs you</p>}
-  </section>
 }
 
 function ItemDetail({ item }: { item: Item }) {

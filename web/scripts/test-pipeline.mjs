@@ -33,6 +33,7 @@ assert.ok(apiUsage.includes('harvest: 2'))
 assert.equal(renderToStaticMarkup(<APIUsagePanel/>), '')
 // Work summary fixtures share selectors with rendered repository rows.
 import { WorkList } from './src/components/WorkList'
+import { attentionIncidents, ATTENTION_LIMIT } from './src/components/Attention'
 import { WorkSummary, selectWorkItems, unknownExecution } from './src/components/WorkSummary'
 const attempt = (profile, status = 'running', stale = false) => ({profile, status, provenance:{source:'offload_live', stale}})
 const workNow = Date.now()
@@ -118,16 +119,75 @@ assert.ok(delivered.includes('abcdef0'))
 assert.equal((delivered.match(/data-stage=/g)||[]).length,5)
 const attention = renderToStaticMarkup(<Attention board={{repos,events:[]}} repoInfo={{}}/>)
 assert.ok(attention.includes('Needs attention (5)'))
+// Issue #540: screenshot-shaped multi-symptom incidents, without live providers.
+const symptomItem = (issue, extra={}) => ({...baseItem,issue,title:'Incident '+issue,stage:'blocked',attention:['CI status could not be read: unavailable','repair exhausted: 3 total attempts'],pr:{number:issue+100,ci:'unknown',ci_error:'unavailable'},...extra})
+const incidentRepo = {repo:'owner/clawflow',enabled:true,items:[symptomItem(527),symptomItem(496),symptomItem(511)],error:'VCS unavailable',stale:true}
+const warning = n => ({time:new Date(Date.parse(now)+n*1000).toISOString(),event:'run/lock_timeout',fields:{repo:incidentRepo.repo,issue:'527',reason:'busy'}})
+const incidentBoard = {repos:[incidentRepo],events:Array.from({length:30},(_,n)=>warning(n))}
+const incidents = attentionIncidents(incidentBoard)
+assert.equal(incidents.length,4)
+assert.deepEqual(incidents.filter(i=>i.issue).map(i=>i.issue).sort(),[496,511,527])
+const incident527 = incidents.find(i=>i.issue===527)
+assert.equal(incident527.reasons.length,3)
+assert.equal(incident527.occurrences,32)
+assert.equal(incident527.primary.text,'repair exhausted: 3 total attempts')
+assert.equal(incident527.primary.disposition,'needs-human')
+assert.equal(incident527.firstSeen,warning(0).time)
+assert.equal(incident527.lastSeen,warning(29).time)
+assert.deepEqual(attentionIncidents(incidentBoard),incidents) // refresh never inflates totals
+const incidentHTML = renderToStaticMarkup(<Attention board={incidentBoard} repoInfo={{}}/>)
+assert.equal((incidentHTML.match(/data-incident-key=/g)||[]).length,4)
+assert.ok(incidentHTML.includes('Supporting reasons (2)'))
+assert.ok(incidentHTML.includes('View issue'))
+assert.ok(incidentHTML.includes('View repository'))
+assert.ok(!incidentHTML.includes('>Open<'))
+const sharedOutage = {...incidentBoard,repos:[{...incidentRepo,error:'unavailable',items:[symptomItem(527,{attention:['CI status could not be read: unavailable']}),symptomItem(496,{attention:['CI status could not be read: unavailable']})]}],events:[{time:now,event:'run/source_error',fields:{repo:incidentRepo.repo,error:'unavailable'}}]}
+assert.equal(attentionIncidents(sharedOutage).length,1)
+assert.equal(attentionIncidents(sharedOutage)[0].firstSeen,now)
+assert.equal(attentionIncidents({...sharedOutage,repos:[{...sharedOutage.repos[0],error:undefined,items:[]}],events:sharedOutage.events}).length,0)
+const issueOnly = extra => ({repos:[{repo:incidentRepo.repo,enabled:true,items:[symptomItem(527,extra)]}],events:[]})
+const unknownOnly = attentionIncidents(issueOnly({attention:['CI status could not be read: unavailable']}))[0]
+assert.equal(unknownOnly.primary.disposition,'informational')
+assert.ok(!unknownOnly.reasons.some(r=>r.text.includes('CI failed')))
+assert.equal(unknownOnly.firstSeen,undefined)
+assert.equal(attentionIncidents(issueOnly({state:'closed'})).length,0)
+assert.equal(attentionIncidents(issueOnly({stage:'merged'})).length,0)
+assert.equal(attentionIncidents(issueOnly({stage:'accepted',attention:[],pr:{ci:'success'}})).length,0)
+const retryItem = {stage:'infra_retry',why:'Infrastructure retry scheduled',attention:[],pr:undefined,acceptance:{next_retry_at:now,completed_at:now,latest_is_infra:true}}
+assert.equal(attentionIncidents(issueOnly(retryItem))[0].primary.disposition,'automatic-retry')
+assert.equal(attentionIncidents(issueOnly({...retryItem,acceptance:{}}))[0].primary.disposition,'needs-human')
+assert.equal(attentionIncidents(issueOnly({...retryItem,acceptance:{next_retry_at:'invalid'}}))[0].primary.disposition,'needs-human')
+assert.equal(attentionIncidents({...issueOnly(retryItem),repos:[{...issueOnly(retryItem).repos[0],enabled:false} ]})[0].primary.disposition,'needs-human')
+assert.equal(attentionIncidents(issueOnly({...retryItem,attention:['repair blocked: infrastructure budget exhausted']}))[0].primary.disposition,'needs-human')
+const liveRepair = {stage:'ci_failed',why:'CI failed; repair-ci is running',attention:[],pr:{ci:'failure'},run:{live:true,operator:'repair-ci'}}
+assert.equal(attentionIncidents(issueOnly(liveRepair))[0].primary.disposition,'automatic-retry')
+assert.equal(attentionIncidents(issueOnly({...liveRepair,run:{live:false,operator:'repair-ci'}}))[0].primary.disposition,'informational')
+const otherRepo = {...incidentRepo,repo:'owner/other',error:undefined,items:[symptomItem(527)]}
+assert.equal(attentionIncidents({...incidentBoard,repos:[incidentRepo,otherRepo]}).length,5)
+const clearedLocks = attentionIncidents({...incidentBoard,events:[...incidentBoard.events,{time:new Date(Date.parse(now)+40000).toISOString(),event:'run/end',fields:{repo:incidentRepo.repo}}]})
+assert.equal(clearedLocks.find(i=>i.issue===527).occurrences,2)
+const withRun = attentionIncidents(issueOnly({executions:[{run_path:'./data/runs/owner__clawflow/issue-527/2026-10-30T00-00-00Z/',started_at:now,status:'failed',provenance:{source:'offload_final'}}]}))[0]
+assert.equal(withRun.runUrl,'/runs/owner__clawflow/issue-527/2026-10-30T00-00-00Z')
+assert.ok(renderToStaticMarkup(<Attention board={issueOnly({executions:[{run_path:'./data/runs/owner__clawflow/issue-527/ts/',status:'failed',provenance:{}}]})} repoInfo={{}}/>).includes('View run'))
+const manyIncidents = {repos:[{...incidentRepo,error:undefined,items:Array.from({length:12},(_,n)=>symptomItem(n+1))}],events:[]}
+const bounded = renderToStaticMarkup(<Attention board={manyIncidents} repoInfo={{}}/>)
+assert.equal((bounded.match(/data-incident-key=/g)||[]).length,ATTENTION_LIMIT)
+assert.ok(bounded.includes('Show more (7)'))
+assert.equal(selectWorkItems([{...baseItem,stage:'merged',attention:['old error']}],'attention').length,0)
+assert.equal(selectWorkItems([{...baseItem,stage:'infra_retry'}],'attention').length,1)
+
+repos[0].items[2].pr = {number:100}
 const pilotActions = [
  {run_id:'wake',actor:'pilot',at:now,outcome:'applied',action:{id:'q',type:'ask_human',repo:'owner/repo-0',issue:2,body:'Which environment? <script>bad</script>'}},
  {run_id:'wake',actor:'pilot',at:now,outcome:'head_changed',action:{id:'m',type:'override_merge',repo:'owner/repo-0',pr:100,head:'a'.repeat(40)}},
  {run_id:'wake',actor:'pilot',at:now,outcome:'applied',action:{id:'n',type:'note',repo:'owner/repo-0',body:'Diagnosis recorded'}},
 ]
 const pilotAttention = renderToStaticMarkup(<Attention board={{repos,events:[],pilot_actions:pilotActions}} repoInfo={{}}/>)
-assert.ok(pilotAttention.includes('Needs attention (8)'))
+assert.ok(pilotAttention.includes('Needs attention (5)'))
+assert.ok(!pilotAttention.includes('Show more'))
 assert.ok(pilotAttention.includes('Which environment?'))
-assert.ok(pilotAttention.includes('override_merge · head_changed'))
-assert.ok(pilotAttention.includes('Diagnosis recorded'))
+assert.ok(!pilotAttention.includes('override_merge · head_changed'))
+assert.ok(!pilotAttention.includes('Diagnosis recorded'))
 assert.ok(!pilotAttention.includes('<script>'))
 assert.equal(itemPilotActions(pilotActions, 'other/repo', {issue:2,pr:{number:100}}).length,0)
 assert.equal(itemPilotActions(pilotActions, 'owner/repo-0', {issue:2}).length,1)
@@ -169,14 +229,14 @@ for (const separator of [
 }
 assert.equal(preferences({tab:'invalid'}).tab,undefined)
 assert.equal(preferences({tab:'all'}).tab,'all')
-console.log('PASS: Work summary selectors, mixed profiles, loading/empty/stale snapshots, complete filtered rows; 5 repos / 40 items / 50 events')
+console.log('PASS: attention incidents #527/#496/#511, source outages, retry policy, resolution, observed counts/times, bounded cards and links; Work summary selectors, mixed profiles, loading/empty/stale snapshots, complete filtered rows; 5 repos / 40 items / 50 events')
 `,
     },
-    bundle: true, platform: 'node', format: 'cjs', outfile: join(dir, 'test.cjs'),
+    sourcemap: 'inline', bundle: true, platform: 'node', format: 'cjs', outfile: join(dir, 'test.cjs'),
     plugins: [{ name: 'router-stub', setup(b) {
       b.onResolve({filter:/^@tanstack\/react-router$/}, () => ({path:'router',namespace:'stub'}))
       b.onLoad({filter:/.*/,namespace:'stub'}, () => ({contents:'export const createFileRoute = () => options => options'}))
     }}],
   })
-  process.stdout.write(execFileSync(process.execPath, [join(dir, 'test.cjs')]))
+  process.stdout.write(execFileSync(process.execPath, ['--enable-source-maps', join(dir, 'test.cjs')]))
 } finally { await rm(dir, {recursive:true,force:true}) }
