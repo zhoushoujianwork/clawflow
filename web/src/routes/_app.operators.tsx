@@ -3,13 +3,12 @@ import { useEffect, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { cn } from '../lib/utils'
 
-interface Operator {
+export interface Operator {
   name: string
   description: string
   target: string
   labels_required: string[]
   labels_excluded: string[]
-  lock_label: string
   source: string
 }
 
@@ -50,15 +49,20 @@ function OperatorsList() {
   useDocumentTitle('Operators')
   const [ops, setOps] = useState<Operator[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
 
   useEffect(() => {
     fetch('/data/operators.json', { cache: 'no-store' })
-      .then(r => (r.ok ? r.json() : []))
+      .then(r => { if (!r.ok) throw new Error('Unavailable'); return r.json() })
       .then(d => setOps(Array.isArray(d) ? d : []))
-      .catch(() => setOps([]))
+      .catch(() => setError(true))
       .finally(() => setLoading(false))
   }, [])
 
+  return <OperatorInspection ops={ops} loading={loading} error={error} />
+}
+
+export function OperatorInspection({ ops, loading = false, error = false }: { ops: Operator[]; loading?: boolean; error?: boolean }) {
   // Group operators by stage, preserving explicit intra-stage order.
   const grouped = STAGES.map(stage => ({
     ...stage,
@@ -72,13 +76,14 @@ function OperatorsList() {
       <div className="mb-5">
         <h1 className="text-2xl font-bold text-foreground">Registered operators</h1>
         <p className="text-xs text-muted-foreground mt-1">
-          Issues flow through implementation, tests and repair, PR checks, then merge. Drop a SKILL.md into{' '}
-          <code className="px-1 py-0.5 bg-secondary rounded text-[10px]">~/.clawflow/skills/&lt;name&gt;/</code> to override by name.
+          Administration · Read-only inspection of active operators, triggers and user overrides. Historical run records retain their original operator names.
         </p>
       </div>
 
       {loading ? (
         <p className="text-sm text-muted-foreground text-center py-8">Loading…</p>
+      ) : error ? (
+        <p role="alert" className="text-sm text-destructive">Could not load registered operators. Reload to retry.</p>
       ) : ops.length === 0 ? (
         <div className="bg-card border border-border rounded-xl p-8 text-center">
           <p className="text-sm text-muted-foreground">No operators registered.</p>
@@ -122,11 +127,12 @@ function OperatorCard({ op }: { op: Operator }) {
       <div className="flex flex-wrap gap-3 text-[11px] items-baseline">
         <LabelList title="requires" labels={op.labels_required} tone="green" />
         <LabelList title="excludes" labels={op.labels_excluded} tone="red" />
-        <LabelList title="lock" labels={[op.lock_label]} tone="amber" />
       </div>
-      <div className="mt-2 text-[10px] text-muted-foreground font-mono truncate" title={op.source}>
-        source: {op.source}
-      </div>
+      <details className="mt-2 text-xs text-muted-foreground [overflow-wrap:anywhere]">
+        <summary className="cursor-pointer">Operator diagnostics</summary>
+        <p className="font-mono">source: {op.source}</p>
+        <p>Execution uses local locks; legacy lock labels are ignored.</p>
+      </details>
     </div>
   )
 }
