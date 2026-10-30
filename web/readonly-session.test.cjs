@@ -8,7 +8,7 @@ const React = require('react')
 const { renderToStaticMarkup } = require('react-dom/server')
 
 // Render the real layout with resolved session states, without a browser or API.
-function renderLayout(readonly, pathname = '/dashboard', ready = true) {
+function renderLayout(readonly, pathname = '/pipeline', ready = true) {
   const filename = path.join(__dirname, 'src/routes/_app.tsx')
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS },
@@ -57,13 +57,15 @@ test('loopback session keeps local controls', () => {
   assert.match(html, /CHAT_DRAWER/)
   assert.match(html, /href="\/settings"/)
 })
-test('Work and Usage lead the navigation; legacy routes stay grouped', () => {
+test('Work and Usage lead navigation with one work destination', () => {
   const html = renderLayout(false, '/pipeline')
   const nav = html.match(/<nav[^>]*>[\s\S]*?<\/nav>/)[0]
   assert.match(nav, /^<nav[^>]*><a href="\/pipeline">Work<\/a><a href="\/usage">Usage<\/a>/)
-  for (const route of ['repos', 'projects', 'dashboard', 'operators', 'settings']) {
+  for (const route of ['repos', 'projects', 'operators', 'settings']) {
     assert.match(nav, new RegExp('href="/' + route + '"'))
   }
+  assert.doesNotMatch(nav, /Dashboard|href="\/dashboard"/)
+  assert.equal((nav.match(/href="\/pipeline"/g) || []).length, 1)
   assert.doesNotMatch(nav, /data-active="true"/)
   assert.match(html, /href="#main-content"/)
   assert.match(html, /id="main-content"[^>]*tabindex="-1"/)
@@ -78,52 +80,7 @@ test('remote deep links cannot mount privileged pages', () => {
   assert.doesNotMatch(html, /PAGE_CONTENT/)
 })
 test('pending session does not mount page controls', () => {
-  const html = renderLayout(true, '/dashboard', false)
+  const html = renderLayout(true, '/pipeline', false)
   assert.match(html, /Loading session/)
   assert.doesNotMatch(html, /PAGE_CONTENT|SYNC_CONTROL|CHAT_DRAWER/)
-})
-
-function dashboardComponents(readonly) {
-  const filename = path.join(__dirname, 'src/routes/_app.dashboard.tsx')
-  const source = fs.readFileSync(filename, 'utf8') + '\nexport { Dashboard, Row, AutoRunBanner }'
-  const compiled = ts.transpileModule(source, {
-    compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS },
-  }).outputText
-  const component = new Module(filename, module)
-  component.filename = filename
-  component.paths = module.paths
-  const nativeRequire = component.require.bind(component)
-  component.require = name => {
-    if (name === '@tanstack/react-router') return {
-      createFileRoute: () => options => options,
-      Link: ({ children }) => React.createElement('a', null, children),
-    }
-    if (name.endsWith('/session')) return { useReadOnly: () => readonly }
-    if (name.endsWith('/useDocumentTitle')) return { useDocumentTitle() {} }
-    if (name.endsWith('/utils')) return { cn: (...args) => args.filter(Boolean).join(' ') }
-    if (name.endsWith('/vcsUrls')) return { issueUrl: () => '#' }
-    if (name.endsWith('/VcsIcon')) return { VcsIcon: () => null }
-    if (name.endsWith('/IssueList')) return { SubIssueRing: () => null }
-    return nativeRequire(name)
-  }
-  component._compile(compiled, filename)
-  return component.exports
-}
-
-test('remote dashboard disables run and pause, hides cancellation', () => {
-  for (const readonly of [true, false]) {
-    const { Dashboard, Row, AutoRunBanner } = dashboardComponents(readonly)
-    const dashboard = renderToStaticMarkup(React.createElement(Dashboard))
-    const runButton = dashboard.match(/<button[^>]*>[\s\S]*?<\/button>/)[0]
-    assert.equal(/disabled/.test(runButton), readonly)
-    const banner = renderToStaticMarkup(React.createElement(AutoRunBanner, {
-      intervalMin: 5, paused: false, nextFireMs: 0, now: 0, busy: false, onToggle() {},
-    }))
-    assert.equal(/disabled/.test(banner), readonly)
-    const row = renderToStaticMarkup(React.createElement(Row, {
-      r: { repo: 'owner/repo', issue_number: 1, operator: 'implement', started_at: '2026-10-28T00:00:00Z', status: 'running', path: 'runs/test' },
-      repoMap: {}, onCancel() {},
-    }))
-    assert.equal(/<button/.test(row), !readonly)
-  }
 })

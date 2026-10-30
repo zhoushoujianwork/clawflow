@@ -22,7 +22,7 @@ function AppLayout() {
       .then(d => { setReadonly(d.readonly !== false); setSessionReady(true) })
       .catch(() => setSessionReady(true))
   }, [])
-  const allowedPage = ['/dashboard', '/pipeline', '/usage', '/'].includes(pathname)
+  const allowedPage = ['/pipeline', '/usage'].includes(pathname)
   const [currentVersion, setCurrentVersion] = useState<string | null>(null)
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
   const [channel, setChannel] = useState('')
@@ -120,11 +120,10 @@ function AppLayout() {
                 <ShellLink to="/repos">Repositories</ShellLink>
                 <ShellLink to="/projects">Projects</ShellLink>
               </NavigationGroup>}
-              <NavigationGroup label="Administration" active={/^\/(dashboard|operators|settings)(\/|$)/.test(pathname)} pathname={pathname}>
-                <ShellLink to="/dashboard">Dashboard</ShellLink>
-                {!readonly && <ShellLink to="/operators">Operators</ShellLink>}
-                {!readonly && <ShellLink to="/settings">Settings</ShellLink>}
-              </NavigationGroup>
+              {!readonly && <NavigationGroup label="Administration" active={/^\/(operators|settings)(\/|$)/.test(pathname)} pathname={pathname}>
+                <ShellLink to="/operators">Operators</ShellLink>
+                <ShellLink to="/settings">Settings</ShellLink>
+              </NavigationGroup>}
             </nav>
           </div>
 
@@ -218,7 +217,7 @@ function StewardButton() {
     aria-label="与平台 steward 对话" title="与平台 steward 对话">Steward</button>
 }
 
-type ShellDestination = '/pipeline' | '/usage' | '/repos' | '/projects' | '/dashboard' | '/operators' | '/settings'
+type ShellDestination = '/pipeline' | '/usage' | '/repos' | '/projects' | '/operators' | '/settings'
 
 function ShellLink({ to, children }: { to: ShellDestination; children: ReactNode }) {
   return <Link to={to} className="shell-link" activeProps={{ 'aria-current': 'page' }}>{children}</Link>
