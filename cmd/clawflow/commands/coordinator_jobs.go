@@ -27,6 +27,7 @@ import (
 )
 
 type coordinatorPayload struct {
+	Testing           testingRequirements  `json:"testing,omitempty"`
 	AcceptancePlan    *acceptance.Plan     `json:"acceptance_plan,omitempty"`
 	Acceptance        *acceptance.Contract `json:"acceptance,omitempty"`
 	AcceptanceWorker  string               `json:"acceptance_worker,omitempty"`
@@ -128,7 +129,7 @@ func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordi
 			unique = append(unique, tag)
 		}
 	}
-	p := coordinatorPayload{Kind: kind, Operator: j.op.Name, SkillDigest: skillDigest(j.op), Repo: j.repo, Platform: platform, BaseURL: j.repoCfg.BaseURL, Issue: j.sub.Number, Role: roleForOperator(j.op.Name), Language: j.language, TimeoutSec: int64(timeout / time.Second), Tags: unique}
+	p := coordinatorPayload{Testing: declaredTesting(j.repo, j.repoCfg), Kind: kind, Operator: j.op.Name, SkillDigest: skillDigest(j.op), Repo: j.repo, Platform: platform, BaseURL: j.repoCfg.BaseURL, Issue: j.sub.Number, Role: roleForOperator(j.op.Name), Language: j.language, TimeoutSec: int64(timeout / time.Second), Tags: unique}
 	p.RepoPolicy.AcceptanceSetupCommand = j.repoCfg.AcceptanceSetupCommand
 	p.RepoPolicy.BaseBranch, p.RepoPolicy.TestCommand, p.RepoPolicy.CIRequired = j.repoCfg.BaseBranch, j.repoCfg.TestCommand, j.repoCfg.CIRequired
 	p.AcceptancePlan = j.acceptancePlan
@@ -293,7 +294,7 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 		r.TerminalState = "failed"
 	}
 	switch r.Status {
-	case "success", "failed", "disallowed-outcome", "skipped-empty", "output-limit", "lease-lost", "skipped", "cancelled", "auth-error", "no-marker", "rate-limited", "cost-limit":
+	case "blocked", "success", "failed", "disallowed-outcome", "skipped-empty", "output-limit", "lease-lost", "skipped", "cancelled", "auth-error", "no-marker", "rate-limited", "cost-limit":
 	default:
 		return coordinator.ErrInvalid
 	}
@@ -306,11 +307,20 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	if t.State != "leased" || t.LeaseOwner != worker || t.FencingToken != fence || t.LeaseExpiresAt == nil || !t.LeaseExpiresAt.After(time.Now()) {
 		return coordinator.ErrStaleLease
 	}
+	if r.Status == "blocked" {
+		if !failed || r.NextAction == "" || r.NextOwner == "" || r.Error == "" || len(r.Effects) != 0 || r.Acceptance != nil {
+			return coordinator.ErrInvalid
+		}
+	}
 	if t.Kind == "acceptance" {
 		return s.finishAcceptance(ctx, t, worker, fence, raw, &r, failed)
 	}
 	if r.Acceptance != nil {
 		return coordinator.ErrInvalid
+	}
+	if r.Status == "blocked" {
+		r.Output = testingBlockedBody(&r.jobResult)
+		r.Effects = []jobEffect{{Kind: "issue-comment", Repo: t.Repo, Number: t.Issue, Body: r.Output}}
 	}
 	j, err := s.loadJob(ctx, t)
 	if err != nil {

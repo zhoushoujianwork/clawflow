@@ -99,6 +99,9 @@ func (p *jobProvenance) normalize() []string {
 }
 
 type jobResult struct {
+	SOPDigest         string          `json:"sop_digest,omitempty"`
+	NextAction        string          `json:"next_action,omitempty"`
+	NextOwner         string          `json:"next_owner,omitempty"`
 	Provenance        *jobProvenance  `json:"provenance,omitempty"`
 	DevelopmentEvents string          `json:"development_events,omitempty"`
 	Status            string          `json:"status"`

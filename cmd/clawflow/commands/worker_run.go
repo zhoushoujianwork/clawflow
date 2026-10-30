@@ -35,6 +35,7 @@ import (
 type workerOptions struct {
 	Coordinator, TokenFile, Fingerprint, StateDir string
 	Tags, Roles                                   []string
+	Capabilities                                  []string
 	RunUntagged                                   bool
 	MaxParallel                                   int
 }
@@ -46,6 +47,7 @@ func configureWorker(cmd *cobra.Command) {
 	f.StringVar(&o.TokenFile, "token-file", "", "Worker token 文件")
 	f.StringVar(&o.Fingerprint, "fingerprint", "", "Coordinator SHA-256 指纹")
 	f.StringVar(&o.StateDir, "state-dir", os.Getenv("CLAWFLOW_STATE_DIR"), "Worker 状态目录")
+	f.StringSliceVar(&o.Capabilities, "capabilities", nil, "机器已配置的测试能力（逻辑别名，不代表实时探测或操作授权）")
 	f.StringSliceVar(&o.Tags, "tags", nil, "Worker 标签")
 	f.StringSliceVar(&o.Roles, "roles", []string{"operator"}, "Worker 角色")
 	f.BoolVar(&o.RunUntagged, "run-untagged", true, "接受无标签任务")
@@ -173,6 +175,9 @@ func (a *workerAPI) postOnce(ctx context.Context, path string, in, out any) erro
 type workerBuilder func(context.Context, *coordinator.Task) (*runJob, time.Duration, error)
 
 func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, poll time.Duration, build workerBuilder) error {
+	for _, capability := range o.Capabilities {
+		o.Tags = append(o.Tags, "capability:"+capability)
+	}
 	registration := map[string]any{"tags": o.Tags, "roles": o.Roles, "max_parallel": o.MaxParallel, "run_untagged": o.RunUntagged}
 	api.registration = registration
 	if err := api.post(ctx, "register", registration, nil); err != nil {
@@ -298,12 +303,20 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 	if t.Kind != "acceptance" && !slices.Contains(o.Roles, "operator") {
 		eligible = false
 	}
+	executionCtx := ctx
+	var readiness *jobResult
+	var sopDigest string
+	if eligible {
+		executionCtx, readiness, sopDigest = workerTestingContext(ctx, t, o.Tags)
+	}
 	if !eligible {
 		result.Error = "任务标签与 worker 不匹配"
+	} else if readiness != nil {
+		result = readiness
 	} else if t.Kind == "acceptance" {
-		return runWorkerAcceptanceTask(ctx, parent, api, o, t, stop, done)
+		return runWorkerAcceptanceTask(executionCtx, parent, api, o, t, stop, done)
 	} else {
-		j, timeout, err := build(ctx, t)
+		j, timeout, err := build(executionCtx, t)
 		if err != nil {
 			result.Error = err.Error()
 			result.InfraKind = "launch"
@@ -321,7 +334,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 				return err
 			}
 			defer os.Remove(spoolPath)
-			runCtx := workerEffectContext(ctx, spoolPath)
+			runCtx := workerEffectContext(executionCtx, spoolPath)
 			j.hooks = &jobHooks{SkipIndex: true, AfterRun: func(r *jobResult) { result = r }, AcquireLock: workerAcquireIssueLock, ReleaseLock: workerReleaseIssueLock}
 			_, _, failed := runOneOperatorFn(runCtx, j, timeout)
 			if j.result != nil {
@@ -340,6 +353,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 			}
 		}
 	}
+	result.SOPDigest = sopDigest
 	close(stop)
 	lost := <-done
 	if lost || parent.Err() != nil {

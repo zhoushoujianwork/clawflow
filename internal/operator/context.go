@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -17,10 +18,10 @@ import (
 // or "" for the historical auto-detect behaviour). A non-empty value appends
 // a language directive so all operator output (comments, verdicts) uses the
 // configured language.
-func BuildSystemPrompt(op *Operator, repo string, lang string) string {
+func BuildSystemPrompt(op *Operator, repo string, lang string, contexts ...context.Context) string {
 	var b strings.Builder
 
-	if header := project.HeaderForRepo(repo); header != "" {
+	if header := project.HeaderForRepo(repo, contexts...); header != "" {
 		b.WriteString(header)
 	}
 
