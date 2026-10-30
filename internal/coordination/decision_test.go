@@ -21,6 +21,20 @@ func TestDecisionEvidenceAndClosure(t *testing.T) {
 		{"compatible proceed", func(s *Snapshot, d *Decision) {}, true},
 		{"invalid outcome", func(s *Snapshot, d *Decision) { d.Outcome = "close-anything" }, false},
 		{"unknown issue", func(s *Snapshot, d *Decision) { d.Issues = []int{999} }, false},
+		{"proceed citing own issue", func(s *Snapshot, d *Decision) { d.Issues = []int{1} }, true},
+		{"proceed citing own and related issue", func(s *Snapshot, d *Decision) { d.Issues = []int{1, 2} }, true},
+		{"own issue plus unknown issue", func(s *Snapshot, d *Decision) { d.Issues = []int{1, 999} }, false},
+		{"waiting on own issue alone", func(s *Snapshot, d *Decision) { d.Outcome = "waiting"; d.Issues = []int{1} }, false},
+		{"waiting on own issue and a task", func(s *Snapshot, d *Decision) {
+			d.Outcome = "waiting"
+			d.Issues = []int{1}
+			d.Tasks = []string{"other"}
+		}, true},
+		{"supersede by own issue", func(s *Snapshot, d *Decision) {
+			d.Outcome = "superseded"
+			d.Issues = []int{1}
+			s.Issue.Body = "Superseded by: #1"
+		}, false},
 		{"unknown task", func(s *Snapshot, d *Decision) { d.Tasks = []string{"missing"} }, false},
 		{"waiting condition", func(s *Snapshot, d *Decision) { d.Outcome = "waiting"; d.Tasks = []string{"other"} }, true},
 		{"waiting without condition", func(s *Snapshot, d *Decision) { d.Outcome = "waiting" }, false},
