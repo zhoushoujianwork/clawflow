@@ -101,6 +101,10 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 	if err != nil {
 		return err
 	}
+	// Bind review to the development task's immutable requirements, not today's SOP.
+	if err := inheritDevelopmentTesting(&p, dev); err != nil {
+		return err
+	}
 	p.AcceptancePlan = &plan
 	p.Acceptance, p.DevelopmentWorker, p.Role = &c, dev.LeaseOwner, "acceptance"
 	p.AcceptanceWorker = rc.AcceptanceWorker
@@ -209,7 +213,10 @@ func (s *coordinatorResults) finishAcceptance(ctx context.Context, t *coordinato
 		}
 		now := time.Now().UTC()
 		digest, _ := p.Acceptance.Digest()
-		r.Acceptance = &acceptance.Record{Version: acceptance.Version, Contract: *p.Acceptance, ContractDigest: digest, AttemptID: execution.NewSessionKey(), Role: "acceptance", Verdict: acceptance.Blocked, Report: "Worker acceptance setup or execution failed", Completed: true, StartedAt: now, CompletedAt: now}
+		r.Acceptance = &acceptance.Record{Version: acceptance.Version, Contract: *p.Acceptance, ContractDigest: digest, AttemptID: execution.NewSessionKey(), Role: "acceptance", Verdict: acceptance.Blocked, Report: "Worker acceptance setup or execution failed", NextAction: r.NextAction, NextOwner: r.NextOwner, Completed: true, StartedAt: now, CompletedAt: now}
+		if r.Status == "blocked" {
+			r.Acceptance.Report = testingBlockedBody(&r.jobResult)
+		}
 	} else {
 		// Decode nested evidence with the store's exact schema decoder.
 		var envelope struct {

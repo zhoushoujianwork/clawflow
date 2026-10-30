@@ -242,7 +242,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		}
 	}
 	// Add environment procedures after selecting the report mode, never to planning.
-	prompt += project.TestingHeaderForRepo(c.Repository)
+	prompt += project.TestingHeaderForRepo(c.Repository, ctx)
 	prompt += renderReviewInstruction(c.HeadSHA, renderCI)
 	execute := runner.Execute
 	if execute == nil {

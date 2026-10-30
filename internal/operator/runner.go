@@ -286,7 +286,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		}
 		defer release()
 	}
-	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language)
+	systemPrompt := BuildSystemPrompt(op, opts.Repo, opts.Language, ctx)
 	userMessage := BuildUserMessage(sub, opts.Repo, opts.Comments)
 	if opts.ResumeContext != "" {
 		userMessage += "\n---\n\n" + opts.ResumeContext

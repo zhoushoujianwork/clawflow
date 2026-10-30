@@ -1,16 +1,16 @@
 # 特殊真实测试环境：声明与就绪契约
 
-状态：设计契约及 SOP 模板。#559 的代码仅共享机器本地主项目 `testing.md`，不实现 coordinator 文档传输或结构化 readiness gate。#602 增加了下述机器本地共享资源租约，跨机器权威租约服务仍未实现。以下协议描述后续实现必须满足的行为，不表示已有运行时能力。未完成的执行验收项继续保留，不能因 SOP 注入完成关闭整个需求。
+状态：设计契约及 SOP 模板。#559 共享机器本地主项目 `testing.md`；#603 增加 coordinator SOP 摘要和能力声明的 readiness 检查（见末节）；#602 增加机器本地共享资源租约。不实现 coordinator 文档传输、实时环境探测或跨机器权威租约服务。以下协议中的后续设计不表示已有运行时能力。未完成的执行验收项继续保留，不能因 SOP 注入完成关闭整个需求。
 
 ## 当前边界与共同输入
 
 开发通过 `project.HeaderForRepo`、独立验收通过 `project.TestingHeaderForRepo` 读取执行机器上的同一主项目 `testing.md`，使用相同的 SOP 段落格式。主项目遵循仓库 `primary_project`，未配置时按项目名排序选择。验收只读取测试程序，不注入 `context.md` 或 `deployment.md` 中的开发结论。requirements-only planner 不读取这些机器文档，也不读取开发答案。
 
-文档不存在、为空或仓库无项目时，保持旧提示输入行为。这是向后兼容，不是证明真实环境可用。若批准的需求要求真实测试而文档或能力缺失，审核者必须报告 `blocked`、缺失证据、就绪步骤和 `next_owner`，不得用离线通过替代。当前依赖审核者遵守指令，尚无结构化环境门禁保证此行为。
+文档不存在、为空或仓库无项目时，保持旧提示输入行为。这是向后兼容，不是证明真实环境可用。若批准的需求要求真实测试而文档或能力缺失，审核者必须报告 `blocked`、缺失证据、就绪步骤和 `next_owner`，不得用离线通过替代。声明了需求的 coordinator 任务现在执行末节所述结构化前置检查；实时探测仍依赖独立证据。
 
-本机单 worker 需要有正确项目映射和私有文件。跨机器 coordinator 目前不随任务分发这些文档、能力或资源锁；配置同步也不证明候选 worker 已具备能力。不得假定 coordinator 上的文件存在于 worker。后续调度协议须携带公开环境 ID、SOP 版本摘要、所需能力和租约键，worker 解析私有绑定后验证摘要，一致才可执行。缺少映射、文件、版本匹配或能力时返回 `blocked`；项目维护者负责 SOP，机器维护者负责绑定/登录/connector，调度者负责重新分派。不能自动把私有文档复制进公共任务或评论。
+本机单 worker 需要有正确项目映射和私有文件。跨机器 coordinator 不分发私有文档或资源锁；#603 随任务携带公开能力需求和 SOP 摘要，worker 仍须具备自己的本地文件。配置同步也不证明候选 worker 已具备能力。不得假定 coordinator 上的文件存在于 worker。后续调度协议须携带公开环境 ID、SOP 版本摘要、所需能力和租约键，worker 解析私有绑定后验证摘要，一致才可执行。缺少映射、文件、版本匹配或能力时返回 `blocked`；项目维护者负责 SOP，机器维护者负责绑定/登录/connector，调度者负责重新分派。不能自动把私有文档复制进公共任务或评论。
 
-共享 SOP 应仅含程序和前置条件，不含开发结果；使用不可变版本及 SHA-256 摘要约定开发和验收读取同一版。当前逐次读取文件，不会锁定两次会话之间的文档版本；版本变化需要重新建立基线，不能声称快照一致性已实现。验收会话仍独立，固定候选 head，重新探测并生成新证据；已有 source immutability、exact-head 和 native identity 检查保持有效。SOP 不得改变批准需求或成为 planner 的新需求来源。
+共享 SOP 应仅含程序和前置条件，不含开发结果；使用不可变版本及 SHA-256 摘要约定开发和验收读取同一版。coordinator 任务在执行前校验摘要并固定会话文本；验收继承开发候选的摘要，版本变化会阻塞并要求恢复版本或重新建立基线。非 coordinator 调用仍逐次读取文件，不能声称其跨会话快照一致性已实现。验收会话仍独立，固定候选 head，重新探测并生成新证据；已有 source immutability、exact-head 和 native identity 检查保持有效。SOP 不得改变批准需求或成为 planner 的新需求来源。
 
 ## 通用声明模板
 
@@ -122,3 +122,43 @@ next_action: 在已批准独占窗口加载候选构建后重新探测；不能�
 ## 权限和恢复边界
 
 SOP 不是授权来源。只读探测获准不等于 GUI 操作、真实写入、替换 daemon、部署候选或发布获准。禁止占用其他任务/用户工程、操作生产工程、读取凭据或扩大任务范围。需要的操作超出当前授权时，保留证据并 blocked，给出操作、责任方和可审核的恢复方案。公共模板和测试 fixture 只使用逻辑别名与合成身份。
+
+## #603：已实现的 coordinator readiness 检查
+
+仓库配置可声明公开前置条件（不包含私有路径、身份或 SOP 正文）：
+
+```yaml
+testing_sop_required: true
+testing_sop_digest: <approved-content-sha256>
+required_capabilities: [fixture-runtime]
+```
+
+`testing_sop_digest` 是批准的 `testing.md` 原始字节的 SHA-256。若 coordinator
+本机有非空 SOP，入队时自动要求 SOP 并固定其摘要；显式配置摘要优先。
+coordinator 没有 SOP 时，须通过以上配置声明需求，不能从未声明的自然语言推断能力。
+要求 SOP 却没有批准摘要时返回 blocked，由项目维护者配置摘要后重新入队。
+任务只传需求和摘要，不传机器本地文档。
+
+远程 worker 使用 `--capabilities fixture-runtime` 声明机器已配置的逻辑能力，
+注册时作为 `capability:fixture-runtime` 标签公开；本机 worker 可在
+`settings.coordinator.local_worker.tags` 配置相同的能力标签。
+原有 `--tags`、主机标签和仓库 `worker_tags` 路由保持不变。
+能力声明不代表实时探测通过，更不代表真实写入获准；#601 的实时身份与证据分层、
+#602 的共享资源租约仍是独立工作。
+
+worker 在 checkout 或启动算子/验收前读取自己的主项目 SOP。
+缺文件/映射、摘要不匹配、未固定必需版本或缺能力时，上传结构化
+`status: blocked`、`next_action` 和 `next_owner`，不执行离线测试来替代。
+coordinator 持久化阻塞结果并发布说明；任务调度终态使用现有 `failed`，
+result 保持 `blocked`，独立验收记录使用 `blocked`。准备就绪后需重新入队。
+SOP/版本由 `project-maintainer` 处理，能力由 `environment-maintainer` 配置或请求改派。
+
+开发执行记录实际使用的 SOP 摘要。验收任务继承该候选开发任务的需求与摘要，
+即使 coordinator 配置或文档随后变化也不重新选版；worker 遇到版本变化会明确报告
+“Testing SOP revision changed”，要求恢复批准版本或重新建立开发和验收基线。
+本次会话通过检查的本地 SOP 字节固定在执行上下文中，后续文件编辑不能改变提示输入。
+历史任务没有版本证据时只能使用其原有任务声明，不能追认其版本一致性。
+
+SOP 始终是程序说明，不能授权 GUI 操作、替换 daemon、修改生产工程、读取凭据
+或扩大发布范围。readiness 检查只读取 SOP 和已声明能力，不执行文档中的命令。
+#603 的实现不包含实时探测、候选部署或资源租约，也不扩大操作授权；#602 的机器本地共享资源租约见前节。
