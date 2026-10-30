@@ -176,3 +176,27 @@ func TestRepairWorkdirFailureNeverRunsAgent(t *testing.T) {
 		t.Fatal("missing infrastructure run log")
 	}
 }
+
+// An issue can disappear after notification but before the final label read.
+// A settled repair must not panic or manufacture a label on another issue.
+type vanishedRepairIssueClient struct{ *repairFailureClient }
+
+func (c vanishedRepairIssueClient) GetIssue(string, int) (*vcs.Issue, error) { return nil, nil }
+func TestRepairFailureHandlesVanishedIssue(t *testing.T) {
+	withRunLog(t)
+	pr, issue := repairFixture()
+	base := &repairFailureClient{repairClient: repairClient{pr: pr, issue: issue}}
+	j := &runJob{repo: "o/r", client: vanishedRepairIssueClient{base}, sub: &operator.Subject{Number: issue.Number}, repair: &ciRepairContext{PR: pr, FailingCheck: "Native macOS"}}
+	now := time.Now().Add(-time.Hour)
+	for n := 0; n < 3; n++ {
+		if _, e := reserveRepair(snapshot.DataDir(), j.repo, pr, repairReasonCI, now.Add(time.Duration(n)*10*time.Minute)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e := finishRepairFailure(context.Background(), j, "real repair failed"); e != nil {
+		t.Fatal(e)
+	}
+	if base.labels != 0 || len(base.comments) != 1 {
+		t.Fatalf("labels=%d comments=%v", base.labels, base.comments)
+	}
+}

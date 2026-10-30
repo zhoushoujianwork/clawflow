@@ -696,6 +696,10 @@ func finishRepairFailure(ctx context.Context, j *runJob, reason string) error {
 	if e != nil {
 		return e
 	}
+	if issue == nil {
+		runLog.Info("run/ci_repair_issue_missing", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number)
+		return nil
+	}
 	if !issue.HasLabel("agent-failed") {
 		if e := j.client.AddLabel(j.repo, j.sub.Number, "agent-failed"); e != nil {
 			return e
