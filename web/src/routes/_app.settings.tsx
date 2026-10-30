@@ -1,3 +1,4 @@
+import { ScheduledChecksAdministration } from '../components/ScheduledChecksPanel'
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
@@ -75,6 +76,8 @@ function SettingsPage() {
           fields are never shown in full — type the new value to change them, leave blank to keep.
         </p>
       </div>
+
+      <ScheduledChecksAdministration />
 
       {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
       {error && (
