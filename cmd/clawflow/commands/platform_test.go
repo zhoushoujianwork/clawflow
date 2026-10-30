@@ -16,9 +16,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"gopkg.in/yaml.v3"
 )
 
@@ -243,5 +246,34 @@ func TestPlatformAdminPreservesRepoPolicy(t *testing.T) {
 		if _, err := a.Repos(context.Background(), input); err == nil {
 			t.Fatalf("accepted %+v", input)
 		}
+	}
+}
+
+func TestPlatformStatusHousekeepingAndDiskWarning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	cfg := &config.Config{}
+	cfg.Settings.Housekeeping.DiskWarningPercent = 0.000001
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	last := housekeeping.Result{At: time.Now().UTC(), Paths: []string{"owned"}, Bytes: 42}
+	if err := os.MkdirAll(snapshot.DataDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(housekeepingResultPath(), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	admin := &platformAdmin{board: func(context.Context) (coordinator.Board, error) { return coordinator.Board{}, nil }}
+	status, err := admin.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Disk == nil || status.TempDisk == nil || !status.Disk.Warning || !status.TempDisk.Warning || status.LastHousekeeping == nil || status.LastHousekeeping.Bytes != 42 {
+		t.Fatalf("%+v", status)
 	}
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
@@ -443,6 +444,9 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 		}
 	}()
 
+	hk := runHousekeeping(ctx, cfg, false)
+	lg.Info("run/housekeeping", "removed", len(hk.Paths), "bytes", hk.Bytes, "skipped", hk.Skipped, "errors", hk.Errors)
+
 	allRepos, hiddenRepo, err := resolveRunRepos(cfg, onlyRepo, onlyIssue)
 	if err != nil {
 		return err
@@ -512,30 +516,6 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	} else {
 		fmt.Fprintf(os.Stderr, "⚠ reconcile stale runs: %v\n", err)
 		lg.Warn("run/reconcile", "err", err.Error())
-	}
-
-	// GC analysis worktrees for repos that are no longer in config. When a
-	// repo is removed from clawflow config the persistent analysis worktree
-	// it created would otherwise remain registered in the source clone's
-	// .git/worktrees/ forever (issue #211). This is cheap (just a directory
-	// scan) and idempotent.
-	if n := pruneOrphanedAnalysisWorktrees(cfg); n > 0 {
-		fmt.Fprintf(os.Stderr, "✓ pruned %d orphaned analysis worktree(s)\n", n)
-		lg.Info("run/prune_analysis_worktrees", "pruned", n)
-	}
-
-	// GC empty issue-* implement worktrees left behind by early-exit
-	// failures that used to be preserved on status alone regardless of
-	// content (issue #329). Covers both new accumulation (going forward,
-	// runOneOperator's cleanup decision now checks content too) and the
-	// pre-existing pile of empty shells from before this fix.
-	// Limited to repos this pass holds the run lock for: another pass may be
-	// about to write into an empty-looking worktree of a repo it holds.
-	pruneCfg := *cfg
-	pruneCfg.Repos = allRepos
-	if n := pruneEmptyIssueWorktrees(&pruneCfg); n > 0 {
-		fmt.Fprintf(os.Stderr, "✓ pruned %d empty issue worktree(s)\n", n)
-		lg.Info("run/prune_empty_issue_worktrees", "pruned", n)
 	}
 
 	// Snapshot the static state so the dashboard can render it even if no
@@ -1463,6 +1443,11 @@ func runJobsParallel(ctx context.Context, jobs []*runJob, workers int, timeout t
 // from concurrent workers stays disentangleable.
 func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didFire bool, hitRateLimit bool, failed bool) {
 	j.result = &jobResult{Status: "skipped"}
+	releaseMaintenance, maintenanceErr := housekeeping.Gate(ctx, os.TempDir(), false)
+	if maintenanceErr != nil {
+		return false, false, true
+	}
+	defer releaseMaintenance()
 	releaseSlot, slotErr := configuredAgentSlot(ctx)
 	if slotErr != nil {
 		runLog.Info("run/agent_slot_busy", "repo", j.repo, "err", slotErr.Error())

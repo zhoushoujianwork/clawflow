@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 )
 
 // RepoRequest limits remote mutations to enrollment and existing repo options.
@@ -19,9 +21,13 @@ type RepoRequest struct {
 }
 
 type PlatformStatus struct {
-	Version string         `json:"version"`
-	Queue   map[string]int `json:"queue"`
-	Workers []BoardWorker  `json:"workers"`
+	Disk             *housekeeping.Disk   `json:"disk,omitempty"`
+	TempDisk         *housekeeping.Disk   `json:"temp_disk,omitempty"`
+	LastHousekeeping *housekeeping.Result `json:"last_housekeeping,omitempty"`
+	DiskError        string               `json:"disk_error,omitempty"`
+	Version          string               `json:"version"`
+	Queue            map[string]int       `json:"queue"`
+	Workers          []BoardWorker        `json:"workers"`
 }
 
 // AdminService reuses the host's config mutation paths, without exposing credentials.

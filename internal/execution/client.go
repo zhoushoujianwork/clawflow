@@ -24,6 +24,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/agentcapacity"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 )
 
 const MaxRequestBytes = 4 << 20
@@ -343,6 +344,11 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, err
 	}
 	defer release()
+	releaseMaintenance, err := housekeeping.Gate(ctx, os.TempDir(), false)
+	if err != nil {
+		return result, err
+	}
+	defer releaseMaintenance()
 	dir, err := os.MkdirTemp("", "clawflow-offload-*")
 	if err != nil {
 		return result, err

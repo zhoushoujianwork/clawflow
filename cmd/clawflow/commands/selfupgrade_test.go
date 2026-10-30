@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -47,6 +48,7 @@ func newUpgradeHarness(t *testing.T) *upgradeHarness {
 		t.Fatal(err)
 	}
 	u := newSelfUpgrader()
+	u.DiskProbe = func(string) (housekeeping.Disk, error) { return housekeeping.Disk{Available: 100 << 30}, nil }
 	u.Version = "oldver"
 	u.Commit = strings.Repeat("a", 40)
 	u.Executable = func() (string, error) { return h.dest, nil }
@@ -655,5 +657,41 @@ func TestCandidateMigrationDeadline(t *testing.T) {
 	err := u.migrateCandidate(ctx, "/candidate")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestSelfUpgradeInsufficientDisk(t *testing.T) {
+	h := newUpgradeHarness(t)
+	calls, cleaned := 0, 0
+	h.u.DiskProbe = func(string) (housekeeping.Disk, error) { calls++; return housekeeping.Disk{Available: 1}, nil }
+	h.u.Housekeeping = func(context.Context) { cleaned++ }
+	out := h.u.Upgrade(context.Background(), selfUpgradeRepo(t))
+	if out.Result != selfUpgradeSkipped || out.Reason != "insufficient_disk" || cleaned != 1 || calls != 2 {
+		t.Fatalf("outcome=%+v, probes=%d, cleanup=%d", out, calls, cleaned)
+	}
+	for _, call := range h.calls {
+		if strings.Contains(call, "go build") || strings.Contains(call, "pnpm") {
+			t.Fatal("build started with insufficient disk:", call)
+		}
+	}
+}
+
+func TestSelfUpgradeDiskVolumesAndRecovery(t *testing.T) {
+	h := newUpgradeHarness(t)
+	cleaned := false
+	var paths []string
+	h.u.DiskProbe = func(path string) (housekeeping.Disk, error) {
+		paths = append(paths, path)
+		if path == "temp" && !cleaned {
+			return housekeeping.Disk{}, nil
+		}
+		return housekeeping.Disk{Available: 100 << 30}, nil
+	}
+	h.u.Housekeeping = func(context.Context) { cleaned = true }
+	if err := h.u.ensureDisk(context.Background(), "build", "temp"); err != nil {
+		t.Fatal(err)
+	}
+	if !cleaned || strings.Join(paths, ",") != "build,temp,build,temp" {
+		t.Fatalf("probes=%v cleaned=%v", paths, cleaned)
 	}
 }

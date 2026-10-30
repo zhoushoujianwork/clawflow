@@ -97,6 +97,8 @@ func captureStderr(t *testing.T, fn func()) string {
 
 func targetedConfig(t *testing.T, mutate func(*config.Repo)) {
 	t.Helper()
+	// Scheduler housekeeping must never scan the host temp root in tests.
+	t.Setenv("TMPDIR", t.TempDir())
 	repo := config.Repo{Enabled: false, Platform: "github", BaseURL: "https://vcs.invalid", LocalPath: t.TempDir(), BaseBranch: "main"}
 	if mutate != nil {
 		mutate(&repo)

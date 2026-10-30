@@ -25,6 +25,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
+	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -772,6 +773,12 @@ func acceptanceReviewerEnv(env []string) []string {
 }
 
 func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber int) (acceptance.Record, error) {
+	releaseMaintenance, maintenanceErr := housekeeping.Gate(ctx, os.TempDir(), false)
+	if maintenanceErr != nil {
+		return acceptance.Record{}, maintenanceErr
+	}
+	defer releaseMaintenance()
+
 	ctx = gitexec.WithRepo(ctx, repo)
 	releaseSlot, err := configuredAgentSlot(ctx)
 	if err != nil {
