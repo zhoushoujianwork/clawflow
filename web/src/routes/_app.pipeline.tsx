@@ -9,7 +9,7 @@ import { WorkSearchControls } from '../components/WorkSearchControls'
 import { workSearch, type WorkSearch } from '../lib/workSearch'
 import type { ProjectEntry } from '../lib/projectMembership'
 import { WorkList } from '../components/WorkList'
-import { ScheduledChecksPanel } from "../components/ScheduledChecksPanel"
+import { ScheduledChecksPanel, useScheduledChecks } from "../components/ScheduledChecksPanel"
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ExternalLink, Loader2, RefreshCw } from 'lucide-react'
@@ -221,6 +221,7 @@ function shortSha(sha?: string): string {
 }
 
 function PipelinePage() {
+  const scheduled = useScheduledChecks()
   useDocumentTitle('Work')
   const search = Route.useSearch()
   const navigate = Route.useNavigate()
@@ -317,7 +318,7 @@ function PipelinePage() {
         {selectedItem && <><ItemDetail item={selectedItem} /><PilotTimeline actions={itemPilotActions(board?.pilot_actions || [], selected.repo, selectedItem)} /></>}
       </WorkDetail>}
       <WorkSummary repos={board?.repos} sources={board?.sources} generatedAt={board?.generated_at} stale={board?.stale} refreshing={refreshing || board?.refreshing} failed={!!error} filter={search.work} onFilter={work => update({ work, tab: work === 'delivered' ? 'delivered' : 'active' })} />
-      <ScheduledChecksPanel />
+      <ScheduledChecksPanel data={scheduled.data} error={scheduled.error} />
 
       {loading && !board ? (
         <p className="text-sm text-muted-foreground text-center py-8 flex items-center justify-center gap-2">
@@ -333,7 +334,7 @@ function PipelinePage() {
             {!board.worker_pool && <p>{board.worker_pool_error || (board.worker_pool === null ? 'Coordinator disabled' : 'Worker source unavailable')}</p>}
           </details>
           <ExecutionCapacity board={board} failed={!!error} />
-          <Attention board={board} repoInfo={repoInfo} />
+          <Attention board={board} schedules={scheduled.data} repoInfo={repoInfo} />
           <div className="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Pipeline items">
             {(['active', 'running', 'waiting', 'delivered'] as const).map(tab => {
               const selected = search.work || (search.tab === 'delivered' ? 'delivered' : 'active')

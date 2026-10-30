@@ -1,3 +1,4 @@
+import { checkNeedsAttention, latestCheckRun, resultLink, type ChecksData } from './ScheduledChecksPanel'
 import { runDetailUrl } from '../lib/runDetailUrl'
 import { useState } from 'react'
 import type { Board, Item, PipelineEvent } from '../routes/_app.pipeline'
@@ -17,6 +18,7 @@ export interface Incident {
   lastSeen?: string
   occurrences: number
   runUrl?: string
+  schedule?: boolean
 }
 export const ATTENTION_LIMIT = 5
 const active = (item: Item) => item.state !== 'closed' && item.stage !== 'merged'
@@ -25,7 +27,7 @@ const validTime = (s?: string) => s && Number.isFinite(Date.parse(s)) ? s : unde
 
 // These are observations in the bounded snapshot/event window, not lifetime totals.
 // Re-reading a snapshot never increments a counter or creates another incident.
-export function attentionIncidents(board: Board): Incident[] {
+export function attentionIncidents(board: Board, schedules?: ChecksData): Incident[] {
   const incidents = new Map<string, Incident>()
   function add(key: string, repo: string, issue: number | undefined, title: string, reason: Reason, runUrl?: string) {
     let row = incidents.get(key)
@@ -113,12 +115,20 @@ export function attentionIncidents(board: Board): Incident[] {
       disposition: a.action.type === 'ask_human' && a.outcome === 'applied' ? 'needs-human' : 'informational', severity: 'info', time: a.at,
     })
   }
+  for (const check of schedules?.checks || []) {
+    const run = latestCheckRun(schedules!, check.id)
+    if (!checkNeedsAttention(check)) continue
+    const key = JSON.stringify(['schedule', check.id])
+    const reason: Reason = { text: !check.enabled && check.failures >= 3 ? 'Disabled after three failures' : 'Scheduled check failed', disposition: 'needs-human', severity: 'error', time: check.last_run_at || undefined }
+    const evidence: Reason = { ...reason, text: run ? `${run.started_at} · ${run.status} · ${run.summary || 'Summary unavailable'}` : check.last_summary || 'Latest evidence unavailable' }
+    incidents.set(key, { key, repo: 'Steward · Scheduled observation', title: check.id, reasons: [reason, evidence], primary: reason, occurrences: 1, lastSeen: validTime(check.last_run_at || undefined), runUrl: run ? resultLink(check.id) : undefined, schedule: true })
+  }
   return [...incidents.values()].sort((a, b) => rank(b.primary) - rank(a.primary) || a.key.localeCompare(b.key))
 }
 
-export function Attention({ board, repoInfo }: { board: Board; repoInfo: RepoInfoMap }) {
+export function Attention({ board, repoInfo, schedules }: { board: Board; repoInfo: RepoInfoMap; schedules?: ChecksData }) {
   const [limit, setLimit] = useState(ATTENTION_LIMIT)
-  const rows = attentionIncidents(board)
+  const rows = attentionIncidents(board, schedules)
   return <section className="mb-4 min-w-0" aria-label="Needs attention">
     {board.pilot_error && <p role="alert">{board.pilot_error}</p>}
     {rows.length ? <>
@@ -128,8 +138,9 @@ export function Attention({ board, repoInfo }: { board: Board; repoInfo: RepoInf
         <div className="flex flex-wrap gap-2"><strong>{row.title || `Issue #${row.issue}`}</strong><span>{row.primary.severity}</span><span>{row.primary.disposition === 'needs-human' ? 'Needs human' : row.primary.disposition === 'automatic-retry' ? 'Automatic retry' : 'Informational'}</span></div>
         <p className="mt-1">{row.primary.text}</p>
         <p className="text-muted-foreground mt-2">{row.repo}{row.issue ? ` #${row.issue}` : ''} · First seen: {row.firstSeen || 'unknown'} · Last seen: {row.lastSeen || 'unknown'} · Occurrences: {row.occurrences}</p>
-        <div className="flex flex-wrap gap-3 mt-2"><a className="text-brand underline" href={row.issue ? issueUrl(row.repo, row.issue, repoInfo) : repoUrl(row.repo, repoInfo)} target="_blank" rel="noreferrer">{row.issue ? 'View issue' : 'View repository'}</a>{row.runUrl && <a className="text-brand underline" href={row.runUrl}>View run</a>}</div>
-        {row.reasons.length > 1 && <details className="mt-2"><summary className="cursor-pointer">Supporting reasons ({row.reasons.length - 1})</summary><ul className="list-disc pl-4">{row.reasons.filter(r => r.text !== row.primary.text).map(r => <li key={r.text}>{r.text}</li>)}</ul></details>}
+        <div className="flex flex-wrap gap-3 mt-2">{!row.schedule && <a className="text-brand underline" href={row.issue ? issueUrl(row.repo, row.issue, repoInfo) : repoUrl(row.repo, repoInfo)} target="_blank" rel="noreferrer">{row.issue ? 'View issue' : 'View repository'}</a>}{row.runUrl && <a className="text-brand underline" href={row.runUrl}>{row.schedule ? 'Latest result' : 'View run'}</a>}</div>
+        {row.schedule && <p className="mt-2 whitespace-pre-wrap">{row.reasons[1].text}</p>}
+        {!row.schedule && row.reasons.length > 1 && <details className="mt-2"><summary className="cursor-pointer">Supporting reasons ({row.reasons.length - 1})</summary><ul className="list-disc pl-4">{row.reasons.filter(r => r.text !== row.primary.text).map(r => <li key={r.text}>{r.text}</li>)}</ul></details>}
       </li>)}</ul>
       {rows.length > limit && <button type="button" className="text-sm underline mt-2" onClick={() => setLimit(limit + ATTENTION_LIMIT)}>Show more ({rows.length - limit})</button>}
     </> : <p className="text-sm text-muted-foreground">Nothing needs you</p>}
