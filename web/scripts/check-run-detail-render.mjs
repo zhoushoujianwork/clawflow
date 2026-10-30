@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { preview } from 'vite'
+import { defaultParseSearch } from '@tanstack/react-router'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const server = await preview({root,configFile:false,preview:{host:'127.0.0.1',port:0}})
@@ -36,7 +37,9 @@ try {
     assert.equal(requests.some(r=>r.includes('events.jsonl')),false)
     const back = page.getByRole('link',{name:'Back to Work details'})
     const url = new URL(await back.getAttribute('href'),origin)
-    assert.deepEqual(JSON.parse(url.searchParams.get('detail')),['owner/repo',549])
+    assert.equal(url.pathname,'/pipeline')
+    // The router decodes its serialized search value before Work reads the JSON key.
+    assert.deepEqual(JSON.parse(defaultParseSearch(url.search).detail),['owner/repo',549])
     await page.getByRole('button',{name:'Load execution events / legacy transcript'}).click()
     await page.getByText('Progress · tool_call · tool: Read',{exact:true}).waitFor()
     assert.ok(requests.some(r=>r.includes('events.jsonl')))
