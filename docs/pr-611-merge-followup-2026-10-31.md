@@ -61,3 +61,11 @@ Test 检查 `124234340438` 也失败，Web render 通过。ClawFlow 的有界日
 完整回归后，将源提交 `2106391aec4e9c4b4bf333bf311b57109039b927` 滚动部署为 `dev-merge-assist-2106391a`，摘要 `6f91518012a86fbbb4d21d59d45396d8161a9fd39fc7610b870e6559d8ee6482`。两个 worker generation 均匹配；#612 executor PID 59667、epoch 1、原固定执行器及 PostgreSQL PID 61176 保持。Offload #68 此时已自然完成，journal 为 acknowledged，不将其进程结束误报为部署中断。备份为 `~/Library/Application Support/ClawFlow/backups/coordination-primary-20261031-lxpdopu6/`。安装后的 CLI 已实际读回准确失败 job 日志，证明日志修复进入部署版本，结果在 `/tmp/clawflow-pr611-installed-ci-log-proof.txt`。
 
 按用户此前明确要求，将“现在已经改运行在本地了 更新一下你的记忆”原文及本机 ClawFlow/B0435.local 的只读证据提交到已配置的 Agent-Host 记忆连接 default，回执 `b9e6f395-4b3d-4b4b-a8f8-17f1f79dc9cf`、ingestion_status=received。这只证明已接收，未声称已完成选择或发布，不轮询处理状态。
+
+## 恢复固定 SOP，隔离补充资料
+
+19:07:59 UTC，#612 原 CC 会话达到一小时执行期限，结果为 `context deadline exceeded`、error_kind=canceled、infra_kind=execution-interrupted；任务原 epoch 1 的 journal 和 execution.json 已由正常机制保留在 `history/.../epoch-1/`。它在本轮各次部署期间保持连续，最终因原定执行期限结束，不能描述为部署取消。
+
+随后自动重试进入 epoch 2/3，但在模型启动前被 testing SOP 摘要不一致拦截：任务固定 `800afdfb709f5445c55ed84774ce89a726836f3862530828c377a0a8fb956bfa`，而本轮为 #611 追加的共享 SOP 已改变。这是本轮操作引入的失误，不能通过改任务摘要或清空重试历史解决。
+
+已从原始备份恢复共享 `testing.md`，SHA-256 精确匹配上述固定版本。补充原生资料说明移至 `acceptance-inputs/clawflow-pr611/testing.native-evidence-procedure.md`，只在项目 context 中提供只读定位；它不替代原 SOP、原有验收要求或独立判断。临时证据写入脚本也已改为只更新独立说明文件，避免新提交验收时再次改共享 SOP。调度器已重新选取 #612；是否进入新会话、修复与合并仍需按后续真实记录判断。
