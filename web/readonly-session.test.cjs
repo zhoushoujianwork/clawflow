@@ -74,6 +74,14 @@ test('nested management routes mark their group active', () => {
   assert.match(renderLayout(false, '/repos/owner/repo'), /data-active="true">Management/)
   assert.match(renderLayout(false, '/settings'), /data-active="true">Administration/)
 })
+test('administration retains local destinations and is absent on LAN', () => {
+  const local = renderLayout(false)
+  const group = local.match(/<details[^>]*><summary[^>]*>Administration<\/summary>([\s\S]*?)<\/details>/)[1]
+  assert.match(group, /href="\/operators"/)
+  assert.match(group, /href="\/settings"/)
+  assert.doesNotMatch(group, /Dashboard|href="\/dashboard"/)
+  assert.doesNotMatch(renderLayout(true), />Administration<|href="\/(operators|settings|dashboard)"/)
+})
 test('remote deep links cannot mount privileged pages', () => {
   const html = renderLayout(true, '/settings')
   assert.match(html, /requires local access/)
