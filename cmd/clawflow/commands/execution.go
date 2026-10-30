@@ -24,7 +24,7 @@ func NewExecutionCmd() *cobra.Command {
 		Use:   "execution",
 		Short: "Inspect the configured Offload execution engine",
 	}
-	cmd.AddCommand(newExecutionCheckCmd())
+	cmd.AddCommand(newExecutionCheckCmd(), newExecutionStatusCmd())
 	return cmd
 }
 

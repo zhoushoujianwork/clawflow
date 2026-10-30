@@ -32,7 +32,7 @@ Each task directory retains `journal.json`, `executor.log`, and `execution.json`
 clawflow worker executions --root /absolute/execution-root
 ```
 
-States include `prepared`, `running`, `pending_sync`, `acknowledged`, `rejected`, and `needs_recovery`. The executor retries transient upload failures; a restarted manager restarts pending delivery. The controller acknowledges the exact persisted report idempotently, including after finalization. Same-epoch durable results can arrive after the execution deadline while ownership is still reserved. Conflicting or superseded results are retained locally and rejected, never applied as new work.
+States include `prepared`, `running`, `pending_sync`, `acknowledged`, `pending_release`, `released`, `rejected`, and `needs_recovery`. The executor retries transient upload failures; a restarted manager restarts pending delivery. The controller acknowledges the exact persisted report idempotently, including after finalization. Same-epoch durable results can arrive after the execution deadline while ownership is still reserved. Conflicting or superseded results are retained locally and rejected, never applied as new work.
 
 Execution has a fixed deadline based on the task timeout, plus ten minutes for reporting. Heartbeats do not extend execution authority indefinitely. If the controller remains unavailable, the executor stops at the execution deadline and preserves its result. Expired durable tasks retain their reservation rather than being blindly reassigned. This trades automatic replacement availability for duplicate-execution safety.
 
@@ -53,3 +53,7 @@ This supports controller/manager restarts and retained development/repair sessio
 ## Validation boundary
 
 Headless fixtures exercise durable authority, fencing, late/duplicate reports, journal corruption, admission generation transfer, checkpoint resume and a real subprocess crash with an inherited recovery lock. These tests do not invoke a paid provider or restart production services. Record real backend and first-production-cutover acceptance separately.
+
+## Offload readiness during durable handoff
+
+Readiness gates are process-local caches and are excluded from generation and execution journals. A manager loaded through `worker serve` rebuilds its gate in that worker's environment. A prepared executor checks its own runtime before starting task code. If blocked, it durably records `pending_release` and returns the unused lease without a result or attempt charge; successful or stale release responses retire the local attempt as `released`. Managers replay pending releases after restart. A later authorized claim archives that released attempt before preparing a new execution, with exclusive executor/session locks and no retained checkpoint. Reports and interrupted sessions retain their separate delivery/recovery paths.

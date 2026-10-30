@@ -77,7 +77,16 @@ Supports macOS (Apple Silicon & Intel) and Linux (x86_64 & arm64). The installer
 - Initializes `~/.clawflow/config/` with a template config
 - Adds `~/.clawflow/bin` to your shell `PATH`
 
-You also need Agent-Host with the execution CLI and explicitly configured execution config, native command and native profile paths. See [AGH execution setup](docs/agh-execution-design.md). ACP currently supports Claude only; ClawFlow never launches a native backend directly.
+You also need the [Offload](https://github.com/zhoushoujianwork/offload) CLI on every machine that runs an execution worker, plus an explicit `settings.execution.profile` created with `offload config`. Offload owns model credentials and native backends; ClawFlow never launches a backend directly. See [Offload setup](docs/offload-execution-design.md).
+
+ClawFlow detects a missing or incompatible Offload by default and does not install it for you:
+
+```bash
+clawflow execution status            # per-worker readiness, using each worker's own launchd PATH
+clawflow execution status --recheck  # after installing Offload yourself
+```
+
+The official install command in the Offload README is `go install github.com/zhoushoujianwork/offload@latest` (Go 1.24+). Controller-only and viewer-only machines need no local Offload. See [execution readiness](docs/execution-capability-check.md#readiness-status).
 
 ---
 
@@ -420,7 +429,7 @@ clawflow web service uninstall
 What it shows:
 
 - **Dashboard** — filterable timeline of recent operator runs across every monitored repo, with status, duration, and PR links
-- **Run detail** — replay of the raw AGH NDJSON event log (tool calls, assistant messages, final result) for any past run
+- **Run detail** — replay of the raw Offload event log (tool calls, assistant messages, final result) for any past run
 - **Repos** — read-only view of every repo in `config.yaml` with per-repo run history
 - **Operators** — active built-in and user operators with triggers, outcomes, and descriptions
 

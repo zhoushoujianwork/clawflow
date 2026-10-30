@@ -1526,6 +1526,17 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if rc, ok := j.client.(interface{ SetRequestContext(context.Context) }); ok {
 		rc.SetRequestContext(ctx)
 	}
+	// A missing or incompatible Offload is a setup state, not a task failure:
+	// stop before any repair reservation, label or circuit-breaker count.
+	if j.hooks == nil {
+		if ready := offloadReadyFn(ctx, roleForOperator(j.op.Name)); ready.Blocked() {
+			j.result.Status, j.result.Error = "blocked", ready.Summary
+			j.result.NextAction, j.result.NextOwner = "Run "+execution.RecheckCommand+" and follow its setup steps", "environment-maintainer"
+			fmt.Fprintf(os.Stderr, "%s → waiting for Offload setup: %s (recheck: %s)\n", prefix, ready.Summary, execution.RecheckCommand)
+			runLog.Warn("run/offload_unavailable", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name, "reason", ready.Reason)
+			return false, false, false
+		}
+	}
 	if j.repair != nil {
 		if err := prepareCIRepairContext(ctx, j, time.Now().UTC()); err != nil {
 			j.result.Error = err.Error()

@@ -63,6 +63,10 @@ Record the printed certificate SHA-256 fingerprint. In the app's **Settings**, e
 
 The app stores connection metadata, not token contents, in preferences. The CLI bridge reuses the existing authenticated, pinned platform client, rejects redirects and emits JSON only. Leave the address blank to reuse an existing `clawflow platform login` configuration. When viewing a controller on its own host, use explicit app connection fields; do not configure that host as a platform client, which intentionally disables local scheduling.
 
+## Offload readiness
+
+Settings shows **Offload execution** from `clawflow execution status --json`, and the menu-bar item gains an attention mark when any local worker lacks a usable Offload. Worker rows under **On this Mac** repeat the same one-line reason. The app polls the CLI's cached result every 15 seconds and runs no probe of its own; **Recheck Offload** is the explicit action after you install it. Viewer-only Macs show that no local executor is required. See [execution readiness](execution-capability-check.md#readiness-status). Native visual behavior is not covered by the headless tests.
+
 ## Daily use
 
 The menu-bar panel and Settings show **On this Mac** with installed ClawFlow worker/controller LaunchAgents, process status and Start / Restart / Stop shortcuts. Stop unloads the selected service but retains its plist so Start can load it again. Restart/Stop require confirmation because they interrupt local work. These controls never manage the remote controller. Quit App closes only the viewer. Service commands report acceptance; the next status refresh confirms the process state.

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,8 @@ type Report struct {
 	Profile       string   `json:"profile"`
 	Checks        []Check  `json:"checks"`
 	Unverified    []string `json:"unverified"`
+	// Reason is a stable machine code (Reason* constants) set when blocked.
+	Reason string `json:"reason,omitempty"`
 }
 
 // RequiredFlags lists the flags ClawFlow may pass to Offload at execution time.
@@ -87,6 +90,11 @@ func newReport(profile string) Report {
 		r.Checks = append(r.Checks, Check{ID: id, Status: CheckSkipped, Message: "not evaluated"})
 	}
 	return r
+}
+
+func (r *Report) block(id, reason, message string) {
+	r.Reason = reason
+	r.set(id, CheckBlocked, message)
 }
 
 func (r *Report) set(id, status, message string) {
@@ -130,13 +138,20 @@ func sanitizeText(s string, max int) string {
 // arguments) to inspect declared flags. Provider execution and permission
 // enforcement are never exercised and are reported as unverified.
 func ProbeCapabilities(ctx context.Context, c Config) Report {
+	r, _ := probeCapabilities(ctx, c, nil)
+	return r
+}
+
+// probeCapabilities inspects the environment given by get (nil: this process)
+// and also returns the recognized help text for follow-up declaration checks.
+func probeCapabilities(ctx context.Context, c Config, get func(string) (string, bool)) (Report, []byte) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	r := newReport(c.Profile)
-	if err := ValidateConfig(c); err != nil {
-		r.set(CheckConfig, CheckBlocked, err.Error())
-		return r
+	if reason, err := validateConfigWith(c, func(f string) (string, error) { return lookPathIn(f, get) }); err != nil {
+		r.block(CheckConfig, reason, err.Error())
+		return r, nil
 	}
 	r.set(CheckConfig, CheckPassed, "command and profile settings are well formed")
 
@@ -144,24 +159,32 @@ func ProbeCapabilities(ctx context.Context, c Config) Report {
 	if command == "" {
 		command = "offload"
 	}
-	resolved, err := exec.LookPath(command)
+	resolved, err := lookPathIn(command, get)
 	if err == nil {
 		resolved, err = filepath.Abs(resolved)
 	}
 	if err != nil {
-		r.set(CheckCommand, CheckBlocked, "Offload executable unavailable")
-		return r
+		r.block(CheckCommand, lookupKind(err), "Offload executable unavailable")
+		return r, nil
 	}
 	r.Command = resolved
 	r.set(CheckCommand, CheckPassed, "configured command resolved to an absolute path")
 
-	output, problem := runHelpProbe(ctx, resolved)
+	output, problem := runProbe(ctx, probeSpec{command: resolved, args: []string{"-h"}, what: "help", limit: MaxProbeOutputBytes,
+		env: func(dir string) []string {
+			if get == nil {
+				return probeEnvironment(dir)
+			}
+			return probeEnvironmentFrom(dir, get)
+		}, okExit: func(c int) bool { return c == 0 || c == 2 }})
+	reason := probeProblemReason(problem)
 	if problem == "" {
 		problem = validateHelp(output)
+		reason = ReasonIncompatible
 	}
 	if problem != "" {
-		r.set(CheckHelpProbe, CheckBlocked, problem)
-		return r
+		r.block(CheckHelpProbe, reason, problem)
+		return r, nil
 	}
 	r.set(CheckHelpProbe, CheckPassed, "help output recognized")
 
@@ -173,12 +196,12 @@ func ProbeCapabilities(ctx context.Context, c Config) Report {
 		}
 	}
 	if len(missing) > 0 {
-		r.set(CheckFlagDeclarations, CheckBlocked, "required flags not declared: "+strings.Join(missing, ", "))
-		return r
+		r.block(CheckFlagDeclarations, ReasonIncompatible, "required flags not declared: "+strings.Join(missing, ", "))
+		return r, nil
 	}
 	r.set(CheckFlagDeclarations, CheckPassed, "all required flags are declared")
 	r.Status = StatusReady
-	return r
+	return r, output
 }
 
 // boundedBuffer keeps at most max bytes and signals once when more is written.
@@ -217,10 +240,12 @@ func (b *boundedBuffer) bytes() []byte {
 	return append([]byte(nil), b.buf.Bytes()...)
 }
 
-func probeEnvironment(home string) []string {
+func probeEnvironment(home string) []string { return probeEnvironmentFrom(home, os.LookupEnv) }
+
+func probeEnvironmentFrom(home string, get func(string) (string, bool)) []string {
 	env := []string{"HOME=" + home, "LC_ALL=C"}
 	for _, key := range []string{"PATH", "SystemRoot"} {
-		if v, ok := os.LookupEnv(key); ok {
+		if v, ok := get(key); ok {
 			env = append(env, key+"="+v)
 		}
 	}
@@ -231,6 +256,22 @@ func probeEnvironment(home string) []string {
 // problem string is a fixed, safe message. Exit status 0 and 2 (Go flag help)
 // are the only accepted outcomes.
 func runHelpProbe(ctx context.Context, command string) ([]byte, string) {
+	return runProbe(ctx, probeSpec{command: command, args: []string{"-h"}, what: "help", limit: MaxProbeOutputBytes,
+		env: func(dir string) []string { return probeEnvironment(dir) }, okExit: func(c int) bool { return c == 0 || c == 2 }})
+}
+
+// probeSpec describes one bounded, read-only child process.
+type probeSpec struct {
+	command string
+	args    []string
+	what    string // "help" or "profile"; appears in fixed problem messages
+	limit   int
+	env     func(privateDir string) []string
+	okExit  func(int) bool
+}
+
+func runProbe(ctx context.Context, spec probeSpec) ([]byte, string) {
+	command := spec.command
 	release, err := housekeeping.Gate(ctx, os.TempDir(), false)
 	if err != nil {
 		return nil, "probe workspace unavailable"
@@ -247,20 +288,20 @@ func runHelpProbe(ctx context.Context, command string) ([]byte, string) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	if ctx.Err() != nil {
-		return nil, probeContextProblem(ctx)
+		return nil, probeContextProblem(ctx, spec.what)
 	}
 
-	out := newBoundedBuffer(MaxProbeOutputBytes)
-	cmd := exec.Command(command, "-h")
+	out := newBoundedBuffer(spec.limit)
+	cmd := exec.Command(command, spec.args...)
 	cmd.Dir = dir
-	cmd.Env = probeEnvironment(dir)
+	cmd.Env = spec.env(dir)
 	cmd.Stdin = nil // null device: empty stdin
 	cmd.Stdout = out
 	cmd.Stderr = out
 	cmd.WaitDelay = probeWaitDelay
 	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
-		return nil, "Offload help probe could not start"
+		return nil, "Offload " + spec.what + " probe could not start"
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -270,9 +311,9 @@ func runHelpProbe(ctx context.Context, command string) ([]byte, string) {
 	select {
 	case waitErr = <-done:
 	case <-ctx.Done():
-		reason = probeContextProblem(ctx)
+		reason = probeContextProblem(ctx, spec.what)
 	case <-out.over:
-		reason = "help output exceeded 128 KiB"
+		reason = spec.what + " output exceeded " + limitText(spec.limit)
 	}
 	// Always signal the whole group: descendants may outlive the leader.
 	terminateProcessGroupSync(cmd, probeGrace)
@@ -285,7 +326,7 @@ func runHelpProbe(ctx context.Context, command string) ([]byte, string) {
 	}
 	select {
 	case <-out.over:
-		return nil, "help output exceeded 128 KiB"
+		return nil, spec.what + " output exceeded " + limitText(spec.limit)
 	default:
 	}
 	// ErrWaitDelay means a descendant held the output pipes after the leader
@@ -294,25 +335,30 @@ func runHelpProbe(ctx context.Context, command string) ([]byte, string) {
 	if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
 		var ee *exec.ExitError
 		if !errors.As(waitErr, &ee) {
-			return nil, "help probe I/O failed"
+			return nil, spec.what + " probe I/O failed"
 		}
 	}
 	if cmd.ProcessState == nil {
-		return nil, "help probe did not finish"
+		return nil, spec.what + " probe did not finish"
 	}
-	switch cmd.ProcessState.ExitCode() {
-	case 0, 2:
+	if spec.okExit(cmd.ProcessState.ExitCode()) {
 		return out.bytes(), ""
-	default:
-		return nil, "help probe exited with an unsupported status"
 	}
+	return nil, spec.what + " probe exited with an unsupported status"
 }
 
-func probeContextProblem(ctx context.Context) string {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "help probe timed out"
+func limitText(n int) string {
+	if n >= 1<<20 {
+		return strconv.Itoa(n>>20) + " MiB"
 	}
-	return "help probe canceled"
+	return strconv.Itoa(n>>10) + " KiB"
+}
+
+func probeContextProblem(ctx context.Context, what string) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return what + " probe timed out"
+	}
+	return what + " probe canceled"
 }
 
 var (

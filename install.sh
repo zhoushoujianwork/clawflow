@@ -149,6 +149,11 @@ if ! printf ':%s:' "$PATH" | grep -q ":$CLAWFLOW_HOME/bin:"; then
   fi
 fi
 
+# ---------- Offload readiness (read-only; never installs anything) ----------
+echo ""
+echo "  [check] Offload execution dependency (read-only)..."
+"$CLAWFLOW_BIN" execution status --shell --no-fail 2>&1 | sed 's/^/    /' || true
+
 # ---------- done ----------
 cat <<MSG
 
@@ -173,6 +178,8 @@ cat <<MSG
        clawflow repo add <owner/repo | URL | local path>
   3. Run the operator loop:
        clawflow run
+  4. If Offload was reported missing, install it yourself, then recheck:
+       clawflow execution status --recheck
 
 Built-in operators:
        clawflow operators list

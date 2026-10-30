@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBarExtra {
             MenuSummary(model: model).task { model.start() }
         } label: {
-            MenuBarBrand(summary: model.summary)
+            MenuBarBrand(summary: model.summary, offloadAttention: model.offloadNeedsAttention)
         }
         .menuBarExtraStyle(.window)
     }
@@ -34,6 +34,10 @@ struct MenuSummary: View {
         let status = model.popover
         VStack(alignment: .leading, spacing: 10) {
             header(status)
+            if model.offloadNeedsAttention, let readiness = model.executionReadiness.status {
+                Label(readiness.summary, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                Text("Open Settings for setup steps, then recheck.").font(.caption).foregroundStyle(.secondary)
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if status.hasData {
@@ -48,7 +52,7 @@ struct MenuSummary: View {
                 HStack(spacing: 6) { ProgressView().controlSize(.small); Text(pending.text) }.font(.caption)
             }
             if let error = model.actionError { Text(error).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
-            DisclosureGroup("On this Mac") { LocalServiceControls(services: model.localServices).padding(.top, 6) }
+            DisclosureGroup("On this Mac") { LocalServiceControls(services: model.localServices, readiness: model.executionReadiness).padding(.top, 6) }
                 .font(.callout)
             Divider()
             HStack {

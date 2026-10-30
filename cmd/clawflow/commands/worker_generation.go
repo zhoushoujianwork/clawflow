@@ -205,6 +205,11 @@ func newWorkerGenerationCommands() []*cobra.Command {
 		if err != nil {
 			return err
 		}
+		host, err := os.Hostname()
+		if err != nil {
+			return err
+		}
+		g.Options.Gate = workerGateFactory(host, g.Options.Roles)
 		g.Options.KeepAliveOwner = false
 		return runManagedWorker(cmd.Context(), api, g.Options, func(ctx context.Context, t *coordinator.Task) (*runJob, time.Duration, error) {
 			return buildWorkerJob(ctx, t, reg)
