@@ -12,6 +12,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
+	"github.com/zhoushoujianwork/clawflow/internal/resourcelease"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -81,6 +82,11 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		if err != nil {
 			record.Verdict = Blocked
 			record.Report = err.Error()
+			var busy *resourcelease.Blocked
+			if errors.As(err, &busy) {
+				record.NextOwner = "scheduling"
+				record.NextAction = err.Error()
+			}
 		}
 		record.Cancelled = ctx.Err() != nil
 		if record.Cancelled {
@@ -148,6 +154,15 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		return record, err
 	}
 	record.Plan = plan
+	// Acquire before preparing or executing the candidate. Planning remains
+	// requirements-only; review always uses a fresh attempt and fresh evidence.
+	release, leaseErr := project.AcquireResources(c.Repository, resourcelease.Holder{
+		Task: c.TaskID, Phase: "acceptance", Candidate: c.HeadSHA, Attempt: record.AttemptID,
+	})
+	if leaseErr != nil {
+		return record, leaseErr
+	}
+	defer release()
 	if runner.Prepare != nil {
 		if err = ctx.Err(); err != nil {
 			return record, err

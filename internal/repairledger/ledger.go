@@ -48,7 +48,7 @@ func (l Ledger) Counts() (consumed, infra int) {
 	for _, a := range l.Attempts {
 		if a.Released == "" {
 			consumed++
-		} else if a.Released != "no-change" {
+		} else if a.Released != "no-change" && a.Released != "resource-busy" {
 			infra++
 		}
 	}
