@@ -183,10 +183,17 @@ func (a *workerAPI) postOnce(ctx context.Context, path string, in, out any) erro
 
 type workerBuilder func(context.Context, *coordinator.Task) (*runJob, time.Duration, error)
 
-func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, poll time.Duration, build workerBuilder) error {
+// Apply intrinsic protocol tags before either registration path. Durable
+// managers register before entering runWorker and must advertise the same set.
+func coordinationWorkerOptions(o workerOptions) workerOptions {
 	if !slices.Contains(o.Tags, coordination.WorkerTag) {
-		o.Tags = append(o.Tags, coordination.WorkerTag)
+		o.Tags = append(slices.Clone(o.Tags), coordination.WorkerTag)
 	}
+	return o
+}
+
+func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, poll time.Duration, build workerBuilder) error {
+	o = coordinationWorkerOptions(o)
 	for _, capability := range o.Capabilities {
 		o.Tags = append(o.Tags, "capability:"+capability)
 	}

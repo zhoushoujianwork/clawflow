@@ -25,6 +25,7 @@ type workerGeneration struct {
 }
 
 func runManagedWorker(ctx context.Context, api *workerAPI, o workerOptions, build workerBuilder) error {
+	o = coordinationWorkerOptions(o)
 	if !o.Durable {
 		return runWorker(ctx, api, o, 30*time.Second, 5*time.Second, build)
 	}
