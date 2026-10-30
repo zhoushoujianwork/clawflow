@@ -34,6 +34,8 @@ clawflow worker executions --root /absolute/execution-root
 
 States include `prepared`, `running`, `pending_sync`, `acknowledged`, `rejected`, and `needs_recovery`. The executor retries transient upload failures; a restarted manager restarts pending delivery. The controller acknowledges the exact persisted report idempotently, including after finalization. Same-epoch durable results can arrive after the execution deadline while ownership is still reserved. Conflicting or superseded results are retained locally and rejected, never applied as new work.
 
+A controller-authorized infrastructure retry can reuse a task ID with a newer epoch. When replaying its saved claim, the worker archives an acknowledged prior attempt under `history/<task-id>/epoch-<epoch>/` before preparing the new attempt. The archive retains the report, checkpoint/session reference and executor output. Executor and session locks must both be free; their original lock files remain in place. Unacknowledged, rejected, expired or identity-mismatched claims still require reconciliation. Do not delete retained journals to clear an epoch mismatch, and do not use session recovery for an already acknowledged attempt.
+
 Execution has a fixed deadline based on the task timeout, plus ten minutes for reporting. Heartbeats do not extend execution authority indefinitely. If the controller remains unavailable, the executor stops at the execution deadline and preserves its result. Expired durable tasks retain their reservation rather than being blindly reassigned. This trades automatic replacement availability for duplicate-execution safety.
 
 ## Interrupted execution recovery

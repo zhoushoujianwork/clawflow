@@ -112,48 +112,57 @@ func workerJournalRoot(o workerOptions) string {
 }
 
 func launchWorkerExecutor(o workerOptions, t *coordinator.Task) error {
-	if !coordinator.DurableTask(t) {
-		return fmt.Errorf("controller did not grant durable execution; upgrade controller first")
-	}
-	root := workerJournalRoot(o)
-	path := filepath.Join(root, t.ID, "journal.json")
+	path := filepath.Join(workerJournalRoot(o), t.ID, "journal.json")
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("execution journal already exists")
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	j, err := prepareWorkerExecutor(o, t)
+	if err != nil {
+		return err
+	}
+	return spawnWorkerExecutor(path, j)
+}
+
+func prepareWorkerExecutor(o workerOptions, t *coordinator.Task) (*workerJournal, error) {
+	if !coordinator.DurableTask(t) {
+		return nil, fmt.Errorf("controller did not grant durable execution; upgrade controller first")
+	}
+	root := workerJournalRoot(o)
+	path := filepath.Join(root, t.ID, "journal.json")
 	pinned := o.Executable
 	if pinned == "" {
-		return fmt.Errorf("worker generation executable was not pinned")
+		return nil, fmt.Errorf("worker generation executable was not pinned")
 	}
 	if _, err := os.Stat(pinned); err != nil {
-		return err
+		return nil, err
 	}
 	ec, err := execution.LoadConfig()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	offload, err := exec.LookPath(ec.Command)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	native, err := os.ReadFile(offload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	runtime := filepath.Join(root, "runtimes", fmt.Sprintf("%x", sha256.Sum256(native)), "offload")
 	if _, err := os.Stat(runtime); os.IsNotExist(err) {
 		if err := writeDurableFile(runtime, native, 0700); err != nil {
-			return err
+			return nil, err
 		}
 	} else if err != nil {
-		return err
+		return nil, err
 	}
 	j := &workerJournal{Version: 1, Task: *t, Options: o, OffloadCommand: runtime, Executable: pinned, State: "prepared"}
 	if err := writeWorkerJournal(path, j); err != nil {
-		return err
+		return nil, err
 	}
-	return spawnWorkerExecutor(path, j)
+	return j, nil
 }
 
 func spawnWorkerExecutor(path string, j *workerJournal) error {
