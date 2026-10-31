@@ -174,6 +174,44 @@ func TestDevelopmentWorkerAndSupersededAcceptance(t *testing.T) {
 	}
 }
 
+func TestLatestDevelopmentRetainsTestingEvidence(t *testing.T) {
+	s, db, _ := setup(t)
+	defer db.Close()
+	payload := json.RawMessage(`{"testing":{"sop_required":true,"sop_digest":"approved-revision"}}`)
+	_, err := s.Enqueue(ctx, Task{Repo: "owner/repo", Issue: 42, PR: 11, Kind: "repair", Operator: "repair-ci", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, s, "developer", 1)
+	task := claim(t, s, "developer")
+	result := json.RawMessage(`{"status":"success","head_sha":"submitted-head","pr_number":11,"sop_digest":"actually-read-revision"}`)
+	if err := s.Complete(ctx, task.ID, "developer", task.FencingToken, result); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := s.LatestDevelopment(ctx, "owner/repo", 42, 11, "submitted-head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var declaration struct {
+		Testing struct {
+			Required bool   `json:"sop_required"`
+			Digest   string `json:"sop_digest"`
+		} `json:"testing"`
+	}
+	var proof struct {
+		Digest string `json:"sop_digest"`
+	}
+	if err := json.Unmarshal(dev.Payload, &declaration); err != nil {
+		t.Fatalf("acceptance lost development testing declaration: %v", err)
+	}
+	if err := json.Unmarshal(dev.Result, &proof); err != nil {
+		t.Fatalf("acceptance lost development testing result: %v", err)
+	}
+	if !declaration.Testing.Required || declaration.Testing.Digest != "approved-revision" || proof.Digest != "actually-read-revision" || dev.LeaseOwner != "developer" {
+		t.Fatalf("incomplete development baseline: %+v, %+v, worker=%q", declaration, proof, dev.LeaseOwner)
+	}
+}
+
 func TestDefaultAcceptancePolicyExcludesRevokedWorkers(t *testing.T) {
 	s, db, _ := setup(t)
 	defer db.Close()

@@ -118,3 +118,14 @@ be88412b 已滚动部署为 dev-acceptance-plan-be88412b，CLI SHA-256 为 f133e
 活动 #612 的 executor PID 62130、Offload PID 62369、native CC PID 62371、会话 750996d5-cbce-49d6-a05a-a4e84f6617a2、工作树、原 f133ee... 固定执行器、fencing_token=1、lease_owner=local-cli-worker 及固定计划 bfc25647... 在滚动前后逐项相同。两个 worker 在线、未暂停，容量仍为 1/4，PostgreSQL PID 61176 保持。App 仍为原安装版本；#611 界面未宣称已部署。桌面最后检查仍锁定。
 
 交付记录时，#611 的新 Native macOS 和 Web render 均已成功，Test 仍在运行；没有把 pending 当成通过。当前提交的界面实测及之后的独立验收仍待完成，#610 hold 未解除。
+
+
+## 后续推进：补齐原生证据与修复自动验收链路
+
+用户继续要求由 ClawFlow 自身完成阻塞恢复，并询问多个 App 的原因。只读盘点确认安装目录只有一个 ClawFlow，临时目录有四份验收预览，其中两个因上轮锁屏尝试遗留运行。已通过 CUA 退出多余实例；桌面恢复可用后，在 e1837c8a 原始隔离预览补做 9 组真实捕获：mixed、scrolled、keyboard-footer、keyboard-reverse、pending、error、success、disconnected、unavailable。保留合成 fixture、未测真实菜单栏锚定／VoiceOver 和未遍历全部中间键盘路径的限制。19 份 PNG／完整 AX／来源文件摘要已核对并接入独立证据索引；未更改共享 testing.md。完成后预览全部退出，进程盘点只剩 /Applications/ClawFlow.app。
+
+准确 e1837c8a 的 Native macOS、Web render、Test 三项 CI 均成功，PR 说明已更新；解除本轮设置的 #610 临时 hold，由现有 controller 接手。随后自动链路真实暴露两个确定缺陷：#622 持续 unexpected end of JSON input，是 LatestDevelopment 只选择 id/lease_owner 却丢弃验收所需 payload/result；#611 则在契约已核对完整 PR 后，又用缺少 branch 字段的列表摘要查祖先，导致 git check-ref-format 失败。
+
+两个缺陷均先写回归再改实现。独立 PostgreSQL 的 TestLatestDevelopmentRetainsTestingEvidence 在旧查询上真实失败，错误正是读取空测试声明的 unexpected end of JSON input；补取两个字段后正常通过。完整 TestEnqueueAcceptanceFromPRSummaryAfterBaseMerge 在旧入队流程退出 1；修正为采用契约返回的完整 PR。原数据库、来源记录、SOP 摘要和修复预算均未修改。
+
+另补充 development_verification 派发路径，使缺少来源的受管 PR 可以通过真实新开发核验继续。最初回归证明 updated-head／missing-history 都不会被旧代码派发；修复后通过。检查已有来源、执行中、损坏记录、CI pending／无 CI、skip、fork、关闭自动合并、预算耗尽及派发后状态变化都保持门禁；真实 Offload 协议 fixture 验证 no-change 可生成带核验原因的新完成记录，并消耗一次共享预算。没有重写旧 run，也没有凭文本标记放开来源门禁。

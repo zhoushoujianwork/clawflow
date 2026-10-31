@@ -73,3 +73,14 @@ Start the new controller and managers only after reviewing the imported journals
 ## Offload readiness during durable handoff
 
 Readiness gates are process-local caches and are excluded from generation and execution journals. A manager loaded through `worker serve` rebuilds its gate in that worker's environment. A prepared executor checks its own runtime before starting task code. If blocked, it durably records `pending_release` and returns the unused lease without a result or attempt charge; successful or stale release responses retire the local attempt as `released`. Managers replay pending releases after restart. A later authorized claim archives that released attempt before preparing a new execution, with exclusive executor/session locks and no retained checkpoint. Reports and interrupted sessions retain their separate delivery/recovery paths.
+
+
+## PR 缺少开发来源时的自动恢复
+
+人工协助更新 PR、旧执行主机不可达或本机缺少原开发记录时，CI 全绿也不能替代开发来源。对已开启自动合并、必需 CI 和独立验收的受管 PR，扫描器现在可派发一次真实的 `development_verification`：CC 在隔离 checkout 中按当前 issue 重新核查整个差异并执行相关无界面检查。成功后，再由不同原生会话独立验收，最后仍走准确 head 的 CI 与条件合并。
+
+这是新的开发核验记录，不是补写旧会话、不宣称原作者身份，也不修改或挪用历史证据。核验不能修改源码、提交、推送或更改来源文件；需要保留真实 native 工具活动，报告实际命令与限制，并由 runner 确认工作区干净、准确提交仍在原分支发布。成功使用 `no-change`，但仍消耗共享三次修复预算中的一次；原有基础设施上限、冷却、退避和 worker 互斥保留。失败、检查不完整或发现缺陷均不能生成成功来源。
+
+仅“缺少历史”或“当前 head 没有完成记录”可自动核验。损坏／歧义记录、正在运行的开发、未通过的 CI、fork／非受管分支、手动 skip、未启用的策略、预算耗尽和读取错误保持阻塞，不通过创建新记录掩盖它们。协调器 payload 保留核验原因，重启后的 worker 与结果回放沿用同一目的；审计 metadata 记录 `repair_reason=development_verification`。无需启动第二个调度器。
+
+验收入队从数据库读取开发任务时必须同时保留 payload 与 result，才能继承实际读过的 SOP 版本；从 VCS 列表取得摘要后，后续来源检查使用契约绑定的完整 PR 信息。缺字段不应被误报为证据损坏或永久等待。数据库检索与完整入队的隔离 PostgreSQL 回归覆盖这两个边界。

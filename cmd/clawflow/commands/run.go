@@ -1880,6 +1880,11 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		OnSessionResume:     sessionOpts.OnSessionResume,
 		PrepareFreshSession: func() error { return archiveRejectedResume(runDir, eventsFile) },
 		ValidateOutcome: func(outcome, body string) error {
+			if j.repair != nil && j.repair.DevelopmentVerification && outcome == "no-change" {
+				if err := validateDevelopmentVerificationActivity(filepath.Join(runDir, "events.jsonl")); err != nil {
+					return err
+				}
+			}
 			var err error
 			confirmedHead, err = validateRepairOutcome(ctx, workdir, j, outcome, body)
 			return err

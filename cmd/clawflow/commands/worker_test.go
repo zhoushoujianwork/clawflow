@@ -377,6 +377,22 @@ func TestBuildWorkerJobLocalConfig(t *testing.T) {
 	if _, _, err := buildWorkerJob(context.Background(), task, reg); err == nil || !strings.Contains(err.Error(), "skill_digest") {
 		t.Fatal("digest mismatch accepted", err)
 	}
+	verificationOp, ok := reg.Get("repair-ci")
+	if !ok {
+		t.Fatal("missing repair-ci")
+	}
+	p.Kind, p.Operator, p.SkillDigest = "repair", verificationOp.Name, skillDigest(verificationOp)
+	p.Repair = &coordinatorRepair{PR: 11, Reason: "development_verification"}
+	task.Kind, task.Operator = p.Kind, p.Operator
+	task.Payload, _ = json.Marshal(p)
+	j, _, err = buildWorkerJob(context.Background(), task, reg)
+	if err != nil || j.repair == nil || !j.repair.DevelopmentVerification {
+		t.Fatalf("worker lost verification purpose: %+v, %v", j, err)
+	}
+	loaded, err := loadCoordinatorJob(context.Background(), task)
+	if err != nil || loaded.repair == nil || !loaded.repair.DevelopmentVerification {
+		t.Fatalf("coordinator replay lost verification purpose: %+v, %v", loaded, err)
+	}
 }
 
 func TestWorkerCloneCancelled(t *testing.T) {

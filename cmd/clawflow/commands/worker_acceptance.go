@@ -30,7 +30,9 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 	if err := issueWorkAllowed(client, repo, extractClosesIssue(pr.Body)); err != nil {
 		return err
 	}
-	c, _, _, _, err := acceptanceContract(ctx, client, repo, pr.Number)
+	// ListOpenPRs may supply only a summary. Use the same authoritative PR
+	// that established the immutable contract for subsequent ancestry checks.
+	c, _, _, pr, err := acceptanceContract(ctx, client, repo, pr.Number)
 	if err != nil {
 		return err
 	}

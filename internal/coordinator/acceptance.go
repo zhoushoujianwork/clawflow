@@ -34,7 +34,7 @@ func acceptanceAllowed(t Task, w Worker) bool {
 // LatestDevelopment ties the developer worker to the same PR and submitted head.
 func (s *Store) LatestDevelopment(ctx context.Context, repo string, issue, pr int, head string) (*Task, error) {
 	var task Task
-	err := s.db.WithContext(ctx).Select("id", "lease_owner").Where("repo = ? AND issue = ? AND kind IN ? AND state = 'done' AND result->>'status' = 'success' AND result->>'head_sha' = ? AND (pr = ? OR result->>'pr_number' = ?)", repo, issue, []string{"implement", "repair"}, head, pr, strconv.Itoa(pr)).Order("created_at DESC, id DESC").First(&task).Error
+	err := s.db.WithContext(ctx).Select("id", "lease_owner", "payload", "result").Where("repo = ? AND issue = ? AND kind IN ? AND state = 'done' AND result->>'status' = 'success' AND result->>'head_sha' = ? AND (pr = ? OR result->>'pr_number' = ?)", repo, issue, []string{"implement", "repair"}, head, pr, strconv.Itoa(pr)).Order("created_at DESC, id DESC").First(&task).Error
 	return &task, err
 }
 
