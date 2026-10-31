@@ -37,13 +37,13 @@ func TestScheduleActionSchemaAndBudget(t *testing.T) {
 }
 
 func TestStewardScheduleActions(t *testing.T) {
-	s, dsn := storetest.NewWithDSN(t)
 	ctx := context.Background()
-	if _, err := s.Migrate(ctx, store.Migrations); err != nil {
+	e, _ := testExecutor(t)
+	s, err := store.EnsureReady(ctx, &config.Config{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(store.DSNEnv, dsn)
-	e, _ := testExecutor(t)
+	defer s.Close()
 	e.Config = &config.Config{}
 	e.DefaultRepo = ""
 	spec := `"schedule":{"cron":"0 9 * * *","timezone":"Asia/Shanghai","prompt":"summarize","ops":2,"timeout_seconds":60,"enabled":true}`

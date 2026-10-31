@@ -113,7 +113,7 @@ Host affinity is enforced by worker task tags.`,
 			} else if err := cfg.Settings.SchedulingError(); err != nil {
 				return err
 			}
-			// PostgreSQL is required: fail fast before any work.
+			// The embedded store must open: fail fast before any work.
 			release, err := gateStore(cmd.Context())
 			if err != nil {
 				return err

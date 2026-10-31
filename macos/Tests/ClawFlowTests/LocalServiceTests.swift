@@ -35,4 +35,12 @@ final class LocalServiceTests: XCTestCase {
         XCTAssertFalse(LocalService.accepts("com.patsnap.relayer.worker"))
         XCTAssertFalse(LocalService.accepts("com.zhoushoujianwork.clawflow.web"))
     }
+    func testStartupManagesOnlyControllerAndWorkers() {
+        // The embedded SQLite store has no service. A leftover PostgreSQL
+        // LaunchAgent is neither listed nor started, and never stopped by the app.
+        XCTAssertFalse(LocalService.accepts("com.zhoushoujianwork.clawflow.postgres"))
+        XCTAssertTrue(LocalService.accepts("com.zhoushoujianwork.clawflow.controller"))
+        XCTAssertTrue(LocalService.accepts("com.zhoushoujianwork.clawflow.worker-a"))
+        XCTAssertEqual(LocalService(id: "com.zhoushoujianwork.clawflow.controller", path: "/tmp/c.plist").title, "Local controller")
+    }
 }

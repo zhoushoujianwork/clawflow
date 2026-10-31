@@ -1,6 +1,6 @@
 # SQLite for the single-host controller
 
-Status: Proposed feature · 2026-10-30
+Status: Implemented (tooling) · 2026-10-31. Live cutover is a separate operator step; see [sqlite-host-runbook.md](sqlite-host-runbook.md).
 
 Replace the required PostgreSQL service with embedded SQLite for the native macOS host. The app should open, recover its controller and schedule work without installing, configuring or starting a database server.
 

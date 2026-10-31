@@ -57,7 +57,7 @@ func NewWebCmd() *cobra.Command {
 		Long: `Starts a tiny static file server at http://<host>:<port>/ backed by
 ~/.clawflow/dashboard/. The dashboard renders snapshots written by
 previous 'clawflow run' invocations (repos.json, operators.json,
-PostgreSQL run history, plus per-run events.jsonl for replay). No VCS calls happen
+SQLite run history, plus per-run events.jsonl for replay). No VCS calls happen
 here — run 'clawflow run' first if you want fresh data.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lock, err := controllerLock()
@@ -69,7 +69,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			if err != nil {
 				return err
 			}
-			// PostgreSQL is required: fail fast before touching any state
+			// The embedded store must open: fail fast before touching any state
 			// or binding the port.
 			release, err := gateStore(cmd.Context())
 			if err != nil {
@@ -170,7 +170,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 
 			// Reconcile any "running" entries left over from an
 			// interrupted `clawflow run` (Ctrl-C, SIGTERM, machine
-			// sleep), updating their PostgreSQL rows.
+			// sleep), updating their database rows.
 			// Without this, restarting the dashboard would still show a
 			// frozen "running" row pointing at a long-dead process —
 			// and any deleted run dirs would linger in the index until

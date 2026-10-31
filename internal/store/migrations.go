@@ -8,10 +8,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// migrationLockKey is the fixed pg_advisory_xact_lock key serializing
-// concurrent migrators ("clawflow" packed into an int64).
-const migrationLockKey int64 = 0x636c6177666c6f77
-
 // Migration is one versioned, forward-only schema change.
 type Migration struct {
 	Version int
@@ -41,17 +37,42 @@ var Migrations = []Migration{
 	{Version: 7, Name: "scheduled_checks", Up: migrateSchedules},
 	{Version: 8, Name: "offload_execution_evidence", Up: migrateExecutionEvidence},
 	{Version: 9, Name: "coordinator_application_errors", Up: func(tx *gorm.DB) error {
-		return tx.Exec("ALTER TABLE coordinator_tasks ADD COLUMN application_attempts integer NOT NULL DEFAULT 0, ADD COLUMN application_error text NOT NULL DEFAULT ''").Error
+		return execAll(tx,
+			"ALTER TABLE coordinator_tasks ADD COLUMN application_attempts integer NOT NULL DEFAULT 0",
+			"ALTER TABLE coordinator_tasks ADD COLUMN application_error text NOT NULL DEFAULT ''")
 	}},
 	{Version: 10, Name: "native_worker_onboarding", Up: func(tx *gorm.DB) error {
-		return tx.Exec(`ALTER TABLE coordinator_workers ADD COLUMN paused boolean NOT NULL DEFAULT false;
-CREATE TABLE coordinator_invitations (name text PRIMARY KEY, hash bytea NOT NULL, expires_at timestamptz NOT NULL, consumed boolean NOT NULL DEFAULT false);`).Error
+		return execAll(tx,
+			"ALTER TABLE coordinator_workers ADD COLUMN paused boolean NOT NULL DEFAULT false",
+			"CREATE TABLE coordinator_invitations (name text PRIMARY KEY, hash blob NOT NULL, expires_at timestamp NOT NULL, consumed boolean NOT NULL DEFAULT false)")
 	}},
 	{Version: 11, Name: "durable_worker_execution", Up: func(tx *gorm.DB) error {
-		return tx.Exec(`ALTER TABLE coordinator_workers ADD COLUMN durable boolean NOT NULL DEFAULT false;
- ALTER TABLE coordinator_tasks ADD COLUMN result_digest text NOT NULL DEFAULT '';
- ALTER TABLE task_attempts ADD COLUMN result_digest text NOT NULL DEFAULT '';`).Error
+		return execAll(tx,
+			"ALTER TABLE coordinator_workers ADD COLUMN durable boolean NOT NULL DEFAULT false",
+			"ALTER TABLE coordinator_tasks ADD COLUMN result_digest text NOT NULL DEFAULT ''",
+			"ALTER TABLE task_attempts ADD COLUMN result_digest text NOT NULL DEFAULT ''")
 	}},
+	{Version: 12, Name: "import_provenance", Up: migrateProvenance},
+}
+
+// execAll runs statements one at a time: the SQLite driver executes a single
+// statement per Exec.
+func execAll(tx *gorm.DB, statements ...string) error {
+	for _, statement := range statements {
+		if err := tx.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateProvenance records where imported data came from, separately from the
+// SQLite schema versions in schema_migrations.
+func migrateProvenance(tx *gorm.DB) error {
+	return execAll(tx, `CREATE TABLE import_provenance (
+ id integer PRIMARY KEY AUTOINCREMENT, source_kind text NOT NULL, source_schema_version integer NOT NULL,
+ source_snapshot_id text NOT NULL, imported_at timestamp NOT NULL, tables text NOT NULL CHECK (json_valid(tables))
+)`)
 }
 
 type schemaMigration struct {
@@ -65,7 +86,7 @@ func (schemaMigration) TableName() string { return "schema_migrations" }
 const createMigrationsTable = `CREATE TABLE IF NOT EXISTS schema_migrations (
 	version int PRIMARY KEY,
 	name text NOT NULL,
-	applied_at timestamptz NOT NULL DEFAULT now()
+	applied_at timestamp NOT NULL
 )`
 
 // validateMigrations checks that versions are positive, unique and ascending
@@ -91,7 +112,7 @@ func validateMigrations(migs []Migration) error {
 }
 
 // Migrate applies every pending migration in order. Each migration runs in
-// its own transaction, under a transaction-scoped advisory lock, and is
+// its own immediate transaction (one writer at a time across processes) and is
 // recorded in schema_migrations in that same transaction. It returns the
 // versions applied by this call; repeated runs are no-ops.
 func (s *Store) Migrate(ctx context.Context, migs []Migration) ([]int, error) {
@@ -99,9 +120,6 @@ func (s *Store) Migrate(ctx context.Context, migs []Migration) ([]int, error) {
 		return nil, err
 	}
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockMigrations(tx); err != nil {
-			return err
-		}
 		return tx.Exec(createMigrationsTable).Error
 	}); err != nil {
 		return nil, fmt.Errorf("prepare schema_migrations: %w", err)
@@ -111,11 +129,8 @@ func (s *Store) Migrate(ctx context.Context, migs []Migration) ([]int, error) {
 	for _, m := range migs {
 		done := false
 		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			// Taking the lock per transaction and re-checking afterwards
-			// keeps concurrent migrators from applying a version twice.
-			if err := lockMigrations(tx); err != nil {
-				return err
-			}
+			// The immediate transaction already holds the writer lock; the
+			// re-check keeps concurrent migrators from applying a version twice.
 			var n int64
 			if err := tx.Model(&schemaMigration{}).Where("version = ?", m.Version).Count(&n).Error; err != nil {
 				return err
@@ -142,10 +157,6 @@ func (s *Store) Migrate(ctx context.Context, migs []Migration) ([]int, error) {
 	return applied, nil
 }
 
-func lockMigrations(tx *gorm.DB) error {
-	return tx.Exec("SELECT pg_advisory_xact_lock(?)", migrationLockKey).Error
-}
-
 // Status reports the applied/pending state of each migration in migs. A
 // database that was never migrated reports everything as pending.
 func (s *Store) Status(ctx context.Context, migs []Migration) ([]MigrationStatus, error) {
@@ -155,7 +166,7 @@ func (s *Store) Status(ctx context.Context, migs []Migration) ([]MigrationStatus
 	db := s.db.WithContext(ctx)
 
 	var exists bool
-	if err := db.Raw("SELECT to_regclass('schema_migrations') IS NOT NULL").Scan(&exists).Error; err != nil {
+	if err := db.Raw("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')").Scan(&exists).Error; err != nil {
 		return nil, fmt.Errorf("check schema_migrations: %w", err)
 	}
 	appliedAt := map[int]time.Time{}

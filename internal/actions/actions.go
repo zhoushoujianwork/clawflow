@@ -144,14 +144,14 @@ type record struct {
 	Key     string          `gorm:"primaryKey"`
 	RunID   int64           `gorm:"primaryKey"`
 	Attempt int             `gorm:"primaryKey"`
-	Payload json.RawMessage `gorm:"type:jsonb"`
+	Payload json.RawMessage `gorm:"serializer:json"`
 }
 
 func (record) TableName() string { return "actions_evidence" }
 
 type attachment struct {
 	Key     string          `gorm:"primaryKey"`
-	Payload json.RawMessage `gorm:"type:jsonb"`
+	Payload json.RawMessage `gorm:"serializer:json"`
 }
 
 func (attachment) TableName() string { return "actions_attachments" }
@@ -174,7 +174,7 @@ func (s Ledger) Load(ctx context.Context, key string) (Observation, error) {
 // Terminal evidence requires a fresh explicit observation; it never starts work.
 func (s Ledger) Pending(ctx context.Context) ([]Request, error) {
 	var rows []attachment
-	if err := s.DB.WithContext(ctx).Where("payload->>'state' IN ('waiting_external','infra_error')").Order("payload->>'observed_at', key").Limit(1).Find(&rows).Error; err != nil {
+	if err := s.DB.WithContext(ctx).Where("json_extract(payload, '$.state') IN ('waiting_external','infra_error')").Order("json_extract(payload, '$.observed_at'), key").Limit(1).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	var requests []Request
@@ -201,28 +201,28 @@ func (s Ledger) Reconcile(ctx context.Context, p Provider, r Request) (Observati
 	if err != nil {
 		return Observation{}, err
 	}
+	// The provider observation is a network call and must not run inside a
+	// SQLite write transaction (it would hold the single writer lock). Observe
+	// first, then persist atomically. Two pollers for one key may both observe;
+	// the observation is read-only, and the later committed row wins.
 	var out Observation
+	previous, err := s.Load(ctx, key)
+	if err != nil {
+		return Observation{}, err
+	}
+	out, err = p.ObserveActions(ctx, r, previous)
+	if err != nil {
+		if out.RunID == 0 {
+			out = previous
+		}
+		out.State, out.Reason = "infra_error", "Actions evidence unavailable; retry observation without dispatch"
+	}
+	out.Key, out.Request, out.ObservedAt = key, r, time.Now().UTC()
+	payload, e := json.Marshal(out)
+	if e != nil {
+		return out, e
+	}
 	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Serialize pollers for the same immutable contract and policy.
-		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", "actions/"+key).Error; err != nil {
-			return err
-		}
-		previous, err := (Ledger{DB: tx}).Load(ctx, key)
-		if err != nil {
-			return err
-		}
-		out, err = p.ObserveActions(ctx, r, previous)
-		if err != nil {
-			if out.RunID == 0 {
-				out = previous
-			}
-			out.State, out.Reason = "infra_error", "Actions evidence unavailable; retry observation without dispatch"
-		}
-		out.Key, out.Request, out.ObservedAt = key, r, time.Now().UTC()
-		payload, e := json.Marshal(out)
-		if e != nil {
-			return e
-		}
 		if e := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "key"}}, DoUpdates: clause.AssignmentColumns([]string{"payload"})}).Create(&attachment{key, payload}).Error; e != nil {
 			return e
 		}

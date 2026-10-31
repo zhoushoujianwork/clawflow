@@ -34,7 +34,7 @@ type EffectIntent struct {
 	Number           int
 	IdempotencyKey   string
 	PayloadDigest    string
-	Payload          json.RawMessage `gorm:"type:jsonb"`
+	Payload          json.RawMessage `gorm:"serializer:rawjson"`
 	Status           string
 	AppliedReference string
 	UpdatedAt        time.Time
@@ -167,7 +167,7 @@ func (s *Store) ApplyEffects(ctx context.Context, id string, epoch int64, apply 
 	var remoteErr error
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var t Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+		if err := tx.First(&t, "id = ?", id).Error; err != nil {
 			return err
 		}
 		if t.FencingToken != epoch || t.State != "leased" || t.LeaseExpiresAt != nil || len(t.Result) == 0 {
@@ -242,7 +242,7 @@ func failIntents(tx *gorm.DB, id string) error {
 func (s *Store) Cancel(ctx context.Context, id string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var t Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+		if err := tx.First(&t, "id = ?", id).Error; err != nil {
 			return err
 		}
 		if t.State == "cancelled" {
@@ -266,7 +266,7 @@ func (s *Store) Cancel(ctx context.Context, id string) error {
 func (s *Store) FinalizeApplication(ctx context.Context, id string, epoch int64, failed bool, finalize func(Task) error) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var t Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+		if err := tx.First(&t, "id = ?", id).Error; err != nil {
 			return err
 		}
 		if t.FencingToken != epoch || t.State != "leased" || t.LeaseExpiresAt != nil || len(t.Result) == 0 {
@@ -325,7 +325,7 @@ func (s *Store) PRBlocked(ctx context.Context, repo string, pr int) (bool, error
 func (s *Store) RecordApplicationFailure(ctx context.Context, id string, epoch int64, message string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var t Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+		if err := tx.First(&t, "id = ?", id).Error; err != nil {
 			return err
 		}
 		if t.State != "leased" || t.FencingToken != epoch || t.LeaseExpiresAt != nil {
