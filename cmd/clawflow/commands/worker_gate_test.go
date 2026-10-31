@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,25 +27,29 @@ func blockedGate() *workerGate {
 }
 
 func TestBlockedWorkerNeverClaimsButStaysRegistered(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	var claims, registers atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/worker/v1/claim":
-			claims.Add(1)
-		case "/worker/v1/register":
-			registers.Add(1)
-		}
-		_, _ = io.WriteString(w, `{"task":null}`)
-	}))
-	defer server.Close()
-	api := &workerAPI{base: server.URL, client: server.Client()}
-	if err := runWorker(ctx, api, workerOptions{MaxParallel: 1, Gate: blockedGate()}, time.Second, 10*time.Millisecond, nil); err != nil {
-		t.Fatal(err)
-	}
-	if claims.Load() != 0 || registers.Load() < 2 {
-		t.Fatalf("claims=%d registers=%d", claims.Load(), registers.Load())
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+			defer cancel()
+			var claims, registers atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/worker/v1/claim":
+					claims.Add(1)
+				case "/worker/v1/register":
+					registers.Add(1)
+				}
+				_, _ = io.WriteString(w, `{"task":null}`)
+			}))
+			defer server.Close()
+			api := &workerAPI{base: server.URL, client: server.Client()}
+			if err := runWorker(ctx, api, workerOptions{StateDir: t.TempDir(), Durable: durable, MaxParallel: 1, Gate: blockedGate()}, time.Second, 10*time.Millisecond, nil); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+			if claims.Load() != 0 || registers.Load() < 2 {
+				t.Fatalf("claims=%d registers=%d", claims.Load(), registers.Load())
+			}
+		})
 	}
 }
 
@@ -76,26 +81,30 @@ func TestBlockedWorkerShutdownDuringReregistrationIsClean(t *testing.T) {
 }
 
 func TestHealthyGateStillClaims(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	var claims atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/worker/v1/claim" {
-			claims.Add(1)
-			cancel()
-		}
-		_, _ = io.WriteString(w, `{"task":null}`)
-	}))
-	defer server.Close()
-	gate := &workerGate{name: "w", cache: newReadinessCache(func(context.Context) execution.Readiness {
-		return execution.Readiness{State: execution.StateReady}
-	})}
-	api := &workerAPI{base: server.URL, client: server.Client()}
-	if err := runWorker(ctx, api, workerOptions{MaxParallel: 1, Gate: gate}, time.Second, 10*time.Millisecond, nil); err != nil {
-		t.Fatal(err)
-	}
-	if claims.Load() != 1 {
-		t.Fatalf("claims=%d", claims.Load())
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			var claims atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/worker/v1/claim" {
+					claims.Add(1)
+					cancel()
+				}
+				_, _ = io.WriteString(w, `{"task":null}`)
+			}))
+			defer server.Close()
+			gate := &workerGate{name: "w", cache: newReadinessCache(func(context.Context) execution.Readiness {
+				return execution.Readiness{State: execution.StateReady}
+			})}
+			api := &workerAPI{base: server.URL, client: server.Client()}
+			if err := runWorker(ctx, api, workerOptions{StateDir: t.TempDir(), Durable: durable, MaxParallel: 1, Gate: gate}, time.Second, 10*time.Millisecond, nil); err != nil {
+				t.Fatal(err)
+			}
+			if claims.Load() != 1 {
+				t.Fatalf("claims=%d", claims.Load())
+			}
+		})
 	}
 }
 

@@ -91,6 +91,9 @@ func Emit(args map[string]string, text, kind, mode string) {
 	}
 	event := func(seq int, typ string) {
 		e := map[string]any{"schema_version": 1, "type": typ, "run_id": "run-actual", "caller_run_id": caller, "seq": seq, "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "session": session, "backend": "claude", "model": result["model"]}
+		if typ == "progress" && os.Getenv("OFFLOAD_TEST_TOOL_CATEGORY") != "" {
+			e["tool_category"] = os.Getenv("OFFLOAD_TEST_TOOL_CATEGORY")
+		}
 		if typ == "final" {
 			if mode == "final-model-empty" || mode == "result-model-final-empty" {
 				e["model"] = ""

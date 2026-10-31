@@ -127,9 +127,27 @@ func newWorkerRecoveryCommands() []*cobra.Command {
 		for _, path := range paths {
 			j, err := readWorkerJournal(path)
 			if err != nil {
-				return err
+				rows = append(rows, map[string]any{"state": "recovery_blocked", "journal": path, "error": err.Error()})
+				continue
 			}
 			rows = append(rows, map[string]any{"task": j.Task.ID, "repo": j.Task.Repo, "issue": j.Task.Issue, "attempt": j.Task.Attempt + 1, "state": j.State, "executor_live": filelock.Held(path + ".lock"), "error": j.Error, "journal": path, "updated_at": j.UpdatedAt})
+		}
+		diagnostics, err := filepath.Glob(filepath.Join(root, "recovery", "*.json"))
+		if err != nil {
+			return err
+		}
+		for _, path := range diagnostics {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				rows = append(rows, map[string]any{"state": "recovery_blocked", "source": path, "error": err.Error()})
+				continue
+			}
+			var row map[string]any
+			if err := json.Unmarshal(raw, &row); err != nil {
+				rows = append(rows, map[string]any{"state": "recovery_blocked", "source": path, "error": err.Error()})
+				continue
+			}
+			rows = append(rows, row)
 		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(rows)
 	}}

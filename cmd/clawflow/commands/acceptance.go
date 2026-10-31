@@ -371,12 +371,16 @@ func acceptanceEvent(raw []byte) (execution.Event, error) {
 }
 
 var errDevelopmentHeadMissing = errors.New("latest development run is absent, incomplete or unsuccessful")
+var errDevelopmentHistoryMissing = errors.New("trusted development provenance unavailable")
 
 // Only ClawFlow's completed local run metadata and sanitized native event
 // sequence supply developer identity for the requested head.
 func acceptanceDevelopment(repo string, issue int, head string, prNumbers ...int) (acceptance.Identity, error) {
 	parent := filepath.Dir(snapshot.RunDir(repo, issue, time.Now()))
 	entries, err := os.ReadDir(parent)
+	if errors.Is(err, os.ErrNotExist) {
+		return acceptance.Identity{}, errDevelopmentHistoryMissing
+	}
 	if err != nil || len(entries) > 10000 {
 		return acceptance.Identity{}, errors.New("trusted development provenance unavailable")
 	}

@@ -40,21 +40,27 @@ func coordinationPath(repo string, issue int) string {
 // Only the coordinator or standalone scheduler writes coordination state. A
 // worker receives the approved snapshot and revalidates it before clone/edit.
 func collectCoordination(ctx context.Context, j *runJob, tasks coordinationTasks, exclude string) (coordination.Snapshot, error) {
-	s := coordination.Snapshot{Repository: j.repo}
+	rank, err := queue.LoadRank()
+	if err != nil {
+		return coordination.Snapshot{}, err
+	}
+	var order []int
+	for _, key := range rank {
+		if key.Repo == j.repo {
+			order = append(order, key.Number)
+		}
+	}
+	return collectCoordinationWithOrder(ctx, j, tasks, exclude, order)
+}
+
+// 排序由 controller 提供；worker 只刷新远端事实，不读取本地队列文件。
+func collectCoordinationWithOrder(ctx context.Context, j *runJob, tasks coordinationTasks, exclude string, order []int) (coordination.Snapshot, error) {
+	s := coordination.Snapshot{Repository: j.repo, ManualOrder: slices.Clone(order)}
 	if j.op != nil {
 		s.Operation = j.op.Name
 	}
 	if j.repair != nil {
 		s.TargetPR = j.repair.PR.Number
-	}
-	rank, e := queue.LoadRank()
-	if e != nil {
-		return s, e
-	}
-	for _, key := range rank {
-		if key.Repo == j.repo {
-			s.ManualOrder = append(s.ManualOrder, key.Number)
-		}
 	}
 	issue, err := j.client.GetIssue(j.repo, j.sub.Number)
 	if err != nil || issue == nil {
@@ -502,15 +508,13 @@ func validateWorkerCoordination(ctx context.Context, j *runJob, approved *coordi
 	if approved.Version != coordination.Version || approved.Repository != j.repo || approved.Issue.Number != j.sub.Number || approved.Operation != j.op.Name {
 		return fmt.Errorf("%w: invalid approved snapshot", errCoordinationChanged)
 	}
-	fresh, err := collectCoordination(ctx, j, nil, "")
+	fresh, err := collectCoordinationWithOrder(ctx, j, nil, "", approved.ManualOrder)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errCoordinationChanged, err)
 	}
 	expected := *approved
 	expected.Tasks = nil
 	fresh.Tasks = nil
-	// Manual ranking is coordinator-owned, not read from worker-local state.
-	fresh.ManualOrder = expected.ManualOrder
 	if coordination.Digest(fresh) != coordination.Digest(expected) {
 		return fmt.Errorf("%w before worker start; scheduling must reassess", errCoordinationChanged)
 	}

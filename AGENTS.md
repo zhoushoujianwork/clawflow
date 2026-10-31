@@ -1,5 +1,11 @@
 # Repository agent instructions
 
+## Issue 与 PR 的可读性
+
+- 标题先说明用户能得到的改进，例如“菜单栏直接查看运行任务和排队原因”；不要只写架构名、内部机制或笼统的“优化”。
+- 说明开头先写当前问题和改完后的使用效果，再写实现、验证及限制。让不读源码的用户也能判断这项工作是否解决了自己的问题。
+- 技术细节和验收证据保留在后面；不要为了简化表达省略真实阻塞、降低验收条件或把未完成工作写成已完成。
+
 ## Native dashboard updates and validation
 
 - The macOS ClawFlow app is a dashboard and control client. The controller/scheduler, workers, and database run as separate services; quitting or restarting the app leaves active execution running.

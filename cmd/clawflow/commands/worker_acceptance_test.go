@@ -19,6 +19,8 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
+	"github.com/zhoushoujianwork/clawflow/internal/store"
+	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
@@ -342,6 +344,58 @@ func TestAcceptanceDevelopmentWorkerBaseMerge(t *testing.T) {
 				t.Fatal("contract lost merged head")
 			}
 		})
+	}
+}
+
+func TestEnqueueAcceptanceFromPRSummaryAfterBaseMerge(t *testing.T) {
+	f, rc := acceptanceFixture(t)
+	git, proven := provenanceGitFixture(t, f)
+	git("checkout", "main")
+	git("commit", "--allow-empty", "-m", "base update")
+	git("checkout", f.pr.HeadBranch)
+	git("merge", "--no-ff", "main", "-m", "merge")
+	f.pr.HeadSHA, f.pr.BaseSHA = git("rev-parse", "HEAD"), git("rev-parse", "main")
+	db, dsn := storetest.NewWithDSN(t)
+	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	oldStore, oldAllowed := requireStore, coordinatorPRAllowedFn
+	t.Cleanup(func() { requireStore, coordinatorPRAllowedFn = oldStore, oldAllowed })
+	requireStore = func(ctx context.Context) (*store.Store, error) { return store.Open(ctx, dsn) }
+	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
+	s := coordinator.New(db.DB())
+	payload, _ := json.Marshal(coordinatorPayload{Testing: testingRequirements{SOPRequired: true, SOPDigest: "approved-revision"}})
+	_, err := s.Enqueue(context.Background(), coordinator.Task{Repo: "o/r", Issue: 42, PR: 11, Kind: "implement", Operator: "implement", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterWorker(context.Background(), coordinator.Worker{ID: "dev", MaxParallel: 1, RunUntagged: true}); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := s.Claim(context.Background(), "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _ := json.Marshal(jobResult{Status: "success", HeadSHA: proven, PRNumber: 11, SOPDigest: "actually-read-revision"})
+	if err := s.Complete(context.Background(), dev.ID, "dev", dev.FencingToken, result); err != nil {
+		t.Fatal(err)
+	}
+	// PR listings need not contain branch names. The contract's authoritative
+	// GetPR response must supply the graph used to inherit developer ownership.
+	summary := vcs.PR{Number: 11, Body: f.pr.Body, HeadSHA: f.pr.HeadSHA}
+	if err := enqueueWorkerAcceptance(context.Background(), f, "o/r", rc, summary, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	active, err := s.Active(context.Background())
+	if err != nil || len(active) != 1 || active[0].Kind != "acceptance" {
+		t.Fatalf("acceptance was not queued: %+v, %v", active, err)
+	}
+	var queued coordinatorPayload
+	if err := json.Unmarshal(active[0].Payload, &queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued.Acceptance.HeadSHA != f.pr.HeadSHA || queued.DevelopmentWorker != "dev" || !queued.Testing.RevisionPinned || queued.Testing.SOPDigest != "actually-read-revision" {
+		t.Fatalf("lost authoritative head, ownership or testing baseline: %+v", queued)
 	}
 }
 

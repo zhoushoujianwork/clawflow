@@ -3,13 +3,56 @@ package commands
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
+
+func TestProvenanceLookupFetchesGraphWithoutSourceBlobs(t *testing.T) {
+	f, rc := acceptanceFixture(t)
+	git, _ := provenanceGitFixture(t, f)
+	// Permit real partial-fetch negotiation on the fixture's local server.
+	git("config", "uploadpack.allowFilter", "true")
+	dir := git("rev-parse", "--show-toplevel")
+	if err := os.WriteFile(filepath.Join(dir, "payload.bin"), []byte(strings.Repeat("source payload\n", 10000)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "payload.bin")
+	git("commit", "-m", "development with source")
+	proven := git("rev-parse", "HEAD")
+	run := writeAcceptanceDevelopment(t, "success", time.Now().Add(-time.Minute), nil)
+	updateDevelopmentHead(t, run, proven)
+	git("checkout", "main")
+	git("commit", "--allow-empty", "-m", "base update")
+	git("checkout", f.pr.HeadBranch)
+	git("merge", "--no-ff", "main", "-m", "merge")
+	f.pr.HeadSHA, f.pr.BaseSHA = git("rev-parse", "HEAD"), git("rev-parse", "main")
+	base := acceptanceGit
+	checked := false
+	acceptanceGit = func(ctx context.Context, workspace string, args ...string) (string, error) {
+		out, err := base(ctx, workspace, args...)
+		if len(args) > 0 && args[0] == "fetch" && err == nil {
+			objects, checkErr := exec.Command("git", "-C", workspace, "cat-file", "--batch-check", "--batch-all-objects").CombinedOutput()
+			if checkErr != nil {
+				t.Fatal(checkErr)
+			}
+			if strings.Contains(string(objects), " blob ") {
+				t.Fatal("provenance verification downloaded source blobs unnecessarily")
+			}
+			checked = true
+		}
+		return out, err
+	}
+	identity, head, err := acceptanceInheritedDevelopmentHead(context.Background(), rc, "o/r", 42, f.pr)
+	if err != nil || head != proven || identity.SessionID != "dev-session" || !checked {
+		t.Fatalf("graph proof failed: %+v %s %v", identity, head, err)
+	}
+}
 
 // The origin transport is redirected locally; all graph, fetch and review
 // checkout operations use real Git repositories.

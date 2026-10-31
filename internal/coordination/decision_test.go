@@ -19,8 +19,30 @@ func TestDecisionEvidenceAndClosure(t *testing.T) {
 		valid  bool
 	}{
 		{"compatible proceed", func(s *Snapshot, d *Decision) {}, true},
+		{"current issue is known evidence", func(s *Snapshot, d *Decision) { d.Issues = []int{s.Issue.Number} }, true},
+		{"current and related issues are known", func(s *Snapshot, d *Decision) { d.Issues = []int{s.Issue.Number, 2} }, true},
+		{"zero target is not evidence", func(s *Snapshot, d *Decision) { s.Issue.Number = 0; d.Issues = []int{0} }, false},
+		{"self supersession remains forbidden", func(s *Snapshot, d *Decision) {
+			d.Outcome = "superseded"
+			d.Issues = []int{s.Issue.Number}
+			s.Issue.Body = "Superseded by: #1"
+		}, false},
 		{"invalid outcome", func(s *Snapshot, d *Decision) { d.Outcome = "close-anything" }, false},
 		{"unknown issue", func(s *Snapshot, d *Decision) { d.Issues = []int{999} }, false},
+		{"proceed citing own issue", func(s *Snapshot, d *Decision) { d.Issues = []int{1} }, true},
+		{"proceed citing own and related issue", func(s *Snapshot, d *Decision) { d.Issues = []int{1, 2} }, true},
+		{"own issue plus unknown issue", func(s *Snapshot, d *Decision) { d.Issues = []int{1, 999} }, false},
+		{"waiting on own issue alone", func(s *Snapshot, d *Decision) { d.Outcome = "waiting"; d.Issues = []int{1} }, false},
+		{"waiting on own issue and a task", func(s *Snapshot, d *Decision) {
+			d.Outcome = "waiting"
+			d.Issues = []int{1}
+			d.Tasks = []string{"other"}
+		}, true},
+		{"supersede by own issue", func(s *Snapshot, d *Decision) {
+			d.Outcome = "superseded"
+			d.Issues = []int{1}
+			s.Issue.Body = "Superseded by: #1"
+		}, false},
 		{"unknown task", func(s *Snapshot, d *Decision) { d.Tasks = []string{"missing"} }, false},
 		{"waiting condition", func(s *Snapshot, d *Decision) { d.Outcome = "waiting"; d.Tasks = []string{"other"} }, true},
 		{"waiting without condition", func(s *Snapshot, d *Decision) { d.Outcome = "waiting" }, false},

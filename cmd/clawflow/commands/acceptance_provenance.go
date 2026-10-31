@@ -34,7 +34,7 @@ func acceptanceInheritedDevelopmentHead(ctx context.Context, rc config.Repo, rep
 		{"check-ref-format", "refs/heads/" + pr.BaseBranch},
 		{"check-ref-format", "refs/heads/" + pr.HeadBranch},
 		{"remote", "add", "origin", origin},
-		{"fetch", "--no-tags", "origin", "refs/heads/" + pr.BaseBranch + ":" + base, "refs/heads/" + pr.HeadBranch + ":refs/clawflow/head"},
+		{"fetch", "--no-tags", "--filter=blob:none", "origin", "refs/heads/" + pr.BaseBranch + ":" + base, "refs/heads/" + pr.HeadBranch + ":refs/clawflow/head"},
 	} {
 		if _, err := acceptanceGit(ctx, dir, args...); err != nil {
 			return acceptance.Identity{}, "", err

@@ -34,6 +34,7 @@ import (
 )
 
 type workerOptions struct {
+	receiptCache                                  map[string][32]byte // Manager-local verified receipts; never persisted.
 	KeepAliveOwner                                bool
 	Executable                                    string
 	Coordinator, TokenFile, Fingerprint, StateDir string
@@ -168,7 +169,16 @@ func (a *workerAPI) postOnce(ctx context.Context, path string, in, out any) erro
 	}
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.client.Do(req)
+	client := a.client
+	if strings.HasSuffix(path, "/complete") || strings.HasSuffix(path, "/fail") {
+		// Completion revalidates remote provenance before acknowledging the outbox.
+		// Keep registration/heartbeat latency bounded independently; never mutate
+		// the shared client used by concurrent requests. Caller cancellation wins.
+		reportClient := *a.client
+		reportClient.Timeout = 90 * time.Second
+		client = &reportClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("coordinator request failed: %w", err)
 	}
@@ -207,17 +217,7 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 		return err
 	}
 	if o.Durable {
-
-		// Saved, unstarted claims remain durable while this environment cannot
-		// prepare an executor. Pending reports can still recover independently.
-		if o.Gate == nil || o.Gate.ready(ctx) {
-			if err := recoverWorkerClaims(ctx, api, o); err != nil {
-				return err
-			}
-		}
-		if err := recoverWorkerExecutors(o); err != nil {
-			return err
-		}
+		return runDurableWorker(ctx, api, o, poll)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -251,22 +251,7 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 					continue
 				}
 				request := any(struct{}{})
-				claimPath := ""
-				if o.Durable {
-					var err error
-					claimPath, request, err = prepareWorkerClaim(o)
-					if err != nil {
-						errors <- err
-						cancel()
-						return
-					}
-				}
 				if err := api.post(ctx, "claim", request, &claim); err != nil {
-					if o.Durable {
-						errors <- err
-						cancel()
-						return
-					}
 					if workerFatal(err) {
 						errors <- err
 						cancel()
@@ -284,35 +269,10 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 					continue
 				}
 				if claim.Task == nil {
-					if claimPath != "" {
-						if err := os.Remove(claimPath); err != nil {
-							errors <- err
-							cancel()
-							return
-						}
-					}
-					if o.Durable {
-						if err := recoverWorkerExecutors(o); err != nil {
-							slog.Warn("worker/recovery", "err", err)
-						}
-					}
 					select {
 					case <-ctx.Done():
 						return
 					case <-time.After(poll):
-					}
-					continue
-				}
-				if o.Durable {
-					if err := acceptWorkerClaim(o, claim.Task); err != nil {
-						errors <- err
-						cancel()
-						return
-					}
-					if err := os.Remove(claimPath); err != nil {
-						errors <- err
-						cancel()
-						return
 					}
 					continue
 				}
@@ -577,7 +537,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	}
 	if p.Repair != nil {
 		r := p.Repair
-		j.repair = &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict"}
+		j.repair = &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict", DevelopmentVerification: r.Reason == "development_verification"}
 	}
 	if p.Kind == "repair" && j.repair == nil {
 		return nil, 0, fmt.Errorf("repair task missing repair payload")

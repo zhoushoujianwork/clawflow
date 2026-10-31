@@ -135,7 +135,12 @@ func Validate(s Snapshot, d Decision) error {
 	if len(d.Issues)+len(d.PRs)+len(d.Tasks) > 20 {
 		return fmt.Errorf("too many evidence references")
 	}
+	own := 0
 	for _, n := range d.Issues {
+		if n > 0 && n == s.Issue.Number {
+			own++
+			continue
+		}
 		if !slices.ContainsFunc(s.Issues, func(i vcs.Issue) bool { return i.Number == n }) {
 			return fmt.Errorf("unknown issue #%d", n)
 		}
@@ -150,7 +155,7 @@ func Validate(s Snapshot, d Decision) error {
 			return fmt.Errorf("unknown task")
 		}
 	}
-	if d.Outcome == "waiting" && len(d.Issues)+len(d.PRs)+len(d.Tasks) == 0 {
+	if d.Outcome == "waiting" && len(d.Issues)-own+len(d.PRs)+len(d.Tasks) == 0 {
 		return fmt.Errorf("waiting needs a concrete condition")
 	}
 	if len(s.Incomplete) > 0 && d.Outcome != "needs-confirmation" {

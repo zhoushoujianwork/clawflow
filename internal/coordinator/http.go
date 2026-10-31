@@ -50,7 +50,7 @@ func NewHandler(store WorkerStore) http.Handler {
 			}
 			if len(parts) == 3 && parts[0] == "tasks" && len(parts[1]) <= 128 && parts[1] != "" {
 				switch parts[2] {
-				case "heartbeat", "complete", "fail", "recover", "release":
+				case "heartbeat", "complete", "fail", "recover", "inspect", "release":
 					action = parts[2]
 					task = parts[1]
 				}
@@ -149,6 +149,22 @@ func NewHandler(store WorkerStore) http.Handler {
 					return err
 				}
 				switch action {
+				case "inspect":
+					reader, ok := store.(interface {
+						Task(context.Context, string) (*Task, error)
+					})
+					if !ok {
+						return ErrInvalid
+					}
+					current, readErr := reader.Task(ctx, task)
+					if readErr != nil {
+						return readErr
+					}
+					if current == nil || current.LeaseOwner != worker || current.FencingToken != input.FencingToken {
+						return ErrStaleLease
+					}
+					// Inspection exposes no task payload, report or other worker's state.
+					output = map[string]any{"state": current.State, "report_committed": len(current.Result) > 0}
 				case "recover":
 					recovery, ok := store.(interface {
 						RecoverExecution(context.Context, string, string, int64) (*Task, error)

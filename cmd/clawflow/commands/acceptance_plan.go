@@ -87,9 +87,10 @@ func implementationChecklist(plan *acceptance.Plan) string {
 // the isolated planner receives requirements only. Changes to execution policy
 // or the criteria protocol still invalidate the cache.
 func acceptancePlanningPolicy(repo string, rc config.Repo, ec execution.Config) string {
-	// Version 2 invalidates cached plans that treated implementer process as criteria.
+	// Version 3 distinguishes runtime-live proof from CI/forge observations and
+	// excludes post-merge delivery steps from pre-merge source acceptance.
 	return acceptanceHash(struct {
 		Version, EvidenceSchema                                  int
 		Repository, Platform, BaseURL, Command, Profile, Sandbox string
-	}{2, acceptanceEvidenceSchema, repo, rc.Platform, rc.BaseURL, ec.Command, ec.Profile, ec.CodexSandbox})
+	}{3, acceptanceEvidenceSchema, repo, rc.Platform, rc.BaseURL, ec.Command, ec.Profile, ec.CodexSandbox})
 }

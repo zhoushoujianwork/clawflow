@@ -307,6 +307,82 @@ func TestWorkerReportAllowsBoundedDevelopmentMetadata(t *testing.T) {
 	}
 }
 
+type inspectAPIStore struct {
+	apiStore
+	task Task
+}
+
+func (s *inspectAPIStore) Task(context.Context, string) (*Task, error) { return &s.task, nil }
+
+func TestWorkerHTTPInspectReceiptFencesAndRedacts(t *testing.T) {
+	for _, scenario := range []string{"missing", "committed", "other_owner", "old_epoch"} {
+		t.Run(scenario, func(t *testing.T) {
+			store := &inspectAPIStore{task: Task{ID: "task", State: "leased", LeaseOwner: "worker", FencingToken: 7, Payload: json.RawMessage(`{"secret":"private payload"}`)}}
+			if scenario == "committed" {
+				store.task.Result = json.RawMessage(`{"secret":"private report"}`)
+			}
+			if scenario == "other_owner" {
+				store.task.LeaseOwner = "another"
+			}
+			fence := `{"fencing_token":7}`
+			if scenario == "old_epoch" {
+				fence = `{"fencing_token":6}`
+			}
+			server := httptest.NewTLSServer(NewHandler(store))
+			defer server.Close()
+			status, body := request(t, server, "tasks/task/inspect", "Bearer valid", fence)
+			if scenario == "other_owner" || scenario == "old_epoch" {
+				if status != 409 {
+					t.Fatal(status, string(body))
+				}
+				return
+			}
+			if status != 200 || strings.Contains(string(body), "secret") || strings.Contains(string(body), "private") {
+				t.Fatal(status, string(body))
+			}
+			var receipt struct {
+				State     string `json:"state"`
+				Committed bool   `json:"report_committed"`
+			}
+			if err := json.Unmarshal(body, &receipt); err != nil || receipt.State != "leased" || receipt.Committed != (scenario == "committed") {
+				t.Fatal(receipt, err)
+			}
+			status, _ = request(t, server, "tasks/task/inspect", "Bearer unknown", fence)
+			if status != 401 {
+				t.Fatal("unauthenticated inspection", status)
+			}
+		})
+	}
+}
+
+func TestWorkerHTTPInspectPostgres(t *testing.T) {
+	store, _, _ := setup(t)
+	secret, err := store.CreateToken(ctx, "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(NewHandler(store))
+	defer server.Close()
+	request(t, server, "register", "Bearer "+secret, `{}`)
+	task := enqueue(t, store, 1)
+	request(t, server, "claim", "Bearer "+secret, `{}`)
+	check := func(committed bool) {
+		status, body := request(t, server, "tasks/"+task.ID+"/inspect", "Bearer "+secret, `{"fencing_token":1}`)
+		var value struct {
+			Committed bool `json:"report_committed"`
+		}
+		if status != 200 || json.Unmarshal(body, &value) != nil || value.Committed != committed {
+			t.Fatal(status, string(body))
+		}
+	}
+	check(false)
+	status, body := request(t, server, "tasks/"+task.ID+"/complete", "Bearer "+secret, `{"fencing_token":1,"result":{"ok":true}}`)
+	if status != 200 {
+		t.Fatal(status, string(body))
+	}
+	check(true)
+}
+
 func (s *apiStore) Release(c context.Context, id, w string, f int64, reason string) error {
 	return s.Heartbeat(c, id, w, f)
 }

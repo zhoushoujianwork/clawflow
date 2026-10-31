@@ -72,5 +72,6 @@ func NewWorkerCmd() *cobra.Command {
 	cmd.AddCommand(token, newWorkerJoinCmd(), newWorkerExecuteCmd())
 	cmd.AddCommand(newWorkerGenerationCommands()...)
 	cmd.AddCommand(newWorkerRecoveryCommands()...)
+	cmd.AddCommand(newWorkerLegacyImportCmd())
 	return cmd
 }

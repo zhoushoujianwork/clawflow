@@ -164,11 +164,17 @@ func TestInfrastructureAndProductAttempts(t *testing.T) {
 		if i == 1 {
 			raw = json.RawMessage(`{"status":"failed"}`)
 		}
-		if err := s.AcceptResult(ctx, task.ID, "w", task.FencingToken, raw); err != nil {
+		if err := s.AcceptResult(WithReportDigest(ctx, raw, true), task.ID, "w", task.FencingToken, raw); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.FinalizeApplication(ctx, task.ID, task.FencingToken, true, func(Task) error { return nil }); err != nil {
 			t.Fatal(err)
+		}
+		if i == 0 {
+			retry, err := s.Task(ctx, task.ID)
+			if err != nil || retry.ResultDigest != "" || len(retry.Result) != 0 {
+				t.Fatal("infrastructure retry retained the old report receipt", retry, err)
+			}
 		}
 	}
 	var attempts []TaskAttempt
