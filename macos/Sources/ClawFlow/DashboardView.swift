@@ -101,7 +101,7 @@ struct TasksView: View {
                 Spacer()
                 Picker("Stage", selection: $activityFilter) {
                     Text("All stages").tag("")
-                    Text("Implementation").tag("implement")
+                    Text("Development").tag("implement")
                     Text("PR review").tag("acceptance")
                     Text("PR repair").tag("repair")
                     Text("Issue reply").tag("reply")
@@ -124,11 +124,12 @@ struct TasksView: View {
                     TableColumn("Stage") { row in ActivityBadge(activity: row.activity) }.width(120)
                     TableColumn("Runner") { row in Text(row.worker.isEmpty ? "Unassigned" : row.worker).foregroundStyle(.secondary).lineLimit(1) }.width(min: 110, ideal: 140)
                     TableColumn("Duration") { row in
-                        Text(row.startedAt == nil ? "—" : row.elapsed(at: model.summary.connected ? model.now : snapshot.board.generatedAt))
+                        Text(!row.durationAvailable ? "—" : row.elapsed(at: model.summary.connected ? model.now : snapshot.board.generatedAt))
                             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                            .help(row.startedAt == nil ? "Duration unavailable" : "Duration of this attempt")
+                            .help(!row.durationAvailable ? "Duration unavailable" : "Duration of this attempt")
                     }.width(100)
                 }
+                .tableStyle(.bordered).alternatingRowBackgrounds(.disabled)
                 .overlay {
                     if rows.isEmpty { DashboardEmptyState(title: "No matching tasks", symbol: "checklist", detail: history ? "Completed attempts appear here." : "Running and queued jobs appear here when assigned.") }
                 }
@@ -157,19 +158,22 @@ struct TaskDetail: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 ActivityBadge(activity: row.activity)
-                Label(row.status, systemImage: row.symbol).font(.headline)
+                TaskStateLabel(row: row, connected: model.summary.connected).font(.headline)
                 Text(row.title).font(.title3).textSelection(.enabled)
                 Text(row.reason).textSelection(.enabled)
-                LabeledContent("Worker", value: row.worker.isEmpty ? "Unassigned" : row.worker)
+                DetailField(label: "Worker", value: row.worker.isEmpty ? "Unassigned" : row.worker)
                 if row.group == .running || row.startedAt != nil {
-                    LabeledContent("Elapsed", value: row.elapsed(at: model.summary.connected ? model.now : snapshot.board.generatedAt))
+                    DetailField(label: "Elapsed", value: row.elapsed(at: model.summary.connected ? model.now : snapshot.board.generatedAt))
                 }
-                LabeledContent("Attempt", value: "\(row.attempt + 1)")
-                LabeledContent("Last update") { Text(row.updatedAt, style: .relative) }
-                if !row.tags.isEmpty { LabeledContent("Required tags", value: row.tags.joined(separator: ", ")) }
-                if let link = row.link(in: snapshot) { Link(row.issue > 0 ? "Open issue" : "Open pull request", destination: link).buttonStyle(.bordered) }
-                if row.issue > 0, let pr = row.prLink(in: snapshot) { Link("Open PR #\(row.pr)", destination: pr).buttonStyle(.bordered) }
+                DetailField(label: "Attempt", value: "\(row.attempt + 1)")
+                HStack(alignment: .top) { Text("Last update").foregroundStyle(.secondary).frame(width: 110, alignment: .leading); Text(row.updatedAt, style: .relative); Spacer() }
+                if !row.tags.isEmpty { DetailField(label: "Required tags", value: row.tags.joined(separator: ", ")) }
+                HStack(spacing: 12) {
+                    if let link = row.link(in: snapshot) { Link(row.issue > 0 ? "Open issue" : "Open pull request", destination: link) }
+                    if row.issue > 0, let pr = row.prLink(in: snapshot) { Link("Open PR #\(row.pr)", destination: pr) }
+                }.buttonStyle(.bordered).controlSize(.regular)
                 Divider()
+                Label("Full Offload execution output is not available in this build.", systemImage: "terminal").font(.callout).foregroundStyle(.secondary)
                 DisclosureGroup("Coordinator activity", isExpanded: $showEvents) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Scheduling events · refreshes every 5 seconds while connected.").font(.caption).foregroundStyle(.secondary)
@@ -179,9 +183,8 @@ struct TaskDetail: View {
                             HStack(alignment: .top) { Text(event.at, style: .time).foregroundStyle(.secondary); Text(event.action).textSelection(.enabled) }.font(.caption.monospaced())
                         }
                         Button("Refresh activity") { Task { await loadEvents() } }.disabled(!model.summary.connected || loading)
-                    }.padding(.top, 8)
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
                 }.onChange(of: showEvents) { _, expanded in if expanded { Task { await loadEvents() } } }
-                Text("Full Offload execution output is not available in this build.").font(.caption).foregroundStyle(.secondary)
                 Text("Task ID: \(row.id)").font(.caption).foregroundStyle(.tertiary).textSelection(.enabled)
             }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -240,7 +243,7 @@ struct WorkersView: View {
                 TableColumn("Capacity") { row in Text("\(row.runningTasks.count) / \(row.maxParallel) active").monospacedDigit() }.width(120)
                 TableColumn("Roles") { row in Text(row.roles.joined(separator: ", ")).foregroundStyle(.secondary) }.width(min: 140, ideal: 200)
                 TableColumn("Tags") { row in Text(row.tags.isEmpty ? "—" : row.tags.joined(separator: ", ")).foregroundStyle(.secondary) }.width(min: 100, ideal: 160)
-            }
+            }.tableStyle(.bordered).alternatingRowBackgrounds(.disabled)
         }
         .sheet(isPresented: Binding(get: { selected != nil }, set: { if !$0 { selected = nil } })) {
             VStack(spacing: 0) {
@@ -250,10 +253,10 @@ struct WorkersView: View {
                         VStack(alignment: .leading, spacing: 16) {
                             Text(row.name).font(.title2)
                             Text(row.state).foregroundStyle(.secondary)
-                            LabeledContent("Roles", value: row.roles.joined(separator: ", "))
-                            LabeledContent("Tags", value: row.tags.isEmpty ? "No project tags" : row.tags.joined(separator: ", "))
-                            LabeledContent("Capacity", value: "\(row.runningTasks.count) / \(row.maxParallel)")
-                            if let seen = row.lastSeen { LabeledContent("Last contact") { Text(seen, style: .relative) } }
+                            DetailField(label: "Roles", value: row.roles.joined(separator: ", "))
+                            DetailField(label: "Tags", value: row.tags.isEmpty ? "No project tags" : row.tags.joined(separator: ", "))
+                            DetailField(label: "Capacity", value: "\(row.runningTasks.count) / \(row.maxParallel)")
+                            if let seen = row.lastSeen { HStack { Text("Last contact").foregroundStyle(.secondary).frame(width: 110, alignment: .leading); Text(seen, style: .relative); Spacer() } }
                             Text("Assignment eligibility follows repository and worker tags. Review tags before resuming a new worker.").font(.callout).foregroundStyle(.secondary)
                             Button(row.paused ? "Resume assignments" : "Stop new assignments") { Task { await model.perform(row.paused ? "resume" : "drain", name: row.name) } }
                                 .disabled(!model.summary.connected || model.busy || row.revoked)
@@ -409,5 +412,17 @@ struct TaskStateLabel: View {
             }
             Text(row.status).lineLimit(1)
         }.help(connected ? row.reason : "Last known status · connection unavailable")
+    }
+}
+
+struct DetailField: View {
+    let label: String
+    let value: String
+    var body: some View {
+        HStack(alignment: .top) {
+            Text(label).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
+            Text(value).textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
     }
 }
