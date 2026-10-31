@@ -333,37 +333,36 @@ struct IssueQueueView: View {
             }.controlSize(.regular).padding(.horizontal, 20).frame(height: 56)
             Divider()
             List {
-                ForEach(snapshot.projects.filter { projectFilter.isEmpty || $0.name == projectFilter }) { project in
-                    ForEach(project.repos) { repo in
-                        Section {
-                            if let error = repo.queueError { Text(error).foregroundStyle(.orange) }
-                            if let updated = repo.queueUpdatedAt {
-                                Text("Last evaluated \(updated.formatted()) · \(repo.skippedIssues ?? 0) explicitly skipped")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            } else if repo.queueError == nil {
-                                Text(repo.issueQueue == nil ? "Update the controller to view issue queues." : "Not evaluated yet.").foregroundStyle(.secondary)
-                            }
-                            ForEach((repo.issueQueue ?? []).filter { search.isEmpty || "\($0.key) \($0.title ?? "") \($0.state)".localizedCaseInsensitiveContains(search) }) { issue in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack {
-                                        Text("\(issue.position)").monospacedDigit().foregroundStyle(.secondary).frame(width: 28)
-                                        Text("#\(issue.number) \(issue.title ?? "")").fontWeight(.medium).lineLimit(1)
-                                        Spacer()
-                                        Text(issue.tier).font(.caption.monospaced()).frame(width: 72, alignment: .leading)
-                                        Text(issue.status).font(.caption).foregroundStyle(issue.state.hasPrefix("blocked") ? .orange : .secondary).frame(width: 190, alignment: .leading)
-                                    }
-                                    Text(issue.state).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled).padding(.leading, 36)
-                                    if let base = safeWebURL(repo.url) {
-                                        Link("Open issue", destination: base.appendingPathComponent(repo.platform == "gitlab" ? "-/issues/\(issue.number)" : "issues/\(issue.number)" )).font(.caption).padding(.leading, 36)
-                                    }
-                                }.padding(.vertical, 8)
-                            }
-                            if repo.queueUpdatedAt != nil && (repo.issueQueue ?? []).isEmpty {
-                                Text("No queued issues at the last evaluation.").foregroundStyle(.secondary)
-                            }
-                        } header: {
-                            Text("\(project.name) / \(repo.name) · \(repo.enabled ? "Monitoring" : "Paused") · \((repo.issueQueue ?? []).count) issues")
+                ForEach(snapshot.projectRepositories.filter { projectFilter.isEmpty || $0.project == projectFilter }) { entry in
+                    let repo = entry.repo
+                    Section {
+                        if let error = repo.queueError { Text(error).foregroundStyle(.orange) }
+                        if let updated = repo.queueUpdatedAt {
+                            Text("Last evaluated \(updated.formatted()) · \(repo.skippedIssues ?? 0) explicitly skipped")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else if repo.queueError == nil {
+                            Text(repo.issueQueue == nil ? "Update the controller to view issue queues." : "Not evaluated yet.").foregroundStyle(.secondary)
                         }
+                        ForEach((repo.issueQueue ?? []).filter { search.isEmpty || "\($0.key) \($0.title ?? "") \($0.state)".localizedCaseInsensitiveContains(search) }) { issue in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text("\(issue.position)").monospacedDigit().foregroundStyle(.secondary).frame(width: 28)
+                                    Text("#\(issue.number) \(issue.title ?? "")").fontWeight(.medium).lineLimit(1)
+                                    Spacer()
+                                    Text(issue.tier).font(.caption.monospaced()).frame(width: 72, alignment: .leading)
+                                    Text(issue.status).font(.caption).foregroundStyle(issue.state.hasPrefix("blocked") ? .orange : .secondary).frame(width: 190, alignment: .leading)
+                                }
+                                Text(issue.state).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled).padding(.leading, 36)
+                                if let base = safeWebURL(repo.url) {
+                                    Link("Open issue", destination: base.appendingPathComponent(repo.platform == "gitlab" ? "-/issues/\(issue.number)" : "issues/\(issue.number)" )).font(.caption).padding(.leading, 36)
+                                }
+                            }.padding(.vertical, 8)
+                        }
+                        if repo.queueUpdatedAt != nil && (repo.issueQueue ?? []).isEmpty {
+                            Text("No queued issues at the last evaluation.").foregroundStyle(.secondary)
+                        }
+                    } header: {
+                        Text("\(entry.project) / \(repo.name) · \(repo.enabled ? "Monitoring" : "Paused") · \((repo.issueQueue ?? []).count) issues")
                     }
                 }
             }

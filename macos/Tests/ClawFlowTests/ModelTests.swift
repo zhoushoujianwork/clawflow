@@ -29,6 +29,19 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(row.elapsed(at: Date().addingTimeInterval(60)), "Duration unavailable")
     }
 
+    func testSharedRepositoryHasSeparateQueueSectionIdentityPerProject() throws {
+        let value = try snapshot()
+        let first = value.projects[0]
+        let data = try JSONSerialization.jsonObject(with: Data(#"{"schema_version":1,"version":"test","controller":"mini","board":{"generated_at":"2026-10-30T00:00:00Z","workers":[],"tasks":[]},"projects":[]}"#.utf8)) as! [String: Any]
+        var fixture = data
+        let repo: [String: Any] = ["name": first.repos[0].name, "url": "https://github.com/o/r", "platform": "github", "enabled": true, "ci_required": true, "acceptance_required": true, "auto_merge": false, "worker_tags": []]
+        fixture["projects"] = [["name": "Platform", "repos": [repo]], ["name": "Library", "repos": [repo]]]
+        let rows = try DashboardSnapshot.decode(JSONSerialization.data(withJSONObject: fixture)).projectRepositories
+        XCTAssertEqual(rows.map(\.project), ["Platform", "Library"])
+        XCTAssertEqual(Set(rows.map(\.id)).count, 2)
+        XCTAssertEqual(Set(rows.map { $0.repo.name }).count, 1)
+    }
+
     func testReleaseCheckKeepsDevChannelAndValidatesLink() throws {
         let data = Data(#"{"tag_name":"v1.2.3","html_url":"https://github.com/zhoushoujianwork/clawflow/releases/tag/v1.2.3","draft":false,"prerelease":false}"#.utf8)
         let release = try decoder().decode(AppRelease.self, from: data)

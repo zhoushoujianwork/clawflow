@@ -13,6 +13,17 @@ struct DashboardSnapshot: Decodable {
         return value
     }
     func repository(_ name: String) -> RepoRow? { projects.flatMap(\.repos).first { $0.name == name } }
+    var projectRepositories: [ProjectRepository] {
+        projects.flatMap { project in project.repos.map { ProjectRepository(project: project.name, repo: $0) } }
+    }
+}
+
+/// A repository can belong to several projects. List sections must identify the membership.
+struct ProjectRepository: Identifiable {
+    struct Identity: Hashable { let project: String; let repo: String }
+    let project: String
+    let repo: RepoRow
+    var id: Identity { Identity(project: project, repo: repo.name) }
 }
 
 func decoder() -> JSONDecoder {
