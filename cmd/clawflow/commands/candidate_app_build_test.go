@@ -16,9 +16,20 @@ func TestNativeBuildScriptRefusesUnsafeCandidateTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(root, "macos", "build-app.sh")
-	if _, err := os.Stat(script); err != nil {
+	source := filepath.Join(root, "macos", "build-app.sh")
+	contents, err := os.ReadFile(source)
+	if err != nil {
 		t.Skip("build script unavailable")
+	}
+	// A developer may already have a stable build in the checkout. Exercise
+	// refusal in a disposable repository layout instead of inspecting that build.
+	root = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "macos"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "macos", "build-app.sh")
+	if err := os.WriteFile(script, contents, 0700); err != nil {
+		t.Fatal(err)
 	}
 	cases := []struct {
 		name string
@@ -44,5 +55,22 @@ func TestNativeBuildScriptRefusesUnsafeCandidateTargets(t *testing.T) {
 	// Refusal must happen before any directory is created.
 	if _, err := os.Stat(filepath.Join(root, "macos", "dist")); err == nil {
 		t.Fatal("a refused candidate build created the stable dist directory")
+	}
+	// Refusal must also preserve an existing stable artifact.
+	dist := filepath.Join(root, "macos", "dist")
+	if err := os.Mkdir(dist, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dist, "existing-build")
+	if err := os.WriteFile(marker, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", script)
+	cmd.Env = append(os.Environ(), "CLAWFLOW_CANDIDATE_ID=0123456789ab", "CLAWFLOW_CANDIDATE_OUT="+dist)
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "overlaps") {
+		t.Fatalf("existing dist was not refused: %v %s", err, out)
+	}
+	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "keep" {
+		t.Fatalf("existing build changed: %q %v", contents, err)
 	}
 }
