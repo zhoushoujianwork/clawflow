@@ -5,10 +5,12 @@
 ## 本地样式
 
 - Sidebar 统一 200pt，主区域最小宽度 900pt；顶部筛选栏和详情栏均为 56pt。
-- 任务和 Runner 为全宽原生 Table，数据行至少 48pt。任务展示状态、标题/原因、真实任务类型、Runner、本次耗时。空列表只出现一个紧凑空状态。
+- 主看板是全宽 Pipeline Table，每个 repo + issue 仅一行；状态是执行活动，不是交付通过。展开后按阶段展示 Job，Job 内保留 Runner、本次耗时与详情。Runner 管理仍为独立表格。空列表只出现一个紧凑空状态。
 - 选中行打开可关闭详情；刷新、任务结束后仍保留该任务详情，不能因切换为历史状态自动消失。无该记录时关闭。
 - 保留原来的连接新鲜度、失联停止旋转和耗时推进规则。历史缺少结束时间时显示耗时不可用，不继续累计。
-- 阶段筛选仅映射已存在的 kind：implement / acceptance / repair / reply。不能根据列表顺序推断某 issue 已通过检查或审核。
+- 已有阶段 Job 映射 kind：implement / acceptance / repair / reply；独立检查无上报时显示 Not reported。阶段完成图标仅代表该 Job 完成，不能推断审核通过、CI 成功或已合并。
+- PR-only Job 仅在同仓库已有明确且唯一的 PR → Issue 关联时归入 Issue Pipeline；关联缺失或歧义时保留为独立未归属 PR 项，不猜归属。共享项目的同一个 Issue 只聚合一次。
+- 当前快照仅含各 task 的当前 attempt，不宣称完整历史重试；显示已有 Job 和 attempt 序号，缺失记录明确说明。
 - Coordinator activity 是调度事件，每 5 秒轮询；隐藏、断开或关闭详情后不继续取流。不是完整执行终端。
 
 ## 待实现的阶段与执行投影

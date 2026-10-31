@@ -1,14 +1,14 @@
 import SwiftUI
 
 enum Destination: String, CaseIterable, Identifiable {
-    case issues = "Issue Queue", tasks = "Tasks", workers = "Workers", projects = "Projects"
+    case issues = "Issue Queue", tasks = "Pipelines", workers = "Workers", projects = "Projects"
     var id: String { rawValue }
     var symbol: String { switch self { case .issues: return "list.number"; case .tasks: return "checklist"; case .workers: return "desktopcomputer"; case .projects: return "folder" } }
 }
 
 struct DashboardView: View {
     @ObservedObject var model: DashboardModel
-    @State private var destination: Destination? = .issues
+    @State private var destination: Destination? = .tasks
     @State private var search = ""
     @State private var projectFilter = ""
     var body: some View {
@@ -44,7 +44,7 @@ struct DashboardView: View {
                 if let snapshot = model.snapshot {
                     switch destination ?? .tasks {
                     case .issues: IssueQueueView(snapshot: snapshot, search: search, projectFilter: $projectFilter)
-                    case .tasks: TasksView(model: model, snapshot: snapshot, search: search, projectFilter: $projectFilter)
+                    case .tasks: PipelinesView(model: model, snapshot: snapshot, search: search, projectFilter: $projectFilter)
                     case .workers: WorkersView(model: model, snapshot: snapshot, search: search)
                     case .projects: ProjectsView(model: model, snapshot: snapshot, search: search) { name in
                         projectFilter = name; destination = .issues; search = ""
@@ -71,78 +71,6 @@ struct DashboardView: View {
             Button { Task { await model.refresh() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }.keyboardShortcut("r")
         }
         .frame(minWidth: 1100, minHeight: 680)
-    }
-}
-
-struct TasksView: View {
-    @ObservedObject var model: DashboardModel
-    let snapshot: DashboardSnapshot
-    let search: String
-    @Binding var projectFilter: String
-    @State private var history = false
-    @State private var activityFilter = ""
-    @State private var selected: String?
-    var rows: [TaskRow] {
-        let repos = snapshot.projects.first { $0.name == projectFilter }?.repos.map(\.name)
-        return snapshot.board.tasks.filter {
-            ($0.group == .history) == history && (activityFilter.isEmpty || $0.kind == activityFilter) && (projectFilter.isEmpty || repos?.contains($0.repo) == true) &&
-            (search.isEmpty || "\($0.title) \($0.worker) \($0.status)".localizedCaseInsensitiveContains(search))
-        }.sorted { a, b in
-            if history { return a.updatedAt > b.updatedAt }
-            if a.group != b.group { return a.group.rawValue < b.group.rawValue }
-            return a.updatedAt > b.updatedAt
-        }
-    }
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Picker("Tasks", selection: $history) { Text("Active").tag(false); Text("History").tag(true) }.pickerStyle(.segmented).frame(width: 180)
-                Text("\(rows.count) shown").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Picker("Stage", selection: $activityFilter) {
-                    Text("All stages").tag("")
-                    Text("Development").tag("implement")
-                    Text("PR review").tag("acceptance")
-                    Text("PR repair").tag("repair")
-                    Text("Issue reply").tag("reply")
-                }.frame(width: 200)
-                Picker("Project", selection: $projectFilter) {
-                    Text("All projects").tag("")
-                    ForEach(snapshot.projects) { Text($0.name).tag($0.name) }
-                }.frame(maxWidth: 260)
-            }.controlSize(.regular).padding(.horizontal, 20).frame(height: 56)
-            Divider()
-            HStack(spacing: 0) {
-                Table(rows, selection: $selected) {
-                    TableColumn("Status") { row in TaskStateLabel(row: row, connected: model.summary.connected) }.width(155)
-                    TableColumn("Job") { row in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(row.title).fontWeight(.medium).lineLimit(1).help(row.title)
-                            Text((row.pr > 0 ? "PR #\(row.pr) · " : "") + row.reason).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        }.frame(minHeight: 48).help(row.reason)
-                    }.width(min: 240, ideal: 340)
-                    TableColumn("Stage") { row in ActivityBadge(activity: row.activity) }.width(120)
-                    TableColumn("Runner") { row in Text(row.worker.isEmpty ? "Unassigned" : row.worker).foregroundStyle(.secondary).lineLimit(1) }.width(min: 110, ideal: 140)
-                    TableColumn("Duration") { row in
-                        Text(!row.durationAvailable ? "—" : row.elapsed(at: model.summary.connected ? model.now : snapshot.board.generatedAt))
-                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                            .help(!row.durationAvailable ? "Duration unavailable" : "Duration of this attempt")
-                    }.width(100)
-                }
-                .tableStyle(.bordered).alternatingRowBackgrounds(.disabled)
-                .overlay {
-                    if rows.isEmpty { DashboardEmptyState(title: "No matching tasks", symbol: "checklist", detail: history ? "Completed attempts appear here." : "Running and queued jobs appear here when assigned.") }
-                }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .sheet(isPresented: Binding(get: { snapshot.board.tasks.contains { $0.id == selected } }, set: { if !$0 { selected = nil } })) {
-            if let row = snapshot.board.tasks.first(where: { $0.id == selected }) {
-                VStack(spacing: 0) {
-                    DetailHeader(title: "Job details · attempt \(row.attempt + 1)") { selected = nil }
-                    TaskDetail(model: model, snapshot: snapshot, row: row).id(row.id)
-                }.frame(width: 760, height: 620)
-            }
-        }
     }
 }
 
