@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
@@ -28,6 +29,11 @@ func clientForRepo(repo string) (vcs.Client, error) {
 	creds, err := config.LoadCredentials()
 	if err != nil {
 		return nil, err
+	}
+	if devmode.Active() {
+		if err := devmode.CheckBaseURL(repoCfg.BaseURL); err != nil {
+			return nil, &httpError{Code: 403, Msg: err.Error()}
+		}
 	}
 	platform := repoCfg.Platform
 	if platform == "" {

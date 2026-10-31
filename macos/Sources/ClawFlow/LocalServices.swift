@@ -9,8 +9,8 @@ struct LocalService: Identifiable {
     var error: String?
     var title: String { id.hasSuffix(".postgres") ? "Local database" : id.hasSuffix(".controller") ? "Local controller" : "Worker · " + id.replacingOccurrences(of: "com.zhoushoujianwork.clawflow.worker-", with: "") }
     var status: String { error != nil ? "Status unavailable" : running ? "Running · PID \(pid ?? "—")" : loaded ? "Loaded · not running" : "Stopped" }
-    static func accepts(_ label: String) -> Bool {
-        label == "com.zhoushoujianwork.clawflow.postgres" || label == "com.zhoushoujianwork.clawflow.controller" || label.hasPrefix("com.zhoushoujianwork.clawflow.worker-")
+    static func accepts(_ label: String, identity: AppIdentity = .current) -> Bool {
+        identity.manages(label)
     }
     mutating func apply(_ text: String) {
         loaded = true; running = false; pid = nil; error = nil
@@ -41,10 +41,10 @@ struct LocalService: Identifiable {
     @Published var message: String?
     private var refreshing = false
     private var loop: Task<Void, Never>?
-    func start(ensureRunning: Bool = false) {
+    func start(ensureRunning: Bool = false, identity: AppIdentity = .current) {
         guard loop == nil else { return }
         loop = Task { [weak self] in
-            if ensureRunning { await self?.ensureHostRunning() }
+            if ensureRunning && identity.startsHostServices { await self?.ensureHostRunning() }
             while !Task.isCancelled {
                 await self?.refresh()
                 try? await Task.sleep(for: .seconds(5))

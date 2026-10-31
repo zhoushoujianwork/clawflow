@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm/logger"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 )
 
 // Connection pool defaults.
@@ -35,6 +36,12 @@ type Store struct {
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// A development candidate may only use its own schema.
+	if devmode.Active() {
+		if err := devmode.CheckDSN(dsn); err != nil {
+			return nil, err
+		}
 	}
 	// The GORM logger is silent: it would otherwise print SQL parameters.
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{

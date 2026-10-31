@@ -170,3 +170,7 @@ SOP/版本由 `project-maintainer` 处理，能力由 `environment-maintainer` �
 SOP 始终是程序说明，不能授权 GUI 操作、替换 daemon、修改生产工程、读取凭据
 或扩大发布范围。readiness 检查只读取 SOP 和已声明能力，不执行文档中的命令。
 #603 的实现不包含实时探测、候选部署或资源租约，也不扩大操作授权；#602 的机器本地共享资源租约见前节。
+
+## #613：本地候选隔离
+
+候选构建、开发 worker 与独立评审 worker 在按提交隔离的运行时中执行，不影响稳定宿主。启动前以同一固定摘要与能力校验开发和验收两端；缺失返回 `blocked` 与 `next_owner`。详见 [candidate-isolation.md](candidate-isolation.md)。该实现不提供 GUI 目视验收，也不改变上述租约与 live 证据规则。
