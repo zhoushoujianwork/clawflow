@@ -129,3 +129,16 @@ be88412b 已滚动部署为 dev-acceptance-plan-be88412b，CLI SHA-256 为 f133e
 两个缺陷均先写回归再改实现。独立 PostgreSQL 的 TestLatestDevelopmentRetainsTestingEvidence 在旧查询上真实失败，错误正是读取空测试声明的 unexpected end of JSON input；补取两个字段后正常通过。完整 TestEnqueueAcceptanceFromPRSummaryAfterBaseMerge 在旧入队流程退出 1；修正为采用契约返回的完整 PR。原数据库、来源记录、SOP 摘要和修复预算均未修改。
 
 另补充 development_verification 派发路径，使缺少来源的受管 PR 可以通过真实新开发核验继续。最初回归证明 updated-head／missing-history 都不会被旧代码派发；修复后通过。检查已有来源、执行中、损坏记录、CI pending／无 CI、skip、fork、关闭自动合并、预算耗尽及派发后状态变化都保持门禁；真实 Offload 协议 fixture 验证 no-change 可生成带核验原因的新完成记录，并消耗一次共享预算。没有重写旧 run，也没有凭文本标记放开来源门禁。
+
+
+## 自动链路修复的本地交付
+
+最终源码提交 fe9b6c361c861379608623b43ab11ae73c87060e 已正常推送。3260 项首次全量验证之后，又加入两个真实 PostgreSQL 边界回归，最终重新完整运行 `go test -p 2 -race -json ./... -count=1 -timeout 8m`：3262 通过、0 失败、0 跳过、退出 0，产物 `/tmp/clawflow-runtime-recovery-suite-jdg7q6fi/summary.json`，临时数据库已停止。新 CLI 的五个 embedded operator 校验通过。修复前后数据库目标回归产物分别为 `/var/folders/64/xyvthqtj4xqb6xp70kw9hgf80000gq/T/clawflow-development-contract-8b1747ht`（旧查询失败）和 `.../clawflow-development-contract-mw1h7on8`（修复通过）；PR 摘要的完整入队回归为 `.../clawflow-summary-contract-_xfp6t15`（旧流程失败）与 `.../clawflow-summary-contract-rtw9ue1s`（修复通过）。
+
+本机服务已滚动更新为 `dev-auto-acceptance-fe9b6c36`，SHA-256 `fa4ba0b490667424e66cc996aeba5fa23c60e384d8b70c544620e804525ddb83`，两个 worker generation 相符，在线／未暂停，容量仍为 1/4。切换时无活动 task 或持有规划锁的 planner；PostgreSQL PID 61176 未重启。备份、原配置、数据库快照及前后证据在 `~/Library/Application Support/ClawFlow/backups/coordination-primary-20261031-ccqpjds7/`。未进行 SQLite 切换，App 安装版也未混同为服务版本。
+
+核对 #608 的原暂停评论后，确认 clawflow-skip 是此前 owner-directed local PR handling claim 的临时排他标记。现已先留下中文交回说明，再解除该标记，让现有调度器处理 #609；没有移除失败标签或清空预算。#609 与 #617 当前准确 head 的三项必需 CI 都已成功，无需为了核验而额外修改提交。新自动会话和验收结果需要以之后的实际 journal/run 证据为准，不能把部署成功写成已合并。
+
+更新前已启动的旧扫描 PID 33765 自然于 03:32:46 UTC 结束并释放仓库锁；新扫描 PID 39217 于 03:33:10 UTC 使用 dev-auto-acceptance-fe9b6c36 启动，没有启动第二个调度器或终止旧扫描。服务环境的两个 worker 均配置 claude-claude-sonnet-5-1m-inherit-inherit；readiness 只证明安装／配置可用，实际 provider 会话仍以之后 execution.json 为准。
+
+新增交付登记 [#623](https://github.com/zhoushoujianwork/clawflow/issues/623)，用于把恢复分支已有的修复合入主分支，不重复实现；先挂临时 skip 与 implemented，待现有代码 PR 关联后交自动链路。范围包含本分支原有 durable／协调恢复、CI 证据读取和本轮验收恢复；不携带 #611 菜单栏或 #622 SQLite 功能，也不触发数据库迁移。与 #619 的原始协调修复保留提交关系和作者历史。
