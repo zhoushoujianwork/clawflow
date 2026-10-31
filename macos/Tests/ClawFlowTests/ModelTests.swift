@@ -22,6 +22,13 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(row.elapsed(at: Date()), "00:01:05")
     }
 
+    func testFinishedAttemptWithoutEndDoesNotKeepCounting() throws {
+        let json = #"{"id":"t","repo":"o/r","issue":1,"pr":0,"kind":"implement","state":"done","stage":"done","worker":"w","attempt":0,"updated_at":"2026-10-30T00:09:00Z","started_at":"2026-10-30T00:00:00Z","tags":[]}"#
+        let row = try decoder().decode(TaskRow.self, from: Data(json.utf8))
+        XCTAssertEqual(row.elapsed(at: Date()), "Duration unavailable")
+        XCTAssertEqual(row.elapsed(at: Date().addingTimeInterval(60)), "Duration unavailable")
+    }
+
     func testReleaseCheckKeepsDevChannelAndValidatesLink() throws {
         let data = Data(#"{"tag_name":"v1.2.3","html_url":"https://github.com/zhoushoujianwork/clawflow/releases/tag/v1.2.3","draft":false,"prerelease":false}"#.utf8)
         let release = try decoder().decode(AppRelease.self, from: data)

@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Window("ClawFlow", id: "dashboard") {
             DashboardView(model: model).task { model.start() }
         }
-        .defaultSize(width: 1060, height: 680)
+        .defaultSize(width: 1200, height: 760)
         .commands { CommandGroup(replacing: .newItem) {} }
         Settings { ConnectionView(model: model) }
         MenuBarExtra {
