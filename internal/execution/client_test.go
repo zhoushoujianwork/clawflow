@@ -27,6 +27,16 @@ func TestOffloadHelper(t *testing.T) {
 		os.Exit(3)
 	}
 	args := offloadtest.Args()
+	if capture := os.Getenv("OFFLOAD_TEST_ENV_CAPTURE"); capture != "" {
+		// Record the environment this real child process actually received.
+		raw, _ := json.Marshal(os.Environ())
+		_ = os.WriteFile(capture, raw, 0600)
+		if args["-w"] == "" {
+			args["-execution-policy"] = "default"
+		}
+		offloadtest.Emit(args, "environment captured", "", "")
+		return
+	}
 	if expected := os.Getenv("OFFLOAD_TEST_DSN_HASH"); expected != "" {
 		dsn := os.Getenv("CLAWFLOW_TEST_DATABASE_DSN")
 		if fmt.Sprintf("%x", sha256.Sum256([]byte(dsn))) != expected {
@@ -424,6 +434,54 @@ func TestConfiguredTestDatabaseReachesManagedAgentAndIsRedacted(t *testing.T) {
 			}
 			if os.Getenv("CLAWFLOW_TEST_DATABASE_DSN") != "inherited" {
 				t.Fatal("parent environment mutated")
+			}
+		})
+	}
+}
+
+func TestSupervisorStateDirIsNotInheritedByOffloadChild(t *testing.T) {
+	for _, mode := range []string{"bypassPermissions", "default"} {
+		t.Run(mode, func(t *testing.T) {
+			c, req := fixture(t)
+			req.PermissionMode = mode
+			// Fake path in an isolated directory; never a real worker location.
+			supervisorState := filepath.Join(t.TempDir(), "supervisor-state")
+			t.Setenv("CLAWFLOW_STATE_DIR", supervisorState)
+			const dsn = "postgres://fixture@localhost/fixture"
+			const spool = "CLAWFLOW_EFFECT_SPOOL"
+			t.Setenv("CLAWFLOW_TEST_DATABASE_DSN", dsn)
+			t.Setenv("OFFLOAD_TEST_CAPTURE", filepath.Join(t.TempDir(), "calls"))
+			capture := filepath.Join(t.TempDir(), "env.json")
+			t.Setenv("OFFLOAD_TEST_ENV_CAPTURE", capture)
+			env := append(os.Environ(), spool+"=/fixture/spool")
+			result, err := Run(context.Background(), c, req, env, io.Discard, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Profile != "test-profile" {
+				t.Fatalf("profile changed: %q", result.Profile)
+			}
+			raw, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var child []string
+			if err := json.Unmarshal(raw, &child); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+			for _, kv := range child {
+				k, v, _ := strings.Cut(kv, "=")
+				if k == "CLAWFLOW_STATE_DIR" {
+					t.Fatal("child inherited supervisor CLAWFLOW_STATE_DIR")
+				}
+				got[k] = v
+			}
+			if got["CLAWFLOW_TEST_DATABASE_DSN"] != dsn || got[spool] != "/fixture/spool" || got["HOME"] != os.Getenv("HOME") {
+				t.Fatal("authorized environment was not preserved")
+			}
+			if os.Getenv("CLAWFLOW_STATE_DIR") != supervisorState || len(env) != len(append(os.Environ(), spool+"=/fixture/spool")) {
+				t.Fatal("parent environment changed")
 			}
 		})
 	}
