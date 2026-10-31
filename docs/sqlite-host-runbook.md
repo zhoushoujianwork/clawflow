@@ -50,6 +50,14 @@ After cutover the host refuses contradictory input: a leftover `CLAWFLOW_DATABAS
 - **Before SQLite accepted new work:** `clawflow db rollback` (controller stopped) restores the pre-cutover `config.yaml` and renames the SQLite file to `*.rolled-back-<time>`. It compares a content fingerprint with the one recorded at cutover.
 - **After new work:** `db rollback` refuses (`ErrReconcileRequired`). Switching back to the older PostgreSQL snapshot would replay completed tasks and effects. Reconcile first, or do a verified reverse import (not provided by this change).
 
+### 宿主脚本的隔离测试
+
+`HOME` 只能隔离文件路径，不能隔离 `launchctl gui/<uid>`。宿主安装及退役脚本拒绝与系统账户主目录不一致的 `HOME`，包括预览操作；测试必须 mock 服务命令，不能用临时 HOME 配合真实 `--apply` 验证。
+
+运行 `python3 -m unittest discover -s macos -p test_install_host.py`。测试在临时目录中验证拒绝越界、正常预览及退役行为，所有 launchctl 调用均被替换，不操作真实服务。
+
+2026-10-31 12:05（UTC+8），独立验收使用临时 HOME 执行旧版退役脚本，但固定服务标签仍指向真实用户域，正式 PostgreSQL 被卸载，控制器持续返回 HTTP 500。17:17 重新加载原 PostgreSQL plist 后，数据库 WAL 恢复完成、快照请求成功、两个 worker 自动重新连接。未执行 SQLite 切换。`KeepAlive` 会处理已加载服务的退出，不能恢复被显式 bootout 的服务；此事故不能归为普通进程崩溃。
+
 ## Verification record
 
 Observed in the development environment on 2026-10-31 (Apple M1, macOS 26.2):
