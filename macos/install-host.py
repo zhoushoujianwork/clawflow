@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import pwd
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,16 @@ def run(*args, check=True):
 POSTGRES_LABEL = 'com.zhoushoujianwork.clawflow.postgres'
 
 
+def service_home():
+    # HOME changes filesystem paths, but never changes launchd's gui/<uid> domain.
+    # Reject fixture homes before even querying a real service by its fixed label.
+    home = Path.home()
+    account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if home.resolve() != account_home.resolve():
+        raise SystemExit('HOME does not match the current macOS account; refusing host service operations. Mock launchctl for isolated tests.')
+    return home
+
+
 def retire_postgres(apply):
     """Unload ClawFlow's dedicated PostgreSQL LaunchAgent after a completed cutover.
 
@@ -29,7 +40,7 @@ def retire_postgres(apply):
     rollback` and manual recovery stay possible. Other PostgreSQL services are
     never inspected or stopped.
     """
-    home = Path.home()
+    home = service_home()
     root = home / 'Library/Application Support/ClawFlow'
     record = root / 'data/cutover.json'
     database = root / 'data/clawflow.sqlite3'
@@ -63,7 +74,7 @@ def install():
         return
     if sys.platform != 'darwin':
         raise SystemExit('macOS is required')
-    home = Path.home()
+    home = service_home()
     legacy = home / '.clawflow'
     root = home / 'Library/Application Support/ClawFlow'
     logs = home / 'Library/Logs/ClawFlow'
