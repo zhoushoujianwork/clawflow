@@ -169,7 +169,16 @@ func (a *workerAPI) postOnce(ctx context.Context, path string, in, out any) erro
 	}
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.client.Do(req)
+	client := a.client
+	if strings.HasSuffix(path, "/complete") || strings.HasSuffix(path, "/fail") {
+		// Completion revalidates remote provenance before acknowledging the outbox.
+		// Keep registration/heartbeat latency bounded independently; never mutate
+		// the shared client used by concurrent requests. Caller cancellation wins.
+		reportClient := *a.client
+		reportClient.Timeout = 90 * time.Second
+		client = &reportClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("coordinator request failed: %w", err)
 	}

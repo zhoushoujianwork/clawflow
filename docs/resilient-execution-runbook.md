@@ -84,3 +84,11 @@ Readiness gates are process-local caches and are excluded from generation and ex
 仅“缺少历史”或“当前 head 没有完成记录”可自动核验。损坏／歧义记录、正在运行的开发、未通过的 CI、fork／非受管分支、手动 skip、未启用的策略、预算耗尽和读取错误保持阻塞，不通过创建新记录掩盖它们。协调器 payload 保留核验原因，重启后的 worker 与结果回放沿用同一目的；审计 metadata 记录 `repair_reason=development_verification`。无需启动第二个调度器。
 
 验收入队从数据库读取开发任务时必须同时保留 payload 与 result，才能继承实际读过的 SOP 版本；从 VCS 列表取得摘要后，后续来源检查使用契约绑定的完整 PR 信息。缺字段不应被误报为证据损坏或永久等待。数据库检索与完整入队的隔离 PostgreSQL 回归覆盖这两个边界。
+
+## 验收结果回传超时
+
+`pending_sync` 表示执行结果已经落入 worker journal，不能重新启动模型或清空任务。先检查 executor 是否仍持有锁，以及结果上传日志；控制器重建验收契约时仍会核对远端 PR 和开发来源。
+
+来源继承只需要提交祖先关系，临时 Git 仓库使用 `--filter=blob:none` 获取提交图，保留完整的 head、父节点及主分支关系检查。结果 `/complete`、`/fail` 请求单独使用 90 秒有限时长，注册和心跳继续使用 10 秒，调用方取消仍生效。不会通过放宽验收合约来接受结果，也不增加修复预算。
+
+滚动更新先检查活动会话与待回传 journal，备份并暂停新领取；保留已完成结果、原 epoch、worker 所有权和会话身份。旧执行器固定使用旧二进制，因此更新 controller 后须实际观察旧 journal 获得确认、名额释放、后续独立验收开始，不能仅凭 worker 在线宣布恢复。
