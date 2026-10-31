@@ -90,3 +90,27 @@ func (s *Store) CancelSupersededAcceptance(ctx context.Context, repo string, pr 
 		return nil
 	})
 }
+
+// The caller must first observe the PR closed through the authenticated VCS.
+// Fence the exact late uploader, never an already accepted result or a newer owner.
+func (s *Store) RetireClosedAcceptance(ctx context.Context, id, worker string, fence int64) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var task Task
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ?", id).Error; err != nil {
+			return err
+		}
+		if task.Kind != "acceptance" || task.State != "leased" || task.LeaseOwner != worker || task.FencingToken != fence || len(task.Result) != 0 || task.LeaseExpiresAt == nil {
+			return ErrStaleLease
+		}
+		if err := tx.Model(&task).Updates(map[string]any{"state": "cancelled", "fencing_token": gorm.Expr("fencing_token + 1"), "lease_expires_at": nil}).Error; err != nil {
+			return err
+		}
+		if err := failIntents(tx, id); err != nil {
+			return err
+		}
+		if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND ended_at IS NULL", id).Updates(map[string]any{"status": "cancelled", "ended_at": time.Now().UTC()}).Error; err != nil {
+			return err
+		}
+		return audit(tx, worker, id, "acceptance-closed")
+	})
+}

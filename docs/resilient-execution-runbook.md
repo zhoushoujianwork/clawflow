@@ -92,3 +92,11 @@ Readiness gates are process-local caches and are excluded from generation and ex
 来源继承只需要提交祖先关系，临时 Git 仓库使用 `--filter=blob:none` 获取提交图，保留完整的 head、父节点及主分支关系检查。结果 `/complete`、`/fail` 请求单独使用 90 秒有限时长，注册和心跳继续使用 10 秒，调用方取消仍生效。不会通过放宽验收合约来接受结果，也不增加修复预算。
 
 滚动更新先检查活动会话与待回传 journal，备份并暂停新领取；保留已完成结果、原 epoch、worker 所有权和会话身份。旧执行器固定使用旧二进制，因此更新 controller 后须实际观察旧 journal 获得确认、名额释放、后续独立验收开始，不能仅凭 worker 在线宣布恢复。
+
+## 已合并 PR 的迟到审核
+
+入队先复核当前验收契约是否已有有效通过记录，并在最终入队前与结果发布共用锁再次检查，避免扫描途中结果完成后又派发同一审核。
+
+worker 回传时，由控制器从 VCS 确认 PR 已关闭或合并后，仅退役该未提交结果的 acceptance task。数据库事务核对原 owner、epoch、种类和状态，再撤销 authority 并保留审计；已经 accepted 的结果或新的 owner／epoch 不能被撤销。回传收到终态 stale 响应后停止重试，原 journal 及原通过记录继续保留。VCS 读取失败保持错误，不据此取消任务。
+
+2026-10-31 的 #626 故障保留了两条相同契约的审核：较早结果已通过且 PR 已合并，较晚结果停在 `pending_sync` 并收到 HTTP 500。运维在备份后核对实际合并 head、原通过记录、已完成 checkpoint 和原 owner／epoch，通过现有取消事务退役这条多余审核，随后 #624 自动开始验收；没有重跑模型、增加容量或改写 journal。修复由 #627 单独交付，不移动正在审核的 #624 提交。

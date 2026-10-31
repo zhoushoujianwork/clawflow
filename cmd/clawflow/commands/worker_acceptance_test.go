@@ -84,6 +84,58 @@ func acceptanceUploadTask(t *testing.T, c acceptance.Contract) *resultStoreFake 
 	return &resultStoreFake{task: coordinator.Task{ID: "upload", Kind: "acceptance", Repo: "o/r", Issue: 42, PR: 11, Operator: "acceptance", Payload: payload, State: "leased", LeaseOwner: "w", FencingToken: 1, LeaseExpiresAt: &expires}}
 }
 
+func (s *resultStoreFake) RetireClosedAcceptance(_ context.Context, id, worker string, fence int64) error {
+	if s.task.ID != id || s.task.LeaseOwner != worker || s.task.FencingToken != fence || s.task.State != "leased" {
+		return coordinator.ErrStaleLease
+	}
+	s.task.State = "cancelled"
+	s.task.FencingToken++
+	s.task.LeaseExpiresAt = nil
+	return nil
+}
+
+func TestClosedPRAcceptanceUploadRetiresOnlyLateTask(t *testing.T) {
+	f, _ := acceptanceFixture(t)
+	r := produceAcceptance(t, f)
+	backing := acceptanceUploadTask(t, r.Contract)
+	f.pr.State = "closed"
+	s := &coordinatorResults{WorkerStore: backing, tasks: backing}
+	raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "success"}, Acceptance: &r})
+	err := s.Complete(context.Background(), "upload", "w", 1, raw)
+	if !errors.Is(err, coordinator.ErrStaleLease) || backing.task.State != "cancelled" || backing.task.FencingToken != 2 {
+		t.Fatalf("late result left retrying: state=%s epoch=%d err=%v", backing.task.State, backing.task.FencingToken, err)
+	}
+	if len(backing.task.Result) != 0 {
+		t.Fatal("late result accepted as current evidence")
+	}
+	store, err := acceptance.OpenStore(acceptanceStorePath("o/r", 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	latest, err := store.LatestRecord(r.Contract)
+	if err != nil || latest.AttemptID != r.AttemptID || latest.Verdict != acceptance.Passed {
+		t.Fatalf("original passing evidence changed: %+v %v", latest, err)
+	}
+}
+
+func TestPassedAcceptanceIsNotRequeued(t *testing.T) {
+	f, rc := acceptanceFixture(t)
+	_ = produceAcceptance(t, f)
+	old := requireStore
+	t.Cleanup(func() { requireStore = old })
+	requireStore = func(context.Context) (*store.Store, error) {
+		t.Fatal("passing contract attempted database dispatch again")
+		return nil, errors.New("unexpected enqueue")
+	}
+	oldAllowed := coordinatorPRAllowedFn
+	t.Cleanup(func() { coordinatorPRAllowedFn = oldAllowed })
+	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
+	if err := enqueueWorkerAcceptance(context.Background(), f, "o/r", rc, f.pr, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCoordinatorAcceptanceUpload(t *testing.T) {
 	for _, mode := range []string{"valid", "valid-any", "stale", "self-worker", "self-worker-any", "missing-worker-any", "self-session", "tampered", "head", "command"} {
 		t.Run(mode, func(t *testing.T) {
