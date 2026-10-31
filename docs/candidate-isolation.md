@@ -111,3 +111,7 @@ clawflow candidate clean --commit <sha>
 - 稳定宿主快照只读取文件、探测端口与 `ps`；未覆盖稳定宿主上由其他用户启动的进程。
 - 本变更不实现跨机器的权威租约，也不为候选自动安装 launchd 服务；`LabelPrefix`/`ServiceLabel` 只定义命名空间并由 App 与 CLI 强制。
 - 隔离是对协作程序的约束：恶意子进程若自行构造 HTTP 客户端并显式设置 `Transport`，仍可绕过进程内传输守卫；git 与 offload 子进程通过清除的环境变量与 `GIT_ALLOW_PROTOCOL` 约束。
+
+## 升级
+
+候选通过隔离验证后，使用 `clawflow upgrade` 滚动升级已安装的 controller 与 worker，见 [controller-upgrade.md](controller-upgrade.md)。

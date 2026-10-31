@@ -330,3 +330,36 @@ func TestNativeWorkerMigrationPreservesExistingEligibility(t *testing.T) {
 		t.Fatal("existing eligibility changed", err)
 	}
 }
+
+func TestAppliedVersionsAndContractMarking(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	got, err := s.AppliedVersions(ctx)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("an unmigrated database has no versions: %v %v", got, err)
+	}
+	if _, err := s.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.AppliedVersions(ctx)
+	if err != nil || len(got) != len(store.Migrations) || got[len(got)-1] != store.LatestVersion(store.Migrations) {
+		t.Fatalf("applied %v for %d migrations (%v)", got, len(store.Migrations), err)
+	}
+	// A version this binary does not know is still reported, so a rolling
+	// upgrade can tell the database moved ahead of the running build.
+	if err := s.DB().Exec("INSERT INTO schema_migrations (version, name) VALUES (9999, 'future')").Error; err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.AppliedVersions(ctx)
+	if got[len(got)-1] != 9999 {
+		t.Fatalf("unknown version missing: %v", got)
+	}
+	for _, m := range store.Migrations {
+		if m.Contract {
+			t.Fatalf("migration %d: contract migrations must not ship until a documented two-release contract step", m.Version)
+		}
+	}
+	if len(store.ContractVersions([]store.Migration{{Version: 1}, {Version: 2, Contract: true}})) != 1 {
+		t.Fatal("contract versions not reported")
+	}
+}
