@@ -10,6 +10,8 @@ import SwiftUI
     @Published private(set) var error: String?
     @Published private(set) var busy = false
     @Published var actionError: String?
+    /// The monitoring/worker change currently awaiting the controller; shown as pending feedback.
+    @Published private(set) var pendingAction: PendingAction?
     @Published var now = Date()
     private var polling: Task<Void, Never>?
     private var executionLoop: Task<Void, Never>?
@@ -18,6 +20,7 @@ import SwiftUI
     private var refreshing = false
     private var generation = 0
     var summary: StatusSummary { .reduce(snapshot: snapshot, received: received, error: error, now: now) }
+    var popover: StatusPopover { .make(snapshot: snapshot, received: received, error: error, now: now) }
     /// Menu-bar attention includes an unusable local executor, not only task attention.
     var offloadNeedsAttention: Bool { executionReadiness.status?.needsAttention ?? false }
 
@@ -70,8 +73,8 @@ import SwiftUI
     }
     func perform(_ action: String, name: String) async {
         guard summary.connected, !busy else { return }
-        busy = true; actionError = nil
-        defer { busy = false }
+        busy = true; actionError = nil; pendingAction = PendingAction(action: action, name: name)
+        defer { busy = false; pendingAction = nil }
         do { _ = try await request([action, name]); await refresh() }
         catch { actionError = error.localizedDescription + " Refresh before repeating the action." }
     }
