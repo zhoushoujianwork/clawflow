@@ -299,3 +299,36 @@ func TestRepairInfrastructureResultReturnsThroughLedgerScheduler(t *testing.T) {
 		t.Fatalf("repair immediately reclaimed: %v", err)
 	}
 }
+
+func TestExpiredRepairReturnsThroughLedgerScheduler(t *testing.T) {
+	s, db, _ := setup(t)
+	register(t, s, "w", 1)
+	task, err := s.Enqueue(ctx, Task{Repo: "o/r", Issue: 1, PR: 11, Kind: "repair", Operator: "repair-ci"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leased := claim(t, s, "w")
+	if err := db.DB().Model(&Task{}).Where("id = ?", task.ID).Update("lease_expires_at", time.Now().Add(-time.Second)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ExpireLeases(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingResults(ctx)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending=%v err=%v", pending, err)
+	}
+	var result struct {
+		InfraKind string `json:"infra_kind"`
+		Error     string `json:"error"`
+	}
+	if err := json.Unmarshal(pending[0].Result, &result); err != nil || result.InfraKind != "lease-expired" || result.Error == "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if err := s.FinalizeApplication(ctx, task.ID, leased.FencingToken, true, func(Task) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Claim(ctx, "w"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("repair bypassed ledger: %v", err)
+	}
+}

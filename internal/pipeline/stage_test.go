@@ -107,3 +107,12 @@ func TestDeriveLiveRunWinsOverOpenPR(t *testing.T) {
 		t.Fatalf("finished run must not show implementing")
 	}
 }
+
+func TestPRWaitingOnFailureLabel(t *testing.T) {
+	for _, ci := range []string{"failure", "pending", "success"} {
+		stage, why, _ := Derive(Evidence{IssueState: "open", Labels: []string{"agent-failed"}, PR: openPR(ci)})
+		if stage != StageBlocked || !strings.Contains(why, "waiting on label") || !strings.Contains(why, "remove agent-failed") {
+			t.Fatalf("stage=%s why=%s", stage, why)
+		}
+	}
+}

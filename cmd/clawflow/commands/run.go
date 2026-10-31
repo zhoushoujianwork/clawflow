@@ -1546,6 +1546,20 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		}
 		logAcceptanceRepair(j, "start")
 	}
+	// Every pre-agent exit must return its reservation, including metadata,
+	// comment fetch and planning failures that bypass normal result handling.
+	agentInvoked := false
+	if j.repair != nil {
+		defer func() {
+			if agentInvoked || j.result.InfraKind != "" {
+				return
+			}
+			if err := j.releaseRepair("setup", time.Now().UTC()); err != nil {
+				runLog.Warn("run/ci_repair_release_failed", "repo", j.repo, "pr", j.repair.PR.Number, "err", err.Error())
+			}
+			runLog.Warn("run/ci_repair_infra", "repo", j.repo, "pr", j.repair.PR.Number, "kind", "setup", "err", j.result.Error)
+		}()
+	}
 
 	if j.op.Name == "implement" {
 		if err := prepareImplementation(j); err != nil {
@@ -1684,7 +1698,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		// failures once this line and the real run/end converge on the same slug.
 		runLog.Warn("run/end", "repo", j.repo, "issue", j.sub.Number, "op", j.op.Name,
 			"status", "failed", "stage", runningMeta.Stage, "err", overrideErr.Error(), "cost", "0.0000")
-		if ctx.Err() == nil && j.hooks == nil {
+		if j.repair == nil && ctx.Err() == nil && j.hooks == nil {
 			checkCircuitBreaker(j, prefix)
 		}
 		return false, false, true
@@ -1783,8 +1797,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			} else {
 				runLog.Warn("run/ci_repair_release_failed", "repo", j.repo, "issue", j.sub.Number, "err", rerr.Error())
 			}
-			_ = j.client.AddLabel(j.repo, j.sub.Number, "agent-failed")
-			_ = j.client.PostIssueComment(j.repo, j.sub.Number, j.repair.label()+" repair setup failed: "+err.Error())
+			// A ledger persistence failure is also infrastructure, never a code verdict.
 			logAcceptanceRepair(j, "end", "status", "failed", "err", err.Error())
 		} else {
 			if ctx.Err() == nil && j.hooks == nil {
@@ -1871,6 +1884,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		j.result.Provenance = provenanceFromRun(runningMeta)
 	})
 	confirmedHead := ""
+	agentInvoked = true
 	output, outcome, runErr := runJobOperator(ctx, j.op, j.sub, j.client, operator.RunOptions{
 		CoordinationChecked: j.coordination != nil,
 		CoordinationContext: coordinationPrompt(j.coordination),
@@ -1896,6 +1910,9 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		Language:       j.language,
 		StageFunc:      emitStage,
 	})
+	if j.repair != nil && runErr == nil && strings.TrimSpace(output) == "" {
+		runErr = fmt.Errorf("repair ended without an agent result")
+	}
 	var writebackErr *operator.WriteBackError
 	errors.As(runErr, &writebackErr)
 	if writebackErr != nil {
@@ -2012,8 +2029,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if kind, ok := classifyRepairInfra(runErr, filepath.Join(runDir, "events.jsonl")); ok {
 		j.result.InfraKind = kind
 	}
-	if j.repair != nil && runErr != nil {
-		if kind, ok := classifyRepairInfra(runErr, filepath.Join(runDir, "events.jsonl")); ok {
+	if j.repair != nil {
+		if kind, ok := classifyRepairResult(runErr, output, filepath.Join(runDir, "events.jsonl")); ok {
 			if rerr := j.releaseRepair(kind, time.Now().UTC()); rerr != nil {
 				fmt.Fprintf(os.Stderr, "%s ⚠ repair attempt release failed (attempt stays consumed): %v\n", prefix, rerr)
 				runLog.Warn("run/ci_repair_release_failed", "repo", j.repo, "issue", j.sub.Number, "err", rerr.Error())
@@ -2262,7 +2279,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// issue #326. Emitted alongside rather than replacing `outcome` so existing
 	// greps over run.log keep working.
 	appliedLabel := outcome
-	if isDisallowedOutcome || writebackErr != nil || outcome == "no-change" {
+	if isDisallowedOutcome || writebackErr != nil || outcome == "no-change" || (j.repair != nil && outcome == "agent-failed") {
 		appliedLabel = ""
 	}
 	logFn("run/end",
@@ -2271,6 +2288,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		"op", j.op.Name,
 		"status", rm.Status,
 		"writeback_pending", rm.WritebackError != "",
+		"err", rm.Error,
 		"duration", runDur,
 		"outcome", outcome,
 		"applied_label", appliedLabel,
@@ -2288,9 +2306,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// Released infrastructure outcomes are bounded by the repair ledger's own
 	// infrastructure budget, so they must not also trip the circuit breaker
 	// (which would label the issue agent-failed and block further repair).
-	if repairInfra && rm.Status == "failed" {
+	if repairInfra && rm.Status != "success" {
 		fmt.Printf("%s ✗ %s repair infrastructure failure (not counted toward circuit breaker)\n", prefix, j.repair.label())
 		return false, false, true
+	}
+
+	if j.repair != nil && rm.Status != "success" {
+		if j.hooks == nil {
+			if err := finishRepairFailure(ctx, j, rm.Error); err != nil {
+				runLog.Warn("run/ci_repair_notice_failed", "repo", j.repo, "pr", j.repair.PR.Number, "err", err.Error())
+			}
+		}
+		return false, isRateLimit, true
 	}
 
 	switch rm.Status {
