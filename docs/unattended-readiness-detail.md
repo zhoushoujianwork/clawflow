@@ -41,3 +41,11 @@
 local-worker 当前 generation 的固定 CLI 实测版本同为 `0.75.0-dev.20261031155048.a22c49ee`。该核对不代表其他 worker 或所有历史 executor 都已验证。
 
 读取 PR #622 评论成功，但未找到 `repair-exhausted` 标记。仍须核查 issue #612 评论和通知入口，不能仅凭预算账本认定人工交接已经完成。此次未发消息、未改预算、未部署或重启。
+
+## 耗尽交接已确认；测试缓存污染已定位
+
+issue #612 的评论包含 `clawflow:repair-exhausted=pr-622`，明确三次预算用尽、最后失败为 `no-change repair left local changes`、未合并并需要人接手。通知没有丢失，只是发布在 issue；代码先发布通知再添加失败标签。
+
+任务 `2f570cce...` 的保留工作树 `local-worker/data/ci-repair-worktrees/repair-809726528` 经只读检查，源码 diff 为空，仅有未跟踪 `macos/__pycache__/`，包含 install-host 与 test_install_host 的 Python 3.11 字节码。该缓存触发工作树清洁门禁；未删除现场或重置预算。
+
+补充精确的 `/macos/__pycache__/` 忽略规则。隔离 Git 夹具证明旧规则报告未跟踪缓存，新规则保持清洁；源码文件仍不被忽略，diff 检查通过。此修复尚未进入 #622 的当前提交，也未将其失败记录改成成功；后续交付必须保留新 head 的 CI 和独立验收要求。
