@@ -47,4 +47,3 @@ create and selects the exact existing scope on view/update/delete. These use
 GitLab's [project variables API](https://docs.gitlab.com/api/project_level_variables/);
 newer attributes and environment scopes depend on your server's support. The
 commands reuse the configured GitLab token and enforce the Pilot write budget.
-
