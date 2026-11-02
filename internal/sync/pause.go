@@ -13,6 +13,26 @@ func PausePath() (string, error) {
 		return "", fmt.Errorf("a non-root absolute HOME is required")
 	}
 	root := filepath.Join(home, ".clawflow")
+	// Only the host installer's standard migration alias is supported. Do
+	// not follow arbitrary links or allow a linked pause marker.
+	if st, statErr := os.Lstat(root); statErr == nil && st.Mode()&os.ModeSymlink != 0 {
+		target, linkErr := os.Readlink(root)
+		standard := filepath.Join(home, "Library", "Application Support", "ClawFlow")
+		if linkErr != nil || target != standard {
+			return "", fmt.Errorf("refusing symlink %s", root)
+		}
+		for _, part := range []string{"Library", "Library/Application Support", "Library/Application Support/ClawFlow"} {
+			path := filepath.Join(home, part)
+			info, err := os.Lstat(path)
+			if err != nil {
+				return "", err
+			}
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("refusing non-directory or symlink %s", path)
+			}
+		}
+		root = standard
+	}
 	for _, path := range []string{home, root, filepath.Join(root, "sync-paused")} {
 		st, err := os.Lstat(path)
 		if os.IsNotExist(err) {

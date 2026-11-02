@@ -11,3 +11,5 @@
 videos/
 /macos/.build/
 /macos/dist/
+# Python host-script tests generate bytecode without changing source.
+/macos/__pycache__/
