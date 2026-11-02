@@ -110,7 +110,7 @@ func ContractVersions(migs []Migration) []int {
 func (s *Store) AppliedVersions(ctx context.Context) ([]int, error) {
 	db := s.db.WithContext(ctx)
 	var exists bool
-	if err := db.Raw("SELECT to_regclass('schema_migrations') IS NOT NULL").Scan(&exists).Error; err != nil {
+	if err := db.Raw("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')").Scan(&exists).Error; err != nil {
 		return nil, fmt.Errorf("check schema_migrations: %w", err)
 	}
 	if !exists {

@@ -23,7 +23,7 @@ const (
 )
 
 // fixture is an isolated stand-in for the production host. It uses a real
-// PostgreSQL schema and the real coordinator store, so leases, fencing and
+// SQLite database and the real coordinator store, so leases, fencing and
 // result acceptance are the production code paths. Only process management
 // and the service manager are simulated.
 type fixture struct {
@@ -258,7 +258,7 @@ func (f *fixture) reconnect() {
 			return
 		}
 		for _, n := range names {
-			_ = f.db.DB().Exec("UPDATE coordinator_tokens SET last_seen = clock_timestamp() WHERE name = ?", n).Error
+			_ = f.db.DB().Exec("UPDATE coordinator_tokens SET last_seen = ? WHERE name = ?", time.Now().UTC(), n).Error
 		}
 	}()
 }
@@ -284,7 +284,7 @@ func (f *fixture) RollWorker(_ context.Context, descriptor string, a upgrade.Art
 		go func() {
 			defer f.wg.Done()
 			time.Sleep(15 * time.Millisecond)
-			_ = f.db.DB().Exec("UPDATE coordinator_tokens SET last_seen = clock_timestamp() WHERE name = ?", descriptor).Error
+			_ = f.db.DB().Exec("UPDATE coordinator_tokens SET last_seen = ? WHERE name = ?", time.Now().UTC(), descriptor).Error
 		}()
 	}
 	return nil
@@ -308,7 +308,7 @@ func (f *fixture) register(name string, slots int) {
 // touch simulates worker contact now.
 func (f *fixture) touch(name string) {
 	f.t.Helper()
-	if err := f.db.DB().Exec("UPDATE coordinator_tokens SET last_seen = clock_timestamp() WHERE name = ?", name).Error; err != nil {
+	if err := f.db.DB().Exec("UPDATE coordinator_tokens SET last_seen = ? WHERE name = ?", time.Now().UTC(), name).Error; err != nil {
 		f.t.Fatal(err)
 	}
 }
