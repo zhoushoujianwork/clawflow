@@ -1,8 +1,8 @@
 import Foundation
 
 /// One issue is one pipeline; jobs are evidence attached to it, not delivery verdicts.
-struct IssuePipeline: Identifiable {
-    struct Identity: Hashable { let repo: String; let issue: Int; let unlinkedPR: Int }
+struct IssuePipeline: Identifiable, Sendable {
+    struct Identity: Hashable, Sendable { let repo: String; let issue: Int; let unlinkedPR: Int }
     let id: Identity
     let jobs: [TaskRow]
     let queue: IssueQueueRow?
@@ -40,7 +40,7 @@ struct IssuePipeline: Identifiable {
 }
 
 extension DashboardSnapshot {
-    var issuePipelines: [IssuePipeline] {
+    func makeIssuePipelines() -> [IssuePipeline] {
         struct PRKey: Hashable { let repo: String; let pr: Int }
         var issuesByPR: [PRKey: Set<Int>] = [:]
         for job in board.tasks where job.issue > 0 && job.pr > 0 {

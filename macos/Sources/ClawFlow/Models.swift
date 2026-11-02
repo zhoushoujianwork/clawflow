@@ -1,11 +1,27 @@
 import Foundation
 
-struct DashboardSnapshot: Decodable {
+struct DashboardSnapshot: Decodable, Sendable {
     let schemaVersion: Int
     let version: String
     let controller: String
     let board: WorkerBoard
     let projects: [ProjectRow]
+    private(set) var issuePipelines: [IssuePipeline] = []
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, version, controller, board, projects }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        version = try values.decode(String.self, forKey: .version)
+        controller = try values.decode(String.self, forKey: .controller)
+        board = try values.decode(WorkerBoard.self, forKey: .board)
+        projects = try values.decode([ProjectRow].self, forKey: .projects)
+        issuePipelines = makeIssuePipelines()
+    }
+
+    static func decodeInBackground(_ data: Data) async throws -> Self {
+        try await Task.detached(priority: .userInitiated) { try decode(data) }.value
+    }
 
     static func decode(_ data: Data) throws -> Self {
         let value = try decoder().decode(Self.self, from: data)
@@ -29,22 +45,22 @@ struct ProjectRepository: Identifiable {
 func decoder() -> JSONDecoder {
     let decoder = JSONDecoder()
     decoder.keyDecodingStrategy = .convertFromSnakeCase
+    let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    let wholeSeconds = Date.ISO8601FormatStyle()
     decoder.dateDecodingStrategy = .custom { decoder in
         let text = try decoder.singleValueContainer().decode(String.self)
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text) { return date }
+        if let date = (try? fractional.parse(text)) ?? (try? wholeSeconds.parse(text)) { return date }
         throw DashboardError.message("Invalid controller timestamp.")
     }
     return decoder
 }
 
-struct WorkerBoard: Decodable {
+struct WorkerBoard: Decodable, Sendable {
     let generatedAt: Date
     let workers: [WorkerRow]
     let tasks: [TaskRow]
 }
-struct WorkerRow: Decodable, Identifiable {
+struct WorkerRow: Decodable, Identifiable, Sendable {
     var id: String { name }
     let name: String
     let tags: [String]
@@ -71,7 +87,7 @@ enum TaskActivity {
         switch self { case .development: return "hammer"; case .review: return "checkmark.shield"; case .repair: return "wrench.and.screwdriver"; case .reply: return "text.bubble"; case .unknown: return "questionmark.circle" }
     }
 }
-struct TaskRow: Decodable, Identifiable {
+struct TaskRow: Decodable, Identifiable, Sendable {
     let startedAt: Date?
     let endedAt: Date?
     var durationAvailable: Bool { startedAt != nil && (group != .history || endedAt != nil) }
@@ -139,12 +155,12 @@ struct TaskRow: Decodable, Identifiable {
         return base.appendingPathComponent(repo.platform == "gitlab" ? "-/merge_requests/\(pr)" : "pull/\(pr)")
     }
 }
-struct ProjectRow: Decodable, Identifiable {
+struct ProjectRow: Decodable, Identifiable, Sendable {
     var id: String { name }
     let name: String
     let repos: [RepoRow]
 }
-struct IssueQueueRow: Decodable, Identifiable {
+struct IssueQueueRow: Decodable, Identifiable, Sendable {
     var id: String { key }
     let key: String
     let position: Int
@@ -167,7 +183,7 @@ struct IssueQueueRow: Decodable, Identifiable {
         }
     }
 }
-struct RepoRow: Decodable, Identifiable {
+struct RepoRow: Decodable, Identifiable, Sendable {
     let issueQueue: [IssueQueueRow]?
     let queueUpdatedAt: Date?
     let queueError: String?
@@ -203,7 +219,7 @@ func safeWebURL(_ text: String) -> URL? {
 
 enum StatusKind: Equatable { case unknown, unavailable, stale, attention, running, waiting, idle }
 
-struct StatusSummary {
+struct StatusSummary: Equatable {
     let title: String
     let symbol: String
     /// Running tasks, or "–" when status is unknown or stale. Never a guessed zero.

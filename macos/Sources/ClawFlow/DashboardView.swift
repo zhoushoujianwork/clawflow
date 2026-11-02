@@ -91,7 +91,11 @@ struct TaskDetail: View {
                 Text(row.reason).textSelection(.enabled)
                 DetailField(label: "Worker", value: row.worker.isEmpty ? "Unassigned" : row.worker)
                 if row.group == .running || row.startedAt != nil {
-                    DetailField(label: "Elapsed", value: row.elapsed(at: model.summary.connected ? model.now : snapshot.board.generatedAt))
+                    HStack(alignment: .top) {
+                        Text("Elapsed").foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
+                        TaskElapsedText(row: row, connected: model.summary.connected, frozenAt: snapshot.board.generatedAt)
+                        Spacer()
+                    }
                 }
                 DetailField(label: "Attempt", value: "\(row.attempt + 1)")
                 HStack(alignment: .top) { Text("Last update").foregroundStyle(.secondary).frame(width: 110, alignment: .leading); Text(row.updatedAt, style: .relative); Spacer() }

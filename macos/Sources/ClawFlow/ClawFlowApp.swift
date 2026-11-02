@@ -31,6 +31,9 @@ struct MenuSummary: View {
     @ObservedObject var model: DashboardModel
     @Environment(\.openWindow) private var openWindow
     var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in content }
+    }
+    @ViewBuilder private var content: some View {
         let status = model.popover
         VStack(alignment: .leading, spacing: 10) {
             header(status)

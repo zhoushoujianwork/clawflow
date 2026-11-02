@@ -67,7 +67,7 @@ struct PipelineDetail: View {
     @State private var selectedJob: String?
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            LazyVStack(alignment: .leading, spacing: 20) {
                 Text(pipeline.title).font(.title3.weight(.semibold)).textSelection(.enabled)
                 Text(pipeline.repo + " " + pipeline.reference).foregroundStyle(.secondary)
                 PipelineState(row: pipeline, connected: model.summary.connected)
@@ -102,7 +102,7 @@ struct PipelineDetail: View {
                         Text("Attempt \(job.attempt + 1)").monospacedDigit()
                         Text(job.worker.isEmpty ? "Unassigned" : job.worker).foregroundStyle(.secondary)
                         Spacer()
-                        Text(job.durationAvailable ? job.elapsed(at: model.summary.connected ? model.now : snapshot.board.generatedAt) : "—").monospacedDigit()
+                        TaskElapsedText(row: job, connected: model.summary.connected, frozenAt: snapshot.board.generatedAt, unavailable: "—").monospacedDigit()
                         Image(systemName: "chevron.right").foregroundStyle(.secondary)
                     }.font(.callout).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
