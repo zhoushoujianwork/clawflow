@@ -78,12 +78,23 @@ Observed in the development environment on 2026-10-31 (Apple M1, macOS 26.2):
 | 16 | 1600 | 1465/s | 0.36 ms | 0.71 ms | 37 ms | 950 ms |
 | 32 | 3200 | 1641/s | 0.36 ms | 0.78 ms | 22 ms | 1.85 s |
 
-These are single-run numbers for this machine and a tight loop, with no network, no provider calls and no UI load. They are not a capacity promise. Real workers heartbeat far less often than this loop. The tail grows with the number of concurrent writers because writers queue behind one lock; measure on the target host before raising worker counts. UI responsiveness under load was not measured.
+These are single-run numbers for this machine and a tight loop, with no network, no provider calls and no UI load. They are not a capacity promise. Real workers heartbeat far less often than this loop. The tail grows with the number of concurrent writers because writers queue behind one lock; measure on the target host before raising worker counts.
+
+Dashboard read latency while the same workers were writing (`MEASURE-BOARD` lines of the same test; the test polls `Board`, the snapshot the dashboard reads, every 50 ms on a separate connection pool). Single run, 2026-11-02, same machine:
+
+| Worker processes | Board reads | p50 | p95 | max |
+|---|---|---|---|---|
+| 4 | 5 | 1.2 ms | 1.9 ms | 9.7 ms |
+| 16 | 26 | 4.9 ms | 6.3 ms | 35 ms |
+| 32 | 39 | 12 ms | 16 ms | 28 ms |
+
+Reads stay in the low milliseconds because WAL readers do not wait for the writer. This measures the database read behind the dashboard, not native rendering: no macOS app was driven, so on-screen responsiveness is unmeasured and listed below. The Board table had few tasks (at most a few thousand rows, mostly completed); larger histories were not measured.
 
 ## Not verified by this change
 
 Recorded separately from fixtures so they are not mistaken for observed acceptance:
 
+- On-screen UI responsiveness in the native app under worker load (only the dashboard's database read was measured, see above).
 - A real second machine (LAN worker over the network).
 - Launching the installed macOS app after login with no PostgreSQL process, and checking the changed screens. The Swift unit tests and `swift build` pass; no desktop session was driven.
 - A cutover of the live production database. This change ships the tooling; the live cutover is a separate, operator-run step after the checks above.

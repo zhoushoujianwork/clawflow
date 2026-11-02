@@ -286,9 +286,34 @@ func TestMeasureWorkerLoad(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		// The dashboard polls Board on its own connection pool while the workers
+		// write. Its latency is the headless proxy for UI responsiveness; native
+		// rendering is not measured here.
+		stopPoll := make(chan struct{})
+		pollDone := make(chan []time.Duration)
+		go func() {
+			var reads []time.Duration
+			tick := time.NewTicker(50 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case <-stopPoll:
+					pollDone <- reads
+					return
+				case <-tick.C:
+					t0 := time.Now()
+					if _, err := s.Board(context.Background()); err != nil {
+						t.Errorf("board read under load: %v", err)
+					}
+					reads = append(reads, time.Since(t0))
+				}
+			}
+		}()
 		var all []time.Duration
 		for i, c := range cmds {
 			if err := c.Wait(); err != nil {
+				close(stopPoll)
+				<-pollDone
 				t.Fatalf("process %d: %v: %s", i, err, outs[i].String())
 			}
 			var lat []int64
@@ -299,11 +324,18 @@ func TestMeasureWorkerLoad(t *testing.T) {
 				all = append(all, time.Duration(ns))
 			}
 		}
+		close(stopPoll)
+		reads := <-pollDone
+		sort.Slice(reads, func(i, j int) bool { return reads[i] < reads[j] })
 		sort.Slice(all, func(i, j int) bool { return all[i] < all[j] })
 		pct := func(p float64) time.Duration { return all[int(float64(len(all)-1)*p)] }
 		wall := time.Since(start)
 		t.Logf("MEASURE processes=%d ops=%d wall=%s throughput=%.0f/s p50=%s p95=%s p99=%s max=%s",
 			procs, len(all), wall.Round(time.Millisecond), float64(len(all))/wall.Seconds(),
 			pct(.50).Round(time.Microsecond), pct(.95).Round(time.Microsecond), pct(.99).Round(time.Microsecond), all[len(all)-1].Round(time.Microsecond))
+		if len(reads) > 0 {
+			t.Logf("MEASURE-BOARD processes=%d reads=%d p50=%s p95=%s max=%s", procs, len(reads),
+				reads[len(reads)/2].Round(time.Microsecond), reads[int(float64(len(reads)-1)*.95)].Round(time.Microsecond), reads[len(reads)-1].Round(time.Microsecond))
+		}
 	}
 }
