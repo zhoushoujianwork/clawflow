@@ -23,3 +23,13 @@
 4. 为四类真实流程记录 task、epoch、代码 SHA、CI/验收身份及终态；缺证据保持 pending。
 
 本次未启动模型、第二调度器或重启服务，未变更线上状态。
+
+## 本机阻塞核验与第一项修复
+
+- launchd 确认 native controller PID 19445，LastExitStatus=0，入口为标准目录下的 bin/clawflow。旧 web 服务的 stopped 状态与它无关。
+- #622 查询时 head 为 `fff2ab05d2153d5e45fd0f2e488a466a25602ca5`，仍 open。当前 acceptance status 退出 1，原因是最新开发记录缺失、未完成或不成功。此前循环日志为 unstructured report；两者不能混成“只是等待审核”。
+- 修复账本已用完三次预算：development_verification 一次，acceptance 两次；另有一次 launch 失败释放了预留。未清空预算、解除 agent-failed 或重跑模型。扫描仍继续，单项阻塞未停止整个调度器。
+- 修复同步暂停标记的迁移兼容：只接受安装器标准 Application Support/ClawFlow 的绝对别名；仍拒绝任意别名、符号链接父目录及链接标记。暂停标记继续位于根目录，保持 reset 归档边界。
+- 新测试在旧代码上真实失败（refusing symlink），修复后定向测试通过。正式安装 CLI 尚未替换；此次修复不能写成已上线。
+- 定向 race 检查通过；以新源码执行只读 `sync status` 返回 `sync paused: true`（退出 0）。保留实际暂停状态，没有 resume。
+- 实际模型验收所需 Offload 例外授权已询问，未收到授权前不启动或恢复任务。
