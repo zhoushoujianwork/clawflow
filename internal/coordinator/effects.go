@@ -284,6 +284,8 @@ func (s *Store) FinalizeApplication(ctx context.Context, id string, epoch int64,
 		}
 		var r struct {
 			InfraKind string `json:"infra_kind"`
+			Status    string `json:"status"`
+			NextOwner string `json:"next_owner"`
 		}
 		if err := json.Unmarshal(t.Result, &r); err != nil {
 			return err
@@ -298,7 +300,12 @@ func (s *Store) FinalizeApplication(ctx context.Context, id string, epoch int64,
 			values["attempt"] = t.Attempt
 			// Repairs must return through the scheduler so ledger cooldown and a
 			// fresh enqueue reservation govern the next attempt.
-			if t.Attempt < MaxInfrastructureAttempts && t.Kind != "repair" {
+			// A rejected coordination snapshot cannot become valid by replaying
+			// the same payload. Return to scheduling for a fresh assessment.
+			// Older pinned workers report this as blocked/launch/scheduling.
+			reassess := r.InfraKind == "coordination-changed" ||
+				(r.InfraKind == "launch" && r.Status == "blocked" && r.NextOwner == "scheduling")
+			if t.Attempt < MaxInfrastructureAttempts && t.Kind != "repair" && !reassess {
 				values["state"] = "pending"
 				values["result"] = nil
 				values["result_digest"] = ""

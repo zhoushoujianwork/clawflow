@@ -392,6 +392,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 			result.InfraKind = "launch"
 			if errors.Is(err, errCoordinationChanged) {
 				result.Status = "blocked"
+				result.InfraKind = "coordination-changed"
 				result.NextAction = "Reassess current issue, PRs and active work on the next scheduler pass"
 				result.NextOwner = "scheduling"
 			}

@@ -205,6 +205,60 @@ func TestInfrastructureExpiryBound(t *testing.T) {
 		t.Fatalf("retry not bounded: %v", err)
 	}
 }
+
+func TestCoordinationReassessmentDoesNotReplayStalePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, kind, owner string
+		retry                     bool
+	}{
+		{"current-worker", "blocked", "coordination-changed", "scheduling", false},
+		{"pinned-old-worker", "blocked", "launch", "scheduling", false},
+		{"ordinary-launch", "failed", "launch", "", true},
+		{"other-blocker", "blocked", "launch", "environment", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db, _ := setup(t)
+			register(t, s, "w", 1)
+			enqueue(t, s, 1)
+			task := claim(t, s, "w")
+			raw, err := json.Marshal(map[string]string{"status": tc.status, "infra_kind": tc.kind, "next_owner": tc.owner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.AcceptResult(WithReportDigest(ctx, raw, true), task.ID, "w", task.FencingToken, raw); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.FinalizeApplication(ctx, task.ID, task.FencingToken, true, func(Task) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			// Restart the store facade: the reassessment decision must be durable.
+			s = New(db.DB())
+			current, err := s.Task(ctx, task.ID)
+			if err != nil || current.Attempt != 1 {
+				t.Fatalf("attempt accounting: %+v, %v", current, err)
+			}
+			if tc.retry {
+				if current.State != "pending" {
+					t.Fatalf("ordinary infrastructure retry lost: %+v", current)
+				}
+				if next := claim(t, s, "w"); next.ID != task.ID || next.FencingToken <= task.FencingToken {
+					t.Fatalf("retry ownership: %+v", next)
+				}
+				return
+			}
+			var retained map[string]string
+			if err := json.Unmarshal(current.Result, &retained); err != nil || retained["status"] != tc.status || retained["infra_kind"] != tc.kind || retained["next_owner"] != tc.owner {
+				t.Fatalf("result evidence changed: %s, %v", current.Result, err)
+			}
+			if current.State != "failed" || current.ResultDigest == "" || current.LeaseOwner != "w" || current.FencingToken != task.FencingToken {
+				t.Fatalf("reassessment lost retained evidence or ownership: %+v", current)
+			}
+			if _, err := s.Claim(ctx, "w"); !errors.Is(err, ErrNoTask) {
+				t.Fatalf("stale payload was claimable again: %v", err)
+			}
+		})
+	}
+}
 func TestHeadMismatchStopsLaterEffects(t *testing.T) {
 	s, db, _ := setup(t)
 	register(t, s, "w", 1)

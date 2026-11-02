@@ -259,7 +259,7 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 						t.Fatalf("bad result: %+v", result)
 					}
 				case "coordination-stale":
-					if executed.Load() || result.Status != "blocked" || result.NextOwner != "scheduling" || result.InfraKind != "launch" || len(result.Effects) > 0 {
+					if executed.Load() || result.Status != "blocked" || result.NextOwner != "scheduling" || result.InfraKind != "coordination-changed" || len(result.Effects) > 0 {
 						t.Fatalf("stale context reached execution or terminal outcome: %+v", result)
 					}
 				case "lease-lost", "heartbeat-error":
