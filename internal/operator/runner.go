@@ -462,8 +462,9 @@ func runWriteBack(v VCS, op *Operator, sub *Subject, opts RunOptions, body, outc
 				"  ⚠ operator %q produced disallowed outcome %q (allowed: %v); skipping label add\n",
 				op.Name, outcome, op.Outcomes)
 			disallowed = fmt.Errorf("%w: %q not in %v (operator %q)", ErrDisallowedOutcome, outcome, op.Outcomes, op.Name)
-		} else if op.Name == "repair-ci" && outcome == "no-change" {
-			// A confirmed no-op posts its reason but has no terminal label.
+		} else if op.Name == "repair-ci" && (outcome == "no-change" || outcome == "agent-failed") {
+			// Repair failures are labeled by the shared repair budget owner.
+			// A confirmed no-op also has no terminal label.
 		} else if err := v.AddLabel(opts.Repo, sub.Number, outcome); err != nil {
 			writeErrors = append(writeErrors, fmt.Errorf("add outcome label %q: %w", outcome, err))
 		} else {

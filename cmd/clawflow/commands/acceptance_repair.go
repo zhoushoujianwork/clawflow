@@ -13,6 +13,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -227,9 +228,10 @@ func repairNotifier(client vcs.Client, repo string, cfg config.Repo, pr, issue i
 // repairExhaustedNotice posts the one comment (deduped by marker) that ends
 // automatic repair for a PR whose shared budget is spent.
 func repairExhaustedNotice(ctx context.Context, client vcs.Client, repo string, cfg config.Repo, pr vcs.PR, issue int) {
-	n := repairNotifier(client, repo, cfg, pr.Number, issue)
-	n.ctx = ctx
-	n.notify(acceptanceRepairExhaustedComment(pr.Number), acceptanceRepairExhaustedMarker(pr.Number))
+	j := &runJob{repo: repo, repoCfg: cfg, client: client, sub: &operator.Subject{Number: issue}, repair: &ciRepairContext{PR: pr}}
+	if err := finishRepairFailure(ctx, j, "shared repair budget spent"); err != nil {
+		runLog.Warn("run/ci_repair_notice_failed", "repo", repo, "pr", pr.Number, "err", err.Error())
+	}
 }
 
 func acceptanceRepairExhaustedMarker(pr int) string {

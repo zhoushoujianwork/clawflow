@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 	"github.com/zhoushoujianwork/clawflow/internal/pilot/budget"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
@@ -23,6 +24,11 @@ func newVCSClient(repo config.Repo) (vcs.Client, error) {
 	creds, err := config.LoadCredentials()
 	if err != nil {
 		return nil, fmt.Errorf("load credentials: %w", err)
+	}
+	if devmode.Active() {
+		if err := devmode.CheckBaseURL(repo.BaseURL); err != nil {
+			return nil, err
+		}
 	}
 	platform := repo.Platform
 	if platform == "" {

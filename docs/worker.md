@@ -176,3 +176,7 @@ token 保存在状态目录 `data/coordinator/local-worker.token`，权限为 `0
 若仓库另有显式标签要求，worker 也必须携带这些标签。
 未匹配的任务保持 pending，看板显示等待的标签；任务表显示持有租约的 worker，仓库栏显示所属平台。
 全局 `max_concurrent_agents` 和仓库 `max_in_flight` 在平台领取租约时执行，跨所有 worker 共享。
+
+## 本地候选隔离
+
+`--state-dir` 不隔离配置、凭据、端口、数据库与 launchd 标签。需要在同一台 Mac 上测试开发候选时使用 `clawflow candidate`，见 [candidate-isolation.md](candidate-isolation.md)。

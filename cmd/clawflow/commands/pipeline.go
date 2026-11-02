@@ -487,7 +487,8 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 				// A spent ledger alone is historical once the failure has recovered.
 				repairRelevant := item.PR.CI == "failure" || item.PR.CI == "unknown" || item.Stage == pipeline.StageRejected || item.Stage == pipeline.StageInfraRetry
 				if err := checkRepairBudget(snapshot.DataDir(), repo, item.PR.Number, now); repairRelevant && (errors.Is(err, errRepairExhausted) || errors.Is(err, errRepairBlocked)) {
-					item.Attention = append(item.Attention, err.Error())
+					item.Stage, item.Why = pipeline.StageBlocked, "needs a person: "+err.Error()
+					item.Attention = append(item.Attention, item.Why)
 				}
 			}
 			if d.globalQueue != nil && (item.Run == nil || !item.Run.Live) {

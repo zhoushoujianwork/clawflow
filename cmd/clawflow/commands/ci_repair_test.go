@@ -321,7 +321,7 @@ func TestCIRepairExistingPROutcome(t *testing.T) {
 			},
 		})
 		wantLabels := 1
-		if label == "no-change" {
+		if label == "no-change" || label == "agent-failed" {
 			wantLabels = 0
 		}
 		if err != nil || outcome != label || len(f.labels) != wantLabels || (wantLabels == 1 && f.labels[0] != label) || len(f.comments) != 1 {

@@ -110,6 +110,7 @@ type jobResult struct {
 	Error             string          `json:"error,omitempty"`
 	Usage             *snapshot.Usage `json:"usage,omitempty"`
 	Cost              float64         `json:"cost"`
+	FailingCheck      string          `json:"failing_check,omitempty"`
 	InfraKind         string          `json:"infra_kind,omitempty"`
 	PRNumber          int             `json:"pr_number,omitempty"`
 	PRURL             string          `json:"pr_url,omitempty"`

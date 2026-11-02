@@ -189,26 +189,72 @@ func safeWebURL(_ text: String) -> URL? {
     return u
 }
 
+enum StatusKind: Equatable { case unknown, unavailable, stale, attention, running, waiting, idle }
+
 struct StatusSummary {
     let title: String
     let symbol: String
+    /// Running tasks, or "–" when status is unknown or stale. Never a guessed zero.
     let count: String
     let connected: Bool
+    var kind: StatusKind = .idle
+    /// Task counts from the controller snapshot; nil while unknown or when only last-known data exists.
+    var attention: Int?
+    var running: Int?
+    var waiting: Int?
+
+    /// Compact text beside the menu-bar mark. Icons never carry state alone.
+    var menuText: String? {
+        switch kind {
+        case .attention: return "\(attention ?? 0)"
+        case .running: return "\(running ?? 0)"
+        case .waiting: return "\(waiting ?? 0)"
+        default: return nil
+        }
+    }
+    var menuSymbol: String? {
+        switch kind {
+        case .unknown, .unavailable: return "questionmark"
+        case .stale: return "slash.circle"
+        case .attention: return "exclamationmark"
+        case .waiting: return "hourglass"
+        case .running, .idle: return nil
+        }
+    }
+    var accessibilityLabel: String {
+        switch kind {
+        case .unknown: return "ClawFlow: not connected, status unknown"
+        case .unavailable: return "ClawFlow: controller unavailable, status unknown"
+        case .stale: return "ClawFlow: connection lost, showing last known data"
+        case .attention: return "ClawFlow: needs attention, \(attention ?? 0) need attention, \(running ?? 0) running, \(waiting ?? 0) queued"
+        case .running: return "ClawFlow: working, \(running ?? 0) running, \(waiting ?? 0) queued"
+        case .waiting: return "ClawFlow: waiting, \(waiting ?? 0) queued, none running"
+        case .idle: return "ClawFlow: idle, nothing running or queued"
+        }
+    }
+
     static func reduce(snapshot: DashboardSnapshot?, received: Date?, error: String?, now: Date = Date()) -> Self {
         guard let snapshot, let received else {
-            return Self(title: error == nil ? "Not connected" : "Unavailable", symbol: "questionmark.circle", count: "–", connected: false)
+            return Self(title: error == nil ? "Not connected" : "Unavailable", symbol: "questionmark.circle", count: "–", connected: false,
+                        kind: error == nil ? .unknown : .unavailable)
         }
         guard error == nil, now.timeIntervalSince(received) < 20,
               now.timeIntervalSince(snapshot.board.generatedAt) < 30,
               snapshot.board.generatedAt.timeIntervalSince(now) < 5 else {
-            return Self(title: "Connection lost · last known data", symbol: "clock.badge.exclamationmark", count: "–", connected: false)
+            return Self(title: "Connection lost · last known data", symbol: "clock.badge.exclamationmark", count: "–", connected: false, kind: .stale)
         }
         let running = snapshot.board.tasks.filter { $0.group == .running }.count
-        if snapshot.board.tasks.contains(where: { $0.group == .attention }) {
-            return Self(title: "Needs attention", symbol: "exclamationmark.triangle", count: "\(running)", connected: true)
+        let attention = snapshot.board.tasks.filter { $0.group == .attention }.count
+        let waiting = snapshot.board.tasks.filter { $0.group == .waiting }.count
+        if attention > 0 {
+            return Self(title: "Needs attention", symbol: "exclamationmark.triangle", count: "\(running)", connected: true,
+                        kind: .attention, attention: attention, running: running, waiting: waiting)
         }
-        if running > 0 { return Self(title: "Working", symbol: "arrow.triangle.2.circlepath", count: "\(running)", connected: true) }
-        let waiting = snapshot.board.tasks.contains { $0.group == .waiting }
-        return Self(title: waiting ? "Waiting" : "Idle", symbol: waiting ? "hourglass" : "circle", count: "0", connected: true)
+        if running > 0 {
+            return Self(title: "Working", symbol: "arrow.triangle.2.circlepath", count: "\(running)", connected: true,
+                        kind: .running, attention: 0, running: running, waiting: waiting)
+        }
+        return Self(title: waiting > 0 ? "Waiting" : "Idle", symbol: waiting > 0 ? "hourglass" : "circle", count: "0", connected: true,
+                    kind: waiting > 0 ? .waiting : .idle, attention: 0, running: 0, waiting: waiting)
     }
 }

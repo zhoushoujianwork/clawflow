@@ -415,7 +415,7 @@ func TestPipelineRepairBudgetAttention(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := itemFor(t, buildPipeline(context.Background(), d).Repos[0], 1)
-	if len(item.Attention) != 1 || !strings.Contains(item.Attention[0], "attempts") {
+	if item.Stage != pipeline.StageBlocked || !strings.Contains(item.Why, "needs a person") || len(item.Attention) != 1 || !strings.Contains(item.Attention[0], "attempts") {
 		t.Fatalf("missing budget attention: %+v", item)
 	}
 	// A historical exhausted ledger is not an active incident after CI recovers.

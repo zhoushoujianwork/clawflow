@@ -110,6 +110,9 @@ func derivePROpen(e Evidence, ev []string) (Stage, string, []string) {
 	a := e.Acceptance
 	add := func(format string, args ...any) { ev = append(ev, fmt.Sprintf(format, args...)) }
 
+	if hasLabel(e.Labels, "agent-failed") && (e.Run == nil || !e.Run.Live) {
+		return StageBlocked, fmt.Sprintf("PR #%d waiting on label: remove agent-failed from the issue to clear the label gate", pr.Number), append(ev, "label agent-failed")
+	}
 	if pr.Draft {
 		return StageBlocked, fmt.Sprintf("PR #%d is a draft", pr.Number), ev
 	}

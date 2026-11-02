@@ -452,6 +452,7 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if env == nil {
 		env = os.Environ()
 	}
+	env = withoutSupervisorState(env)
 	if c.TestDatabaseDSN != "" && req.PermissionMode == "bypassPermissions" {
 		filtered := make([]string, 0, len(env)+1)
 		for _, kv := range env {
@@ -830,6 +831,20 @@ func Chat(ctx context.Context, in io.Reader, out io.Writer, opts Options) error 
 			opts.OnSession(r.NativeSessionID)
 		}
 	}
+}
+
+// withoutSupervisorState drops the supervisor's private runtime state directory
+// from the child environment so agent-run tests cannot write into it. The parent
+// keeps its own value for state, locks, journals and native sessions; the slice
+// is copied so the caller's environment is not modified.
+func withoutSupervisorState(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "CLAWFLOW_STATE_DIR=") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 func redact(s string, env []string) string {

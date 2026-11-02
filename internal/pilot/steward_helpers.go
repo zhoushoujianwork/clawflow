@@ -9,6 +9,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/chat"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -35,6 +36,11 @@ func clientFor(repo string, cfg *config.Config, creds *config.Credentials) (vcs.
 	rc, ok := cfg.Repos[repo]
 	if !ok {
 		return nil, fmt.Errorf("repo %q not in config", repo)
+	}
+	if devmode.Active() {
+		if err := devmode.CheckBaseURL(rc.BaseURL); err != nil {
+			return nil, err
+		}
 	}
 	platform := rc.Platform
 	if platform == "" {

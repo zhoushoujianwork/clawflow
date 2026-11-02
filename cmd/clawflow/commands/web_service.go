@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 )
 
 const webServiceLabel = "com.zhoushoujianwork.clawflow.web"
@@ -33,6 +34,10 @@ type webServiceStatus struct {
 }
 
 func newWebService() (webService, error) {
+	// The stable LaunchAgent labels belong to the installed host.
+	if devmode.Active() {
+		return webService{}, fmt.Errorf("%w: launchd services of the installed host are unavailable to a candidate", devmode.ErrBlocked)
+	}
 	if runtime.GOOS != "darwin" {
 		return webService{}, fmt.Errorf("web service is only supported on macOS")
 	}
