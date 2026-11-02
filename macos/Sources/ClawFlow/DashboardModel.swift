@@ -12,7 +12,7 @@ import SwiftUI
     @Published var actionError: String?
     /// The monitoring/worker change currently awaiting the controller; shown as pending feedback.
     @Published private(set) var pendingAction: PendingAction?
-    @Published var now = Date()
+    private(set) var now = Date()
     private var polling: Task<Void, Never>?
     private var executionLoop: Task<Void, Never>?
     private var forwarding: AnyCancellable?
@@ -36,15 +36,28 @@ import SwiftUI
                 try? await Task.sleep(for: .seconds(15))
             }
         }
-        freshnessTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.now = Date() }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.advanceClock(to: Date()) }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        freshnessTimer = timer
         polling = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
                 try? await Task.sleep(for: .seconds(5))
             }
         }
+    }
+    // A clock tick must not invalidate every table cell. Only freshness transitions
+    // change global state; live elapsed labels own their small TimelineView.
+    func advanceClock(to date: Date) {
+        let next = StatusSummary.reduce(snapshot: snapshot, received: received, error: error, now: date)
+        if next != summary { objectWillChange.send() }
+        now = date
+    }
+    func acceptSnapshot(_ next: DashboardSnapshot, at date: Date) {
+        now = date
+        snapshot = next; received = date; error = nil
     }
     func configure(_ connection: Connection) {
         generation += 1
@@ -56,12 +69,12 @@ import SwiftUI
         guard !refreshing else { return }
         refreshing = true
         let requestGeneration = generation
-        defer { refreshing = false; now = Date() }
+        defer { refreshing = false; advanceClock(to: Date()) }
         do {
             let data = try await request(["snapshot"])
-            let next = try DashboardSnapshot.decode(data)
+            let next = try await DashboardSnapshot.decodeInBackground(data)
             guard requestGeneration == generation else { return }
-            snapshot = next; received = Date(); error = nil
+            acceptSnapshot(next, at: Date())
         } catch {
             guard requestGeneration == generation else { return }
             self.error = error.localizedDescription
