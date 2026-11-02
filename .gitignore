@@ -11,3 +11,6 @@
 videos/
 /macos/.build/
 /macos/dist/
+
+# Python test/import bytecode is not a source change.
+__pycache__/
