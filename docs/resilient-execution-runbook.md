@@ -44,6 +44,12 @@ Each unsafe or corrupt item is retained and diagnosed independently under `recov
 
 Execution has a fixed deadline based on the task timeout, plus ten minutes for reporting. Heartbeats do not extend execution authority indefinitely. If the controller remains unavailable, the executor stops at the execution deadline and preserves its result. Expired durable tasks retain their reservation rather than being blindly reassigned. This trades automatic replacement availability for duplicate-execution safety.
 
+### 启动前协调快照失效
+
+Worker 在启动开发前发现已批准的协调快照变化时，记录 `blocked / coordination-changed`，由 scheduling 重新评估。Controller 保留该次结果、owner、epoch 和尝试记录，不再把同一份过期 payload 放回 pending。兼容仍固定在旧二进制上的 worker 所发出的 `blocked / launch / next_owner=scheduling` 报告；其他临时启动故障仍按原基础设施上限重试。
+
+这只处理尚未启动模型的派发拒绝，不代表已解决执行超时后的原会话恢复。检查历史时分别核对启动前拒绝与实际启动过的 Offload session，不能把新任务执行称为原会话续跑。
+
 ## Interrupted execution recovery
 
 Managers detect interrupted executors and mark them `needs_recovery`. After the original authority expires, they attempt guarded recovery of implementation and repair sessions. It can also be requested explicitly:
