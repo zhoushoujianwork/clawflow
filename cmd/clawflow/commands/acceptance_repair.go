@@ -90,6 +90,10 @@ func sanitizeReviewerText(s string, limit int) string {
 // findingsFromRecord reduces a failed record to bounded redacted findings.
 func findingsFromRecord(r acceptance.Record) *acceptanceFindings {
 	f := &acceptanceFindings{AttemptID: r.AttemptID, Verdict: string(r.Verdict), ContractDigest: r.ContractDigest}
+	// Malformed reviewer output is retained for diagnosis, not repair authority.
+	if r.Unstructured || r.ValidationError != "" {
+		return f
+	}
 	for _, finding := range r.Findings {
 		if !finding.Failing() {
 			continue

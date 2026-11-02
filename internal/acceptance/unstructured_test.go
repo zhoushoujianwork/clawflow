@@ -26,6 +26,9 @@ func TestUnstructuredFailureExtraction(t *testing.T) {
 		if got := applyUnstructuredReport(&r, tc.text, errors.New("invalid schema")); got != tc.want {
 			t.Fatalf("%s: got %v", tc.text, got)
 		}
+		if tc.want && r.NextOwner != "acceptance" {
+			t.Fatalf("wrong owner: %s", r.NextOwner)
+		}
 		if tc.want && (r.Verdict != Failed || !r.Unstructured || r.ValidationError != "invalid schema" || !strings.Contains(r.Findings[0].Summary, ":")) {
 			t.Fatalf("record=%+v", r)
 		}
