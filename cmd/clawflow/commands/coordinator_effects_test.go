@@ -17,6 +17,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -548,4 +549,107 @@ func resultBudgetClient(t *testing.T, base string, budget github.Budget) *github
 	client := github.New("fixture", base)
 	client.UseCacheDir(root)
 	return client
+}
+
+func TestInterruptedReportQuarantinesUnfinishedEffects(t *testing.T) {
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	cfg := &config.Config{}
+	cfg.Settings.MaxConsecutiveFailures = 1
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// Any product-failure automation would attempt an unexpected VCS write.
+
+	db := storetest.New(t)
+	ctx := context.Background()
+	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	tasks := coordinator.New(db.DB())
+	if err := tasks.RegisterWorker(ctx, coordinator.Worker{ID: "w", Durable: true, MaxParallel: 1, RunUntagged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tasks.Enqueue(ctx, coordinator.Task{Repo: "o/r", Issue: 639, Kind: "implement", Operator: "implement", Payload: json.RawMessage(`{"timeout_sec":60}`)}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := tasks.Claim(ctx, "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &intentVCS{comments: map[string]bool{}}
+	job := &runJob{repo: "o/r", client: client, sub: &operator.Subject{Number: 639}, op: &operator.Operator{Name: "implement"}}
+	service := &coordinatorResults{WorkerStore: tasks, tasks: tasks, loadJob: func(context.Context, *coordinator.Task) (*runJob, error) { return job, nil }, apply: applyCoordinatorReport}
+	// Real failure shape: a queued PR request, but timeout prevented a verified head.
+	raw := json.RawMessage(`{"status":"failed","infra_kind":"execution-interrupted","error":"context deadline exceeded","provenance":{"session_id":"retained-native"},"effects":[{"kind":"pr-create","repo":"o/r","head":"fix/issue-639","base":"main","title":"retained work"},{"kind":"issue-comment","repo":"o/r","number":639,"body":"not delivered"}]}`)
+	if err := service.Fail(ctx, task.ID, "w", task.FencingToken, raw); err != nil {
+		t.Fatal("interruption rejected instead of retained", err)
+	}
+	got, err := tasks.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored struct {
+		Effects   []jobEffect `json:"effects"`
+		Unapplied []jobEffect `json:"unapplied_effects"`
+	}
+	if err := json.Unmarshal(got.Result, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Effects) != 0 || len(stored.Unapplied) != 2 {
+		t.Fatal("lost or executable interrupted effects", string(got.Result))
+	}
+	if !coordinator.MatchingReport(got, "w", task.FencingToken, raw, true) {
+		t.Fatal("original wire receipt lost")
+	}
+	if err := service.Fail(ctx, task.ID, "w", task.FencingToken, raw); err != nil {
+		t.Fatal("duplicate receipt rejected", err)
+	}
+	// Reconstruct the facade to exercise committed report replay after restart.
+	tasks = coordinator.New(db.DB())
+	service.WorkerStore = tasks
+	service.tasks = tasks
+	if err := service.recoverResults(ctx, tasks); err != nil {
+		t.Fatal(err)
+	}
+	if client.creates != 0 || client.commentWrites != 0 {
+		t.Fatal("interrupted operation published", client)
+	}
+	var count int64
+	if err := db.DB().Model(&coordinator.EffectIntent{}).Where("task_id = ?", task.ID).Count(&count).Error; err != nil || count != 0 {
+		t.Fatal("quarantined effect became intent", count, err)
+	}
+	next, err := tasks.RecoverExecution(ctx, task.ID, "w", task.FencingToken)
+	if err != nil || next.Attempt != 1 || next.FencingToken != task.FencingToken+1 {
+		t.Fatal("same-session recovery unavailable", next, err)
+	}
+	if err := service.Fail(ctx, task.ID, "w", task.FencingToken, raw); err != nil {
+		t.Fatal("historical original receipt lost", err)
+	}
+}
+
+func TestInterruptedReportDoesNotWeakenEffectAuthority(t *testing.T) {
+	for _, mode := range []string{"success", "complete-endpoint", "foreign-repo", "unknown-effect", "non-durable", "forged-quarantine"} {
+		t.Run(mode, func(t *testing.T) {
+			tasks, _, client, service := resultFixture(t)
+			tasks.task.Kind = "implement"
+			tasks.task.Payload = json.RawMessage(`{"durable_execution":true}`)
+			raw := `{"status":"failed","infra_kind":"execution-interrupted","effects":[{"kind":"pr-create","repo":"o/r","head":"fix","base":"main","title":"fix"}]}`
+			switch mode {
+			case "success":
+				raw = strings.Replace(raw, `"status":"failed"`, `"status":"success"`, 1)
+			case "foreign-repo":
+				raw = strings.Replace(raw, `"repo":"o/r"`, `"repo":"foreign/repo"`, 1)
+			case "unknown-effect":
+				raw = strings.Replace(raw, `"kind":"pr-create"`, `"kind":"shell"`, 1)
+			case "non-durable":
+				tasks.task.Payload = nil
+			case "forged-quarantine":
+				raw = `{"status":"failed","infra_kind":"execution-interrupted","unapplied_effects":[]}`
+			}
+			err := service.finish(context.Background(), tasks.task.ID, "w", 3, json.RawMessage(raw), mode != "complete-endpoint")
+			if !errors.Is(err, coordinator.ErrInvalid) || len(tasks.task.Result) != 0 || len(client.calls) != 0 {
+				t.Fatal("invalid report accepted", err, tasks.task, client.calls)
+			}
+		})
+	}
 }

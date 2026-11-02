@@ -68,7 +68,9 @@ This supports controller/manager restarts and retained development/repair sessio
 
 开发／修复任务报告 `execution-interrupted` 后，控制器完成结果处理，仍保留原任务、worker、epoch 和回执，以过期 durable lease 表示 `recovery_pending`，阻止另一个 worker 或下一轮扫描新建替代任务。worker 在原授权到期、执行锁释放后，核对 journal、checkpoint 与报告的原生 session 一致，归档旧尝试，再申请新 epoch 并在原 worktree 续跑。每次真正授权恢复消耗一次既有基础设施预算；请求重放不重复扣减。
 
-恢复申请只接受已完成结果处理、无 effects 且有 session 的中断报告。取消、被后续任务取代、已成功完成、会话缺失、profile／runtime 变化、预算耗尽均不自动恢复。恢复的启动检查仍生效；旧版固定执行器报告 `launch` 或 `coordination-changed` 时，控制器也根据前一尝试的中断记录保留任务。缺少安全证据时保持阻塞，不能通过改写历史、重置预算或创建新会话消除阻塞。
+中断报告可以携带运行期间已排队但尚未发布的操作。控制器仍校验项目、目标和操作类型，将这些操作保存到仅控制器可写的 `unapplied_effects` 审计字段，清空可执行 effects；不创建 PR、不发布评论、不生成 effect intent，也不把中断计作产品失败触发自动化。原始报告摘要保持不变，旧 worker 重放仍可确认。恢复后由原会话重新核对 worktree、已提交代码和远端状态，旧操作不会自动重放。
+
+恢复申请只接受已完成结果处理、无可执行 effects 且有 session 的中断报告。取消、被后续任务取代、已成功完成、会话缺失、profile／runtime 变化、预算耗尽均不自动恢复。恢复的启动检查仍生效；旧版固定执行器报告 `launch` 或 `coordination-changed` 时，控制器也根据前一尝试的中断记录保留任务。缺少安全证据时保持阻塞，不能通过改写历史、重置预算或创建新会话消除阻塞。
 
 此路径不导入之前已经终结或被替代的历史超时任务。部署后需单独记录真实 backend 的超时续跑验收；无界面测试验证权限、预算、回执、锁与 worktree 保留，并不代表已做真实模型续跑。
 
