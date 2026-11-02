@@ -167,3 +167,21 @@ func TestExecutionAttributionObserver(t *testing.T) {
 		})
 	}
 }
+
+func TestDevelopmentRunRequestsTranscriptCaptureOnly(t *testing.T) {
+	var captured []bool
+	opts := RunOptions{Workdir: t.TempDir(), ExecuteFunc: func(_ context.Context, _ string, o execution.Options) (execution.Result, error) {
+		captured = append(captured, o.CaptureTranscript)
+		// The managed profile, session lineage and policy are untouched by capture.
+		if o.PermissionMode != "bypassPermissions" || o.Profile != "" {
+			t.Errorf("options changed: %+v", o)
+		}
+		return execution.Result{Text: "ok", NativeSessionID: "s"}, nil
+	}}
+	if _, err := runDevelopment(context.Background(), "prompt", opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 1 || !captured[0] {
+		t.Fatalf("captured=%v", captured)
+	}
+}

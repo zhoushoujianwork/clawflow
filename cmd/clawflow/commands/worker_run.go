@@ -28,6 +28,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -159,6 +160,9 @@ func (a *workerAPI) postOnce(ctx context.Context, path string, in, out any) erro
 	limit := coordinator.MaxRequestBytes
 	if strings.HasSuffix(path, "/complete") || strings.HasSuffix(path, "/fail") {
 		limit = coordinator.MaxReportBytes
+	}
+	if strings.HasSuffix(path, "/transcript") {
+		limit = coordinator.MaxTranscriptRequestBytes
 	}
 	if len(data) > limit {
 		return fmt.Errorf("worker report exceeds coordinator limit")
@@ -409,7 +413,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 				return err
 			}
 			defer os.Remove(spoolPath)
-			runCtx := workerEffectContext(executionCtx, spoolPath)
+			runCtx := execution.WithTranscriptSink(workerEffectContext(executionCtx, spoolPath), newWorkerTranscriptSink(api, t))
 			j.hooks = &jobHooks{SkipIndex: true, AfterRun: func(r *jobResult) { result = r }, AcquireLock: workerAcquireIssueLock, ReleaseLock: workerReleaseIssueLock}
 			_, _, failed := runOneOperatorFn(runCtx, j, timeout)
 			if j.result != nil {

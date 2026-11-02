@@ -305,7 +305,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 		}
 		if op.Name != "implement" && op.Name != "repair-ci" {
 			runFunc = func(ctx context.Context, prompt, workdir string, timeout time.Duration, events io.Writer, role string, instructions ...string) (string, error) {
-				options := execution.Options{Workspace: workdir, Role: role, Timeout: timeout, Events: events}
+				options := execution.Options{Workspace: workdir, Role: role, Timeout: timeout, Events: events, CaptureTranscript: true}
 				options.MaxBudgetUSD, _ = ctx.Value(budgetKey{}).(float64)
 				if len(instructions) > 0 {
 					options.Instructions = instructions[0]

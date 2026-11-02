@@ -266,3 +266,12 @@ func (a *platformAdmin) Status(ctx context.Context) (coordinator.PlatformStatus,
 	}
 	return out, err
 }
+
+// ReadTranscript serves stored execution output for one task. It reads only the
+// controller's retained rows and never contacts a worker, Offload or a provider.
+func (a *platformAdmin) ReadTranscript(ctx context.Context, q coordinator.TranscriptQuery) (*coordinator.TranscriptView, error) {
+	if a.workers == nil {
+		return nil, fmt.Errorf("worker service unavailable")
+	}
+	return a.workers.ReadTranscript(ctx, q)
+}

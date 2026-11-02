@@ -25,7 +25,7 @@ func Args() map[string]string {
 	}
 	for i := start; i < len(os.Args); i++ {
 		a := os.Args[i]
-		if a == "-json" || a == "-no-salvage" || a == "-w" || a == "-tools-disabled" {
+		if a == "-json" || a == "-no-salvage" || a == "-w" || a == "-tools-disabled" || a == "-capture-transcript" {
 			args[a] = "true"
 		} else if i+1 < len(os.Args) {
 			i++
@@ -160,6 +160,7 @@ func Helper(t *testing.T) {
 	if os.Getenv("CLAWFLOW_OFFLOAD_TEST_HELPER") != "1" {
 		return
 	}
+	Transcript()
 	args := Args()
 	prompt, _ := io.ReadAll(os.Stdin)
 	if args["-instructions-file"] == "" {
@@ -205,4 +206,64 @@ func Helper(t *testing.T) {
 		text = "Final answer\n<!-- clawflow:outcome=done -->"
 	}
 	Emit(args, text, os.Getenv("OFFLOAD_TEST_ERROR"), mode)
+}
+
+// Transcript serves the fake `offload transcript ...` subcommands and reports
+// whether argv was one. OFFLOAD_TEST_TRANSCRIPT_PAGES names a JSON file: an
+// object mapping an input cursor ("" for the first read) to the document to
+// print. The token {{CALLER}} is replaced by the requested caller run ID.
+// OFFLOAD_TEST_TRANSCRIPT_LOG, when set, receives one line per read.
+func Transcript() bool {
+	argv := []string{}
+	for i, a := range os.Args {
+		if a == "--" {
+			argv = os.Args[i+1:]
+			break
+		}
+	}
+	if len(argv) < 2 || argv[0] != "transcript" {
+		return false
+	}
+	switch argv[1] {
+	case "capabilities":
+		if os.Getenv("OFFLOAD_TEST_TRANSCRIPT_UNSUPPORTED") != "" {
+			fmt.Fprintln(os.Stderr, "offload: unknown command transcript")
+			os.Exit(2)
+		}
+		fmt.Println(`{"schema_version":1,"interface":"offload.transcript"}`)
+	case "read":
+		caller, cursor := "", ""
+		for i := 2; i+1 < len(argv); i++ {
+			switch argv[i] {
+			case "--caller-run-id":
+				caller = argv[i+1]
+			case "--cursor":
+				cursor = argv[i+1]
+			}
+		}
+		if log := os.Getenv("OFFLOAD_TEST_TRANSCRIPT_LOG"); log != "" {
+			if f, err := os.OpenFile(log, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600); err == nil {
+				fmt.Fprintf(f, "%s|%s\n", caller, cursor)
+				_ = f.Close()
+			}
+		}
+		raw, err := os.ReadFile(os.Getenv("OFFLOAD_TEST_TRANSCRIPT_PAGES"))
+		if err != nil {
+			os.Exit(2)
+		}
+		var pages map[string]json.RawMessage
+		if json.Unmarshal(raw, &pages) != nil {
+			os.Exit(2)
+		}
+		page, ok := pages[cursor]
+		if !ok {
+			fmt.Println(`{"schema_version":1,"interface":"offload.transcript","availability":"cursor_invalid","events":[],"has_more":false,"end_of_stream":false}`)
+			os.Exit(0)
+		}
+		fmt.Println(strings.ReplaceAll(string(page), "{{CALLER}}", caller))
+	default:
+		os.Exit(2)
+	}
+	os.Exit(0)
+	return true
 }

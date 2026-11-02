@@ -3,10 +3,12 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +70,34 @@ func NewPlatformHandler(store WorkerStore, admin AdminService) http.Handler {
 			if !token.HasScope(ScopeAdmin) {
 				status = 403
 				return ErrToken
+			}
+			if id, ok := transcriptTaskID(r.URL.Path); ok {
+				action, target = "transcript", id
+				if r.Method != "GET" {
+					status = 405
+					return nil
+				}
+				reader, ok := admin.(TranscriptReader)
+				if !ok {
+					status = 404
+					return nil
+				}
+				query, valid := parseTranscriptQuery(id, r.URL.Query())
+				if !valid {
+					status = 400
+					return ErrInvalid
+				}
+				// Opening or replaying output is audited; incremental polls are not.
+				if query.After == 0 {
+					if err = store.AppendAudit(ctx, actor, target, "admin:transcript:open"); err != nil {
+						return err
+					}
+				}
+				out, err = reader.ReadTranscript(ctx, query)
+				if errors.Is(err, ErrTaskNotFound) {
+					status = 404
+				}
+				return err
 			}
 			switch r.URL.Path {
 			case "/admin/v1/dashboard":
@@ -178,8 +208,11 @@ func NewPlatformHandler(store WorkerStore, admin AdminService) http.Handler {
 		}
 		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer auditCancel()
-		if err := store.AppendAudit(auditCtx, actor, target, fmt.Sprintf("admin:%s:%d", action, status)); err != nil {
-			status = 500
+		// Successful transcript reads poll about once a second; opening is audited above.
+		if action != "transcript" || status != 200 {
+			if err := store.AppendAudit(auditCtx, actor, target, fmt.Sprintf("admin:%s:%d", action, status)); err != nil {
+				status = 500
+			}
 		}
 		if status >= 400 {
 			out = map[string]string{"error": http.StatusText(status)}
@@ -226,4 +259,40 @@ func repoAuditTarget(input string) string {
 		}
 	}
 	return key
+}
+
+// transcriptTaskID matches /admin/v1/tasks/{id}/transcript.
+func transcriptTaskID(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/admin/v1/tasks/")
+	if !ok {
+		return "", false
+	}
+	id, tail, ok := strings.Cut(rest, "/")
+	if !ok || tail != "transcript" || id == "" || len(id) > 128 || strings.ContainsAny(id, "/\x00") {
+		return "", false
+	}
+	return id, true
+}
+
+func parseTranscriptQuery(id string, values url.Values) (TranscriptQuery, bool) {
+	q := TranscriptQuery{TaskID: id}
+	var invocation int64
+	for key, dst := range map[string]*int64{"epoch": &q.Epoch, "after": &q.After, "invocation": &invocation} {
+		if raw := values.Get(key); raw != "" {
+			n, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || n < 0 {
+				return q, false
+			}
+			*dst = n
+		}
+	}
+	q.Invocation = int(invocation)
+	if raw := values.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return q, false
+		}
+		q.Limit = n
+	}
+	return q, true
 }

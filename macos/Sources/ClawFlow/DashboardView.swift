@@ -79,6 +79,7 @@ struct TaskDetail: View {
     let snapshot: DashboardSnapshot
     let row: TaskRow
     @State private var showEvents = true
+    @State private var showLog = true
     @State private var events: [TaskEvent] = []
     @State private var eventError: String?
     @State private var loading = false
@@ -105,7 +106,10 @@ struct TaskDetail: View {
                     if row.issue > 0, let pr = row.prLink(in: snapshot) { Link("Open PR #\(row.pr)", destination: pr) }
                 }.buttonStyle(.bordered).controlSize(.regular)
                 Divider()
-                Label("Full Offload execution output is not available in this build.", systemImage: "terminal").font(.callout).foregroundStyle(.secondary)
+                DisclosureGroup("Execution log", isExpanded: $showLog) {
+                    TranscriptLogView(model: model, taskId: row.id).padding(.top, 8)
+                }
+                Divider()
                 DisclosureGroup("Coordinator activity", isExpanded: $showEvents) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Scheduling events · refreshes every 5 seconds while connected.").font(.caption).foregroundStyle(.secondary)

@@ -85,7 +85,7 @@ func runDevelopment(ctx context.Context, prompt string, opts RunOptions, instruc
 		execute = execution.Execute
 	}
 	activity := &developmentActivity{dst: opts.EventWriter}
-	options := execution.Options{Workspace: opts.Workdir, Role: opts.Role, Timeout: opts.Timeout, Events: activity, PermissionMode: "bypassPermissions"}
+	options := execution.Options{Workspace: opts.Workdir, Role: opts.Role, Timeout: opts.Timeout, Events: activity, PermissionMode: "bypassPermissions", CaptureTranscript: true}
 	if len(instructions) > 0 {
 		options.Instructions = instructions[0]
 	}

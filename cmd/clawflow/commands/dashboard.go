@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -46,6 +47,34 @@ func NewDashboardCmd() *cobra.Command {
 			return call(c, "POST", "/admin/v1/dashboard/action", coordinator.DashboardRequest{Action: action, Name: args[0]})
 		}})
 	}
+	// Read-only execution output for one task; never starts a provider.
+	var epoch, after, invocation int64
+	var limit int
+	transcript := &cobra.Command{Use: "transcript TASK", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
+		query := url.Values{}
+		if epoch > 0 {
+			query.Set("epoch", strconv.FormatInt(epoch, 10))
+		}
+		if invocation > 0 {
+			query.Set("invocation", strconv.FormatInt(invocation, 10))
+		}
+		if after > 0 {
+			query.Set("after", strconv.FormatInt(after, 10))
+		}
+		if limit > 0 {
+			query.Set("limit", strconv.Itoa(limit))
+		}
+		path := "/admin/v1/tasks/" + url.PathEscape(args[0]) + "/transcript"
+		if len(query) > 0 {
+			path += "?" + query.Encode()
+		}
+		return call(c, "GET", path, nil)
+	}}
+	transcript.Flags().Int64Var(&epoch, "epoch", 0, "Execution (lease epoch); default latest")
+	transcript.Flags().Int64Var(&invocation, "invocation", 0, "Offload invocation within the execution; default latest")
+	transcript.Flags().Int64Var(&after, "after", 0, "Last sequence already held")
+	transcript.Flags().IntVar(&limit, "limit", 0, "Maximum events")
+	cmd.AddCommand(transcript)
 	// Only monitoring changes here. CI/acceptance/merge remain independent and
 	// cannot be weakened by an innocent dashboard pause/resume action.
 	for _, action := range []string{"enable", "disable"} {

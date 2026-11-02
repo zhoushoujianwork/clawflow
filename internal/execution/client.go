@@ -132,6 +132,9 @@ type Request struct {
 	AllowedTools, DisallowedTools                          []string
 	TimeoutMS                                              int64
 	MaxBudgetUSD                                           float64
+	// CaptureTranscript opts this single managed invocation into Offload's
+	// private transcript (-capture-transcript). It is off for every other call.
+	CaptureTranscript bool
 }
 
 type Observation struct {
@@ -473,6 +476,18 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if err != nil {
 		return result, &UnavailableError{Reason: ReasonMissing, Message: "Offload executable path unavailable"}
 	}
+	// Capture is requested only when a consumer will read it and this Offload
+	// advertises the transcript interface.
+	sink := transcriptSinkFrom(ctx)
+	if req.CaptureTranscript && sink != nil {
+		if supported, reason := transcriptSupported(ctx, command, env); supported {
+			args = append(args, "-capture-transcript")
+		} else {
+			// Older Offload: run exactly as before and tell the viewer why.
+			_ = sink.Deliver(context.WithoutCancel(ctx), TranscriptPage{CallerRunID: req.RequestID, Availability: "unsupported_version", Reason: reason, EndOfStream: true})
+			sink = nil
+		}
+	}
 	cmd := exec.Command(command, args...)
 	if checkpointFile != nil {
 		cmd.ExtraFiles = []*os.File{checkpointFile}
@@ -517,6 +532,13 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	}
 	registerActiveCmd(cmd)
 	defer unregisterActiveCmd(cmd)
+	// Transcript content is a best-effort side channel: it never changes the
+	// result, event or outcome protocol below, and a failure never fails the run.
+	var pump *transcriptPump
+	if req.CaptureTranscript && sink != nil {
+		pump = startTranscriptPump(ctx, command, env, req.RequestID, sink)
+		defer pump.finish(transcriptFinalGrace)
+	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
@@ -559,6 +581,10 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		}
 	}
 
+	if pump != nil {
+		// The writer has exited: let the pump read the ended capture once, then stop.
+		pump.finish(transcriptFinalGrace)
+	}
 	// Drain only newly completed records, even on timeout or invalid stdout.
 	if eventErr == nil {
 		eventErr = tail.poll()
@@ -683,6 +709,7 @@ func safeKind(s string) string {
 type Options struct {
 	Workspace, Model, Role, Profile, Instructions, SessionKey, PermissionMode string
 	Resume, ToolsDisabled                                                     bool
+	CaptureTranscript                                                         bool
 	AllowedTools, DisallowedTools                                             []string
 	Timeout                                                                   time.Duration
 	MaxBudgetUSD                                                              float64
@@ -750,7 +777,7 @@ func execute(ctx context.Context, prompt string, opts Options, observe func(Obse
 	if opts.PermissionMode == "" {
 		opts.PermissionMode = "default"
 	}
-	req := Request{Version: 1, RequestID: NewSessionKey(), SessionKey: opts.SessionKey, Resume: opts.Resume, Workspace: opts.Workspace, Model: opts.Model, Instructions: opts.Instructions, Prompt: prompt, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: opts.Timeout.Milliseconds(), MaxBudgetUSD: opts.MaxBudgetUSD}
+	req := Request{Version: 1, RequestID: NewSessionKey(), SessionKey: opts.SessionKey, Resume: opts.Resume, Workspace: opts.Workspace, Model: opts.Model, Instructions: opts.Instructions, Prompt: prompt, PermissionMode: opts.PermissionMode, ToolsDisabled: opts.ToolsDisabled, AllowedTools: opts.AllowedTools, DisallowedTools: opts.DisallowedTools, TimeoutMS: opts.Timeout.Milliseconds(), MaxBudgetUSD: opts.MaxBudgetUSD, CaptureTranscript: opts.CaptureTranscript}
 	// Credentials and models come only from Offload profiles or explicit model input.
 	return Run(ctx, c, req, effectEnvironment(ctx, os.Environ()), opts.Events, observe)
 }

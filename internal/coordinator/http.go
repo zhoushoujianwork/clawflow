@@ -50,7 +50,7 @@ func NewHandler(store WorkerStore) http.Handler {
 			}
 			if len(parts) == 3 && parts[0] == "tasks" && len(parts[1]) <= 128 && parts[1] != "" {
 				switch parts[2] {
-				case "heartbeat", "complete", "fail", "recover", "inspect", "release":
+				case "heartbeat", "complete", "fail", "recover", "inspect", "release", "transcript":
 					action = parts[2]
 					task = parts[1]
 				}
@@ -84,6 +84,9 @@ func NewHandler(store WorkerStore) http.Handler {
 			limit := int64(MaxRequestBytes)
 			if action == "complete" || action == "fail" {
 				limit = MaxReportBytes
+			}
+			if action == "transcript" {
+				limit = MaxTranscriptRequestBytes
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 			decode := func(v any) error {
@@ -139,6 +142,20 @@ func NewHandler(store WorkerStore) http.Handler {
 					claimed, err = store.Claim(ctx, worker)
 				}
 				output = map[string]any{"task": claimed}
+			case "transcript":
+				appender, ok := store.(TranscriptAppender)
+				if !ok {
+					status = http.StatusNotFound
+					return nil
+				}
+				var upload TranscriptUpload
+				if err := decode(&upload); err != nil {
+					status = 400
+					return err
+				}
+				var ack TranscriptAck
+				ack, err = appender.AppendTranscript(ctx, task, worker, upload)
+				output = ack
 			default:
 				var input struct {
 					FencingToken int64           `json:"fencing_token"`
@@ -194,6 +211,8 @@ func NewHandler(store WorkerStore) http.Handler {
 			status = 401
 		case errors.Is(err, ErrStaleLease):
 			status = 409
+		case errors.Is(err, ErrTranscriptOrder), errors.Is(err, ErrTranscriptIdentity):
+			status = 422
 		case errors.Is(err, ErrNoTask):
 			status = 200
 			output = map[string]any{"task": nil}
@@ -208,8 +227,11 @@ func NewHandler(store WorkerStore) http.Handler {
 		// raw URLs, request bodies or backend error messages.
 		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer auditCancel()
-		if err := store.AppendAudit(auditCtx, worker, task, fmt.Sprintf("http:%s:%d", action, status)); err != nil {
-			status = 500
+		// Accepted transcript pages arrive about once a second; only refusals are audited.
+		if action != "transcript" || status != http.StatusOK {
+			if err := store.AppendAudit(auditCtx, worker, task, fmt.Sprintf("http:%s:%d", action, status)); err != nil {
+				status = 500
+			}
 		}
 		if status >= 400 {
 			output = map[string]string{"error": http.StatusText(status)}

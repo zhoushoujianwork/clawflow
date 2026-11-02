@@ -92,6 +92,10 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 			if err := reconcileActionsObservations(reconcileCtx, actions.Ledger{DB: db.DB()}); err != nil && reconcileCtx.Err() == nil {
 				runLog.Warn("coordinator/reconcile", "err", err.Error())
 			}
+			// Retention keeps a header so the viewer reports "expired", not "never captured".
+			if _, err := tasks.PruneTranscripts(reconcileCtx, time.Now().Add(-coordinator.TranscriptRetention)); err != nil && reconcileCtx.Err() == nil {
+				runLog.Warn("coordinator/transcript-retention", "err", err.Error())
+			}
 			select {
 			case <-reconcileCtx.Done():
 				return

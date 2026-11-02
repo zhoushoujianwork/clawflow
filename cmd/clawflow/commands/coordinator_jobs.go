@@ -645,3 +645,13 @@ func (s *coordinatorResults) ClaimWithID(ctx context.Context, worker, id string)
 	}
 	return claimer.ClaimWithID(ctx, worker, id)
 }
+
+// AppendTranscript relays execution output to the coordinator store, under the
+// same worker token, lease and fencing checks as reports.
+func (s *coordinatorResults) AppendTranscript(ctx context.Context, id, worker string, in coordinator.TranscriptUpload) (coordinator.TranscriptAck, error) {
+	appender, ok := s.WorkerStore.(coordinator.TranscriptAppender)
+	if !ok {
+		return coordinator.TranscriptAck{}, coordinator.ErrInvalid
+	}
+	return appender.AppendTranscript(ctx, id, worker, in)
+}

@@ -26,6 +26,7 @@ func TestOffloadHelper(t *testing.T) {
 	if os.Getenv("CLAWFLOW_EXPECT_SLOT") == "1" && agentcapacity.Used() != 1 {
 		os.Exit(3)
 	}
+	offloadtest.Transcript()
 	args := offloadtest.Args()
 	if capture := os.Getenv("OFFLOAD_TEST_ENV_CAPTURE"); capture != "" {
 		// Record the environment this real child process actually received.
