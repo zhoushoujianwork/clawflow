@@ -309,6 +309,10 @@ type coordinatorReport struct {
 	Events []json.RawMessage `json:"events,omitempty"`
 }
 
+func (s *coordinatorResults) Task(ctx context.Context, id string) (*coordinator.Task, error) {
+	return s.tasks.Task(ctx, id)
+}
+
 func (s *coordinatorResults) Complete(ctx context.Context, id, worker string, fence int64, raw json.RawMessage) error {
 	return s.finish(ctx, id, worker, fence, raw, false)
 }
@@ -467,7 +471,7 @@ func loadCoordinatorJob(ctx context.Context, t *coordinator.Task) (*runJob, erro
 	j := &runJob{repo: t.Repo, repoCfg: rc, client: client, op: op, sub: &operator.Subject{Number: t.Issue}}
 	if p.Repair != nil {
 		r := p.Repair
-		j.repair = &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict"}
+		j.repair = &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict", DevelopmentVerification: r.Reason == "development_verification"}
 	}
 	return j, nil
 }
@@ -479,14 +483,24 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 		status = "cancelled"
 	}
 	if j.repair != nil {
+		j.repair.FailingCheck = r.FailingCheck
 		if err := repairledger.ApplyResult(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, t.ID, j.repair.reason(), r.InfraKind, now); err != nil {
 			return err
+		}
+		if r.InfraKind != "" {
+			runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "kind", r.InfraKind, "err", r.Error)
 		}
 		if r.InfraKind != "" && status == "failed" {
 			status = "skipped"
 		}
 	}
 	meta := snapshot.RunMeta{Repo: t.Repo, IssueNumber: t.Issue, Operator: t.Operator, StartedAt: t.CreatedAt, EndedAt: &now, Status: status, Outcome: r.Outcome, Error: r.Error, Usage: r.Usage, HeadSHA: r.HeadSHA, PRUrl: r.PRURL, PRNumber: r.PRNumber, Summary: r.Output}
+	if j.repair != nil {
+		meta.RepairReason = j.repair.reason()
+	}
+	if r.Outcome == "no-change" {
+		meta.OutcomeReason = r.Output
+	}
 	meta.Warnings = r.ProvenanceWarnings
 	meta.Machine = t.LeaseOwner
 	if p := r.Provenance; p != nil {
@@ -537,6 +551,12 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 	prefix := fmt.Sprintf("[%s#%d %s]", j.repo, j.sub.Number, j.op.Name)
 	if r.Status == "success" {
 		runPostAutomation(ctx, j, r.Outcome, r.Output, prefix)
+	}
+	if j.repair != nil {
+		if status != "success" && r.InfraKind == "" {
+			return finishRepairFailure(ctx, j, r.Error)
+		}
+		return nil
 	}
 	switch status {
 	case "failed", "disallowed-outcome", "skipped-empty", "output-limit":

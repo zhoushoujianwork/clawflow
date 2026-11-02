@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -694,79 +695,97 @@ func TestNoChangeRepairValidationAndBudget(t *testing.T) {
 func TestOffloadHelper(t *testing.T) { offloadtest.Helper(t) }
 
 func TestNoChangeRepairRunRecordsSuccess(t *testing.T) {
-	f, _, reg, cfg := repairAcceptanceFixture(t, "failed")
-	source := newIssue329Repo(t)
-	git := func(args ...string) string {
-		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", source}, args...)...).CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v %s", args, err, out)
-		}
-		return strings.TrimSpace(string(out))
-	}
-	remote := git("config", "--get", "remote.origin.url")
-	git("push", "origin", "HEAD:refs/heads/"+f.pr.HeadBranch)
-	git("remote", "set-url", "origin", "https://github.com/o/r.git")
-	t.Setenv("GIT_CONFIG_COUNT", "1")
-	t.Setenv("GIT_CONFIG_KEY_0", "url."+remote+".insteadOf")
-	t.Setenv("GIT_CONFIG_VALUE_0", "https://github.com/o/r.git")
-	f.pr.HeadSHA = git("rev-parse", "HEAD")
-	f.openPRs = []vcs.PR{f.pr}
-	parent := filepath.Dir(snapshot.RunDir("o/r", 42, time.Now()))
-	entries, _ := os.ReadDir(parent)
-	for _, e := range entries {
-		updateDevelopmentHead(t, filepath.Join(parent, e.Name()), f.pr.HeadSHA)
-	}
-	offloadtest.Setup(t)
-	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "acceptance-profile")
-	t.Setenv("OFFLOAD_TEST_TEXT", "No change required: findings conflict with the issue body. Tests passed.\n<!-- clawflow:outcome=no-change -->")
-	recordVerdict(t, f)
-	jobs := scanRepair(t, reg, f, cfg, 0)
-	if len(jobs) != 1 {
-		t.Fatalf("jobs=%v", jobs)
-	}
-	client := &setupRepairFake{acceptanceFake: f}
-	jobs[0].client, jobs[0].repoCfg.LocalPath = client, source
-	oldGit := acceptanceGit
-	acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
-		if args[0] == "ls-remote" {
-			return f.pr.HeadSHA + "\trefs/heads/" + f.pr.HeadBranch, nil
-		}
-		return oldGit(ctx, dir, args...)
-	}
-	fired, limited, failed := runOneOperator(context.Background(), jobs[0], time.Minute)
-	if !fired || limited || failed {
-		t.Fatalf("fired=%v limited=%v failed=%v", fired, limited, failed)
-	}
-	entries, _ = os.ReadDir(parent)
-	found := false
-	for _, e := range entries {
-		b, _ := os.ReadFile(filepath.Join(parent, e.Name(), "meta.json"))
-		var m snapshot.RunMeta
-		if err := json.Unmarshal(b, &m); err != nil {
-			t.Fatal(err)
-		}
-		if m.Operator != "repair-ci" {
-			continue
-		}
-		found = true
-		if m.Status != "success" || m.Outcome != "no-change" || m.OutcomeReason == "" || m.HeadSHA != f.pr.HeadSHA {
-			t.Fatalf("meta=%+v", m)
-		}
-	}
-	if !found || len(client.labels) != 0 || len(f.comments) != 1 || !strings.Contains(f.comments[0], "conflict") {
-		t.Fatalf("found=%v labels=%v comments=%v", found, client.labels, f.comments)
-	}
-	_, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", f.pr.Number)
-	ledger, err := loadCIRepairLedger(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if consumed, infra := ledger.counts(); consumed != 0 || infra != 0 {
-		t.Fatalf("consumed=%d infra=%d", consumed, infra)
-	}
-	if _, err := acceptanceDevelopment("o/r", 42, f.pr.HeadSHA, f.pr.Number); err != nil {
-		t.Fatal(err)
+	for _, verification := range []bool{false, true} {
+		t.Run(fmt.Sprintf("verification-%v", verification), func(t *testing.T) {
+			f, _, reg, cfg := repairAcceptanceFixture(t, "failed")
+			source := newIssue329Repo(t)
+			git := func(args ...string) string {
+				t.Helper()
+				out, err := exec.Command("git", append([]string{"-C", source}, args...)...).CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v %s", args, err, out)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			remote := git("config", "--get", "remote.origin.url")
+			git("push", "origin", "HEAD:refs/heads/"+f.pr.HeadBranch)
+			git("remote", "set-url", "origin", "https://github.com/o/r.git")
+			t.Setenv("GIT_CONFIG_COUNT", "1")
+			t.Setenv("GIT_CONFIG_KEY_0", "url."+remote+".insteadOf")
+			t.Setenv("GIT_CONFIG_VALUE_0", "https://github.com/o/r.git")
+			f.pr.HeadSHA = git("rev-parse", "HEAD")
+			f.openPRs = []vcs.PR{f.pr}
+			parent := filepath.Dir(snapshot.RunDir("o/r", 42, time.Now()))
+			entries, _ := os.ReadDir(parent)
+			for _, e := range entries {
+				if !verification {
+					updateDevelopmentHead(t, filepath.Join(parent, e.Name()), f.pr.HeadSHA)
+				}
+			}
+			offloadtest.Setup(t)
+			t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "acceptance-profile")
+			if verification {
+				t.Setenv("OFFLOAD_TEST_TOOL_CATEGORY", "shell")
+			}
+			t.Setenv("OFFLOAD_TEST_TEXT", "No change required: findings conflict with the issue body. Tests passed.\n<!-- clawflow:outcome=no-change -->")
+			if !verification {
+				recordVerdict(t, f)
+			}
+			jobs := scanRepair(t, reg, f, cfg, 0)
+			if len(jobs) != 1 {
+				t.Fatalf("jobs=%v", jobs)
+			}
+			client := &setupRepairFake{acceptanceFake: f}
+			jobs[0].client, jobs[0].repoCfg.LocalPath = client, source
+			oldGit := acceptanceGit
+			acceptanceGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+				if args[0] == "ls-remote" {
+					return f.pr.HeadSHA + "\trefs/heads/" + f.pr.HeadBranch, nil
+				}
+				return oldGit(ctx, dir, args...)
+			}
+			fired, limited, failed := runOneOperator(context.Background(), jobs[0], time.Minute)
+			if !fired || limited || failed {
+				t.Fatalf("fired=%v limited=%v failed=%v", fired, limited, failed)
+			}
+			entries, _ = os.ReadDir(parent)
+			found := false
+			for _, e := range entries {
+				b, _ := os.ReadFile(filepath.Join(parent, e.Name(), "meta.json"))
+				var m snapshot.RunMeta
+				if err := json.Unmarshal(b, &m); err != nil {
+					t.Fatal(err)
+				}
+				if m.Operator != "repair-ci" {
+					continue
+				}
+				found = true
+				if verification && m.RepairReason != "development_verification" {
+					t.Fatalf("missing verification audit reason: %+v", m)
+				}
+				if m.Status != "success" || m.Outcome != "no-change" || m.OutcomeReason == "" || m.HeadSHA != f.pr.HeadSHA {
+					t.Fatalf("meta=%+v", m)
+				}
+			}
+			if !found || len(client.labels) != 0 || len(f.comments) != 1 || !strings.Contains(f.comments[0], "conflict") {
+				t.Fatalf("found=%v labels=%v comments=%v", found, client.labels, f.comments)
+			}
+			_, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", f.pr.Number)
+			ledger, err := loadCIRepairLedger(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantConsumed := 0
+			if verification {
+				wantConsumed = 1
+			}
+			if consumed, infra := ledger.counts(); consumed != wantConsumed || infra != 0 {
+				t.Fatalf("consumed=%d infra=%d", consumed, infra)
+			}
+			if _, err := acceptanceDevelopment("o/r", 42, f.pr.HeadSHA, f.pr.Number); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

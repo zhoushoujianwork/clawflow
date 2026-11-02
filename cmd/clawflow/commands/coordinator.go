@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
+
 	"github.com/zhoushoujianwork/clawflow/internal/actions"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -64,6 +66,12 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		}
 		adminHandler.ServeHTTP(w, r)
 	})
+	if devmode.Active() {
+		if err := devmode.CheckListen(server.Addr); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		db.Close()
@@ -159,6 +167,7 @@ func startLocalWorker(ctx context.Context, settings config.LocalWorkerSettings, 
 		return nil, err
 	}
 	o := workerOptions{Coordinator: "https://" + net.JoinHostPort(host, port), TokenFile: tokenPath, Fingerprint: pin, MaxParallel: parallel, Tags: append(append([]string{}, settings.Tags...), config.HostTag(hostname)), Roles: []string{"operator", "acceptance"}, RunUntagged: true}
+	o.Gate = workerGateFactory(hostname, o.Roles)
 	api, err := newWorkerAPI(o)
 	if err != nil {
 		return nil, err

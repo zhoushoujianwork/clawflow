@@ -24,6 +24,8 @@ struct Connection: Codable, Equatable {
             let candidate = helpers.appendingPathComponent("Helpers/clawflow").path
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
         }
+        // A candidate app must use its bundled helper, never the installed CLI.
+        guard AppIdentity.current.allowsInstalledCLIFallback else { return "" }
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clawflow/bin/clawflow").resolvingSymlinksInPath().path
     }
     func arguments(_ command: [String]) -> [String] {

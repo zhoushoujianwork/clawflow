@@ -1,25 +1,43 @@
+import Combine
 import SwiftUI
 
 @MainActor final class DashboardModel: ObservableObject {
     let localServices = LocalServices()
+    let executionReadiness = ExecutionReadiness()
     @Published var connection = Connection.load()
     @Published private(set) var snapshot: DashboardSnapshot?
     @Published private(set) var received: Date?
     @Published private(set) var error: String?
     @Published private(set) var busy = false
     @Published var actionError: String?
+    /// The monitoring/worker change currently awaiting the controller; shown as pending feedback.
+    @Published private(set) var pendingAction: PendingAction?
     @Published var now = Date()
     private var polling: Task<Void, Never>?
+    private var executionLoop: Task<Void, Never>?
+    private var forwarding: AnyCancellable?
     private var freshnessTimer: Timer?
     private var refreshing = false
     private var generation = 0
     var summary: StatusSummary { .reduce(snapshot: snapshot, received: received, error: error, now: now) }
+    var popover: StatusPopover { .make(snapshot: snapshot, received: received, error: error, now: now) }
+    /// Menu-bar attention includes an unusable local executor, not only task attention.
+    var offloadNeedsAttention: Bool { executionReadiness.status?.needsAttention ?? false }
 
     func start() {
         guard polling == nil else { return }
         localServices.start(ensureRunning: connection.isLocalHost)
+        forwarding = executionReadiness.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        executionReadiness.notify = { Notifier.post("Offload needs setup", body: $0) }
+        executionLoop = Task { [weak self] in
+            // The CLI serves a cached result, so this loop never causes a probe per tick.
+            while !Task.isCancelled {
+                if let self { await self.executionReadiness.refresh(cli: self.connection.cli) }
+                try? await Task.sleep(for: .seconds(15))
+            }
+        }
         freshnessTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.now = Date() }
+            Task { @MainActor [weak self] in self?.now = Date() }
         }
         polling = Task { [weak self] in
             while !Task.isCancelled {
@@ -55,8 +73,8 @@ import SwiftUI
     }
     func perform(_ action: String, name: String) async {
         guard summary.connected, !busy else { return }
-        busy = true; actionError = nil
-        defer { busy = false }
+        busy = true; actionError = nil; pendingAction = PendingAction(action: action, name: name)
+        defer { busy = false; pendingAction = nil }
         do { _ = try await request([action, name]); await refresh() }
         catch { actionError = error.localizedDescription + " Refresh before repeating the action." }
     }

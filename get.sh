@@ -126,6 +126,11 @@ if [[ "$BIN_DIR" == "$HOME/.local/bin" ]]; then
   fi
 fi
 
+# ---------- Offload readiness (read-only; never installs anything) ----------
+echo ""
+echo "  [check] Offload execution dependency (read-only)..."
+"$BIN_DIR/clawflow" execution status --shell --no-fail 2>&1 | sed 's/^/    /' || true
+
 # ---------- done ----------
 echo ""
 echo "ClawFlow installed successfully."

@@ -263,13 +263,17 @@ func TestStoreConcurrentPlanPublication(t *testing.T) {
 	var wg sync.WaitGroup
 	var successes atomic.Int32
 	for i := 0; i < 8; i++ {
+		// Use distinct payloads even when the clock gives writers the same timestamp.
+		plan := passing().Plan
+		plan.Text += strings.Repeat("x", i+1)
+		plan.Digest = digest(plan.Text)
 		wg.Add(1)
-		go func() {
+		go func(plan Plan) {
 			defer wg.Done()
-			if s.SavePlan(contract(), passing().Plan) == nil {
+			if s.SavePlan(contract(), plan) == nil {
 				successes.Add(1)
 			}
-		}()
+		}(plan)
 	}
 	wg.Wait()
 	if successes.Load() != 1 {
@@ -277,6 +281,30 @@ func TestStoreConcurrentPlanPublication(t *testing.T) {
 	}
 	if _, err := s.LoadPlan(contract(), "attempt"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStoreConcurrentIdenticalPlanReplay(t *testing.T) {
+	s := openTestStore(t)
+	plan := passing().Plan
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if s.SavePlan(contract(), plan) == nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if successes.Load() != 8 {
+		t.Fatalf("idempotent publication successes: %d", successes.Load())
+	}
+	loaded, err := s.LoadPlan(contract(), plan.AttemptID)
+	if err != nil || digest(loaded) != digest(plan) {
+		t.Fatalf("replay changed the published plan: %v", err)
 	}
 }
 

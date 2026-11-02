@@ -24,19 +24,25 @@ import (
 )
 
 type ciRepairContext struct {
-	PR       vcs.PR
-	Attempt  int
-	Evidence string
+	PR           vcs.PR
+	Attempt      int
+	FailingCheck string
+	Evidence     string
 	// Acceptance is set when the repair input is a failed independent
 	// acceptance verdict. MergeConflict takes precedence over CI/acceptance.
 	Acceptance    *acceptanceFindings
 	MergeConflict bool
+	// A fresh managed session rechecks an unproven head without changing it.
+	DevelopmentVerification bool
 }
 
 // reason names the repair input for the shared ledger and logs.
 func (r *ciRepairContext) reason() string {
 	if r != nil && r.MergeConflict {
 		return "merge_conflict"
+	}
+	if r != nil && r.DevelopmentVerification {
+		return "development_verification"
 	}
 	if r != nil && r.Acceptance != nil {
 		return repairReasonAcceptance
@@ -48,6 +54,9 @@ func (r *ciRepairContext) reason() string {
 func (r *ciRepairContext) label() string {
 	if r.MergeConflict {
 		return "Merge conflict"
+	}
+	if r.DevelopmentVerification {
+		return "Development verification"
 	}
 	if r.reason() == repairReasonAcceptance {
 		return "Acceptance"
@@ -80,6 +89,9 @@ func ciRepairCandidate(repo string, pr vcs.PR, issue *vcs.Issue) error {
 	}
 	for _, l := range []string{"clawflow-skip", "agent-failed", "agent-skipped", "agent-running", "tracking", "question"} {
 		if issue.HasLabel(l) {
+			if l == "agent-failed" {
+				return fmt.Errorf("PR #%d: issue excluded by agent-failed; remove agent-failed from issue #%d to clear the label gate (spent repair budget still needs a person)", pr.Number, issue.Number)
+			}
 			return fmt.Errorf("issue excluded by %s", l)
 		}
 	}
@@ -149,6 +161,7 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 			continue
 		}
 		var findings *acceptanceFindings
+		verification := false
 		conflict := false
 		if cfg.AutoMerge {
 			status, err := client.GetPRMergeability(repo, pr.Number)
@@ -181,20 +194,34 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 		case accOn:
 			findings = scanAcceptanceRepair(ctx, client, repo, cfg, pr, n)
 			if findings == nil {
-				continue
+				// A missing developer identity cannot produce a reviewer verdict.
+				// Re-evaluate the published head through an actual managed run;
+				// never inherit arbitrary commits or manufacture old run metadata.
+				if !ciOn || !developmentVerificationNeeded(ctx, client, repo, pr) {
+					continue
+				}
+				status, err := repairCIStatus(client, repo, pr)
+				if err != nil || status != vcs.CIStatusSuccess {
+					continue
+				}
+				if err := checkRepairBudget(snapshot.DataDir(), repo, pr.Number, time.Now().UTC()); err != nil {
+					skip(pr.Number, err)
+					continue
+				}
+				verification = true
 			}
 		default:
 			continue
 		}
 		seen[n] = true
 		sub := &operator.Subject{Number: n, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State}
-		jobs = append(jobs, &runJob{op: op, sub: sub, repo: repo, repoCfg: cfg, client: client, repair: &ciRepairContext{PR: pr, Acceptance: findings, MergeConflict: conflict}})
+		jobs = append(jobs, &runJob{op: op, sub: sub, repo: repo, repoCfg: cfg, client: client, repair: &ciRepairContext{PR: pr, Acceptance: findings, MergeConflict: conflict, DevelopmentVerification: verification}})
 	}
 	return jobs
 }
 
 // Called only while holding the existing cross-process issue lock. Reservation
-// precedes workdir/provider startup; a crash intentionally consumes the attempt.
+// precedes workdir/provider startup; coordinator expiry reconciles lost workers.
 func prepareCIRepair(j *runJob, now time.Time) error {
 	return prepareCIRepairContext(context.Background(), j, now)
 }
@@ -205,8 +232,12 @@ func prepareCIRepairContext(ctx context.Context, j *runJob, now time.Time) error
 	if err := reserveJobRepair(ctx, j, now); err != nil {
 		return err
 	}
+	j.repair.FailingCheck = repairFailingCheck(j.client, j.repo, j.repair.PR)
+	if j.result != nil {
+		j.result.FailingCheck = j.repair.FailingCheck
+	}
 	j.repair.Evidence = ""
-	if j.repair.Acceptance == nil && !j.repair.MergeConflict {
+	if j.repair.Acceptance == nil && !j.repair.MergeConflict && !j.repair.DevelopmentVerification {
 		if reader, ok := j.client.(interface {
 			GetMRFailedJobEvidence(string, int, string) (string, error)
 		}); ok {
@@ -255,6 +286,22 @@ func checkCIRepair(ctx context.Context, j *runJob) error {
 		}
 		if pr.BaseBranch == "" || !repairSHA.MatchString(pr.BaseSHA) || pr.BaseBranch == pr.HeadBranch {
 			return fmt.Errorf("missing or unsafe base identity")
+		}
+	} else if j.repair.DevelopmentVerification {
+		if !j.repoCfg.AcceptanceRequired || !j.repoCfg.CIRequired || (j.hooks == nil && !j.repoCfg.AutoMerge) {
+			return errors.New("development verification requires enrolled automatic delivery")
+		}
+		status, err := repairCIStatus(j.client, j.repo, pr)
+		if err != nil {
+			return fmt.Errorf("development verification CI lookup: %w", err)
+		}
+		if status != vcs.CIStatusSuccess {
+			return fmt.Errorf("development verification requires successful exact-head CI: %s", status)
+		}
+		// Workers receive the coordinator's sealed reason; provenance lives on
+		// the coordinator, not in a worker-local metadata directory.
+		if j.hooks == nil && !developmentVerificationNeeded(ctx, j.client, j.repo, pr) {
+			return errors.New("development provenance no longer needs verification")
 		}
 	} else if j.repair.Acceptance != nil {
 		if err := recheckAcceptanceRepair(ctx, j, pr); err != nil {
@@ -375,6 +422,9 @@ func repairToolActivity(path string) (bool, error) {
 }
 
 func (r *ciRepairContext) prompt(testCommand string) string {
+	if r.DevelopmentVerification {
+		return fmt.Sprintf("Development verification context:\nReason: development_verification\nExisting PR: %s\nHead branch: %s\nExpected head SHA: %s\nReserved attempt: %d of 3 (shared repair budget)\nConfigured headless test command: %s\nThe current published head lacks trusted completed development evidence. This is a NEW real developer re-evaluation, not recovery or attribution of an old session. Review the entire PR diff against the issue, inspect its implementation, and run the relevant headless tests. Exact-head CI has succeeded, but it is not a substitute for your investigation. Keep the published head and checkout unchanged: no source edits, commits, pushes, rebases, merges, metadata edits, deployments or desktop interaction. Do not create a new PR. Report actual commands/results and any limitations. Only after a complete successful investigation with passing relevant checks emit no-change; otherwise emit agent-failed with concrete findings. An independent reviewer must still accept this head afterward.\n", r.prURL(), r.PR.HeadBranch, r.PR.HeadSHA, r.Attempt, testCommand)
+	}
 	if r.MergeConflict {
 		return fmt.Sprintf("Merge conflict repair context:\nReason: merge_conflict\nExisting PR: %s\nHead branch: %s\nExpected head SHA: %s\nMerge conflict with %s\nCurrent base SHA at dispatch (information only): %s\nReserved attempt: %d of 3 (shared with CI and acceptance)\nConfigured headless test command: %s\nFetch the current base into origin/<base>; if its SHA differs, log the mismatch and continue with the fetched base. Then git merge origin/<base> (merge commit). Never rebase or force-push. Resolve conflicts preserving both changes' intent under the issue requirements. Run configured tests and push to the same head branch. Do not create a new PR. If resolution is unsafe, report BLOCKED with conflicting files and emit agent-failed.\n", r.prURL(), r.PR.HeadBranch, r.PR.HeadSHA, r.PR.BaseBranch, r.PR.BaseSHA, r.Attempt, testCommand)
 	}
@@ -570,6 +620,9 @@ func confirmedDevelopmentHead(ctx context.Context, workdir string, j *runJob) (s
 }
 
 func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outcome, body string) (string, error) {
+	if j.repair != nil && j.repair.DevelopmentVerification && outcome != "no-change" && outcome != "agent-failed" {
+		return "", errors.New("development verification cannot publish changes")
+	}
 	// Validate conflict repair before operator write-back, not during the later
 	// best-effort provenance lookup. A success marker alone cannot prove a merge.
 	if j.repair != nil && j.repair.MergeConflict && outcome == "agent-implemented" {
@@ -582,8 +635,8 @@ func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outco
 	if outcome != "no-change" {
 		return "", nil
 	}
-	if j.repair == nil || j.repair.Acceptance == nil || strings.TrimSpace(body) == "" {
-		return "", fmt.Errorf("no-change requires acceptance repair and a reason")
+	if j.repair == nil || (j.repair.Acceptance == nil && !j.repair.DevelopmentVerification) || strings.TrimSpace(body) == "" {
+		return "", fmt.Errorf("no-change requires acceptance repair or development verification and a reason")
 	}
 	head, err := confirmedDevelopmentHead(ctx, workdir, j)
 	if err != nil {
@@ -596,8 +649,10 @@ func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outco
 	if err != nil || clean != "" {
 		return "", fmt.Errorf("no-change repair left local changes")
 	}
-	if err := j.releaseRepair("no-change", time.Now().UTC()); err != nil {
-		return "", err
+	if !j.repair.DevelopmentVerification {
+		if err := j.releaseRepair("no-change", time.Now().UTC()); err != nil {
+			return "", err
+		}
 	}
 	return head, nil
 }
@@ -635,4 +690,83 @@ func (r *ciRepairContext) prURL() string {
 		return r.PR.URL
 	}
 	return fmt.Sprintf("https://github.com/%s/pull/%d", r.PR.HeadRepo, r.PR.Number)
+}
+
+// classifyRepairResult handles failures without an authoritative agent result.
+// Unknown or corrupt tool evidence remains consuming, to avoid retrying edits.
+func classifyRepairResult(err error, output, events string) (string, bool) {
+	if kind, ok := classifyRepairInfra(err, events); ok {
+		return kind, true
+	}
+	if strings.TrimSpace(output) == "" {
+		if active, readErr := repairToolActivity(events); readErr == nil && !active {
+			return "no-result", true
+		}
+	}
+	return "", false
+}
+
+// finishRepairFailure is shared by local execution and coordinator application.
+// Repair attempts never enter the issue-wide development circuit breaker.
+func finishRepairFailure(ctx context.Context, j *runJob, reason string) error {
+	err := checkRepairBudget(snapshot.DataDir(), j.repo, j.repair.PR.Number, time.Now().UTC())
+	if !errors.Is(err, errRepairExhausted) && !errors.Is(err, errRepairBlocked) {
+		return nil
+	}
+	check := j.repair.FailingCheck
+	if check == "" {
+		check = repairFailingCheck(j.client, j.repo, j.repair.PR)
+	}
+	marker := acceptanceRepairExhaustedMarker(j.repair.PR.Number)
+	body := fmt.Sprintf("Automatic repair for PR #%d needs a person: %s. Last repair failure: %s. Last failing check: %s. Remove agent-failed from issue #%d to clear the label gate; the spent repair budget requires manual intervention. The PR was not merged.\n\n%s", j.repair.PR.Number, err, reason, check, j.sub.Number, marker)
+	comments, e := j.client.ListIssueComments(j.repo, j.sub.Number)
+	if e != nil {
+		return e
+	}
+	posted := false
+	for _, comment := range comments {
+		if strings.Contains(comment, marker) {
+			posted = true
+			break
+		}
+	}
+	if !posted {
+		e := j.client.PostIssueCommentIdempotent(j.repo, j.sub.Number, body, "repair-exhausted-pr-"+fmt.Sprint(j.repair.PR.Number))
+		if errors.Is(e, vcs.ErrNotSupported) {
+			e = j.client.PostIssueComment(j.repo, j.sub.Number, body)
+		}
+		if e != nil {
+			return e
+		}
+	}
+	issue, e := j.client.GetIssue(j.repo, j.sub.Number)
+	if e != nil {
+		return e
+	}
+	if issue == nil {
+		runLog.Info("run/ci_repair_issue_missing", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number)
+		return nil
+	}
+	if !issue.HasLabel("agent-failed") {
+		if e := j.client.AddLabel(j.repo, j.sub.Number, "agent-failed"); e != nil {
+			return e
+		}
+	}
+	runLog.Warn("run/ci_repair_stopped", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "reason", reason, "check", check, "err", err.Error())
+	return nil
+}
+
+// Preserve the triggering check before repair can move the published head.
+func repairFailingCheck(client vcs.Client, repo string, pr vcs.PR) string {
+	check := "unavailable"
+	if reader, ok := client.(vcs.CIEvidenceProvider); ok {
+		if evidence, err := reader.GetCIEvidence(repo, pr.Number); err == nil && evidence.HeadSHA == pr.HeadSHA {
+			for _, c := range evidence.Checks {
+				if c.Conclusion != nil && (*c.Conclusion == "failure" || *c.Conclusion == "timed_out" || *c.Conclusion == "action_required") {
+					check = c.Name
+				}
+			}
+		}
+	}
+	return check
 }

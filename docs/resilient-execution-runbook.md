@@ -6,7 +6,7 @@ Architecture: [restart-safe execution](resilient-execution-design.md).
 
 The new controller and worker use durable worker protocol 1. Migration 11 adds worker capability and an accepted-report digest; legacy workers retain their existing lease behavior. An old controller rejects the new registration fields instead of pretending to support durable execution. `worker --durable=false` is explicit legacy mode and does not provide restart safety.
 
-The first production cutover must drain tasks owned by the old embedded local worker before restarting that controller. The new architecture cannot retroactively detach already-running old processes. Deploy and migrate the controller first, then roll workers. Once migrated, controller shutdown no longer cancels the local worker manager or its independent task executors.
+The first production cutover must drain tasks owned by the old embedded local worker, or explicitly interrupt them gracefully and adopt their verified interruption records offline before restarting that controller. The new architecture cannot retroactively detach already-running old processes. Deploy and migrate the controller first, then roll workers. Once migrated, controller shutdown no longer cancels the local worker manager or its independent task executors.
 
 Do not roll back to a controller that lacks durable-task quarantine while durable tasks or pending results exist. Database rollback is not binary rollback. Candidate validation must use isolated state and database fixtures; never start another scheduler against production state.
 
@@ -32,7 +32,15 @@ Each task directory retains `journal.json`, `executor.log`, and `execution.json`
 clawflow worker executions --root /absolute/execution-root
 ```
 
-States include `prepared`, `running`, `pending_sync`, `acknowledged`, `rejected`, and `needs_recovery`. The executor retries transient upload failures; a restarted manager restarts pending delivery. The controller acknowledges the exact persisted report idempotently, including after finalization. Same-epoch durable results can arrive after the execution deadline while ownership is still reserved. Conflicting or superseded results are retained locally and rejected, never applied as new work.
+States include `prepared`, `running`, `pending_sync`, `acknowledged`, `pending_release`, `released`, `rejected`, and `needs_recovery`. The executor retries transient upload failures; a restarted manager restarts pending delivery. The controller acknowledges the exact persisted report idempotently, including after finalization. Same-epoch durable results can arrive after the execution deadline while ownership is still reserved. Conflicting or superseded results are retained locally and rejected, never applied as new work.
+
+A controller-authorized infrastructure retry can reuse a task ID with a newer epoch. When replaying its saved claim, the worker archives an acknowledged prior attempt under `history/<task-id>/epoch-<epoch>/` before preparing the new attempt. The archive retains the report, checkpoint/session reference and executor output. Executor and session locks must both be free; their original lock files remain in place. Unacknowledged, rejected or identity-mismatched attempts remain blocked unless an existing verified recovery path applies. Do not delete retained journals to clear an epoch mismatch, and do not use session recovery for an already acknowledged attempt.
+
+The controller clears the current report digest when preparing an infrastructure retry. A current receipt requires a committed result; historical receipts remain scoped to their recorded attempt epoch. Managers now inspect acknowledged receipts through the authenticated worker API. If the same owner and epoch are still leased without a committed result, the manager durably returns the exact retained report to `pending_sync` and replays it. Committed or superseded receipts are not replayed. The inspection response exposes only state and whether a result is committed. Do not manufacture a successful result or reset retry limits.
+
+Managers reconcile saved claims and journals on startup and during polling. A durable claim whose execution deadline passed can report a launch failure only when executor and session locks are free and local evidence proves it never started: no journal/checkpoint, an unresumed prepared journal without a checkpoint/report, or an older acknowledged attempt archived before replacement. The controller must confirm the current owner and epoch are still leased without a committed result. Reporting uses the existing infrastructure retry budget; it neither extends authority nor starts a replacement session.
+
+Each unsafe or corrupt item is retained and diagnosed independently under `recovery/`; it no longer terminates the entire manager. `worker executions` includes these `recovery_blocked` reasons alongside readable journals. Reconciliation clears a diagnostic after success. Authentication and TLS trust failures remain fatal. Corrupt shared snapshots such as `queue.json` are not replaced with empty state: retain the file and repair it from verified evidence. Session/profile changes still require the guarded recovery checks above.
 
 Execution has a fixed deadline based on the task timeout, plus ten minutes for reporting. Heartbeats do not extend execution authority indefinitely. If the controller remains unavailable, the executor stops at the execution deadline and preserves its result. Expired durable tasks retain their reservation rather than being blindly reassigned. This trades automatic replacement availability for duplicate-execution safety.
 
@@ -53,3 +61,42 @@ This supports controller/manager restarts and retained development/repair sessio
 ## Validation boundary
 
 Headless fixtures exercise durable authority, fencing, late/duplicate reports, journal corruption, admission generation transfer, checkpoint resume and a real subprocess crash with an inherited recovery lock. These tests do not invoke a paid provider or restart production services. Record real backend and first-production-cutover acceptance separately.
+
+## Explicit legacy interruption import
+
+For an owner-authorized recovery test, capture task records, native session IDs, worktree paths and worker options before sending SIGTERM to legacy Offload processes. Stop controller and worker services, back up the database, and apply current migrations. Verify native history records the interruption and no original process survives.
+
+`clawflow worker import-legacy --manifest /private/captured-manifest.json` preflights worker credentials, repository/worktree identity and configured profile. `--apply` additionally requires the exact original task epoch, a sealed `failed` / `Offload execution: canceled` report, no effect intents, and no explicit task cancellation or successful result. It archives the interruption report in the journal, grants one new epoch, and prepares a same-session recovery without starting it. The controller ownership lock must be available throughout import. The private manifest contains token file paths, never token values.
+
+Start the new controller and managers only after reviewing the imported journals. Existing paused worker registration does not prevent recovery of its already-owned tasks. Keep new dispatch paused during the recovery test, then restore the previous dispatch/drain state after verifying resumed native session IDs and worktree identity. An interruption import consumes a bounded infrastructure attempt; it does not reset repair budgets, weaken provenance or replay previously queued effects.
+
+## Offload readiness during durable handoff
+
+Readiness gates are process-local caches and are excluded from generation and execution journals. A manager loaded through `worker serve` rebuilds its gate in that worker's environment. A prepared executor checks its own runtime before starting task code. If blocked, it durably records `pending_release` and returns the unused lease without a result or attempt charge; successful or stale release responses retire the local attempt as `released`. Managers replay pending releases after restart. A later authorized claim archives that released attempt before preparing a new execution, with exclusive executor/session locks and no retained checkpoint. Reports and interrupted sessions retain their separate delivery/recovery paths.
+
+
+## PR 缺少开发来源时的自动恢复
+
+人工协助更新 PR、旧执行主机不可达或本机缺少原开发记录时，CI 全绿也不能替代开发来源。对已开启自动合并、必需 CI 和独立验收的受管 PR，扫描器现在可派发一次真实的 `development_verification`：CC 在隔离 checkout 中按当前 issue 重新核查整个差异并执行相关无界面检查。成功后，再由不同原生会话独立验收，最后仍走准确 head 的 CI 与条件合并。
+
+这是新的开发核验记录，不是补写旧会话、不宣称原作者身份，也不修改或挪用历史证据。核验不能修改源码、提交、推送或更改来源文件；需要保留真实 native 工具活动，报告实际命令与限制，并由 runner 确认工作区干净、准确提交仍在原分支发布。成功使用 `no-change`，但仍消耗共享三次修复预算中的一次；原有基础设施上限、冷却、退避和 worker 互斥保留。失败、检查不完整或发现缺陷均不能生成成功来源。
+
+仅“缺少历史”或“当前 head 没有完成记录”可自动核验。损坏／歧义记录、正在运行的开发、未通过的 CI、fork／非受管分支、手动 skip、未启用的策略、预算耗尽和读取错误保持阻塞，不通过创建新记录掩盖它们。协调器 payload 保留核验原因，重启后的 worker 与结果回放沿用同一目的；审计 metadata 记录 `repair_reason=development_verification`。无需启动第二个调度器。
+
+验收入队从数据库读取开发任务时必须同时保留 payload 与 result，才能继承实际读过的 SOP 版本；从 VCS 列表取得摘要后，后续来源检查使用契约绑定的完整 PR 信息。缺字段不应被误报为证据损坏或永久等待。数据库检索与完整入队的隔离 PostgreSQL 回归覆盖这两个边界。
+
+## 验收结果回传超时
+
+`pending_sync` 表示执行结果已经落入 worker journal，不能重新启动模型或清空任务。先检查 executor 是否仍持有锁，以及结果上传日志；控制器重建验收契约时仍会核对远端 PR 和开发来源。
+
+来源继承只需要提交祖先关系，临时 Git 仓库使用 `--filter=blob:none` 获取提交图，保留完整的 head、父节点及主分支关系检查。结果 `/complete`、`/fail` 请求单独使用 90 秒有限时长，注册和心跳继续使用 10 秒，调用方取消仍生效。不会通过放宽验收合约来接受结果，也不增加修复预算。
+
+滚动更新先检查活动会话与待回传 journal，备份并暂停新领取；保留已完成结果、原 epoch、worker 所有权和会话身份。旧执行器固定使用旧二进制，因此更新 controller 后须实际观察旧 journal 获得确认、名额释放、后续独立验收开始，不能仅凭 worker 在线宣布恢复。
+
+## 已合并 PR 的迟到审核
+
+入队先复核当前验收契约是否已有有效通过记录，并在最终入队前与结果发布共用锁再次检查，避免扫描途中结果完成后又派发同一审核。
+
+worker 回传时，由控制器从 VCS 确认 PR 已关闭或合并后，仅退役该未提交结果的 acceptance task。数据库事务核对原 owner、epoch、种类和状态，再撤销 authority 并保留审计；已经 accepted 的结果或新的 owner／epoch 不能被撤销。回传收到终态 stale 响应后停止重试，原 journal 及原通过记录继续保留。VCS 读取失败保持错误，不据此取消任务。
+
+2026-10-31 的 #626 故障保留了两条相同契约的审核：较早结果已通过且 PR 已合并，较晚结果停在 `pending_sync` 并收到 HTTP 500。运维在备份后核对实际合并 head、原通过记录、已完成 checkpoint 和原 owner／epoch，通过现有取消事务退役这条多余审核，随后 #624 自动开始验收；没有重跑模型、增加容量或改写 journal。修复由 #627 单独交付，不移动正在审核的 #624 提交。

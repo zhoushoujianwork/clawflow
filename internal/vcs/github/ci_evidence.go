@@ -154,7 +154,8 @@ func (c *Client) GetFailedJobEvidence(repo, sha string, jobID int64) (string, er
 	inspected := 0
 	downloads := 0
 	for _, r := range runs.Runs {
-		if r.WorkflowID <= 0 || r.ID != latest[r.WorkflowID] || r.HeadSHA != sha || !strings.EqualFold(r.HeadRepository.FullName, repo) || r.Status != "completed" || (r.Conclusion != "failure" && r.Conclusion != "timed_out") || r.RunAttempt < 1 {
+		// 已取消的 workflow 仍可能包含先前失败的 job；仅下方失败 job 的日志可作为证据。
+		if r.WorkflowID <= 0 || r.ID != latest[r.WorkflowID] || r.HeadSHA != sha || !strings.EqualFold(r.HeadRepository.FullName, repo) || r.Status != "completed" || (r.Conclusion != "failure" && r.Conclusion != "timed_out" && r.Conclusion != "cancelled") || r.RunAttempt < 1 {
 			continue
 		}
 		inspected++

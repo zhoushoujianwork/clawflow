@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 )
 
 // envOrFile returns the env value if set, otherwise the file value.
@@ -1005,6 +1007,7 @@ func Load() (*Config, error) {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("cannot parse config: %w", err)
 		}
+		cfg.applyCandidateBoundary()
 		if err := cfg.Settings.GitHubApp.Validate(); err != nil {
 			return nil, err
 		}
@@ -1021,10 +1024,34 @@ func Load() (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("cannot parse config: %w", err)
 	}
+	cfg.applyCandidateBoundary()
 	if err := cfg.Settings.GitHubApp.Validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// applyCandidateBoundary makes a development candidate inert toward real
+// repositories regardless of what its config file says: repositories that are
+// not loopback fixtures, or whose clone lives outside the candidate root, are
+// disabled, and auto-merge and self-upgrade are always off. Outside candidate
+// mode this is a no-op.
+func (c *Config) applyCandidateBoundary() {
+	if !devmode.Active() {
+		return
+	}
+	for name, r := range c.Repos {
+		if devmode.CheckBaseURL(r.BaseURL) != nil {
+			r.Enabled = false
+		}
+		if r.LocalPath != "" && !devmode.Within(devmode.Root(), r.LocalPath) {
+			r.Enabled = false
+		}
+		r.AutoMerge = false
+		r.SelfUpgrade = false
+		c.Repos[name] = r
+	}
+	c.Settings.GitHubApp = GitHubAppSettings{}
 }
 
 // ConfigPath returns the canonical config file path.

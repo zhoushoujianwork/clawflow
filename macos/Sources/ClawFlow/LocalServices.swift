@@ -9,8 +9,9 @@ struct LocalService: Identifiable {
     var error: String?
     var title: String { id.hasSuffix(".controller") ? "Local controller" : "Worker · " + id.replacingOccurrences(of: "com.zhoushoujianwork.clawflow.worker-", with: "") }
     var status: String { error != nil ? "Status unavailable" : running ? "Running · PID \(pid ?? "—")" : loaded ? "Loaded · not running" : "Stopped" }
-    static func accepts(_ label: String) -> Bool {
-        label == "com.zhoushoujianwork.clawflow.controller" || label.hasPrefix("com.zhoushoujianwork.clawflow.worker-")
+    static func accepts(_ label: String, identity: AppIdentity = .current) -> Bool {
+        identity.manages(label)
+
     }
     mutating func apply(_ text: String) {
         loaded = true; running = false; pid = nil; error = nil
@@ -41,10 +42,10 @@ struct LocalService: Identifiable {
     @Published var message: String?
     private var refreshing = false
     private var loop: Task<Void, Never>?
-    func start(ensureRunning: Bool = false) {
+    func start(ensureRunning: Bool = false, identity: AppIdentity = .current) {
         guard loop == nil else { return }
         loop = Task { [weak self] in
-            if ensureRunning { await self?.ensureHostRunning() }
+            if ensureRunning && identity.startsHostServices { await self?.ensureHostRunning() }
             while !Task.isCancelled {
                 await self?.refresh()
                 try? await Task.sleep(for: .seconds(5))
@@ -95,6 +96,7 @@ struct LocalService: Identifiable {
 
 struct LocalServiceControls: View {
     @ObservedObject var services: LocalServices
+    @ObservedObject var readiness: ExecutionReadiness
     @State private var pending: LocalService?
     @State private var action = ""
     @State private var confirming = false
@@ -106,6 +108,9 @@ struct LocalServiceControls: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(row.title).font(.callout)
                     Text(row.status).font(.caption).foregroundStyle(.secondary)
+                    if row.id.contains(".worker-"), let status = readiness.status, let worker = status.readiness(forService: row.id), worker.state != "ready" {
+                        Text(worker.summary).font(.caption).foregroundStyle(.orange)
+                    }
                     HStack {
                         Button("Start") { Task { await services.perform("start", service: row) } }.disabled(row.running)
                         Button("Restart") { pending = row; action = "restart"; confirming = true }.disabled(!row.loaded)

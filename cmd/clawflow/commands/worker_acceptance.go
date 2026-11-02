@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -30,8 +31,13 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 	if err := issueWorkAllowed(client, repo, extractClosesIssue(pr.Body)); err != nil {
 		return err
 	}
-	c, _, _, _, err := acceptanceContract(ctx, client, repo, pr.Number)
+	// ListOpenPRs may supply only a summary. Use the same authoritative PR
+	// that established the immutable contract for subsequent ancestry checks.
+	c, _, _, pr, err := acceptanceContract(ctx, client, repo, pr.Number)
 	if err != nil {
+		return err
+	}
+	if passed, err := completedAcceptancePassed(c); passed || err != nil {
 		return err
 	}
 	db, err := requireStore(ctx)
@@ -110,12 +116,41 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 	if p.AcceptanceWorker != "" && p.AcceptanceWorker != "any" && p.AcceptanceWorker != "different" {
 		return coordinator.ErrInvalid
 	}
+	// A previous review can finish while this scan builds its plan. Serialize
+	// this last check with canonical result publication before admitting work.
+	unlock, err := acceptanceLock(repo, pr.Number)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if passed, err := completedAcceptancePassed(c); passed || err != nil {
+		return err
+	}
 	_, err = s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
 		p.TaskID = t.ID
 		t.Payload, err = json.Marshal(p)
 		return err
 	})
 	return err
+}
+
+func completedAcceptancePassed(c acceptance.Contract) (bool, error) {
+	if !acceptanceStoreExists(c.Repository, c.PRNumber) {
+		return false, nil
+	}
+	store, err := acceptance.OpenStore(acceptanceStorePath(c.Repository, c.PRNumber))
+	if err != nil {
+		return false, err
+	}
+	defer store.Close()
+	r, err := store.LatestRecord(c)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return r.Verdict == acceptance.Passed && acceptance.Evaluate(c, r) == nil, nil
 }
 
 // Workers use the coordinator's contract; local policy and provenance never replace it.
@@ -235,6 +270,22 @@ func (s *coordinatorResults) finishAcceptance(ctx context.Context, t *coordinato
 	}
 	if contextual, ok := client.(interface{ SetRequestContext(context.Context) }); ok {
 		contextual.SetRequestContext(ctx)
+	}
+	pr, err := client.GetPR(t.Repo, t.PR)
+	if err != nil {
+		return err
+	}
+	if pr.Number == t.PR && strings.EqualFold(pr.HeadRepo, t.Repo) && (pr.State == "closed" || pr.IsMerged()) {
+		retirer, ok := s.tasks.(interface {
+			RetireClosedAcceptance(context.Context, string, string, int64) error
+		})
+		if !ok {
+			return coordinator.ErrInvalid
+		}
+		if err := retirer.RetireClosedAcceptance(ctx, t.ID, worker, fence); err != nil {
+			return err
+		}
+		return coordinator.ErrStaleLease
 	}
 	c, _, _, _, err := acceptanceContract(ctx, client, t.Repo, t.PR)
 	if err != nil {

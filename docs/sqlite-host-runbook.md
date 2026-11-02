@@ -27,6 +27,12 @@ The directory is created `0700` and the file `0600`. Opening refuses a network f
 
 `modernc.org/sqlite v1.58.0` (pure Go, no CGO), bundling SQLite **3.53.4** (read from `sqlite_version()` at the pinned version). Check upstream release notes and `go list -m -u modernc.org/sqlite` when updating; a bump needs the full test suite. Verified with `CGO_ENABLED=0` for `darwin/arm64`, `darwin/amd64` and `linux/amd64`, the release targets.
 
+### 已包含的安全与数据完整性修复
+
+2026-11-02 核对上游记录：固定的 SQLite 3.53.4 包含 3.53.0 修复的 WAL-reset 数据损坏问题，以及 3.53.2 修复的 CVE-2026-11822 / CVE-2026-11824（FTS5 在特定恶意 SQL 和配置条件下的堆缓冲区越界）。版本包含修复不等于这些攻击前提在本产品可达，也不构成对未审计漏洞的保证。
+
+参考：[3.53.4 发布记录](https://www.sqlite.org/releaselog/3_53_4.html)、[SQLite 官方漏洞状态表](https://www.sqlite.org/cves.html)、[固定 Go 驱动版本](https://pkg.go.dev/modernc.org/sqlite@v1.58.0)。升级驱动仍须独立核对版本与回归结果，本次未变更依赖版本。
+
 ## New host
 
 Nothing to configure. `clawflow controller` (or the app's local-controller start) creates the database and applies migrations on first start.

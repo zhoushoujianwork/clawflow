@@ -23,6 +23,7 @@ import (
 // One immutable executable is retained per task. The manager may exit or be
 // upgraded; its detached executor owns heartbeat, work and durable delivery.
 type workerJournal struct {
+	LegacyReport   json.RawMessage `json:",omitempty"`
 	Resume         bool
 	Version        int
 	Task           coordinator.Task
@@ -111,48 +112,57 @@ func workerJournalRoot(o workerOptions) string {
 }
 
 func launchWorkerExecutor(o workerOptions, t *coordinator.Task) error {
-	if !coordinator.DurableTask(t) {
-		return fmt.Errorf("controller did not grant durable execution; upgrade controller first")
-	}
-	root := workerJournalRoot(o)
-	path := filepath.Join(root, t.ID, "journal.json")
+	path := filepath.Join(workerJournalRoot(o), t.ID, "journal.json")
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("execution journal already exists")
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	j, err := prepareWorkerExecutor(o, t)
+	if err != nil {
+		return err
+	}
+	return spawnWorkerExecutor(path, j)
+}
+
+func prepareWorkerExecutor(o workerOptions, t *coordinator.Task) (*workerJournal, error) {
+	if !coordinator.DurableTask(t) {
+		return nil, fmt.Errorf("controller did not grant durable execution; upgrade controller first")
+	}
+	root := workerJournalRoot(o)
+	path := filepath.Join(root, t.ID, "journal.json")
 	pinned := o.Executable
 	if pinned == "" {
-		return fmt.Errorf("worker generation executable was not pinned")
+		return nil, fmt.Errorf("worker generation executable was not pinned")
 	}
 	if _, err := os.Stat(pinned); err != nil {
-		return err
+		return nil, err
 	}
 	ec, err := execution.LoadConfig()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	offload, err := exec.LookPath(ec.Command)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	native, err := os.ReadFile(offload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	runtime := filepath.Join(root, "runtimes", fmt.Sprintf("%x", sha256.Sum256(native)), "offload")
 	if _, err := os.Stat(runtime); os.IsNotExist(err) {
 		if err := writeDurableFile(runtime, native, 0700); err != nil {
-			return err
+			return nil, err
 		}
 	} else if err != nil {
-		return err
+		return nil, err
 	}
 	j := &workerJournal{Version: 1, Task: *t, Options: o, OffloadCommand: runtime, Executable: pinned, State: "prepared"}
 	if err := writeWorkerJournal(path, j); err != nil {
-		return err
+		return nil, err
 	}
-	return spawnWorkerExecutor(path, j)
+	return j, nil
 }
 
 func spawnWorkerExecutor(path string, j *workerJournal) error {
@@ -181,56 +191,75 @@ func recoverWorkerExecutors(o workerOptions) error {
 		return err
 	}
 	for _, path := range paths {
-		if filelock.Held(path + ".lock") {
-			continue
+		err := recoverWorkerExecutor(o, path)
+		if workerFatal(err) {
+			return err
 		}
-		j, err := readWorkerJournal(path)
+		if err := recordWorkerRecovery(o, path, err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func recoverWorkerExecutor(o workerOptions, path string) error {
+	if filelock.Held(path + ".lock") {
+		return nil
+	}
+	j, err := readWorkerJournal(path)
+	if err != nil {
+		return err
+	}
+	switch j.State {
+	case "prepared", "pending_sync", "pending_release":
+		if j.State == "prepared" && expiredWorkerAuthority(&j.Task) {
+			return reconcileRetainedWorkerJournal(o, path)
+		}
+		if err := spawnWorkerExecutor(path, j); err != nil {
+			return err
+		}
+	case "acknowledged":
+		if len(j.Report) > 0 {
+			return reconcileRetainedWorkerJournal(o, path)
+		}
+	case "needs_recovery":
+		if j.Task.LeaseExpiresAt != nil && !j.Task.LeaseExpiresAt.After(time.Now()) {
+			api, err := newWorkerAPI(o)
+			if err != nil {
+				return err
+			}
+			recoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err = prepareWorkerRecovery(recoveryCtx, api, path)
+			cancel()
+			api.client.CloseIdleConnections()
+			if err != nil {
+				return err
+			}
+			recovered, readErr := readWorkerJournal(path)
+			if readErr != nil {
+				return readErr
+			}
+			if err := spawnWorkerExecutor(path, recovered); err != nil {
+				return err
+			}
+		}
+	case "running":
+		// Serialize against an executor that is still entering its critical section.
+		lock, err := filelock.Try(path+".lock", map[string]any{"PID": os.Getpid()})
+		if errors.Is(err, filelock.ErrHeld) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		switch j.State {
-		case "prepared", "pending_sync":
-			if err := spawnWorkerExecutor(path, j); err != nil {
-				return err
-			}
-		case "needs_recovery":
-			if j.Task.LeaseExpiresAt != nil && !j.Task.LeaseExpiresAt.After(time.Now()) {
-				api, err := newWorkerAPI(o)
-				if err != nil {
-					return err
-				}
-				recoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				err = prepareWorkerRecovery(recoveryCtx, api, path)
-				cancel()
-				api.client.CloseIdleConnections()
-				if err == nil {
-					recovered, readErr := readWorkerJournal(path)
-					if readErr != nil {
-						return readErr
-					}
-					if err := spawnWorkerExecutor(path, recovered); err != nil {
-						return err
-					}
-				}
-			}
-		case "running":
-			// Serialize against an executor that is still entering its critical section.
-			lock, err := filelock.Try(path+".lock", map[string]any{"PID": os.Getpid()})
-			if errors.Is(err, filelock.ErrHeld) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			current, err := readWorkerJournal(path)
-			if err == nil && current.State == "running" {
-				current.State, current.Error = "needs_recovery", "Executor interrupted; retained worktree/session requires verified recovery"
-				err = writeWorkerJournal(path, current)
-			}
-			filelock.Release(lock)
-			if err != nil {
-				return err
-			}
+		current, err := readWorkerJournal(path)
+		if err == nil && current.State == "running" {
+			current.State, current.Error = "needs_recovery", "Executor interrupted; retained worktree/session requires verified recovery"
+			err = writeWorkerJournal(path, current)
+		}
+		filelock.Release(lock)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -251,7 +280,7 @@ func newWorkerExecuteCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if j.State == "acknowledged" || j.State == "rejected" {
+		if j.State == "acknowledged" || j.State == "rejected" || j.State == "released" {
 			return nil
 		}
 		if j.Options.StateDir != "" {
@@ -274,6 +303,9 @@ func newWorkerExecuteCmd() *cobra.Command {
 		if j.State == "pending_sync" {
 			return deliverWorkerReport(ctx, api, path, j)
 		}
+		if j.State == "pending_release" {
+			return deliverWorkerRelease(ctx, api, path, j)
+		}
 		if j.State != "prepared" {
 			return fmt.Errorf("execution needs verified recovery, not replay")
 		}
@@ -286,6 +318,28 @@ func newWorkerExecuteCmd() *cobra.Command {
 		}
 		ctx, cancel := context.WithDeadline(ctx, deadline)
 		defer cancel()
+
+		host, err := os.Hostname()
+		if err != nil {
+			return err
+		}
+		gate := workerGateFactory(host, j.Options.Roles)
+		if gate != nil && !gate.ready(ctx) {
+			if j.Resume {
+				return fmt.Errorf("Offload unavailable for retained session; verified recovery required")
+			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(path), "execution.json")); !os.IsNotExist(err) {
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("Offload unavailable with retained checkpoint; verified recovery required")
+			}
+			j.State, j.Action = "pending_release", "release"
+			if err := writeWorkerJournal(path, j); err != nil {
+				return err
+			}
+			return deliverWorkerRelease(ctx, api, path, j)
+		}
 		j.State = "running"
 		if err := writeWorkerJournal(path, j); err != nil {
 			return err
@@ -346,4 +400,15 @@ func detachedWorkerAttributes() *syscall.SysProcAttr { return &syscall.SysProcAt
 func workerIdentity(o workerOptions) string {
 	token, _ := filepath.Abs(o.TokenFile)
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(o.Coordinator+"\n"+token)))[:24]
+}
+
+// No task code or native session has started. A stale release receipt also
+// retires this unstarted local attempt; its old epoch must never execute.
+func deliverWorkerRelease(ctx context.Context, api *workerAPI, path string, j *workerJournal) error {
+	err := api.post(ctx, "tasks/"+j.Task.ID+"/release", map[string]any{"fencing_token": j.Task.FencingToken}, nil)
+	if err != nil && !errors.Is(err, workerHTTPError(409)) {
+		return err
+	}
+	j.State, j.Error = "released", ""
+	return writeWorkerJournal(path, j)
 }

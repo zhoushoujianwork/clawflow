@@ -159,6 +159,12 @@ func TestCoordinatorPayloadAndDispatch(t *testing.T) {
 	if p.ReopenEventID != "reopened" || p.Kind != "repair" || p.Repair.Attempt != 2 || p.Repair.Acceptance.AttemptID != "a" || p.Repair.Reason != repairReasonAcceptance {
 		t.Fatal(p)
 	}
+	j.repair.Acceptance = nil
+	j.repair.DevelopmentVerification = true
+	_, p = coordinatorTask(j, time.Minute)
+	if p.Repair.Reason != "development_verification" || p.Kind != "repair" {
+		t.Fatal(p)
+	}
 	j.repair = nil
 	j.op.Name = "reply-comment"
 	_, p = coordinatorTask(j, time.Minute)

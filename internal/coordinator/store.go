@@ -431,6 +431,32 @@ func (s *Store) Fail(ctx context.Context, id, worker string, fence int64, result
 	return s.finish(ctx, id, worker, fence, "failed", result)
 }
 
+// Release returns a freshly leased task to the queue when the worker discovers
+// before starting any work that it cannot execute (for example Offload is
+// missing). It consumes no attempt: the attempt row is removed, Attempt is
+// unchanged and no result, intent or label is written.
+func (s *Store) Release(ctx context.Context, id, worker string, fence int64, reason string) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var t Task
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrStaleLease
+			}
+			return err
+		}
+		if t.State != "leased" || t.LeaseOwner != worker || t.FencingToken != fence || t.LeaseExpiresAt == nil || len(t.Result) != 0 {
+			return ErrStaleLease
+		}
+		if err := tx.Model(&Task{}).Where("id = ?", id).Updates(map[string]any{"state": "pending", "lease_owner": "", "lease_expires_at": nil}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("task_id = ? AND lease_epoch = ?", id, fence).Delete(&TaskAttempt{}).Error; err != nil {
+			return err
+		}
+		return audit(tx, worker, id, "release:"+reason)
+	})
+}
+
 // MaxInfrastructureAttempts bounds retries independently of product repairs.
 const MaxInfrastructureAttempts = 3
 
@@ -456,6 +482,11 @@ func (s *Store) ExpireLeases(ctx context.Context, now time.Time) ([]Task, error)
 			t.LeaseExpiresAt = nil
 			if t.Attempt >= MaxInfrastructureAttempts {
 				t.State = "failed"
+			}
+			if t.Kind == "repair" {
+				// Reconcile expiry through the shared ledger before rescheduling.
+				t.State = "leased"
+				t.Result = json.RawMessage(`{"status":"failed","infra_kind":"lease-expired","error":"worker lease expired before a result was accepted"}`)
 			}
 			if err := tx.Save(t).Error; err != nil {
 				return err

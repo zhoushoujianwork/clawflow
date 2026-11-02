@@ -7,6 +7,21 @@ import (
 	"time"
 )
 
+func TestMatchingReportDoesNotAcknowledgePreviousAttemptDigest(t *testing.T) {
+	raw := json.RawMessage(`{"status":"blocked","infra_kind":"launch","error":"setup unavailable"}`)
+	task := &Task{ID: "task", State: "leased", LeaseOwner: "worker", FencingToken: 3, ResultDigest: reportDigest(raw, true)}
+	if MatchingReport(task, "worker", 3, raw, true) {
+		t.Fatal("retry acknowledged an uncommitted report using the previous attempt's digest")
+	}
+	task.Result = raw
+	if !MatchingReport(task, "worker", 3, raw, true) {
+		t.Fatal("committed same-epoch report was not acknowledged")
+	}
+	if MatchingReport(task, "worker", 1, raw, true) {
+		t.Fatal("old epoch matched the current receipt")
+	}
+}
+
 func TestDurableAuthorityAndRecovery(t *testing.T) {
 	s, db, _ := setup(t)
 	if err := s.RegisterWorker(ctx, Worker{ID: "durable", Durable: true, MaxParallel: 1, RunUntagged: true, Roles: []string{"operator"}}); err != nil {

@@ -13,6 +13,13 @@ type Migration struct {
 	Version int
 	Name    string
 	Up      func(tx *gorm.DB) error
+	// Contract marks a destructive change (drop, rename, type change, new
+	// NOT NULL without default) that a binary from before the migration cannot
+	// tolerate. Unmarked migrations are expand steps: additive and safe while
+	// old and new processes share one database. A contract migration must ship
+	// in a later release than the code that stopped using the old shape; the
+	// rolling upgrade refuses to apply it. See docs/controller-upgrade.md.
+	Contract bool
 }
 
 // MigrationStatus reports whether a migration has been applied.
@@ -73,6 +80,51 @@ func migrateProvenance(tx *gorm.DB) error {
  id integer PRIMARY KEY AUTOINCREMENT, source_kind text NOT NULL, source_schema_version integer NOT NULL,
  source_snapshot_id text NOT NULL, imported_at timestamp NOT NULL, tables text NOT NULL CHECK (json_valid(tables))
 )`)
+}
+
+// LatestVersion is the highest version in migs, or 0 when empty.
+func LatestVersion(migs []Migration) int {
+	latest := 0
+	for _, m := range migs {
+		if m.Version > latest {
+			latest = m.Version
+		}
+	}
+	return latest
+}
+
+// ContractVersions lists the destructive migrations in migs.
+func ContractVersions(migs []Migration) []int {
+	out := []int{}
+	for _, m := range migs {
+		if m.Contract {
+			out = append(out, m.Version)
+		}
+	}
+	return out
+}
+
+// AppliedVersions returns every version recorded in schema_migrations,
+// including versions this binary does not know. A database that was never
+// migrated yields no versions.
+func (s *Store) AppliedVersions(ctx context.Context) ([]int, error) {
+	db := s.db.WithContext(ctx)
+	var exists bool
+	if err := db.Raw("SELECT to_regclass('schema_migrations') IS NOT NULL").Scan(&exists).Error; err != nil {
+		return nil, fmt.Errorf("check schema_migrations: %w", err)
+	}
+	if !exists {
+		return []int{}, nil
+	}
+	var rows []schemaMigration
+	if err := db.Order("version").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("read schema_migrations: %w", err)
+	}
+	out := make([]int, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Version)
+	}
+	return out, nil
 }
 
 type schemaMigration struct {

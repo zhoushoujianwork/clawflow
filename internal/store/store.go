@@ -22,6 +22,7 @@ import (
 	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 )
 
 // FileName is the database file inside <state dir>/data.
@@ -78,6 +79,13 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	if path == "" {
 		return nil, errors.New("database path is required")
+	}
+	// SQLite candidates must stay inside their private runtime root, including symlink targets.
+	if devmode.Active() {
+		if err := devmode.CheckWritePath(path); err != nil {
+			return nil, err
+		}
+
 	}
 	path, err := filepath.Abs(path)
 	if err != nil {

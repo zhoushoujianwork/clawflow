@@ -31,17 +31,17 @@ enum BrandMark {
 
 struct MenuBarBrand: View {
     let summary: StatusSummary
+    var offloadAttention = false
     var body: some View {
         HStack(spacing: 3) {
             Image(nsImage: BrandMark.menuBar)
-            if !summary.connected || summary.title == "Needs attention" {
-                Image(systemName: summary.connected ? "exclamationmark" : "slash.circle")
-                    .font(.system(size: 9, weight: .semibold))
-            } else if summary.count != "0" {
-                Text(summary.count).font(.system(size: 11, weight: .medium)).monospacedDigit()
-            }
+            if offloadAttention && summary.connected && summary.title != "Needs attention" {
+                Image(systemName: "exclamationmark").font(.system(size: 9, weight: .semibold))
+            } else if let symbol = summary.menuSymbol { Image(systemName: symbol).font(.system(size: 9, weight: .semibold)) }
+            if let text = summary.menuText { Text(text).font(.system(size: 11, weight: .medium)).monospacedDigit() }
         }
-        .accessibilityLabel("ClawFlow: \(summary.title), \(summary.count) running")
-        .help("ClawFlow · \(summary.title)")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(offloadAttention ? "\(summary.accessibilityLabel). Offload needs setup" : summary.accessibilityLabel)
+        .help(offloadAttention ? "ClawFlow · \(summary.title) · Offload needs setup" : "ClawFlow · \(summary.title)")
     }
 }

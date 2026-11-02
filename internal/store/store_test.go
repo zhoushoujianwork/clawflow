@@ -12,6 +12,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
 )
@@ -183,4 +184,29 @@ func TestOpenRefusesCorruptDatabase(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestCandidateSQLiteFileMustStayInsideRuntime(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(devmode.EnvID, "0123456789ab")
+	t.Setenv(devmode.EnvRoot, root)
+	outside := filepath.Join(t.TempDir(), "foreign", "database.sqlite3")
+	if _, err := store.Open(context.Background(), outside); !errors.Is(err, devmode.ErrBlocked) {
+		t.Fatalf("outside database: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(outside)); !os.IsNotExist(err) {
+		t.Fatalf("rejected path was created: %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Open(context.Background(), filepath.Join(root, "escape", "database.sqlite3")); !errors.Is(err, devmode.ErrBlocked) {
+		t.Fatalf("symlink escaped runtime: %v", err)
+	}
+	own := filepath.Join(root, "state", "data", "clawflow.sqlite3")
+	db, err := store.Open(context.Background(), own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
 }
