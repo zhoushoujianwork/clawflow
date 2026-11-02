@@ -47,7 +47,7 @@ func newWorkerLegacyImportCmd() *cobra.Command {
 		if json.Unmarshal(raw, &rows) != nil || len(rows) == 0 {
 			return fmt.Errorf("invalid legacy manifest")
 		}
-		db, _, err := openDB(cmd)
+		db, err := openDB(cmd)
 		if err != nil {
 			return err
 		}

@@ -63,11 +63,11 @@ func (h *upgradeHost) db(ctx context.Context) (*store.Store, error) {
 	if h.dbOnce != nil {
 		return h.dbOnce, nil
 	}
-	dsn, err := store.ResolveDSN(h.cfg)
+	path, err := store.ResolvePath(h.cfg)
 	if err != nil {
 		return nil, err
 	}
-	s, err := store.Open(ctx, dsn)
+	s, err := store.Open(ctx, path)
 	if err != nil {
 		return nil, err
 	}

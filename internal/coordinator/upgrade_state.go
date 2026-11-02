@@ -69,7 +69,7 @@ func (s *Store) UpgradeSnapshot(ctx context.Context, watch []string) (UpgradeSna
 		Unsettled      int
 	}
 	if err := s.db.WithContext(ctx).Raw(`SELECT t.id, t.lease_owner, t.fencing_token,
- COALESCE(t.payload->>'durable_execution' = 'true', false) AS durable,
+ COALESCE(json_extract(t.payload, '$.durable_execution'), false) AS durable,
  (t.lease_expires_at IS NULL AND t.result IS NOT NULL) AS accepted,
  (SELECT count(*) FROM effect_intents e WHERE e.task_id = t.id AND e.lease_epoch = t.fencing_token AND e.status IN ('pending','uncertain')) AS unsettled
  FROM coordinator_tasks t WHERE t.state = 'leased' ORDER BY t.id`).Scan(&rows).Error; err != nil {

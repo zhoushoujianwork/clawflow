@@ -105,11 +105,16 @@ type ExecutionSettings struct {
 	CodexSandbox    string            `yaml:"codex_sandbox,omitempty" json:"codex_sandbox,omitempty"`
 }
 
-// DatabaseSettings configures the required PostgreSQL store. The DSN is a
-// secret: it is never synced (see MarshalForGist) and must be masked when
-// printed. CLAWFLOW_DATABASE_DSN overrides it.
+// DatabaseSettings records which store the host uses. The controller owns an
+// embedded SQLite file (<state dir>/data/clawflow.sqlite3); there is no DSN to
+// configure on a fresh host. DSN is the legacy PostgreSQL connection string,
+// read only by the offline importer (`clawflow db plan/import/cutover`) and
+// removed from the config by a successful cutover. Engine is "sqlite" once a
+// cutover record exists. Neither is ever synced (see MarshalForGist), and the
+// DSN must be masked when printed.
 type DatabaseSettings struct {
-	DSN string `yaml:"dsn,omitempty"`
+	DSN    string `yaml:"dsn,omitempty"`
+	Engine string `yaml:"engine,omitempty"`
 }
 
 // QueueSettings tunes the unified work queue.
@@ -196,7 +201,7 @@ type Settings struct {
 	Coordinator CoordinatorSettings `yaml:"coordinator,omitempty"`
 	Execution   ExecutionSettings   `yaml:"execution,omitempty"`
 
-	// Database holds the PostgreSQL connection settings (machine-local secret).
+	// Database holds the store selection (machine-local; never synced).
 	Database DatabaseSettings `yaml:"database,omitempty"`
 
 	PollInterval int `yaml:"poll_interval"`

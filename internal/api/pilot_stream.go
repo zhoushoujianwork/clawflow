@@ -18,7 +18,7 @@ import (
 // the top "Pilot" badge reflects the live `running / done / error` state
 // without manual refresh (issue #240).
 //
-// Polls PostgreSQL so standalone wakes and the dashboard share state.
+// Polls the database so standalone wakes and the dashboard share state.
 func HandlePilotStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -52,7 +52,7 @@ func TestScheduledChecksLifecycle(t *testing.T) {
 		t.Fatalf("replayed %d runs", len(rows))
 	}
 	for _, r := range rows {
-		if r.ID == runs[0].ID && (string(r.Actions) != `[{"outcome": "applied"}]` || len(r.Usage) == 0) {
+		if r.ID == runs[0].ID && (string(r.Actions) != `[{"outcome":"applied"}]` || len(r.Usage) == 0) {
 			t.Fatalf("result not recorded %+v", r)
 		}
 	}

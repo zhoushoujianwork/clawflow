@@ -252,7 +252,7 @@ func TestCandidateFailedRestartCannotReuseEarlierPassingEvidence(t *testing.T) {
 	up.SetArgs([]string{"up", "--commit", p.Commit, "--base", p.Base, "--checkout", t.TempDir()})
 	up.SilenceErrors = true
 	if err := up.Execute(); err == nil {
-		t.Fatal("up unexpectedly succeeded without administrative DSN")
+		t.Fatal("up unexpectedly succeeded with a checkout that is not a Git repository")
 	}
 	down := NewCandidateCmd()
 	down.SetArgs([]string{"down", "--commit", p.Commit, "--base", p.Base, "--offline", "passed"})

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
-	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
 )
 
 func execRoot(t *testing.T, args ...string) (string, error) {
@@ -24,17 +24,39 @@ func execRoot(t *testing.T, args ...string) (string, error) {
 	return out.String() + errBuf.String(), err
 }
 
-// The required-DB gate must stop `run` and `web` before any work when no DSN
-// is configured.
-func TestRunAndWebFailFastWithoutDSN(t *testing.T) {
+// A fresh host must start `run` and `web` without PostgreSQL, a DSN or any
+// database credentials: the gate creates the embedded SQLite store.
+func TestGateOpensEmbeddedStoreOnFreshHost(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv(store.DSNEnv, "")
+	t.Setenv("CLAWFLOW_STATE_DIR", "")
+	t.Setenv(store.LegacyDSNEnv, "")
 	writeMinimalConfig(t, home)
+	release, err := gateStore(context.Background())
+	if err != nil {
+		t.Fatalf("fresh host: %v", err)
+	}
+	defer release()
+	if activeStore == nil || !strings.HasSuffix(activeStore.Path(), filepath.Join("data", store.FileName)) {
+		t.Fatalf("store not bound to the default path: %+v", activeStore)
+	}
+}
+
+// A leftover PostgreSQL DSN without a cutover must stop the gate instead of
+// silently starting on an empty SQLite store.
+func TestGateRefusesLegacyDSNWithoutCutover(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAWFLOW_STATE_DIR", "")
+	writeMinimalConfig(t, home)
+	t.Setenv(store.LegacyDSNEnv, "postgres://u:hunter2@127.0.0.1:1/db")
 	for _, cmd := range []string{"run", "web"} {
-		_, err := execRoot(t, cmd)
-		if !errors.Is(err, store.ErrNoDSN) {
-			t.Errorf("%s: want ErrNoDSN, got %v", cmd, err)
+		out, err := execRoot(t, cmd)
+		if !errors.Is(err, store.ErrCutoverRequired) {
+			t.Errorf("%s: want ErrCutoverRequired, got %v", cmd, err)
+		}
+		if strings.Contains(out, "hunter2") || (err != nil && strings.Contains(err.Error(), "hunter2")) {
+			t.Errorf("%s leaked the DSN password", cmd)
 		}
 	}
 }
@@ -69,26 +91,32 @@ func TestDBCommandRegistered(t *testing.T) {
 	}
 }
 
-func TestDBStatusMasksDSN(t *testing.T) {
+func TestDBStatusReportsSQLite(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CLAWFLOW_STATE_DIR", "")
+	t.Setenv(store.LegacyDSNEnv, "")
 	writeMinimalConfig(t, home)
-	t.Setenv(store.DSNEnv, "postgres://u:hunter2@127.0.0.1:1/db?sslmode=disable&connect_timeout=2")
-	out, err := execRoot(t, "db", "status")
-	if err == nil {
-		t.Fatal("expected connectivity failure")
+	if _, err := execRoot(t, "db", "migrate"); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(out, "hunter2") || strings.Contains(err.Error(), "hunter2") {
-		t.Fatalf("password leaked: %q / %v", out, err)
+	out, err := execRoot(t, "db", "status")
+	if err != nil || !strings.Contains(out, "SQLite") || !strings.Contains(out, "Integrity:    ok") {
+		t.Fatalf("status: %q %v", out, err)
 	}
 }
 
 func TestDBMigrateImportsHistoryOnlyWhenEmpty(t *testing.T) {
-	s, dsn := storetest.NewWithDSN(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CLAWFLOW_STATE_DIR", "")
+	t.Setenv(store.LegacyDSNEnv, "")
 	writeMinimalConfig(t, home)
-	t.Setenv(store.DSNEnv, dsn)
+	s, err := store.EnsureReady(context.Background(), &config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
 	dir := filepath.Join(home, ".clawflow", "data", "runs", "legacy")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)

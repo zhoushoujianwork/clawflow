@@ -2,12 +2,14 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/upgrade"
@@ -65,5 +67,27 @@ func TestUpgradeIsHostMutatingInCandidateMode(t *testing.T) {
 	}
 	if !errors.Is(refuseInCandidate(), devmode.ErrBlocked) {
 		t.Fatal("refuseInCandidate must block inside a candidate")
+	}
+}
+
+func TestUpgradeHostUsesSQLiteAndRefusesLegacyDSN(t *testing.T) {
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	t.Setenv(store.LegacyDSNEnv, "")
+	t.Setenv(devmode.EnvID, "")
+	h := &upgradeHost{cfg: &config.Config{}}
+	defer h.close()
+	db, err := h.db(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.Path() != store.DefaultPath() {
+		t.Fatalf("unexpected database: %s", db.Path())
+	}
+	legacy := &config.Config{}
+	legacy.Settings.Database.DSN = "postgres://u:p@127.0.0.1:1/database"
+	other := &upgradeHost{cfg: legacy}
+	defer other.close()
+	if _, err := other.db(context.Background()); !errors.Is(err, store.ErrCutoverRequired) {
+		t.Fatalf("legacy host must require explicit cutover: %v", err)
 	}
 }

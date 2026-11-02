@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/devmode"
-	"github.com/zhoushoujianwork/clawflow/internal/store"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var schemaPattern = regexp.MustCompile(`^cf_cand_[0-9a-f]{12}$`)
@@ -44,11 +46,15 @@ type SchemaManager interface {
 // DSN. The DSN is held in memory only.
 type PostgresSchemas struct{ DSN string }
 
-func (p PostgresSchemas) admin(ctx context.Context) (*store.Store, error) {
+func (p PostgresSchemas) admin(ctx context.Context) (*gorm.DB, error) {
 	if devmode.Active() {
 		return nil, fmt.Errorf("%w: a candidate cannot administer schemas", devmode.ErrBlocked)
 	}
-	return store.Open(ctx, p.DSN)
+	db, err := gorm.Open(postgres.Open(p.DSN), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		return nil, fmt.Errorf("cannot open legacy candidate schema connection")
+	}
+	return db.WithContext(ctx), nil
 }
 
 func (p PostgresSchemas) Ensure(ctx context.Context, schema string, owned bool) error {
@@ -61,9 +67,13 @@ func (p PostgresSchemas) Ensure(ctx context.Context, schema string, owned bool) 
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	conn, err := s.DB()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
 	var n int64
-	if err := s.DB().WithContext(ctx).Raw("SELECT count(*) FROM information_schema.schemata WHERE schema_name = ?", schema).Scan(&n).Error; err != nil {
+	if err := s.WithContext(ctx).Raw("SELECT count(*) FROM information_schema.schemata WHERE schema_name = ?", schema).Scan(&n).Error; err != nil {
 		return err
 	}
 	if n > 0 {
@@ -72,7 +82,7 @@ func (p PostgresSchemas) Ensure(ctx context.Context, schema string, owned bool) 
 		}
 		return collide("database schema %s already exists and is not recorded for this candidate", schema)
 	}
-	return s.DB().WithContext(ctx).Exec(`CREATE SCHEMA "` + schema + `"`).Error
+	return s.WithContext(ctx).Exec(`CREATE SCHEMA "` + schema + `"`).Error
 }
 
 func (p PostgresSchemas) Drop(ctx context.Context, schema string) error {
@@ -85,6 +95,10 @@ func (p PostgresSchemas) Drop(ctx context.Context, schema string) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
-	return s.DB().WithContext(ctx).Exec(`DROP SCHEMA IF EXISTS "` + schema + `" CASCADE`).Error
+	conn, err := s.DB()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return s.WithContext(ctx).Exec(`DROP SCHEMA IF EXISTS "` + schema + `" CASCADE`).Error
 }

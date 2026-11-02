@@ -18,7 +18,7 @@
 | 评审 worker 会话 | `<root>/state-review` | 与开发 worker 不嵌套、不相等 |
 | 缓存 / 临时 | `<root>/cache`、`<root>/tmp` | 独立 `GOCACHE`、`TMPDIR` |
 | 监听端口 | 提交推导的 20000–39999，仅 `127.0.0.1` | 拒绝稳定端口（8090、8093、5432 及配置的监听端口）与 1024 以下端口 |
-| 数据库 | schema `cf_cand_<id>`，DSN 以 `search_path` 固定 | 连接未固定到该 schema 即被拒绝 |
+| 数据库 | 候选根内的 `state/data/clawflow.sqlite3` | 越出候选根的数据库路径（含符号链接）即被拒绝 |
 | launchd 标签 | `com.zhoushoujianwork.clawflow.dev.<id>.<kind>` | 稳定 App 与 CLI 都不管理 `.dev.` 标签，反之亦然 |
 | App bundle id | `com.clawflow.dashboard.dev.<id>` | 偏好域（UserDefaults）因此独立 |
 | App 产物 | `<root>/app/ClawFlow Dev.app` | 拒绝 `macos/dist`、`/Applications`、`~/Applications` |
@@ -33,7 +33,7 @@ clawflow candidate prepare --commit <sha> --repo owner/repo \
   --fixture owner/repo=http://127.0.0.1:<fixture-port>
 
 # 2. 在一次性 checkout（HEAD 必须等于 <sha> 且无改动）上构建并启动开发 controller 与两个 worker
-export CLAWFLOW_CANDIDATE_ADMIN_DSN=...   # 仅经环境变量传入；不会写入任何文件或证据
+# SQLite 候选无需 PostgreSQL 或管理 DSN；数据库位于候选根内。
 clawflow candidate up --commit <sha> --checkout <disposable-worktree>
 
 # 3. 停止（仅停止清单中仍属于本候选的进程），对比稳定宿主，写证据
@@ -42,11 +42,11 @@ clawflow candidate down --commit <sha> --offline passed
 # 4. 独立评审：校验证据属于被评审的提交
 clawflow candidate verify <root>/evidence.json --commit <sha>
 
-# 5. 清理：仅删除自己的根目录与 schema
+# 5. 清理：仅删除自己的根目录与 SQLite 文件
 clawflow candidate clean --commit <sha>
 ```
 
-`CLAWFLOW_CANDIDATE_ADMIN_DSN` 未设置时 `up` 返回 blocked（environment-maintainer），不会伪造通过。
+SQLite 候选不读取 `CLAWFLOW_CANDIDATE_ADMIN_DSN`。旧 PostgreSQL 候选的 `.schema-created` 记录会阻止直接复用；保留旧根用于显式清理，并在新根创建 SQLite 候选。
 
 候选构建以只读模块模式执行，并在构建后再次核对提交和工作区。每次 `up` 都先归档旧证据，再创建本轮记录；启动失败不会沿用上轮成功。运行中的候选拒绝重复启动。`verify` 会根据各层结果重新计算结论，不只读取 `status`。
 
@@ -66,7 +66,7 @@ clawflow candidate clean --commit <sha>
 - **仓库**：配置加载时，非回环 `base_url`（含默认 github.com）的仓库被禁用，clone 不在候选根内的仓库被禁用，`auto_merge`、`self_upgrade`、GitHub App 身份一律清除；`newVCSClient`、API 与 Pilot 的客户端构造再次拒绝真实地址。
 - **子进程**：清除 `GH_TOKEN`、`GITHUB_TOKEN`、`GITLAB_TOKEN`、`SSH_AUTH_SOCK`，`GIT_ALLOW_PROTOCOL=file`。
 - **监听**：coordinator 仅可绑定回环地址上的候选端口。
-- **数据库**：`store.Open` 要求 DSN 固定到候选 schema。
+- **数据库**：`store.Open` 要求 SQLite 文件（含解析后的符号链接）位于候选根内。
 - **宿主变更命令**：`update`、`sync`、`login`、`web`、`candidate`、`__respawn` 被拒绝；稳定 launchd 服务封装与自升级的二进制替换路径同样拒绝。
 
 默认情况下候选配置不启用任何仓库（`ConfigOptions.Dispatch=false`）、`run_interval_minutes=0`、`auto_merge=false`，因此夹具不会启动重复工作或写回。

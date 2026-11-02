@@ -31,7 +31,7 @@ import (
 
 func TestWorkerTokenCLI(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	db, dsn := storetest.NewWithDSN(t)
+	db, dsn := storetest.NewWithPath(t)
 	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
 		t.Fatal(err)
 	}

@@ -3,11 +3,12 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
+	"reflect"
 	"slices"
 	"strconv"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // AcceptanceRouting is coordinator-owned task policy, never a worker assertion.
@@ -34,7 +35,8 @@ func acceptanceAllowed(t Task, w Worker) bool {
 // LatestDevelopment ties the developer worker to the same PR and submitted head.
 func (s *Store) LatestDevelopment(ctx context.Context, repo string, issue, pr int, head string) (*Task, error) {
 	var task Task
-	err := s.db.WithContext(ctx).Select("id", "lease_owner", "payload", "result").Where("repo = ? AND issue = ? AND kind IN ? AND state = 'done' AND result->>'status' = 'success' AND result->>'head_sha' = ? AND (pr = ? OR result->>'pr_number' = ?)", repo, issue, []string{"implement", "repair"}, head, pr, strconv.Itoa(pr)).Order("created_at DESC, id DESC").First(&task).Error
+	err := s.db.WithContext(ctx).Select("id", "lease_owner", "payload", "result").Where("repo = ? AND issue = ? AND kind IN ? AND state = 'done' AND json_extract(result, '$.status') = 'success' AND json_extract(result, '$.head_sha') = ? AND (pr = ? OR CAST(json_extract(result, '$.pr_number') AS TEXT) = ?)", repo, issue, []string{"implement", "repair"}, head, pr, strconv.Itoa(pr)).Order("created_at DESC, id DESC").First(&task).Error
+
 	return &task, err
 }
 
@@ -71,10 +73,34 @@ func (s *Store) CancelSupersededAcceptance(ctx context.Context, repo string, pr 
 		return ErrInvalid
 	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var cancelled []Task
-		err := tx.Model(&cancelled).Clauses(clause.Returning{}).Where("repo = ? AND pr = ? AND kind = 'acceptance' AND state IN ? AND payload->'acceptance' IS DISTINCT FROM ?::jsonb", repo, pr, []string{"pending", "leased"}, string(contract)).Updates(map[string]any{"state": "cancelled", "lease_expires_at": nil, "fencing_token": gorm.Expr("fencing_token + 1")}).Error
-		if err != nil {
+		var candidates []Task
+		if err := tx.Where("repo = ? AND pr = ? AND kind = 'acceptance' AND state IN ?", repo, pr, []string{"pending", "leased"}).Find(&candidates).Error; err != nil {
 			return err
+		}
+		// JSON documents are compared semantically (key order and spacing are
+		// irrelevant), as the former jsonb comparison did. The transaction holds
+		// the writer lock, so the set cannot change before the update below.
+		var want any
+		if err := json.Unmarshal(contract, &want); err != nil {
+			return ErrInvalid
+		}
+		var cancelled []Task
+		for _, task := range candidates {
+			var envelope struct {
+				Acceptance json.RawMessage `json:"acceptance"`
+			}
+			var have any
+			present := json.Unmarshal(task.Payload, &envelope) == nil && len(envelope.Acceptance) > 0
+			if present {
+				_ = json.Unmarshal(envelope.Acceptance, &have)
+			}
+			if present && reflect.DeepEqual(have, want) {
+				continue
+			}
+			if err := tx.Model(&Task{}).Where("id = ?", task.ID).Updates(map[string]any{"state": "cancelled", "lease_expires_at": nil, "fencing_token": gorm.Expr("fencing_token + 1")}).Error; err != nil {
+				return err
+			}
+			cancelled = append(cancelled, task)
 		}
 		for _, task := range cancelled {
 			if err := failIntents(tx, task.ID); err != nil {
@@ -96,7 +122,7 @@ func (s *Store) CancelSupersededAcceptance(ctx context.Context, repo string, pr 
 func (s *Store) RetireClosedAcceptance(ctx context.Context, id, worker string, fence int64) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var task Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ?", id).Error; err != nil {
+		if err := tx.First(&task, "id = ?", id).Error; err != nil {
 			return err
 		}
 		if task.Kind != "acceptance" || task.State != "leased" || task.LeaseOwner != worker || task.FencingToken != fence || len(task.Result) != 0 || task.LeaseExpiresAt == nil {

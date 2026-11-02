@@ -60,10 +60,7 @@ func (s *Store) AdoptLegacyInterruption(ctx context.Context, id, worker string, 
 		if json.Unmarshal(payload["timeout_sec"], &timeout) != nil || timeout < 1 || timeout > 86400 {
 			return ErrInvalid
 		}
-		var now time.Time
-		if err := tx.Raw("SELECT clock_timestamp()").Scan(&now).Error; err != nil {
-			return err
-		}
+		now := controllerNow()
 		payload["durable_execution"] = json.RawMessage("true")
 		payload["legacy_recovery"] = json.RawMessage("true")
 		task.Payload, _ = json.Marshal(payload)

@@ -407,7 +407,7 @@ func TestEnqueueAcceptanceFromPRSummaryAfterBaseMerge(t *testing.T) {
 	git("checkout", f.pr.HeadBranch)
 	git("merge", "--no-ff", "main", "-m", "merge")
 	f.pr.HeadSHA, f.pr.BaseSHA = git("rev-parse", "HEAD"), git("rev-parse", "main")
-	db, dsn := storetest.NewWithDSN(t)
+	db, dsn := storetest.NewWithPath(t)
 	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
 		t.Fatal(err)
 	}

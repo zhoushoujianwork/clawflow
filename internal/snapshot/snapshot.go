@@ -1668,7 +1668,7 @@ func ConsecutiveFailures(repo string, issueNum int) int {
 }
 
 // WriteRunsIndex is a compatibility reader for callers that used to refresh
-// the dashboard cache. PostgreSQL writers update rows directly; no index is written.
+// the dashboard cache. database writers update rows directly; no index is written.
 func WriteRunsIndex(limit int) ([]RunIndexEntry, error) {
 	if RunStore() != nil {
 		return databaseRuns(limit)
@@ -1689,7 +1689,7 @@ func ReadRunsIndex() []RunIndexEntry { entries, _ := WriteRunsIndex(0); return e
 // list than fail the entire index write.
 //
 // This local-history reader does not rewrite metadata. Usage repair is explicit
-// through `usage backfill --apply`, which binds the PostgreSQL store.
+// through `usage backfill --apply`, which binds the run store.
 func collectRunEntries(root string) []RunIndexEntry {
 	// Non-nil empty slice so JSON renders as [] instead of null when there
 	// are no runs yet — saves the dashboard a nullability check.
