@@ -75,7 +75,7 @@ func applyUnstructuredReport(r *Record, text string, validationErr error) bool {
 	r.Verdict, r.Findings = Failed, DeduplicateFindings(findings)
 	r.Report = "failed (unstructured findings)"
 	r.Evidence = []string{"Untrusted reviewer findings; report validation failed: " + validationErr.Error()}
-	r.NextOwner, r.NextAction = "implementation", "Repair the reported findings, then run fresh acceptance."
+	r.NextOwner, r.NextAction = "acceptance", "Review the report validation error and missing evidence before fresh acceptance; unvalidated findings do not authorize code repair."
 	return true
 }
 

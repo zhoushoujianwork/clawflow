@@ -849,3 +849,14 @@ func TestGitLabAcceptanceRepair(t *testing.T) {
 		})
 	}
 }
+
+func TestMalformedAcceptanceCannotSupplyRepairEvidence(t *testing.T) {
+	for _, r := range []acceptance.Record{
+		{Unstructured: true}, {ValidationError: "missing exact-head evidence"},
+	} {
+		r.Findings = []acceptance.Finding{{Kind: "defect", Summary: "wrong value", Evidence: "unvalidated claim"}}
+		if f := findingsFromRecord(r); len(f.Evidence) != 0 || f.Summary != "" {
+			t.Fatalf("invalid report authorized repair: %+v", f)
+		}
+	}
+}

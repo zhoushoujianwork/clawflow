@@ -100,7 +100,7 @@ func TestAcceptanceReportCannotForgeChecklist(t *testing.T) {
 	}
 }
 
-func TestUnstructuredAcceptanceDispatchesRepair(t *testing.T) {
+func TestUnstructuredAcceptanceBlocksRepair(t *testing.T) {
 	f, _, reg, cfg := repairAcceptanceFixture(t, "failed")
 	acceptanceEvidenceSchema = 1
 	acceptanceNativeRun = func(_ context.Context, _ execution.Config, req execution.Request, _ []string, _ io.Writer, _ func(execution.Observation)) (execution.Result, error) {
@@ -135,13 +135,10 @@ func TestUnstructuredAcceptanceDispatchesRepair(t *testing.T) {
 		t.Fatal("missing comment annotation")
 	}
 	jobs := scanRepair(t, reg, f, cfg, 0)
-	if len(jobs) != 1 {
-		t.Fatalf("jobs=%v", jobs)
+	if len(jobs) != 0 {
+		t.Fatalf("invalid report dispatched repair: %v", jobs)
 	}
-	prompt := jobs[0].repair.prompt("go test ./...")
-	for _, want := range []string{"BEGIN UNTRUSTED REVIEWER FINDINGS", "retry loses data", "FAIL TestRetry"} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("missing %q: %s", want, prompt)
-		}
+	if r.NextOwner != "acceptance" {
+		t.Fatalf("invalid report assigned to %s", r.NextOwner)
 	}
 }
