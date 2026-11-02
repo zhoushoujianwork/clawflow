@@ -146,11 +146,11 @@ clawflow issue list --repo owner/repo
 clawflow update
 ```
 
-当前 runner 不等同于拟议的持久任务引擎，详见[托管开发设计](managed-development-design.md)。
+当前部署与规模化托管目标分别验证，详见[托管开发设计](managed-development-design.md)。
 
 ---
 
 ## 下一步
 
-- [配置多仓库监控](../readme.md#setup)
+- [配置 controller 与项目](native-macos.md#controller-setup)
 - [算子架构与 schema](../CLAUDE.md#算子规范)
