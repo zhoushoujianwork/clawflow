@@ -552,6 +552,7 @@ func resultBudgetClient(t *testing.T, base string, budget github.Budget) *github
 }
 
 func TestInterruptedReportQuarantinesUnfinishedEffects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
 	cfg := &config.Config{}
 	cfg.Settings.MaxConsecutiveFailures = 1
