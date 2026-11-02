@@ -1,6 +1,6 @@
 # ClawFlow
 
-ClawFlow 在自己的机器上调度开发任务，通过 Offload 执行开发与审核，把 Issue 推进到经过 CI 和独立验收的 PR。当前主线是**本机单 controller、独立 worker、原生 macOS App**。
+ClawFlow 在自己的机器上调度开发任务，通过 Offload 执行开发与审核，把 Issue 推进到经过 CI 和独立验收的 PR。当前部署采用**本机单 controller、独立 worker、原生 macOS App**。架构目标是托管 **1000 个以上项目、支持 10,000 个并发 worker**，按 GitLab Runner 的使用方式，让项目的各个阶段持续排队、执行、恢复和交付。当前部署规模不代表架构容量上限。
 
 无人值守闭环仍在验证中，不能把一次任务成功等同于长期可靠运行。实际部署与限制见[部署记录](docs/unattended-deployment-2026-11-02.md)，目标与范围见[托管开发设计](docs/managed-development-design.md)。
 
@@ -38,7 +38,7 @@ App 更新与后台服务升级分开进行。`make dev` 不替换独立安装�
 
 ## 当前范围
 
-先验证正常交付、CI 修复、验收修复、重启恢复四条真实链路，再积累一周、至少 20 个真实任务的运行证据。多 controller、一万 worker、工作流市场和新增 Web 控制面不属于本期目标。
+先验证正常交付、CI 修复、验收修复、重启恢复四条真实链路，再积累一周、至少 20 个真实任务的运行证据。这只是本机闭环的第一轮验收；后续必须验证 1000+ 项目、10,000 worker 的混合阶段负载、公平调度和故障恢复。容量目标尚未得到实测证明。工作流市场和新增 Web 控制面不属于当前推进重点。
 
 Operator 继续通过技能文件定义执行活动；历史 `classify`、`evaluate-bug`、`evaluate-feat`、`decompose` 阶段已退役，不需要恢复它们才能启动开发。
 
