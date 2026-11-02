@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Window("ClawFlow", id: "dashboard") {
             DashboardView(model: model).task { model.start() }
         }
-        .defaultSize(width: 1060, height: 680)
+        .defaultSize(width: 1200, height: 760)
         .commands { CommandGroup(replacing: .newItem) {} }
         Settings { ConnectionView(model: model) }
         MenuBarExtra {
@@ -31,6 +31,9 @@ struct MenuSummary: View {
     @ObservedObject var model: DashboardModel
     @Environment(\.openWindow) private var openWindow
     var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in content }
+    }
+    @ViewBuilder private var content: some View {
         let status = model.popover
         VStack(alignment: .leading, spacing: 10) {
             header(status)
