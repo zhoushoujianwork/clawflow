@@ -295,6 +295,25 @@ func (s *Store) FinalizeApplication(ctx context.Context, id string, epoch int64,
 			state = "failed"
 		}
 		values := map[string]any{"state": state, "application_error": ""}
+		retain := InterruptedResult(t.Result)
+		if !retain && (r.InfraKind == "launch" || r.InfraKind == "coordination-changed") {
+			// Pinned executors from older generations cannot classify a blocked
+			// recovery. Controller history still prevents a fresh replacement.
+			var previous int64
+			if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND lease_epoch = ? AND status = 'interrupted'", id, epoch-1).Count(&previous).Error; err != nil {
+				return err
+			}
+			retain = previous > 0
+		}
+		if failed && DurableTask(&t) && (t.Kind == "implement" || t.Kind == "repair") && retain {
+			// A committed interruption reserves the same worker/task. Keep its
+			// receipt, but leave PendingResults so finalization runs only once.
+			// An expired durable lease is already the recovery-pending state.
+			if err := tx.Model(&t).Updates(map[string]any{"state": "leased", "lease_expires_at": time.Now().UTC(), "application_error": ""}).Error; err != nil {
+				return err
+			}
+			return audit(tx, t.LeaseOwner, id, "interruption-retained")
+		}
 		if r.InfraKind != "" && r.InfraKind != "no-change" {
 			t.Attempt++
 			values["attempt"] = t.Attempt

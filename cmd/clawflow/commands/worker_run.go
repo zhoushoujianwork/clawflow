@@ -28,6 +28,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -395,6 +396,14 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 				result.InfraKind = "coordination-changed"
 				result.NextAction = "Reassess current issue, PRs and active work on the next scheduler pass"
 				result.NextOwner = "scheduling"
+			}
+			if _, resuming := execution.RecoveryWorkspace(executionCtx); resuming {
+				// A retained session that cannot pass launch checks must not
+				// fall back to a fresh worktree. No new model ran, so do not
+				// manufacture native provenance for this blocked recovery.
+				result.Status, result.InfraKind = "failed", "execution-interrupted"
+				result.NextOwner = "scheduling"
+				result.NextAction = "Reconcile the retained session and current launch requirements before recovery"
 			}
 		} else {
 			spool, spoolErr := os.CreateTemp("", "clawflow-effects-"+t.ID+"-*")

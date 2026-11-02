@@ -220,6 +220,12 @@ func recoverWorkerExecutor(o workerOptions, path string) error {
 		}
 	case "acknowledged":
 		if len(j.Report) > 0 {
+			var report struct {
+				Result json.RawMessage `json:"result"`
+			}
+			if json.Unmarshal(j.Report, &report) == nil && coordinator.InterruptedResult(report.Result) {
+				return recoverAcknowledgedInterruption(o, path, j)
+			}
 			return reconcileRetainedWorkerJournal(o, path)
 		}
 	case "needs_recovery":

@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,7 +26,15 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	if err != nil {
 		return err
 	}
-	if j.State != "needs_recovery" && j.State != "running" {
+	var report struct {
+		FencingToken int64           `json:"fencing_token"`
+		Result       json.RawMessage `json:"result"`
+	}
+	acknowledged := j.State == "acknowledged"
+	if acknowledged && (json.Unmarshal(j.Report, &report) != nil || report.FencingToken != j.Task.FencingToken || j.Action != "fail" || !coordinator.InterruptedResult(report.Result)) {
+		return fmt.Errorf("acknowledged report is not an execution interruption")
+	}
+	if !acknowledged && j.State != "needs_recovery" && j.State != "running" {
 		return fmt.Errorf("journal is not an interrupted execution")
 	}
 	if j.Task.Kind != "implement" && j.Task.Kind != "repair" {
@@ -59,6 +68,16 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	if cp.Completed || cp.Session == "" {
 		return fmt.Errorf("session is missing or already completed; manual result reconciliation required")
 	}
+	if acknowledged {
+		var r struct {
+			Provenance struct {
+				Session string `json:"session_id"`
+			} `json:"provenance"`
+		}
+		if json.Unmarshal(report.Result, &r) != nil || r.Provenance.Session != cp.Session {
+			return fmt.Errorf("checkpoint session differs from acknowledged interruption")
+		}
+	}
 	if !filepath.IsAbs(cp.Workspace) {
 		return fmt.Errorf("invalid recorded worktree")
 	}
@@ -77,6 +96,13 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	if j.Task.LeaseExpiresAt == nil || j.Task.LeaseExpiresAt.After(time.Now()) {
 		return fmt.Errorf("previous execution authority has not expired; recovery postponed")
 	}
+	if acknowledged {
+		// Archive before requesting authority; a lost response can be retried
+		// against the unchanged journal without losing the original receipt.
+		if err := archiveWorkerAttempt(j.Options, path, j.Task.FencingToken); err != nil {
+			return err
+		}
+	}
 	var recovered struct {
 		Task *coordinator.Task `json:"task"`
 	}
@@ -91,7 +117,33 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	j.Resume = true
 	j.State = "prepared"
 	j.Error = ""
+	j.Report, j.Action = nil, ""
 	return writeWorkerJournal(path, j)
+}
+
+func recoverAcknowledgedInterruption(o workerOptions, path string, j *workerJournal) error {
+	if j.Task.LeaseExpiresAt == nil || j.Task.LeaseExpiresAt.After(time.Now()) {
+		return nil
+	}
+	api, err := newWorkerAPI(o)
+	if err != nil {
+		return err
+	}
+	defer api.client.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = prepareWorkerRecovery(ctx, api, path); err != nil {
+		// Old/superseded receipts must never be revived. Retain the journal.
+		if errors.Is(err, workerHTTPError(409)) {
+			return nil
+		}
+		return err
+	}
+	j, err = readWorkerJournal(path)
+	if err != nil {
+		return err
+	}
+	return spawnWorkerExecutor(path, j)
 }
 
 func newWorkerRecoveryCommands() []*cobra.Command {

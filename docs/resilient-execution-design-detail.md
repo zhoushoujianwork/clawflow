@@ -56,3 +56,9 @@ Resume is not process checkpointing: a model may re-evaluate commands. Existing 
 - Recover from valid sessions and dirty worktrees; reject wrong repo, reused PID, changed profile, missing session, active locks and explicit cancellation.
 - Reboot worker with retained storage; resume only supported interrupted work, replay completed outbox records, and leave ambiguous cases visible.
 - Use headless fake executors/backends for failure injection. Any real provider/session acceptance is a separately bounded test.
+
+## Reported interruption recovery
+
+A finalized durable implement/repair interruption stays leased with an expired deadline and its result/digest retained. This existing recovery-pending representation reserves shared capacity and issue ownership while excluding the report from PendingResults. RecoverExecution requires the same owner/epoch, a finalized interruption with session evidence and no effects, and remaining infrastructure budget. It archives the receipt in TaskAttempt, increments attempt/epoch once and clears the current report. Retry of a lost recovery response is idempotent.
+
+Acknowledged worker journals archive the previous attempt before requesting recovery and verify the report session against the checkpoint. Existing executor/native locks, original authority expiry, canonical repository, profile and pinned runtime checks remain mandatory. A resumed launch rejection retains its reservation, including legacy executors identified through the previous interrupted TaskAttempt; it cannot silently become a fresh task. See the [runbook](resilient-execution-runbook.md) for blocked cases and live validation limits.

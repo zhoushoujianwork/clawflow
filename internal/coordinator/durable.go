@@ -65,8 +65,29 @@ func DurableTask(t *Task) bool {
 	return json.Unmarshal(t.Payload, &payload) == nil && payload.Durable
 }
 
+// InterruptedResult identifies a reported execution interruption, not a new
+// development attempt. Missing session evidence must stay reserved for review.
+func InterruptedResult(raw json.RawMessage) bool {
+	var r struct {
+		Status string `json:"status"`
+		Kind   string `json:"infra_kind"`
+	}
+	return json.Unmarshal(raw, &r) == nil && r.Status == "failed" && r.Kind == "execution-interrupted"
+}
+
+func recoverableReport(raw json.RawMessage) bool {
+	var r struct {
+		Effects    []json.RawMessage `json:"effects"`
+		Provenance struct {
+			Session string `json:"session_id"`
+		} `json:"provenance"`
+	}
+	return InterruptedResult(raw) && json.Unmarshal(raw, &r) == nil && len(r.Effects) == 0 && r.Provenance.Session != ""
+}
+
 // RecoverExecution reauthorizes only the same worker after the old authority
-// has ended. Running, cancelled, reported and superseded tasks cannot be resumed.
+// has ended. Only finalized interruption receipts may resume after reporting;
+// active, cancelled, successful and superseded tasks remain fenced out.
 func (s *Store) RecoverExecution(ctx context.Context, id, worker string, epoch int64) (*Task, error) {
 	var task Task
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -85,7 +106,8 @@ func (s *Store) RecoverExecution(ctx context.Context, id, worker string, epoch i
 				return err
 			}
 		}
-		if !DurableTask(&task) || task.State != "leased" || task.LeaseOwner != worker || task.FencingToken != epoch || task.Result != nil || task.LeaseExpiresAt == nil || task.LeaseExpiresAt.After(now) || task.Attempt >= MaxInfrastructureAttempts-1 {
+		reported := len(task.Result) > 0
+		if !DurableTask(&task) || task.State != "leased" || task.LeaseOwner != worker || task.FencingToken != epoch || (reported && (!recoverableReport(task.Result) || task.ResultDigest == "")) || task.LeaseExpiresAt == nil || task.LeaseExpiresAt.After(now) || task.Attempt >= MaxInfrastructureAttempts-1 || (task.Kind != "implement" && task.Kind != "repair") {
 			return ErrStaleLease
 		}
 		var payload struct {
@@ -94,11 +116,16 @@ func (s *Store) RecoverExecution(ctx context.Context, id, worker string, epoch i
 		if json.Unmarshal(task.Payload, &payload) != nil || payload.Timeout < 1 || payload.Timeout > 86400 {
 			return ErrInvalid
 		}
-		if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND lease_epoch = ?", id, epoch).Updates(map[string]any{"status": "interrupted", "ended_at": now, "kind": "infra", "error_kind": "executor-interrupted"}).Error; err != nil {
+		updates := map[string]any{"status": "interrupted", "kind": "infra"}
+		if !reported {
+			updates["ended_at"], updates["error_kind"] = now, "executor-interrupted"
+		}
+		if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND lease_epoch = ?", id, epoch).Updates(updates).Error; err != nil {
 			return err
 		}
 		task.Attempt++
 		task.FencingToken++
+		task.Result, task.ResultDigest = nil, ""
 		deadline := now.Add(time.Duration(payload.Timeout)*time.Second + DurableReportGrace)
 		task.LeaseExpiresAt = &deadline
 		if err := tx.Save(&task).Error; err != nil {
