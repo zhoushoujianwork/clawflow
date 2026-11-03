@@ -33,8 +33,9 @@ type PullRequest struct {
 	Files []string `json:"files,omitempty"`
 }
 type Snapshot struct {
-	Operation string `json:"operation"`
-	TargetPR  int    `json:"target_pr,omitempty"`
+	Operation    string `json:"operation"`
+	TargetPR     int    `json:"target_pr,omitempty"`
+	RepairReason string `json:"repair_reason,omitempty"`
 
 	ManualOrder []int `json:"manual_order"`
 

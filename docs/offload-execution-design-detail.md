@@ -38,3 +38,10 @@ Task/request input remains bounded at 4 MiB; combined instructions (including re
 Run focused checks serially with `GOMAXPROCS=2 go test -p 1` and the relevant packages/test names. No live provider or desktop check is part of this implementation. The supervisor must review before full-suite or live acceptance.
 
 Supervisor validation supersedes the worker-only notes: Offload full tests/vet, ClawFlow full race suite, dashboard production build/typecheck, and both live local Git delivery checks passed. Final recovery changes received focused execution and nearest-dependency checks. See the [acceptance record](offload-live-acceptance-2026-10-26.md). No desktop, real remote PR/merge or installed-runtime rollout was performed.
+
+
+### 结束事件的实际模型名
+
+Offload 的 start/progress 事件可使用 profile 请求的模型名，final 与 stdout 则可报告原生后端解析后的模型名。例如 `claude-sonnet-5[1m]` 在结束时记录为 `claude-sonnet-5`。事件流只允许 final 更新模型信息；中途 progress 换模型仍拒绝。最终模型仍沿用已有 stdout 优先、事件回退规则，不引入字符串别名猜测。
+
+run ID、caller run ID、backend、native session、序列及结束状态检查保持不变。实际 #651 恢复会话返回了正确完成标记和 exit 0，但旧执行器在 final 因模型名变化拒绝，已保留原失败报告及事件；修复不会将这份历史失败改为成功，也不重置修复预算。
