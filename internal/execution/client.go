@@ -414,7 +414,19 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, err
 	}
 	defer releaseMaintenance()
-	dir, err := os.MkdirTemp("", "clawflow-offload-*")
+	artifactParent := ""
+	if checkpoint != nil {
+		// Recovery inputs and results must survive OS temporary-directory cleanup.
+		// Keep each invocation separate so a resume never replaces prior evidence.
+		artifactParent, err = filepath.Abs(filepath.Join(filepath.Dir(checkpointPath), "execution-artifacts"))
+		if err != nil {
+			return result, err
+		}
+		if err = os.MkdirAll(artifactParent, 0700); err != nil {
+			return result, err
+		}
+	}
+	dir, err := os.MkdirTemp(artifactParent, "clawflow-offload-*")
 	if err != nil {
 		return result, err
 	}
