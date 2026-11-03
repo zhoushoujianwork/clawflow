@@ -133,7 +133,7 @@ func (t *eventTail) accept(raw []byte) error {
 			return &Error{Kind: "protocol_session_mismatch"}
 		}
 	}
-	if (t.backend != "" && e.Backend != "" && e.Backend != t.backend) || (t.model != "" && e.Model != "" && e.Model != t.model) {
+	if (t.backend != "" && e.Backend != "" && e.Backend != t.backend) || (e.Type != "final" && t.model != "" && e.Model != "" && e.Model != t.model) {
 		return &Error{Kind: "protocol_identity_mismatch"}
 	}
 	switch e.Type {
@@ -143,7 +143,9 @@ func (t *eventTail) accept(raw []byte) error {
 		}
 	case "progress":
 	case "final":
-		if (t.session != "" && e.Session != t.session) || (t.backend != "" && e.Backend != t.backend) || (t.model != "" && e.Model != "" && e.Model != t.model) {
+		// Offload resolves the actual model at completion; start/progress use
+		// the requested model. This metadata change is not a new execution.
+		if (t.session != "" && e.Session != t.session) || (t.backend != "" && e.Backend != t.backend) {
 			return &Error{Kind: "protocol_identity_mismatch"}
 		}
 		if !hasFields(raw, "status", "exit_code") || (e.Status != "ok" && e.Status != "error" && e.Status != "timeout") || (e.Status == "ok" && (e.ExitCode != 0 || e.ErrorKind != "")) || (e.Status != "ok" && e.ExitCode == 0) {
