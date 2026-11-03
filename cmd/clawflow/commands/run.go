@@ -662,7 +662,7 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 				ready = append(ready, j)
 				continue
 			}
-			allowed, checkErr := coordinateDispatch(ctx, j, nil)
+			allowed, checkErr := prepareDispatch(ctx, j, nil)
 			if checkErr != nil {
 				runLog.Warn("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", checkErr.Error())
 			}
