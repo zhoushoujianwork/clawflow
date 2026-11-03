@@ -93,7 +93,12 @@ func TestCheckpointExecutorHelper(t *testing.T) {
 	if os.Getenv("CLAWFLOW_CHECKPOINT_HELPER") != "1" {
 		return
 	}
-	_, err := Run(WithCheckpoint(context.Background(), os.Getenv("CLAWFLOW_CHECKPOINT_PATH"), false), Config{Command: os.Getenv("CLAWFLOW_CHECKPOINT_COMMAND"), Profile: "fixture"}, Request{Version: 1, RequestID: "caller", Workspace: os.Getenv("CLAWFLOW_CHECKPOINT_WORKSPACE"), PermissionMode: "bypassPermissions", TimeoutMS: 15000}, nil, nil, nil)
+	ctx := WithCheckpoint(context.Background(), os.Getenv("CLAWFLOW_CHECKPOINT_PATH"), false)
+	observation := os.Getenv("CLAWFLOW_OBSERVATION_HELPER") == "1"
+	if observation {
+		ctx = WithObservationCheckpoint(context.Background(), os.Getenv("CLAWFLOW_CHECKPOINT_PATH"))
+	}
+	_, err := Run(ctx, Config{Command: os.Getenv("CLAWFLOW_CHECKPOINT_COMMAND"), Profile: "fixture"}, Request{Version: 1, RequestID: "caller", Workspace: os.Getenv("CLAWFLOW_CHECKPOINT_WORKSPACE"), PermissionMode: "bypassPermissions", ToolsDisabled: observation, TimeoutMS: 15000}, nil, nil, nil)
 	if err != nil {
 		os.Exit(2)
 	}
@@ -101,6 +106,11 @@ func TestCheckpointExecutorHelper(t *testing.T) {
 }
 
 func TestCheckpointLockSurvivesExecutorCrash(t *testing.T) {
+	t.Run("development", func(t *testing.T) { checkpointLockSurvivesExecutorCrash(t, false) })
+	t.Run("observation", func(t *testing.T) { checkpointLockSurvivesExecutorCrash(t, true) })
+}
+
+func checkpointLockSurvivesExecutorCrash(t *testing.T, observation bool) {
 	c, req, gate := streamingFixture(t)
 	path := filepath.Join(t.TempDir(), "execution.json")
 	executable, err := os.Executable()
@@ -109,6 +119,9 @@ func TestCheckpointLockSurvivesExecutorCrash(t *testing.T) {
 	}
 	helper := exec.Command(executable, "-test.run=^TestCheckpointExecutorHelper$")
 	helper.Env = append(os.Environ(), "CLAWFLOW_CHECKPOINT_HELPER=1", "CLAWFLOW_CHECKPOINT_PATH="+path, "CLAWFLOW_CHECKPOINT_COMMAND="+c.Command, "CLAWFLOW_CHECKPOINT_WORKSPACE="+req.Workspace)
+	if observation {
+		helper.Env = append(helper.Env, "CLAWFLOW_OBSERVATION_HELPER=1")
+	}
 	if err := helper.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -165,5 +178,73 @@ func TestCheckpointResumeUsesNativeSession(t *testing.T) {
 	cp, err := ReadCheckpoint(path)
 	if err != nil || !cp.Completed {
 		t.Fatal(cp, err)
+	}
+}
+
+func TestObservationCheckpointRetainsIdentityAndRefusesReuse(t *testing.T) {
+	c, req, gate := streamingFixture(t)
+	req.ToolsDisabled = true
+	path := filepath.Join(t.TempDir(), "preflight.json")
+	if err := os.WriteFile(gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithObservationCheckpoint(context.Background(), path)
+	result, err := Run(ctx, c, req, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := ReadCheckpoint(path)
+	if err != nil || !cp.Completed || !cp.ObservationOnly || cp.RunID != result.RunID || cp.Session != result.NativeSessionID || cp.CallerRunID != req.RequestID {
+		t.Fatalf("checkpoint=%+v err=%v", cp, err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Run(ctx, c, req, nil, nil, nil); err == nil {
+		t.Fatal("observation path reused")
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(original) {
+		t.Fatal("original identity overwritten")
+	}
+	// Observation metadata must not authorize development/session recovery.
+	cp.Completed = false
+	if err = writeCheckpoint(path, cp); err != nil {
+		t.Fatal(err)
+	}
+	req.PermissionMode = "bypassPermissions"
+	req.ToolsDisabled = false
+	if _, _, err = recoveryCheckpoint(WithCheckpoint(context.Background(), path, true), c, &req); err == nil {
+		t.Fatal("read-only checkpoint resumed as development")
+	}
+}
+
+func TestObservationCheckpointRejectsToolsAndResume(t *testing.T) {
+	for _, mode := range []string{"tools", "resume"} {
+		t.Run(mode, func(t *testing.T) {
+			c, req, _ := streamingFixture(t)
+			req.ToolsDisabled = mode != "tools"
+			req.Resume = mode == "resume"
+			if _, _, err := recoveryCheckpoint(WithObservationCheckpoint(context.Background(), filepath.Join(t.TempDir(), "execution.json")), c, &req); err == nil {
+				t.Fatal("unsafe observation accepted")
+			}
+		})
+	}
+}
+
+func TestObservationCheckpointDoesNotReplaceDanglingLink(t *testing.T) {
+	c, req, _ := streamingFixture(t)
+	req.ToolsDisabled = true
+	path := filepath.Join(t.TempDir(), "execution.json")
+	if err := os.Symlink("missing-evidence.json", path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(WithObservationCheckpoint(context.Background(), path), c, req, nil, nil, nil); err == nil {
+		t.Fatal("existing evidence path replaced")
+	}
+	target, err := os.Readlink(path)
+	if err != nil || target != "missing-evidence.json" {
+		t.Fatal(target, err)
 	}
 }

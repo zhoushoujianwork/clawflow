@@ -18,15 +18,25 @@ type Checkpoint struct {
 	ArtifactDir                                          string
 	UpdatedAt                                            time.Time
 	Completed                                            bool
+	ObservationOnly                                      bool
+	CallerRunID                                          string
 }
 type checkpointOptions struct {
-	Path   string
-	Resume bool
+	Path            string
+	Resume          bool
+	ObservationOnly bool
 }
 type checkpointKey struct{}
 
 func WithCheckpoint(ctx context.Context, path string, resume bool) context.Context {
-	return context.WithValue(ctx, checkpointKey{}, checkpointOptions{path, resume})
+	return context.WithValue(ctx, checkpointKey{}, checkpointOptions{Path: path, Resume: resume})
+}
+
+// WithObservationCheckpoint records a tools-disabled preflight invocation's
+// identity and inherited process lock. It grants no native resume authority.
+// Use a fresh path for each invocation; records are never overwritten.
+func WithObservationCheckpoint(ctx context.Context, path string) context.Context {
+	return context.WithValue(ctx, checkpointKey{}, checkpointOptions{Path: path, ObservationOnly: true})
 }
 
 func RecoveryWorkspace(ctx context.Context) (string, bool) {
@@ -90,21 +100,29 @@ func writeCheckpoint(path string, c Checkpoint) error {
 
 func recoveryCheckpoint(ctx context.Context, c Config, req *Request) (string, *Checkpoint, error) {
 	option, _ := ctx.Value(checkpointKey{}).(checkpointOptions)
-	if option.Path == "" || req.PermissionMode != "bypassPermissions" || req.ToolsDisabled {
+	if option.Path == "" {
 		return "", nil, nil
 	}
-	cp := Checkpoint{Version: 1, Workspace: req.Workspace, Profile: c.Profile, Command: c.Command}
+	if option.ObservationOnly {
+		if !req.ToolsDisabled || req.Resume || option.Resume {
+			return "", nil, errors.New("observation checkpoint requires a fresh tools-disabled invocation")
+		}
+	} else if req.PermissionMode != "bypassPermissions" || req.ToolsDisabled {
+		return "", nil, nil
+	}
+	cp := Checkpoint{Version: 1, Workspace: req.Workspace, Profile: c.Profile, Command: c.Command, ObservationOnly: option.ObservationOnly, CallerRunID: req.RequestID}
 	if option.Resume {
 		previous, err := ReadCheckpoint(option.Path)
 		if err != nil {
 			return "", nil, err
 		}
-		if previous.Completed || previous.Workspace != req.Workspace || previous.Profile != c.Profile || previous.Command != c.Command || !idPattern.MatchString(previous.Session) {
+		if previous.ObservationOnly || previous.Completed || previous.Workspace != req.Workspace || previous.Profile != c.Profile || previous.Command != c.Command || !idPattern.MatchString(previous.Session) {
 			return "", nil, errors.New("recorded execution cannot safely resume")
 		}
 		req.Resume, req.SessionKey = true, previous.Session
 		req.Prompt = "Recover the interrupted task in this same session and worktree. Verify existing edits, commits and external effects before continuing; do not repeat completed actions.\n\n" + req.Prompt
 		cp = previous
+		cp.CallerRunID = req.RequestID
 	}
 	return option.Path, &cp, nil
 }
