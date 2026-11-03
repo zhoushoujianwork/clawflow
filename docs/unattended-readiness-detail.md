@@ -73,3 +73,15 @@ issue #612 的评论包含 `clawflow:repair-exhausted=pr-622`，明确三次预�
 任务 `2f570cce...` 的保留工作树 `local-worker/data/ci-repair-worktrees/repair-809726528` 经只读检查，源码 diff 为空，仅有未跟踪 `macos/__pycache__/`，包含 install-host 与 test_install_host 的 Python 3.11 字节码。该缓存触发工作树清洁门禁；未删除现场或重置预算。
 
 补充精确的 `/macos/__pycache__/` 忽略规则。隔离 Git 夹具证明旧规则报告未跟踪缓存，新规则保持清洁；源码文件仍不被忽略，diff 检查通过。此修复尚未进入 #622 的当前提交，也未将其失败记录改成成功；后续交付必须保留新 head 的 CI 和独立验收要求。
+
+
+## 历史真实流程分类核对（2026-11-03）
+
+只读看板与 15 份已完成 repair journal 对照：其中 12 份为 `development_verification`，1 份为 `ci`，2 份为 `acceptance`。不能把所有 repair/done 都计为 CI 修复或验收缺陷修复。私有分类明细保留在 `backups/restart-651-20261103/repair-flow-audit.json`。
+
+#610 / PR #611 的历史证据：
+
+- CI 修复 task `9ba86bf06ed206f49807ce2381981d0322c865f05723c058836ccece55463c63`、epoch 1、session `87728782-1d1c-4816-83c2-7c565b31fe0b`，输入 head `4666c027f73f0c680b17dfb1142003eebe358668` 的 [Test 失败](https://github.com/zhoushoujianwork/clawflow/actions/runs/41105570205/job/124234340438)，输出 head `17b92f515234737ae1f9fdf8e17187a306267a4d` 的 [Test 成功](https://github.com/zhoushoujianwork/clawflow/actions/runs/41115045367/job/124266946924)。该修复 head 的 Native macOS 检查为 cancelled，不能宣称当时全部 CI 已绿。
+- 验收修复 task `65ad642e0740640b1247891fe22b5d295929c06a5ca0e309c3c2cbcf9e8c6cfb` 的输入、输出均为 `e1837c8a5016437654d88279bddd14b4e2b2a5e8`，`infra_kind=no-change`。这是重新核验，不是修改代码修复验收缺陷。
+- 最终 head `e1837c8a5016437654d88279bddd14b4e2b2a5e8` 的三项 CI 均成功；本地 completed/passed 独立验收绑定开发 session `574b9ee0-e1fd-4513-90f2-7a0218abcf44` 与不同 reviewer session `839c3f3a-372e-4512-8b7d-50d53aa25b1e`，无 unstructured/validation_error。GitHub 确认 [PR #611](https://github.com/zhoushoujianwork/clawflow/pull/611) 于 2026-10-31 13:35:41 UTC 合并，merge commit `493ab0dde8d935c11ae8e4c17d4ac8c9f7627e77`；本地提交图确认 CI 修复 head 为最终 head 的祖先。
+- 以上证明相关阶段有真实执行与最终交付记录，不证明全过程无人介入。期间的人工跟进见 [#611 记录](pr-611-merge-followup-2026-10-31.md)，不把此历史任务计入尚未启动的一周自动验收窗口。
