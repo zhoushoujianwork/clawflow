@@ -20,10 +20,12 @@ import (
 // stable config and data files, which of its ports accept connections, and
 // the identity (pid and start time) of its processes.
 type StableSnapshot struct {
-	Config    string       `json:"config"`
-	Data      string       `json:"data"`
-	Listeners map[int]bool `json:"listeners"`
-	Processes []string     `json:"processes"`
+	Config      string            `json:"config"`
+	Data        string            `json:"data"`
+	Listeners   map[int]bool      `json:"listeners"`
+	Processes   []string          `json:"processes"`
+	ConfigPaths map[string]string `json:"config_paths,omitempty"`
+	DataPaths   map[string]string `json:"data_paths,omitempty"`
 }
 
 // StableProbe supplies the process view; replaced in tests.
@@ -62,7 +64,7 @@ func DefaultStableProbe(stableRoot, candidateBase string) StableProbe {
 	}}
 }
 
-func digestTree(root string, skip func(rel string) bool) (string, error) {
+func digestTree(root string, skip func(rel string) bool, entries ...map[string]string) (string, error) {
 	h := sha256.New()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -78,8 +80,17 @@ func digestTree(root string, skip func(rel string) bool) (string, error) {
 			}
 			return nil
 		}
+		// Hash exactly the same bytes for the aggregate and the per-path evidence.
+		// Neither file contents nor symlink targets are retained in the snapshot.
+		entry := sha256.New()
+		writer := io.MultiWriter(h, entry)
+		defer func() {
+			if len(entries) > 0 && entries[0] != nil {
+				entries[0][rel] = hex.EncodeToString(entry.Sum(nil))
+			}
+		}()
 		if d.IsDir() {
-			fmt.Fprintf(h, "d %s\n", rel)
+			fmt.Fprintf(writer, "d %s\n", rel)
 			return nil
 		}
 		info, err := d.Info()
@@ -88,10 +99,10 @@ func digestTree(root string, skip func(rel string) bool) (string, error) {
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
 			target, _ := os.Readlink(path)
-			fmt.Fprintf(h, "l %s %s\n", rel, target)
+			fmt.Fprintf(writer, "l %s %s\n", rel, target)
 			return nil
 		}
-		fmt.Fprintf(h, "f %s %d %s\n", rel, info.Size(), info.Mode())
+		fmt.Fprintf(writer, "f %s %d %s\n", rel, info.Size(), info.Mode())
 		if info.Mode().IsRegular() {
 			file, err := os.Open(path)
 			if err != nil {
@@ -106,7 +117,7 @@ func digestTree(root string, skip func(rel string) bool) (string, error) {
 			if closeErr != nil {
 				return closeErr
 			}
-			fmt.Fprintf(h, "c %s %s\n", rel, hex.EncodeToString(content.Sum(nil)))
+			fmt.Fprintf(writer, "c %s %s\n", rel, hex.EncodeToString(content.Sum(nil)))
 		}
 		return nil
 	})
@@ -115,16 +126,16 @@ func digestTree(root string, skip func(rel string) bool) (string, error) {
 
 // TakeStable records the stable host's observable state. Reads only.
 func TakeStable(s Stable, probe StableProbe) (StableSnapshot, error) {
-	var snap StableSnapshot
+	snap := StableSnapshot{ConfigPaths: map[string]string{}, DataPaths: map[string]string{}}
 	var err error
-	if snap.Config, err = digestTree(filepath.Join(s.Root, "config"), nil); err != nil {
+	if snap.Config, err = digestTree(filepath.Join(s.Root, "config"), nil, snap.ConfigPaths); err != nil {
 		return snap, err
 	}
 	if snap.Data, err = digestTree(filepath.Join(s.Root, "data"), func(rel string) bool {
 		// Per-run history is appended by normal stable activity and is not
 		// part of the configuration or queue state being protected.
 		return rel == "runs" || strings.HasPrefix(rel, "runs"+string(filepath.Separator))
-	}); err != nil {
+	}, snap.DataPaths); err != nil {
 		return snap, err
 	}
 	snap.Listeners = map[int]bool{}
@@ -148,9 +159,11 @@ func (a StableSnapshot) Diff(b StableSnapshot) []string {
 	var d []string
 	if a.Config != b.Config {
 		d = append(d, "stable config changed")
+		d = append(d, changedPaths("config", a.ConfigPaths, b.ConfigPaths)...)
 	}
 	if a.Data != b.Data {
 		d = append(d, "stable data changed")
+		d = append(d, changedPaths("data", a.DataPaths, b.DataPaths)...)
 	}
 	for port, was := range a.Listeners {
 		if b.Listeners[port] != was {
@@ -161,4 +174,42 @@ func (a StableSnapshot) Diff(b StableSnapshot) []string {
 		d = append(d, "stable process identity changed")
 	}
 	return d
+}
+
+// Legacy snapshots still fail on their aggregate digest; missing path evidence
+// cannot be interpreted as an empty tree or used to approve a change.
+func changedPaths(kind string, before, after map[string]string) []string {
+	if before == nil || after == nil {
+		return nil
+	}
+	keys := map[string]bool{}
+	for k := range before {
+		keys[k] = true
+	}
+	for k := range after {
+		keys[k] = true
+	}
+	var changed []string
+	for k := range keys {
+		if before[k] != after[k] {
+			changed = append(changed, k)
+		}
+	}
+	sort.Strings(changed)
+	var result []string
+	for i, k := range changed {
+		if i == 50 {
+			result = append(result, fmt.Sprintf("stable %s: %d additional changed paths", kind, len(changed)-i))
+			break
+		}
+		action := "modified"
+		if _, ok := before[k]; !ok {
+			action = "added"
+		}
+		if _, ok := after[k]; !ok {
+			action = "removed"
+		}
+		result = append(result, fmt.Sprintf("stable %s path %s: %q", kind, action, k))
+	}
+	return result
 }
