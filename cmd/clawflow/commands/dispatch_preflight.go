@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -32,6 +33,14 @@ func prepareDispatch(ctx context.Context, j *runJob, tasks coordinationTasks) (a
 		return false, err
 	}
 	store := dispatchPreflightStore(j)
+	fence, err := filelock.Try(store.Path()+".execution.lock", map[string]int{"PID": os.Getpid()})
+	if err != nil {
+		return false, err
+	}
+	defer filelock.Release(fence)
+	if err = reconcileDispatchPreflight(ctx, j, store); err != nil {
+		return false, errors.Join(err, publishPreflightWait(j, store, err))
+	}
 	id, err := store.Begin("dispatch", dispatchPreflightNow())
 	if err != nil {
 		return false, errors.Join(err, publishPreflightWait(j, store, err))
@@ -68,13 +77,28 @@ func prepareDispatch(ctx context.Context, j *runJob, tasks coordinationTasks) (a
 			failure = errors.Join(failure, publishPreflightWait(j, store, failure))
 		}
 	}()
+	if err := writePreflightOwner(root, id, store); err != nil {
+		return false, err
+	}
+	if err := recordPreflightStage(root, "coordination", "started"); err != nil {
+		return false, err
+	}
 	allowed, failure = coordinateDispatch(execution.WithObservationCheckpoint(ctx, coordinationPath), j, tasks)
+	if err := recordPreflightStage(root, "coordination", "returned"); err != nil {
+		return false, errors.Join(failure, err)
+	}
 	if failure != nil || !allowed {
 		return false, failure
 	}
 	allowed = false
 	stage = "plan"
+	if err := recordPreflightStage(root, "plan", "started"); err != nil {
+		return false, err
+	}
 	plan, err := dispatchPreflightPlan(execution.WithObservationCheckpoint(ctx, planPath), j)
+	if recordErr := recordPreflightStage(root, "plan", "returned"); recordErr != nil {
+		return false, errors.Join(err, recordErr)
+	}
 	if err != nil {
 		return false, err
 	}
