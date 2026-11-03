@@ -26,7 +26,7 @@ For service supervision, a pinned manager can also run with `clawflow worker ser
 
 ## Result replay and status
 
-Each task directory retains `journal.json`, `executor.log`, and `execution.json` when a managed development session starts. Files are private. A persisted claim ID makes assignment replay safe after a lost response. The journal stores task identity, epoch, pinned executable paths and result outbox; it contains no worker token value. The checkpoint points to retained native output artifacts, including inputs, which must remain private.
+Each task directory retains `journal.json`, `executor.log`, and `execution.json` when a managed development session starts. Files are private. A persisted claim ID makes assignment replay safe after a lost response. The journal stores task identity, epoch, pinned executable paths and result outbox; it contains no worker token value. The checkpoint points to retained native output artifacts, including inputs, which must remain private. Checkpoint-managed executions keep each invocation in a separate private `execution-artifacts/clawflow-offload-*` directory beside `execution.json`, so an OS temporary-directory cleanup does not remove recovery inputs, event streams or final output. Resuming preserves earlier invocation directories and records the new one in the checkpoint. Existing checkpoints pointing at temporary paths are not rewritten or reconstructed; missing old files remain an explicit evidence limitation. Executions without a checkpoint retain their existing temporary-file cleanup behavior.
 
 ```sh
 clawflow worker executions --root /absolute/execution-root
