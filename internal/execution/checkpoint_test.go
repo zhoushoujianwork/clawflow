@@ -167,3 +167,74 @@ func TestCheckpointResumeUsesNativeSession(t *testing.T) {
 		t.Fatal(cp, err)
 	}
 }
+
+func TestCheckpointArtifactsSurviveTemporaryCleanupAndResume(t *testing.T) {
+	c, req, gate := streamingFixture(t)
+	req.PermissionMode = "bypassPermissions"
+	req.TimeoutMS = 10000
+	req.Prompt = "retained task input"
+	req.Instructions = "retained operator instructions"
+	checkpoint := filepath.Join(t.TempDir(), "execution.json")
+	ephemeral := t.TempDir()
+	t.Setenv("TMPDIR", ephemeral)
+	ctx, cancel := context.WithCancel(WithCheckpoint(context.Background(), checkpoint, false))
+	defer cancel()
+	_, err := Run(ctx, c, req, nil, nil, func(o Observation) {
+		if o.NativeSessionID != "" {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("interruption: %v", err)
+	}
+	before, err := ReadCheckpoint(checkpoint)
+	if err != nil || before.Completed || before.Session != "native-actual" {
+		t.Fatalf("checkpoint: %+v %v", before, err)
+	}
+	expectedParent := filepath.Join(filepath.Dir(checkpoint), "execution-artifacts")
+	if filepath.Dir(before.ArtifactDir) != expectedParent {
+		t.Fatalf("durable evidence in temporary storage: %s", before.ArtifactDir)
+	}
+	for _, p := range []string{expectedParent, before.ArtifactDir} {
+		info, err := os.Stat(p)
+		if err != nil || info.Mode().Perm() != 0700 {
+			t.Fatalf("artifact directory permissions: %s %v", p, err)
+		}
+	}
+	saved := map[string][]byte{}
+	for _, name := range []string{"instructions.md", "task.txt", "stdout.json", "events.ndjson"} {
+		raw, err := os.ReadFile(filepath.Join(before.ArtifactDir, name))
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		saved[name] = raw
+	}
+	// Model the reboot cleanup that removed the original real task's /tmp output.
+	if err := os.RemoveAll(ephemeral); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ephemeral, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAWFLOW_EXPECT_RESUME", before.Session)
+	if err := os.WriteFile(gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Run(WithCheckpoint(context.Background(), checkpoint, true), c, req, nil, nil, nil)
+	if err != nil || result.NativeSessionID != before.Session {
+		t.Fatalf("resume: %+v %v", result, err)
+	}
+	after, err := ReadCheckpoint(checkpoint)
+	if err != nil || !after.Completed || after.ArtifactDir == before.ArtifactDir || filepath.Dir(after.ArtifactDir) != expectedParent {
+		t.Fatalf("new invocation did not retain separate evidence: %+v %v", after, err)
+	}
+	for name, want := range saved {
+		raw, err := os.ReadFile(filepath.Join(before.ArtifactDir, name))
+		if err != nil || string(raw) != string(want) {
+			t.Fatalf("prior evidence lost or overwritten: %s %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(after.ArtifactDir, "stdout.json")); err != nil {
+		t.Fatal(err)
+	}
+}
