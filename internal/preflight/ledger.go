@@ -85,7 +85,13 @@ func (l Ledger) Status() (Status, error) {
 			switch e.Outcome {
 			case "success":
 				s = Status{}
-			case "waiting": // Normal dependency/ownership waiting does not reset failures.
+			case "waiting": // Normal waiting does not reset or consume failures.
+				if e.Reason == "evidence-changed" {
+					// Re-fetch later without turning normal source activity into an outage.
+					if next := e.EndedAt.Add(Cooldown); next.After(s.NotBefore) {
+						s.NotBefore = next
+					}
+				}
 			case "failure":
 				if e.Reason == "" {
 					return s, errors.New("missing preflight failure classification")

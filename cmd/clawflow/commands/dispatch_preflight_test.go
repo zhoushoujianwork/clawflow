@@ -163,8 +163,15 @@ func TestDispatchPreflightRechecksAfterPlanning(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, _ := l.Status()
-	if st.Failures != 1 || st.PendingID != "" {
-		t.Fatal("stale approval treated as success", st)
+	if st.Failures != 0 || st.PendingID != "" || !st.NotBefore.After(time.Now()) {
+		t.Fatal("changed evidence must wait without charging service failure", st)
+	}
+	if ok, err := prepareDispatch(context.Background(), j, tasks); ok || !errors.Is(err, preflight.ErrCooldown) {
+		t.Fatal("changed evidence retried without cooldown", ok, err)
+	}
+	q, err := queue.LoadState(j.repo)
+	if err != nil || len(q.Entries) != 1 || !strings.Contains(q.Entries[0].Reason, "等待重新取证") {
+		t.Fatal("missing evidence-change explanation", q, err)
 	}
 }
 

@@ -214,3 +214,52 @@ func TestConcurrentBeginHasOneWinner(t *testing.T) {
 		t.Fatalf("mode=%v", info.Mode())
 	}
 }
+
+func TestEvidenceChangesThrottleWithoutErasingOrExhaustingFailures(t *testing.T) {
+	s, now := fixture(t)
+	id, err := s.Begin("dispatch", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Finish(id, "failure", "timeout", now); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(Cooldown)
+	for i := 0; i < MaxFailures+1; i++ {
+		id, err = s.Begin("dispatch", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = s.Finish(id, "waiting", "evidence-changed", now); err != nil {
+			t.Fatal(err)
+		}
+		reloaded := Store{Root: s.Root, Repo: s.Repo, Issue: s.Issue}
+		l, err := reloaded.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := l.Status()
+		if err != nil || st.Failures != 1 || !st.NotBefore.Equal(now.Add(Cooldown)) {
+			t.Fatal(st, err)
+		}
+		if _, err = reloaded.Begin("dispatch", st.NotBefore.Add(-time.Nanosecond)); !errors.Is(err, ErrCooldown) {
+			t.Fatal(err)
+		}
+		now = st.NotBefore
+	}
+	id, err = s.Begin("dispatch", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Finish(id, "success", "", now); err != nil {
+		t.Fatal(err)
+	}
+	l, err := s.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := l.Status()
+	if err != nil || st.Failures != 0 || !st.NotBefore.IsZero() {
+		t.Fatal(st, err)
+	}
+}

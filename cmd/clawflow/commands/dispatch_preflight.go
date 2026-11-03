@@ -60,6 +60,9 @@ func prepareDispatch(ctx context.Context, j *runJob, tasks coordinationTasks) (a
 		if failure != nil {
 			outcome, reason = "failure", stage+"-failed"
 		}
+		if errors.Is(failure, errCoordinationChanged) {
+			outcome, reason = "waiting", "evidence-changed"
+		}
 		if errors.Is(failure, filelock.ErrHeld) {
 			outcome, reason = "waiting", "resource-busy"
 		}
@@ -125,6 +128,9 @@ func publishPreflightWait(j *runJob, store preflight.Store, cause error) error {
 			return err
 		}
 		reason = fmt.Sprintf("预检服务失败 %d/%d；下次重试 %s", st.Failures, preflight.MaxFailures, st.NotBefore.Format(time.RFC3339))
+		if len(l.Events) > 0 && l.Events[len(l.Events)-1].Reason == "evidence-changed" {
+			reason = fmt.Sprintf("任务事实已变化，等待重新取证；下次重试 %s（预检服务失败 %d/%d）", st.NotBefore.Format(time.RFC3339), st.Failures, preflight.MaxFailures)
+		}
 		if st.PendingID != "" {
 			state = "blocked"
 			reason = "预检调用尚未核对终态；保留原调用，需核对执行身份"
