@@ -11,7 +11,7 @@
 | 正常开发交付 | 保留任务和 PR 历史可查 | 对同一个真实任务贯通源码、CI、独立验收、合并终态，不能只看 task done |
 | CI 修复 | #612 / #622 有真实修复与预算耗尽交接记录 | 成功修复后完整交付的准确 head 证据 |
 | 验收修复 | #622 记录过验收修复，预算耗尽未重置 | 验收失败→有限修复→新独立验收通过→合并的完整链路 |
-| 重启恢复 | 11 月 3 日 13:10:27 主机重启；#651 会话与 worktree 保留，锁已释放 | 原授权到期后同一 session 恢复、回传确认与后续交付；当前尚未验证 |
+| 重启恢复 | 11 月 3 日 13:10:27 主机重启；14:07:31 自动以 epoch 2 恢复原 session，已产生新执行事件 | 回传确认、独立验收与后续交付；尚未验证整个恢复闭环 |
 | 持续运行 | 尚未启动连续验收窗口 | 连续七天、至少 20 个已授权真实任务的成功／阻塞／人工介入与恢复记录 |
 
 每条真实流程至少绑定 issue/PR、task ID、attempt/epoch、native session、准确代码 head、CI、独立验收及最终状态。人工修配置、手工推进、环境故障和恢复操作单独记录；不计作无需人工介入的自动成功。不通过补写来源、重置预算或更换会话制造闭环。
@@ -21,6 +21,7 @@
 - 重启前 #651 / PR #652 的开发来源核验 task 为 `e2dc67c335cb2697618036b01ad577dcef4a128ea0318f8a98ce189bb04d3d59`，epoch 1、attempt 0；native session `1c875860-fe17-47fd-b7c9-230a9c26b5e2`，Offload run `7b8506048eb8ea2d95c0dc74fb6a8121`。
 - 13:52 后只读核对：controller 和两个 worker 已在线；该任务 journal 为 `needs_recovery`，checkpoint 未完成，执行锁与会话锁均空闲；不能将看板残留的 running 阶段当作执行仍然存活。
 - 原 worktree 和固定 Offload runtime 存在，原生会话历史存在；checkpoint 指向的系统临时输出目录已不存在。原授权到 `2026-11-03T14:07:29.850586+08:00` 才到期，未提前重派或改写 epoch。
+- 14:07:31 原授权到期后，manager 自动将原任务推进到 attempt 1 / epoch 2。14:09:50 核对 session、worktree inode、head、profile 与固定 runtime SHA256 均匹配原基线；新 Offload invocation `943c0a57152669073ecb09ea60fc2dfe` 为 active，原生历史包含 14:08 后的新工具执行事件。没有手工调用 recover、修改 journal 或新建替代会话。该事实只证明同会话续跑，尚不代表任务完成。
 - 重启前 journal、checkpoint、executor 日志、原生历史和只读观测保存在本机私有 `backups/restart-651-20261103/`，不包含复制的 worker 凭证。旧报告／会话和遗失文件的事实保持原样。
 - 持久化缺口修复将 checkpoint 管理的执行文件移到任务自己的 `execution-artifacts/` 下；每次 invocation 独立目录。该代码尚未部署，不能宣称已找回本次丢失的旧文件。
 - #652 为协调语义与围栏 JSON 修复；#650 为中断报告保存修复，明确等待 #651。两者仍需真实来源、独立验收和部署，#639 尚未恢复。当前不启动一周验收计时。
