@@ -302,11 +302,18 @@ type coordinatorResults struct {
 }
 
 type coordinatorReport struct {
+	// Controller-owned audit data, never converted into publishable intents.
+	// The worker wire schema deliberately does not accept this field.
+	UnappliedEffects   []jobEffect        `json:"unapplied_effects,omitempty"`
 	ProvenanceWarnings []string           `json:"provenance_warnings,omitempty"`
 	TerminalState      string             `json:"coordinator_state,omitempty"`
 	Acceptance         *acceptance.Record `json:"acceptance,omitempty"`
 	jobResult
 	Events []json.RawMessage `json:"events,omitempty"`
+}
+
+func retainedInterruption(t *coordinator.Task, r *coordinatorReport) bool {
+	return coordinator.DurableTask(t) && (t.Kind == "implement" || t.Kind == "repair") && r.Status == "failed" && r.InfraKind == "execution-interrupted"
 }
 
 func (s *coordinatorResults) Task(ctx context.Context, id string) (*coordinator.Task, error) {
@@ -379,6 +386,10 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	if r.Acceptance != nil {
 		return coordinator.ErrInvalid
 	}
+	interrupted := retainedInterruption(t, &r)
+	if interrupted && !failed {
+		return coordinator.ErrInvalid
+	}
 	if r.Status == "blocked" {
 		r.Output = testingBlockedBody(&r.jobResult)
 		r.Effects = []jobEffect{{Kind: "issue-comment", Repo: t.Repo, Number: t.Issue, Body: r.Output}}
@@ -393,13 +404,19 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 		}
 		switch e.Kind {
 		case "pr-create":
-			if !acceptanceSHA(r.HeadSHA) || e.Head == "" || e.Base == "" || e.Title == "" || t.Kind != "implement" {
+			if t.Kind != "implement" || (!interrupted && (!acceptanceSHA(r.HeadSHA) || e.Head == "" || e.Base == "" || e.Title == "")) {
 				return coordinator.ErrInvalid
 			}
 		case "issue-comment", "pr-comment", "add-label", "remove-label", "close-issue":
 		default:
 			return coordinator.ErrInvalid
 		}
+	}
+	if interrupted {
+		// A timed-out worker may have queued operations before it could seal
+		// a valid head/result. Preserve them as evidence, never publish them.
+		// WithReportDigest still acknowledges the unchanged original report.
+		r.UnappliedEffects, r.Effects = r.Effects, nil
 	}
 	// Keep the most recent events, bounded independently of the HTTP body cap.
 	if len(r.Events) > 100 {
@@ -523,7 +540,9 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 			_ = snapshot.WriteRunMeta(dir, meta)
 		}
 	}()
-	if r.Status == "lease-lost" {
+	if r.Status == "lease-lost" || retainedInterruption(t, r) {
+		// Recovery owns this task; do not turn an execution interruption into
+		// product-failure automation or publish its incomplete operations.
 		return nil
 	}
 	for _, e := range r.Effects {
