@@ -107,11 +107,11 @@ func TestExecutionCheckBlockedJSONOnceAndQuiet(t *testing.T) {
 	}
 }
 
-func TestExecutionCheckMissingProfileBlocked(t *testing.T) {
+func TestExecutionCheckAllowsOffloadDefaultProfile(t *testing.T) {
 	executionFixture(t, executionHelp(), "2", "")
 	out, _, err := runExecutionCheckCLI(t, "--json")
 	var r execution.Report
-	if err == nil || json.Unmarshal([]byte(out), &r) != nil || r.Status != "blocked" || r.Checks[0].Status != "blocked" {
+	if err != nil || json.Unmarshal([]byte(out), &r) != nil || r.Status != "ready" || r.Checks[0].Status != "passed" {
 		t.Fatalf("err=%v out=%q", err, out)
 	}
 }
@@ -291,14 +291,14 @@ func TestExecutionCheckInvalidCanonicalBlocksWithoutMutationOrLeak(t *testing.T)
 	}
 }
 
-func TestExecutionCheckMissingEverythingIsBlockedWithoutWrites(t *testing.T) {
+func TestExecutionCheckMissingClawFlowConfigUsesOffloadDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	clearOffloadEnv(t)
 	before := snapshotDir(t, home)
 	out, _, err := runExecutionCheckCLI(t, "--json")
 	var r execution.Report
-	if err == nil || json.Unmarshal([]byte(out), &r) != nil || r.Status != "blocked" {
+	if err != nil || json.Unmarshal([]byte(out), &r) != nil || r.Status != "ready" {
 		t.Fatalf("err=%v out=%q", err, out)
 	}
 	assertSnapshotEqual(t, before, snapshotDir(t, home))

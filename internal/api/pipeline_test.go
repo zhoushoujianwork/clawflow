@@ -114,7 +114,7 @@ func TestHandlePipelineJSONShape(t *testing.T) {
 	if sched := rt["scheduler"].(map[string]any); sched["status"] != "idle" {
 		t.Fatalf("scheduler = %v", sched)
 	}
-	if exec := rt["execution"].(map[string]any); exec["ready"] != false || exec["error"] == "" {
+	if exec := rt["execution"].(map[string]any); exec["ready"] != true || exec["error"] != nil {
 		t.Fatalf("execution = %v", exec)
 	}
 

@@ -39,8 +39,8 @@ func LoadConfig() (Config, error) {
 	cfg, err := config.Load()
 	if err == nil {
 		c = cfg.Settings.Execution
-	} else if os.Getenv("CLAWFLOW_OFFLOAD_PROFILE") == "" {
-		return c, errors.New("Offload settings unavailable: configure settings.execution.profile or CLAWFLOW_OFFLOAD_PROFILE")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return c, errors.New("Offload settings unavailable: fix or recreate ~/.clawflow/config/config.yaml")
 	}
 	return WithEnvironment(c), nil
 }
@@ -96,8 +96,8 @@ func validateConfigWith(c Config, look func(string) (string, error)) (string, er
 		kind := lookupKind(err)
 		return kind, &UnavailableError{Reason: kind, Message: "Offload unavailable: install offload or set settings.execution.command / CLAWFLOW_OFFLOAD_COMMAND"}
 	}
-	if !validProfile(c.Profile) {
-		return ReasonProfileMissing, &UnavailableError{Reason: ReasonProfileMissing, Message: "Offload readiness: configure an explicit settings.execution.profile / CLAWFLOW_OFFLOAD_PROFILE"}
+	if c.Profile != "" && !validProfile(c.Profile) {
+		return ReasonConfigInvalid, &UnavailableError{Reason: ReasonConfigInvalid, Message: "Offload readiness: invalid execution profile"}
 	}
 	for _, profile := range c.RoleProfiles {
 		if !validProfile(profile) {
@@ -112,6 +112,45 @@ func validateConfigWith(c Config, look func(string) (string, error)) (string, er
 
 func validProfile(profile string) bool {
 	return strings.TrimSpace(profile) != "" && !strings.ContainsAny(profile, "\x00\r\n")
+}
+
+func lookupEnvironment(env []string) func(string) (string, bool) {
+	values := make(map[string]string, len(env))
+	for _, kv := range env {
+		if key, value, ok := strings.Cut(kv, "="); ok {
+			values[key] = value
+		}
+	}
+	return func(key string) (string, bool) { value, ok := values[key]; return value, ok }
+}
+
+// resolveDefaultProfile asks Offload which profile its own configuration has
+// selected. The resolved name is pinned into ownership and recovery metadata
+// so a later default change cannot move an interrupted task.
+func resolveDefaultProfile(ctx context.Context, c Config, env []string) (string, error) {
+	if c.Profile != "" {
+		return c.Profile, nil
+	}
+	command := c.Command
+	if command == "" {
+		command = "offload"
+	}
+	resolved, err := exec.LookPath(command)
+	if err != nil {
+		return "", &UnavailableError{Reason: lookupKind(err), Message: "Offload executable unavailable"}
+	}
+	get := lookupEnvironment(env)
+	out, problem := runProbe(ctx, probeSpec{command: resolved, args: []string{"profiles", "--json"}, what: "profile", limit: maxProfilesBytes,
+		env: func(dir string) []string { return profileEnvironment(dir, get) }, okExit: func(code int) bool { return code == 0 }})
+	var snap profileSnapshot
+	if problem != "" || json.Unmarshal(out, &snap) != nil || snap.SchemaVersion != 1 {
+		return "", &UnavailableError{Reason: ReasonConfigUnavailable, Message: "Offload default profile unavailable: run offload config"}
+	}
+	profile, reason, message := snap.selected("")
+	if reason != "" {
+		return "", &UnavailableError{Reason: reason, Message: message}
+	}
+	return profile, nil
 }
 
 func Ready() error {
@@ -342,6 +381,15 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if err := ValidateConfig(c); err != nil {
 		return result, err
 	}
+	if env == nil {
+		env = os.Environ()
+	}
+	env = withoutSupervisorState(env)
+	var err error
+	c.Profile, err = resolveDefaultProfile(ctx, c, env)
+	if err != nil {
+		return result, err
+	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
@@ -461,10 +509,6 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if command == "" {
 		command = "offload"
 	}
-	if env == nil {
-		env = os.Environ()
-	}
-	env = withoutSupervisorState(env)
 	if c.TestDatabaseDSN != "" && req.PermissionMode == "bypassPermissions" {
 		filtered := make([]string, 0, len(env)+1)
 		for _, kv := range env {

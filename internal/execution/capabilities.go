@@ -153,7 +153,7 @@ func probeCapabilities(ctx context.Context, c Config, get func(string) (string, 
 		r.block(CheckConfig, reason, err.Error())
 		return r, nil
 	}
-	r.set(CheckConfig, CheckPassed, "command and profile settings are well formed")
+	r.set(CheckConfig, CheckPassed, "execution overrides are well formed")
 
 	command := c.Command
 	if command == "" {
