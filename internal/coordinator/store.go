@@ -44,6 +44,7 @@ type Task struct {
 	Attempt             int             `json:"attempt"`
 	LeaseOwner          string          `json:"lease_owner"`
 	LeaseExpiresAt      *time.Time      `json:"lease_expires_at"`
+	LastEventAt         *time.Time      `json:"-"`
 	FencingToken        int64           `json:"fencing_token"`
 	Result              json.RawMessage `gorm:"type:jsonb" json:"result"`
 	CreatedAt           time.Time       `json:"created_at"`
@@ -357,6 +358,7 @@ func (s *Store) claim(ctx context.Context, worker, claimID string) (*Task, error
 			t.State = "leased"
 			t.LeaseOwner = worker
 			t.LeaseExpiresAt = &expires
+			t.LastEventAt = nil
 			t.FencingToken++
 			if err := tx.Save(&t).Error; err != nil {
 				return err
@@ -418,6 +420,28 @@ func (s *Store) leaseUpdate(ctx context.Context, id, worker string, fence int64,
 }
 func (s *Store) Heartbeat(ctx context.Context, id, worker string, fence int64) error {
 	return s.leaseUpdate(ctx, id, worker, fence, "heartbeat", map[string]interface{}{"lease_expires_at": gorm.Expr("CASE WHEN payload->>'durable_execution' = 'true' THEN lease_expires_at ELSE clock_timestamp() + interval '120 seconds' END")})
+}
+
+// MaxProgressAgeSec bounds a reported event age to the longest task timeout.
+const MaxProgressAgeSec = 86400
+
+// ReportProgress records the worker's last execution event for the watchdog.
+// The age is resolved against the controller clock, so worker clock skew cannot
+// fake or hide progress. It never renews the lease and adds no audit row.
+func (s *Store) ReportProgress(ctx context.Context, id, worker string, fence, ageSec int64) error {
+	if ageSec < 0 || ageSec > MaxProgressAgeSec {
+		return ErrInvalid
+	}
+	r := s.db.WithContext(ctx).Model(&Task{}).
+		Where("id = ? AND lease_owner = ? AND fencing_token = ? AND state = 'leased' AND lease_expires_at > clock_timestamp()", id, worker, fence).
+		UpdateColumn("last_event_at", gorm.Expr("GREATEST(COALESCE(last_event_at, '-infinity'::timestamptz), clock_timestamp() - make_interval(secs => ?::double precision))", ageSec))
+	if r.Error != nil {
+		return r.Error
+	}
+	if r.RowsAffected != 1 {
+		return ErrStaleLease
+	}
+	return nil
 }
 func (s *Store) finish(ctx context.Context, id, worker string, fence int64, state string, result json.RawMessage) error {
 	if len(result) == 0 {

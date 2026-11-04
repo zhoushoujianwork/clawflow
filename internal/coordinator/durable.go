@@ -124,6 +124,7 @@ func (s *Store) RecoverExecution(ctx context.Context, id, worker string, epoch i
 			return err
 		}
 		task.Attempt++
+		task.LastEventAt = nil
 		task.FencingToken++
 		task.Result, task.ResultDigest = nil, ""
 		deadline := now.Add(time.Duration(payload.Timeout)*time.Second + DurableReportGrace)

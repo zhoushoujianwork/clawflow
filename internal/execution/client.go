@@ -573,6 +573,9 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	}
 	registerActiveCmd(cmd)
 	defer unregisterActiveCmd(cmd)
+	progress := ProgressFrom(ctx)
+	progress.begin()
+	defer progress.end()
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
@@ -596,7 +599,11 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 			waiting = false
 		case <-ticker.C:
 			if eventErr == nil {
+				seen := tail.seq
 				eventErr = tail.poll()
+				if tail.seq != seen {
+					progress.event()
+				}
 				if eventErr == nil {
 					eventErr = checkpointErr
 				}
