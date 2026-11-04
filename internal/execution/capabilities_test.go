@@ -171,7 +171,7 @@ func TestProbeConfigAndCommandFailures(t *testing.T) {
 		t.Fatalf("report=%+v", r)
 	}
 	cmd := helpScript(t, helpFor(RequiredFlags, ""), 2)
-	r = ProbeCapabilities(context.Background(), Config{Command: cmd})
+	r = ProbeCapabilities(context.Background(), Config{Command: cmd, Profile: "bad\nname"})
 	if r.Status != StatusBlocked || check(r, CheckConfig).Status != CheckBlocked || check(r, CheckHelpProbe).Status != CheckSkipped {
 		t.Fatalf("report=%+v", r)
 	}

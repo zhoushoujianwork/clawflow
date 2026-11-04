@@ -107,11 +107,11 @@ func TestExecutionCheckBlockedJSONOnceAndQuiet(t *testing.T) {
 	}
 }
 
-func TestExecutionCheckMissingProfileBlocked(t *testing.T) {
+func TestExecutionCheckMissingProfileUsesOffloadDefault(t *testing.T) {
 	executionFixture(t, executionHelp(), "2", "")
 	out, _, err := runExecutionCheckCLI(t, "--json")
 	var r execution.Report
-	if err == nil || json.Unmarshal([]byte(out), &r) != nil || r.Status != "blocked" || r.Checks[0].Status != "blocked" {
+	if err != nil || json.Unmarshal([]byte(out), &r) != nil || r.Status != "ready" || r.Profile != "" {
 		t.Fatalf("err=%v out=%q", err, out)
 	}
 }
@@ -250,9 +250,8 @@ func TestExecutionCheckLegacyConfigIsNeverMigrated(t *testing.T) {
 			}
 			continue
 		}
-		msg := r.Checks[0].Message
-		if err == nil || r.Status != "blocked" || !strings.Contains(msg, "legacy repos.yaml") || !strings.Contains(msg, "config.yaml") {
-			t.Fatalf("legacy-only must be actionable: err=%v r=%+v", err, r)
+		if err != nil || r.Status != "ready" || r.Profile != "" {
+			t.Fatalf("legacy-only config must not be migrated and uses the Offload default: err=%v r=%+v", err, r)
 		}
 	}
 }
@@ -291,14 +290,14 @@ func TestExecutionCheckInvalidCanonicalBlocksWithoutMutationOrLeak(t *testing.T)
 	}
 }
 
-func TestExecutionCheckMissingEverythingIsBlockedWithoutWrites(t *testing.T) {
+func TestExecutionCheckMissingEverythingUsesDefaultWithoutWrites(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	clearOffloadEnv(t)
 	before := snapshotDir(t, home)
 	out, _, err := runExecutionCheckCLI(t, "--json")
 	var r execution.Report
-	if err == nil || json.Unmarshal([]byte(out), &r) != nil || r.Status != "blocked" {
+	if json.Unmarshal([]byte(out), &r) != nil || (err == nil) != (r.Status == "ready") || r.Profile != "" {
 		t.Fatalf("err=%v out=%q", err, out)
 	}
 	assertSnapshotEqual(t, before, snapshotDir(t, home))

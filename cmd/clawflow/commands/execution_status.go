@@ -42,9 +42,7 @@ func loadExecutionSettings(get func(string) (string, bool)) (execution.Config, e
 		}
 		c = cfg.Settings.Execution
 	case os.IsNotExist(statErr):
-		if v, ok := get("CLAWFLOW_OFFLOAD_PROFILE"); !ok || v == "" {
-			return c, fmt.Errorf("Offload settings unavailable: configure settings.execution.profile or CLAWFLOW_OFFLOAD_PROFILE")
-		}
+		// No config file: Offload's own default profile applies.
 	default:
 		return c, fmt.Errorf("Offload settings unreadable: ~/.clawflow/config/config.yaml is not accessible")
 	}

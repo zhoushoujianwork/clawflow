@@ -39,8 +39,6 @@ func LoadConfig() (Config, error) {
 	cfg, err := config.Load()
 	if err == nil {
 		c = cfg.Settings.Execution
-	} else if os.Getenv("CLAWFLOW_OFFLOAD_PROFILE") == "" {
-		return c, errors.New("Offload settings unavailable: configure settings.execution.profile or CLAWFLOW_OFFLOAD_PROFILE")
 	}
 	return WithEnvironment(c), nil
 }
@@ -96,8 +94,9 @@ func validateConfigWith(c Config, look func(string) (string, error)) (string, er
 		kind := lookupKind(err)
 		return kind, &UnavailableError{Reason: kind, Message: "Offload unavailable: install offload or set settings.execution.command / CLAWFLOW_OFFLOAD_COMMAND"}
 	}
-	if !validProfile(c.Profile) {
-		return ReasonProfileMissing, &UnavailableError{Reason: ReasonProfileMissing, Message: "Offload readiness: configure an explicit settings.execution.profile / CLAWFLOW_OFFLOAD_PROFILE"}
+	// An empty profile is valid: Offload then selects its own default.
+	if c.Profile != "" && !validProfile(c.Profile) {
+		return ReasonConfigInvalid, &UnavailableError{Reason: ReasonConfigInvalid, Message: "Offload readiness: invalid profile"}
 	}
 	for _, profile := range c.RoleProfiles {
 		if !validProfile(profile) {
@@ -435,7 +434,10 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		return result, err
 	}
 	eventPath := filepath.Join(dir, "events.ndjson") // Offload creates exclusively with mode 0600.
-	args := []string{"-json", "-no-salvage", "-p", c.Profile, "-d", req.Workspace, "-t", (time.Duration(req.TimeoutMS) * time.Millisecond).String(), "-caller-run-id", req.RequestID, "-events-file", eventPath, "-instructions-file", instructions}
+	args := []string{"-json", "-no-salvage", "-d", req.Workspace, "-t", (time.Duration(req.TimeoutMS) * time.Millisecond).String(), "-caller-run-id", req.RequestID, "-events-file", eventPath, "-instructions-file", instructions}
+	if c.Profile != "" { // empty: let Offload choose its default profile
+		args = append(args, "-p", c.Profile)
+	}
 	if req.Resume {
 		args = append(args, "-r", req.SessionKey)
 	}

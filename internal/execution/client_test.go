@@ -250,8 +250,12 @@ func TestOffloadRolesRestrictionsRedactionAndErrors(t *testing.T) {
 func TestOffloadConfigurationRequired(t *testing.T) {
 	c, _ := fixture(t)
 	c.Profile = ""
+	if err := ValidateConfig(c); err != nil {
+		t.Fatalf("empty profile must defer to Offload default: %v", err)
+	}
+	c.Profile = "bad\nname"
 	if ValidateConfig(c) == nil {
-		t.Fatal("implicit profile")
+		t.Fatal("invalid profile")
 	}
 	c.Profile = "test"
 	c.CodexSandbox = "unrestricted"
@@ -484,5 +488,29 @@ func TestSupervisorStateDirIsNotInheritedByOffloadChild(t *testing.T) {
 				t.Fatal("parent environment changed")
 			}
 		})
+	}
+}
+
+func TestEmptyProfileOmitsProfileFlag(t *testing.T) {
+	c, req := fixture(t)
+	c.Profile = ""
+	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "")
+	_ = os.Unsetenv("CLAWFLOW_OFFLOAD_PROFILE")
+	capture := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+	if _, err := Run(context.Background(), c, req, nil, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var call struct{ Args map[string]string }
+	_ = json.Unmarshal(raw, &call)
+	if _, ok := call.Args["-p"]; ok {
+		t.Fatalf("-p must be omitted: %s", raw)
+	}
+	if call.Args["-d"] == "" {
+		t.Fatalf("expected run args: %s", raw)
 	}
 }

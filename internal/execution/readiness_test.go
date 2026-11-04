@@ -141,8 +141,8 @@ func TestReadinessAbsentProfileConfiguration(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	r = CheckReadiness(context.Background(), Config{Command: cmd}, nil, hermetic)
-	if r.Reason != ReasonProfileMissing {
-		t.Fatalf("empty profile: %+v", r)
+	if r.Reason == ReasonProfileMissing {
+		t.Fatalf("empty profile must defer to Offload default: %+v", r)
 	}
 	// A nonempty string alone is never proof the profile exists.
 	r = CheckReadiness(context.Background(), Config{Command: cmd, Profile: "anything"}, nil, hermetic)

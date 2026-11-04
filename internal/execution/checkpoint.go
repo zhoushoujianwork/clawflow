@@ -44,7 +44,7 @@ func ReadCheckpoint(path string) (Checkpoint, error) {
 	if err != nil {
 		return c, err
 	}
-	if json.Unmarshal(raw, &c) != nil || c.Version != 1 || c.Workspace == "" || c.Profile == "" {
+	if json.Unmarshal(raw, &c) != nil || c.Version != 1 || c.Workspace == "" {
 		return c, errors.New("invalid execution checkpoint")
 	}
 	return c, nil

@@ -224,6 +224,9 @@ func CheckReadiness(ctx context.Context, c Config, roles []string, opts Readines
 		} else {
 			check.Status, check.Message = CheckPassed, "selected profile is defined in Offload configuration (credentials not verified)"
 			for _, p := range profiles {
+				if p == "" {
+					continue // Offload's own default profile
+				}
 				if reason, msg := snap.check(p); reason != "" {
 					check.Status, check.Message = CheckBlocked, msg
 					report.Status, report.Reason = StatusBlocked, reason
@@ -332,7 +335,7 @@ type profileSnapshot struct {
 
 func (s profileSnapshot) check(profile string) (string, string) {
 	if strings.TrimSpace(profile) == "" {
-		return ReasonProfileMissing, "No Offload profile is selected for ClawFlow."
+		return "", "" // unset: Offload selects its default
 	}
 	if !s.ConfigExists {
 		return ReasonProfileNotFound, "Offload has no profile configuration (run offload config)."
