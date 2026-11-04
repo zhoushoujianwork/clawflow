@@ -1,93 +1,224 @@
 import SwiftUI
 
 enum Destination: String, CaseIterable, Identifiable {
-    case pipelines = "Pipelines", workers = "Workers", projects = "Projects"
+    case overview, pipelines, workers, projects
     var id: String { rawValue }
-    var symbol: String { switch self { case .pipelines: return "point.3.connected.trianglepath.dotted"; case .workers: return "desktopcomputer"; case .projects: return "folder" } }
-    /// Persisted values from older builds (for example "Issue Queue" or "Tasks") fall back to Pipelines.
-    static func restore(_ raw: String) -> Destination { Destination(rawValue: raw) ?? .pipelines }
+    var title: String {
+        switch self { case .overview: return "概览"; case .pipelines: return "Pipelines"; case .workers: return "Workers"; case .projects: return "Projects" }
+    }
+    /// Persisted values from older builds ("Issue Queue", "Pipelines", "Tasks" …) fall back to the overview.
+    static func restore(_ raw: String) -> Destination { Destination(rawValue: raw) ?? .overview }
     func badge(in snapshot: DashboardSnapshot?) -> String? {
         guard let snapshot else { return nil }
         switch self {
-        case .pipelines: return snapshot.activePipelineCount > 0 ? "\(snapshot.activePipelineCount)" : nil
+        case .overview: return nil
+        case .pipelines: return "\(snapshot.activePipelineCount)"
         case .workers: return "\(snapshot.board.workers.filter(\.live).count)/\(snapshot.board.workers.count)"
         case .projects: return "\(snapshot.uniqueProjects.flatMap(\.repos).filter(\.enabled).count)"
         }
     }
 }
 
+/// Layout constants shared by the pages and the trailing pane.
+enum DashboardLayout {
+    static let pane: CGFloat = 400
+    static let gap: CGFloat = 28
+    /// Below this list width the stage bar hides so the title keeps its room.
+    static let stageBarMinList: CGFloat = 720
+    static var paneFootprint: CGFloat { pane + gap * 2 + 1 }
+}
+
 struct DashboardView: View {
     @ObservedObject var model: DashboardModel
-    @AppStorage("dashboard.destination") private var storedDestination = Destination.pipelines.rawValue
+    @AppStorage("dashboard.destination") private var storedDestination = Destination.overview.rawValue
     @State private var search = ""
-    @State private var projectFilter = ""
+    @State private var repoFilter = ""
+    @State private var showAll = false
+    @State private var selected: IssuePipeline.Identity?
+    @State private var job: String?
+    @State private var autoSelected = false
     private var destination: Destination { Destination.restore(storedDestination) }
-    private var selection: Binding<Destination?> {
-        Binding(get: { destination }, set: { if let next = $0 { storedDestination = next.rawValue } })
-    }
+    private func go(_ next: Destination) { storedDestination = next.rawValue; job = nil }
+
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(nsImage: BrandMark.menuBar)
-                    Text("ClawFlow").font(.headline)
-                    Spacer()
-                }.padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
-                List(Destination.allCases, selection: selection) { item in
-                    Label(item.rawValue, systemImage: item.symbol)
-                        .badge(item.badge(in: model.snapshot).map { Text($0) })
-                        .padding(.vertical, 6).tag(item)
-                }.listStyle(.sidebar)
-                SettingsLink().controlSize(.regular).padding()
-            }.frame(width: 200).background(.bar)
-            Divider()
-            VStack(spacing: 0) {
-                HStack {
-                    Label(model.summary.title, systemImage: model.summary.symbol)
-                    Spacer()
-                    Text(model.snapshot?.controller ?? "Connect in Settings").foregroundStyle(.secondary)
-                }.font(.callout).padding(.horizontal, 18).padding(.vertical, 12).fixedSize(horizontal: false, vertical: true)
-                Divider()
-                if let error = model.error {
-                    Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding(10)
-                }
-                if let error = model.actionError {
-                    HStack { Text(error).foregroundStyle(.orange); Button("Dismiss") { model.actionError = nil } }.font(.caption).padding(10)
-                }
-                if let snapshot = model.snapshot {
-                    switch destination {
-                    case .pipelines: PipelinesView(model: model, snapshot: snapshot, search: search, projectFilter: $projectFilter)
-                    case .workers: WorkersView(model: model, snapshot: snapshot, search: search)
-                    case .projects: ProjectsView(model: model, snapshot: snapshot, search: search) { name in
-                        projectFilter = name; storedDestination = Destination.pipelines.rawValue; search = ""
-                    }
-                    }
-                } else {
-                    ContentUnavailableView {
-                        Label("Connect to ClawFlow", systemImage: "network")
-                    } description: {
-                        Text("Choose a controller in Settings. Tasks and LAN workers keep running when this app is closed.")
-                    } actions: { SettingsLink().buttonStyle(.borderedProminent) }
-                }
-                Divider()
-                HStack {
-                    if let received = model.received {
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
-                            let seconds = Int(context.date.timeIntervalSince(received))
-                            Text("Last received " + (seconds < 60 ? "\(max(0, seconds)) s ago" : relativeAge(received, now: context.date)))
-                        }
-                    }
-                    else { Text("No status received") }
-                    Spacer()
-                    Text(model.snapshot.map { "Controller \($0.version)" } ?? "")
-                }.font(.caption).foregroundStyle(.secondary).padding(8)
+        VStack(spacing: 0) {
+            tabRow
+            if let snapshot = model.snapshot {
+                if destination != .workers { chipRow(snapshot) }
+                messages
+                GeometryReader { proxy in content(snapshot, width: proxy.size.width) }
+            } else {
+                messages
+                ContentUnavailableView {
+                    Label("连接 ClawFlow", systemImage: "network")
+                } description: {
+                    Text("在设置里选择 controller。关闭这个窗口不会停止任务和局域网 Worker。")
+                } actions: { SettingsLink { Text("打开设置") }.buttonStyle(.borderedProminent) }
             }
         }
-        .searchable(text: $search, prompt: "Search \(destination.rawValue.lowercased())")
-        .toolbar {
-            Button { Task { await model.refresh() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }.keyboardShortcut("r")
-        }
+        .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 4)
+        .foregroundStyle(DS.fg)
+        .background(DS.panel)
         .frame(minWidth: 1040, minHeight: 680)
+    }
+
+    private var tabRow: some View {
+        HStack(spacing: 4) {
+            ForEach(Destination.allCases) { item in
+                TabPill(title: item.title, count: item.badge(in: model.snapshot), selected: destination == item) { go(item) }
+            }
+            Spacer(minLength: 12)
+            FreshnessText(summary: model.summary, received: model.received)
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass").foregroundStyle(DS.dim)
+                TextField("搜索", text: $search).textFieldStyle(.plain).frame(width: 130)
+            }.font(DS.sub).padding(.horizontal, 8).padding(.vertical, 4)
+                .background(DS.raise, in: RoundedRectangle(cornerRadius: 8))
+            Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.plain).foregroundStyle(DS.dim).keyboardShortcut("r").help("刷新").accessibilityLabel("刷新")
+            SettingsLink { Image(systemName: "gearshape") }
+                .buttonStyle(.plain).foregroundStyle(DS.dim).help("设置").accessibilityLabel("设置")
+        }
+        .padding(.bottom, 10)
+        .overlay(alignment: .bottom) { DS.line.frame(height: 1) }
+    }
+
+    private func chipRow(_ snapshot: DashboardSnapshot) -> some View {
+        var repos = snapshot.filterRepos
+        if !repoFilter.isEmpty, !repos.contains(where: { $0.name == repoFilter }), let extra = snapshot.repository(repoFilter) { repos.append(extra) }
+        return FlowLayout(spacing: 4) {
+            Chip(title: "全部仓库", selected: repoFilter.isEmpty) { repoFilter = "" }
+            ForEach(repos) { repo in
+                Chip(title: repo.shortName, selected: repoFilter == repo.name) { repoFilter = repo.name }.help(repo.name)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 9)
+        .overlay(alignment: .bottom) { DS.line.frame(height: 1) }
+    }
+
+    @ViewBuilder private var messages: some View {
+        if let error = model.error {
+            Text(error).font(DS.small).foregroundStyle(DS.warn).textSelection(.enabled).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        if let pending = model.pendingAction {
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text(pending.textZh) }
+                .font(DS.small).foregroundStyle(DS.dim).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        if let error = model.actionError {
+            HStack {
+                Text(error).foregroundStyle(DS.warn).textSelection(.enabled)
+                Button("关闭") { model.actionError = nil }.buttonStyle(DButtonStyle())
+            }.font(DS.small).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func matches(_ row: IssuePipeline) -> Bool {
+        (repoFilter.isEmpty || row.repo == repoFilter) &&
+        (search.isEmpty || "\(row.repo) \(row.reference) \(row.title)".localizedCaseInsensitiveContains(search))
+    }
+
+    @ViewBuilder private func content(_ snapshot: DashboardSnapshot, width: CGFloat) -> some View {
+        let rows = snapshot.issuePipelines.filter(matches)
+        let showsPane = (destination == .overview || destination == .pipelines) && selected != nil
+        let listWidth = showsPane ? width - DashboardLayout.paneFootprint : width
+        let selection = Binding<IssuePipeline.Identity?>(get: { selected }, set: { selected = $0; job = nil })
+        HStack(alignment: .top, spacing: 0) {
+            Group {
+                switch destination {
+                case .overview:
+                    OverviewPage(model: model, snapshot: snapshot, rows: rows, repoFilter: repoFilter,
+                                 selected: selection, showStages: listWidth >= DashboardLayout.stageBarMinList)
+                case .pipelines:
+                    PipelinesPage(model: model, snapshot: snapshot, rows: rows, showAll: $showAll,
+                                  selected: selection, showStages: listWidth >= DashboardLayout.stageBarMinList)
+                case .workers:
+                    WorkersPage(model: model, snapshot: snapshot, search: search)
+                case .projects:
+                    ProjectsPage(model: model, snapshot: snapshot, search: search, repoFilter: repoFilter) { name in
+                        repoFilter = name; search = ""; go(.pipelines)
+                    }
+                }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            if showsPane, let identity = selected {
+                HStack(spacing: 0) {
+                    DS.line.frame(width: 1)
+                    PipelinePane(model: model, snapshot: snapshot, identity: identity, job: $job) { selected = nil; job = nil }
+                        .padding(.leading, DashboardLayout.gap)
+                }
+                .frame(width: DashboardLayout.pane + DashboardLayout.gap + 1)
+                .padding(.leading, DashboardLayout.gap)
+            }
+        }
+        .onExitCommand { selected = nil; job = nil }
+        .onAppear { autoSelect(snapshot, width: width) }
+        .onChange(of: width) { _, next in autoSelect(snapshot, width: next) }
+    }
+
+    /// Opens the first attention pipeline once, only when the window fits the pane next to a full list.
+    private func autoSelect(_ snapshot: DashboardSnapshot, width: CGFloat) {
+        guard !autoSelected, selected == nil else { return }
+        guard width >= DashboardLayout.paneFootprint + DashboardLayout.stageBarMinList else { return }
+        autoSelected = true
+        selected = snapshot.issuePipelines.first { $0.group == .attention }?.id
+    }
+}
+
+/// "已连接 · 12 秒前"; stale and disconnected states use their own wording and stop the dot.
+struct FreshnessText: View {
+    let summary: StatusSummary
+    let received: Date?
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(summary.connected ? DS.bar : DS.faint).frame(width: 7, height: 7)
+            if summary.connected, let received {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let seconds = max(0, Int(context.date.timeIntervalSince(received)))
+                    Text("已连接 · " + (seconds < 60 ? "\(seconds) 秒前" : relativeAge(received, now: context.date)))
+                }
+            } else {
+                Text(summary.freshnessZh)
+            }
+        }
+        .font(DS.small).foregroundStyle(summary.connected ? DS.dim : DS.warn)
+        .monospacedDigit().lineLimit(1)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Wraps chips onto several lines, like the mock's flex-wrap row.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0, height: rows.reduce(0) { $0 + $1.height } + spacing * CGFloat(max(0, rows.count - 1)))
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for index in row.items {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+    private struct Row { var items: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+    private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
+        var rows = [Row()]
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            if !rows[rows.count - 1].items.isEmpty, rows[rows.count - 1].width + spacing + size.width > width { rows.append(Row()) }
+            var row = rows[rows.count - 1]
+            row.width += (row.items.isEmpty ? 0 : spacing) + size.width
+            row.height = max(row.height, size.height)
+            row.items.append(index)
+            rows[rows.count - 1] = row
+        }
+        return rows
     }
 }
 
@@ -99,45 +230,57 @@ struct TaskDetail: View {
     @State private var events: [TaskEvent] = []
     @State private var eventError: String?
     @State private var loading = false
+    private var state: StageState { IssuePipeline.jobState(row).0 }
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 8) {
-                    ActivityBadge(activity: row.activity)
-                    TaskStateLabel(row: row, connected: model.summary.connected).font(.callout.weight(.medium))
-                }
-                Text(row.displayTitle).font(.headline).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                Text(row.reason).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                FactGrid {
-                    Fact("Repository", "\(row.repo) \(row.reference)")
-                    Fact("Worker", row.worker.isEmpty ? "Unassigned" : row.worker)
-                    if row.group == .running || row.startedAt != nil {
-                        Fact("Elapsed") { TaskElapsedText(row: row, connected: model.summary.connected, frozenAt: snapshot.board.generatedAt).monospacedDigit() }
+        VStack(alignment: .leading, spacing: 0) {
+            DSection {
+                Text(row.displayTitle).font(DS.h2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                Text("\(row.kindZh) · \(row.statusZh)").font(DS.sub).foregroundStyle(state.tone.textColor).padding(.top, 3)
+            }
+            DSection {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
+                    GridRow { Fact("类型", row.kindZh); Fact("Worker", row.worker.isEmpty ? "未分配" : row.worker) }
+                    GridRow {
+                        Fact("耗时") { TaskElapsedText(row: row, connected: model.summary.connected, frozenAt: snapshot.board.generatedAt) }
+                        Fact("第几次", "\(row.attempt + 1)")
                     }
-                    Fact("Attempt", "\(row.attempt + 1)")
-                    Fact("Last update", relativeAge(row.updatedAt, now: snapshot.board.generatedAt))
-                    if !row.tags.isEmpty { Fact("Required tags", row.tags.joined(separator: ", ")) }
-                }.font(.callout)
-                HStack(spacing: 8) {
-                    if let link = row.link(in: snapshot) { Link(row.issue > 0 ? "Open issue" : "Open PR", destination: link) }
-                    if row.issue > 0, let pr = row.prLink(in: snapshot) { Link("Open PR #\(row.pr)", destination: pr) }
-                }.buttonStyle(.bordered).controlSize(.regular)
-                Divider()
-                Label("Full Offload execution output is not available in this build.", systemImage: "terminal")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                DisclosureGroup("Coordinator activity", isExpanded: $showEvents) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Scheduling events · refreshes every 5 seconds while connected.").font(.caption).foregroundStyle(.secondary)
+                    GridRow {
+                        Fact("最近更新", relativeAge(row.updatedAt, now: snapshot.board.generatedAt))
+                        Fact("需要标签", row.tags.isEmpty ? "—" : row.tags.joined(separator: ", "))
+                    }
+                }
+                FlowLayout(spacing: 6) {
+                    if let link = row.link(in: snapshot) { Link(destination: link) { Text(row.issue > 0 ? "打开 Issue" : "打开 PR") }.buttonStyle(DButtonStyle()) }
+                    if row.issue > 0, let pr = row.prLink(in: snapshot) { Link(destination: pr) { Text("PR #\(row.pr)") }.buttonStyle(DButtonStyle()) }
+                }.padding(.top, 10)
+            }
+            if let reason = row.meaningfulReasonZh {
+                DSection {
+                    DLabel(text: "原因", top: 0)
+                    Text(reason).font(DS.sub).foregroundStyle(DS.dim).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            DSection(rule: false) {
+                DLabel(text: "执行日志", top: 0)
+                Text("这里放 Offload 的消息和工具调用，现在只有调度事件。").font(DS.sub).foregroundStyle(DS.dim).fixedSize(horizontal: false, vertical: true)
+                DisclosureGroup("调度事件", isExpanded: $showEvents) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("连接时每 5 秒刷新。").font(DS.small).foregroundStyle(DS.dim)
                         if loading { ProgressView().controlSize(.small) }
-                        if let eventError { Text(eventError).foregroundStyle(.orange) }
+                        if let eventError { Text(eventError).font(DS.small).foregroundStyle(DS.warn).textSelection(.enabled) }
                         ForEach(Array(events.enumerated()), id: \.offset) { _, event in
-                            HStack(alignment: .top) { Text(event.at, style: .time).foregroundStyle(.secondary); Text(event.action).textSelection(.enabled) }.font(.caption.monospaced())
+                            HStack(alignment: .top) {
+                                Text(event.at, format: .dateTime.hour().minute().second()).foregroundStyle(DS.dim)
+                                Text(event.action).textSelection(.enabled)
+                            }.font(.caption.monospaced())
                         }
-                        Button("Refresh activity") { Task { await loadEvents() } }.disabled(!model.summary.connected || loading)
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
-                }.onChange(of: showEvents) { _, expanded in if expanded { Task { await loadEvents() } } }
-                Text("Task ID: \(row.id)").font(.caption).foregroundStyle(.tertiary).textSelection(.enabled)
-            }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                        Button("刷新事件") { Task { await loadEvents() } }.buttonStyle(DButtonStyle()).disabled(!model.summary.connected || loading)
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                }
+                .font(DS.sub).padding(.top, 8)
+                .onChange(of: showEvents) { _, expanded in if expanded { Task { await loadEvents() } } }
+                Text("Task ID：\(row.id)").font(DS.small).foregroundStyle(DS.faint).textSelection(.enabled).padding(.top, 10)
+            }
         }
         .task(id: row.id) {
             while !Task.isCancelled {
@@ -160,221 +303,114 @@ struct TaskDetail: View {
     }
 }
 
-struct ActivityBadge: View {
-    let activity: TaskActivity
-    var body: some View {
-        Label(activity.title, systemImage: activity.symbol)
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(.quaternary, in: Capsule())
-    }
-}
-
-/// Aligned facts for a narrow detail pane.
-struct FactGrid<Content: View>: View {
-    @ViewBuilder let content: Content
-    var body: some View {
-        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) { content }
-    }
-}
-struct Fact<Value: View>: View {
-    let label: String
-    @ViewBuilder let value: Value
-    init(_ label: String, @ViewBuilder value: () -> Value) { self.label = label; self.value = value() }
-    var body: some View {
-        GridRow(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-            value.textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-extension Fact where Value == Text {
-    init(_ label: String, _ text: String) { self.init(label) { Text(text) } }
-}
-
-struct Pill: View {
-    let text: String
-    var tint: Color = .secondary
-    var body: some View {
-        Text(text).font(.caption).foregroundStyle(tint)
-            .padding(.horizontal, 7).padding(.vertical, 2)
-            .background(tint.opacity(0.14), in: Capsule())
-            .fixedSize()
-    }
-}
-
-/// One section header style for Pipelines, Workers and Projects.
-struct SectionHeader: View {
-    let title: String
-    var count: Int?
-    var body: some View {
-        HStack(spacing: 6) {
-            Text(title).font(.subheadline.weight(.semibold))
-            if let count { Text("\(count)").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary) }
-            Spacer()
-        }
-    }
-}
-
-struct DashboardEmptyState: View {
-    let title: String
-    let symbol: String
-    let detail: String
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 28)).foregroundStyle(.tertiary)
-            Text(title).font(.headline)
-            Text(detail).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-        }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-struct TaskStateLabel: View {
-    let row: TaskRow
-    let connected: Bool
-    var body: some View {
-        let state = IssuePipeline.jobState(row).0
-        HStack(spacing: 6) {
-            StageGlyph(state: state, connected: connected)
-            Text(row.status).lineLimit(1)
-        }.help(connected ? row.reason : "Last known status · connection unavailable")
-    }
-}
-
-struct WorkersView: View {
+struct WorkersPage: View {
     @ObservedObject var model: DashboardModel
     let snapshot: DashboardSnapshot
     let search: String
-    @State private var selected: String?
     @State private var adding = false
-    @State private var removing = false
+    @State private var removing: String?
     private var rows: [WorkerRow] { snapshot.board.workers.filter { search.isEmpty || "\($0.name) \($0.tags.joined(separator: " "))".localizedCaseInsensitiveContains(search) } }
-    private var current: WorkerRow? { rows.first { $0.id == selected } ?? rows.first }
-    private var selection: Binding<String?> { Binding(get: { current?.id }, set: { selected = $0 }) }
-    private func availabilityTint(_ row: WorkerRow) -> Color { row.live && !row.paused ? .secondary : .orange }
-    private func references(_ row: WorkerRow) -> String {
-        snapshot.board.tasks.filter { $0.worker == row.name && $0.group != .history }.map { "\($0.repoShortName) \($0.reference)" }.joined(separator: ", ")
-    }
+    private var canAct: Bool { model.summary.connected && !model.busy }
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("\(snapshot.board.workers.filter(\.live).count) of \(snapshot.board.workers.count) online").foregroundStyle(.secondary)
-                Spacer()
-                Button("Add Worker") { adding = true }.disabled(!model.summary.connected || model.busy)
-            }.controlSize(.regular).padding(.horizontal, 20).frame(height: 56)
-            Divider()
-            HStack(spacing: 0) {
-                List(selection: selection) {
-                    Section { ForEach(rows) { row in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Label(row.name, systemImage: row.live ? "desktopcomputer" : "wifi.slash").fontWeight(.medium).lineLimit(1)
-                                Spacer()
-                                Text("\(row.runningTasks.count)/\(row.maxParallel)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                            }
-                            HStack(spacing: 6) {
-                                Pill(text: row.state, tint: availabilityTint(row))
-                                Text(row.roles.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                        }.padding(.vertical, 4).frame(minHeight: 48).tag(row.id)
-                    } } header: { SectionHeader(title: "Workers", count: rows.count) }
-                }.frame(width: 320).frame(maxHeight: .infinity)
-                    .overlay { if rows.isEmpty { DashboardEmptyState(title: "No workers", symbol: "desktopcomputer", detail: "Add a worker to run tasks.") } }
-                Divider()
-                if let row = current { detail(row) }
-                else { Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity) }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.sheet(isPresented: $adding) { AddWorkerView(model: model) }
-    }
-    private func detail(_ row: WorkerRow) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 8) {
-                    Text(row.name).font(.title3.weight(.semibold)).textSelection(.enabled)
-                    Pill(text: row.state, tint: availabilityTint(row))
-                }
-                FactGrid {
-                    Fact("Capacity", "\(row.runningTasks.count)/\(row.maxParallel) running")
-                    Fact("Roles", row.roles.isEmpty ? "—" : row.roles.joined(separator: ", "))
-                    Fact("Tags", row.tags.isEmpty ? "No project tags" : row.tags.joined(separator: ", "))
-                    Fact("Last contact", row.lastSeen.map { relativeAge($0, now: snapshot.board.generatedAt) } ?? "Unavailable")
-                    let refs = references(row)
-                    Fact("Running", refs.isEmpty ? "—" : refs)
-                }.font(.callout)
-                Divider()
-                HStack {
-                    Button(row.paused ? "Resume assignments" : "Stop new assignments") { Task { await model.perform(row.paused ? "resume" : "drain", name: row.name) } }
-                        .disabled(!model.summary.connected || model.busy || row.revoked)
-                    Button("Remove worker", role: .destructive) { removing = true }
-                        .disabled(!model.summary.connected || model.busy || row.revoked || !row.paused || snapshot.board.tasks.contains { $0.worker == row.name && $0.state == "leased" })
-                        .confirmationDialog("Revoke access for \(row.name)?", isPresented: $removing) {
-                            Button("Remove worker", role: .destructive) { Task { await model.perform("remove", name: row.name) } }
-                        } message: { Text("Historical tasks remain. This worker credential will no longer authenticate.") }
-                }
-                Text("Stopping assignments lets active tasks finish. Eligibility follows repository and worker tags; review tags before resuming a new worker.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }.padding(20).frame(maxWidth: 640, alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-struct ProjectsView: View {
-    @ObservedObject var model: DashboardModel
-    let snapshot: DashboardSnapshot
-    let search: String
-    let showPipelines: (String) -> Void
-    private var activeByRepo: [String: Int] {
-        snapshot.issuePipelines.filter { $0.group != .history }.reduce(into: [:]) { $0[$1.repo, default: 0] += 1 }
-    }
-    private var projects: [ProjectRow] {
-        snapshot.uniqueProjects.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.repos.contains { $0.name.localizedCaseInsensitiveContains(search) } }
-    }
-    var body: some View {
-        let active = activeByRepo
-        let idle = projects.flatMap(\.repos).filter { (active[$0.name] ?? 0) == 0 && $0.queueError == nil }
-        VStack(spacing: 0) {
-            HStack {
-                Text("\(snapshot.uniqueProjects.flatMap(\.repos).filter(\.enabled).count) repositories monitored").foregroundStyle(.secondary)
-                Spacer()
-            }.padding(.horizontal, 20).frame(height: 56)
-            Divider()
-            List {
-                ForEach(projects) { project in
-                    let busy = project.repos.filter { (active[$0.name] ?? 0) > 0 || $0.queueError != nil }
-                    if !busy.isEmpty {
-                        Section {
-                            ForEach(busy) { repo in line(repo, active: active[repo.name] ?? 0) }
-                        } header: {
-                            HStack {
-                                SectionHeader(title: project.name)
-                                Button("View pipelines") { showPipelines(project.name) }.buttonStyle(.plain).foregroundStyle(.secondary).font(.caption)
-                            }
-                        }
+            VStack(alignment: .leading, spacing: 0) {
+                DSection {
+                    HStack {
+                        Text("\(snapshot.board.workers.filter(\.live).count)/\(snapshot.board.workers.count) 在线").font(DS.sub).foregroundStyle(DS.dim)
+                        Spacer()
+                        Button("添加 Worker") { adding = true }.buttonStyle(DButtonStyle()).disabled(!canAct)
                     }
                 }
-                if !idle.isEmpty {
-                    Section {
-                        ForEach(idle) { repo in line(repo, active: 0) }
-                    } header: { SectionHeader(title: "Nothing active", count: idle.count) }
+                if rows.isEmpty { DashboardEmptyState(text: "没有 Worker") }
+                ForEach(rows) { worker in card(worker) }
+                Text("停止新派发会让正在跑的任务继续完成。能否派发取决于仓库和 Worker 的标签；恢复新 Worker 前先检查标签。")
+                    .font(DS.small).foregroundStyle(DS.dim).fixedSize(horizontal: false, vertical: true).padding(.top, 12)
+            }
+        }
+        .sheet(isPresented: $adding) { AddWorkerView(model: model) }
+    }
+    private func card(_ w: WorkerRow) -> some View {
+        let active = snapshot.board.tasks.filter { $0.worker == w.name && $0.group != .history }
+        let leased = snapshot.board.tasks.contains { $0.worker == w.name && $0.state == "leased" }
+        return DSection {
+            DHeader(title: Text(w.name)) { Text(w.stateZh).foregroundStyle(w.live && !w.paused ? DS.dim : DS.warn) }
+            HStack(spacing: 2) {
+                ForEach(0..<max(w.maxParallel, 0), id: \.self) { slot in TrackSegment(color: slot < w.runningTasks.count ? DS.bar : DS.track) }
+            }
+            .frame(height: 7).padding(.top, 9).padding(.bottom, 7)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(w.name) 槽位：\(w.maxParallel) 个中 \(w.runningTasks.count) 个在跑")
+            HStack {
+                Text("运行中 \(w.runningTasks.count)/\(w.maxParallel)" + (w.roles.isEmpty ? "" : " · " + w.roles.joined(separator: "、")))
+                Spacer()
+                Text("最近联系 \(relativeAge(w.lastSeen, now: snapshot.board.generatedAt))")
+            }.font(DS.sub).foregroundStyle(DS.dim).monospacedDigit()
+            if !w.tags.isEmpty { Text("标签：" + w.tags.joined(separator: ", ")).font(DS.small).foregroundStyle(DS.dim).padding(.top, 2) }
+            if !active.isEmpty {
+                Text("在跑：" + active.map { "\($0.repoShortName) \($0.reference)" }.joined(separator: ", ")).font(DS.small).foregroundStyle(DS.dim).padding(.top, 2)
+            }
+            HStack(spacing: 6) {
+                Button(w.paused ? "恢复派发" : "停止新派发") { Task { await model.perform(w.paused ? "resume" : "drain", name: w.name) } }
+                    .buttonStyle(DButtonStyle()).disabled(!canAct || w.revoked)
+                Button("移除") { removing = w.name }
+                    .buttonStyle(DButtonStyle(role: .destructive)).disabled(!canAct || w.revoked || !w.paused || leased)
+                    .help(w.paused ? "撤销这个 Worker 的凭证" : "先停止新派发，等任务结束后再移除")
+            }.padding(.top, 10)
+            .confirmationDialog("撤销 \(w.name) 的访问？", isPresented: Binding(get: { removing == w.name }, set: { if !$0 { removing = nil } })) {
+                Button("移除 Worker", role: .destructive) { Task { await model.perform("remove", name: w.name) } }
+            } message: { Text("历史任务会保留。这个 Worker 的凭证将不能再认证。") }
+        }
+    }
+}
+
+struct ProjectsPage: View {
+    @ObservedObject var model: DashboardModel
+    let snapshot: DashboardSnapshot
+    let search: String
+    let repoFilter: String
+    let showPipelines: (String) -> Void
+    var body: some View {
+        let active = snapshot.issuePipelines.filter { $0.group != .history }.reduce(into: [String: Int]()) { $0[$1.repo, default: 0] += 1 }
+        let repos = snapshot.uniqueProjects.flatMap(\.repos).filter {
+            (repoFilter.isEmpty || $0.name == repoFilter) && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search))
+        }
+        let on = repos.filter { (active[$0.name] ?? 0) > 0 || $0.queueError != nil }
+        let off = repos.filter { repo in !on.contains { $0.id == repo.id } }
+        ScrollView {
+            DSection(rule: false) {
+                DLabel(text: "有活动的仓库 \(on.count)", top: 0)
+                if on.isEmpty { Text("没有").font(DS.sub).foregroundStyle(DS.dim) }
+                ForEach(on) { repo in line(repo, active: active[repo.name] ?? 0) }
+                if !off.isEmpty {
+                    DLabel(text: "其他仓库 \(off.count)")
+                    ForEach(off) { repo in line(repo, active: 0) }
                 }
-            }.overlay { if projects.isEmpty { DashboardEmptyState(title: "No matching projects", symbol: "folder", detail: "Enable a repository with the clawflow CLI.") } }
+            }
         }
     }
     private func line(_ repo: RepoRow, active: Int) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
-                Text(repo.name).fontWeight(.medium).foregroundStyle(repo.enabled ? .primary : .secondary).lineLimit(1).help(repo.name)
-                Spacer(minLength: 8)
-                Text(active > 0 ? "\(active) active" : repo.idleNote).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                if let skipped = repo.skippedIssues, skipped > 0 { Text("· \(skipped) skipped").font(.caption).foregroundStyle(.secondary) }
-                Pill(text: "CI \(repo.ciRequired ? "required" : "optional")", tint: repo.ciRequired ? .blue : .secondary)
-                Pill(text: "Acceptance \(repo.acceptanceRequired ? "required" : "optional")", tint: repo.acceptanceRequired ? .blue : .secondary)
-                Pill(text: "Auto-merge \(repo.autoMerge ? "on" : "off")", tint: repo.autoMerge ? .blue : .secondary)
-                Button(repo.enabled ? "Pause" : "Resume") { Task { await model.perform(repo.enabled ? "disable" : "enable", name: repo.name) } }
-                    .disabled(!model.summary.connected || model.busy)
+        HStack(alignment: .center, spacing: 10) {
+            RowButton(action: { showPipelines(repo.name) }) {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 2) {
+                    GridRow {
+                        Text(repo.name).fontWeight(.semibold).foregroundStyle(repo.enabled ? DS.fg : DS.dim).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                        Text(active > 0 ? "\(active) 条进行中" : repo.idleNote).fontWeight(.semibold).gridColumnAlignment(.trailing)
+                    }
+                    GridRow {
+                        (Text((repo.skippedIssues ?? 0) > 0 ? "\(repo.skippedIssues!) 条跳过 · " : "")
+                         + (repo.queueError.map { Text($0).foregroundStyle(DS.warn) + Text(" · ") } ?? Text(""))
+                         + Text(repo.queueUpdatedAt.map { "队列 " + relativeAge($0, now: snapshot.board.generatedAt) } ?? "未评估"))
+                            .font(DS.small).foregroundStyle(DS.dim).lineLimit(1).help(repo.queueError ?? "")
+                        HStack(spacing: 4) {
+                            Pill(text: "CI", on: repo.ciRequired); Pill(text: "验收", on: repo.acceptanceRequired); Pill(text: "自动合并", on: repo.autoMerge)
+                        }
+                    }
+                }
             }
-            if let error = repo.queueError { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2).textSelection(.enabled) }
-            if !repo.workerTags.isEmpty { Text("Worker tags: " + repo.workerTags.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
-        }.padding(.vertical, 4)
+            .help("在 Pipelines 里查看 \(repo.name)")
+            Button(repo.enabled ? "暂停" : "恢复") { Task { await model.perform(repo.enabled ? "disable" : "enable", name: repo.name) } }
+                .buttonStyle(DButtonStyle()).disabled(!model.summary.connected || model.busy)
+                .help(repo.enabled ? "暂停只是不再接新 Issue，排队和运行中的任务不会停止" : "恢复监控这个仓库")
+        }
     }
 }

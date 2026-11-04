@@ -1,275 +1,337 @@
 import SwiftUI
 
-/// The one tone-to-color mapping for pipelines, stages and jobs. Finished is neutral, never green.
-enum PipelineTone {
-    case neutral, muted, running, attention, failed
-    var color: Color {
-        switch self {
-        case .neutral: return .secondary
-        case .muted: return Color(nsColor: .tertiaryLabelColor)
-        case .running: return .blue
-        case .attention: return .orange
-        case .failed: return .red
-        }
-    }
-}
 extension StageState {
     var tone: PipelineTone {
         switch self {
-        case .finished, .waiting, .pending: return .neutral
-        case .notReported: return .muted
+        case .finished: return .finished
+        case .waiting: return .waiting
         case .running: return .running
         case .attention: return .attention
         case .failed: return .failed
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .pending: return "circle"
-        case .waiting: return "clock"
-        case .running: return "arrow.triangle.2.circlepath.circle"
-        case .finished: return "checkmark.circle"
-        case .failed: return "xmark.circle.fill"
-        case .attention: return "exclamationmark.circle.fill"
-        case .notReported: return "circle.dashed"
-        }
-    }
-}
-extension IssuePipeline {
-    var stageState: StageState {
-        switch group {
-        case .attention: return .attention
-        case .running: return .running
-        case .waiting: return .waiting
-        case .history: return jobs.first?.state == "failed" ? .failed : .finished
+        case .pending: return .pending
+        case .notReported: return .notReported
         }
     }
 }
 
-struct StageGlyph: View {
-    let state: StageState
-    let connected: Bool
+/// Segmented stage bar with tiny labels. The accessibility label carries every state in words.
+struct StageBar: View {
+    let stages: [PipelineStage]
+    var width: CGFloat = 168
     var body: some View {
-        Group {
-            if state == .running && connected { ProgressView().controlSize(.mini) }
-            else { Image(systemName: state.symbol).foregroundStyle(state.tone.color) }
-        }.frame(width: 16, height: 16)
-    }
-}
-
-private enum PipelineColumns {
-    static let status: CGFloat = 130, graph: CGFloat = 250, worker: CGFloat = 100, age: CGFloat = 80
-    static let spacing: CGFloat = 12, inset: CGFloat = 16
-    static func showMeta(_ width: CGFloat) -> Bool { width >= 760 }
-    static func showGraph(_ width: CGFloat) -> Bool { width >= 720 }
-}
-
-struct PipelinesView: View {
-    @ObservedObject var model: DashboardModel
-    let snapshot: DashboardSnapshot
-    let search: String
-    @Binding var projectFilter: String
-    @State private var showAll = false
-    @State private var selected: IssuePipeline.Identity?
-    private var rows: [IssuePipeline] {
-        let repos = snapshot.projects.first { $0.name == projectFilter }?.repos.map(\.name)
-        return snapshot.issuePipelines.filter {
-            (showAll || $0.group != .history) &&
-            (projectFilter.isEmpty || repos?.contains($0.repo) == true) &&
-            (search.isEmpty || "\($0.repo) \($0.reference) \($0.title)".localizedCaseInsensitiveContains(search))
-        }
-    }
-    var body: some View {
-        let rows = rows
-        VStack(spacing: 0) {
-            topBar(rows)
-            Divider()
-            HStack(spacing: 0) {
-                GeometryReader { proxy in
-                    PipelineList(rows: rows, selected: $selected, connected: model.summary.connected,
-                                 frozenAt: snapshot.board.generatedAt, width: proxy.size.width)
-                }.frame(minWidth: 380)
-                if let selected {
-                    Divider()
-                    PipelinePane(model: model, snapshot: snapshot, identity: selected) { self.selected = nil }
-                        .id(selected)
-                        .frame(minWidth: 360, idealWidth: 420, maxWidth: 560)
+        VStack(spacing: 3) {
+            HStack(spacing: 2) {
+                ForEach(stages) { stage in
+                    TrackSegment(color: stage.state.tone.color, dashed: stage.state == .notReported)
+                        .help("\(stage.title)：\(stage.state.text)")
+                }
+            }.frame(height: 6)
+            HStack(spacing: 2) {
+                ForEach(stages) { stage in
+                    Text(stage.title).font(DS.tiny).foregroundStyle(DS.faint).lineLimit(1).frame(maxWidth: .infinity)
                 }
             }
         }
-    }
-    private func topBar(_ rows: [IssuePipeline]) -> some View {
-        let attention = rows.filter { $0.group == .attention }.count
-        let running = rows.filter { $0.group == .running }.count
-        let waiting = rows.filter { $0.group == .waiting }.count
-        return HStack(spacing: 12) {
-            Picker("Pipelines", selection: $showAll) { Text("Active").tag(false); Text("All").tag(true) }
-                .labelsHidden().pickerStyle(.segmented).frame(width: 140)
-            Picker("Project", selection: $projectFilter) {
-                Text("All projects").tag("")
-                ForEach(snapshot.projects) { Text($0.name).tag($0.name) }
-            }.labelsHidden().frame(maxWidth: 200)
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("\(attention) needs attention · \(running) running · \(waiting) waiting")
-                    .foregroundStyle(attention > 0 ? AnyShapeStyle(PipelineTone.attention.color) : AnyShapeStyle(.secondary))
-                if let throughput = snapshot.board.throughput {
-                    Text(throughputLabel(throughput, generatedAt: snapshot.board.generatedAt)).foregroundStyle(.secondary)
-                }
-            }.font(.caption).lineLimit(1)
-        }.controlSize(.regular).padding(.horizontal, 20).frame(height: 56)
-    }
-}
-
-struct PipelineList: View {
-    let rows: [IssuePipeline]
-    @Binding var selected: IssuePipeline.Identity?
-    let connected: Bool
-    let frozenAt: Date
-    let width: CGFloat
-    var body: some View {
-        VStack(spacing: 0) {
-            PipelineColumnHeader(width: width)
-            Divider()
-            List(selection: $selected) {
-                ForEach([TaskGroup.attention, .running, .waiting, .history], id: \.rawValue) { group in
-                    let members = rows.filter { $0.group == group }
-                    if !members.isEmpty {
-                        Section {
-                            ForEach(members) { row in
-                                PipelineRow(row: row, connected: connected, frozenAt: frozenAt, width: width)
-                                    .tag(row.id)
-                                    .listRowSeparator(.visible)
-                                    .listRowInsets(EdgeInsets(top: 0, leading: PipelineColumns.inset, bottom: 0, trailing: PipelineColumns.inset))
-                            }
-                        } header: { SectionHeader(title: group.title, count: members.count) }
-                    }
-                }
-            }
-            .listStyle(.plain)
-            .alternatingRowBackgrounds(.disabled)
-            .onExitCommand { selected = nil }
-            .overlay { if rows.isEmpty { DashboardEmptyState(title: "No matching pipelines", symbol: "point.3.connected.trianglepath.dotted", detail: "Each known issue appears once. Switch to All to include finished pipelines.") } }
-        }
-    }
-}
-
-struct PipelineColumnHeader: View {
-    let width: CGFloat
-    var body: some View {
-        HStack(spacing: PipelineColumns.spacing) {
-            Text("Status").frame(width: PipelineColumns.status, alignment: .leading)
-            Text("Issue").frame(maxWidth: .infinity, alignment: .leading)
-            if PipelineColumns.showGraph(width) { Text("Stages").frame(width: PipelineColumns.graph, alignment: .leading) }
-            if PipelineColumns.showMeta(width) {
-                Text("Worker").frame(width: PipelineColumns.worker, alignment: .leading)
-                Text("Age").frame(width: PipelineColumns.age, alignment: .trailing)
-            }
-        }
-        .font(.caption.weight(.medium)).foregroundStyle(.secondary)
-        // List rows add their own inset; match it so header and cells align.
-        .padding(.horizontal, PipelineColumns.inset + 8).frame(height: 28)
+        .frame(width: width)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(stages.map { "\($0.title)：\($0.state.text)" }.joined(separator: "，") + "。Job 状态，不代表交付结论。")
     }
 }
 
 struct PipelineRow: View {
     let row: IssuePipeline
-    let connected: Bool
-    let frozenAt: Date
-    let width: CGFloat
+    let selected: Bool
+    let showStages: Bool
+    let select: () -> Void
     private var secondary: String {
-        "\(row.repoShortName) \(row.reference)" + (row.prs.isEmpty ? "" : " · PR " + row.prs.map { "#\($0)" }.joined(separator: ", "))
+        ([row.repoShortName + " " + row.reference] + (row.prs.isEmpty ? [] : ["PR " + row.prs.map { "#\($0)" }.joined(separator: ", ")]))
+            .joined(separator: " · ")
     }
     var body: some View {
-        HStack(spacing: PipelineColumns.spacing) {
+        RowButton(selected: selected, action: select) {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.title).fontWeight(.semibold).lineLimit(1).help(row.title)
+                    (Text(secondary).foregroundStyle(DS.dim)
+                     + (row.rowNote.map { Text(" · ") + Text($0).foregroundStyle(row.group == .attention ? DS.warn : DS.dim) } ?? Text("")))
+                        .font(DS.small).lineLimit(1).truncationMode(.tail)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                if showStages { StageBar(stages: row.stages) }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(row.title)，\(row.status)" + (row.rowNote.map { "，\($0)" } ?? ""))
+    }
+}
+
+/// Rows grouped under dim labels; selection toggles, as in the mock.
+struct PipelineSections: View {
+    let groups: [(String, [IssuePipeline])]
+    @Binding var selected: IssuePipeline.Identity?
+    let showStages: Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+                DLabel(text: group.0, top: index == 0 ? 0 : 14)
+                ForEach(group.1) { row in
+                    PipelineRow(row: row, selected: selected == row.id, showStages: showStages) {
+                        selected = selected == row.id ? nil : row.id
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Up/down keys move the selection through the visible rows.
+private struct KeyboardSelection: ViewModifier {
+    let order: [IssuePipeline.Identity]
+    @Binding var selected: IssuePipeline.Identity?
+    func body(content: Content) -> some View {
+        content.focusable().focusEffectDisabled()
+            .onKeyPress(.downArrow) { move(1) }
+            .onKeyPress(.upArrow) { move(-1) }
+    }
+    private func move(_ step: Int) -> KeyPress.Result {
+        guard !order.isEmpty else { return .ignored }
+        let index = selected.flatMap { order.firstIndex(of: $0) }.map { $0 + step } ?? (step > 0 ? 0 : order.count - 1)
+        selected = order[min(max(index, 0), order.count - 1)]
+        return .handled
+    }
+}
+
+struct OverviewPage: View {
+    @ObservedObject var model: DashboardModel
+    let snapshot: DashboardSnapshot
+    let rows: [IssuePipeline]
+    let repoFilter: String
+    @Binding var selected: IssuePipeline.Identity?
+    let showStages: Bool
+    var body: some View {
+        let active = rows.filter { $0.group == .attention || $0.group == .running }
+        let waiting = rows.filter { $0.group == .waiting }
+        let recent = Array(rows.filter { $0.group == .history }.prefix(4))
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                head
+                if repoFilter.isEmpty { CapacitySection(capacity: snapshot.capacity) }
+                DSection {
+                    if active.isEmpty { Text("现在没有需要你处理的事。").font(DS.sub).foregroundStyle(DS.dim) }
+                    PipelineSections(groups: [("需要处理和运行中", active), ("等待 \(waiting.count)", waiting), ("最近结束", recent)].filter { !$0.1.isEmpty },
+                                     selected: $selected, showStages: showStages)
+                        .padding(.top, active.isEmpty ? 14 : 0)
+                }
+                MetricsSection(metrics: snapshot.metrics(repo: repoFilter))
+            }
+        }
+        .scrollIndicators(.automatic)
+        .contentMargins(.horizontal, 10, for: .scrollContent).padding(.horizontal, -10)
+        .modifier(KeyboardSelection(order: (active + waiting + recent).map(\.id), selected: $selected))
+    }
+    private var head: some View {
+        let attention = rows.filter { $0.group == .attention }.count
+        return DSection {
+            HStack(alignment: .firstTextBaseline) {
+                Text(repoFilter.isEmpty ? "ClawFlow" : (repoFilter.split(separator: "/").last.map(String.init) ?? repoFilter)).font(DS.big)
+                Spacer()
+                Text("Controller \(snapshot.version)").font(DS.sub).foregroundStyle(DS.dim)
+            }
+            HStack(spacing: 0) {
+                if attention > 0 { Text("\(attention) 条需要处理").foregroundStyle(DS.warn) } else { Text("没有需要处理的事") }
+                if let throughput = snapshot.board.throughput { Text(" · " + throughputLabel(throughput, generatedAt: snapshot.board.generatedAt)) }
+            }.font(DS.sub).foregroundStyle(DS.dim).padding(.top, 2)
+        }
+    }
+}
+
+struct PipelinesPage: View {
+    @ObservedObject var model: DashboardModel
+    let snapshot: DashboardSnapshot
+    let rows: [IssuePipeline]
+    @Binding var showAll: Bool
+    @Binding var selected: IssuePipeline.Identity?
+    let showStages: Bool
+    var body: some View {
+        let visible = rows.filter { showAll || $0.group != .history }
+        let groups = [TaskGroup.attention, .running, .waiting, .history].compactMap { group -> (String, [IssuePipeline])? in
+            let members = visible.filter { $0.group == group }
+            return members.isEmpty ? nil : ("\(group.title) \(members.count)", members)
+        }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                DSection {
+                    HStack {
+                        Chip(title: "进行中", selected: !showAll) { showAll = false }
+                        Chip(title: "全部", selected: showAll) { showAll = true }
+                        Spacer()
+                        Text("\(visible.count) 条 Pipeline").font(DS.sub).foregroundStyle(DS.dim)
+                    }
+                }
+                DSection(rule: false) {
+                    if groups.isEmpty { DashboardEmptyState(text: "这里没有 Pipeline") }
+                    PipelineSections(groups: groups, selected: $selected, showStages: showStages)
+                }
+            }
+        }
+        .contentMargins(.horizontal, 10, for: .scrollContent).padding(.horizontal, -10)
+        .modifier(KeyboardSelection(order: groups.flatMap { $0.1.map(\.id) }, selected: $selected))
+    }
+}
+
+/// Worker slots as one segmented bar with a tick between workers and a red mark for held leases.
+struct CapacitySection: View {
+    let capacity: WorkerCapacity
+    var body: some View {
+        DSection {
+            DHeader(title: Text("Worker 槽位 ") + Text("\(capacity.running)/\(capacity.total)").monospacedDigit() + Text(" 在跑")) {
+                Text("\(capacity.live)/\(capacity.workers.count) 在线")
+            }
+            GeometryReader { proxy in
+                HStack(spacing: 2) {
+                    ForEach(Array(capacity.workers.enumerated()), id: \.offset) { index, worker in
+                        if index > 0 { DS.fg.frame(width: 2).padding(.vertical, -1).padding(.horizontal, 2) }
+                        ForEach(0..<max(worker.slots, 0), id: \.self) { slot in
+                            TrackSegment(color: slot < worker.running ? DS.bar : DS.track)
+                        }
+                    }
+                }
+                .overlay(alignment: .leading) {
+                    if let position = capacity.heldPosition {
+                        DS.bad.frame(width: 4).padding(.vertical, -1).offset(x: proxy.size.width * position - 2)
+                    }
+                }
+            }
+            .frame(height: 7).padding(.top, 9).padding(.bottom, 7)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Worker 槽位：\(capacity.total) 个中 \(capacity.running) 个在跑" + (capacity.held > 0 ? "，\(capacity.held) 个租约挂起" : ""))
+            (Text(capacity.workers.map { "\($0.name) \($0.running)/\($0.slots)" }.joined(separator: " · "))
+             + (capacity.held > 0 ? Text(" · ") + Text("\(capacity.held) 个租约挂起，没有释放").foregroundStyle(DS.bad) : Text("")))
+                .font(DS.sub).foregroundStyle(DS.dim).monospacedDigit()
+        }
+    }
+}
+
+struct MetricsSection: View {
+    let metrics: DashboardMetrics
+    private func count(_ value: Int?) -> String { value.map(String.init) ?? "—" }
+    var body: some View {
+        DSection(rule: false) {
+            DHeader(title: Text("交付节奏")) { Text("快照保留的 \(metrics.jobCount) 个 Job") }
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
+                GridRow {
+                    metric("今日完成", count(metrics.todayDone), large: true)
+                    metric("今日失败", count(metrics.todayFailed), large: true, bad: (metrics.todayFailed ?? 0) > 0)
+                    metric("等待中", "\(metrics.waiting)", large: true)
+                }
+                GridRow {
+                    metric("Job 成功率", metrics.successRate.map { "\(Int(($0 * 100).rounded()))%" } ?? "—")
+                    metric("实现耗时中位数", metrics.medianImplementDuration.map(durationText) ?? "—")
+                    metric("修复 Job", count(metrics.repairJobs))
+                }
+            }.padding(.top, 10)
+            HStack {
+                HStack(spacing: 12) {
+                    legend(DS.bar, "完成"); legend(DS.bad, "失败")
+                }
+                Spacer()
+                Text("单日最多 \(metrics.dayMax)")
+            }.font(.system(size: 12)).foregroundStyle(DS.dim).padding(.top, 14).padding(.bottom, 2)
+            DayChart(days: metrics.days, dayMax: metrics.dayMax)
+        }
+    }
+    private func metric(_ label: String, _ value: String, large: Bool = false, bad: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(DS.small).foregroundStyle(DS.dim)
+            Text(value).font(.system(size: large ? 21 : 16, weight: .semibold)).monospacedDigit()
+                .foregroundStyle(bad ? DS.bad : DS.fg).lineLimit(1)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+    }
+    private func legend(_ color: Color, _ text: String) -> some View {
+        HStack(spacing: 4) { RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 8, height: 8); Text(text) }
+    }
+}
+
+/// Seven thin stacked columns: failed on top of done, a flat track line on empty days.
+struct DayChart: View {
+    let days: [DashboardMetrics.Day]
+    let dayMax: Int
+    private static let label: DateFormatter = { let f = DateFormatter(); f.dateFormat = "M/d"; return f }()
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(alignment: .bottom, spacing: 6) {
+                ForEach(days, id: \.start) { day in
+                    GeometryReader { proxy in
+                        let barWidth = min(18, proxy.size.width * 0.6)
+                        VStack(spacing: 1) {
+                            Spacer(minLength: 0)
+                            if day.done + day.failed == 0 {
+                                DS.track.frame(width: barWidth, height: 2)
+                            } else {
+                                if day.failed > 0 { DS.bad.frame(width: barWidth, height: proxy.size.height * CGFloat(day.failed) / CGFloat(dayMax)) }
+                                if day.done > 0 {
+                                    UnevenRoundedRectangle(topLeadingRadius: day.failed > 0 ? 0 : 2, topTrailingRadius: day.failed > 0 ? 0 : 2)
+                                        .fill(DS.bar).frame(width: barWidth, height: proxy.size.height * CGFloat(day.done) / CGFloat(dayMax))
+                                }
+                            }
+                        }.frame(maxWidth: .infinity)
+                    }
+                    .help("\(Self.label.string(from: day.start))：完成 \(day.done)，失败 \(day.failed)")
+                }
+            }.frame(height: 72).padding(.top, 6)
             HStack(spacing: 6) {
-                StageGlyph(state: row.stageState, connected: connected)
-                Text(row.status).lineLimit(1)
-            }.frame(width: PipelineColumns.status, alignment: .leading)
-                .accessibilityElement(children: .combine)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(row.title).fontWeight(.medium).lineLimit(1).help(row.title)
-                HStack(spacing: 0) {
-                    Text(secondary).foregroundStyle(.secondary).layoutPriority(1)
-                    if let note = row.rowNote {
-                        Text(" · " + note).foregroundStyle(row.group == .attention ? PipelineTone.attention.color : Color.secondary).truncationMode(.tail)
-                    }
-                }.font(.caption).lineLimit(1).help(row.reason)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            if PipelineColumns.showGraph(width) {
-                StageGraph(stages: row.stages, connected: connected).frame(width: PipelineColumns.graph, alignment: .leading)
-            }
-            if PipelineColumns.showMeta(width) {
-                Text(row.jobs.first.map { $0.worker.isEmpty ? "—" : $0.worker } ?? "—")
-                    .foregroundStyle(.secondary).lineLimit(1).frame(width: PipelineColumns.worker, alignment: .leading)
-                Group {
-                    if let running = row.runningJob {
-                        TaskElapsedText(row: running, connected: connected, frozenAt: frozenAt, unavailable: "—")
-                    } else {
-                        Text(row.jobs.isEmpty ? "—" : relativeAge(row.updatedAt, now: frozenAt))
-                    }
-                }.font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1)
-                    .frame(width: PipelineColumns.age, alignment: .trailing)
+                ForEach(days, id: \.start) { day in
+                    Text(Self.label.string(from: day.start)).font(.system(size: 11)).foregroundStyle(DS.faint).frame(maxWidth: .infinity)
+                }
             }
         }
-        .frame(minHeight: 48)
-        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("近 7 天每天结束的 Job 数：" + days.map { "\(Self.label.string(from: $0.start)) 完成 \($0.done) 失败 \($0.failed)" }.joined(separator: "，"))
     }
 }
 
-struct StageGraph: View {
-    let stages: [PipelineStage]
-    let connected: Bool
-    var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            ForEach(Array(stages.enumerated()), id: \.element.id) { index, stage in
-                if index > 0 {
-                    Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 14, height: 1).padding(.top, 8)
-                }
-                VStack(spacing: 2) {
-                    StageGlyph(state: stage.state, connected: connected)
-                    Text(stage.title).font(.caption2).foregroundStyle(.secondary).lineLimit(1).fixedSize()
-                }
-                .help(stage.accessibilityLabel + (stage.detail.map { " \($0)" } ?? ""))
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(stage.accessibilityLabel)
-            }
-        }
-    }
-}
-
-/// Inline trailing detail. Looks the pipeline up by identity on each snapshot, so it survives refreshes and completion.
+/// Inline trailing detail. Looks the pipeline up by identity on every snapshot, so it survives refreshes and completion.
 struct PipelinePane: View {
     @ObservedObject var model: DashboardModel
     let snapshot: DashboardSnapshot
     let identity: IssuePipeline.Identity
+    @Binding var job: String?
     let close: () -> Void
-    @State private var job: String?
     var body: some View {
         let pipeline = snapshot.issuePipelines.first { $0.id == identity }
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                if job != nil {
-                    Button { job = nil } label: { Label("Back", systemImage: "chevron.left") }.buttonStyle(.borderless)
-                }
-                Text(job != nil ? "Job" : "Pipeline").font(.headline)
-                Spacer()
-                Button(action: close) { Image(systemName: "xmark") }
-                    .buttonStyle(.borderless).keyboardShortcut(.cancelAction).help("Close details").accessibilityLabel("Close details")
-            }.padding(.horizontal, 16).frame(height: 56)
-            Divider()
+        ScrollView {
             if let pipeline {
                 if let job, let row = pipeline.jobs.first(where: { $0.id == job }) {
-                    TaskDetail(model: model, snapshot: snapshot, row: row).id(row.id)
+                    VStack(alignment: .leading, spacing: 0) {
+                        DSection {
+                            HStack {
+                                Button { self.job = nil } label: { Text("‹ 返回 Pipeline") }.buttonStyle(.plain).font(DS.sub).foregroundStyle(DS.dim)
+                                Spacer()
+                                CloseButton(action: close)
+                            }
+                        }
+                        TaskDetail(model: model, snapshot: snapshot, row: row).id(row.id)
+                    }
                 } else {
-                    PipelineDetail(model: model, snapshot: snapshot, pipeline: pipeline) { job = $0 }
+                    PipelineDetail(model: model, snapshot: snapshot, pipeline: pipeline, close: close) { job = $0 }
                 }
             } else {
-                DashboardEmptyState(title: "Pipeline unavailable", symbol: "point.3.connected.trianglepath.dotted", detail: "This pipeline is no longer in the controller snapshot.")
-                Button("Close", action: close).padding(.bottom, 24)
+                DSection(rule: false) {
+                    HStack { Text("Pipeline").font(DS.sub).foregroundStyle(DS.dim); Spacer(); CloseButton(action: close) }
+                    Text("Pipeline 不可用").font(DS.h2).padding(.top, 4)
+                    Text("快照里已经没有这条 Pipeline。").font(DS.sub).foregroundStyle(DS.dim).padding(.top, 3)
+                    Button("关闭", action: close).buttonStyle(DButtonStyle()).padding(.top, 10)
+                }
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+struct CloseButton: View {
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) { Text("×").font(.system(size: 16)).foregroundStyle(DS.dim).padding(.horizontal, 6).padding(.vertical, 2) }
+            .buttonStyle(.plain).keyboardShortcut(.cancelAction).help("关闭详情").accessibilityLabel("关闭详情")
     }
 }
 
@@ -277,7 +339,9 @@ struct PipelineDetail: View {
     @ObservedObject var model: DashboardModel
     let snapshot: DashboardSnapshot
     let pipeline: IssuePipeline
+    let close: () -> Void
     let open: (String) -> Void
+    private var now: Date { snapshot.board.generatedAt }
     private var issueLink: URL? {
         guard pipeline.issue > 0, let repo = snapshot.repository(pipeline.repo), let base = safeWebURL(repo.url) else { return nil }
         return base.appendingPathComponent(repo.platform == "gitlab" ? "-/issues/\(pipeline.issue)" : "issues/\(pipeline.issue)")
@@ -286,76 +350,88 @@ struct PipelineDetail: View {
         guard let repo = snapshot.repository(pipeline.repo), let base = safeWebURL(repo.url) else { return nil }
         return base.appendingPathComponent(repo.platform == "gitlab" ? "-/merge_requests/\(pr)" : "pull/\(pr)")
     }
-    private var reason: String {
-        pipeline.findings.isEmpty ? pipeline.reason : "Watchdog (observe only): " + pipeline.reason.replacingOccurrences(of: "Watchdog: ", with: "")
-    }
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(pipeline.title).font(.title3.weight(.semibold)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 8) {
-                    Text("\(pipeline.repo) \(pipeline.reference)").foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
-                    Spacer(minLength: 4)
-                }
-                HStack(spacing: 8) {
-                    if let issueLink { Link("Open issue", destination: issueLink) }
-                    ForEach(pipeline.prs, id: \.self) { pr in if let url = prLink(pr) { Link("Open PR #\(pr)", destination: url) } }
-                }.buttonStyle(.bordered).controlSize(.small)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        StageGlyph(state: pipeline.stageState, connected: model.summary.connected)
-                        Text(pipeline.status).fontWeight(.medium)
+        VStack(alignment: .leading, spacing: 0) {
+            DSection {
+                HStack { Text("Pipeline").font(DS.sub).foregroundStyle(DS.dim); Spacer(); CloseButton(action: close) }
+                Text(pipeline.title).font(DS.h2).lineSpacing(2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+                Text("\(pipeline.repo) \(pipeline.reference)" + (pipeline.prs.isEmpty ? "" : " · PR " + pipeline.prs.map { "#\($0)" }.joined(separator: ", ")))
+                    .font(DS.sub).foregroundStyle(DS.dim).textSelection(.enabled).padding(.top, 3)
+                FlowLayout(spacing: 6) {
+                    if let issueLink { Link(destination: issueLink) { Text("打开 Issue") }.buttonStyle(DButtonStyle()) }
+                    ForEach(pipeline.prs, id: \.self) { pr in
+                        if let url = prLink(pr) { Link(destination: url) { Text("PR #\(pr)") }.buttonStyle(DButtonStyle()) }
                     }
-                    Text(reason).font(.callout)
-                        .foregroundStyle(pipeline.group == .attention ? AnyShapeStyle(PipelineTone.attention.color) : AnyShapeStyle(.secondary))
-                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                }.padding(.top, 10)
+            }
+            if let finding = pipeline.findings.first {
+                watchdog(finding)
+            } else if let note = pipeline.rowNote {
+                DSection {
+                    Text(pipeline.status).font(DS.h2).foregroundStyle(pipeline.group == .attention ? DS.warn : DS.fg)
+                    Text(note).font(DS.sub).foregroundStyle(DS.dim).textSelection(.enabled).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
                 }
-                Divider()
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(pipeline.stages.enumerated()), id: \.element.id) { index, stage in
-                        stageView(stage, last: index == pipeline.stages.count - 1)
-                    }
-                }
-                Text("CI and merge status are not reported in this snapshot. Earlier attempts may be unavailable.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            DSection(rule: false) {
+                DLabel(text: "阶段", trailing: "\(pipeline.jobs.count) 个 Job", top: 0)
+                ForEach(pipeline.stages) { stage in stageView(stage) }
+                Text("这里只显示 Job 的执行结果。CI 和合并状态快照里没有上报，已结束不代表已通过。")
+                    .font(DS.small).foregroundStyle(DS.dim).fixedSize(horizontal: false, vertical: true).padding(.top, 6)
+            }
         }
     }
-    private func stageView(_ stage: PipelineStage, last: Bool) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(spacing: 0) {
-                StageGlyph(state: stage.state, connected: model.summary.connected)
-                if !last { Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1).frame(maxHeight: .infinity) }
-            }.frame(width: 16)
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Text(stage.title).fontWeight(.medium)
-                    Text(stage.state.text.capitalizedFirst).font(.caption).foregroundStyle(stage.state.tone.color)
+    private func watchdog(_ finding: Finding) -> some View {
+        DSection {
+            DHeader(title: Text(finding.text).foregroundStyle(DS.warn)) { Text("Watchdog · 只观察") }
+            if let share = finding.withinThresholdShare {
+                GeometryReader { proxy in
+                    HStack(spacing: 2) {
+                        TrackSegment(color: DS.warn).frame(width: max(0, (proxy.size.width - 2) * share))
+                        if share < 1 { TrackSegment(color: DS.bad) }
+                    }
                 }
-                if let detail = stage.detail { Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
-                ForEach(stage.jobs) { job in jobButton(job) }
-            }.padding(.bottom, 14)
-            Spacer(minLength: 0)
+                .frame(height: 7).padding(.top, 9).padding(.bottom, 7)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("已超过 \(finding.thresholdMinutes) 分钟阈值：\(finding.text)")
+                .help("橙色为 \(finding.thresholdMinutes) 分钟阈值内，红色为超出部分")
+            }
+            if let reason = pipeline.jobs.first(where: { $0.id == finding.taskId })?.waitingReason, !reason.isEmpty {
+                Text(reason).font(DS.sub).foregroundStyle(DS.dim).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+    private func stageView(_ stage: PipelineStage) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(stage.title).font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text(stage.state.text).font(DS.small).foregroundStyle(stage.state.tone.textColor)
+            }
+            if let detail = stage.detail {
+                Text(detail).font(DS.sub).foregroundStyle(DS.dim).fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(stage.jobs) { job in jobRow(job) }
+        }
+        .padding(.vertical, 9)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(stage.accessibilityLabel)
-        .help(stage.accessibilityLabel)
     }
-    private func jobButton(_ job: TaskRow) -> some View {
-        Button { open(job.id) } label: {
-            HStack(spacing: 8) {
-                Image(systemName: job.activity.symbol).foregroundStyle(.secondary)
-                Text(job.activity.title).lineLimit(1)
-                Text("Attempt \(job.attempt + 1)").monospacedDigit().foregroundStyle(.secondary)
-                Text(job.worker.isEmpty ? "Unassigned" : job.worker).foregroundStyle(.secondary).lineLimit(1)
-                Spacer(minLength: 4)
-                TaskElapsedText(row: job, connected: model.summary.connected, frozenAt: snapshot.board.generatedAt, unavailable: "—")
-                    .monospacedDigit().foregroundStyle(.secondary)
-                Image(systemName: "chevron.right").foregroundStyle(.tertiary)
-            }.font(.caption).padding(.horizontal, 8).padding(.vertical, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                .contentShape(Rectangle())
-        }.buttonStyle(.plain).help("Open this job's execution details")
+    private func jobRow(_ job: TaskRow) -> some View {
+        let state = IssuePipeline.jobState(job).0
+        return RowButton(action: { open(job.id) }) {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 2) {
+                GridRow {
+                    Text("第 \(job.attempt + 1) 次").fontWeight(.medium).frame(maxWidth: .infinity, alignment: .leading)
+                    TaskElapsedText(row: job, connected: model.summary.connected, frozenAt: now).fontWeight(.semibold).gridColumnAlignment(.trailing)
+                }
+                GridRow {
+                    Text("\(job.worker.isEmpty ? "未分配" : job.worker) · \(relativeAge(job.updatedAt, now: now))")
+                        .font(DS.small).foregroundStyle(DS.dim).lineLimit(1)
+                    Text(state.text).font(DS.small).foregroundStyle(state.tone.textColor)
+                }
+            }.font(.system(size: 13)).monospacedDigit()
+        }
+        .help("查看这次 Job 的执行详情")
+        .accessibilityLabel("第 \(job.attempt + 1) 次 \(job.kindZh)，\(state.text)，\(job.worker.isEmpty ? "未分配" : job.worker)")
     }
 }

@@ -5,13 +5,13 @@ enum StageState: Sendable, Equatable {
     case pending, waiting, running, finished, failed, attention, notReported
     var text: String {
         switch self {
-        case .pending: return "not started"
-        case .waiting: return "waiting"
-        case .running: return "running"
-        case .finished: return "finished"
-        case .failed: return "failed"
-        case .attention: return "needs attention"
-        case .notReported: return "not reported"
+        case .pending: return "未开始"
+        case .waiting: return "等待"
+        case .running: return "运行中"
+        case .finished: return "已结束"
+        case .failed: return "失败"
+        case .attention: return "需要处理"
+        case .notReported: return "未上报"
         }
     }
 }
@@ -23,7 +23,7 @@ struct PipelineStage: Identifiable, Sendable {
     let detail: String?
     /// Jobs of this stage, newest first.
     let jobs: [TaskRow]
-    var accessibilityLabel: String { "\(title): \(state.text). Job status, not a delivery verdict." }
+    var accessibilityLabel: String { "\(title)：\(state.text)。Job 状态，不代表交付结论。" }
 }
 
 /// One issue is one pipeline; jobs are evidence attached to it, not delivery verdicts.
@@ -45,7 +45,7 @@ struct IssuePipeline: Identifiable, Sendable {
     var repo: String { id.repo }
     var issue: Int { id.issue }
     var repoShortName: String { repo.split(separator: "/").last.map(String.init) ?? repo }
-    var reference: String { issue > 0 ? "#\(issue)" : "PR #\(id.unlinkedPR) · issue unavailable" }
+    var reference: String { issue > 0 ? "#\(issue)" : "PR #\(id.unlinkedPR) · 无关联 Issue" }
     var title: String {
         if let title = queue?.title, !title.isEmpty { return title }
         return jobs.first { !($0.subject ?? "").isEmpty }?.subject ?? reference
@@ -59,38 +59,44 @@ struct IssuePipeline: Identifiable, Sendable {
     }
     var status: String {
         switch group {
-        case .attention: return "Needs attention"
-        case .running: return "Running"
-        case .waiting: return "Waiting"
-        case .history: return jobs.first?.state == "failed" ? "Latest job failed" : "Finished"
+        case .attention: return "需要处理"
+        case .running: return "运行中"
+        case .waiting: return "等待"
+        case .history: return jobs.first?.state == "failed" ? "最近一次 Job 失败" : "已结束"
         }
     }
-    var symbol: String {
-        switch group { case .attention: return "exclamationmark.triangle"; case .running: return "arrow.triangle.2.circlepath"; case .waiting: return "clock"; case .history: return "checkmark.circle" }
+    /// Overall state for glyphs and bars; finished is neutral.
+    var stageState: StageState {
+        switch group {
+        case .attention: return .attention
+        case .running: return .running
+        case .waiting: return .waiting
+        case .history: return jobs.first?.state == "failed" ? .failed : .finished
+        }
     }
     var updatedAt: Date { jobs.first?.updatedAt ?? .distantPast }
     /// The running job, when any; its elapsed time is the pipeline's age.
     var runningJob: TaskRow? { jobs.first { $0.group == .running } }
     func jobs(kind: String) -> [TaskRow] { jobs.filter { $0.kind == kind } }
     /// Readable queue reason; raw scheduler codes never reach the interface.
-    private var queueReason: String? { queue.map { $0.detail ?? $0.status } }
+    private var queueReason: String? { queue.map { $0.detail ?? $0.statusZh } }
     /// Why the row is not moving, for the list. Nil when the status column already says it all.
     var rowNote: String? {
         switch group {
         case .attention: return reason
-        case .waiting: return reason == "Waiting" ? nil : reason
+        case .waiting: return reason == "等待" ? nil : reason
         case .running, .history: return nil
         }
     }
     var reason: String {
-        if let finding = findings.first { return finding.reason }
+        if let finding = findings.first { return finding.text }
         switch group {
         case .attention:
-            return jobs.first { $0.group == .attention }?.reason ?? queueReason ?? "Needs attention"
+            return jobs.first { $0.group == .attention }?.reasonZh ?? queueReason ?? "需要处理"
         case .running, .waiting:
-            return jobs.first { $0.group == group }?.reason ?? queueReason ?? "Waiting"
+            return jobs.first { $0.group == group }?.reasonZh ?? queueReason ?? "等待"
         case .history:
-            return "Job execution finished. CI, acceptance verdict and merge are not reported by this snapshot."
+            return "Job 已执行结束。CI、验收结论和合并状态快照里没有上报。"
         }
     }
 
@@ -103,50 +109,50 @@ struct IssuePipeline: Identifiable, Sendable {
         let laterWork = !repair.isEmpty || !review.isEmpty || jobs.contains { $0.pr > 0 }
         var result = [admit(queue: queue, hasDevelopmentJob: !implement.isEmpty || laterWork)]
         let (implementState, implementDetail) = implement.first.map(jobState)
-            ?? (laterWork ? (.notReported, "Job is no longer in this snapshot") : (.pending, nil))
-        result.append(PipelineStage(id: "implement", title: "Implement", state: implementState, detail: implementDetail, jobs: implement))
+            ?? (laterWork ? (.notReported, "这次 Job 已不在快照里") : (.pending, nil))
+        result.append(PipelineStage(id: "implement", title: "实现", state: implementState, detail: implementDetail, jobs: implement))
         if let newest = repair.first {
             let (state, detail) = jobState(newest)
-            result.append(PipelineStage(id: "repair", title: "Repair ×\(repair.count)", state: state, detail: detail, jobs: repair))
+            result.append(PipelineStage(id: "repair", title: "修复 ×\(repair.count)", state: state, detail: detail, jobs: repair))
         }
         // The scheduler's verdict is about the current head, so it outranks an older finished review job.
         let reviewOutstanding = ["no_verdict", "acceptance_stale"].contains(queue?.reasonCode ?? "")
         if let newest = review.first, !reviewOutstanding || newest.group == .running || newest.group == .attention {
             let (state, detail) = jobState(newest)
-            result.append(PipelineStage(id: "review", title: "Review", state: state, detail: detail, jobs: review))
+            result.append(PipelineStage(id: "review", title: "验收", state: state, detail: detail, jobs: review))
         } else if reviewOutstanding {
-            result.append(PipelineStage(id: "review", title: "Review", state: .waiting, detail: queue?.detail, jobs: review))
+            result.append(PipelineStage(id: "review", title: "验收", state: .waiting, detail: queue?.detail, jobs: review))
         } else if acceptanceRequired {
-            result.append(PipelineStage(id: "review", title: "Review", state: .pending, detail: nil, jobs: []))
+            result.append(PipelineStage(id: "review", title: "验收", state: .pending, detail: nil, jobs: []))
         }
         return result
     }
     private static func admit(queue: IssueQueueRow?, hasDevelopmentJob: Bool) -> PipelineStage {
         let state = queue?.state ?? ""
-        let readable = queue.map { $0.detail ?? $0.status }
+        let readable = queue.map { $0.detail ?? $0.statusZh }
         func stage(_ value: StageState, _ detail: String?) -> PipelineStage {
-            PipelineStage(id: "admit", title: "Admit", state: value, detail: detail, jobs: [])
+            PipelineStage(id: "admit", title: "准入", state: value, detail: detail, jobs: [])
         }
         if state.hasPrefix("waiting:coordination") || state.hasPrefix("waiting:needs-confirmation") || state.hasPrefix("waiting:dependency") {
             return stage(.waiting, readable)
         }
         if state.hasPrefix("blocked") { return stage(.attention, readable) }
-        if state.hasPrefix("eligible:coordination checked") { return stage(.finished, "Coordination checked") }
+        if state.hasPrefix("eligible:coordination checked") { return stage(.finished, "协调已检查") }
         if state.hasPrefix("eligible") {
-            return stage(.waiting, queue?.reasonCode == "max_in_flight" ? queue?.detail : "Waiting for a slot")
+            return stage(.waiting, queue?.reasonCode == "max_in_flight" ? queue?.detail : "等待名额")
         }
         if hasDevelopmentJob || state.hasPrefix("in_flight") { return stage(.finished, nil) }
         return stage(.notReported, readable)
     }
     /// Maps one job to its stage state. A done job is `finished`, not passed.
     static func jobState(_ job: TaskRow) -> (StageState, String?) {
-        if job.group == .attention { return (.attention, job.reason) }
-        if job.group == .running { return (.running, job.status) }
-        if job.state == "pending" { return (.waiting, job.reason) }
+        if job.group == .attention { return (.attention, job.reasonZh) }
+        if job.group == .running { return (.running, job.statusZh) }
+        if job.state == "pending" { return (.waiting, job.reasonZh) }
         switch job.state {
         case "done": return (.finished, nil)
-        case "failed": return (.failed, job.reason)
-        case "cancelled": return (.pending, "Cancelled")
+        case "failed": return (.failed, job.meaningfulReasonZh)
+        case "cancelled": return (.pending, "已取消")
         default: return (.notReported, nil)
         }
     }

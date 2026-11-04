@@ -7,6 +7,9 @@ struct DashboardSnapshot: Decodable, Sendable {
     let board: WorkerBoard
     let projects: [ProjectRow]
     private(set) var issuePipelines: [IssuePipeline] = []
+    /// Metrics per repository filter, computed once at decode.
+    private(set) var metricsByRepo: [String: DashboardMetrics] = [:]
+    private(set) var capacity = WorkerCapacity(workers: [], live: 0, total: 0, running: 0, held: 0)
 
     private enum CodingKeys: String, CodingKey { case schemaVersion, version, controller, board, projects }
     init(from decoder: Decoder) throws {
@@ -17,6 +20,8 @@ struct DashboardSnapshot: Decodable, Sendable {
         board = try values.decode(WorkerBoard.self, forKey: .board)
         projects = try values.decode([ProjectRow].self, forKey: .projects)
         issuePipelines = makeIssuePipelines()
+        metricsByRepo = makeMetrics()
+        capacity = WorkerCapacity.make(board)
     }
 
     static func decodeInBackground(_ data: Data) async throws -> Self {
@@ -161,9 +166,6 @@ struct TaskRow: Decodable, Identifiable, Sendable {
         if state == "done" { return "This attempt finished. CI, acceptance and merge remain separate delivery gates." }
         if state == "pending" { return "Waiting for an eligible worker and available capacity." }
         return status
-    }
-    var symbol: String {
-        switch group { case .attention: return "exclamationmark.triangle"; case .running: return "arrow.triangle.2.circlepath"; case .waiting: return "hourglass"; case .history: return state == "done" ? "checkmark.circle" : "minus.circle" }
     }
     func link(in snapshot: DashboardSnapshot) -> URL? {
         guard let repo = snapshot.repository(repo), let base = safeWebURL(repo.url) else { return nil }

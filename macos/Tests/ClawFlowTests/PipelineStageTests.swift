@@ -29,21 +29,21 @@ final class PipelineStageTests: XCTestCase {
     func testDependencyWaitsWithReadableDetail() throws {
         let admit = try XCTUnwrap(stage(try pipeline([], queue: "waiting:dependency").1, "admit"))
         XCTAssertEqual(admit.state, .waiting)
-        XCTAssertEqual(admit.detail, "Waiting for a dependency")
+        XCTAssertEqual(admit.detail, "等待依赖")
     }
     func testBlockedIsAttentionAndParkedIsWaiting() throws {
         let blocked = try pipeline([], queue: "blocked:some_new_reason").1
         XCTAssertEqual(stage(blocked, "admit")?.state, .attention)
         XCTAssertEqual(blocked.group, .attention)
-        XCTAssertEqual(blocked.reason, "Some new reason")
+        XCTAssertEqual(blocked.reason, "已阻塞")
         let parked = try pipeline([], queue: "parked:acceptance_stale").1
         XCTAssertEqual(parked.group, .waiting)
     }
     func testCoordinationCheckedFinishesAdmitAndEligibleWaitsForSlot() throws {
         XCTAssertEqual(stage(try pipeline([], queue: "eligible:coordination checked").1, "admit")?.state, .finished)
         let eligible = try XCTUnwrap(stage(try pipeline([], queue: "eligible").1, "admit"))
-        XCTAssertEqual(eligible.state, .waiting); XCTAssertEqual(eligible.detail, "Waiting for a slot")
-        XCTAssertEqual(stage(try pipeline([], queue: "eligible:max_in_flight").1, "admit")?.detail, "Repository slots full")
+        XCTAssertEqual(eligible.state, .waiting); XCTAssertEqual(eligible.detail, "等待名额")
+        XCTAssertEqual(stage(try pipeline([], queue: "eligible:max_in_flight").1, "admit")?.detail, "仓库名额已满")
     }
     func testInFlightWithoutJobFinishesAdmitAndImplementIsPending() throws {
         let row = try pipeline([], queue: "in_flight").1
@@ -58,7 +58,7 @@ final class PipelineStageTests: XCTestCase {
         XCTAssertEqual(IssuePipeline.stages(jobs: [], queue: nil, acceptanceRequired: false).first?.state, .notReported)
     }
     func testNoVerdictAndStaleAcceptanceWaitAtReview() throws {
-        for (state, detail) in [("in_flight:no_verdict", "PR open, awaiting acceptance"), ("parked:acceptance_stale", "PR changed, acceptance out of date")] {
+        for (state, detail) in [("in_flight:no_verdict", "PR 已开，等待验收"), ("parked:acceptance_stale", "PR 已变更，验收已过期")] {
             let review = try XCTUnwrap(stage(try pipeline([job("a")], queue: state).1, "review"), state)
             XCTAssertEqual(review.state, .waiting, state)
             XCTAssertEqual(review.detail, detail, state)
@@ -72,7 +72,7 @@ final class PipelineStageTests: XCTestCase {
     func testRepairOnlyWithJobsAndCountsThem() throws {
         XCTAssertNil(stage(try pipeline([job("a")]).1, "repair"))
         let repair = try XCTUnwrap(stage(try pipeline([job("a"), job("r1", kind: "repair"), job("r2", kind: "repair")]).1, "repair"))
-        XCTAssertEqual(repair.title, "Repair ×2")
+        XCTAssertEqual(repair.title, "修复 ×2")
         XCTAssertEqual(repair.jobs.count, 2)
     }
     func testDoneJobIsFinishedNeverPassed() throws {
@@ -80,7 +80,7 @@ final class PipelineStageTests: XCTestCase {
         XCTAssertEqual(implement.state, .finished)
         XCTAssertNotEqual(implement.state.tone.color, .green)
         XCTAssertFalse(implement.accessibilityLabel.localizedCaseInsensitiveContains("passed"))
-        XCTAssertEqual(implement.accessibilityLabel, "Implement: finished. Job status, not a delivery verdict.")
+        XCTAssertEqual(implement.accessibilityLabel, "实现：已结束。Job 状态，不代表交付结论。")
         XCTAssertNil(try pipeline([job("a")]).1.stages.first { ["ci", "merge"].contains($0.id) })
     }
     func testJobStateMap() throws {
@@ -89,17 +89,17 @@ final class PipelineStageTests: XCTestCase {
         XCTAssertEqual(stage(try pipeline([job("a", state: "pending", stage: "pending")]).1, "implement")?.state, .waiting)
         XCTAssertEqual(stage(try pipeline([job("a", state: "leased", stage: "lease_expired")]).1, "implement")?.state, .attention)
         let cancelled = try XCTUnwrap(stage(try pipeline([job("a", state: "cancelled", stage: "cancelled")]).1, "implement"))
-        XCTAssertEqual(cancelled.state, .pending); XCTAssertEqual(cancelled.detail, "Cancelled")
+        XCTAssertEqual(cancelled.state, .pending); XCTAssertEqual(cancelled.detail, "已取消")
         let newest = try pipeline([job("old", state: "failed", stage: "failed"), job("new", updated: "2026-10-30T01:00:00Z")]).1
         XCTAssertEqual(stage(newest, "implement")?.state, .finished)
         XCTAssertEqual(stage(newest, "implement")?.jobs.map(\.id), ["new", "old"])
     }
     func testFindingMakesAttentionAndSuppliesReason() throws {
         let finding: [String: Any] = ["task_id": "a", "repo": "o/r", "issue": 7, "pr": 0, "rule": "no_progress",
-            "since": "2026-10-29T23:00:00Z", "age_sec": 3600, "reason": "No progress for 60 minutes"]
+            "since": "2026-10-29T23:00:00Z", "age_sec": 3600, "reason": "60 分钟无进展"]
         let row = try pipeline([job("a", state: "leased", stage: "running")], findings: [finding]).1
         XCTAssertEqual(row.group, .attention)
-        XCTAssertEqual(row.reason, "No progress for 60 minutes")
+        XCTAssertEqual(row.reason, "60 分钟无进展")
         XCTAssertEqual(row.findings.count, 1)
         let other = try pipeline([job("b", state: "leased", stage: "running")], findings: [finding]).1
         XCTAssertEqual(other.group, .running)
@@ -107,7 +107,7 @@ final class PipelineStageTests: XCTestCase {
     func testOldFailedHistoryIsNotAttention() throws {
         let row = try pipeline([job("a", state: "failed", stage: "failed")]).1
         XCTAssertEqual(row.group, .history)
-        XCTAssertEqual(row.status, "Latest job failed")
+        XCTAssertEqual(row.status, "最近一次 Job 失败")
     }
     func testSnapshotDecodesWithAndWithoutFindingsAndThroughput() throws {
         let (old, _) = try pipeline([job("a")])
@@ -134,15 +134,15 @@ final class PipelineStageTests: XCTestCase {
     func testOutstandingVerdictOutranksOlderFinishedReview() throws {
         let row = try pipeline([job("a", kind: "acceptance")], queue: "parked:acceptance_stale").1
         XCTAssertEqual(stage(row, "review")?.state, .waiting)
-        XCTAssertEqual(stage(row, "review")?.detail, "PR changed, acceptance out of date")
+        XCTAssertEqual(stage(row, "review")?.detail, "PR 已变更，验收已过期")
         XCTAssertEqual(stage(row, "review")?.jobs.count, 1)
-        XCTAssertEqual(row.rowNote, "PR changed, acceptance out of date")
+        XCTAssertEqual(row.rowNote, "PR 已变更，验收已过期")
         XCTAssertEqual(stage(try pipeline([job("a", kind: "acceptance")]).1, "review")?.state, .finished)
     }
     func testFailedHistoryStatusAndNotes() throws {
         let row = try pipeline([job("i", state: "failed", stage: "failed")]).1
-        XCTAssertEqual(row.status, "Latest job failed")
+        XCTAssertEqual(row.status, "最近一次 Job 失败")
         XCTAssertNil(row.rowNote)
-        XCTAssertEqual(try pipeline([], queue: "waiting:dependency").1.rowNote, "Waiting for a dependency")
+        XCTAssertEqual(try pipeline([], queue: "waiting:dependency").1.rowNote, "等待依赖")
     }
 }
