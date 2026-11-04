@@ -645,6 +645,16 @@ func persistDevelopmentEvents(ctx context.Context, t *coordinator.Task, j *runJo
 	return os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(r.DevelopmentEvents), 0600)
 }
 
+func (s *coordinatorResults) ReportProgress(ctx context.Context, id, worker string, fence, ageSec int64) error {
+	progress, ok := s.WorkerStore.(interface {
+		ReportProgress(context.Context, string, string, int64, int64) error
+	})
+	if !ok {
+		return coordinator.ErrInvalid
+	}
+	return progress.ReportProgress(ctx, id, worker, fence, ageSec)
+}
+
 func (s *coordinatorResults) RecoverExecution(ctx context.Context, id, worker string, epoch int64) (*coordinator.Task, error) {
 	recovery, ok := s.WorkerStore.(interface {
 		RecoverExecution(context.Context, string, string, int64) (*coordinator.Task, error)

@@ -305,9 +305,21 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 		return nil
 	}
 }
+
+// reportWorkerProgress is best effort and separate from the heartbeat: an older
+// controller rejects unknown heartbeat fields, and a failed heartbeat cancels
+// the task. Any failure here, including 404 from that controller, is ignored.
+func reportWorkerProgress(ctx context.Context, api *workerAPI, path string, fence int64, progress *execution.Progress) {
+	reportCtx, cancel := context.WithTimeout(ctx, workerProgressTimeout)
+	defer cancel()
+	_ = api.postOnce(reportCtx, path+"progress", map[string]any{"fencing_token": fence, "last_event_age_sec": progress.AgeSeconds(time.Now())}, nil)
+}
+
 func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *coordinator.Task, interval time.Duration, build workerBuilder) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	progress := &execution.Progress{}
+	ctx = execution.WithProgress(ctx, progress)
 	stop := make(chan struct{})
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	defer stopHeartbeat()
@@ -351,6 +363,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 					done <- true
 					return
 				}
+				reportWorkerProgress(heartbeatCtx, api, path, t.FencingToken, progress)
 			}
 		}
 	}()
