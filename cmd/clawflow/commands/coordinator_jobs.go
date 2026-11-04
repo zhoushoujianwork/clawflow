@@ -398,20 +398,34 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	if err != nil {
 		return err
 	}
+	applicable := make([]jobEffect, 0, len(r.Effects))
+	var unapplied []jobEffect
 	for _, e := range r.Effects {
 		if e.Repo != t.Repo || (e.Kind != "pr-create" && ((e.Number != t.Issue && e.Number != t.PR) || e.Number <= 0)) {
 			return coordinator.ErrInvalid
 		}
 		switch e.Kind {
 		case "pr-create":
-			if t.Kind != "implement" || (!interrupted && (!acceptanceSHA(r.HeadSHA) || e.Head == "" || e.Base == "" || e.Title == "")) {
+			if t.Kind != "implement" {
 				return coordinator.ErrInvalid
+			}
+			if !interrupted && (!acceptanceSHA(r.HeadSHA) || e.Head == "" || e.Base == "" || e.Title == "") {
+				// A durable attempt that already ended in failure can never send a
+				// better report. Rejecting it would hold its lease and repository
+				// slot forever, so keep the request as evidence and end the task.
+				if !failed || !coordinator.DurableTask(t) || r.Status == "failed" || r.Status == "success" {
+					return coordinator.ErrInvalid
+				}
+				unapplied = append(unapplied, e)
+				continue
 			}
 		case "issue-comment", "pr-comment", "add-label", "remove-label", "close-issue":
 		default:
 			return coordinator.ErrInvalid
 		}
+		applicable = append(applicable, e)
 	}
+	r.Effects, r.UnappliedEffects = applicable, unapplied
 	if interrupted {
 		// A timed-out worker may have queued operations before it could seal
 		// a valid head/result. Preserve them as evidence, never publish them.
