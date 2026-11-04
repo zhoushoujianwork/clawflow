@@ -576,6 +576,31 @@ func setupCIRepairWorkdir(ctx context.Context, cfg config.Repo, repo string, pr 
 	return worktreeResult{Path: dir}, func() { _ = os.RemoveAll(dir) }, nil
 }
 
+const (
+	developmentHeadAttempts   = 3
+	developmentHeadRetryDelay = 3 * time.Second
+)
+
+// retryDevelopmentHead rides out transient remote failures: a paid development
+// run must not lose its head to one failed lookup. A timeout already waited long
+// enough and is not retried.
+func retryDevelopmentHead(ctx context.Context, delay time.Duration, lookup func() error) error {
+	var err error
+	for attempt := 0; attempt < developmentHeadAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(delay):
+			}
+		}
+		if err = lookup(); err == nil || errors.Is(err, gitexec.ErrTimeout) {
+			return err
+		}
+	}
+	return err
+}
+
 // confirmedDevelopmentHead binds local execution to the published branch. Never
 // infer ownership from a PR head observed without matching the agent checkout.
 func confirmedDevelopmentHead(ctx context.Context, workdir string, j *runJob) (string, error) {
@@ -593,7 +618,12 @@ func confirmedDevelopmentHead(ctx context.Context, workdir string, j *runJob) (s
 			return "", fmt.Errorf("development branch unavailable")
 		}
 	}
-	remote, err := acceptanceGit(ctx, workdir, "ls-remote", "--exit-code", "origin", "refs/heads/"+branch)
+	var remote string
+	err = retryDevelopmentHead(ctx, developmentHeadRetryDelay, func() error {
+		var lookupErr error
+		remote, lookupErr = acceptanceGit(ctx, workdir, "ls-remote", "--exit-code", "origin", "refs/heads/"+branch)
+		return lookupErr
+	})
 	if err != nil {
 		return "", fmt.Errorf("development head verification: %w", err)
 	}
