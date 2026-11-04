@@ -210,7 +210,7 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 		if source, ok := s.(coordinationTasks); ok {
 			allowed, checkErr := coordinateDispatch(ctx, j, source)
 			if checkErr != nil {
-				runLog.Warn("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", checkErr.Error())
+				coordLog().Warn("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", checkErr.Error())
 			}
 			if !allowed || checkErr != nil {
 				continue
@@ -265,17 +265,17 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 				if reserved {
 					_ = j.releaseRepair("coordination-changed", time.Now().UTC())
 				}
-				runLog.Info("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
+				coordLog().Info("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())
 				continue
 			}
 			if coordinationPreparationErr != nil {
-				runLog.Info("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", coordinationPreparationErr.Error())
+				coordLog().Info("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", coordinationPreparationErr.Error())
 				continue
 			}
 			// Match local execution: a repair preparation failure skips only
 			// this job. Store failures and pass cancellation remain fatal.
 			if repairPreparationErr != nil && errors.Is(err, repairPreparationErr) && ctx.Err() == nil {
-				runLog.Warn("run/ci_repair_skip", "repo", j.repo, "issue", j.sub.Number, "err", repairPreparationErr.Error())
+				coordLog().Warn("run/ci_repair_skip", "repo", j.repo, "issue", j.sub.Number, "err", repairPreparationErr.Error())
 				continue
 			}
 			if reserved {
@@ -505,7 +505,7 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 			return err
 		}
 		if r.InfraKind != "" {
-			runLog.Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "kind", r.InfraKind, "err", r.Error)
+			coordLog().Warn("run/ci_repair_infra", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "kind", r.InfraKind, "err", r.Error)
 		}
 		if r.InfraKind != "" && status == "failed" {
 			status = "skipped"

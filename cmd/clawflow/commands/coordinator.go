@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/devmode"
+	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 
 	"github.com/zhoushoujianwork/clawflow/internal/actions"
 	"github.com/zhoushoujianwork/clawflow/internal/api"
@@ -20,11 +21,33 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
+// controllerLog is the controller process's own log (controller.log). runLog is
+// only assigned by `clawflow run`, so controller-side code must go through
+// coordLog instead of using runLog directly.
+var controllerLog *clog.Logger
+
+// coordLog prefers runLog when a run command installed one, otherwise the
+// controller log. Both are nil-safe no-ops when unavailable.
+func coordLog() *clog.Logger {
+	if runLog != nil {
+		return runLog
+	}
+	return controllerLog
+}
+
+// logReconcileFailure records only the error text, never task payloads.
+func logReconcileFailure(err error) {
+	coordLog().Warn("coordinator/reconcile", "err", pipelineClip(err.Error(), pipelineErrLimit))
+}
+
 // startCoordinator binds synchronously so startup failures reach the CLI.
 func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, out io.Writer, onError func(error)) (func(), error) {
 	api.WorkerPoolSource = nil
 	if !settings.Enabled {
 		return func() {}, nil
+	}
+	if runLog == nil {
+		controllerLog, _ = clog.Open("controller")
 	}
 	db, err := requireStore(ctx)
 	if err != nil {
@@ -87,10 +110,10 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		defer tick.Stop()
 		for {
 			if err := results.recoverResults(reconcileCtx, tasks); err != nil && reconcileCtx.Err() == nil {
-				runLog.Warn("coordinator/reconcile", "err", err.Error())
+				coordLog().Warn("coordinator/reconcile", "err", err.Error())
 			}
 			if err := reconcileActionsObservations(reconcileCtx, actions.Ledger{DB: db.DB()}); err != nil && reconcileCtx.Err() == nil {
-				runLog.Warn("coordinator/reconcile", "err", err.Error())
+				coordLog().Warn("coordinator/reconcile", "err", err.Error())
 			}
 			select {
 			case <-reconcileCtx.Done():
@@ -187,7 +210,7 @@ func startLocalWorker(ctx context.Context, settings config.LocalWorkerSettings, 
 		if err := runWorker(ctx, api, o, 30*time.Second, 5*time.Second, func(ctx context.Context, t *coordinator.Task) (*runJob, time.Duration, error) {
 			return localWorkerJob(ctx, t, reg)
 		}); err != nil && ctx.Err() == nil {
-			runLog.Warn("coordinator/local-worker", "err", err.Error())
+			coordLog().Warn("coordinator/local-worker", "err", err.Error())
 		}
 	}()
 	return func() { cancel(); <-done }, nil
