@@ -252,10 +252,8 @@ write-back are disabled by default.`}
 		if _, err := m.Down(); err != nil {
 			return err
 		}
-		if admin := strings.TrimSpace(os.Getenv(adminDSNEnv)); admin != "" && !keepSchema && schemaRecorded(p) {
-			if err := (candidate.PostgresSchemas{DSN: admin}).Drop(cmd.Context(), p.Schema); err != nil {
-				return err
-			}
+		if schemaRecorded(p) {
+			return fmt.Errorf("legacy PostgreSQL candidate schema is recorded; preserve this runtime and retire its schema separately")
 		}
 		return m.Remove()
 	}}

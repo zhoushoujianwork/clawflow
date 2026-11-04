@@ -31,6 +31,12 @@ The directory is created `0700` and the file `0600`. Opening refuses a network f
 
 Nothing to configure. `clawflow controller` (or the app's local-controller start) creates the database and applies migrations on first start.
 
+### 隔离候选与升级验证
+
+SQLite 候选使用候选自身 `CLAWFLOW_STATE_DIR/data/clawflow.sqlite3`，不再要求 `CLAWFLOW_CANDIDATE_ADMIN_DSN`。存储打开时检查真实路径必须位于候选根目录，防止通过绝对路径或符号链接访问正式数据库。候选启动、停止及证据校验仍使用 `candidate prepare/up/down/verify`；已有 PostgreSQL schema 标记的旧候选不会由新清理命令删除，须保留并单独退役。
+
+滚动升级读取 SQLite 的迁移版本和租约状态。JSON 布尔值按 SQLite 类型判定，durable 任务继续持有原租约，避免被误判为需要排空的内嵌任务。首次从 PostgreSQL 切换仍必须按下节执行数据导入与核对，不能以普通二进制升级代替。
+
 ## Moving an existing PostgreSQL host
 
 Everything below runs on the controller host. PostgreSQL is only read; it is never modified.

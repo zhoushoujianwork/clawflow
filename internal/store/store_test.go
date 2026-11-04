@@ -12,9 +12,35 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/zhoushoujianwork/clawflow/internal/devmode"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
 )
+
+func TestCandidateDatabaseCannotEscapeRoot(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	t.Setenv(devmode.EnvID, "123456789abc")
+	t.Setenv(devmode.EnvRoot, root)
+	for _, path := range []string{filepath.Join(outside, "direct.sqlite3"), filepath.Join(root, "escape", "linked.sqlite3")} {
+		if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil && !os.IsExist(err) {
+			t.Fatal(err)
+		}
+		if db, err := store.Open(context.Background(), path); !errors.Is(err, devmode.ErrBlocked) {
+			if db != nil {
+				db.Close()
+			}
+			t.Fatalf("outside database accepted: %s: %v", path, err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("outside file created: %s", path)
+		}
+	}
+	db, err := store.Open(context.Background(), filepath.Join(root, "data", "candidate.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+}
 
 func TestConnectionPolicyAppliesToEveryConnection(t *testing.T) {
 	s := mustMigrate(t, storetest.New(t))
