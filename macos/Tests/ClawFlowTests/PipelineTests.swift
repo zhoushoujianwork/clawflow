@@ -21,7 +21,7 @@ final class PipelineTests: XCTestCase {
         XCTAssertEqual(row.issue, 7)
         XCTAssertEqual(Set(row.jobs.map(\.id)), ["dev", "repair", "review"])
         XCTAssertEqual(row.prs, [9])
-        XCTAssertEqual(row.status, "Jobs finished") // execution success is not pipeline delivery success
+        XCTAssertEqual(row.status, "Finished") // execution success is not pipeline delivery success
     }
     func testAmbiguousPRReviewIsNotAttachedToAnArbitraryIssue() throws {
         let rows = try snapshot([job("one", issue: 1, pr: 9), job("two", issue: 2, pr: 9), job("review", issue: 0, pr: 9, kind: "acceptance")]).issuePipelines

@@ -59,6 +59,26 @@ struct WorkerBoard: Decodable, Sendable {
     let generatedAt: Date
     let workers: [WorkerRow]
     let tasks: [TaskRow]
+    /// Watchdog findings; nil from controllers that predate the watchdog. Observe-only.
+    let findings: [Finding]?
+    /// Completion counts since `throughput.since`; nil from older controllers, never shown as zero.
+    let throughput: Throughput?
+}
+struct Throughput: Decodable, Sendable {
+    let since: Date
+    let done: Int
+    let failed: Int
+}
+/// Why the controller watchdog thinks a task looks stuck. It never acts on the task.
+struct Finding: Decodable, Sendable {
+    let taskId: String
+    let repo: String?
+    let issue: Int?
+    let pr: Int?
+    let rule: String?
+    let since: Date?
+    let ageSec: Int?
+    let reason: String
 }
 struct WorkerRow: Decodable, Identifiable, Sendable {
     var id: String { name }
@@ -90,6 +110,7 @@ enum TaskActivity {
 struct TaskRow: Decodable, Identifiable, Sendable {
     let startedAt: Date?
     let endedAt: Date?
+    let lastEventAt: Date?
     var durationAvailable: Bool { startedAt != nil && (group != .history || endedAt != nil) }
     func elapsed(at now: Date) -> String {
         guard durationAvailable, let startedAt else { return "Duration unavailable" }
