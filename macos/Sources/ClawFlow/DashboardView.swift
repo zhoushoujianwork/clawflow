@@ -71,7 +71,12 @@ struct DashboardView: View {
                 }
                 Divider()
                 HStack {
-                    if let received = model.received { Text("Last received \(received, style: .relative) ago") }
+                    if let received = model.received {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            let seconds = Int(context.date.timeIntervalSince(received))
+                            Text("Last received " + (seconds < 60 ? "\(max(0, seconds)) s ago" : relativeAge(received, now: context.date)))
+                        }
+                    }
                     else { Text("No status received") }
                     Spacer()
                     Text(model.snapshot.map { "Controller \($0.version)" } ?? "")

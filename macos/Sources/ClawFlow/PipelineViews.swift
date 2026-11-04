@@ -61,7 +61,7 @@ private enum PipelineColumns {
     static let status: CGFloat = 130, graph: CGFloat = 250, worker: CGFloat = 100, age: CGFloat = 80
     static let spacing: CGFloat = 12, inset: CGFloat = 16
     static func showMeta(_ width: CGFloat) -> Bool { width >= 760 }
-    static func showGraph(_ width: CGFloat) -> Bool { width >= 560 }
+    static func showGraph(_ width: CGFloat) -> Bool { width >= 720 }
 }
 
 struct PipelinesView: View {
