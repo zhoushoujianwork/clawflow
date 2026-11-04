@@ -124,6 +124,31 @@ func digestTree(root string, skip func(rel string) bool, entries ...map[string]s
 	return hex.EncodeToString(h.Sum(nil)), err
 }
 
+// stableActivityData names top-level data entries a healthy stable scheduler
+// rewrites on every pass: run history, scan-derived snapshots, HTTP caches and
+// scan counters. A candidate cannot reach them through its own HOME, and they
+// change whether or not one is running, so they cannot show contamination.
+// Configuration, manual queue order and task, acceptance and coordination
+// records stay protected.
+var stableActivityData = map[string]bool{
+	"git-status.json":   true,
+	"github-http":       true,
+	"harvest":           true,
+	"housekeeping.json": true,
+	"issues.json":       true,
+	"meta.json":         true,
+	"operators.json":    true,
+	"pending.json":      true,
+	"pipeline-prs":      true,
+	"pipeline.json":     true,
+	"queue-state":       true,
+	"repos.json":        true,
+	"runs":              true,
+	"runs.json":         true,
+	"usage.json":        true,
+	"vcs-usage.json":    true,
+}
+
 // TakeStable records the stable host's observable state. Reads only.
 func TakeStable(s Stable, probe StableProbe) (StableSnapshot, error) {
 	snap := StableSnapshot{ConfigPaths: map[string]string{}, DataPaths: map[string]string{}}
@@ -132,9 +157,7 @@ func TakeStable(s Stable, probe StableProbe) (StableSnapshot, error) {
 		return snap, err
 	}
 	if snap.Data, err = digestTree(filepath.Join(s.Root, "data"), func(rel string) bool {
-		// Per-run history is appended by normal stable activity and is not
-		// part of the configuration or queue state being protected.
-		return rel == "runs" || strings.HasPrefix(rel, "runs"+string(filepath.Separator))
+		return stableActivityData[strings.Split(rel, string(filepath.Separator))[0]]
 	}, snap.DataPaths); err != nil {
 		return snap, err
 	}
