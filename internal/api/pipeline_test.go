@@ -29,6 +29,7 @@ func resetPipeline(t *testing.T, src func(context.Context) (pipeline.Snapshot, e
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "")
+	t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", filepath.Join(t.TempDir(), "missing-offload"))
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	oldLiveSource := pipelineLiveSource
 	resetPipelineExecutionCache()
@@ -114,7 +115,7 @@ func TestHandlePipelineJSONShape(t *testing.T) {
 	if sched := rt["scheduler"].(map[string]any); sched["status"] != "idle" {
 		t.Fatalf("scheduler = %v", sched)
 	}
-	if exec := rt["execution"].(map[string]any); exec["ready"] != true || exec["error"] != nil {
+	if exec := rt["execution"].(map[string]any); exec["ready"] != false || exec["error"] == "" {
 		t.Fatalf("execution = %v", exec)
 	}
 

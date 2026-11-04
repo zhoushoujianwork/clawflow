@@ -295,6 +295,7 @@ func TestExecutionCheckMissingClawFlowConfigUsesOffloadDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	clearOffloadEnv(t)
+	t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", fakeOffload(t, executionHelp(), "2"))
 	before := snapshotDir(t, home)
 	out, _, err := runExecutionCheckCLI(t, "--json")
 	var r execution.Report
