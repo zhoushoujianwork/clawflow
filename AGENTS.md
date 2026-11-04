@@ -15,6 +15,12 @@
 - Core service updates are a separate deployment step. Inspect active tasks and service state first, preserve running work, and use the service's supported drain/recovery process when a restart is needed. App restart authorization does not authorize interrupting active tasks.
 - On an explicit local connection, app startup may start installed services that are not loaded. Loaded services are reused. Account for this existing recovery behavior when validating app startup; do not describe app launch as having no possible service side effects.
 
+## 本地交付与实际运行验收
+
+- ClawFlow 更新的完成标准包括：通过必需 CI 和独立验收、更新对应的本地组件，并实际验证本地运行。提交、推送和 PR 合并只是中间状态。
+- 根据改动验证本地 API 与数据库就绪、worker 在线和任务连续性，以及 App 连接、受影响页面和操作流程。交付报告记录实际安装的提交/版本、执行过的运行检查和未完成项。
+- 本地更新遵循现有排空、恢复、备份和迁移流程，保留正在执行的工作。App 更新与后台服务更新分别交付；数据库切换按其专用验收和回滚条件执行。
+
 ## Local native development
 
 - Use `make dev` to build a timestamped dev app, install it at `/Applications/ClawFlow.app`, and relaunch it. Use `make dev-build` for build-only validation; override `CLAWFLOW_DEV_INSTALL_DIR` for an isolated install. `make cli-dev` retains the separate CLI installation workflow.
