@@ -84,6 +84,11 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	if devmode.Active() {
+		if err := devmode.CheckWritePath(path); err != nil {
+			return nil, err
+		}
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)

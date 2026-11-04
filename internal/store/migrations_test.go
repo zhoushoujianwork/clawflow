@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -381,7 +382,7 @@ func TestAppliedVersionsAndContractMarking(t *testing.T) {
 	}
 	// A version this binary does not know is still reported, so a rolling
 	// upgrade can tell the database moved ahead of the running build.
-	if err := s.DB().Exec("INSERT INTO schema_migrations (version, name) VALUES (9999, 'future')").Error; err != nil {
+	if err := s.DB().Exec("INSERT INTO schema_migrations (version, name, applied_at) VALUES (9999, 'future', ?)", time.Now().UTC()).Error; err != nil {
 		t.Fatal(err)
 	}
 	got, _ = s.AppliedVersions(ctx)

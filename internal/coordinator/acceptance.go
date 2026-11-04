@@ -121,7 +121,7 @@ func (s *Store) CancelSupersededAcceptance(ctx context.Context, repo string, pr 
 func (s *Store) RetireClosedAcceptance(ctx context.Context, id, worker string, fence int64) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var task Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ?", id).Error; err != nil {
+		if err := tx.First(&task, "id = ?", id).Error; err != nil {
 			return err
 		}
 		if task.Kind != "acceptance" || task.State != "leased" || task.LeaseOwner != worker || task.FencingToken != fence || len(task.Result) != 0 || task.LeaseExpiresAt == nil {
