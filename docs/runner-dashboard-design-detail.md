@@ -5,7 +5,9 @@
 ## 本地样式
 
 - Sidebar 统一 200pt，主区域最小宽度 900pt；顶部筛选栏和详情栏均为 56pt。
-- 主看板是全宽 Pipeline Table，每个 repo + issue 仅一行；状态是执行活动，不是交付通过。展开后按阶段展示 Job，Job 内保留 Runner、本次耗时与详情。Runner 管理仍为独立表格。空列表只出现一个紧凑空状态。
+- 主看板是按需要处理、运行中、等待、已结束分组的 Pipeline 列表，每个 repo + issue 仅一行；状态是执行活动，不是交付通过。详情在右侧内嵌打开，按阶段展示 Job，Job 内保留 Runner、本次耗时与详情。Runner 管理仍为独立页面。空列表只出现一个紧凑空状态。
+- 阶段由纯函数推导（`IssuePipeline.stages`）：Admit 来自队列状态，或由已存在的实现 Job、`in_flight` 证明；Implement、Repair、Review 取该类型最新 Job；Repair 仅在有 Job 时出现；Review 在仓库未开启验收且无 Job 时省略，无 Job 时由 `in_flight:no_verdict`、`*:acceptance_stale` 判定为等待。
+- Watchdog 发现按 task ID 关联到 Pipeline，令其进入需要处理；旧 controller 没有 `findings`、`throughput` 时按缺失处理，不显示为 0。
 - 选中行打开可关闭详情；刷新、任务结束后仍保留该任务详情，不能因切换为历史状态自动消失。无该记录时关闭。
 - 保留原来的连接新鲜度、失联停止旋转和耗时推进规则。历史缺少结束时间时显示耗时不可用，不继续累计。
 - 已有阶段 Job 映射 kind：implement / acceptance / repair / reply；独立检查无上报时显示 Not reported。阶段完成图标仅代表该 Job 完成，不能推断审核通过、CI 成功或已合并。
