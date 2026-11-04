@@ -538,6 +538,11 @@ func TestWorkerAcceptanceRepairUsesCoordinatorSnapshot(t *testing.T) {
 	if err := recheckAcceptanceRepair(context.Background(), j, j.repair.PR); err == nil {
 		t.Fatal("blocked verdict accepted")
 	}
+	j.repair.Acceptance.NextOwner = "implementer"
+	if err := recheckAcceptanceRepair(context.Background(), j, j.repair.PR); err != nil {
+		t.Fatal(err)
+	}
+	j.repair.Acceptance.NextOwner = ""
 	j.repair.Acceptance.Verdict = "failed"
 	if err := recheckAcceptanceRepair(context.Background(), j, vcs.PR{HeadSHA: "changed"}); err == nil {
 		t.Fatal("changed head accepted")
