@@ -7,7 +7,7 @@ import (
 
 func newConfigProviderCmd() *cobra.Command {
 	retired := func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("ClawFlow provider configuration is retired; use offload config, then set settings.execution.profile or CLAWFLOW_OFFLOAD_PROFILE")
+		return fmt.Errorf("ClawFlow provider configuration is retired; use offload config to select the default profile")
 	}
 	cmd := &cobra.Command{Use: "provider", Short: "Retired: configure execution through Offload profiles", RunE: retired}
 	for _, name := range []string{"list", "add", "remove", "enable", "disable", "move", "test"} {

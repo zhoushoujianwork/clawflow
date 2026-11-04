@@ -83,11 +83,8 @@ func loadExecutionCheckConfig() (execution.Config, error) {
 		}
 		c = cfg.Settings.Execution
 	case os.IsNotExist(statErr):
-		if os.Getenv("CLAWFLOW_OFFLOAD_PROFILE") == "" {
-			if _, err := os.Stat(filepath.Join(filepath.Dir(path), "repos.yaml")); err == nil {
-				return c, errors.New("Only a legacy repos.yaml exists; this check does not migrate it. Create ~/.clawflow/config/config.yaml with settings.execution.profile or set CLAWFLOW_OFFLOAD_PROFILE")
-			}
-			return c, errors.New("Offload settings unavailable: configure settings.execution.profile or CLAWFLOW_OFFLOAD_PROFILE")
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), "repos.yaml")); err == nil && os.Getenv("CLAWFLOW_OFFLOAD_PROFILE") == "" {
+			return c, errors.New("Only a legacy repos.yaml exists; this check does not migrate it. Create ~/.clawflow/config/config.yaml")
 		}
 	default:
 		return c, errors.New("Offload settings unreadable: ~/.clawflow/config/config.yaml is not accessible")

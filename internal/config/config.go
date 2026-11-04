@@ -95,7 +95,7 @@ type Repo struct {
 	UpdatedBy string `yaml:"updated_by,omitempty"`
 }
 
-// ExecutionSettings selects machine-local Offload profiles. Profiles own model authentication.
+// ExecutionSettings optionally overrides machine-local Offload execution defaults.
 type ExecutionSettings struct {
 	// TestDatabaseDSN is a machine-local secret passed only through the agent environment.
 	TestDatabaseDSN string            `yaml:"test_database_dsn,omitempty" json:"-"`

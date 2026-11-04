@@ -223,12 +223,19 @@ func CheckReadiness(ctx context.Context, c Config, roles []string, opts Readines
 			report.Unverified = append(report.Unverified, "profile_existence")
 		} else {
 			check.Status, check.Message = CheckPassed, "selected profile is defined in Offload configuration (credentials not verified)"
+			resolved := make([]string, 0, len(profiles))
 			for _, p := range profiles {
-				if reason, msg := snap.check(p); reason != "" {
+				selected, reason, msg := snap.selected(p)
+				if reason != "" {
 					check.Status, check.Message = CheckBlocked, msg
 					report.Status, report.Reason = StatusBlocked, reason
 					break
 				}
+				resolved = append(resolved, selected)
+			}
+			if report.Status == StatusReady {
+				r.Profiles = resolved
+				report.Profile = resolved[0]
 			}
 		}
 		report.Checks = append(report.Checks, check)
@@ -259,7 +266,7 @@ func ConfigBlockedReadiness(message string, opts ReadinessOptions) Readiness {
 	report.Reason = ReasonConfigUnavailable
 	return Readiness{SchemaVersion: ReadinessSchemaVersion, State: StateBlocked, Reason: ReasonConfigUnavailable, Worker: opts.Worker,
 		Environment: opts.Environment, Summary: sanitizeText(message, 200), Report: &report, CheckedAt: now().UTC(),
-		Guidance: &Guidance{Steps: []string{"Set settings.execution.profile in ~/.clawflow/config/config.yaml, or CLAWFLOW_OFFLOAD_PROFILE for the service environment."},
+		Guidance: &Guidance{Steps: []string{"Run offload config and select a default profile."},
 			Recheck: RecheckCommand}}
 }
 
@@ -299,10 +306,10 @@ func describeBlocked(reason, configured string, report Report) (string, *Guidanc
 		g.Link = OffloadInstallDocs
 		return "Offload does not declare the capabilities ClawFlow needs.", g
 	case ReasonProfileMissing:
-		g.Steps = []string{"Set settings.execution.profile in ~/.clawflow/config/config.yaml, or CLAWFLOW_OFFLOAD_PROFILE for the worker environment.", "List profiles with: offload profiles"}
-		return "No Offload profile is selected for ClawFlow.", g
+		g.Steps = []string{"Run offload config and select a default profile.", "List profiles with: offload profiles"}
+		return "No default profile is selected in Offload.", g
 	case ReasonProfileNotFound:
-		g.Steps = []string{"Create or select a profile with: offload config", "Then make settings.execution.profile match a profile name or alias."}
+		g.Steps = []string{"Create or select a default profile with: offload config", "If ClawFlow explicitly overrides the profile, make that value match a profile name or alias."}
 		g.Link = OffloadInstallDocs
 		return sanitizeText(detail, 200), g
 	case ReasonConfigInvalid:
@@ -322,18 +329,32 @@ const maxProfilesBytes = 1 << 20
 var profilesDeclaration = regexp.MustCompile(`(?m)^\s*offload profiles \[--json\](?:\s|$)`)
 
 type profileSnapshot struct {
-	SchemaVersion int  `json:"schema_version"`
-	ConfigExists  bool `json:"config_exists"`
+	SchemaVersion int    `json:"schema_version"`
+	ConfigExists  bool   `json:"config_exists"`
+	Active        string `json:"active"`
 	Profiles      []struct {
 		Name string `json:"name"`
 	} `json:"profiles"`
 	aliases map[string]bool
 }
 
-func (s profileSnapshot) check(profile string) (string, string) {
-	if strings.TrimSpace(profile) == "" {
-		return ReasonProfileMissing, "No Offload profile is selected for ClawFlow."
+func (s profileSnapshot) selected(profile string) (string, string, string) {
+	if profile == "" {
+		profile = s.Active
 	}
+	if !s.ConfigExists {
+		return "", ReasonProfileNotFound, "Offload has no profile configuration (run offload config)."
+	}
+	if !validProfile(profile) {
+		return "", ReasonProfileMissing, "Offload has no active default profile (run offload config)."
+	}
+	if reason, message := s.check(profile); reason != "" {
+		return "", reason, message
+	}
+	return profile, "", ""
+}
+
+func (s profileSnapshot) check(profile string) (string, string) {
 	if !s.ConfigExists {
 		return ReasonProfileNotFound, "Offload has no profile configuration (run offload config)."
 	}

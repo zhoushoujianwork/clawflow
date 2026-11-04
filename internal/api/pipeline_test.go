@@ -29,6 +29,7 @@ func resetPipeline(t *testing.T, src func(context.Context) (pipeline.Snapshot, e
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "")
+	t.Setenv("CLAWFLOW_OFFLOAD_COMMAND", filepath.Join(t.TempDir(), "missing-offload"))
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	oldLiveSource := pipelineLiveSource
 	resetPipelineExecutionCache()

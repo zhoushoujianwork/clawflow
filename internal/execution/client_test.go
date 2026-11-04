@@ -247,16 +247,38 @@ func TestOffloadRolesRestrictionsRedactionAndErrors(t *testing.T) {
 		t.Fatal(string(raw))
 	}
 }
-func TestOffloadConfigurationRequired(t *testing.T) {
+func TestOffloadConfigurationValidation(t *testing.T) {
 	c, _ := fixture(t)
 	c.Profile = ""
-	if ValidateConfig(c) == nil {
-		t.Fatal("implicit profile")
+	if ValidateConfig(c) != nil {
+		t.Fatal("Offload default profile should be allowed")
 	}
 	c.Profile = "test"
 	c.CodexSandbox = "unrestricted"
 	if ValidateConfig(c) == nil {
 		t.Fatal("invalid sandbox")
+	}
+}
+
+func TestOffloadDefaultProfileIsResolvedAndPinned(t *testing.T) {
+	c, req := fixture(t)
+	c.Profile = ""
+	capture := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("OFFLOAD_TEST_CAPTURE", capture)
+	result, err := Run(context.Background(), c, req, nil, io.Discard, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var call struct{ Args map[string]string }
+	if err := json.Unmarshal(raw, &call); err != nil {
+		t.Fatal(err)
+	}
+	if call.Args["-p"] != "test-profile" || result.Profile != "test-profile" {
+		t.Fatalf("args=%v result=%+v", call.Args, result)
 	}
 }
 func TestDuplicateJSONKeysRejected(t *testing.T) {
