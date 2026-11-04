@@ -957,22 +957,6 @@ func LoadCredentials() (*Credentials, error) {
 	return c, nil
 }
 
-// Save writes the config back to ~/.clawflow/config/config.yaml.
-func (c *Config) Save() error {
-	if c.Repos == nil {
-		c.Repos = make(map[string]Repo)
-	}
-	data, err := yaml.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("cannot marshal config: %w", err)
-	}
-	path := ConfigPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
 // SaveCredentials writes credentials with restricted permissions (0600).
 func SaveCredentials(c *Credentials) error {
 	data, err := yaml.Marshal(c)
