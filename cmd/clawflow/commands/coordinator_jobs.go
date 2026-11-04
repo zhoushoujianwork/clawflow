@@ -398,6 +398,9 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	if err != nil {
 		return err
 	}
+	if err := resolveReportedHead(t, &r, failed, j.client); err != nil {
+		return err
+	}
 	applicable := make([]jobEffect, 0, len(r.Effects))
 	var unapplied []jobEffect
 	for _, e := range r.Effects {
@@ -657,6 +660,35 @@ func persistDevelopmentEvents(ctx context.Context, t *coordinator.Task, j *runJo
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(r.DevelopmentEvents), 0600)
+}
+
+// resolveReportedHead fills a successful implementation's head from the platform
+// when the worker could not confirm it, for example during a transient network
+// failure. A pushed result must not be lost to that, and the PR's head is defined
+// by the platform anyway; acceptance still verifies it independently. A lookup
+// error is returned so the worker retries; a missing branch stays invalid.
+func resolveReportedHead(t *coordinator.Task, r *coordinatorReport, failed bool, client vcs.Client) error {
+	if failed || r.Status != "success" || t.Kind != "implement" || acceptanceSHA(r.HeadSHA) {
+		return nil
+	}
+	provider, ok := client.(vcs.BranchHeadProvider)
+	if !ok {
+		return nil
+	}
+	for _, e := range r.Effects {
+		if e.Kind != "pr-create" || e.Head == "" {
+			continue
+		}
+		head, err := provider.BranchHead(t.Repo, e.Head)
+		if err != nil {
+			return fmt.Errorf("resolve reported head: %w", err)
+		}
+		if acceptanceSHA(head) {
+			r.HeadSHA = head
+		}
+		return nil
+	}
+	return nil
 }
 
 func (s *coordinatorResults) ReportProgress(ctx context.Context, id, worker string, fence, ageSec int64) error {

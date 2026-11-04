@@ -1941,6 +1941,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		confirmedHead, headErr = confirmedDevelopmentHead(ctx, workdir, j)
 		if errors.Is(headErr, gitexec.ErrTimeout) {
 			runErr = headErr
+		} else if headErr != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ development head unconfirmed: %v\n", prefix, headErr)
 		}
 	}
 	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
