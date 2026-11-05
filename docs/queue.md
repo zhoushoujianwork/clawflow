@@ -2,6 +2,8 @@
 
 启用仓库中的所有 open leaf issue 默认参与队列；owner 添加 `clawflow-skip` 即可排除。旧 `clawflow` 标签不影响选择，也不会被删除。没有选择模式配置。
 
+`implement` 只接收仓库写权限成员创建的 issue，或作者名（不区分大小写）出现在仓库 `allowed_issue_authors` 中的 issue。可用 `clawflow repo set owner/repo --allowed-issue-authors user,bot` 配置；空值清除。作者未获准时队列显示 `author_not_admitted:<login>`，作者为空或权限查询失败时显示 `author_check_failed`，均在下一轮重新检查。此门禁不影响评论回复、父任务进度、现有 PR 修复或验收。
+
 保留现有终态标签、暂停/取消、依赖、worker 主机亲和性及重试限制。`agent-skipped` 表示 agent 被阻塞，不等同于 owner 的退出选择。只有 owner 能添加或删除 `clawflow-skip`；算子结果、修复、Pilot 和解阻流程均不能修改它。
 
 顺序仍为 P0–P3（无标签为 P2）、手动 rank、创建时间、issue key，仓库 `max_in_flight` 不变。`queue add/remove/move` 仅维护 rank，不改变资格；移除 rank 后仍会自动选中。

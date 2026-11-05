@@ -151,13 +151,16 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 		CreatedAt string   `json:"created_at"`
 		UpdatedAt string   `json:"updated_at"`
 		ClosedAt  string   `json:"closed_at"`
+		Author    struct {
+			Username string `json:"username"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
 	issues := make([]vcs.Issue, len(raw))
 	for i, r := range raw {
-		issues[i] = vcs.Issue{Number: r.IID, State: "open", Title: r.Title, Body: r.Body, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
+		issues[i] = vcs.Issue{Number: r.IID, State: "open", Title: r.Title, Body: r.Body, Author: r.Author.Username, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
 	}
 	return issues, nil
 }
@@ -326,11 +329,14 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 		Title  string `json:"title"`
 		Body   string `json:"description"`
 		WebURL string `json:"web_url"`
+		Author struct {
+			Username string `json:"username"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.Issue{}, err
 	}
-	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body, URL: raw.WebURL}, nil
+	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body, Author: raw.Author.Username, URL: raw.WebURL}, nil
 }
 
 func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdate) (vcs.Issue, error) {
@@ -353,11 +359,14 @@ func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdat
 		return vcs.Issue{}, fmt.Errorf("gitlab update issue: HTTP %d: %s", status, data)
 	}
 	var raw struct {
-		ID    int64  `json:"id"`
-		IID   int    `json:"iid"`
-		Title string `json:"title"`
-		Body  string `json:"description"`
-		State string `json:"state"`
+		ID     int64  `json:"id"`
+		IID    int    `json:"iid"`
+		Title  string `json:"title"`
+		Body   string `json:"description"`
+		State  string `json:"state"`
+		Author struct {
+			Username string `json:"username"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.Issue{}, err
@@ -366,7 +375,7 @@ func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdat
 	if state == "opened" {
 		state = "open"
 	}
-	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body, State: state}, nil
+	return vcs.Issue{ID: raw.ID, Number: raw.IID, Title: raw.Title, Body: raw.Body, Author: raw.Author.Username, State: state}, nil
 }
 
 func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.Issue, error) {
@@ -394,6 +403,9 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		Labels    []string `json:"labels"`
 		CreatedAt string   `json:"created_at"`
 		UpdatedAt string   `json:"updated_at"`
+		Author    struct {
+			Username string `json:"username"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -404,7 +416,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		if s == "opened" {
 			s = "open"
 		}
-		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, State: s, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, Author: r.Author.Username, State: s, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 	}
 	return issues, nil
 }
@@ -601,6 +613,9 @@ func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue
 		Labels    []string `json:"labels"`
 		CreatedAt string   `json:"created_at"`
 		UpdatedAt string   `json:"updated_at"`
+		Author    struct {
+			Username string `json:"username"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -611,9 +626,30 @@ func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue
 		if s == "opened" {
 			s = "open"
 		}
-		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, State: s, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		issues[i] = vcs.Issue{Number: r.IID, Title: r.Title, Body: r.Body, Author: r.Author.Username, State: s, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 	}
 	return issues, nil
+}
+
+func (c *Client) AuthorHasWriteAccess(repo, login string) (bool, error) {
+	path := fmt.Sprintf("/projects/%s/members/all?query=%s&per_page=100", projectID(repo), url.QueryEscape(login))
+	data, err := c.allPages(path)
+	if err != nil {
+		return false, fmt.Errorf("gitlab project members: %w", err)
+	}
+	var members []struct {
+		Username    string `json:"username"`
+		AccessLevel int    `json:"access_level"`
+	}
+	if err := json.Unmarshal(data, &members); err != nil {
+		return false, err
+	}
+	for _, member := range members {
+		if strings.EqualFold(member.Username, login) {
+			return member.AccessLevel >= 30, nil
+		}
+	}
+	return false, nil
 }
 
 // ListIssuesByBodyKeyword returns all open issues whose body contains keyword.
@@ -778,6 +814,9 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 		CreatedAt string   `json:"created_at"`
 		UpdatedAt string   `json:"updated_at"`
 		ClosedAt  string   `json:"closed_at"`
+		Author    struct {
+			Username string `json:"username"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -791,6 +830,7 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 		Number:    raw.IID,
 		Title:     raw.Title,
 		Body:      raw.Body,
+		Author:    raw.Author.Username,
 		State:     state,
 		Labels:    raw.Labels,
 		URL:       raw.WebURL,

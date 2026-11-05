@@ -111,7 +111,13 @@ func prepareImplementation(j *runJob) error {
 	if issue == nil {
 		return fmt.Errorf("issue no longer exists")
 	}
-	fresh := &operator.Subject{Number: issue.Number, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State, SubTotal: issue.SubIssuesTotal, URL: issue.URL}
+	j.sub.Author = issue.Author
+	admission, reason := issueAdmissionFn(j.client, j.repo, j.repoCfg, *issue)
+	if reason != "" {
+		return &issueAdmissionDeferredError{reason: reason}
+	}
+	j.admission = admission
+	fresh := &operator.Subject{Number: issue.Number, Title: issue.Title, Body: issue.Body, Author: issue.Author, Labels: issue.Labels, State: issue.State, SubTotal: issue.SubIssuesTotal, URL: issue.URL}
 	if !implementationSubjectAllowed(fresh) {
 		return fmt.Errorf("issue is no longer an eligible open leaf")
 	}

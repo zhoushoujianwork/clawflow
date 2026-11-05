@@ -12,6 +12,7 @@ type Subject struct {
 	Number     int
 	Title      string
 	Body       string
+	Author     string
 	Labels     []string
 	State      string // "open" | "closed"
 	IsPR       bool

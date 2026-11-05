@@ -84,6 +84,34 @@ func TestRepoSetBoundMachinePreservedWithAutomationFlags(t *testing.T) {
 	}
 }
 
+func TestRepoSetAllowedIssueAuthors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"ns/repo": {Enabled: true}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		value string
+		want  []string
+	}{
+		{"Alice, release-bot", []string{"Alice", "release-bot"}},
+		{"", nil},
+	} {
+		cmd := newRepoSetCmd()
+		cmd.SetArgs([]string{"ns/repo", "--allowed-issue-authors", tc.value})
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := loaded.Repos["ns/repo"].AllowedIssueAuthors; !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("value %q: got %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
 func TestRepoSetBoundMachineRejectsInvalidWithoutMutation(t *testing.T) {
 	for _, value := range []string{"two hosts", " host", "host\tname", "host\nname", "host\x00name", "host\x7fname", "host\u00a0name", "host/name", `host\name`} {
 		t.Run(value, func(t *testing.T) {

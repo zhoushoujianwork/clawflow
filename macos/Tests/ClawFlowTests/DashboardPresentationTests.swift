@@ -136,4 +136,19 @@ final class QueueReasonArgumentTests: XCTestCase {
         XCTAssertEqual(row.reasonCode, "area_busy")
         XCTAssertEqual(row.detail, "和 PR #622 改动范围重叠")
     }
+
+    func testAuthorAdmissionReasons() throws {
+        let denied = #"{"key":"o/r#1","position":1,"number":1,"title":"t","tier":"P2","state":"blocked:author_not_admitted:guest"}"#
+        let deniedRow = try decoder().decode(IssueQueueRow.self, from: Data(denied.utf8))
+        XCTAssertEqual(deniedRow.reasonCode, "author_not_admitted")
+        XCTAssertEqual(deniedRow.detail, "作者 guest 没有写权限，未启动")
+
+        let deniedWithoutLogin = #"{"key":"o/r#2","position":2,"number":2,"title":"t","tier":"P2","state":"blocked:author_not_admitted"}"#
+        let anonymousRow = try decoder().decode(IssueQueueRow.self, from: Data(deniedWithoutLogin.utf8))
+        XCTAssertEqual(anonymousRow.detail, "作者没有写权限，未启动")
+
+        let failed = #"{"key":"o/r#3","position":3,"number":3,"title":"t","tier":"P2","state":"blocked:author_check_failed"}"#
+        let failedRow = try decoder().decode(IssueQueueRow.self, from: Data(failed.utf8))
+        XCTAssertEqual(failedRow.detail, "作者权限查询失败，本轮未启动")
+    }
 }
