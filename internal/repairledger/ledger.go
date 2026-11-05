@@ -53,12 +53,17 @@ const ReleaseOffloadUnavailable = "offload-unavailable"
 // repair or infrastructure budget and adds no backoff.
 const ReleaseCoordinationChanged = "coordination-changed"
 
+// ReleaseEnqueueDeduplicated marks a reservation released because another
+// controller inserted the same repair task after preparation started. No
+// repair ran, so it consumes no repair or infrastructure budget.
+const ReleaseEnqueueDeduplicated = "enqueue-deduplicated"
+
 // Counts returns (consumed repair attempts, released infrastructure outcomes).
 func (l Ledger) Counts() (consumed, infra int) {
 	for _, a := range l.Attempts {
 		if a.Released == "" {
 			consumed++
-		} else if a.Released != "no-change" && a.Released != "resource-busy" && a.Released != ReleaseOffloadUnavailable && a.Released != ReleaseCoordinationChanged {
+		} else if a.Released != "no-change" && a.Released != "resource-busy" && a.Released != ReleaseOffloadUnavailable && a.Released != ReleaseCoordinationChanged && a.Released != ReleaseEnqueueDeduplicated {
 			infra++
 		}
 	}
@@ -210,7 +215,7 @@ func Release(root, repo string, pr vcs.PR, attempt int, kind string, now time.Ti
 		return fmt.Errorf("no open repair reservation for attempt %d", attempt)
 	}
 	ledger.Attempts[idx].Released = kind
-	if kind != ReleaseCoordinationChanged {
+	if kind != ReleaseCoordinationChanged && kind != ReleaseEnqueueDeduplicated {
 		_, infra := ledger.Counts()
 		backoff := Cooldown << uint(infra)
 		if backoff > MaxBackoff || backoff <= 0 {

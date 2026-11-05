@@ -2,7 +2,6 @@ package coordinator
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"strings"
 	"time"
@@ -41,7 +40,7 @@ type BoardTask struct {
 	Subject   string     `json:"subject"`
 	Durable   bool       `json:"durable" gorm:"->"`
 	// Routing contains only private acceptance routing fields, never the full payload.
-	Routing             json.RawMessage `json:"-" gorm:"column:acceptance_routing;type:jsonb"`
+	Routing             json.RawMessage `json:"-" gorm:"column:acceptance_routing;serializer:rawjson"`
 	ApplicationAttempts int             `json:"application_attempts"`
 	ApplicationError    string          `json:"application_error,omitempty"`
 	WaitingReason       string          `json:"waiting_reason,omitempty" gorm:"-"`
@@ -71,11 +70,11 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 	}
 	// Cached outside the transaction: board reads never wait on VCS.
 	orphans := s.cachedOrphanedPRs()
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var now time.Time
-		if err := tx.Raw("SELECT transaction_timestamp()").Scan(&now).Error; err != nil {
-			return err
-		}
+	// The store DSN makes ordinary GORM transactions BEGIN IMMEDIATE. Board is
+	// read-only, so use an explicit deferred transaction on one connection: WAL
+	// readers get a consistent snapshot without acquiring the writer lock.
+	err := deferredReadTransaction(s.db.WithContext(ctx), func(tx *gorm.DB) error {
+		now := controllerNow()
 		var workers []Worker
 		if err := tx.Select("id, tags, roles, run_untagged, max_parallel, paused").Order("id").Find(&workers).Error; err != nil {
 			return err
@@ -96,22 +95,45 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			heartbeats[beat.Worker] = beat.At
 		}
 		tasks := []BoardTask{}
-		if err := tx.Model(&Task{}).Select("(SELECT started_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS started_at, (SELECT ended_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS ended_at, id, COALESCE(payload->>'durable_execution' = 'true', false) AS durable, COALESCE(payload->>'title', '') AS subject, repo, issue, pr, kind, state, tags, jsonb_build_object('acceptance_worker', payload->'acceptance_worker', 'development_worker', payload->'development_worker') AS acceptance_routing, priority, lease_owner, lease_expires_at, last_event_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
+		if err := tx.Model(&Task{}).Select("(SELECT started_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS started_at, (SELECT ended_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS ended_at, id, COALESCE(json_extract(payload, '$.durable_execution') = 1, 0) AS durable, COALESCE(json_extract(payload, '$.title'), '') AS subject, repo, issue, pr, kind, state, tags, json_object('acceptance_worker', json_extract(payload, '$.acceptance_worker'), 'development_worker', json_extract(payload, '$.development_worker')) AS acceptance_routing, priority, lease_owner, lease_expires_at, last_event_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
 			return err
 		}
 		out = deriveBoard(now, workers, tokens, heartbeats, tasks)
 		out.applyFindings(now, workers, limits)
 		cfg := s.Watchdog.withDefaults()
 		var history []FinishedTask
-		if err := tx.Model(&Task{}).Select("repo, issue, pr, state, updated_at, COALESCE(result->>'infra_kind', '') AS infra_kind, COALESCE(result->>'error', '') AS err, COALESCE(result->>'head_sha', '') AS head").
+		if err := tx.Model(&Task{}).Select("repo, issue, pr, state, updated_at, COALESCE(json_extract(result, '$.infra_kind'), '') AS infra_kind, COALESCE(json_extract(result, '$.error'), '') AS err, COALESCE(json_extract(result, '$.head_sha'), '') AS head").
 			Where("state IN ('failed', 'done') AND updated_at > ?", now.Add(-cfg.FailureWindow)).Order("updated_at DESC").Scan(&history).Error; err != nil {
 			return err
 		}
 		out.Findings = append(out.Findings, repeatedFailureFindings(now, history, cfg)...)
 		out.Findings = append(out.Findings, orphanedPRFindings(now, orphans, out.Tasks, cfg)...)
 		return nil
-	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	})
 	return out, err
+}
+
+func deferredReadTransaction(db *gorm.DB, read func(*gorm.DB) error) error {
+	return db.Connection(func(conn *gorm.DB) error {
+		if err := conn.Exec("BEGIN DEFERRED").Error; err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				cleanup := conn.Session(&gorm.Session{NewDB: true, Context: context.Background()})
+				_ = cleanup.Exec("ROLLBACK").Error
+			}
+		}()
+		if err := read(conn.Session(&gorm.Session{NewDB: true})); err != nil {
+			return err
+		}
+		if err := conn.Exec("COMMIT").Error; err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
 }
 
 func deriveBoard(now time.Time, workers []Worker, tokens []Token, heartbeats map[string]time.Time, tasks []BoardTask) Board {

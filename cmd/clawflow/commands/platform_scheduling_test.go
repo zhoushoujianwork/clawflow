@@ -82,7 +82,7 @@ func TestClientRunAndLocalEnableRefused(t *testing.T) {
 }
 
 func TestClientLocalRunWarnsAndExecutes(t *testing.T) {
-	db, dsn := storetest.NewWithDSN(t)
+	db, dsn := storetest.NewWithPath(t)
 	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
 		t.Fatal(err)
 	}

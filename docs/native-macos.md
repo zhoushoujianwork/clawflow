@@ -17,7 +17,7 @@ After building, preview migration with `python3 macos/install-host.py`; apply it
 | Content | Installed location |
 |---|---|
 | Shared configuration | `~/Library/Application Support/ClawFlow/config/config.yaml` |
-| Controller state, projects, PostgreSQL and independent worker state | `~/Library/Application Support/ClawFlow/` |
+| Controller state, projects, the SQLite database and independent worker state | `~/Library/Application Support/ClawFlow/` |
 | Stable service CLI | `~/Library/Application Support/ClawFlow/bin/clawflow` |
 | Service logs | `~/Library/Logs/ClawFlow/` |
 | Login startup definitions | `~/Library/LaunchAgents/com.zhoushoujianwork.clawflow.*.plist` |
@@ -25,13 +25,13 @@ After building, preview migration with `python3 macos/install-host.py`; apply it
 
 The old `~/.clawflow` path remains a compatibility symlink to Application Support, and its `logs` entry points to Library/Logs. Existing historical paths and CLI scripts remain usable. Config, runtime and credential lookup resolve the same migrated root; explicit independent-worker state overrides remain supported. Non-migrated CLI installations retain their existing paths. Credentials required by unattended CLI workers remain in protected files inside the private data directory; this migration does not convert them to Keychain items.
 
-Opening the app with an explicit localhost controller connection starts missing installed database, controller and worker agents once, in that order. Loaded agents are reused, and readiness failures are retried by launchd. Remote viewer connections do not start local services. Stopping a service in the current app session keeps it stopped until explicitly started, the app is reopened, or the next login starts its agent. Quitting the app leaves services running. Host installation still requires database/execution configuration; app startup does not invent credentials or install unknown services.
+Opening the app with an explicit localhost controller connection starts missing installed controller and worker agents once. There is no database service: the controller opens its embedded SQLite file. Loaded agents are reused, and readiness failures are retried by launchd. Remote viewer connections do not start local services. Stopping a service in the current app session keeps it stopped until explicitly started, the app is reopened, or the next login starts its agent. Quitting the app leaves services running. Host installation still requires execution configuration; app startup does not invent credentials or install unknown services.
 
-Validated on 2026-10-30: the existing idle host was migrated, all four LaunchAgent path references were updated, both workers reconnected, and app preferences matched the CLI token path. Unloading the controller and reopening the app started it again without creating a second worker identity. The PostgreSQL-backed full Go race suite, 14 Swift tests, vet, build and app signature checks passed. No computer reboot was performed.
+Validated on 2026-10-30 (before the SQLite change; that run used PostgreSQL): the existing idle host was migrated, all four LaunchAgent path references were updated, both workers reconnected, and app preferences matched the CLI token path. Unloading the controller and reopening the app started it again without creating a second worker identity. The PostgreSQL-backed full Go race suite, 14 Swift tests, vet, build and app signature checks passed. No computer reboot was performed.
 
 ## Controller setup
 
-Reuse your existing PostgreSQL and worker configuration. The new `controller` command uses the same coordinator HTTPS listener, scheduler, execution profiles and delivery gates as the previous service.
+A fresh host needs no database setup. A host that still has a PostgreSQL DSN must first run the one-time import in [sqlite-host-runbook.md](sqlite-host-runbook.md); until then the controller refuses to start. The `controller` command uses the same coordinator HTTPS listener, scheduler, execution profiles and delivery gates as the previous service.
 
 ```yaml
 settings:

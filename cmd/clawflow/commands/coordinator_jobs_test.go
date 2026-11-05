@@ -20,6 +20,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
@@ -28,8 +29,9 @@ import (
 
 type resultStoreFake struct {
 	coordinator.WorkerStore
-	mu   sync.Mutex
-	task coordinator.Task
+	mu                   sync.Mutex
+	task                 coordinator.Task
+	conflictAfterPrepare bool
 }
 
 func (s *resultStoreFake) VerifyToken(context.Context, string) (*coordinator.Token, error) {
@@ -64,18 +66,23 @@ func (s *resultStoreFake) FinishResult(_ context.Context, id, w string, f int64,
 func (s *resultStoreFake) ExpireLeases(context.Context, time.Time) ([]coordinator.Task, error) {
 	return nil, nil
 }
-func (s *resultStoreFake) EnqueuePrepared(_ context.Context, t coordinator.Task, fn func(*coordinator.Task) error) (*coordinator.Task, error) {
+func (s *resultStoreFake) EnqueuePrepared(_ context.Context, t coordinator.Task, fn func(*coordinator.Task) error) (*coordinator.Task, bool, error) {
 	if s.task.ID != "" {
-		return &s.task, nil
+		return &s.task, false, nil
 	}
 	t.ID = "task"
 	t.CreatedAt = time.Now().UTC()
 	t.State = "pending"
 	if err := fn(&t); err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if s.conflictAfterPrepare {
+		s.task = t
+		s.task.ID = "competing-task"
+		return &s.task, false, nil
 	}
 	s.task = t
-	return &s.task, nil
+	return &s.task, true, nil
 }
 
 type resultClientFake struct {
@@ -347,6 +354,25 @@ func TestCoordinatorRepairEnqueueReservesOnce(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRepairConcurrentEnqueueReleasesLosingReservation(t *testing.T) {
+	withRunLog(t)
+	pr, issue := repairFixture()
+	j := &runJob{repo: "o/r", repoCfg: config.Repo{AutoMerge: true, CIRequired: true}, client: &repairClient{pr: pr, issue: issue, status: vcs.CIStatusFailure}, op: &operator.Operator{Name: "repair-ci"}, sub: &operator.Subject{Number: issue.Number}, repair: &ciRepairContext{PR: pr}}
+	s := &resultStoreFake{conflictAfterPrepare: true}
+	if _, _, err := dispatchCoordinatorJobs(context.Background(), s, []*runJob{j}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	_, path := ciRepairLedgerPath(snapshot.DataDir(), j.repo, pr.Number)
+	ledger, err := loadCIRepairLedger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumed, infra := ledger.counts()
+	if len(ledger.Attempts) != 1 || consumed != 0 || infra != 0 || ledger.Attempts[0].Released != repairledger.ReleaseEnqueueDeduplicated {
+		t.Fatalf("losing reservation consumed budget: %+v", ledger)
+	}
+}
+
 func TestCoordinatorSchedulingIgnoresLocalExecutionRequirements(t *testing.T) {
 	oldGate := coordinatorPRAllowedFn
 	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
@@ -384,7 +410,7 @@ func TestCoordinatorRejectsExpiredAndCrossRepoResults(t *testing.T) {
 
 func TestCoordinatorRunOnceEnqueuesAndPreservesCapacity(t *testing.T) {
 	stubDispatchCoordination(t)
-	db, dsn := storetest.NewWithDSN(t)
+	db, dsn := storetest.NewWithPath(t)
 	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
 		t.Fatal(err)
 	}
@@ -498,8 +524,8 @@ type coordinatorEnqueueFailure struct {
 	err error
 }
 
-func (s *coordinatorEnqueueFailure) EnqueuePrepared(context.Context, coordinator.Task, func(*coordinator.Task) error) (*coordinator.Task, error) {
-	return nil, s.err
+func (s *coordinatorEnqueueFailure) EnqueuePrepared(context.Context, coordinator.Task, func(*coordinator.Task) error) (*coordinator.Task, bool, error) {
+	return nil, false, s.err
 }
 
 func TestCoordinatorDispatchPreservesFatalErrors(t *testing.T) {

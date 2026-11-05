@@ -20,7 +20,7 @@ var ctx = context.Background()
 
 func setup(t *testing.T) (*Store, *store.Store, string) {
 	t.Helper()
-	db, dsn := storetest.NewWithDSN(t)
+	db, dsn := storetest.NewWithPath(t)
 	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
 		t.Fatal(err)
 	}
@@ -322,13 +322,19 @@ func TestPreparedEnqueueDeduplicatesBeforeReservation(t *testing.T) {
 		task.Payload = json.RawMessage(`{"task_id":"` + task.ID + `","attempt":1}`)
 		return nil
 	}
-	first, err := s.EnqueuePrepared(ctx, input, prepare)
+	first, inserted, err := s.EnqueuePrepared(ctx, input, prepare)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := s.EnqueuePrepared(ctx, input, prepare)
+	if !inserted {
+		t.Fatal("first enqueue was not inserted")
+	}
+	second, inserted, err := s.EnqueuePrepared(ctx, input, prepare)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if inserted {
+		t.Fatal("duplicate enqueue reported an insert")
 	}
 	if calls != 1 || first.ID != second.ID || !strings.Contains(string(second.Payload), second.ID) {
 		t.Fatal(calls, first, second)

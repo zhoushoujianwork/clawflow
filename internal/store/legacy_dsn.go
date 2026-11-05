@@ -17,8 +17,8 @@ const DSNEnv = "CLAWFLOW_DATABASE_DSN"
 const maskedSecret = "****"
 
 // ErrNoDSN is returned when neither the environment nor the config carries a
-// database DSN. PostgreSQL is required, so callers must treat it as fatal.
-var ErrNoDSN = errors.New("a PostgreSQL DSN is required: set " + DSNEnv +
+// legacy PostgreSQL DSN. Only the offline importer needs one.
+var ErrNoDSN = errors.New("a legacy PostgreSQL DSN is required for the import: set " + DSNEnv +
 	" or settings.database.dsn in ~/.clawflow/config/config.yaml (see docs/storage-design.md)")
 
 var (

@@ -177,7 +177,7 @@ func enqueueCoordinatorJobs(ctx context.Context, jobs []*runJob, timeout time.Du
 }
 
 type coordinatorQueue interface {
-	EnqueuePrepared(context.Context, coordinator.Task, func(*coordinator.Task) error) (*coordinator.Task, error)
+	EnqueuePrepared(context.Context, coordinator.Task, func(*coordinator.Task) error) (*coordinator.Task, bool, error)
 	ExpireLeases(context.Context, time.Time) ([]coordinator.Task, error)
 }
 
@@ -246,7 +246,7 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 		reserved := false
 		var repairPreparationErr error
 		var coordinationPreparationErr error
-		_, err = s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
+		_, inserted, enqueueErr := s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
 			if j.coordination != nil {
 				fresh, e := collectCoordination(ctx, j, nil, "")
 				if e != nil {
@@ -273,6 +273,13 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 			t.Payload, err = json.Marshal(p)
 			return err
 		})
+		err = enqueueErr
+		if err == nil && reserved && !inserted {
+			if releaseErr := j.releaseRepair(repairledger.ReleaseEnqueueDeduplicated, time.Now().UTC()); releaseErr != nil {
+				return fired, failed, fmt.Errorf("release deduplicated repair %s#%d: %w", j.repo, j.sub.Number, releaseErr)
+			}
+			reserved = false
+		}
 		if err != nil {
 			if errors.Is(err, coordinator.ErrCoordinationChanged) {
 				if reserved {

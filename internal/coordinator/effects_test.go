@@ -137,7 +137,7 @@ func TestInboxDuplicateKeepsGeneration(t *testing.T) {
 	if err := s.Complete(ctx, task.ID, "w", task.FencingToken, nil); err != nil {
 		t.Fatal(err)
 	}
-	again, err := s.EnqueuePrepared(ctx, input, func(*Task) error { t.Fatal("duplicate prepared new work"); return nil })
+	again, _, err := s.EnqueuePrepared(ctx, input, func(*Task) error { t.Fatal("duplicate prepared new work"); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

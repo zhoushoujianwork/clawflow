@@ -30,7 +30,7 @@ struct AppIdentity: Equatable {
             return label.hasPrefix(prefix)
         }
         guard !label.hasPrefix("com.zhoushoujianwork.clawflow.dev.") else { return false }
-        return label == "com.zhoushoujianwork.clawflow.postgres" || label == "com.zhoushoujianwork.clawflow.controller" || label.hasPrefix("com.zhoushoujianwork.clawflow.worker-")
+        return label == "com.zhoushoujianwork.clawflow.controller" || label.hasPrefix("com.zhoushoujianwork.clawflow.worker-")
     }
     /// Candidates never start services on launch and never use the installed CLI.
     var startsHostServices: Bool { !isCandidate }

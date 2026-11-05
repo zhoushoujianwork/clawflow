@@ -12,7 +12,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
-// streamPollInterval is how often HandleRunStream queries PostgreSQL to detect
+// streamPollInterval is how often HandleRunStream queries the database to detect
 // changes. Declared as a var so tests can shrink it. 1s gives sub-second-feel
 // latency for the dashboard while keeping disk reads cheap (the file is a few
 // KB and only re-emitted when its bytes actually change).
@@ -27,7 +27,7 @@ var streamHeartbeatEvery = 15 * time.Second
 // operator-status page reflects lifecycle stage transitions in real time
 // without manual refresh (issue #199).
 //
-// Separate runner and web processes observe shared PostgreSQL state.
+// Separate runner and web processes observe shared database state.
 func HandleRunStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -52,7 +52,7 @@ func HandleRunStream(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var last []byte
-	// send queries PostgreSQL and emits a frame only when the compacted bytes
+	// send queries the database and emits a frame only when the compacted bytes
 	// changed. Returns true if a data frame was written.
 	send := func() bool {
 		data, err := readRunsCompact(ctx)

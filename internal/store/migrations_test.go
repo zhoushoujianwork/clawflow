@@ -3,9 +3,12 @@ package store_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -160,7 +163,7 @@ func TestMigrateFailureRollsBack(t *testing.T) {
 		t.Fatalf("rows = %d, want 1 (failed migration must not be recorded)", got)
 	}
 	var exists bool
-	if err := s.DB().Raw("SELECT to_regclass('half_done') IS NOT NULL").Scan(&exists).Error; err != nil || exists {
+	if err := s.DB().Raw("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='half_done')").Scan(&exists).Error; err != nil || exists {
 		t.Fatalf("failed migration DDL must roll back (exists=%v err=%v)", exists, err)
 	}
 }
@@ -192,34 +195,71 @@ func TestMigrateConcurrentRunnersApplyOnce(t *testing.T) {
 	}
 }
 
-func TestEnsureReady(t *testing.T) {
-	s, dsn := storetest.NewWithDSN(t)
+func TestEnsureReadyFreshHostNeedsNoDSN(t *testing.T) {
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	t.Setenv(store.LegacyDSNEnv, "")
 	ctx := context.Background()
-	t.Setenv(store.DSNEnv, dsn)
-	cfg := &config.Config{}
-
-	_, err := store.EnsureReady(ctx, cfg)
-	if err == nil || !strings.Contains(err.Error(), "clawflow db migrate") || !strings.Contains(err.Error(), "pending") {
-		t.Fatalf("want pending-migration error mentioning `clawflow db migrate`, got %v", err)
-	}
-
-	if _, err := s.Migrate(ctx, store.Migrations); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	ready, err := store.EnsureReady(ctx, cfg)
+	s, err := store.EnsureReady(ctx, &config.Config{})
 	if err != nil {
-		t.Fatalf("EnsureReady after migrate: %v", err)
+		t.Fatalf("fresh host must start without PostgreSQL or a DSN: %v", err)
 	}
-	defer ready.Close()
-	if err := ready.Ping(ctx); err != nil {
-		t.Fatalf("Ping: %v", err)
+	defer s.Close()
+	statuses, err := s.Status(ctx, store.Migrations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range statuses {
+		if !st.Applied {
+			t.Fatalf("migration %d pending after EnsureReady", st.Version)
+		}
+	}
+	info, err := os.Stat(s.Path())
+	if err != nil || info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("database file must be private: %v %v", info, err)
+	}
+	if want := filepath.Join(os.Getenv("CLAWFLOW_STATE_DIR"), "data", store.FileName); s.Path() != want {
+		t.Fatalf("path = %s, want %s", s.Path(), want)
 	}
 }
 
-func TestEnsureReadyWithoutDSN(t *testing.T) {
-	t.Setenv(store.DSNEnv, "")
-	if _, err := store.EnsureReady(context.Background(), &config.Config{}); !errors.Is(err, store.ErrNoDSN) {
-		t.Fatalf("want ErrNoDSN, got %v", err)
+func TestEnsureReadyRefusesLegacyDSNWithoutCutover(t *testing.T) {
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	t.Setenv(store.LegacyDSNEnv, "")
+	cfg := &config.Config{}
+	cfg.Settings.Database.DSN = "postgres://u:p@127.0.0.1:1/db"
+	if _, err := store.EnsureReady(context.Background(), cfg); !errors.Is(err, store.ErrCutoverRequired) {
+		t.Fatalf("want ErrCutoverRequired, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("CLAWFLOW_STATE_DIR"), "data", store.FileName)); err == nil {
+		t.Fatal("an empty SQLite store must not be created beside live PostgreSQL data")
+	}
+	t.Setenv(store.LegacyDSNEnv, "postgres://u:p@127.0.0.1:1/db")
+	if _, err := store.EnsureReady(context.Background(), &config.Config{}); !errors.Is(err, store.ErrCutoverRequired) {
+		t.Fatalf("env DSN: want ErrCutoverRequired, got %v", err)
+	}
+}
+
+func TestEnsureReadyCutoverHostRejectsContradictionsAndMissingFile(t *testing.T) {
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	t.Setenv(store.LegacyDSNEnv, "")
+	cfg := &config.Config{}
+	cfg.Settings.Database.Engine = store.EngineSQLite
+	if _, err := store.EnsureReady(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "restore") {
+		t.Fatalf("missing database must not be recreated empty: %v", err)
+	}
+	s, err := store.Open(context.Background(), store.DefaultPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	cfg.Settings.Database.DSN = "postgres://u:p@h/db"
+	if _, err := store.EnsureReady(context.Background(), cfg); err == nil {
+		t.Fatal("leftover DSN after cutover must be refused")
+	}
+	cfg.Settings.Database.DSN = ""
+	t.Setenv(store.LegacyDSNEnv, "postgres://u:p@h/db")
+	if _, err := store.EnsureReady(context.Background(), cfg); err == nil {
+		t.Fatal("environment DSN after cutover must be refused")
 	}
 }
 
@@ -236,12 +276,12 @@ func TestActionsMigrationAfterTokenScope(t *testing.T) {
 	}
 	for _, table := range []string{"actions_attachments", "actions_evidence"} {
 		var exists bool
-		if err := s.DB().Raw("SELECT to_regclass(?) IS NOT NULL", table).Scan(&exists).Error; err != nil || !exists {
+		if err := s.DB().Raw("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)", table).Scan(&exists).Error; err != nil || !exists {
 			t.Fatalf("missing %s: exists=%v err=%v", table, exists, err)
 		}
 	}
 	var scope string
-	if err := s.DB().Raw("SELECT column_default FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tokens' AND column_name = 'scope'").Scan(&scope).Error; err != nil || !strings.Contains(scope, "worker") {
+	if err := s.DB().Raw("SELECT dflt_value FROM pragma_table_info('coordinator_tokens') WHERE name = 'scope'").Scan(&scope).Error; err != nil || !strings.Contains(scope, "worker") {
 		t.Fatalf("token scope migration lost: default=%q err=%v", scope, err)
 	}
 }
@@ -258,7 +298,7 @@ func TestScheduledChecksMigrationAfterActionsEvidence(t *testing.T) {
 	}
 	for _, table := range []string{"actions_attachments", "actions_evidence", "scheduled_checks", "scheduled_check_runs"} {
 		var exists bool
-		if err := s.DB().Raw("SELECT to_regclass(?) IS NOT NULL", table).Scan(&exists).Error; err != nil || !exists {
+		if err := s.DB().Raw("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)", table).Scan(&exists).Error; err != nil || !exists {
 			t.Fatalf("missing %s: exists=%v err=%v", table, exists, err)
 		}
 	}
@@ -272,11 +312,6 @@ func TestExecutionEvidenceUpgradePreservesLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, table := range []string{"runs", "pilot_runs"} {
-		if err := s.DB().Exec("ALTER TABLE " + table + ` DROP COLUMN offload_run_id, DROP COLUMN caller_run_id,
- DROP COLUMN session_id, DROP COLUMN exit_code, DROP COLUMN error_kind,
- DROP COLUMN elapsed_ms, DROP COLUMN execution_status`).Error; err != nil {
-			t.Fatal(err)
-		}
 		if err := s.DB().Exec("INSERT INTO "+table+" (run_dir, status, payload) VALUES (?, ?, ?)", "/legacy", "success", `{"status":"success"}`).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -307,7 +342,7 @@ func TestCoordinatorApplicationErrorsMigrationAfterExecutionEvidence(t *testing.
 		t.Fatalf("application errors upgrade: applied=%v err=%v", applied, err)
 	}
 	var columns int64
-	if err := s.DB().Raw("SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'coordinator_tasks' AND column_name IN ('application_attempts', 'application_error')").Scan(&columns).Error; err != nil || columns != 2 {
+	if err := s.DB().Raw("SELECT count(*) FROM pragma_table_info('coordinator_tasks') WHERE name IN ('application_attempts', 'application_error')").Scan(&columns).Error; err != nil || columns != 2 {
 		t.Fatalf("application error columns: count=%d err=%v", columns, err)
 	}
 }
@@ -318,7 +353,7 @@ func TestNativeWorkerMigrationPreservesExistingEligibility(t *testing.T) {
 	if _, err := s.Migrate(ctx, store.Migrations[:9]); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DB().Exec("INSERT INTO coordinator_workers (id,max_parallel,created_at,updated_at) VALUES ('existing',2,now(),now())").Error; err != nil {
+	if err := s.DB().Exec("INSERT INTO coordinator_workers (id,max_parallel,created_at,updated_at) VALUES ('existing',2,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)").Error; err != nil {
 		t.Fatal(err)
 	}
 	applied, err := s.Migrate(ctx, store.Migrations[:10])
@@ -347,7 +382,7 @@ func TestAppliedVersionsAndContractMarking(t *testing.T) {
 	}
 	// A version this binary does not know is still reported, so a rolling
 	// upgrade can tell the database moved ahead of the running build.
-	if err := s.DB().Exec("INSERT INTO schema_migrations (version, name) VALUES (9999, 'future')").Error; err != nil {
+	if err := s.DB().Exec("INSERT INTO schema_migrations (version, name, applied_at) VALUES (9999, 'future', ?)", time.Now().UTC()).Error; err != nil {
 		t.Fatal(err)
 	}
 	got, _ = s.AppliedVersions(ctx)

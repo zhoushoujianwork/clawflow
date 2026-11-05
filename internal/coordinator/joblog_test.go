@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,7 +73,7 @@ func TestAppendLogRejectsAfterLeaseEndsOrExpires(t *testing.T) {
 	}
 
 	expired := leased(t, s, "w3", 2)
-	if err := s.db.Exec("UPDATE coordinator_tasks SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = ?", expired.ID).Error; err != nil {
+	if err := s.db.Exec("UPDATE coordinator_tasks SET lease_expires_at = ? WHERE id = ?", time.Now().UTC().Add(-time.Second), expired.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AppendLog(ctx, expired.ID, "w3", page(expired.FencingToken, 0, 1, logEvent(1, "message", "late"))); !errors.Is(err, ErrStaleLease) {
@@ -121,6 +122,49 @@ func TestAppendLogDuplicatesOrderingAndResume(t *testing.T) {
 	for i, want := range []int64{1, 2, 3, 4} {
 		if seqs[i] != want {
 			t.Fatalf("order %v", seqs)
+		}
+	}
+}
+
+func TestAppendLogConcurrentOverlapStaysGapFree(t *testing.T) {
+	s, _, _ := setup(t)
+	task := leased(t, s, "w1", 1)
+	f := task.FencingToken
+	pages := []LogPage{
+		page(f, 0, 1, logEvent(1, "message", "a")),
+		page(f, 0, 2, logEvent(1, "message", "a"), logEvent(2, "message", "b")),
+	}
+	start := make(chan struct{})
+	errs := make(chan error, len(pages))
+	var wg sync.WaitGroup
+	for i := range pages {
+		wg.Add(1)
+		go func(p LogPage) {
+			defer wg.Done()
+			<-start
+			ack, err := s.AppendLog(ctx, task.ID, "w1", p)
+			if err == nil && !ack.Accepted {
+				err = errors.New("overlapping page was not accepted")
+			}
+			errs <- err
+		}(pages[i])
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	read, err := s.ReadLog(ctx, task.ID, 0, 0, 100)
+	if err != nil || len(read.Entries) != 2 {
+		t.Fatalf("read=%+v err=%v", read, err)
+	}
+	for i, entry := range read.Entries {
+		var event joblog.Event
+		if err := json.Unmarshal(entry.Event, &event); err != nil || event.Seq != int64(i+1) {
+			t.Fatalf("entry %d: %+v err=%v", i, event, err)
 		}
 	}
 }
@@ -214,7 +258,7 @@ func TestLogEpochsAreIsolatedAcrossRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The lease expires and the task is retried on another worker with a new fence.
-	if err := s.db.Exec("UPDATE coordinator_tasks SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = ?", first.ID).Error; err != nil {
+	if err := s.db.Exec("UPDATE coordinator_tasks SET lease_expires_at = ? WHERE id = ?", time.Now().UTC().Add(-time.Second), first.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ExpireLeases(ctx, time.Now().UTC()); err != nil {

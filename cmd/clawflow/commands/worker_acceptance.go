@@ -126,7 +126,7 @@ func enqueueWorkerAcceptance(ctx context.Context, client vcs.Client, repo string
 	if passed, err := completedAcceptancePassed(c); passed || err != nil {
 		return err
 	}
-	_, err = s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
+	_, _, err = s.EnqueuePrepared(ctx, t, func(t *coordinator.Task) error {
 		p.TaskID = t.ID
 		t.Payload, err = json.Marshal(p)
 		return err

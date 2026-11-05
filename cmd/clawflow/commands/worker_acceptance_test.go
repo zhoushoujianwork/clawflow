@@ -408,7 +408,7 @@ func TestEnqueueAcceptanceFromPRSummaryAfterBaseMerge(t *testing.T) {
 	git("checkout", f.pr.HeadBranch)
 	git("merge", "--no-ff", "main", "-m", "merge")
 	f.pr.HeadSHA, f.pr.BaseSHA = git("rev-parse", "HEAD"), git("rev-parse", "main")
-	db, dsn := storetest.NewWithDSN(t)
+	db, dsn := storetest.NewWithPath(t)
 	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
 		t.Fatal(err)
 	}
@@ -482,13 +482,13 @@ func TestWorkerAcceptanceRequirementsChangeRequeuesSameHead(t *testing.T) {
 	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return spy, nil }
 	ctx := context.Background()
 
-	db, dsn := storetest.NewWithDSN(t)
+	db, path := storetest.NewWithPath(t)
 	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
 		t.Fatal(err)
 	}
 	oldStore, oldAllowed := requireStore, coordinatorPRAllowedFn
 	t.Cleanup(func() { requireStore, coordinatorPRAllowedFn = oldStore, oldAllowed })
-	requireStore = func(ctx context.Context) (*store.Store, error) { return store.Open(ctx, dsn) }
+	requireStore = func(ctx context.Context) (*store.Store, error) { return store.Open(ctx, path) }
 	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
 
 	// The result a reviewer would upload for the original requirements. Its

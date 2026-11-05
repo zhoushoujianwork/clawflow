@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // DurableReportGrace reserves time after the execution deadline for result upload.
@@ -91,13 +90,10 @@ func recoverableReport(raw json.RawMessage) bool {
 func (s *Store) RecoverExecution(ctx context.Context, id, worker string, epoch int64) (*Task, error) {
 	var task Task
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ?", id).Error; err != nil {
+		if err := tx.First(&task, "id = ?", id).Error; err != nil {
 			return err
 		}
-		var now time.Time
-		if err := tx.Raw("SELECT clock_timestamp()").Scan(&now).Error; err != nil {
-			return err
-		}
+		now := controllerNow()
 		if DurableTask(&task) && task.State == "leased" && task.LeaseOwner == worker && task.FencingToken == epoch+1 && task.Result == nil {
 			var previous TaskAttempt
 			if err := tx.First(&previous, "task_id = ? AND lease_epoch = ? AND worker_id = ? AND status = 'interrupted'", id, epoch, worker).Error; err == nil {
@@ -147,33 +143,5 @@ func (s *Store) ClaimWithID(ctx context.Context, worker, id string) (*Task, erro
 	if !claimIDPattern.MatchString(id) {
 		return nil, ErrInvalid
 	}
-	var task *Task
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", worker+"/claim/"+id).Error; err != nil {
-			return err
-		}
-		var existing Task
-		err := tx.Where("lease_owner = ? AND payload->>'worker_claim_id' = ?", worker, id).First(&existing).Error
-		if err == nil {
-			if existing.State != "leased" || existing.Result != nil {
-				return ErrNoTask
-			}
-			task = &existing
-			return nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		var registered Worker
-		if err := tx.First(&registered, "id = ?", worker).Error; err != nil {
-			return err
-		}
-		if !registered.Durable {
-			return ErrInvalid
-		}
-		store := &Store{db: tx, LeaseLimits: s.LeaseLimits}
-		task, err = store.claim(ctx, worker, id)
-		return err
-	})
-	return task, err
+	return s.claim(ctx, worker, id)
 }

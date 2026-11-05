@@ -1,6 +1,6 @@
 # Storage design
 
-Proposed follow-up: [SQLite for the single-host controller](sqlite-host-design.md). The PostgreSQL-only behavior below describes the current implementation and remains active until that feature is implemented and migration is verified.
+**Superseded for the controller store** by [SQLite for the single-host controller](sqlite-host-design.md); operations are in [sqlite-host-runbook.md](sqlite-host-runbook.md). The controller now uses embedded SQLite, and PostgreSQL remains only as the source of the one-time import. The PostgreSQL-specific text below is kept as history of the previous design.
 
 ClawFlow keeps its durable state in **PostgreSQL**, accessed through GORM. PostgreSQL is required: there is no SQLite or embedded fallback. Details for contributors are in [storage-design-detail.md](storage-design-detail.md).
 

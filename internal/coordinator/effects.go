@@ -34,7 +34,7 @@ type EffectIntent struct {
 	Number           int
 	IdempotencyKey   string
 	PayloadDigest    string
-	Payload          json.RawMessage `gorm:"type:jsonb"`
+	Payload          json.RawMessage `gorm:"serializer:rawjson"`
 	Status           string
 	AppliedReference string
 	UpdatedAt        time.Time
@@ -164,14 +164,17 @@ func (s *Store) PendingResults(ctx context.Context) ([]Task, error) {
 }
 
 func (s *Store) ApplyEffects(ctx context.Context, id string, epoch int64, apply func(EffectIntent) (EffectResult, error)) error {
-	var remoteErr error
+	// Remote effects are at-least-once and idempotent. Keep the per-task lock
+	// across the remote call so two controller goroutines cannot both apply the
+	// same intent, but never hold SQLite's single writer lock across that call.
+	unlock := applicationLocks.lock(id)
+	defer unlock()
+
+	var intents []EffectIntent
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var t Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+		if err := applicationTask(tx, id, epoch, &t); err != nil {
 			return err
-		}
-		if t.FencingToken != epoch || t.State != "leased" || t.LeaseExpiresAt != nil || len(t.Result) == 0 {
-			return ErrStaleLease
 		}
 		// Reports sealed before this migration may have already written an
 		// unmarked comment. Preserve them for explicit reconciliation rather
@@ -191,7 +194,6 @@ func (s *Store) ApplyEffects(ctx context.Context, id string, epoch int64, apply 
 				return fmt.Errorf("legacy report has no durable intents; reconcile existing effects before recovery")
 			}
 		}
-		var intents []EffectIntent
 		if err := tx.Where("task_id = ? AND status IN ?", id, []string{"pending", "uncertain"}).Order("position, id").Find(&intents).Error; err != nil {
 			return err
 		}
@@ -199,19 +201,39 @@ func (s *Store) ApplyEffects(ctx context.Context, id string, epoch int64, apply 
 			if intent.LeaseEpoch != t.FencingToken {
 				return ErrStaleLease
 			}
-			res, err := apply(intent)
-			intent.Status = "applied"
-			intent.AppliedReference = res.Reference
-			intent.UpdatedAt = time.Now().UTC()
-			if err != nil {
-				intent.Status = "uncertain"
-				remoteErr = err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, intent := range intents {
+		res, remoteErr := apply(intent)
+		headMismatch := false
+		err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var t Task
+			if err := applicationTask(tx, id, epoch, &t); err != nil {
+				return err
 			}
-			if err := tx.Save(&intent).Error; err != nil {
+			var current EffectIntent
+			if err := tx.First(&current, "id = ?", intent.ID).Error; err != nil {
+				return err
+			}
+			if current.TaskID != id || current.LeaseEpoch != epoch || (current.Status != "pending" && current.Status != "uncertain") {
+				return ErrStaleLease
+			}
+			current.Status = "applied"
+			current.AppliedReference = res.Reference
+			current.UpdatedAt = time.Now().UTC()
+			if remoteErr != nil {
+				current.Status = "uncertain"
+			}
+			if err := tx.Save(&current).Error; err != nil {
 				return err
 			}
 			if remoteErr != nil {
-				break
+				return nil
 			}
 			if res.PR > 0 {
 				t.PR = res.PR
@@ -220,6 +242,7 @@ func (s *Store) ApplyEffects(ctx context.Context, id string, epoch int64, apply 
 				}
 			}
 			if res.HeadMismatch {
+				headMismatch = true
 				if err := tx.Model(&t).Update("state", "head-mismatch").Error; err != nil {
 					return err
 				}
@@ -228,13 +251,29 @@ func (s *Store) ApplyEffects(ctx context.Context, id string, epoch int64, apply 
 				}
 				return failIntents(tx, id)
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
-	if err != nil {
+		if remoteErr != nil {
+			return remoteErr
+		}
+		if headMismatch {
+			return nil
+		}
+	}
+	return nil
+}
+
+func applicationTask(tx *gorm.DB, id string, epoch int64, out *Task) error {
+	if err := tx.First(out, "id = ?", id).Error; err != nil {
 		return err
 	}
-	return remoteErr
+	if out.FencingToken != epoch || out.State != "leased" || out.LeaseExpiresAt != nil || len(out.Result) == 0 {
+		return ErrStaleLease
+	}
+	return nil
 }
 func failIntents(tx *gorm.DB, id string) error {
 	return tx.Model(&EffectIntent{}).Where("task_id = ? AND status IN ?", id, []string{"pending", "uncertain"}).Updates(map[string]any{"status": "failed", "updated_at": time.Now().UTC()}).Error
@@ -242,7 +281,7 @@ func failIntents(tx *gorm.DB, id string) error {
 func (s *Store) Cancel(ctx context.Context, id string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var t Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+		if err := tx.First(&t, "id = ?", id).Error; err != nil {
 			return err
 		}
 		if t.State == "cancelled" {
@@ -261,16 +300,18 @@ func (s *Store) Cancel(ctx context.Context, id string) error {
 	})
 }
 
-// FinalizeApplication prevents cancellation or a second applier from racing
-// coordinator post-processing. External writes in finalize must be idempotent.
+// FinalizeApplication prevents a second in-process applier from racing
+// coordinator post-processing. External writes in finalize are at-least-once
+// and must be idempotent: cancellation can commit after the remote write and
+// before its local state transition, in which case revalidation stops here.
 func (s *Store) FinalizeApplication(ctx context.Context, id string, epoch int64, failed bool, finalize func(Task) error) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var t Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+	unlock := applicationLocks.lock(id)
+	defer unlock()
+
+	var prepared Task
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := applicationTask(tx, id, epoch, &prepared); err != nil {
 			return err
-		}
-		if t.FencingToken != epoch || t.State != "leased" || t.LeaseExpiresAt != nil || len(t.Result) == 0 {
-			return ErrStaleLease
 		}
 		var count int64
 		if err := tx.Model(&EffectIntent{}).Where("task_id = ? AND status != 'applied'", id).Count(&count).Error; err != nil {
@@ -279,8 +320,25 @@ func (s *Store) FinalizeApplication(ctx context.Context, id string, epoch int64,
 		if count != 0 {
 			return ErrInvalid
 		}
-		if err := finalize(t); err != nil {
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := finalize(prepared); err != nil {
+		return err
+	}
+
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var t Task
+		if err := applicationTask(tx, id, epoch, &t); err != nil {
 			return err
+		}
+		var count int64
+		if err := tx.Model(&EffectIntent{}).Where("task_id = ? AND status != 'applied'", id).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != 0 {
+			return ErrInvalid
 		}
 		var r struct {
 			InfraKind string `json:"infra_kind"`
@@ -352,7 +410,7 @@ func (s *Store) PRBlocked(ctx context.Context, repo string, pr int) (bool, error
 func (s *Store) RecordApplicationFailure(ctx context.Context, id string, epoch int64, message string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var t Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", id).Error; err != nil {
+		if err := tx.First(&t, "id = ?", id).Error; err != nil {
 			return err
 		}
 		if t.State != "leased" || t.FencingToken != epoch || t.LeaseExpiresAt != nil {

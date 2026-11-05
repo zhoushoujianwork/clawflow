@@ -288,7 +288,7 @@ func pipelineRuntime() pipeline.Runtime {
 	}
 	runMu.Unlock()
 	// Display one recorded execution, independent of today's configured profile.
-	// ReadRunsIndex reads PostgreSQL when a run store is bound (file fallback otherwise).
+	// ReadRunsIndex reads the database when a run store is bound (file fallback otherwise).
 	rt.Execution = latestExecution(snapshot.ReadRunsIndex())
 	if err := execution.Ready(); err != nil {
 		rt.Execution.Error = err.Error()

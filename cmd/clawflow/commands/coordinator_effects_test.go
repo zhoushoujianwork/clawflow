@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/retry"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 
@@ -118,9 +119,123 @@ func TestCoordinatorDurableReportRecovery(t *testing.T) {
 	}
 }
 
+func openDefaultSQLiteTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	db, err := store.Open(context.Background(), store.DefaultPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.BindRunStore(db)
+	t.Cleanup(func() {
+		snapshot.BindRunStore(nil)
+		_ = db.Close()
+	})
+	return db
+}
+
+func TestCoordinatorFailedSQLiteLifecycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	db := openDefaultSQLiteTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	tasks := coordinator.New(db.DB())
+	if err := tasks.RegisterWorker(ctx, coordinator.Worker{ID: "w", MaxParallel: 1, RunUntagged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tasks.Enqueue(ctx, coordinator.Task{Repo: "o/r", Issue: 2, Kind: "implement", Operator: "implement"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := tasks.Claim(ctx, "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &intentVCS{comments: map[string]bool{}}
+	job := &runJob{repo: "o/r", client: client, sub: &operator.Subject{Number: 2}, op: &operator.Operator{Name: "implement"}}
+	service := &coordinatorResults{WorkerStore: tasks, tasks: tasks, loadJob: func(context.Context, *coordinator.Task) (*runJob, error) { return job, nil }, apply: applyCoordinatorReport}
+	raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "failed", Error: "tests failed", Usage: &snapshot.Usage{InputTokens: 9}, Effects: []jobEffect{{Kind: "issue-comment", Repo: "o/r", Number: 2, Body: "failed"}}}})
+	if err := service.Fail(ctx, task.ID, "w", task.FencingToken, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recoverResults(ctx, tasks); err != nil {
+		t.Fatal(err)
+	}
+	current, err := tasks.Task(ctx, task.ID)
+	if err != nil || current.State != "failed" || client.commentWrites != 1 {
+		t.Fatalf("task=%+v comments=%d err=%v", current, client.commentWrites, err)
+	}
+	runs, err := db.Runs(ctx, "run", store.RunFilter{Repo: "o/r"})
+	if err != nil || len(runs) != 1 || runs[0].Status != "failed" || runs[0].InputTokens == nil || *runs[0].InputTokens != 9 {
+		t.Fatalf("runs=%+v err=%v", runs, err)
+	}
+	var intent coordinator.EffectIntent
+	if err := db.DB().First(&intent, "task_id = ?", task.ID).Error; err != nil || intent.Status != "applied" {
+		t.Fatalf("intent=%+v err=%v", intent, err)
+	}
+}
+
+func TestCoordinatorAcceptanceSQLiteLifecycle(t *testing.T) {
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	f, _ := acceptanceFixture(t)
+	record := produceAcceptance(t, f)
+	if err := os.RemoveAll(acceptanceStorePath("o/r", 11)); err != nil {
+		t.Fatal(err)
+	}
+	db := openDefaultSQLiteTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	tasks := coordinator.New(db.DB())
+	if err := tasks.RegisterWorker(ctx, coordinator.Worker{ID: "reviewer", Roles: []string{"acceptance"}, MaxParallel: 1, RunUntagged: true}); err != nil {
+		t.Fatal(err)
+	}
+	input := coordinator.Task{Repo: "o/r", Issue: 42, PR: 11, Kind: "acceptance", Operator: "acceptance"}
+	queued, _, err := tasks.EnqueuePrepared(ctx, input, func(task *coordinator.Task) error {
+		payload := coordinatorPayload{TaskID: task.ID, Kind: "acceptance", Repo: "o/r", Issue: 42, Acceptance: &record.Contract, AcceptanceWorker: "different", DevelopmentWorker: "developer"}
+		var marshalErr error
+		task.Payload, marshalErr = json.Marshal(payload)
+		return marshalErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := tasks.Claim(ctx, "reviewer")
+	if err != nil || task.ID != queued.ID {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	service := &coordinatorResults{WorkerStore: tasks, tasks: tasks}
+	raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "success"}, Acceptance: &record})
+	if err := service.Complete(ctx, task.ID, "reviewer", task.FencingToken, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recoverResults(ctx, tasks); err != nil {
+		t.Fatal(err)
+	}
+	current, err := tasks.Task(ctx, task.ID)
+	if err != nil || current.State != "done" {
+		t.Fatalf("task=%+v err=%v", current, err)
+	}
+	var intent coordinator.EffectIntent
+	if err := db.DB().First(&intent, "task_id = ?", task.ID).Error; err != nil || intent.Status != "applied" || intent.Kind != "pr-comment" {
+		t.Fatalf("intent=%+v err=%v", intent, err)
+	}
+	records, err := acceptance.OpenStore(acceptanceStorePath("o/r", 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer records.Close()
+	latest, err := records.LatestRecord(record.Contract)
+	if err != nil || latest.AttemptID != record.AttemptID {
+		t.Fatalf("record=%+v err=%v", latest, err)
+	}
+}
+
 func testCoordinatorDurableReportRecovery(t *testing.T, mode string) {
 	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
-	db := storetest.New(t)
+	db := openDefaultSQLiteTestStore(t)
 	ctx := context.Background()
 	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
 		t.Fatal(err)
@@ -155,7 +270,7 @@ func testCoordinatorDurableReportRecovery(t *testing.T, mode string) {
 		finalized++
 		return applyCoordinatorReport(ctx, task, job, r)
 	}}
-	raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "success", HeadSHA: c.head, Effects: []jobEffect{{Kind: "pr-create", Repo: "o/r", Head: "fix", Base: "main", Title: "fix"}, {Kind: "issue-comment", Repo: "o/r", Number: 1, Body: "done"}}}})
+	raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "success", HeadSHA: c.head, Usage: &snapshot.Usage{InputTokens: 17, OutputTokens: 3, TotalCostUSD: 0.25}, Effects: []jobEffect{{Kind: "pr-create", Repo: "o/r", Head: "fix", Base: "main", Title: "fix"}, {Kind: "issue-comment", Repo: "o/r", Number: 1, Body: "done"}}}})
 	if err := service.Complete(ctx, task.ID, "w", task.FencingToken, raw); err != nil {
 		t.Fatal(err)
 	}
@@ -192,6 +307,14 @@ func testCoordinatorDurableReportRecovery(t *testing.T, mode string) {
 	current, _ := tasks.Task(ctx, task.ID)
 	if current.State != "done" || current.PR != 11 || current.ApplicationAttempts != 0 {
 		t.Fatalf("%+v", current)
+	}
+	runs, err := db.Runs(ctx, "run", store.RunFilter{Repo: "o/r"})
+	if err != nil || len(runs) != 1 || runs[0].InputTokens == nil || *runs[0].InputTokens != 17 || runs[0].CostUSD == nil || *runs[0].CostUSD != 0.25 {
+		t.Fatalf("run usage=%+v err=%v", runs, err)
+	}
+	var intents []coordinator.EffectIntent
+	if err := db.DB().Where("task_id = ?", task.ID).Order("position, id").Find(&intents).Error; err != nil || len(intents) != 2 || intents[0].Status != "applied" || intents[1].Status != "applied" {
+		t.Fatalf("intents=%+v err=%v", intents, err)
 	}
 }
 

@@ -100,7 +100,7 @@ func TestLocalWorkerDisabled(t *testing.T) {
 	stop()
 }
 
-// The coordinator and worker use real TLS and PostgreSQL; only operator work
+// The coordinator and worker use real TLS and SQLite; only operator work
 // and the external VCS/native reviewer are fixtures. Each result is recovered by
 // a new applier to exercise the persisted protocol rather than an in-memory path.
 func TestCoordinatorWorkerLifecycle(t *testing.T) {
@@ -254,7 +254,7 @@ func TestCoordinatorWorkerLifecycle(t *testing.T) {
 	task, payload := coordinatorTask(&runJob{repo: "o/r", repoCfg: rc, op: &operator.Operator{Name: "acceptance"}, sub: &operator.Subject{Number: 42}}, time.Minute)
 	task.PR = 11
 	payload.Acceptance, payload.AcceptanceWorker, payload.DevelopmentWorker = &contract, "different", "local-worker"
-	review, err := tasks.EnqueuePrepared(ctx, task, func(task *coordinator.Task) error {
+	review, _, err := tasks.EnqueuePrepared(ctx, task, func(task *coordinator.Task) error {
 		payload.TaskID = task.ID
 		task.Payload, err = json.Marshal(payload)
 		return err

@@ -76,7 +76,7 @@ with --apply once the plan looks right.`,
 			if !apply {
 				return nil
 			}
-			fmt.Println("  PostgreSQL usage updated")
+			fmt.Println("  database usage updated")
 			return nil
 		},
 	}
