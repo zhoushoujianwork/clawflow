@@ -91,7 +91,7 @@ func newDBMigrateCmd() *cobra.Command {
 			}
 			defer s.Close()
 			fmt.Fprintf(cmd.OutOrStdout(), "Database: %s\n", s.Path())
-			applied, err := s.Migrate(cmd.Context(), store.Migrations)
+			applied, err := s.MigrateWithBackup(cmd.Context())
 			for _, v := range applied {
 				fmt.Fprintf(cmd.OutOrStdout(), "applied migration %d\n", v)
 			}

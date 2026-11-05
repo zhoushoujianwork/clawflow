@@ -106,6 +106,39 @@ func TestDBStatusReportsSQLite(t *testing.T) {
 	}
 }
 
+func TestDBMigrateBacksUpExistingPendingDatabase(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAWFLOW_STATE_DIR", "")
+	t.Setenv(store.LegacyDSNEnv, "")
+	writeMinimalConfig(t, home)
+	path := filepath.Join(home, ".clawflow", "data", store.FileName)
+	s, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Migrate(context.Background(), store.Migrations[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execRoot(t, "db", "migrate"); err != nil {
+		t.Fatal(err)
+	}
+	backups, err := filepath.Glob(path + ".pre-migrate-*.bak")
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("verified pre-migration backup missing: %v (%v)", backups, err)
+	}
+	if _, err := execRoot(t, "db", "migrate"); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := filepath.Glob(path + ".pre-migrate-*.bak")
+	if len(again) != 1 {
+		t.Fatalf("current database created another backup: %v", again)
+	}
+}
+
 func TestDBMigrateImportsHistoryOnlyWhenEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

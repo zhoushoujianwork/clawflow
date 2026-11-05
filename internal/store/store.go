@@ -229,17 +229,24 @@ func EnsureReady(ctx context.Context, cfg *config.Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.migrateWithBackup(ctx); err != nil {
+	if _, err := s.MigrateWithBackup(ctx); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Store) migrateWithBackup(ctx context.Context) error {
+// MigrateWithBackup applies pending migrations, first taking a verified SQLite
+// backup when the database already has an applied schema. Fresh and current
+// databases do not create a backup.
+func (s *Store) MigrateWithBackup(ctx context.Context) ([]int, error) {
+	return s.migrateWithBackup(ctx, s.Backup)
+}
+
+func (s *Store) migrateWithBackup(ctx context.Context, backup func(context.Context, string) error) ([]int, error) {
 	statuses, err := s.Status(ctx, Migrations)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	applied, pending := 0, 0
 	for _, st := range statuses {
@@ -250,14 +257,13 @@ func (s *Store) migrateWithBackup(ctx context.Context) error {
 		}
 	}
 	if pending == 0 {
-		return nil
+		return nil, nil
 	}
 	if applied > 0 {
 		dest := fmt.Sprintf("%s.pre-migrate-%s.bak", s.path, time.Now().UTC().Format("20060102T150405Z"))
-		if err := s.Backup(ctx, dest); err != nil {
-			return err
+		if err := backup(ctx, dest); err != nil {
+			return nil, err
 		}
 	}
-	_, err = s.Migrate(ctx, Migrations)
-	return err
+	return s.Migrate(ctx, Migrations)
 }
