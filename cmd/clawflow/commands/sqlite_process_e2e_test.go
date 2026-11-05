@@ -333,9 +333,13 @@ func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\'
 
 func copyProcessE2EProfile(t *testing.T, destination, name string) {
 	t.Helper()
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		t.Fatalf("locate host Offload config: %v", err)
+	configDir := os.Getenv("XDG_CONFIG_HOME")
+	if configDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("locate host Offload config: %v", err)
+		}
+		configDir = filepath.Join(home, ".config")
 	}
 	source := filepath.Join(configDir, "offload", "config.json")
 	raw, err := os.ReadFile(source)
