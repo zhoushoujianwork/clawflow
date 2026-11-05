@@ -94,7 +94,7 @@ func (s *Store) VerifyToken(ctx context.Context, secret string) (*Token, error) 
 			return ErrToken
 		}
 		found.LastSeen = &now
-		return audit(tx, found.Name, "", "token-verify")
+		return s.auditSampled(tx, found.Name, "", "token-verify")
 	})
 	if err != nil {
 		return nil, err

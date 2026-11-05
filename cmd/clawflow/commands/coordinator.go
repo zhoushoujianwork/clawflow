@@ -141,7 +141,18 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		defer close(reconcileDone)
 		tick := time.NewTicker(30 * time.Second)
 		defer tick.Stop()
+		var lastAuditPurge time.Time
 		for {
+			if time.Since(lastAuditPurge) >= 10*time.Minute {
+				lastAuditPurge = time.Now()
+				retention := coordinator.AuditRetention{
+					Routine:  time.Duration(settings.AuditRetentionDays) * 24 * time.Hour,
+					Security: time.Duration(settings.AuditSecurityRetentionDays) * 24 * time.Hour,
+				}
+				if _, err := tasks.PurgeAudit(reconcileCtx, time.Now(), retention); err != nil && reconcileCtx.Err() == nil {
+					coordLog().Warn("coordinator/audit_retention", "err", err.Error())
+				}
+			}
 			runReconcilePass(reconcileCtx,
 				func(c context.Context) error { return results.recoverResults(c, tasks) },
 				func(c context.Context) error {

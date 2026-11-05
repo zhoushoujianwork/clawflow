@@ -96,6 +96,11 @@ type Store struct {
 	OrphanRefreshInterval time.Duration
 	OrphanRefreshTimeout  time.Duration
 
+	// AuditSampleWindow limits low-value audit rows (token-verify, empty claim, dashboard reads)
+	// to one per worker and action per window; zero uses the default, negative disables sampling.
+	AuditSampleWindow time.Duration
+	sampler           auditSampler
+
 	orphanMu    sync.RWMutex
 	orphanCache []OrphanedPR
 }
@@ -113,7 +118,7 @@ func audit(tx *gorm.DB, worker, task, action string) error {
 	return tx.Create(&Audit{Worker: worker, Task: task, Action: action, CreatedAt: time.Now().UTC()}).Error
 }
 func (s *Store) AppendAudit(ctx context.Context, worker, task, action string) error {
-	return audit(s.db.WithContext(ctx), worker, task, action)
+	return s.auditSampled(s.db.WithContext(ctx), worker, task, action)
 }
 func (s *Store) RegisterWorker(ctx context.Context, w Worker) error {
 	if w.ID == "" || w.MaxParallel < 1 {
