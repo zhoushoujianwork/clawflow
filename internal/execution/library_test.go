@@ -62,6 +62,46 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 	}
 }
 
+func TestEngineParitySuccessResultAndEventSequence(t *testing.T) {
+	cliConfig, cliRequest := fixture(t)
+	cliConfig.Profile = "fixture"
+	cliRequest.PermissionMode = "default"
+	t.Setenv("OFFLOAD_TEST_TEXT", "Final answer")
+	var cliEvents bytes.Buffer
+	cliResult, cliErr := Run(context.Background(), cliConfig, cliRequest, nil, &cliEvents, nil)
+	if cliErr != nil {
+		t.Fatal(cliErr)
+	}
+	libraryConfig, libraryRequest := libraryFixture(t, `cat >/dev/null
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"native-actual","result":"Final answer"}'
+`)
+	libraryRequest.RequestID = cliRequest.RequestID
+	var libraryEvents bytes.Buffer
+	libraryResult, libraryErr := Run(context.Background(), libraryConfig, libraryRequest, nil, &libraryEvents, nil)
+	if libraryErr != nil {
+		t.Fatal(libraryErr)
+	}
+	project := func(r Result) []any {
+		return []any{r.Status, r.Text, r.Model, r.NativeSessionID, r.Profile, r.Backend, r.CallerRunID, r.ExecutionPolicy, r.ExitCode, r.ErrorKind, r.Error}
+	}
+	if !reflect.DeepEqual(project(cliResult), project(libraryResult)) {
+		t.Fatalf("cli=%+v library=%+v", cliResult, libraryResult)
+	}
+	eventTypes := func(raw []byte) []string {
+		var types []string
+		for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+			var event Event
+			if json.Unmarshal(line, &event) == nil {
+				types = append(types, event.Type)
+			}
+		}
+		return types
+	}
+	if cli, library := eventTypes(cliEvents.Bytes()), eventTypes(libraryEvents.Bytes()); !reflect.DeepEqual(cli, library) {
+		t.Fatalf("cli events=%v library events=%v", cli, library)
+	}
+}
+
 func TestLibraryCheckpointPersistsEngineRunAndDurableResult(t *testing.T) {
 	c, req := libraryFixture(t, `cat >/dev/null
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native-actual","model":"fixture"}'
