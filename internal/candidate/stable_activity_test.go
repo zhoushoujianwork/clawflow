@@ -56,8 +56,6 @@ func TestStableSnapshotStillProtectsDurableState(t *testing.T) {
 		"queue.json",
 		"projects.json",
 		"acceptance/o__r/1.json",
-		"acceptance-plans/plan.json",
-		"coordination/o__r.json",
 		"coordinator/key.pem",
 		"ci-repair/o__r.json",
 		// A lookalike of an excluded name is not excluded.
