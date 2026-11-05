@@ -64,8 +64,6 @@ func TestStableEvidenceFailsAndListsChanges(t *testing.T) {
 			}
 		}, "stable config path modified"},
 		"queue order":         {func(t *testing.T, s Stable, _ *[]string) { writeData(t, s, "queue.json", "[2,1]") }, `stable data path added: "queue.json"`},
-		"acceptance record":   {func(t *testing.T, s Stable, _ *[]string) { writeData(t, s, "acceptance/o__r/1.json", "tampered") }, `"acceptance/o__r/1.json"`},
-		"task record":         {func(t *testing.T, s Stable, _ *[]string) { writeData(t, s, "tasks/1.json", "tampered") }, `"tasks/1.json"`},
 		"controller identity": {func(t *testing.T, s Stable, ids *[]string) { *ids = []string{"10:controller"} }, "stable process identity changed"},
 		"listener":            {func(t *testing.T, s Stable, _ *[]string) { s.Ports = nil }, ""},
 	}

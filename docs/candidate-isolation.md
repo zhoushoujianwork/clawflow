@@ -109,7 +109,7 @@ clawflow candidate clean --commit <sha>
 ## 限制
 
 - 稳定宿主快照只读取文件、探测端口与 `ps`；未覆盖稳定宿主上由其他用户启动的进程。
-- 快照比对配置、人工队列顺序及任务、验收和协调记录。健康的调度每轮都会重写的内容不参与比对：运行历史、扫描派生快照、HTTP 缓存和扫描计数（见 `stableActivityData`）。稳定宿主上有任务在写验收或协调记录时，比对仍可能失败，应等任务结束后重跑。
+- 快照只比对：稳定配置目录、`data/queue.json`（人工队列顺序）、稳定服务进程身份与监听端口。`data/` 下其余内容（含 `clawflow.sqlite3`、`-wal`、`-shm`、`acceptance/`、`preflight/`、`coordination/` 及任意新路径）视为稳定 controller 的正常活动，不影响结论；证据只在“已忽略的稳定环境活动”中记录发生变化的顶层条目，不逐个列出文件。因此该比对不能发现候选对这些路径的写入；隔离靠独立的 HOME 与 `CLAWFLOW_STATE_DIR`，以及 `devmode.CheckWritePath` 拒绝写候选根目录之外的路径（含稳定 SQLite 文件，有测试覆盖）。
 - 本变更不实现跨机器的权威租约，也不为候选自动安装 launchd 服务；`LabelPrefix`/`ServiceLabel` 只定义命名空间并由 App 与 CLI 强制。
 - 隔离是对协作程序的约束：恶意子进程若自行构造 HTTP 客户端并显式设置 `Transport`，仍可绕过进程内传输守卫；git 与 offload 子进程通过清除的环境变量与 `GIT_ALLOW_PROTOCOL` 约束。
 

@@ -147,3 +147,18 @@ func TestHostMutatingCommandsRefused(t *testing.T) {
 		t.Fatalf("controller must stay available: %v", err)
 	}
 }
+
+// A candidate that points its database at the stable SQLite file (or its
+// WAL/SHM sidecars) must be refused.
+func TestCheckWritePathRefusesStableSQLite(t *testing.T) {
+	candidateEnv(t)
+	stable := filepath.Join(t.TempDir(), "stable", "data")
+	for _, name := range []string{"clawflow.sqlite3", "clawflow.sqlite3-wal", "clawflow.sqlite3-shm"} {
+		if err := CheckWritePath(filepath.Join(stable, name)); err == nil {
+			t.Fatalf("write to stable %s was allowed", name)
+		}
+	}
+	if err := CheckWritePath(filepath.Join(Root(), "data", "clawflow.sqlite3")); err != nil {
+		t.Fatalf("candidate-owned database refused: %v", err)
+	}
+}
