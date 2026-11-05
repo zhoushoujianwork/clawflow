@@ -228,6 +228,7 @@ type Result struct {
 	Machine          string          `json:"-"`
 	ErrorKind        string          `json:"error_kind"`
 	Error            string          `json:"error"`
+	Cleanup          string          `json:"cleanup,omitempty"`
 	Usage            json.RawMessage `json:"usage"`
 	CostUSD          *float64        `json:"cost_usd"`
 	CostIsEstimate   bool            `json:"cost_is_estimate"`
@@ -809,7 +810,7 @@ var capacityMessage = regexp.MustCompile(`(?i)\bat capacity\b|\boverloaded\b|\bc
 
 func safeKind(s string) string {
 	switch s {
-	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "globally_disabled", "session_busy", "unknown_session", "session_expired", "session_not_found", "ownership_mismatch", "backend_mismatch", "profile_mismatch", "resume_rejected", "context_exhausted", "context_limit", "context_length_exceeded", "timeout", "canceled", "execution", "launch", "events_io":
+	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "globally_disabled", "session_busy", "unknown_session", "session_expired", "session_not_found", "ownership_mismatch", "backend_mismatch", "profile_mismatch", "resume_rejected", "context_exhausted", "context_limit", "context_length_exceeded", "timeout", "canceled", "execution", "launch", "events_io", "result_write":
 		return s
 	}
 	return "execution"

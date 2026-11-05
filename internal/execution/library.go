@@ -17,6 +17,14 @@ import (
 	offload "github.com/zhoushoujianwork/offload/pkg/execution"
 )
 
+var (
+	runEmbeddedOffload = func(ctx context.Context, client *offload.Client, req offload.Request) (offload.Result, error) {
+		return client.Run(ctx, req)
+	}
+	writeLibraryResult = writeResultFile
+	libraryWarning     = func(message string) { _, _ = fmt.Fprintln(os.Stderr, "Warning: "+message) }
+)
+
 func runLibrary(ctx context.Context, c Config, req Request, env []string, events io.Writer, observe func(Observation)) (result Result, runErr error) {
 	defer func() {
 		result.CallerRunID = req.RequestID
@@ -211,14 +219,16 @@ func runLibrary(ctx context.Context, c Config, req Request, env []string, events
 		}
 	}
 
-	runCtx, cancelRun := context.WithCancel(ctx)
-	done := make(chan struct{})
-	activeRun := registerActiveLibraryRun(cancelRun, done)
-	packageResult, packageErr := client.Run(runCtx, libReq)
-	close(done)
-	unregisterActiveLibraryRun(activeRun)
-	cancelRun()
-	if err := writeResultFile(filepath.Join(dir, "result.json"), packageResult.RawRecord); err != nil {
+	packageResult, packageErr := callEmbeddedOffload(ctx, client, libReq)
+	if runErrorKind(packageErr) == "monitor" && libReq.Monitor != nil {
+		libraryWarning("Offload transcript monitor failed before native launch; retrying without transcript capture")
+		libReq.Monitor = nil
+		packageResult, packageErr = callEmbeddedOffload(ctx, client, libReq)
+	}
+	if len(packageResult.RawRecord) > MaxOutputBytes {
+		return result, &Error{Kind: "protocol_output_limit"}
+	}
+	if err := writeLibraryResult(filepath.Join(dir, "result.json"), packageResult.RawRecord); err != nil {
 		return result, errors.Join(&Error{Kind: "result_write"}, err)
 	}
 	if len(packageResult.RawRecord) == 0 || len(packageResult.RawRecord) > MaxOutputBytes || !validJSON(packageResult.RawRecord) || json.Unmarshal(packageResult.RawRecord, &result) != nil {
@@ -266,6 +276,9 @@ func runLibrary(ctx context.Context, c Config, req Request, env []string, events
 			return result, err
 		}
 	}
+	if runErrorKind(packageErr) == "cleanup" && result.Status == "ok" && result.ExitCode == 0 {
+		return result, nil
+	}
 	if packageErr != nil || result.Status != "ok" {
 		if errors.Is(packageErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			return result, context.Canceled
@@ -280,6 +293,25 @@ func runLibrary(ctx context.Context, c Config, req Request, env []string, events
 		return result, &Error{Kind: kind}
 	}
 	return result, nil
+}
+
+func callEmbeddedOffload(ctx context.Context, client *offload.Client, req offload.Request) (offload.Result, error) {
+	runCtx, cancelRun := context.WithCancel(ctx)
+	done := make(chan struct{})
+	activeRun := registerActiveLibraryRun(cancelRun, done)
+	result, err := runEmbeddedOffload(runCtx, client, req)
+	close(done)
+	unregisterActiveLibraryRun(activeRun)
+	cancelRun()
+	return result, err
+}
+
+func runErrorKind(err error) string {
+	var runErr *offload.RunError
+	if errors.As(err, &runErr) {
+		return runErr.Kind
+	}
+	return ""
 }
 
 func libraryStartFailure(kind string) bool {

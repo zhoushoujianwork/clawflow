@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	offload "github.com/zhoushoujianwork/offload/pkg/execution"
 )
 
 func libraryFixture(t *testing.T, script string) (Config, Request) {
@@ -219,6 +221,101 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 	}
 	if len(sink.targets) != 1 || !sink.targets[0].Capture || sink.targets[0].Command != "" || len(sink.ended) != 1 || sink.ended[0] != nil {
 		t.Fatalf("sink=%+v", sink)
+	}
+}
+
+func TestLibraryMonitorFailureRetriesWithoutCapture(t *testing.T) {
+	c, req := libraryFixture(t, `cat >/dev/null
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"native-actual","result":"Final answer"}'
+`)
+	sink := &recordingSink{}
+	oldRun, oldWarning := runEmbeddedOffload, libraryWarning
+	t.Cleanup(func() { runEmbeddedOffload, libraryWarning = oldRun, oldWarning })
+	calls := 0
+	var warning string
+	libraryWarning = func(message string) { warning = message }
+	runEmbeddedOffload = func(ctx context.Context, client *offload.Client, request offload.Request) (offload.Result, error) {
+		calls++
+		if calls == 1 {
+			if request.Monitor == nil {
+				t.Fatal("first attempt omitted monitor")
+			}
+			return offload.Result{ErrorKind: "monitor"}, &offload.RunError{Kind: "monitor", Status: "error", ExitCode: 2}
+		}
+		if request.Monitor != nil {
+			t.Fatal("monitor retry retained monitor")
+		}
+		return oldRun(ctx, client, request)
+	}
+	result, err := Run(WithTranscriptSink(context.Background(), sink), c, req, nil, nil, nil)
+	if err != nil || result.Status != "ok" || calls != 2 || !strings.Contains(warning, "retrying without transcript capture") {
+		t.Fatalf("result=%+v err=%v calls=%d warning=%q", result, err, calls, warning)
+	}
+}
+
+func cannedLibraryResult(t *testing.T, request offload.Request, status string, exit int, kind, cleanup, report string) offload.Result {
+	t.Helper()
+	record := Result{Status: status, Text: report, Model: "profile-model", NativeSessionID: "native-actual", Profile: "fixture", Backend: "claude",
+		RunID: "run-canned", CallerRunID: request.CallerRunID, ExecutionPolicy: "default", ExitCode: exit, ErrorKind: kind, Cleanup: cleanup}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return offload.Result{RunID: record.RunID, CallerRunID: record.CallerRunID, Profile: record.Profile, Backend: record.Backend, Model: record.Model,
+		NativeSessionID: record.NativeSessionID, Status: status, ErrorKind: kind, Cleanup: cleanup, Report: report, ExitCode: exit, RawRecord: raw}
+}
+
+func TestLibraryCleanupErrorKeepsSuccessfulResult(t *testing.T) {
+	for _, status := range []string{"ok", "error"} {
+		t.Run(status, func(t *testing.T) {
+			c, req := libraryFixture(t, "exit 99\n")
+			oldRun := runEmbeddedOffload
+			t.Cleanup(func() { runEmbeddedOffload = oldRun })
+			runEmbeddedOffload = func(_ context.Context, _ *offload.Client, request offload.Request) (offload.Result, error) {
+				exit, kind := 0, ""
+				if status == "error" {
+					exit, kind = 1, "execution"
+				}
+				result := cannedLibraryResult(t, request, status, exit, kind, "native process cleanup remains unresolved", "report")
+				return result, &offload.RunError{Kind: "cleanup", Status: status, ExitCode: exit}
+			}
+			result, err := Run(context.Background(), c, req, nil, nil, nil)
+			if status == "ok" {
+				if err != nil || result.Cleanup == "" || result.Status != "ok" {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+			} else if err == nil || !IsKind(err, "execution") || result.Status != "error" {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestLibraryOversizedResultUsesProtocolOutputLimit(t *testing.T) {
+	c, req := libraryFixture(t, "exit 99\n")
+	oldRun := runEmbeddedOffload
+	t.Cleanup(func() { runEmbeddedOffload = oldRun })
+	runEmbeddedOffload = func(_ context.Context, _ *offload.Client, request offload.Request) (offload.Result, error) {
+		result := cannedLibraryResult(t, request, "ok", 0, "", "", strings.Repeat("x", MaxOutputBytes))
+		return result, nil
+	}
+	_, err := Run(context.Background(), c, req, nil, nil, nil)
+	if !IsKind(err, "protocol_output_limit") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLibraryResultWriteFailureKeepsSafeKind(t *testing.T) {
+	c, req := libraryFixture(t, "exit 99\n")
+	oldRun, oldWrite := runEmbeddedOffload, writeLibraryResult
+	t.Cleanup(func() { runEmbeddedOffload, writeLibraryResult = oldRun, oldWrite })
+	runEmbeddedOffload = func(_ context.Context, _ *offload.Client, request offload.Request) (offload.Result, error) {
+		return cannedLibraryResult(t, request, "ok", 0, "", "", "report"), nil
+	}
+	writeLibraryResult = func(string, []byte) error { return errors.New("fixture write failure") }
+	_, err := Run(context.Background(), c, req, nil, nil, nil)
+	if !IsKind(err, "result_write") || safeKind("result_write") != "result_write" {
+		t.Fatalf("err=%v", err)
 	}
 }
 
