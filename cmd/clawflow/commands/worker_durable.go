@@ -28,6 +28,7 @@ type workerJournal struct {
 	Version        int
 	Task           coordinator.Task
 	Options        workerOptions
+	Engine         string
 	OffloadCommand string
 	Executable     string
 	State          string
@@ -142,23 +143,33 @@ func prepareWorkerExecutor(o workerOptions, t *coordinator.Task) (*workerJournal
 	if err != nil {
 		return nil, err
 	}
-	offload, err := exec.LookPath(ec.Command)
-	if err != nil {
+	if err := execution.ValidateConfig(ec); err != nil {
 		return nil, err
 	}
-	native, err := os.ReadFile(offload)
-	if err != nil {
-		return nil, err
+	engine := ec.Engine
+	if engine == "" {
+		engine = execution.EngineCLI
 	}
-	runtime := filepath.Join(root, "runtimes", fmt.Sprintf("%x", sha256.Sum256(native)), "offload")
-	if _, err := os.Stat(runtime); os.IsNotExist(err) {
-		if err := writeDurableFile(runtime, native, 0700); err != nil {
+	runtime := ""
+	if engine == execution.EngineCLI {
+		offload, err := exec.LookPath(ec.Command)
+		if err != nil {
 			return nil, err
 		}
-	} else if err != nil {
-		return nil, err
+		native, err := os.ReadFile(offload)
+		if err != nil {
+			return nil, err
+		}
+		runtime = filepath.Join(root, "runtimes", fmt.Sprintf("%x", sha256.Sum256(native)), "offload")
+		if _, err := os.Stat(runtime); os.IsNotExist(err) {
+			if err := writeDurableFile(runtime, native, 0700); err != nil {
+				return nil, err
+			}
+		} else if err != nil {
+			return nil, err
+		}
 	}
-	j := &workerJournal{Version: 1, Task: *t, Options: o, OffloadCommand: runtime, Executable: pinned, State: "prepared"}
+	j := &workerJournal{Version: 1, Task: *t, Options: o, Engine: engine, OffloadCommand: runtime, Executable: pinned, State: "prepared"}
 	if err := writeWorkerJournal(path, j); err != nil {
 		return nil, err
 	}
@@ -294,6 +305,11 @@ func newWorkerExecuteCmd() *cobra.Command {
 		}
 		if j.Options.StateDir != "" {
 			if err := os.Setenv("CLAWFLOW_STATE_DIR", j.Options.StateDir); err != nil {
+				return err
+			}
+		}
+		if j.Engine != "" {
+			if err := os.Setenv("CLAWFLOW_OFFLOAD_ENGINE", j.Engine); err != nil {
 				return err
 			}
 		}

@@ -386,12 +386,21 @@ func classifyRepairInfra(err error, eventsPath string) (string, bool) {
 		kind = "rate_limit"
 	case execution.IsKind(err, "launch"):
 		kind = "launch"
+	case execution.IsKind(err, "configuration"):
+		kind = "configuration"
+	case execution.IsKind(err, "unsupported_tools"):
+		kind = "unsupported_tools"
+	case execution.IsKind(err, "globally_disabled"):
+		kind = "globally_disabled"
 	case execution.IsKind(err, "transport"):
 		kind = "transport"
 	case execution.IsKind(err, "timeout") || errors.Is(err, context.DeadlineExceeded):
 		kind = "timeout"
 	default:
 		return "", false
+	}
+	if kind == "launch" || kind == "configuration" || kind == "unsupported_tools" || kind == "globally_disabled" {
+		return kind, true
 	}
 	if active, aerr := repairToolActivity(eventsPath); aerr != nil || active {
 		return "", false
