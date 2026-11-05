@@ -228,6 +228,12 @@ func deriveAcceptanceFailure(a *AcceptanceInfo, now time.Time, ev []string) (Sta
 	if a.Verdict == "blocked" {
 		return StageBlocked, "acceptance blocked; a new commit or issue update is needed", ev
 	}
+	if a.Unstructured && a.MaxUnstructuredRetries > 0 {
+		if a.UnstructuredAttempts > a.MaxUnstructuredRetries {
+			return StageBlocked, fmt.Sprintf("acceptance report stayed invalid after %d automatic fresh reviews; a human must review it", a.MaxUnstructuredRetries), ev
+		}
+		return StageRejected, fmt.Sprintf("acceptance report was invalid (attempt %d of %d); a fresh acceptance runs automatically", a.UnstructuredAttempts, a.MaxUnstructuredRetries+1), ev
+	}
 	if a.Unstructured {
 		return StageRejected, "acceptance failed (unstructured findings); repair and fresh acceptance are needed", ev
 	}
