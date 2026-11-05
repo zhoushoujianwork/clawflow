@@ -20,7 +20,6 @@ import SwiftUI
     private var refreshing = false
     private var generation = 0
     var summary: StatusSummary { .reduce(snapshot: snapshot, received: received, error: error, now: now) }
-    var popover: StatusPopover { .make(snapshot: snapshot, received: received, error: error, now: now) }
     /// Menu-bar attention includes an unusable local executor, not only task attention.
     var offloadNeedsAttention: Bool { executionReadiness.status?.needsAttention ?? false }
 
