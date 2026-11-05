@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/coordination"
@@ -89,7 +90,14 @@ type Store struct {
 	// Watchdog sets the stuck-work thresholds; zero fields use defaults.
 	Watchdog WatchdogConfig
 	// OrphanedPRs lists open managed PRs no automatic flow will advance; nil disables orphaned_pr.
+	// It is only called by RefreshOrphanedPRs, never from board reads or inside a transaction.
 	OrphanedPRs func(context.Context) ([]OrphanedPR, error)
+	// OrphanRefreshInterval and OrphanRefreshTimeout default to 5 minutes and 60 seconds.
+	OrphanRefreshInterval time.Duration
+	OrphanRefreshTimeout  time.Duration
+
+	orphanMu    sync.RWMutex
+	orphanCache []OrphanedPR
 }
 
 func New(db *gorm.DB) *Store { return &Store{db: db} }

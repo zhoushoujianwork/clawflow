@@ -68,6 +68,8 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 		total, repos, err := s.LeaseLimits()
 		limits = dispatchLimits{known: err == nil, total: total, repos: repos}
 	}
+	// Cached outside the transaction: board reads never wait on VCS.
+	orphans := s.cachedOrphanedPRs()
 	// The store DSN makes ordinary GORM transactions BEGIN IMMEDIATE. Board is
 	// read-only, so use an explicit deferred transaction on one connection: WAL
 	// readers get a consistent snapshot without acquiring the writer lock.
@@ -105,12 +107,7 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			return err
 		}
 		out.Findings = append(out.Findings, repeatedFailureFindings(now, history, cfg)...)
-		if s.OrphanedPRs != nil {
-			// A provider error disables only this rule for the snapshot.
-			if prs, err := s.OrphanedPRs(ctx); err == nil {
-				out.Findings = append(out.Findings, orphanedPRFindings(now, prs, out.Tasks, cfg)...)
-			}
-		}
+		out.Findings = append(out.Findings, orphanedPRFindings(now, orphans, out.Tasks, cfg)...)
 		return nil
 	})
 	return out, err
@@ -124,7 +121,7 @@ func deferredReadTransaction(db *gorm.DB, read func(*gorm.DB) error) error {
 		committed := false
 		defer func() {
 			if !committed {
-			cleanup := conn.Session(&gorm.Session{NewDB: true, Context: context.Background()})
+				cleanup := conn.Session(&gorm.Session{NewDB: true, Context: context.Background()})
 				_ = cleanup.Exec("ROLLBACK").Error
 			}
 		}()

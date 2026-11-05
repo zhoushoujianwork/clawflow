@@ -63,10 +63,11 @@ func TestStableEvidenceFailsAndListsChanges(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "stable config path modified"},
-		"queue order": {func(t *testing.T, s Stable, _ *[]string) { writeData(t, s, "queue.json", "[2,1]") }, `stable data path added: "queue.json"`},
-		"coordination record": {func(t *testing.T, s Stable, _ *[]string) { writeData(t, s, "coordination/d/1.json", "tampered") }, `"coordination/d/1.json"`},
+		"queue order":         {func(t *testing.T, s Stable, _ *[]string) { writeData(t, s, "queue.json", "[2,1]") }, `stable data path added: "queue.json"`},
+		"acceptance record":   {func(t *testing.T, s Stable, _ *[]string) { writeData(t, s, "acceptance/o__r/1.json", "tampered") }, `"acceptance/o__r/1.json"`},
+		"task record":         {func(t *testing.T, s Stable, _ *[]string) { writeData(t, s, "tasks/1.json", "tampered") }, `"tasks/1.json"`},
 		"controller identity": {func(t *testing.T, s Stable, ids *[]string) { *ids = []string{"10:controller"} }, "stable process identity changed"},
-		"listener": {func(t *testing.T, s Stable, _ *[]string) { s.Ports = nil }, ""},
+		"listener":            {func(t *testing.T, s Stable, _ *[]string) { s.Ports = nil }, ""},
 	}
 	delete(cases, "listener") // port change is covered by the existing listener test
 	for name, c := range cases {
@@ -108,5 +109,60 @@ func TestStableListenerChangeFailsEvidence(t *testing.T) {
 	ev.Finish()
 	if ev.Status != Failed || !strings.Contains(ev.NextAction, "port 8093") {
 		t.Fatalf("status=%s action=%q", ev.Status, ev.NextAction)
+	}
+}
+
+func TestStableEvidencePassesOnPlanAndCoordinationWrites(t *testing.T) {
+	stable := testStable(t)
+	writeData(t, stable, "coordination/d/1.json", "record")
+	before, err := TakeStable(stable, StableProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeData(t, stable, "acceptance-plans/new.json", "plan")
+	writeData(t, stable, "coordination/d/1.json", "updated content")
+	after, err := TakeStable(stable, StableProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := before.Diff(after); len(d) != 0 {
+		t.Fatalf("scheduler writes failed evidence: %v", d)
+	}
+	ign := strings.Join(before.Ignored(after), ";")
+	if !strings.Contains(ign, "ignored") {
+		t.Fatalf("activity not recorded: %q", ign)
+	}
+	ev := &Evidence{Layers: map[string]string{"offline": Passed, "environment-ready": Passed, "candidate-loaded": Passed, "lifecycle": Passed}, StableDiff: before.Diff(after), StableIgnored: before.Ignored(after)}
+	ev.Finish()
+	if ev.Status != Passed {
+		t.Fatalf("status=%s", ev.Status)
+	}
+}
+
+func TestParseProcesses(t *testing.T) {
+	const ts = "Mon Jan  1 00:00:00 2026"
+	line := func(pid, cmd string) string { return pid + " " + ts + " " + cmd }
+	out := strings.Join([]string{
+		line("1", "/bin/zsh -c 'cd /x/clawflow-1 && go test ./... worker'"),
+		line("2", "grep clawflow worker"),
+		line("3", "git -C /x/clawflow log worker"),
+		line("4", "/usr/bin/git -C /x/clawflow log worker"),
+		line("5", "/a/b/clawflow controller"),
+		line("6", "/a b/clawflow worker --coordinator http://x"),
+		line("7", "/a/b/clawflow worker execute --task 1"),
+	}, "\n")
+	got := parseProcesses(out, "", false)
+	if len(got) != 2 || !strings.HasPrefix(got[0], "5:") || !strings.HasPrefix(got[1], "6:") {
+		t.Fatalf("services = %v", got)
+	}
+	ex := parseProcesses(out, "", true)
+	if len(ex) != 1 || !strings.HasPrefix(ex[0], "7:") {
+		t.Fatalf("executors = %v", ex)
+	}
+	// Same pid and start but a different command line is a different identity.
+	a := parseProcesses(line("5", "/a/b/clawflow controller"), "", false)
+	b := parseProcesses(line("5", "/a/b/clawflow controller --x"), "", false)
+	if a[0] == b[0] {
+		t.Fatal("command line not part of identity")
 	}
 }

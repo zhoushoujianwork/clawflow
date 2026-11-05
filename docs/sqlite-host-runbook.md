@@ -21,7 +21,7 @@ The directory is created `0700` and the file `0600`. Opening refuses a network f
 - A busy timeout surfaces as an error. Callers do not replay a mutation after it; result and effect acceptance stay idempotent through the existing task, epoch, inbox and effect identities.
 - No VCS/provider call or write through a second connection runs inside any transaction that holds SQLite's writer lock. Payload preparation, capacity configuration reads, effect application and result finalization happen outside the short validation/recording transactions around them.
 - Effect application and result finalization are serialized per task inside the controller process. Remote effects remain at-least-once and idempotent: cancellation or a lease change can commit after a remote call but before its local record. The recording transaction revalidates task state and fencing, returns `ErrStaleLease`, and performs no further remote calls; recovery reconciles the stable remote marker.
-- Dashboard snapshots use a deferred read transaction under WAL. They retain a consistent database snapshot without acquiring the writer lock. The orphaned-PR provider lookup is still performed while that read snapshot is open; it cannot block writers, but should remain bounded.
+- Dashboard snapshots use a deferred read transaction under WAL. They retain a consistent database snapshot without acquiring the writer lock. Orphaned-PR provider data is refreshed into a bounded background cache before Board reads and never performs network I/O inside the snapshot.
 - Lease times are stored and compared in UTC. The controller clock owns them; worker clocks cannot extend a lease.
 - Copying the live file alone loses WAL content. Use `clawflow db backup <file>` (`VACUUM INTO`, consistent, WAL included). Before applying migrations to an existing database the controller writes `clawflow.sqlite3.pre-migrate-<time>.bak` the same way.
 
@@ -87,7 +87,7 @@ Transaction-boundary regression verification on 2026-11-05:
 - `FinalizeApplication`, head-mismatch effect application, enqueue preparation and capacity callbacks write through another real SQLite connection without `SQLITE_BUSY` and complete below one second.
 - While effect/finalization callbacks remain blocked for two seconds, heartbeat, claim and log append writes on other connections complete below one second.
 - Cancellation between a remote callback and its recording transaction returns `ErrStaleLease`; finalization replay preserves one run row; same-task appliers serialize while different tasks proceed concurrently.
-- The dashboard's deferred read snapshot remains open across a two-second provider callback while a heartbeat writer succeeds below one second.
+- A deferred dashboard read snapshot remains open for two seconds while a heartbeat writer succeeds below one second; orphan-provider cache tests separately prove Board reads do not wait on VCS.
 
 ## Not verified by this change
 

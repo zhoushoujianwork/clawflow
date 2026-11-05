@@ -1,7 +1,6 @@
 package coordinator
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -9,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func sealForApplication(t *testing.T, s *Store, worker string, issue int, report json.RawMessage) *Task {
@@ -101,15 +102,13 @@ func TestBoardDeferredReadDoesNotBlockWriter(t *testing.T) {
 	enqueue(t, s, 1)
 	task := claim(t, s, "w")
 	started := make(chan struct{})
-	s.OrphanedPRs = func(ctx context.Context) ([]OrphanedPR, error) {
-		close(started)
-		time.Sleep(2 * time.Second)
-		return nil, ctx.Err()
-	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.Board(ctx)
-		done <- err
+		done <- deferredReadTransaction(s.db.WithContext(ctx), func(*gorm.DB) error {
+			close(started)
+			time.Sleep(2 * time.Second)
+			return nil
+		})
 	}()
 	<-started
 	start := time.Now()
