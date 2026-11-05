@@ -132,6 +132,14 @@ type CoordinatorSettings struct {
 	LocalWorker LocalWorkerSettings `yaml:"local_worker,omitempty"`
 }
 
+// WatchdogSettings tunes the repeated_failure and orphaned_pr rules.
+// Zero values use the built-in defaults (3 failures, 360 min window, 30 min).
+type WatchdogSettings struct {
+	FailureThreshold    int `yaml:"failure_threshold,omitempty"`
+	FailureWindowMin    int `yaml:"failure_window_minutes,omitempty"`
+	OrphanedAfterMinute int `yaml:"orphaned_after_minutes,omitempty"`
+}
+
 // LocalWorkerSettings opts the coordinator host into the normal worker pool.
 type LocalWorkerSettings struct {
 	Enabled     bool     `yaml:"enabled,omitempty"`
@@ -194,6 +202,7 @@ type Settings struct {
 	Platform    PlatformSettings    `yaml:"platform,omitempty"`
 	Pilot       PilotSettings       `yaml:"pilot,omitempty"`
 	Coordinator CoordinatorSettings `yaml:"coordinator,omitempty"`
+	Watchdog    WatchdogSettings    `yaml:"watchdog,omitempty"`
 	Execution   ExecutionSettings   `yaml:"execution,omitempty"`
 
 	// Database holds the PostgreSQL connection settings (machine-local secret).
