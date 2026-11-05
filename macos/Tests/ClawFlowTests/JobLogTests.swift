@@ -278,3 +278,29 @@ final class JobLogFollowTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(count, 1)
     }
 }
+
+final class JobDetailWithoutSchedulingEventsTests: XCTestCase {
+    private func source(_ name: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        return try String(contentsOf: root.appendingPathComponent("Sources/ClawFlow/\(name)"), encoding: .utf8)
+    }
+
+    func testJobDetailNeitherLoadsNorShowsSchedulingEvents() throws {
+        for file in ["DashboardView.swift", "Models.swift"] {
+            let text = try source(file)
+            XCTAssertFalse(text.contains("TaskEvent"), file)
+            XCTAssertFalse(text.contains("调度事件"), file)
+            XCTAssertFalse(text.contains("刷新事件"), file)
+            XCTAssertFalse(text.contains("[\"events\""), file)
+        }
+    }
+
+    func testMissingTranscriptStatesTheReasonWithoutEvents() {
+        var buffer = JobLogBuffer()
+        buffer.apply(page(availability: "not_captured", entries: [], streams: false), requestedEpoch: nil)
+        XCTAssertTrue(buffer.lines.isEmpty)
+        XCTAssertEqual(buffer.notice, .notCaptured)
+        XCTAssertFalse(JobLogNotice.notCaptured.title.isEmpty)
+        XCTAssertFalse(JobLogNotice.notCaptured.detail.isEmpty)
+    }
+}

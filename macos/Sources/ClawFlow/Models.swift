@@ -221,11 +221,6 @@ struct RepoRow: Decodable, Identifiable, Sendable {
     let autoMerge: Bool
     let workerTags: [String]
 }
-struct TaskEvent: Decodable, Identifiable {
-    var id: String { "\(at.timeIntervalSince1970):\(action)" }
-    let at: Date
-    let action: String
-}
 struct JoinOffer: Decodable {
     let name: String
     let secret: String
