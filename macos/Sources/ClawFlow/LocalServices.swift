@@ -7,8 +7,8 @@ struct LocalService: Identifiable {
     var running = false
     var pid: String?
     var error: String?
-    var title: String { id.hasSuffix(".controller") ? "Local controller" : "Worker · " + id.replacingOccurrences(of: "com.zhoushoujianwork.clawflow.worker-", with: "") }
-    var status: String { error != nil ? "Status unavailable" : running ? "Running · PID \(pid ?? "—")" : loaded ? "Loaded · not running" : "Stopped" }
+    var title: String { id.hasSuffix(".controller") ? "本机 Controller" : "Worker · " + id.replacingOccurrences(of: "com.zhoushoujianwork.clawflow.worker-", with: "") }
+    var status: String { error != nil ? "状态不可用" : running ? "运行中 · PID \(pid ?? "—")" : loaded ? "已载入 · 未运行" : "已停止" }
     static func accepts(_ label: String, identity: AppIdentity = .current) -> Bool {
         identity.manages(label)
     }
@@ -88,7 +88,7 @@ struct LocalService: Identifiable {
         do {
             _ = try await BridgeProcess().run(executable: "/bin/launchctl", arguments: service.arguments(for: action, uid: getuid()), timeout: 10)
             await refresh()
-            message = "\(action.capitalized) request accepted. Status updates automatically."
+            message = "\(action == "stop" ? "停止" : action == "restart" ? "重启" : "启动")请求已接受，状态会自动更新。"
         } catch { message = error.localizedDescription }
     }
 }
@@ -99,10 +99,11 @@ struct LocalServiceControls: View {
     @State private var pending: LocalService?
     @State private var action = ""
     @State private var confirming = false
+    private var actionTitle: String { action == "stop" ? "停止" : action == "restart" ? "重启" : "启动" }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("On this Mac").font(.headline)
-            if services.rows.isEmpty { Text("No installed local ClawFlow services.").font(.caption).foregroundStyle(.secondary) }
+            Text("本机服务").font(.headline)
+            if services.rows.isEmpty { Text("没有已安装的本机 ClawFlow 服务。").font(.caption).foregroundStyle(.secondary) }
             ForEach(services.rows) { row in
                 VStack(alignment: .leading, spacing: 5) {
                     Text(row.title).font(.callout)
@@ -111,19 +112,19 @@ struct LocalServiceControls: View {
                         Text(worker.summary).font(.caption).foregroundStyle(.orange)
                     }
                     HStack {
-                        Button("Start") { Task { await services.perform("start", service: row) } }.disabled(row.running)
-                        Button("Restart") { pending = row; action = "restart"; confirming = true }.disabled(!row.loaded)
-                        Button("Stop") { pending = row; action = "stop"; confirming = true }.disabled(!row.loaded)
+                        Button("启动") { Task { await services.perform("start", service: row) } }.disabled(row.running)
+                        Button("重启") { pending = row; action = "restart"; confirming = true }.disabled(!row.loaded)
+                        Button("停止") { pending = row; action = "stop"; confirming = true }.disabled(!row.loaded)
                     }.disabled(services.busy || row.error != nil)
                 }
             }
             if let message = services.message { Text(message).font(.caption).foregroundStyle(.secondary) }
-            Text("These controls affect this Mac only. Quitting the app leaves services running.").font(.caption).foregroundStyle(.secondary)
+            Text("这些控制只影响本机。退出 App 后服务会继续运行。").font(.caption).foregroundStyle(.secondary)
         }
-        .confirmationDialog("\(action.capitalized) \(pending?.title ?? "service")?", isPresented: $confirming) {
-            Button(action.capitalized, role: .destructive) {
+        .confirmationDialog("\(actionTitle) \(pending?.title ?? "服务")？", isPresented: $confirming) {
+            Button(actionTitle, role: .destructive) {
                 if let pending { Task { await services.perform(action, service: pending) } }
             }
-        } message: { Text("This interrupts active work handled by this local service. Use Stop new assignments in Workers to drain work first.") }
+        } message: { Text("这会中断该本机服务处理中的工作。请先在 Worker 页面停止新派发并等待任务排空。") }
     }
 }
