@@ -211,7 +211,13 @@ func runLibrary(ctx context.Context, c Config, req Request, env []string, events
 		}
 	}
 
-	packageResult, packageErr := client.Run(ctx, libReq)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	done := make(chan struct{})
+	activeRun := registerActiveLibraryRun(cancelRun, done)
+	packageResult, packageErr := client.Run(runCtx, libReq)
+	close(done)
+	unregisterActiveLibraryRun(activeRun)
+	cancelRun()
 	if err := writeResultFile(filepath.Join(dir, "result.json"), packageResult.RawRecord); err != nil {
 		return result, errors.Join(&Error{Kind: "result_write"}, err)
 	}
