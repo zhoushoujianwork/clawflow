@@ -33,13 +33,13 @@ var linkNextRe = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 
 // RemoteRepo represents a repository available on GitHub/GitLab.
 type RemoteRepo struct {
-	FullName      string `json:"full_name"`      // "owner/repo"
-	Platform      string `json:"platform"`       // "github" or "gitlab"
+	FullName      string `json:"full_name"` // "owner/repo"
+	Platform      string `json:"platform"`  // "github" or "gitlab"
 	Description   string `json:"description"`
 	DefaultBranch string `json:"default_branch"`
 	Private       bool   `json:"private"`
 	HTMLURL       string `json:"html_url"`
-	BaseURL       string `json:"base_url,omitempty"` // GitLab instance URL
+	BaseURL       string `json:"base_url,omitempty"`   // GitLab instance URL
 	LocalPath     string `json:"local_path,omitempty"` // non-empty if a matching local clone exists
 }
 

@@ -221,9 +221,9 @@ func TestDiscoverProjectAssets(t *testing.T) {
 	}
 
 	want := map[string]bool{
-		"projects--myapp--context.md":    true,
-		"projects--myapp--project.yaml":  true,
-		"projects--bbclaw--testing.md":   true,
+		"projects--myapp--context.md":     true,
+		"projects--myapp--project.yaml":   true,
+		"projects--bbclaw--testing.md":    true,
 		"projects--bbclaw--deployment.md": true,
 	}
 
@@ -256,11 +256,11 @@ func TestApplyProjectAssets(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	gistFiles := map[string]GistFileContent{
-		"projects--myapp--context.md":   {Content: "# Context"},
-		"projects--myapp--project.yaml": {Content: "name: myapp"},
-		"skills--evaluate-bug--SKILL.md":   {Content: "# eval-bug skill"},
+		"projects--myapp--context.md":         {Content: "# Context"},
+		"projects--myapp--project.yaml":       {Content: "name: myapp"},
+		"skills--evaluate-bug--SKILL.md":      {Content: "# eval-bug skill"},
 		"skills--evaluate-bug--evaluation.md": {Content: "# eval rubric"},
-		"config.yaml":                   {Content: "repos: []"}, // should be ignored
+		"config.yaml":                         {Content: "repos: []"}, // should be ignored
 	}
 
 	if err := ApplyProjectAssets(gistFiles); err != nil {

@@ -11,10 +11,10 @@ import (
 
 // directoryBrowserResponse is what GET /api/browse-directory returns.
 type directoryBrowserResponse struct {
-	CurrentPath  string      `json:"current_path"`
-	Parent       string      `json:"parent"`
-	Directories  []dirEntry  `json:"directories"`
-	Error        string      `json:"error,omitempty"`
+	CurrentPath string     `json:"current_path"`
+	Parent      string     `json:"parent"`
+	Directories []dirEntry `json:"directories"`
+	Error       string     `json:"error,omitempty"`
 }
 
 type dirEntry struct {
