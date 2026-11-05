@@ -19,7 +19,9 @@ The directory is created `0700` and the file `0600`. Opening refuses a network f
 - Every connection enables `foreign_keys`, `journal_mode=WAL`, `synchronous=FULL` (an acknowledged transition survives power loss) and `busy_timeout=10000` ms.
 - Every write transaction is `BEGIN IMMEDIATE`, so writers are serialized across processes, not only inside one process. Claiming, capacity checks, enqueue de-duplication, lease epochs and result acceptance run inside such a transaction. Row locks and advisory locks are gone; the partial unique indexes, conditional updates and the serialized transaction replace them.
 - A busy timeout surfaces as an error. Callers do not replay a mutation after it; result and effect acceptance stay idempotent through the existing task, epoch, inbox and effect identities.
-- No VCS or provider call runs inside a write transaction.
+- No VCS/provider call or write through a second connection runs inside any transaction that holds SQLite's writer lock. Payload preparation, capacity configuration reads, effect application and result finalization happen outside the short validation/recording transactions around them.
+- Effect application and result finalization are serialized per task inside the controller process. Remote effects remain at-least-once and idempotent: cancellation or a lease change can commit after a remote call but before its local record. The recording transaction revalidates task state and fencing, returns `ErrStaleLease`, and performs no further remote calls; recovery reconciles the stable remote marker.
+- Dashboard snapshots use a deferred read transaction under WAL. They retain a consistent database snapshot without acquiring the writer lock. The orphaned-PR provider lookup is still performed while that read snapshot is open; it cannot block writers, but should remain bounded.
 - Lease times are stored and compared in UTC. The controller clock owns them; worker clocks cannot extend a lease.
 - Copying the live file alone loses WAL content. Use `clawflow db backup <file>` (`VACUUM INTO`, consistent, WAL included). Before applying migrations to an existing database the controller writes `clawflow.sqlite3.pre-migrate-<time>.bak` the same way.
 
@@ -79,6 +81,13 @@ Observed in the development environment on 2026-10-31 (Apple M1, macOS 26.2):
 | 32 | 3200 | 1641/s | 0.36 ms | 0.78 ms | 22 ms | 1.85 s |
 
 These are single-run numbers for this machine and a tight loop, with no network, no provider calls and no UI load. They are not a capacity promise. Real workers heartbeat far less often than this loop. The tail grows with the number of concurrent writers because writers queue behind one lock; measure on the target host before raising worker counts. UI responsiveness under load was not measured.
+
+Transaction-boundary regression verification on 2026-11-05:
+
+- `FinalizeApplication`, head-mismatch effect application, enqueue preparation and capacity callbacks write through another real SQLite connection without `SQLITE_BUSY` and complete below one second.
+- While effect/finalization callbacks remain blocked for two seconds, heartbeat, claim and log append writes on other connections complete below one second.
+- Cancellation between a remote callback and its recording transaction returns `ErrStaleLease`; finalization replay preserves one run row; same-task appliers serialize while different tasks proceed concurrently.
+- The dashboard's deferred read snapshot remains open across a two-second provider callback while a heartbeat writer succeeds below one second.
 
 ## Not verified by this change
 
