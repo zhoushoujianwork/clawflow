@@ -1,11 +1,32 @@
 import Foundation
 
-struct DashboardSnapshot: Decodable {
+struct DashboardSnapshot: Decodable, Sendable {
     let schemaVersion: Int
     let version: String
     let controller: String
     let board: WorkerBoard
     let projects: [ProjectRow]
+    private(set) var issuePipelines: [IssuePipeline] = []
+    /// Metrics per repository filter, computed once at decode.
+    private(set) var metricsByRepo: [String: DashboardMetrics] = [:]
+    private(set) var capacity = WorkerCapacity(workers: [], live: 0, total: 0, running: 0, held: 0)
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, version, controller, board, projects }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        version = try values.decode(String.self, forKey: .version)
+        controller = try values.decode(String.self, forKey: .controller)
+        board = try values.decode(WorkerBoard.self, forKey: .board)
+        projects = try values.decode([ProjectRow].self, forKey: .projects)
+        issuePipelines = makeIssuePipelines()
+        metricsByRepo = makeMetrics()
+        capacity = WorkerCapacity.make(board)
+    }
+
+    static func decodeInBackground(_ data: Data) async throws -> Self {
+        try await Task.detached(priority: .userInitiated) { try decode(data) }.value
+    }
 
     static func decode(_ data: Data) throws -> Self {
         let value = try decoder().decode(Self.self, from: data)
@@ -13,27 +34,58 @@ struct DashboardSnapshot: Decodable {
         return value
     }
     func repository(_ name: String) -> RepoRow? { projects.flatMap(\.repos).first { $0.name == name } }
+    var projectRepositories: [ProjectRepository] {
+        projects.flatMap { project in project.repos.map { ProjectRepository(project: project.name, repo: $0) } }
+    }
+}
+
+/// A repository can belong to several projects. List sections must identify the membership.
+struct ProjectRepository: Identifiable {
+    struct Identity: Hashable { let project: String; let repo: String }
+    let project: String
+    let repo: RepoRow
+    var id: Identity { Identity(project: project, repo: repo.name) }
 }
 
 func decoder() -> JSONDecoder {
     let decoder = JSONDecoder()
     decoder.keyDecodingStrategy = .convertFromSnakeCase
+    let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    let wholeSeconds = Date.ISO8601FormatStyle()
     decoder.dateDecodingStrategy = .custom { decoder in
         let text = try decoder.singleValueContainer().decode(String.self)
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text) { return date }
+        if let date = (try? fractional.parse(text)) ?? (try? wholeSeconds.parse(text)) { return date }
         throw DashboardError.message("Invalid controller timestamp.")
     }
     return decoder
 }
 
-struct WorkerBoard: Decodable {
+struct WorkerBoard: Decodable, Sendable {
     let generatedAt: Date
     let workers: [WorkerRow]
     let tasks: [TaskRow]
+    /// Watchdog findings; nil from controllers that predate the watchdog. Observe-only.
+    let findings: [Finding]?
+    /// Completion counts since `throughput.since`; nil from older controllers, never shown as zero.
+    let throughput: Throughput?
 }
-struct WorkerRow: Decodable, Identifiable {
+struct Throughput: Decodable, Sendable {
+    let since: Date
+    let done: Int
+    let failed: Int
+}
+/// Why the controller watchdog thinks a task looks stuck. It never acts on the task.
+struct Finding: Decodable, Sendable {
+    let taskId: String
+    let repo: String?
+    let issue: Int?
+    let pr: Int?
+    let rule: String?
+    let since: Date?
+    let ageSec: Int?
+    let reason: String
+}
+struct WorkerRow: Decodable, Identifiable, Sendable {
     var id: String { name }
     let name: String
     let tags: [String]
@@ -60,11 +112,13 @@ enum TaskActivity {
         switch self { case .development: return "hammer"; case .review: return "checkmark.shield"; case .repair: return "wrench.and.screwdriver"; case .reply: return "text.bubble"; case .unknown: return "questionmark.circle" }
     }
 }
-struct TaskRow: Decodable, Identifiable {
+struct TaskRow: Decodable, Identifiable, Sendable {
     let startedAt: Date?
     let endedAt: Date?
+    let lastEventAt: Date?
+    var durationAvailable: Bool { startedAt != nil && (group != .history || endedAt != nil) }
     func elapsed(at now: Date) -> String {
-        guard let startedAt else { return "Duration unavailable" }
+        guard durationAvailable, let startedAt else { return "Duration unavailable" }
         let seconds = max(0, Int((endedAt ?? now).timeIntervalSince(startedAt)))
         return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
     }
@@ -113,9 +167,6 @@ struct TaskRow: Decodable, Identifiable {
         if state == "pending" { return "Waiting for an eligible worker and available capacity." }
         return status
     }
-    var symbol: String {
-        switch group { case .attention: return "exclamationmark.triangle"; case .running: return "arrow.triangle.2.circlepath"; case .waiting: return "hourglass"; case .history: return state == "done" ? "checkmark.circle" : "minus.circle" }
-    }
     func link(in snapshot: DashboardSnapshot) -> URL? {
         guard let repo = snapshot.repository(repo), let base = safeWebURL(repo.url) else { return nil }
         if issue > 0 { return base.appendingPathComponent(repo.platform == "gitlab" ? "-/issues/\(issue)" : "issues/\(issue)") }
@@ -127,12 +178,12 @@ struct TaskRow: Decodable, Identifiable {
         return base.appendingPathComponent(repo.platform == "gitlab" ? "-/merge_requests/\(pr)" : "pull/\(pr)")
     }
 }
-struct ProjectRow: Decodable, Identifiable {
+struct ProjectRow: Decodable, Identifiable, Sendable {
     var id: String { name }
     let name: String
     let repos: [RepoRow]
 }
-struct IssueQueueRow: Decodable, Identifiable {
+struct IssueQueueRow: Decodable, Identifiable, Sendable {
     var id: String { key }
     let key: String
     let position: Int
@@ -155,7 +206,7 @@ struct IssueQueueRow: Decodable, Identifiable {
         }
     }
 }
-struct RepoRow: Decodable, Identifiable {
+struct RepoRow: Decodable, Identifiable, Sendable {
     let issueQueue: [IssueQueueRow]?
     let queueUpdatedAt: Date?
     let queueError: String?
@@ -191,7 +242,7 @@ func safeWebURL(_ text: String) -> URL? {
 
 enum StatusKind: Equatable { case unknown, unavailable, stale, attention, running, waiting, idle }
 
-struct StatusSummary {
+struct StatusSummary: Equatable {
     let title: String
     let symbol: String
     /// Running tasks, or "–" when status is unknown or stale. Never a guessed zero.
