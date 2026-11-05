@@ -53,6 +53,8 @@ struct MenuPanelPresentation {
     let tabs: [Tab]
     let hasSnapshot: Bool
     let connected: Bool
+    /// Last controller-recorded point used to freeze elapsed labels when disconnected.
+    let frozenAt: Date
     let freshness: String
     let status: String
     let detail: String?
@@ -68,7 +70,7 @@ struct MenuPanelPresentation {
         let summary = StatusSummary.reduce(snapshot: snapshot, received: received, error: error, now: now)
         guard let snapshot, let received else {
             let unavailable = summary.kind == .unavailable
-            return Self(scopeID: "", scopeTitle: "全部", tabs: [], hasSnapshot: false, connected: false,
+            return Self(scopeID: "", scopeTitle: "全部", tabs: [], hasSnapshot: false, connected: false, frozenAt: now,
                         freshness: unavailable ? "Controller 不可用" : "尚未连接",
                         status: "没有数据", detail: firstLine(error), capacity: nil, today: nil, queue: nil,
                         attention: TaskSection(items: [], total: 0), running: TaskSection(items: [], total: 0),
@@ -104,6 +106,7 @@ struct MenuPanelPresentation {
             tabs: [all] + tabs,
             hasSnapshot: true,
             connected: !stale,
+            frozenAt: snapshot.board.generatedAt,
             freshness: stale ? "最后更新 \(age)" : "刚刚更新",
             status: statusText(attention: attentionRows.count, running: runningRows.count, waiting: waitingRows.count, stale: stale),
             detail: stale ? firstLine(error) : nil,
@@ -297,7 +300,7 @@ struct MenuPanelView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Label(title, systemImage: symbol).font(.system(size: 13, weight: .semibold)).foregroundStyle(tone).padding(.bottom, 3)
                 ForEach(section.items) { item in
-                    MenuTaskRow(item: item, connected: presentation.connected) {
+                    MenuTaskRow(item: item, connected: presentation.connected, frozenAt: presentation.frozenAt) {
                         if let url = item.url { actions.openURL(url) }
                     }
                 }
@@ -400,6 +403,7 @@ private struct MenuProgressSection: View {
 private struct MenuTaskRow: View {
     let item: MenuPanelPresentation.TaskItem
     let connected: Bool
+    let frozenAt: Date
     let action: () -> Void
     @State private var hovering = false
     var body: some View {
@@ -409,7 +413,7 @@ private struct MenuTaskRow: View {
                 HStack(spacing: 5) {
                     Text(item.row.kindZh + " · " + item.row.statusZh)
                     Spacer()
-                    TaskElapsedText(row: item.row, connected: connected, frozenAt: item.row.updatedAt)
+                    TaskElapsedText(row: item.row, connected: connected, frozenAt: frozenAt)
                 }.font(DS.small).foregroundStyle(DS.dim).monospacedDigit()
                 if item.row.group == .attention, let reason = item.row.meaningfulReasonZh {
                     Text(reason).font(DS.small).foregroundStyle(DS.warn).lineLimit(2)
