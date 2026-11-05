@@ -116,3 +116,14 @@ func TestPRWaitingOnFailureLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestUnstructuredRetryThenHuman(t *testing.T) {
+	a := &AcceptanceInfo{Attempts: 2, Verdict: "failed", Unstructured: true, UnstructuredAttempts: 2, MaxUnstructuredRetries: 2}
+	if s, why, _ := deriveAcceptanceFailure(a, time.Time{}, nil); s != StageRejected || !strings.Contains(why, "fresh acceptance runs automatically") {
+		t.Fatalf("%s %s", s, why)
+	}
+	a.UnstructuredAttempts = 3
+	if s, why, _ := deriveAcceptanceFailure(a, time.Time{}, nil); s != StageBlocked || !strings.Contains(why, "human") {
+		t.Fatalf("%s %s", s, why)
+	}
+}

@@ -227,6 +227,11 @@ func harvestCandidates(ctx context.Context, fullName string, repoCfg config.Repo
 			// that is an infrastructure attempt may be retried.
 			d, info, infraErr := harvestInfraDecision(ctx, client, fullName, pr.Number, harvestNow())
 			switch {
+			case d == harvestUnstructuredExhausted && infraErr == nil:
+				skip("unstructured_exhausted", "pr", pr.Number, "issue", issueNum, "attempts", info.attempts)
+				continue
+			case d == harvestUnstructuredRetry && infraErr == nil:
+				// Fresh acceptance at the same head; the repair ledger is untouched.
 			case infraErr != nil || (d == harvestVerdict && !errors.Is(evErr, errAcceptanceMissing)):
 				skip("evidence_not_missing", "pr", pr.Number, "issue", issueNum, "err", evErr.Error())
 				continue
@@ -343,6 +348,9 @@ const (
 	harvestInfraRetry
 	harvestInfraCoolingDown
 	harvestInfraExhausted
+	// harvestUnstructuredRetry: the latest report stayed invalid; run a fresh same-head acceptance.
+	harvestUnstructuredRetry
+	harvestUnstructuredExhausted
 )
 
 type harvestInfraInfo struct {
@@ -372,6 +380,18 @@ func harvestInfraDecision(ctx context.Context, client vcs.Client, repo string, p
 	}
 	info.attempts = attempts.Count
 	if !attempts.LatestIsInfra {
+		n, err := store.UnstructuredAttempts(c)
+		if err != nil {
+			return harvestVerdict, info, err
+		}
+		info.attempts = n
+		switch {
+		case n == 0:
+		case n > acceptance.MaxUnstructuredRetries:
+			return harvestUnstructuredExhausted, info, nil
+		default:
+			return harvestUnstructuredRetry, info, nil
+		}
 		return harvestVerdict, info, nil
 	}
 	if attempts.Count == 0 {
