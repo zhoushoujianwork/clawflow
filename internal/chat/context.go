@@ -113,7 +113,7 @@ separate chat for other topics.
 3. Implement the fix directly.
 4. Run tests/build to verify.
 5. Commit locally with a clear message referencing issue #`+fmt.Sprint(issue.Number)+`.
-6. Optionally update this issue (comment, close, relabel) via
+6. Optionally update this issue (comment, edit body if requirements changed, close, relabel) via
    `+"`"+`clawflow`+"`"+` CLI.
 
 ## Allowed VCS commands (THIS issue only)
@@ -122,6 +122,7 @@ separate chat for other topics.
 - Remove a label: `+"`"+`clawflow label remove --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --label <name>`+"`"+`
 - Post a comment: `+"`"+`clawflow issue comment --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --body "<text>"`+"`"+`
 - Close issue:    `+"`"+`clawflow issue close --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+"`"+`
+- Edit body:      `+"`"+`clawflow issue edit --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --body "<text>"`+"`"+` (requirement changes only)
 
 Do NOT use `+"`"+`clawflow issue create`+"`"+`. Do NOT target any issue other
 than #`+fmt.Sprint(issue.Number)+`.
@@ -180,8 +181,10 @@ that conclusion MUST be persisted on the issue tracker — not just held
 in chat memory. Two valid landing spots:
 
 1. **Post a comment** summarising the conclusion on issue #`+fmt.Sprint(issue.Number)+`.
-   If the conclusion changes scope, restate the new scope so
-   `+"`"+`clawflow run`+"`"+` reads the latest intent.
+   If the conclusion changes scope, update the issue body instead with
+   `+"`"+`clawflow issue edit`+"`"+` (the body is the requirement source for
+   implementation and acceptance; comments are not read as requirements).
+   The body holds requirements only; progress and evidence go in comments.
 2. **Update labels** — add/remove labels to reflect the current state
    (for example, descriptive bug or question labels).
 
@@ -204,6 +207,7 @@ here as code would be discarded by that flow.
 - Remove a label: `+"`"+`clawflow label remove --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --label <name>`+"`"+`
 - Post a comment: `+"`"+`clawflow issue comment --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --body "<text>"`+"`"+`
 - Close issue:    `+"`"+`clawflow issue close --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+"`"+`
+- Edit body:      `+"`"+`clawflow issue edit --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --body "<text>"`+"`"+` (requirement changes only)
 
 After running a command, read the real stdout/stderr and report what
 actually happened. The command's exit status is the only source of
@@ -294,8 +298,9 @@ code from this REPL. Two valid landing spots:
 
 1. **Update a related issue** — post a `+"`"+`comment`+"`"+` summarizing the
    conclusion on the existing issue (and add/remove labels as
-   needed). If the conclusion changes scope, restate the new scope
-   in a comment so `+"`"+`clawflow run`+"`"+` reads the latest intent.
+   needed). If the conclusion changes scope, update the issue body with
+   `+"`"+`clawflow issue edit`+"`"+` instead; the body is the requirement
+   source and holds requirements only, while progress goes in comments.
 2. **Create a new issue** — when the conclusion is a separable piece
    of work (a different bug, a follow-up, a refactor), open a new
    issue with title + body + labels. Do not pile unrelated fixes

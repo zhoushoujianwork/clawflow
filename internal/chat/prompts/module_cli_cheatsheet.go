@@ -35,7 +35,15 @@ func CLICheatsheet(scope Scope) string {
 		fmt.Fprintln(&b, "- `clawflow issue create --repo <owner/name> --title \"...\" [--body \"...\"]`")
 		fmt.Fprintln(&b, "  `issue create` has no `--labels` flag. To add labels, parse the")
 		fmt.Fprintln(&b, "  new issue number from stdout and follow up with `clawflow label add`.")
+		fmt.Fprintln(&b, "  Issue body format: optional `Depends on: #N` first, then `## 问题` (current state and")
+		fmt.Fprintln(&b, "  impact), `## 期望` (behavior after the change, no implementation steps), `## 不做`")
+		fmt.Fprintln(&b, "  (scope boundary), `## 验收` (independently checkable results). The body holds")
+		fmt.Fprintln(&b, "  requirements only; progress and evidence go in comments. Edit the body only when")
+		fmt.Fprintln(&b, "  requirements change, since a body edit invalidates acceptance in progress.")
 	}
+
+	fmt.Fprintln(&b, "- `clawflow issue edit --repo <owner/name> --issue <number> [--title \"...\"] [--body \"...\"]`")
+	fmt.Fprintln(&b, "  (use only when the requirements change; otherwise comment)")
 
 	if scope == ScopeFull || scope == ScopeSingleIssue {
 		fmt.Fprintln(&b, "- `clawflow issue comment --repo <owner/name> <number> --body \"...\"`")

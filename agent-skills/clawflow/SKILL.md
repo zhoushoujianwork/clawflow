@@ -42,13 +42,36 @@ independent acceptance, and merges according to the repository's policy. AI
 handles judging and closing out; do not ask the user to mark or confirm steps.
 
 - **To get work done**, create or update an issue in the target repository with
-  `clawflow issue create` / `clawflow issue comment`, write the requirements and
+  `clawflow issue create` / `clawflow issue edit`, write the requirements and
   acceptance criteria in the issue body, then report the issue link. Use a
   `Depends on: #N` line for prerequisites, or several such lines. All lines are
   combined in first-seen order and deduplicated (max 10 dependencies); tokens
   are comma-separated `#N` or `owner/repo#N`, with warnings for invalid or
   excess tokens. Do not implement it yourself unless
   the user explicitly asks you to.
+
+  Use one requirement contract for every issue type (no per-type templates):
+
+  ```markdown
+  Depends on: #N            (optional, first)
+
+  ## 问题      current state and impact
+  ## 期望      behavior after the change, no implementation steps
+  ## 不做      explicit scope boundary
+  ## 验收      independently checkable results and how to check them
+  ```
+
+  Type differences only: bug — 问题 holds reproduction steps or evidence;
+  feat — 期望 describes user-visible behavior; refactor / chore — 验收 states
+  which behavior must stay unchanged; tracking (parent) — only the goal and the
+  child issue list, no implementation requirements; question — does not use
+  this format and follows the existing reply path.
+
+  The body holds requirements only. Write progress, PR numbers, commits and test
+  results as comments (`clawflow issue comment`). Edit the body
+  (`clawflow issue edit`) only when the requirements change, because a body edit
+  invalidates any in-progress acceptance. Acceptance reads only title and body,
+  so scope changes must go into the body, not a comment.
 - **To report progress**, read the issue and its PR: labels `agent-implemented`
   (PR opened), `agent-skipped` (blocked; the latest comment says what is
   missing), `agent-failed`, the PR's CI and acceptance comments, and merge state.
