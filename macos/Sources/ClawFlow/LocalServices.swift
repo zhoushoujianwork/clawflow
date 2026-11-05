@@ -96,13 +96,15 @@ struct LocalService: Identifiable {
 struct LocalServiceControls: View {
     @ObservedObject var services: LocalServices
     @ObservedObject var readiness: ExecutionReadiness
+    /// The menu panel's expanding row already names this section.
+    var showsTitle = true
     @State private var pending: LocalService?
     @State private var action = ""
     @State private var confirming = false
     private var actionTitle: String { action == "stop" ? "停止" : action == "restart" ? "重启" : "启动" }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("本机服务").font(.headline)
+            if showsTitle { Text("本机服务").font(.headline) }
             if services.rows.isEmpty { Text("没有已安装的本机 ClawFlow 服务。").font(.caption).foregroundStyle(.secondary) }
             ForEach(services.rows) { row in
                 VStack(alignment: .leading, spacing: 5) {

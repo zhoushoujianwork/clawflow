@@ -121,7 +121,7 @@ final class MenuPanelTests: XCTestCase {
         controller.loaded = true; controller.running = true; controller.pid = "4242"
         services.rows = [controller]
         let readiness = ExecutionReadiness()
-        let localControls = AnyView(LocalServiceControls(services: services, readiness: readiness))
+        let localControls = AnyView(LocalServiceControls(services: services, readiness: readiness, showsTitle: false))
         let cases: [(String, MenuPanelPresentation, Bool, AnyView)] = [
             ("all-idle", panel(try fixture()), false, AnyView(EmptyView())),
             ("all-running", panel(mixed), false, AnyView(EmptyView())),

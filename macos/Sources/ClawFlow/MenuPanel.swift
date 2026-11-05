@@ -359,7 +359,7 @@ struct MenuPanelView: View {
                 }
             }
             MenuActionRow(symbol: "desktopcomputer", title: "本机服务", shortcut: nil) { servicesExpanded.toggle() }
-            if servicesExpanded { localServiceControls.padding(.leading, 24).padding(.vertical, 8) }
+            if servicesExpanded { localServiceControls.frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 26).padding(.vertical, 8) }
             DS.line.frame(height: 1).padding(.vertical, 7)
             MenuActionRow(symbol: "gearshape", title: "设置…", shortcut: "⌘,") { actions.openSettings() }
                 .keyboardShortcut(",")
