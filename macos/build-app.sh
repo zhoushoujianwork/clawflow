@@ -16,7 +16,7 @@ out="macos/dist"
 build_path="macos/.build"
 if [ -n "${CLAWFLOW_CANDIDATE_ID:-}" ]; then
   case "$CLAWFLOW_CANDIDATE_ID" in
-    *[!0-9a-f]*|"") echo "CLAWFLOW_CANDIDATE_ID must be 12 lowercase hex characters" >&2; exit 2 ;;
+    *[!0123456789abcdef]*|"") echo "CLAWFLOW_CANDIDATE_ID must be 12 lowercase hex characters" >&2; exit 2 ;;
   esac
   [ "${#CLAWFLOW_CANDIDATE_ID}" -eq 12 ] || { echo "CLAWFLOW_CANDIDATE_ID must be 12 lowercase hex characters" >&2; exit 2; }
   [ -n "${CLAWFLOW_CANDIDATE_OUT:-}" ] || { echo "CLAWFLOW_CANDIDATE_OUT is required for a candidate build" >&2; exit 2; }

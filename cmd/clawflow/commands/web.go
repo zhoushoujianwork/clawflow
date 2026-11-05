@@ -327,7 +327,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			// Provider management (multi-provider failover, issue #128)
 			mux.HandleFunc("/api/providers", func(w http.ResponseWriter, r *http.Request) {
 				switch r.Method {
-				case http.MethodGet:
+				case http.MethodGet, http.MethodPut:
 					api.HandleListProviders(w, r)
 				case http.MethodPost:
 					api.HandleAddProvider(w, r)

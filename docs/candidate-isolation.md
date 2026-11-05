@@ -109,6 +109,7 @@ clawflow candidate clean --commit <sha>
 ## 限制
 
 - 稳定宿主快照只读取文件、探测端口与 `ps`；未覆盖稳定宿主上由其他用户启动的进程。
+- 快照比对配置、人工队列顺序及任务、验收和协调记录。健康的调度每轮都会重写的内容不参与比对：运行历史、扫描派生快照、HTTP 缓存和扫描计数（见 `stableActivityData`）。稳定宿主上有任务在写验收或协调记录时，比对仍可能失败，应等任务结束后重跑。
 - 本变更不实现跨机器的权威租约，也不为候选自动安装 launchd 服务；`LabelPrefix`/`ServiceLabel` 只定义命名空间并由 App 与 CLI 强制。
 - 隔离是对协作程序的约束：恶意子进程若自行构造 HTTP 客户端并显式设置 `Transport`，仍可绕过进程内传输守卫；git 与 offload 子进程通过清除的环境变量与 `GIT_ALLOW_PROTOCOL` 约束。
 

@@ -284,3 +284,9 @@ var ClawFlowLabels = []Label{
 type PRFileProvider interface {
 	ListPRFiles(repo string, prNumber int) ([]string, error)
 }
+
+// BranchHeadProvider reads the commit a branch points at on the platform.
+// A branch that does not exist yields an empty SHA and no error.
+type BranchHeadProvider interface {
+	BranchHead(repo, branch string) (string, error)
+}

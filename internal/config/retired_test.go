@@ -277,3 +277,39 @@ func TestNoRetiredQueuePathsOutsideLegacyLoader(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveAcceptsAndDropsEveryRetiredKey(t *testing.T) {
+	path := saveFixture(t, `settings:
+  require_binding: true
+  confidence_threshold: 0
+  queue:
+    scope: labeled
+repos:
+  o/r:
+    enabled: true
+    workflow: legacy
+    auto_approve: true
+    auto_evaluate_all_issues: true
+    auto_fix: true
+    queue_issue: 1
+    queue_scope: x
+    bound_machine: box
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key := range retiredConfigKeys {
+		name := key[strings.LastIndex(key, ".")+1:]
+		if strings.Contains(string(raw), name+":") {
+			t.Fatalf("%s kept:\n%s", key, raw)
+		}
+	}
+}

@@ -2,7 +2,7 @@
 
 Status: First native implementation available · 2026-10-30
 
-The [implementation and migration guide](native-macos.md) records the delivered scope: native status views, independent controller, LAN invitations and worker drain/resume. It uses the latest existing worker protocol, a shared five-second polling bridge and repository monitoring controls. Manual task retry/cancel, notifications, raw execution-log streaming and advanced policy editors remain outside this first release. Desktop acceptance remains pending.
+The visual direction below is superseded by the [Runner dashboard design](runner-dashboard-design.md), which uses top tabs, an overview page and a small chart. The [implementation and migration guide](native-macos.md) records the delivered scope: native status views, independent controller, LAN invitations and worker drain/resume. It uses the latest existing worker protocol, a shared five-second polling bridge and repository monitoring controls. Manual task retry/cancel, notifications, raw execution-log streaming and advanced policy editors remain outside this first release. Desktop acceptance remains pending.
 
 ClawFlow becomes a small native macOS app for answering three questions: **What is running? What needs me? Which workers are available?** The Go service continues scheduling work independently. LAN workers remain part of the product; closing or quitting the dashboard does not stop them.
 

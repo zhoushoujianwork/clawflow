@@ -212,6 +212,9 @@ func recoverWorkerExecutor(o workerOptions, path string) error {
 	}
 	switch j.State {
 	case "prepared", "pending_sync", "pending_release":
+		if j.Error == workerReportRejected && time.Since(j.UpdatedAt) < workerRejectedRetry {
+			return nil
+		}
 		if j.State == "prepared" && expiredWorkerAuthority(&j.Task) {
 			return reconcileRetainedWorkerJournal(o, path)
 		}
@@ -387,6 +390,11 @@ func persistWorkerReport(ctx context.Context, api *workerAPI, t *coordinator.Tas
 	return deliverWorkerReport(context.WithoutCancel(ctx), api, path, j)
 }
 
+const (
+	workerReportRejected = "Controller rejected this report (HTTP 400); result retained and retried slowly"
+	workerRejectedRetry  = 10 * time.Minute
+)
+
 func deliverWorkerReport(ctx context.Context, api *workerAPI, path string, j *workerJournal) error {
 	err := api.post(ctx, "tasks/"+j.Task.ID+"/"+j.Action, j.Report, nil)
 	if err != nil {
@@ -394,6 +402,11 @@ func deliverWorkerReport(ctx context.Context, api *workerAPI, path string, j *wo
 		if errors.As(err, &status) && status == 409 {
 			j.State = "rejected"
 			j.Error = "Ownership changed; result retained for reconciliation"
+			_ = writeWorkerJournal(path, j)
+		}
+		if errors.As(err, &status) && status == 400 {
+			// Keep the report deliverable: a newer controller may accept it.
+			j.Error = workerReportRejected
 			_ = writeWorkerJournal(path, j)
 		}
 		return err

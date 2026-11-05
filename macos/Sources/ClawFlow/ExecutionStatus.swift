@@ -94,11 +94,23 @@ struct ExecutionStatus: Decodable, Equatable {
 }
 
 struct ExecutionReadinessView: View {
+    @State private var defaultProfile = ""
+    @State private var selectedProfile = ""
+    @State private var settingsError: String?
     @ObservedObject var readiness: ExecutionReadiness
     let cli: String
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Offload execution").font(.headline)
+            Text("Offload default: \(defaultProfile.isEmpty ? "Unavailable" : defaultProfile)").font(.caption)
+            HStack {
+                TextField("Existing Offload profile", text: $selectedProfile)
+                Button("Save to Offload") {
+                    Task { await updateDefault(selectedProfile) }
+                }.disabled(selectedProfile.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            if let settingsError { Text(settingsError).font(.caption).foregroundStyle(.red) }
+            Text("Changes update Offload for all consumers following its default. Explicit worker overrides still apply.").font(.caption).foregroundStyle(.secondary)
             if let status = readiness.status {
                 Label(status.summary, systemImage: status.needsAttention ? "exclamationmark.triangle" : status.state == "ready" ? "checkmark.circle" : "minus.circle")
                     .foregroundStyle(status.needsAttention ? .orange : .primary)
@@ -115,7 +127,18 @@ struct ExecutionReadinessView: View {
             }
             Button("Recheck Offload") { Task { await readiness.recheck(cli: cli) } }.disabled(readiness.rechecking)
             Text("Detection is read-only. Install Offload yourself, then recheck.").font(.caption).foregroundStyle(.secondary)
-        }
+        }.task { await updateDefault(nil) }
+    }
+    private func updateDefault(_ profile: String?) async {
+        do {
+            var args = ["execution", "default"]
+            if let profile { args.append(profile) }
+            let data = try await BridgeProcess().run(executable: cli, arguments: args, timeout: 15)
+            let value = try JSONDecoder().decode([String: String].self, from: data)
+            defaultProfile = value["default_profile"] ?? ""
+            settingsError = nil
+            if profile != nil { selectedProfile = ""; await readiness.recheck(cli: cli) }
+        } catch { settingsError = error.localizedDescription }
     }
 }
 
