@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -121,70 +122,67 @@ func TestSinkSeesFailedRuns(t *testing.T) {
 	}
 }
 
-func transcriptScript(t *testing.T, document string, exit string) string {
+// transcriptStore points the Offload reader at a private temporary store and
+// writes one capture file for runID with n message events.
+func transcriptStore(t *testing.T, runID, caller string, n int, ended bool) {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "doc.json"), []byte(document), 0o600); err != nil {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	dir := filepath.Join(state, "offload", "transcripts")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	argsFile := filepath.Join(dir, "args")
-	return writeScript(t, dir, "offload", "echo \"$@\" > '"+argsFile+"'\ncat '"+filepath.Join(dir, "doc.json")+"'\nexit "+exit+"\n")
+	var b strings.Builder
+	add := func(seq int, typ, extra string) {
+		b.WriteString(`{"schema_version":1,"seq":` + strconv.Itoa(seq) + `,"ts":"2026-11-05T00:00:00Z","run_id":"` + runID + `","caller_run_id":"` + caller + `","backend":"claude","model":"m","attempt":1,"type":"` + typ + `","capture_id":"0123456789abcdef"` + extra + "}\n")
+	}
+	add(1, "capture_start", "")
+	for i := 0; i < n; i++ {
+		add(i+2, "message", `,"role":"assistant","text":"hi"`)
+	}
+	if ended {
+		add(n+2, "execution_end", `,"capture":{"events":3,"content_events":1}`)
+	}
+	if err := os.WriteFile(filepath.Join(dir, runID+".ndjson"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func TestReadTranscriptIsReadOnlyBoundedAndIdentityChecked(t *testing.T) {
-	doc := `{"schema_version":1,"interface":"offload.transcript","availability":"available","run":{"run_id":"run-1","caller_run_id":"caller-1","backend":"claude","model":"m","capture_id":"c1"},"state":"running","events":[{"seq":1}],"next_cursor":"t1.c1.10.1","has_more":true,"end_of_stream":false,"completeness":"in_progress"}`
-	cmd := transcriptScript(t, doc, "0")
-	page, err := ReadTranscript(context.Background(), cmd, []string{"PATH=" + os.Getenv("PATH")}, TranscriptQuery{CallerRunID: "caller-1", Cursor: "t1.c1.0.0", Limit: 50})
-	if err != nil || page.Availability != "available" || len(page.Events) != 1 || !page.HasMore || page.NextCursor != "t1.c1.10.1" {
+func TestReadTranscriptPagesAndChecksIdentity(t *testing.T) {
+	const rid = "0123456789abcdef0123456789abcdef"
+	transcriptStore(t, rid, "caller-1", 3, true)
+	page, err := ReadTranscript(context.Background(), "", nil, TranscriptQuery{CallerRunID: "caller-1", Limit: 2})
+	if err != nil || page.Availability != "available" || len(page.Events) != 2 || !page.HasMore || page.NextCursor == "" || page.Run.RunID != rid {
 		t.Fatalf("page=%+v err=%v", page, err)
 	}
-	args, _ := os.ReadFile(filepath.Join(filepath.Dir(cmd), "args"))
-	for _, want := range []string{"transcript read --json", "--caller-run-id caller-1", "--cursor t1.c1.0.0", "--limit 50"} {
-		if !strings.Contains(string(args), want) {
-			t.Fatalf("args %q missing %q", args, want)
-		}
+	next, err := ReadTranscript(context.Background(), "", nil, TranscriptQuery{CallerRunID: "caller-1", RunID: rid, Cursor: page.NextCursor, Limit: 50})
+	if err != nil || len(next.Events) != 3 || next.HasMore || !next.EndOfStream || next.Summary == nil || next.Summary.ContentEvents != 1 {
+		t.Fatalf("next=%+v err=%v", next, err)
 	}
-	// Run/task launch flags must never reach the reader.
-	for _, banned := range []string{"-p ", "-w", "-r ", "-capture"} {
-		if strings.Contains(" "+string(args), " "+banned) {
-			t.Fatalf("reader passed %q: %s", banned, args)
-		}
+	// A cursor from another capture is reported as invalid, not an error.
+	bad, err := ReadTranscript(context.Background(), "", nil, TranscriptQuery{CallerRunID: "caller-1", Cursor: "t1.fedcba9876543210.0.1"})
+	if err != nil || bad.Availability != "cursor_invalid" || len(bad.Events) != 0 {
+		t.Fatalf("bad=%+v err=%v", bad, err)
 	}
-
-	// A document for a different invocation is rejected.
-	if _, err := ReadTranscript(context.Background(), cmd, nil, TranscriptQuery{CallerRunID: "someone-else"}); !IsKind(err, "transcript_identity") {
-		t.Fatalf("identity: %v", err)
+	// A run that does not exist is reported as not_found.
+	miss, err := ReadTranscript(context.Background(), "", nil, TranscriptQuery{CallerRunID: "nobody"})
+	if err != nil || miss.Availability != "not_found" {
+		t.Fatalf("miss=%+v err=%v", miss, err)
 	}
-	// Unsafe identifiers never reach a process.
+	// A run id from another invocation is not accepted.
+	other, err := ReadTranscript(context.Background(), "", nil, TranscriptQuery{CallerRunID: "someone-else", RunID: rid})
+	if err != nil || other.Availability != "identity_mismatch" || len(other.Events) != 0 {
+		t.Fatalf("other=%+v err=%v", other, err)
+	}
+	// Unsafe identifiers and a canceled context never reach the reader.
 	for _, q := range []TranscriptQuery{{CallerRunID: "a b"}, {CallerRunID: "-x"}, {CallerRunID: "ok", RunID: "../x"}, {CallerRunID: "ok", Cursor: strings.Repeat("c", 300)}} {
-		if _, err := ReadTranscript(context.Background(), cmd, nil, q); !IsKind(err, "transcript_request") {
+		if _, err := ReadTranscript(context.Background(), "", nil, q); !IsKind(err, "transcript_request") {
 			t.Fatalf("%+v: %v", q, err)
 		}
 	}
-}
-
-func TestReadTranscriptRejectsMalformedAndOversizedOutput(t *testing.T) {
-	for name, tc := range map[string]struct{ doc, exit, kind string }{
-		"not-json":    {"nope", "0", "transcript_protocol"},
-		"wrong-iface": {`{"schema_version":1,"interface":"other","availability":"available","events":[]}`, "0", "transcript_protocol"},
-		"unknown":     {`{"schema_version":1,"interface":"offload.transcript","availability":"surprise","events":[]}`, "0", "transcript_protocol"},
-		"version":     {`{"schema_version":2,"interface":"offload.transcript","availability":"available","events":[]}`, "0", "transcript_protocol"},
-		"dup-keys":    {`{"schema_version":1,"schema_version":1,"interface":"offload.transcript","availability":"available","events":[]}`, "0", "transcript_protocol"},
-		"exit-2":      {`{}`, "2", "transcript_read"},
-		"too-large":   {`{"schema_version":1,"interface":"offload.transcript","availability":"available","events":[],"pad":"` + strings.Repeat("x", transcriptReadOutput) + `"}`, "0", "transcript_output_limit"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := ReadTranscript(context.Background(), transcriptScript(t, tc.doc, tc.exit), nil, TranscriptQuery{CallerRunID: "caller-1"}); !IsKind(err, tc.kind) {
-				t.Fatalf("want %s, got %v", tc.kind, err)
-			}
-		})
-	}
-	// Every availability value Offload documents is accepted (exit 0 even when nothing is readable).
-	for _, a := range []string{"not_yet_available", "no_captured_content", "capture_disabled", "expired", "unreadable", "unsupported_backend", "unsupported_version", "not_found", "ambiguous", "cursor_invalid", "identity_mismatch"} {
-		doc := `{"schema_version":1,"interface":"offload.transcript","availability":"` + a + `","events":[]}`
-		page, err := ReadTranscript(context.Background(), transcriptScript(t, doc, "0"), nil, TranscriptQuery{CallerRunID: "caller-1"})
-		if err != nil || page.Availability != a {
-			t.Fatalf("%s: %+v %v", a, page, err)
-		}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ReadTranscript(ctx, "", nil, TranscriptQuery{CallerRunID: "caller-1"}); err == nil {
+		t.Fatal("canceled context must fail")
 	}
 }
