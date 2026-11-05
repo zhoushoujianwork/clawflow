@@ -110,6 +110,9 @@ const (
 	CIStatusSuccess CIStatus = "success"
 	CIStatusFailure CIStatus = "failure"
 	CIStatusNone    CIStatus = "no-checks"
+	// CIStatusCancelled means every non-passing check was cancelled (preempted
+	// runner, timeout, manual cancel). It is not a code failure and not success.
+	CIStatusCancelled CIStatus = "cancelled"
 )
 
 // CIEvidence is an exact-head observation, not an atomic merge authorization.
@@ -137,14 +140,24 @@ type CICheck struct {
 
 // CIRerunPlan includes checks that cannot be mapped to a rerunnable Actions run.
 type CIRerunPlan struct {
-	HeadSHA       string  `json:"head_sha"`
-	RunIDs        []int64 `json:"run_ids"`
-	NotRerunnable []int64 `json:"not_rerunnable_check_ids,omitempty"`
-	RerunIDs      []int64 `json:"rerun_ids,omitempty"`
+	HeadSHA string  `json:"head_sha"`
+	RunIDs  []int64 `json:"run_ids"`
+	// RunKeys optionally names each RunIDs entry with an identity that is stable
+	// across reruns (GitLab retries create new job IDs). Empty means the ID.
+	RunKeys       []string `json:"run_keys,omitempty"`
+	NotRerunnable []int64  `json:"not_rerunnable_check_ids,omitempty"`
+	RerunIDs      []int64  `json:"rerun_ids,omitempty"`
 }
 type CIRerunProvider interface {
 	PlanCIRerun(repo string, prNumber int) (CIRerunPlan, error)
 	RerunFailedJobs(repo string, runID int64) error
+}
+
+// CancelledRerunProvider reruns only cancelled checks (GitHub workflow runs,
+// GitLab pipeline jobs). RunKeys name each RunIDs entry stably across reruns.
+type CancelledRerunProvider interface {
+	PlanCancelledRerun(repo string, prNumber int) (CIRerunPlan, error)
+	RerunCancelled(repo string, id int64) error
 }
 
 // SuccessfulFor rejects missing or duplicate identities and stale observations.

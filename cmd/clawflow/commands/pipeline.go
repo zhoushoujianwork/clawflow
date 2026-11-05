@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -586,6 +587,9 @@ func fillPRDetail(client vcs.Client, repo string, pi *pipeline.PRInfo) error {
 		detailErr = err
 	} else {
 		pi.CI = string(status)
+		if status == vcs.CIStatusCancelled {
+			pi.CICancelExhausted = repairledger.CancelRerunsExhausted(snapshot.DataDir(), repo, vcs.PR{Number: pi.Number, HeadSHA: pi.HeadSHA})
+		}
 	}
 	if m, err := client.GetPRMergeability(repo, pi.Number); err != nil {
 		pi.Mergeable = "unknown"

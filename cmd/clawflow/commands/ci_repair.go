@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -196,6 +197,11 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 				continue
 			}
 			ciFailing = status == vcs.CIStatusFailure
+			if status == vcs.CIStatusCancelled {
+				// Cancelled CI is not a code failure: no repair task, no ledger entry.
+				rerunCancelledCI(client, repo, pr)
+				continue
+			}
 		}
 		switch {
 		case conflict || ciFailing:
@@ -837,4 +843,47 @@ func repairFailingCheck(client vcs.Client, repo string, pr vcs.PR) string {
 		}
 	}
 	return check
+}
+
+// rerunCancelledCI asks the VCS to rerun cancelled checks on the PR head, at
+// most repairledger.MaxCancelReruns times per check per head. It never touches
+// the repair ledger. Returns the number of reruns requested.
+func rerunCancelledCI(client vcs.Client, repo string, pr vcs.PR) int {
+	provider, ok := client.(vcs.CancelledRerunProvider)
+	if !ok {
+		return 0
+	}
+	plan, err := provider.PlanCancelledRerun(repo, pr.Number)
+	if err != nil {
+		runLog.Warn("run/ci_cancel_rerun_skip", "repo", repo, "pr", pr.Number, "err", err.Error())
+		return 0
+	}
+	if len(plan.RunIDs) == 0 || (plan.HeadSHA != "" && pr.HeadSHA != "" && plan.HeadSHA != pr.HeadSHA) {
+		return 0
+	}
+	keys := plan.RunKeys
+	if len(keys) != len(plan.RunIDs) {
+		keys = make([]string, len(plan.RunIDs))
+		for i, id := range plan.RunIDs {
+			keys[i] = strconv.FormatInt(id, 10)
+		}
+	}
+	granted, err := repairledger.ReserveCancelReruns(snapshot.DataDir(), repo, pr, keys)
+	if err != nil {
+		runLog.Warn("run/ci_cancel_rerun_skip", "repo", repo, "pr", pr.Number, "err", err.Error())
+		return 0
+	}
+	n := 0
+	for i, id := range plan.RunIDs {
+		if !granted[i] {
+			continue
+		}
+		if err := provider.RerunCancelled(repo, id); err != nil {
+			runLog.Warn("run/ci_cancel_rerun_failed", "repo", repo, "pr", pr.Number, "id", id, "err", err.Error())
+			continue
+		}
+		n++
+	}
+	runLog.Info("run/ci_cancel_rerun", "repo", repo, "pr", pr.Number, "requested", n)
+	return n
 }

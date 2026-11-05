@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
@@ -642,5 +644,69 @@ func TestGitLabRepairDispatch(t *testing.T) {
 				t.Fatalf("shared budget: %v", err)
 			}
 		})
+	}
+}
+
+type cancelRerunClient struct {
+	repairClient
+	plan   vcs.CIRerunPlan
+	reruns []int64
+}
+
+func (f *cancelRerunClient) PlanCancelledRerun(string, int) (vcs.CIRerunPlan, error) {
+	return f.plan, nil
+}
+func (f *cancelRerunClient) RerunCancelled(_ string, id int64) error {
+	f.reruns = append(f.reruns, id)
+	return nil
+}
+
+func TestCancelledCINeverRepairsOnlyReruns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	lg, err := clog.Open("run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := runLog
+	runLog = lg
+	t.Cleanup(func() { runLog = old; lg.Close() })
+	reg := repairRegistry(t)
+	cfg := config.Repo{AutoMerge: true, CIRequired: true, LocalPath: "unused"}
+	p, i := repairFixture()
+	f := &cancelRerunClient{repairClient: repairClient{pr: p, issue: i, status: vcs.CIStatusCancelled}, plan: vcs.CIRerunPlan{HeadSHA: p.HeadSHA, RunIDs: []int64{100}}}
+	scan := func() int { return len(scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, nil)) }
+	if scan() != 0 || len(f.reruns) != 1 {
+		t.Fatalf("first scan: reruns=%v", f.reruns)
+	}
+	if scan() != 0 || len(f.reruns) != 2 {
+		t.Fatalf("second scan: reruns=%v", f.reruns)
+	}
+	if scan() != 0 || len(f.reruns) != 2 {
+		t.Fatalf("limit exceeded: reruns=%v", f.reruns)
+	}
+	if err := checkRepairBudget(snapshot.DataDir(), "o/r", p.Number, time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("ledger consumed: %v", err)
+	}
+	if !repairledger.CancelRerunsExhausted(snapshot.DataDir(), "o/r", p) {
+		t.Fatal("exhaustion not visible")
+	}
+	// Real failure still repairs; a new head after a rerun succeeds normally.
+	f.status = vcs.CIStatusFailure
+	if scan() != 1 {
+		t.Fatal("failure must still dispatch repair")
+	}
+}
+
+func TestCancelledCIOrphanedAndNotMergeable(t *testing.T) {
+	pr := vcs.PR{Number: 3, HeadBranch: "fix/issue-3", Body: "Fixes #3"}
+	if got := orphanCause(pr, false, func() string { return "" }, nil, true); got != coordinator.OrphanCICancelled {
+		t.Fatalf("cause=%q", got)
+	}
+	if got := orphanCause(pr, false, func() string { return "" }, nil, false); got != "" {
+		t.Fatalf("cause=%q", got)
+	}
+	a := autoMergeAttempt{ciPoll: true, client: &repairClient{status: vcs.CIStatusCancelled}, repoCfg: config.Repo{CIRequired: true}}
+	if a.checkCI() == vcs.CIStatusSuccess {
+		t.Fatal("cancelled satisfied the merge gate")
 	}
 }

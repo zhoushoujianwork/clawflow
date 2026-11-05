@@ -30,7 +30,7 @@ func TestDecide(t *testing.T) {
 		{"lease lost wins", Input{CtxErr: errors.New("canceled"), RunErr: errors.New("x")}, "lease-lost", "canceled", "", "", ""},
 		{"resource busy", Input{ResourceBusy: true, RunErr: errors.New("busy")}, "blocked", "busy", "", "", ""},
 		{"no-change", Input{Output: "same", Outcome: "no-change"}, "success", "", "", "", "same"},
-		{"repair agent-failed", Input{IsRepair: true, RepairLabel: "CI", Output: "o", Outcome: "agent-failed"}, "failed", "CI repair could not update existing PR", "", "", ""},
+		{"repair agent-failed", Input{IsRepair: true, RepairLabel: "CI", Output: "o", Outcome: "agent-failed"}, "failed", "CI repair could not update existing PR: o", "", "", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

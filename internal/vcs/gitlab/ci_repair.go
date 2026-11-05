@@ -110,6 +110,8 @@ func (c *Client) GetCIStatusAtHead(repo string, number int, expected string) (vc
 		return vcs.CIStatusSuccess, nil
 	case "failed":
 		return vcs.CIStatusFailure, nil
+	case "canceled":
+		return vcs.CIStatusCancelled, nil
 	default:
 		return vcs.CIStatusPending, nil
 	}
@@ -159,4 +161,44 @@ func (c *Client) GetMRFailedJobEvidence(repo string, number int, sha string) (st
 		return noJobEvidence, nil
 	}
 	return strings.Join(excerpts, "\n"), nil
+}
+
+// PlanCancelledRerun lists canceled jobs of the MR's head pipeline. Keys are job
+// names because a retry creates a new job ID.
+func (c *Client) PlanCancelledRerun(repo string, number int) (vcs.CIRerunPlan, error) {
+	var plan vcs.CIRerunPlan
+	p, err := c.mrHeadPipeline(repo, number, "")
+	if err != nil || p.ID == 0 {
+		return plan, err
+	}
+	plan.HeadSHA = p.SHA
+	if p.Status != "canceled" {
+		return plan, nil
+	}
+	jobs, err := c.ListPipelineJobs(repo, p.ID)
+	if err != nil {
+		return plan, err
+	}
+	for _, job := range jobs {
+		if job.ID > 0 && job.Status == "canceled" {
+			plan.RunIDs = append(plan.RunIDs, job.ID)
+			plan.RunKeys = append(plan.RunKeys, "job:"+job.Name)
+		}
+	}
+	return plan, nil
+}
+
+// RerunCancelled retries one canceled pipeline job.
+func (c *Client) RerunCancelled(repo string, jobID int64) error {
+	if jobID <= 0 {
+		return fmt.Errorf("invalid job ID")
+	}
+	data, status, err := c.doJSON("POST", fmt.Sprintf("/projects/%s/jobs/%d/retry", projectID(repo), jobID), nil)
+	if err != nil {
+		return err
+	}
+	if status != 200 && status != 201 {
+		return fmt.Errorf("gitlab retry job: HTTP %d: %s", status, data)
+	}
+	return nil
 }

@@ -20,8 +20,10 @@ const (
 	// OrphanAcceptanceUnstructured: the report stayed invalid after all automatic fresh reviews.
 	OrphanAcceptanceUnstructured = "acceptance_unstructured_exhausted"
 	OrphanRepairExhausted        = "repair_exhausted_or_locked"
-	OrphanBranchUnmanaged        = "branch_unmanaged"
-	OrphanIssueUnlinked          = "issue_unlinked"
+	// OrphanCICancelled: required CI stays cancelled after automatic reruns were used up.
+	OrphanCICancelled     = "ci_cancelled_reruns_exhausted"
+	OrphanBranchUnmanaged = "branch_unmanaged"
+	OrphanIssueUnlinked   = "issue_unlinked"
 )
 
 // WatchdogConfig holds the observation thresholds of the stuck-work rules.

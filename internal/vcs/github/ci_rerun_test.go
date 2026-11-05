@@ -156,3 +156,28 @@ func TestCIRerunWorkflowPagination(t *testing.T) {
 		t.Fatalf("%+v %v pages=%d", plan, err, pages)
 	}
 }
+
+func TestPlanCancelledRerunSelectsOnlyCancelled(t *testing.T) {
+	c := ciTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/o/r/pulls/11": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"head":{"sha":"captured-sha"}}`) },
+		"GET /repos/o/r/commits/captured-sha/check-runs": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"total_count":2,"check_runs":[
+    {"id":1,"head_sha":"captured-sha","status":"completed","conclusion":"cancelled","check_suite":{"id":10},"app":{"slug":"github-actions"}},
+    {"id":2,"head_sha":"captured-sha","status":"completed","conclusion":"failure","check_suite":{"id":20},"app":{"slug":"github-actions"}}
+   ]}`)
+		},
+		"GET /repos/o/r/actions/runs": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"total_count":2,"workflow_runs":[
+    {"id":100,"head_sha":"captured-sha","check_suite_id":10,"status":"completed","conclusion":"cancelled"},
+    {"id":200,"head_sha":"captured-sha","check_suite_id":20,"status":"completed","conclusion":"failure"}
+   ]}`)
+		},
+	})
+	plan, err := c.PlanCancelledRerun("o/r", 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(plan.RunIDs, []int64{100}) || !reflect.DeepEqual(plan.RunKeys, []string{"run:100"}) {
+		t.Fatalf("%+v", plan)
+	}
+}
