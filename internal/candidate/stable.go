@@ -49,7 +49,7 @@ func DefaultStableProbe(stableRoot, candidateBase string) StableProbe {
 		if err != nil {
 			return nil, err
 		}
-		return parseProcesses(string(out), candidateBase, executors), nil
+		return parseProcesses(string(out), stableRoot, candidateBase, executors), nil
 	}
 	return StableProbe{
 		Processes: func() ([]string, error) { return list(false) },
@@ -63,7 +63,7 @@ func DefaultStableProbe(stableRoot, candidateBase string) StableProbe {
 // is a task executor), or the ClawFlow.app bundle. Words that merely appear in
 // arguments or paths (a shell cd-ing into a clawflow checkout, grep, git) do
 // not count. Identity stays pid + start time + command line.
-func parseProcesses(out, candidateBase string, executors bool) []string {
+func parseProcesses(out, stableRoot, candidateBase string, executors bool) []string {
 	var ids []string
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
@@ -78,7 +78,12 @@ func parseProcesses(out, candidateBase string, executors bool) []string {
 		}
 		// The command starts after the pid and the five lstart fields.
 		command := commandAfter(line, 6)
-		sub := clawflowSubcommand(command)
+		sub, exe := clawflowSubcommand(command)
+		if sub != "" && !underStableRoot(exe, stableRoot) {
+			// A clawflow process from a temp dir, test dir or another checkout
+			// is not a stable service or executor.
+			sub = ""
+		}
 		isExec := strings.Contains(line, "worker-executions") || sub == "worker execute"
 		if isExec != executors {
 			continue
@@ -105,32 +110,56 @@ func commandAfter(line string, n int) string {
 	return rest
 }
 
+// underStableRoot reports whether the executable path lies strictly inside
+// stableRoot, comparing both lexically and with symlinks resolved.
+func underStableRoot(exe, stableRoot string) bool {
+	if exe == "" || stableRoot == "" || !filepath.IsAbs(exe) {
+		return false
+	}
+	inside := func(root, p string) bool {
+		rel, err := filepath.Rel(root, p)
+		return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	exe = filepath.Clean(exe)
+	root := filepath.Clean(stableRoot)
+	if inside(root, exe) {
+		return true
+	}
+	if r, err := filepath.EvalSymlinks(root); err == nil && inside(r, exe) {
+		return true
+	}
+	return false
+}
+
 // clawflowSubcommand returns "controller", "worker", "worker execute" or ""
-// when command does not run a clawflow executable at its start. Paths may
+// (plus the executable path, empty for a bare name) when command does not run
+// a clawflow executable at its start. Paths may
 // contain spaces, so the executable is the last "/clawflow " whose preceding
 // path has no option-looking token.
-func clawflowSubcommand(command string) string {
-	var rest string
+func clawflowSubcommand(command string) (string, string) {
+	var rest, exe string
 	switch {
 	case strings.HasPrefix(command, "clawflow "):
 		rest = command[len("clawflow "):]
+		exe = "clawflow"
 	case strings.HasPrefix(command, "/"):
 		idx := strings.LastIndex(command, "/clawflow ")
 		if idx < 0 || strings.Contains(command[:idx], " -") {
-			return ""
+			return "", ""
 		}
+		exe = command[:idx+len("/clawflow")]
 		rest = command[idx+len("/clawflow "):]
 	default:
-		return ""
+		return "", ""
 	}
 	args := strings.Fields(rest)
 	if len(args) == 0 || (args[0] != "controller" && args[0] != "worker") {
-		return ""
+		return "", ""
 	}
 	if args[0] == "worker" && len(args) > 1 && args[1] == "execute" {
-		return "worker execute"
+		return "worker execute", exe
 	}
-	return args[0]
+	return args[0], exe
 }
 
 func digestTree(root string, skip func(rel string) bool, entries ...map[string]string) (string, error) {

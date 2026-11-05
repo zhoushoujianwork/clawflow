@@ -937,7 +937,7 @@ func (c *Client) getCIStatus(repo string, prNumber int, evidence *vcs.CIEvidence
 	const pageSize, maxPages = 100, 100
 	total := -1
 	seen := make(map[int64]bool)
-	pending, failed := false, false
+	pending, failed, cancelled := false, false, false
 	for page := 1; page <= maxPages; page++ {
 		path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=%d&filter=latest&page=%d", owner, name, url.PathEscape(pr.HeadSHA), pageSize, page)
 		data, status, err := c.do("GET", path, nil)
@@ -984,7 +984,11 @@ func (c *Client) getCIStatus(repo string, prNumber int, evidence *vcs.CIEvidence
 				if run.Conclusion == nil || *run.Conclusion == "" {
 					return vcs.CIStatusNone, fmt.Errorf("github get check runs: completed check missing conclusion")
 				}
-				failed = failed || *run.Conclusion != "success"
+				if *run.Conclusion == "cancelled" {
+					cancelled = true
+				} else {
+					failed = failed || *run.Conclusion != "success"
+				}
 			case "queued", "in_progress", "waiting", "requested", "pending":
 				if run.Conclusion != nil && *run.Conclusion != "" {
 					return vcs.CIStatusNone, fmt.Errorf("github get check runs: unfinished check has conclusion")
@@ -1006,6 +1010,16 @@ func (c *Client) getCIStatus(repo string, prNumber int, evidence *vcs.CIEvidence
 	}
 	if pending {
 		return vcs.CIStatusPending, nil
+	}
+	if cancelled {
+		current, err := c.GetPR(repo, prNumber)
+		if err != nil {
+			return vcs.CIStatusNone, err
+		}
+		if current.HeadSHA != pr.HeadSHA {
+			return vcs.CIStatusPending, nil
+		}
+		return vcs.CIStatusCancelled, nil
 	}
 	current, err := c.GetPR(repo, prNumber)
 	if err != nil {

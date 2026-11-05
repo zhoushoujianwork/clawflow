@@ -11,6 +11,28 @@ import (
 // PlanCIRerun uses only checks selected by the existing CI aggregate. Workflow
 // runs outside those suites never become rerun candidates.
 func (c *Client) PlanCIRerun(repo string, prNumber int) (vcs.CIRerunPlan, error) {
+	return c.planCIRerun(repo, prNumber, func(conclusion string) bool { return conclusion != "success" })
+}
+
+// PlanCancelledRerun plans reruns for cancelled checks only. Real failures are
+// never rerun here; they belong to the repair path.
+func (c *Client) PlanCancelledRerun(repo string, prNumber int) (vcs.CIRerunPlan, error) {
+	plan, err := c.planCIRerun(repo, prNumber, func(conclusion string) bool { return conclusion == "cancelled" })
+	if err != nil {
+		return plan, err
+	}
+	for _, id := range plan.RunIDs {
+		plan.RunKeys = append(plan.RunKeys, fmt.Sprintf("run:%d", id))
+	}
+	return plan, nil
+}
+
+// RerunCancelled reruns the cancelled jobs of one workflow run.
+func (c *Client) RerunCancelled(repo string, runID int64) error {
+	return c.RerunFailedJobs(repo, runID)
+}
+
+func (c *Client) planCIRerun(repo string, prNumber int, selected func(string) bool) (vcs.CIRerunPlan, error) {
 	var plan vcs.CIRerunPlan
 	evidence, err := c.GetCIEvidence(repo, prNumber)
 	if err != nil {
@@ -19,7 +41,7 @@ func (c *Client) PlanCIRerun(repo string, prNumber int) (vcs.CIRerunPlan, error)
 	plan.HeadSHA = evidence.HeadSHA
 	suites := map[int64]bool{}
 	for _, check := range evidence.Checks {
-		if check.Status == "completed" && check.Conclusion != nil && *check.Conclusion != "success" && check.App.Slug == "github-actions" && check.CheckSuite.ID > 0 {
+		if check.Status == "completed" && check.Conclusion != nil && selected(*check.Conclusion) && check.App.Slug == "github-actions" && check.CheckSuite.ID > 0 {
 			suites[check.CheckSuite.ID] = true
 		}
 	}
@@ -68,7 +90,7 @@ func (c *Client) PlanCIRerun(repo string, prNumber int) (vcs.CIRerunPlan, error)
 					return plan, fmt.Errorf("invalid workflow identity or revision")
 				}
 				seen[run.ID] = true
-				if suites[run.Suite] && run.Status == "completed" && (run.Conclusion == "failure" || run.Conclusion == "timed_out" || run.Conclusion == "cancelled") {
+				if suites[run.Suite] && run.Status == "completed" && (run.Conclusion == "failure" || run.Conclusion == "timed_out" || run.Conclusion == "cancelled") && selected(run.Conclusion) {
 					plan.RunIDs = append(plan.RunIDs, run.ID)
 					matched[run.Suite] = true
 				}

@@ -236,6 +236,9 @@ func newPRCIWaitCmd() *cobra.Command {
 				case vcs.CIStatusFailure:
 					fmt.Println("CI failed")
 					return fmt.Errorf("CI checks failed")
+				case vcs.CIStatusCancelled:
+					fmt.Println("CI cancelled")
+					return fmt.Errorf("CI checks cancelled")
 				case vcs.CIStatusNone:
 					fmt.Println("no CI checks configured")
 					return nil
