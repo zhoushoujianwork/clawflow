@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,6 +211,20 @@ func (m *Manifest) Remove() error {
 		if disk.owned(pr) {
 			return fmt.Errorf("candidate %s still runs %s (pid %d); stop it first", m.Plan.ID, pr.Role, pr.PID)
 		}
+	}
+	// The candidate's Go module cache is read-only. Without this, RemoveAll
+	// deletes the manifest, then fails, and leaves a root no command can claim.
+	// WalkDir does not follow symlinks, so nothing outside the root changes.
+	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	return os.RemoveAll(root)
 }

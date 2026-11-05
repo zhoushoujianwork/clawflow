@@ -3,10 +3,12 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +49,7 @@ func NewPlatformHandler(store WorkerStore, admin AdminService) http.Handler {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		status, actor, action, target := 200, "", "unknown", ""
+		quietRead := false
 		var out any
 		handle := func() error {
 			headers := r.Header.Values("Authorization")
@@ -68,6 +71,37 @@ func NewPlatformHandler(store WorkerStore, admin AdminService) http.Handler {
 			if !token.HasScope(ScopeAdmin) {
 				status = 403
 				return ErrToken
+			}
+			if id, ok := taskLogPath(r.URL.Path); ok {
+				action = "task-logs"
+				target = id
+				if r.Method != "GET" {
+					status = 405
+					return nil
+				}
+				reader, ok := store.(interface {
+					ReadLog(context.Context, string, int64, int64, int) (LogRead, error)
+				})
+				if !ok {
+					status = 404
+					return nil
+				}
+				q := r.URL.Query()
+				epoch, e1 := queryInt(q.Get("epoch"))
+				after, e2 := queryInt(q.Get("after"))
+				limit, e3 := queryInt(q.Get("limit"))
+				if e1 != nil || e2 != nil || e3 != nil || len(q) > 3 {
+					status = 400
+					return ErrInvalid
+				}
+				// Opening a log is audited; follow-up increments are not, to keep polling cheap.
+				quietRead = after > 0
+				if out, err = reader.ReadLog(ctx, id, epoch, after, int(limit)); errors.Is(err, ErrStaleLease) {
+					status = 404
+				} else if errors.Is(err, ErrInvalid) {
+					status = 400
+				}
+				return err
 			}
 			switch r.URL.Path {
 			case "/admin/v1/dashboard":
@@ -178,8 +212,10 @@ func NewPlatformHandler(store WorkerStore, admin AdminService) http.Handler {
 		}
 		auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer auditCancel()
-		if err := store.AppendAudit(auditCtx, actor, target, fmt.Sprintf("admin:%s:%d", action, status)); err != nil {
-			status = 500
+		if !quietRead || status != 200 {
+			if err := store.AppendAudit(auditCtx, actor, target, fmt.Sprintf("admin:%s:%d", action, status)); err != nil {
+				status = 500
+			}
 		}
 		if status >= 400 {
 			out = map[string]string{"error": http.StatusText(status)}
@@ -192,6 +228,30 @@ func NewPlatformHandler(store WorkerStore, admin AdminService) http.Handler {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(out)
 	})
+}
+
+// taskLogPath matches /admin/v1/tasks/{id}/logs for a bounded, plain task id.
+func taskLogPath(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/admin/v1/tasks/")
+	if !ok {
+		return "", false
+	}
+	id, tail, ok := strings.Cut(rest, "/")
+	if !ok || tail != "logs" || id == "" || len(id) > 128 || strings.ContainsAny(id, "/\\ \t\r\n") {
+		return "", false
+	}
+	return id, true
+}
+
+func queryInt(v string) (int64, error) {
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return 0, ErrInvalid
+	}
+	return n, nil
 }
 
 // repoAuditTarget records repository identity, excluding URL credentials and queries.

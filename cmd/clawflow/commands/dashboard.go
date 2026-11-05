@@ -46,6 +46,21 @@ func NewDashboardCmd() *cobra.Command {
 			return call(c, "POST", "/admin/v1/dashboard/action", coordinator.DashboardRequest{Action: action, Name: args[0]})
 		}})
 	}
+	// Read-only, bounded execution output for one task epoch. It contacts only the
+	// controller; it never starts a provider or touches a worker.
+	var logEpoch, logAfter int64
+	var logLimit int
+	logs := &cobra.Command{Use: "logs TASK_ID", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
+		if len(args[0]) == 0 || len(args[0]) > 128 || strings.ContainsAny(args[0], "/\\? #%") {
+			return fmt.Errorf("invalid task id")
+		}
+		path := fmt.Sprintf("/admin/v1/tasks/%s/logs?epoch=%d&after=%d&limit=%d", url.PathEscape(args[0]), logEpoch, logAfter, logLimit)
+		return call(c, "GET", path, nil)
+	}}
+	logs.Flags().Int64Var(&logEpoch, "epoch", 0, "Execution epoch (0 selects the newest)")
+	logs.Flags().Int64Var(&logAfter, "after", 0, "Return entries after this entry id")
+	logs.Flags().IntVar(&logLimit, "limit", 200, "Maximum entries")
+	cmd.AddCommand(logs)
 	// Only monitoring changes here. CI/acceptance/merge remain independent and
 	// cannot be weakened by an innocent dashboard pause/resume action.
 	for _, action := range []string{"enable", "disable"} {

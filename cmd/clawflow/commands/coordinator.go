@@ -92,12 +92,21 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 			if err := reconcileActionsObservations(reconcileCtx, actions.Ledger{DB: db.DB()}); err != nil && reconcileCtx.Err() == nil {
 				runLog.Warn("coordinator/reconcile", "err", err.Error())
 			}
+			// Execution output of finished tasks expires after the Offload retention window.
+			if _, err := tasks.PurgeLogs(reconcileCtx, time.Now().UTC().Add(-coordinator.LogRetention)); err != nil && reconcileCtx.Err() == nil {
+				runLog.Warn("coordinator/log_retention", "err", err.Error())
+			}
 			select {
 			case <-reconcileCtx.Done():
 				return
 			case <-tick.C:
 			}
 		}
+	}()
+	watchdogDone := make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		serveCoordinatorWatchdog(reconcileCtx, tasks.Board, watchdogInterval)
 	}()
 	done := make(chan struct{})
 	go func() {
@@ -112,6 +121,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		_ = server.Close()
 		<-done
 		<-reconcileDone
+		<-watchdogDone
 		db.Close()
 		return nil, err
 	}
@@ -121,6 +131,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		_ = server.Close()
 		<-done
 		<-reconcileDone
+		<-watchdogDone
 		db.Close()
 	}, nil
 }

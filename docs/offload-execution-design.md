@@ -24,7 +24,7 @@ settings:
     codex_sandbox: workspace-write
 ```
 
-The profile is required and owns credentials and default models. Configure it with `offload config`; ClawFlow's old provider settings no longer control execution. `role_profiles` and `codex_sandbox` are optional. Choosing `danger-full-access` is an explicit trusted delivery choice. Execution settings remain machine-local and are excluded from sync. Environment overrides are `CLAWFLOW_OFFLOAD_COMMAND`, `CLAWFLOW_OFFLOAD_PROFILE`, and `CLAWFLOW_OFFLOAD_CODEX_SANDBOX`.
+The profile owns credentials and default models. Configure and select the default with `offload config`; when ClawFlow has no explicit profile, it resolves Offload's active profile before each new run and pins that name for recovery. `profile`, `role_profiles`, and `codex_sandbox` remain optional overrides. Choosing `danger-full-access` is an explicit trusted delivery choice. Execution settings remain machine-local and are excluded from sync. Environment overrides are `CLAWFLOW_OFFLOAD_COMMAND`, `CLAWFLOW_OFFLOAD_PROFILE`, and `CLAWFLOW_OFFLOAD_CODEX_SANDBOX`.
 
 Implement, CI repair, Pilot and explicit issue edit conversations use managed delivery. Auxiliary operators and document generation use read-only execution; tools-disabled and narrower tool restrictions remain explicit. Positive dollar budgets fail before launch with `unsupported_budget`; no budget is silently dropped. Existing budgeted Pilot settings therefore remain blocked until the execution contract supports those caps.
 

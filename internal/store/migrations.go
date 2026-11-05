@@ -59,6 +59,10 @@ CREATE TABLE coordinator_invitations (name text PRIMARY KEY, hash bytea NOT NULL
  ALTER TABLE coordinator_tasks ADD COLUMN result_digest text NOT NULL DEFAULT '';
  ALTER TABLE task_attempts ADD COLUMN result_digest text NOT NULL DEFAULT '';`).Error
 	}},
+	{Version: 12, Name: "coordinator_task_last_event", Up: func(tx *gorm.DB) error {
+		return tx.Exec("ALTER TABLE coordinator_tasks ADD COLUMN last_event_at timestamptz").Error
+	}},
+	{Version: 13, Name: "task_execution_logs", Up: migrateTaskLogs},
 }
 
 // LatestVersion is the highest version in migs, or 0 when empty.
