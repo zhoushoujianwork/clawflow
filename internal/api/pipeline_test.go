@@ -237,9 +237,9 @@ func TestHandlePipelineIsReadOnlyAndNeedsSource(t *testing.T) {
 }
 
 func TestHandlePipelineAgentSlotsStayFresh(t *testing.T) {
-	calls := 0
+	var calls atomic.Int32
 	resetPipeline(t, func(context.Context) (pipeline.Snapshot, error) {
-		calls++
+		calls.Add(1)
 		return fakeSnapshot(), nil
 	})
 	cfg := &config.Config{Settings: config.Settings{MaxConcurrentAgents: 2}}
@@ -280,8 +280,9 @@ func TestHandlePipelineAgentSlotsStayFresh(t *testing.T) {
 	check(1)
 	release()
 	check(0)
-	if calls != 1 {
-		t.Fatalf("snapshot calls=%d, want cached snapshot", calls)
+	pipelineWorkers.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("snapshot calls=%d, want cached snapshot", got)
 	}
 }
 
