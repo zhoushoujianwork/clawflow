@@ -143,30 +143,5 @@ func (s *Store) ClaimWithID(ctx context.Context, worker, id string) (*Task, erro
 	if !claimIDPattern.MatchString(id) {
 		return nil, ErrInvalid
 	}
-	var task *Task
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var existing Task
-		err := tx.Where("lease_owner = ? AND json_extract(payload, '$.worker_claim_id') = ?", worker, id).First(&existing).Error
-		if err == nil {
-			if existing.State != "leased" || existing.Result != nil {
-				return ErrNoTask
-			}
-			task = &existing
-			return nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		var registered Worker
-		if err := tx.First(&registered, "id = ?", worker).Error; err != nil {
-			return err
-		}
-		if !registered.Durable {
-			return ErrInvalid
-		}
-		store := &Store{db: tx, LeaseLimits: s.LeaseLimits}
-		task, err = store.claim(ctx, worker, id)
-		return err
-	})
-	return task, err
+	return s.claim(ctx, worker, id)
 }

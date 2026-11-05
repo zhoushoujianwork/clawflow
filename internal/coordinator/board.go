@@ -2,7 +2,6 @@ package coordinator
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"strings"
 	"time"
@@ -69,7 +68,10 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 		total, repos, err := s.LeaseLimits()
 		limits = dispatchLimits{known: err == nil, total: total, repos: repos}
 	}
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	// The store DSN makes ordinary GORM transactions BEGIN IMMEDIATE. Board is
+	// read-only, so use an explicit deferred transaction on one connection: WAL
+	// readers get a consistent snapshot without acquiring the writer lock.
+	err := deferredReadTransaction(s.db.WithContext(ctx), func(tx *gorm.DB) error {
 		now := controllerNow()
 		var workers []Worker
 		if err := tx.Select("id, tags, roles, run_untagged, max_parallel, paused").Order("id").Find(&workers).Error; err != nil {
@@ -110,8 +112,31 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			}
 		}
 		return nil
-	}, &sql.TxOptions{ReadOnly: true})
+	})
 	return out, err
+}
+
+func deferredReadTransaction(db *gorm.DB, read func(*gorm.DB) error) error {
+	return db.Connection(func(conn *gorm.DB) error {
+		if err := conn.Exec("BEGIN DEFERRED").Error; err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+			cleanup := conn.Session(&gorm.Session{NewDB: true, Context: context.Background()})
+				_ = cleanup.Exec("ROLLBACK").Error
+			}
+		}()
+		if err := read(conn.Session(&gorm.Session{NewDB: true})); err != nil {
+			return err
+		}
+		if err := conn.Exec("COMMIT").Error; err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
 }
 
 func deriveBoard(now time.Time, workers []Worker, tokens []Token, heartbeats map[string]time.Time, tasks []BoardTask) Board {

@@ -131,9 +131,10 @@ func (s *Store) Enqueue(ctx context.Context, input Task) (*Task, error) {
 	return s.EnqueuePrepared(ctx, input, nil)
 }
 
-// EnqueuePrepared prepares a new payload only after active-task deduplication.
-// Every write transaction is BEGIN IMMEDIATE, so producers are serialized across
-// coordinator and CLI processes by the database writer lock.
+// EnqueuePrepared prepares a new payload only after an initial active-task
+// deduplication. Preparation may read providers or reserve external bookkeeping,
+// so it runs without a SQLite transaction. The short write transaction repeats
+// deduplication before insert to preserve cross-process correctness.
 func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*Task) error) (*Task, error) {
 	if input.Repo == "" || input.Issue < 0 || input.PR < 0 || (input.Issue == 0 && input.PR == 0) || input.Operator == "" {
 		return nil, ErrInvalid
@@ -149,6 +150,10 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 	if !json.Valid(input.Payload) {
 		return nil, ErrInvalid
 	}
+	// There is one controller process. Serialize its provider preparation for a
+	// logical queue slot; the transaction below remains the cross-process guard.
+	unlock := enqueueLocks.lock(fmt.Sprintf("%s/%s/%d/%d", input.Repo, input.Kind, input.Issue, input.PR))
+	defer unlock()
 	id, err := randomID()
 	if err != nil {
 		return nil, err
@@ -156,6 +161,45 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 	t := Task{ID: id, Kind: input.Kind, Repo: input.Repo, Issue: input.Issue, PR: input.PR, Operator: input.Operator, Payload: input.Payload, Tags: input.Tags, Priority: input.Priority, QueuePosition: input.QueuePosition, State: "pending"}
 	if t.Tags == nil {
 		t.Tags = []string{}
+	}
+	active := func(db *gorm.DB, out *Task) error {
+		q := db.Where("repo = ? AND kind = ? AND state IN ?", t.Repo, t.Kind, []string{"pending", "leased"})
+		if t.PR > 0 {
+			q = q.Where("pr = ?", t.PR)
+		} else {
+			q = q.Where("(pr = 0 OR kind = 'implement') AND issue = ?", t.Issue)
+		}
+		return q.First(out).Error
+	}
+	// Avoid provider preparation for work that is already known to be present.
+	if input.ExternalID != "" {
+		if input.EventSource == "" {
+			return nil, ErrInvalid
+		}
+		var event InboxEvent
+		if err := s.db.WithContext(ctx).First(&event, "source = ? AND external_id = ?", input.EventSource, input.ExternalID).Error; err == nil {
+			var duplicate Task
+			if err := s.db.WithContext(ctx).First(&duplicate, "id = ?", event.TaskID).Error; err != nil {
+				return nil, err
+			}
+			return &duplicate, nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+	var existing Task
+	if err := active(s.db.WithContext(ctx), &existing); err == nil {
+		return &existing, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if prepare != nil {
+		if err := prepare(&t); err != nil {
+			return nil, err
+		}
+	}
+	if !json.Valid(t.Payload) {
+		return nil, ErrInvalid
 	}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if input.ExternalID != "" {
@@ -177,26 +221,11 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 			now := time.Now().UTC()
 			return tx.Create(&InboxEvent{Source: input.EventSource, ExternalID: input.ExternalID, TaskID: t.ID, ReceivedAt: now, ProcessedAt: now}).Error
 		}
-		q := tx.Where("repo = ? AND kind = ? AND state IN ?", t.Repo, t.Kind, []string{"pending", "leased"})
-		if t.PR > 0 {
-			q = q.Where("pr = ?", t.PR)
-		} else {
-			q = q.Where("(pr = 0 OR kind = 'implement') AND issue = ?", t.Issue)
-		}
-		var existing Task
-		if err := q.First(&existing).Error; err == nil {
+		if err := active(tx, &existing); err == nil {
 			t = existing
 			return remember()
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
-		}
-		if prepare != nil {
-			if err := prepare(&t); err != nil {
-				return err
-			}
-		}
-		if !json.Valid(t.Payload) {
-			return ErrInvalid
 		}
 		// The writer lock held by this transaction makes this check atomic with
 		// enqueue. Two concurrent assessments of an empty queue cannot both
@@ -232,16 +261,11 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 			}
 			return audit(tx, "", t.ID, "enqueue")
 		}
-		q = tx.Where("repo = ? AND kind = ? AND state IN ?", t.Repo, t.Kind, []string{"pending", "leased"})
-		if t.PR > 0 {
-			q = q.Where("pr = ?", t.PR)
-		} else {
-			q = q.Where("(pr = 0 OR kind = 'implement') AND issue = ?", t.Issue)
-		}
-		t = Task{}
-		if err := q.First(&t).Error; err != nil {
+		var conflict Task
+		if err := active(tx, &conflict); err != nil {
 			return err
 		}
+		t = conflict
 		return remember()
 	})
 	return &t, err
@@ -268,17 +292,36 @@ func (s *Store) Claim(ctx context.Context, worker string) (*Task, error) {
 	return s.claim(ctx, worker, "")
 }
 func (s *Store) claim(ctx context.Context, worker, claimID string) (*Task, error) {
+	// Capacity configuration is controller-local file I/O. Resolve it before
+	// acquiring SQLite's writer lock, then enforce the snapshot atomically.
+	var total int
+	var repoLimits map[string]int
+	if s.LeaseLimits != nil {
+		var err error
+		total, repoLimits, err = s.LeaseLimits()
+		if err != nil {
+			return nil, err
+		}
+	}
 	var result Task
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var repoLimits map[string]int
+		if claimID != "" {
+			var existing Task
+			err := tx.Where("lease_owner = ? AND json_extract(payload, '$.worker_claim_id') = ?", worker, claimID).First(&existing).Error
+			if err == nil {
+				if existing.State != "leased" || existing.Result != nil {
+					return ErrNoTask
+				}
+				result = existing
+				return nil
+			}
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
 		if s.LeaseLimits != nil {
 			// The immediate transaction already serializes platform-wide
 			// capacity checks across all workers and API processes.
-			total, limits, err := s.LeaseLimits()
-			if err != nil {
-				return err
-			}
-			repoLimits = limits
 			var leased int64
 			if err := tx.Model(&Task{}).Where("state = 'leased'").Count(&leased).Error; err != nil {
 				return err
@@ -290,6 +333,9 @@ func (s *Store) claim(ctx context.Context, worker, claimID string) (*Task, error
 		var w Worker
 		if err := tx.First(&w, "id = ?", worker).Error; err != nil {
 			return err
+		}
+		if claimID != "" && !w.Durable {
+			return ErrInvalid
 		}
 		if w.Paused {
 			return ErrNoTask
