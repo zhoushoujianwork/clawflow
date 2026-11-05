@@ -9,6 +9,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -21,6 +22,10 @@ import (
 const orphanUnstructuredExhausted = "unstructured_exhausted"
 
 func orphanCause(pr vcs.PR, acceptanceRequired bool, acceptanceVerdict func() string, budgetErr error) string {
+	// Intentional drafts (platform flag or WIP/DRAFT title) are not abandoned.
+	if pr.Draft || isDraftPR(pr.Title) {
+		return ""
+	}
 	issue := pipelinePRIssue(pr)
 	if !pipelineBranchIssue.MatchString(pr.HeadBranch) {
 		if issue == 0 {
@@ -38,6 +43,24 @@ func orphanCause(pr vcs.PR, acceptanceRequired bool, acceptanceVerdict func() st
 		return coordinator.OrphanAcceptanceBlocked
 	}
 	return ""
+}
+
+// orphanVerdict maps acceptance evidence to the verdict token orphanCause uses.
+// Verdicts that repair or a fresh same-head review will still advance map to "".
+func orphanVerdict(info *pipeline.AcceptanceInfo) string {
+	if info == nil {
+		return ""
+	}
+	if info.Unstructured {
+		if info.UnstructuredAttempts > info.MaxUnstructuredRetries {
+			return orphanUnstructuredExhausted
+		}
+		return ""
+	}
+	if info.BlockedRepairable {
+		return ""
+	}
+	return info.Verdict
 }
 
 // newOrphanedPRProvider lists open PRs of enabled repos that no automatic flow
@@ -72,13 +95,7 @@ func newOrphanedPRProvider() func(context.Context) ([]coordinator.OrphanedPR, er
 				pr := pr
 				verdict := func() string {
 					info, _ := pipelineAcceptance(ctx, client, repo, rc, pr, now)
-					if info == nil {
-						return ""
-					}
-					if info.Unstructured && info.UnstructuredAttempts > info.MaxUnstructuredRetries {
-						return orphanUnstructuredExhausted
-					}
-					return info.Verdict
+					return orphanVerdict(info)
 				}
 				budget := checkRepairBudget(snapshot.DataDir(), repo, pr.Number, now)
 				if budget != nil && !isTerminalBudget(budget) {

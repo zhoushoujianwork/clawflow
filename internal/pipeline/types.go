@@ -163,21 +163,23 @@ type AcceptanceInfo struct {
 	// UnstructuredAttempts counts trailing runner-owned unstructured records at this head.
 	UnstructuredAttempts int `json:"unstructured_attempts,omitempty"`
 	// MaxUnstructuredRetries is the number of fresh same-head acceptances allowed afterwards.
-	MaxUnstructuredRetries int    `json:"max_unstructured_retries,omitempty"`
-	Required               bool   `json:"required"`
-	Running                bool   `json:"running,omitempty"`
-	Verdict                string `json:"verdict,omitempty"` // passed | failed | blocked
-	Valid                  bool   `json:"valid,omitempty"`   // record satisfies the current contract
-	Summary                string `json:"summary,omitempty"` // truncated reviewer summary
-	Attempts               int    `json:"attempts"`
-	InfraAttempts          int    `json:"infra_attempts"`
-	MaxInfraRetries        int    `json:"max_infra_attempts,omitempty"`
-	LatestIsInfra          bool   `json:"latest_is_infra,omitempty"`
-	NextRetryAt            string `json:"next_retry_at,omitempty"`
-	CompletedAt            string `json:"completed_at,omitempty"`
-	PlannerSession         string `json:"planner_session,omitempty"`
-	ReviewerSession        string `json:"reviewer_session,omitempty"`
-	Error                  string `json:"error,omitempty"`
+	MaxUnstructuredRetries int `json:"max_unstructured_retries,omitempty"`
+	// BlockedRepairable marks a blocked verdict the implementer can repair automatically.
+	BlockedRepairable bool   `json:"-"`
+	Required          bool   `json:"required"`
+	Running           bool   `json:"running,omitempty"`
+	Verdict           string `json:"verdict,omitempty"` // passed | failed | blocked
+	Valid             bool   `json:"valid,omitempty"`   // record satisfies the current contract
+	Summary           string `json:"summary,omitempty"` // truncated reviewer summary
+	Attempts          int    `json:"attempts"`
+	InfraAttempts     int    `json:"infra_attempts"`
+	MaxInfraRetries   int    `json:"max_infra_attempts,omitempty"`
+	LatestIsInfra     bool   `json:"latest_is_infra,omitempty"`
+	NextRetryAt       string `json:"next_retry_at,omitempty"`
+	CompletedAt       string `json:"completed_at,omitempty"`
+	PlannerSession    string `json:"planner_session,omitempty"`
+	ReviewerSession   string `json:"reviewer_session,omitempty"`
+	Error             string `json:"error,omitempty"`
 }
 
 // Delivery is the merge result of a merged item.
