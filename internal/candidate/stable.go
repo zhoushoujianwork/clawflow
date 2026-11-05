@@ -88,7 +88,7 @@ func parseProcesses(out, stableRoot, candidateBase string, executors bool) []str
 		if isExec != executors {
 			continue
 		}
-		if !executors && sub != "controller" && sub != "worker" && !strings.Contains(line, "ClawFlow.app") {
+		if !executors && sub != "controller" && sub != "worker" && !strings.Contains(command, "ClawFlow.app/Contents/MacOS/") {
 			continue
 		}
 		ids = append(ids, f[0]+":"+strings.Join(f[1:6], " ")+":"+command)
@@ -372,6 +372,7 @@ func (a StableSnapshot) Diff(b StableSnapshot) []string {
 	}
 	if strings.Join(a.Processes, "\n") != strings.Join(b.Processes, "\n") {
 		d = append(d, "stable process identity changed")
+		d = append(d, changedProcesses(a.Processes, b.Processes)...)
 	}
 	return d
 }
@@ -412,4 +413,28 @@ func changedPaths(kind string, before, after map[string]string) []string {
 		result = append(result, fmt.Sprintf("stable %s path %s: %q", kind, action, k))
 	}
 	return result
+}
+
+// changedProcesses names which service processes appeared or disappeared, so a
+// failed candidate says what moved instead of only that something did.
+func changedProcesses(before, after []string) []string {
+	had, has := map[string]bool{}, map[string]bool{}
+	for _, id := range before {
+		had[id] = true
+	}
+	for _, id := range after {
+		has[id] = true
+	}
+	var out []string
+	for _, id := range before {
+		if !has[id] {
+			out = append(out, "stable process gone: "+id)
+		}
+	}
+	for _, id := range after {
+		if !had[id] {
+			out = append(out, "stable process added: "+id)
+		}
+	}
+	return out
 }
