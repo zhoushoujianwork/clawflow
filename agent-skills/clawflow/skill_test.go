@@ -36,7 +36,12 @@ func TestSkillDiscoveryContract(t *testing.T) {
 	if lines := len(strings.Split(strings.TrimSuffix(text, "\n"), "\n")); lines >= 500 {
 		t.Fatalf("skill has %d lines; must stay under 500", lines)
 	}
-	if strings.ContainsFunc(text, func(r rune) bool { return unicode.Is(unicode.Han, r) }) {
+	// The issue body contract names four fixed Chinese headings; allow only those.
+	english := text
+	for _, h := range []string{"问题", "期望", "不做", "验收"} {
+		english = strings.ReplaceAll(english, h, "")
+	}
+	if strings.ContainsFunc(english, func(r rune) bool { return unicode.Is(unicode.Han, r) }) {
 		t.Fatal("skill must remain English-only")
 	}
 }

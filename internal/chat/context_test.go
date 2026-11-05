@@ -108,3 +108,19 @@ func assertSelfAwareness(t *testing.T, builder, prompt string) {
 		}
 	}
 }
+
+func TestChatBuilders_ScopeChangesGoToBody(t *testing.T) {
+	issue := vcs.Issue{Number: 42, Title: "x", State: "open", Body: "details"}
+	for name, out := range map[string]string{
+		"edit":  BuildIssueContext("o/r", issue, nil, ""),
+		"issue": BuildIssueModeContext("o/r", issue, nil, ""),
+	} {
+		if !strings.Contains(out, "clawflow issue edit --repo o/r --issue 42") {
+			t.Errorf("%s: missing issue edit command", name)
+		}
+	}
+	out := BuildIssueModeContext("o/r", issue, nil, "")
+	if !strings.Contains(out, "update the issue body instead") {
+		t.Error("issue mode must tell scope changes to go into the body")
+	}
+}

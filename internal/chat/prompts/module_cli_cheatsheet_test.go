@@ -112,3 +112,21 @@ func TestBehaviorRules_Content(t *testing.T) {
 		t.Error("BehaviorRules missing stay-grounded rule")
 	}
 }
+
+func TestCLICheatsheet_IssueBodyFormatHint(t *testing.T) {
+	for _, scope := range []Scope{ScopeFull, ScopeRepo} {
+		out := CLICheatsheet(scope)
+		for _, want := range []string{"## 验收", "requirements only", "issue edit"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("scope %d: cheatsheet missing %q", scope, want)
+			}
+		}
+	}
+	single := CLICheatsheet(ScopeSingleIssue)
+	if strings.Contains(single, "## 验收") || strings.Contains(single, "issue create") {
+		t.Error("ScopeSingleIssue must not include create-format hint")
+	}
+	if !strings.Contains(single, "issue edit") {
+		t.Error("ScopeSingleIssue cheatsheet should list issue edit")
+	}
+}
