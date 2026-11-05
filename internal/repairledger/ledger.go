@@ -48,12 +48,17 @@ type Ledger struct {
 // attempt; only the usual cooldown applies.
 const ReleaseOffloadUnavailable = "offload-unavailable"
 
+// ReleaseCoordinationChanged marks a reservation released because the approved
+// coordination snapshot changed before start. No model ran, so it consumes no
+// repair or infrastructure budget and adds no backoff.
+const ReleaseCoordinationChanged = "coordination-changed"
+
 // Counts returns (consumed repair attempts, released infrastructure outcomes).
 func (l Ledger) Counts() (consumed, infra int) {
 	for _, a := range l.Attempts {
 		if a.Released == "" {
 			consumed++
-		} else if a.Released != "no-change" && a.Released != "resource-busy" && a.Released != ReleaseOffloadUnavailable {
+		} else if a.Released != "no-change" && a.Released != "resource-busy" && a.Released != ReleaseOffloadUnavailable && a.Released != ReleaseCoordinationChanged {
 			infra++
 		}
 	}
@@ -205,12 +210,14 @@ func Release(root, repo string, pr vcs.PR, attempt int, kind string, now time.Ti
 		return fmt.Errorf("no open repair reservation for attempt %d", attempt)
 	}
 	ledger.Attempts[idx].Released = kind
-	_, infra := ledger.Counts()
-	backoff := Cooldown << uint(infra)
-	if backoff > MaxBackoff || backoff <= 0 {
-		backoff = MaxBackoff
+	if kind != ReleaseCoordinationChanged {
+		_, infra := ledger.Counts()
+		backoff := Cooldown << uint(infra)
+		if backoff > MaxBackoff || backoff <= 0 {
+			backoff = MaxBackoff
+		}
+		ledger.NotBefore = now.Add(backoff)
 	}
-	ledger.NotBefore = now.Add(backoff)
 	return Save(dir, path, ledger)
 }
 
@@ -304,12 +311,14 @@ func ApplyResult(root, repo string, pr vcs.PR, attempt int, taskID, reason, kind
 	a.TaskID, a.Completed = taskID, true
 	if a.Released == "" && kind != "" {
 		a.Released = kind
-		_, infra := ledger.Counts()
-		backoff := Cooldown << uint(infra)
-		if backoff > MaxBackoff || backoff <= 0 {
-			backoff = MaxBackoff
+		if kind != ReleaseCoordinationChanged {
+			_, infra := ledger.Counts()
+			backoff := Cooldown << uint(infra)
+			if backoff > MaxBackoff || backoff <= 0 {
+				backoff = MaxBackoff
+			}
+			ledger.NotBefore = now.Add(backoff)
 		}
-		ledger.NotBefore = now.Add(backoff)
 	}
 	return Save(dir, path, ledger)
 }

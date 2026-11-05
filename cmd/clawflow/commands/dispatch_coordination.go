@@ -529,10 +529,14 @@ func validateWorkerCoordination(ctx context.Context, j *runJob, approved *coordi
 	if err != nil {
 		return fmt.Errorf("%w: %v", errCoordinationChanged, err)
 	}
-	expected := *approved
-	expected.Tasks = nil
-	fresh.Tasks = nil
-	if coordination.Digest(fresh) != coordination.Digest(expected) {
+	// Compare only task-relevant facts so unrelated repository activity does
+	// not invalidate an approved snapshot.
+	var refs []int
+	for _, m := range coordinationReference.FindAllStringSubmatch(approved.Issue.Body, -1) {
+		n, _ := strconv.Atoi(m[1])
+		refs = append(refs, n)
+	}
+	if coordination.Digest(coordination.Relevant(fresh, refs)) != coordination.Digest(coordination.Relevant(*approved, refs)) {
 		return fmt.Errorf("%w before worker start; scheduling must reassess", errCoordinationChanged)
 	}
 	return nil
