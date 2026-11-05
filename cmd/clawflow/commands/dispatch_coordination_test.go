@@ -24,6 +24,7 @@ type dispatchClient struct {
 	vcs.Client
 	issue       vcs.Issue
 	other       vcs.Issue
+	extra       []vcs.Issue
 	prs         []vcs.PR
 	comments    []vcs.IssueComment
 	writes      []string
@@ -46,7 +47,7 @@ func (c *dispatchClient) GetIssue(_ string, n int) (*vcs.Issue, error) {
 	return nil, nil
 }
 func (c *dispatchClient) ListOpenIssues(string) ([]vcs.Issue, error) {
-	return []vcs.Issue{c.issue, c.other}, nil
+	return append([]vcs.Issue{c.issue, c.other}, c.extra...), nil
 }
 func (c *dispatchClient) SearchIssues(string, string, string, int) ([]vcs.Issue, error) {
 	return nil, nil
@@ -495,5 +496,42 @@ func TestWorkerRepairProbeMatchesApprovedReason(t *testing.T) {
 				t.Fatalf("PR change accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestWorkerCoordinationIgnoresUnrelatedActivity(t *testing.T) {
+	j, c, _, _ := coordinationFixture(t)
+	j.repair = &ciRepairContext{PR: vcs.PR{Number: 5, HeadSHA: "h1"}}
+	c.prs = []vcs.PR{{Number: 5, HeadSHA: "h1", State: "open"}}
+	approved, e := collectCoordination(context.Background(), j, nil, "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	// An unrelated new issue and edits to an unreferenced issue keep it valid.
+	c.extra = []vcs.Issue{{Number: 9, Title: "unrelated", State: "open"}}
+	c.other.Title = "renamed unrelated"
+	if e = validateWorkerCoordination(context.Background(), j, &approved); e != nil {
+		t.Fatalf("unrelated activity invalidated snapshot: %v", e)
+	}
+	// A failed validation writes nothing, so the next comparison is unchanged.
+	c.comments = append(c.comments, vcs.IssueComment{Author: "human", Body: "new requirement"})
+	for i := 0; i < 3; i++ {
+		if e = validateWorkerCoordination(context.Background(), j, &approved); !errors.Is(e, errCoordinationChanged) {
+			t.Fatalf("human comment must invalidate: %v", e)
+		}
+	}
+	if len(c.writes) != 0 {
+		t.Fatalf("validation wrote to the issue: %v", c.writes)
+	}
+	// Marked ClawFlow comments never participate.
+	c.comments = c.comments[:0]
+	c.comments = append(c.comments, vcs.IssueComment{Author: "bot", Body: "note\n<!-- clawflow:blocked -->"})
+	if e = validateWorkerCoordination(context.Background(), j, &approved); e != nil {
+		t.Fatalf("marked comment invalidated snapshot: %v", e)
+	}
+	c.comments = nil
+	c.prs[0].HeadSHA = "h2"
+	if e = validateWorkerCoordination(context.Background(), j, &approved); !errors.Is(e, errCoordinationChanged) {
+		t.Fatalf("target PR head change must invalidate: %v", e)
 	}
 }

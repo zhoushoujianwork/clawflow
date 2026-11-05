@@ -421,7 +421,11 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	}
 	if r.Status == "blocked" {
 		r.Output = testingBlockedBody(&r.jobResult)
-		r.Effects = []jobEffect{{Kind: "issue-comment", Repo: t.Repo, Number: t.Issue, Body: r.Output}}
+		// A coordination re-check ran no model and must not write to the issue:
+		// the comment would itself change the next comparison.
+		if r.InfraKind != repairledger.ReleaseCoordinationChanged {
+			r.Effects = []jobEffect{{Kind: "issue-comment", Repo: t.Repo, Number: t.Issue, Body: r.Output}}
+		}
 	}
 	j, err := s.loadJob(ctx, t)
 	if err != nil {

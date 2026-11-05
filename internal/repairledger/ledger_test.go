@@ -123,3 +123,32 @@ func TestCoordinatorResultReplayAndLegacyReservation(t *testing.T) {
 		}
 	}
 }
+
+func TestCoordinationChangedConsumesNoBudgetOrBackoff(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	pr := vcs.PR{Number: 1, HeadSHA: "head"}
+	for i := 0; i < MaxInfra+3; i++ {
+		now = now.Add(10 * time.Minute)
+		n, err := Reserve(root, "o/r", pr, "ci", now)
+		if err != nil {
+			t.Fatalf("locked after %d coordination releases: %v", i, err)
+		}
+		if err := Release(root, "o/r", pr, n, ReleaseCoordinationChanged, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, path := Path(root, "o/r", 1)
+	l, _ := Load(path)
+	if c, infra := l.Counts(); c != 0 || infra != 0 || !l.NotBefore.IsZero() {
+		t.Fatalf("budget/backoff changed: %d %d %v", c, infra, l.NotBefore)
+	}
+	// Reservations already charged by older releases no longer count.
+	old := Ledger{}
+	for i := 0; i < MaxInfra; i++ {
+		old.Attempts = append(old.Attempts, Attempt{Attempt: 1, Released: "coordination-changed"})
+	}
+	if err := Budget(old, now.Add(time.Hour)); err != nil {
+		t.Fatalf("legacy charged ledger stays locked: %v", err)
+	}
+}
