@@ -111,6 +111,7 @@ func newRepoShowCmd() *cobra.Command {
 			fmt.Printf("acceptance_max_parallel: %d\n", r.AcceptanceParallelLimit())
 			fmt.Printf("self_upgrade: %v\n", r.SelfUpgrade)
 			fmt.Printf("worker_tags:  %v\n", r.WorkerTags)
+			fmt.Printf("allowed_issue_authors: %v\n", r.AllowedIssueAuthors)
 			fmt.Printf("base_branch:  %s\n", r.BaseBranch)
 			fmt.Printf("local_path:   %s\n", r.LocalPath)
 			if r.Description != "" {
@@ -348,6 +349,7 @@ func newRepoSetCmd() *cobra.Command {
 	var selfUpgrade string
 	var primaryProject string
 	var boundMachine string
+	var allowedIssueAuthors string
 	var maxInFlight int
 	var acceptanceMaxParallel int
 	var testCommand, acceptanceSetupCommand string
@@ -422,6 +424,14 @@ func newRepoSetCmd() *cobra.Command {
 				}
 			}
 			config.TouchRepo(cfg, ownerRepo, func(r config.Repo) config.Repo {
+				if cmd.Flags().Changed("allowed-issue-authors") {
+					r.AllowedIssueAuthors = nil
+					for _, author := range strings.Split(allowedIssueAuthors, ",") {
+						if author = strings.TrimSpace(author); author != "" {
+							r.AllowedIssueAuthors = append(r.AllowedIssueAuthors, author)
+						}
+					}
+				}
 				if cmd.Flags().Changed("acceptance-overlap-ci") {
 					v := acceptanceOverlapCI == "on"
 					r.AcceptanceOverlapCI = &v
@@ -473,6 +483,7 @@ func newRepoSetCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "  acceptance_overlap_ci: %v\n", r.AcceptanceOverlapsCI())
 			fmt.Fprintf(cmd.OutOrStdout(), "  self_upgrade: %v\n", r.SelfUpgrade)
 			fmt.Fprintf(cmd.OutOrStdout(), "  worker_tags: %v\n", r.WorkerTags)
+			fmt.Fprintf(cmd.OutOrStdout(), "  allowed_issue_authors: %v\n", r.AllowedIssueAuthors)
 			if maxInFlightSet {
 				fmt.Fprintf(cmd.OutOrStdout(), "  max_in_flight: %d\n", r.MaxInFlight)
 			}
@@ -497,6 +508,7 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().IntVar(&acceptanceMaxParallel, "acceptance-max-parallel", 3, "max concurrent independent reviews for this repository (>=1)")
 	cmd.Flags().IntVar(&maxInFlight, "max-in-flight", 0, "max issues of this repo running or awaiting review at once in the unified queue (>=1, default 2)")
 	cmd.Flags().StringVar(&boundMachine, "bound-machine", "", "machine hostname allowed to process this repository (empty clears it)")
+	cmd.Flags().StringVar(&allowedIssueAuthors, "allowed-issue-authors", "", "comma-separated issue authors admitted without a repository permission lookup (empty clears it)")
 	_ = cmd.Flags().MarkDeprecated("bound-machine", "use worker_tags with host-<hostname> instead")
 	return cmd
 }

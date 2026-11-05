@@ -555,8 +555,9 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	rc.CIRequired = p.RepoPolicy.CIRequired
 	rc.AutoMerge = false
 	rc.AcceptanceRequired = p.RepoPolicy.AcceptanceRequired
-	j := &runJob{op: op, repo: p.Repo, repoCfg: rc, client: client, language: p.Language, sub: &operator.Subject{Number: issue.Number, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State, SubTotal: issue.SubIssuesTotal, URL: issue.URL, IsPR: op.Trigger.Target == "pr"}}
+	j := &runJob{op: op, repo: p.Repo, repoCfg: rc, client: client, language: p.Language, sub: &operator.Subject{Number: issue.Number, Title: issue.Title, Body: issue.Body, Author: issue.Author, Labels: issue.Labels, State: issue.State, SubTotal: issue.SubIssuesTotal, URL: issue.URL, IsPR: op.Trigger.Target == "pr"}}
 	j.coordination = p.Coordination
+	j.admission = p.Admission
 	j.acceptancePlan = p.AcceptancePlan
 	if p.ReopenEventID != "" {
 		j.reopen = &reopenContext{Event: vcs.IssueEvent{ID: p.ReopenEventID}}

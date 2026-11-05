@@ -116,6 +116,8 @@ clawflow label init your-org/your-repo
 
 普通 open leaf issue 会直接进入 `implement`，无需分类、独立评估或人工批准标签。实现过程中内部完成分析、计划、测试和修复。Question/comment 保留回复路径，父任务通过 `progress-check` 触发 `track-progress`；父任务不会直接执行实现。
 
+为避免外部提交者直接启动实现，issue 作者还需拥有仓库写权限，或列入仓库的 `allowed_issue_authors`（不区分大小写）。例如：`clawflow repo set your-org/your-repo --allowed-issue-authors release-bot,automation`。
+
 状态标签包括 `agent-implemented`（已开 PR）、`agent-failed`（失败待检查）、`agent-skipped`（跳过）和 `agent-replied`（已回复）。并发控制使用 `~/.clawflow/locks/` 的本地锁文件；不要通过删除远端标签绕过锁。
 
 ## 运行与交付

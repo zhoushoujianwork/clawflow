@@ -131,6 +131,12 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 	fmt.Fprintf(out, "Coordinator HTTPS → %s\nSHA-256 fingerprint: %s\n", listener.Addr(), pin)
 	reconcileCtx, reconcileCancel := context.WithCancel(ctx)
 	reconcileDone := make(chan struct{})
+	// VCS orphaned-PR lookups run on their own schedule, never from board reads.
+	orphanDone := make(chan struct{})
+	go func() {
+		defer close(orphanDone)
+		tasks.RunOrphanRefresh(reconcileCtx)
+	}()
 	go func() {
 		defer close(reconcileDone)
 		tick := time.NewTicker(30 * time.Second)
@@ -171,6 +177,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		_ = server.Close()
 		<-done
 		<-reconcileDone
+		<-orphanDone
 		<-watchdogDone
 		db.Close()
 		return nil, err
@@ -181,6 +188,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		_ = server.Close()
 		<-done
 		<-reconcileDone
+		<-orphanDone
 		<-watchdogDone
 		db.Close()
 	}, nil

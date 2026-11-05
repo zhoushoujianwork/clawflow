@@ -21,6 +21,7 @@ type Issue struct {
 	Number int      `json:"number"`
 	Title  string   `json:"title"`
 	Body   string   `json:"body"`
+	Author string   `json:"author,omitempty"`
 	Labels []string `json:"labels"`
 	State  string   `json:"state"`
 	// URL is the web (HTML) URL of the issue, copied verbatim from the API
@@ -201,6 +202,8 @@ type Client interface {
 	// `clawflow issue search` so operators / PM can pull historical
 	// related issues into evaluation context.
 	SearchIssues(repo, query, state string, limit int) ([]Issue, error)
+	// AuthorHasWriteAccess reports whether login may write to the repository.
+	AuthorHasWriteAccess(repo, login string) (bool, error)
 
 	// Sub-issues (GitHub native; GitLab returns ErrNotSupported).
 	// AddSubIssue links subIssueID (Issue.ID, the platform internal id)

@@ -47,7 +47,7 @@ func TestListOpenIssues(t *testing.T) {
 	client := newTestClient(t, map[string]http.HandlerFunc{
 		"GET " + projectPath + "/issues": func(w http.ResponseWriter, r *http.Request) {
 			jsonResp(w, 200, []map[string]any{
-				{"iid": 1, "title": "bug report", "description": "details", "labels": []string{"bug", "in-progress"}},
+				{"iid": 1, "title": "bug report", "description": "details", "author": map[string]string{"username": "alice"}, "labels": []string{"bug", "in-progress"}},
 				{"iid": 2, "title": "feature", "description": "", "labels": []string{}},
 			})
 		},
@@ -62,6 +62,59 @@ func TestListOpenIssues(t *testing.T) {
 	}
 	if !issues[0].HasLabel("bug") || !issues[0].HasLabel("in-progress") {
 		t.Errorf("expected labels on issue #1, got %v", issues[0].Labels)
+	}
+	if issues[0].Author != "alice" {
+		t.Errorf("expected author alice, got %q", issues[0].Author)
+	}
+}
+
+func TestAuthorHasWriteAccess(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		members []map[string]any
+		status  int
+		want    bool
+		wantErr bool
+	}{
+		{name: "developer", members: []map[string]any{{"username": "alice", "access_level": 30}}, status: 200, want: true},
+		{name: "maintainer", members: []map[string]any{{"username": "ALICE", "access_level": 40}}, status: 200, want: true},
+		{name: "reporter", members: []map[string]any{{"username": "alice", "access_level": 20}}, status: 200},
+		{name: "partial mismatch", members: []map[string]any{{"username": "alice-admin", "access_level": 40}}, status: 200},
+		{name: "server error", status: 500, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newTestClient(t, map[string]http.HandlerFunc{
+				"GET " + projectPath + "/members/all": func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Query().Get("query") != "alice" {
+						t.Fatalf("query = %q", r.URL.Query().Get("query"))
+					}
+					jsonResp(w, tc.status, tc.members)
+				},
+			})
+			got, err := client.AuthorHasWriteAccess("ns/group/repo", "alice")
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("got (%v, %v), want (%v, error=%v)", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuthorHasWriteAccessPaginates(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET " + projectPath + "/members/all": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("page") == "1" {
+				members := make([]map[string]any, 100)
+				for i := range members {
+					members[i] = map[string]any{"username": "other", "access_level": 40}
+				}
+				jsonResp(w, 200, members)
+				return
+			}
+			jsonResp(w, 200, []map[string]any{{"username": "alice", "access_level": 30}})
+		},
+	})
+	if ok, err := client.AuthorHasWriteAccess("ns/group/repo", "alice"); err != nil || !ok {
+		t.Fatalf("got (%v, %v)", ok, err)
 	}
 }
 
@@ -276,6 +329,7 @@ func TestGetIssue(t *testing.T) {
 				"web_url":     "https://gitlab.com/ns/group/repo/-/issues/7",
 				"created_at":  "2026-01-01T00:00:00Z",
 				"updated_at":  "2026-01-02T00:00:00Z",
+				"author":      map[string]string{"username": "alice"},
 			})
 		},
 	})
@@ -298,6 +352,9 @@ func TestGetIssue(t *testing.T) {
 	}
 	if !issue.HasLabel("bug") || !issue.HasLabel("feat") {
 		t.Errorf("expected labels bug+feat, got %v", issue.Labels)
+	}
+	if issue.Author != "alice" {
+		t.Errorf("expected author alice, got %q", issue.Author)
 	}
 }
 

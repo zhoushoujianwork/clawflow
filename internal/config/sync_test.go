@@ -648,6 +648,34 @@ func TestMaxInFlightSync(t *testing.T) {
 	}
 }
 
+func TestAllowedIssueAuthorsSync(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{Repos: map[string]config.Repo{"o/q": {
+		BaseBranch: "main", AllowedIssueAuthors: []string{"release-bot", "automation"},
+	}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(loaded.Repos["o/q"].AllowedIssueAuthors, ","); got != "release-bot,automation" {
+		t.Fatalf("round trip: %q", got)
+	}
+	data, err := config.MarshalForGist(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := config.MergeConfigs(&config.Config{Repos: map[string]config.Repo{}}, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(merged.Repos["o/q"].AllowedIssueAuthors, ","); got != "release-bot,automation" {
+		t.Fatalf("sync lost allowed authors: %q", got)
+	}
+}
+
 // TestSelfUpgradeSurvivesGistRoundTrip verifies self_upgrade is synced and is
 // not dropped when a newer remote entry replaces the local one.
 func TestSelfUpgradeSurvivesGistRoundTrip(t *testing.T) {

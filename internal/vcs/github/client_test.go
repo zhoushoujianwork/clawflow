@@ -38,7 +38,7 @@ func TestListOpenIssues(t *testing.T) {
 	client := newTestClient(t, map[string]http.HandlerFunc{
 		"GET /repos/owner/repo/issues": func(w http.ResponseWriter, r *http.Request) {
 			jsonResp(w, 200, []map[string]any{
-				{"number": 1, "title": "real issue", "body": "body", "labels": []map[string]string{{"name": "bug"}}},
+				{"number": 1, "title": "real issue", "body": "body", "user": map[string]string{"login": "alice"}, "labels": []map[string]string{{"name": "bug"}}},
 				{"number": 2, "title": "a PR", "body": "", "pull_request": map[string]any{}},
 			})
 		},
@@ -59,6 +59,53 @@ func TestListOpenIssues(t *testing.T) {
 	}
 	if !issues[0].HasLabel("bug") {
 		t.Error("expected label 'bug'")
+	}
+	if issues[0].Author != "alice" {
+		t.Errorf("expected author alice, got %q", issues[0].Author)
+	}
+}
+
+func TestAuthorHasWriteAccess(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		permission string
+		status     int
+		want       bool
+		wantErr    bool
+	}{
+		{name: "write", permission: "write", status: 200, want: true},
+		{name: "maintain", permission: "maintain", status: 200, want: true},
+		{name: "admin", permission: "admin", status: 200, want: true},
+		{name: "read", permission: "read", status: 200},
+		{name: "none", permission: "none", status: 200},
+		{name: "not found", status: 404},
+		{name: "server error", status: 500, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newTestClient(t, map[string]http.HandlerFunc{
+				"GET /repos/owner/repo/collaborators/alice/permission": func(w http.ResponseWriter, _ *http.Request) {
+					jsonResp(w, tc.status, map[string]string{"permission": tc.permission})
+				},
+			})
+			got, err := client.AuthorHasWriteAccess("owner/repo", "alice")
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("got (%v, %v), want (%v, error=%v)", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuthorHasWriteAccessEscapesBotLogin(t *testing.T) {
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/collaborators/dependabot[bot]/permission": func(w http.ResponseWriter, r *http.Request) {
+			if !strings.Contains(r.RequestURI, "dependabot%5Bbot%5D") {
+				t.Fatalf("login was not URL-escaped: %q", r.RequestURI)
+			}
+			jsonResp(w, 200, map[string]string{"permission": "write"})
+		},
+	})
+	if ok, err := client.AuthorHasWriteAccess("owner/repo", "dependabot[bot]"); err != nil || !ok {
+		t.Fatalf("got (%v, %v)", ok, err)
 	}
 }
 
@@ -315,6 +362,7 @@ func TestGetIssue(t *testing.T) {
 				"html_url":   "https://github.com/owner/repo/issues/7",
 				"created_at": "2026-01-01T00:00:00Z",
 				"updated_at": "2026-01-02T00:00:00Z",
+				"user":       map[string]string{"login": "alice"},
 				"labels":     []map[string]string{{"name": "bug"}, {"name": "feat"}},
 			})
 		},
@@ -335,6 +383,9 @@ func TestGetIssue(t *testing.T) {
 	}
 	if !issue.HasLabel("bug") || !issue.HasLabel("feat") {
 		t.Errorf("expected labels bug+feat, got %v", issue.Labels)
+	}
+	if issue.Author != "alice" {
+		t.Errorf("expected author alice, got %q", issue.Author)
 	}
 }
 

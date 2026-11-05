@@ -27,6 +27,7 @@ type syncableRepo struct {
 	AcceptanceWorker      string              `yaml:"acceptance_worker,omitempty"`
 	WorkerTags            []string            `yaml:"worker_tags,omitempty"`
 	WorkerTagsByKind      map[string][]string `yaml:"worker_tags_by_kind,omitempty"`
+	AllowedIssueAuthors   []string            `yaml:"allowed_issue_authors,omitempty"`
 	Priority              int                 `yaml:"priority,omitempty"`
 
 	AcceptanceSetupCommand string `yaml:"acceptance_setup_command,omitempty"`
@@ -58,7 +59,7 @@ type syncableRepo struct {
 func toSyncable(r Repo) syncableRepo {
 	return syncableRepo{
 		AcceptanceSetupCommand: r.AcceptanceSetupCommand,
-		AcceptanceMaxParallel:  r.AcceptanceMaxParallel, AcceptanceWorker: r.AcceptanceWorker, WorkerTags: r.WorkerTags, WorkerTagsByKind: r.WorkerTagsByKind, Priority: r.Priority,
+		AcceptanceMaxParallel:  r.AcceptanceMaxParallel, AcceptanceWorker: r.AcceptanceWorker, WorkerTags: r.WorkerTags, WorkerTagsByKind: r.WorkerTagsByKind, AllowedIssueAuthors: r.AllowedIssueAuthors, Priority: r.Priority,
 		Enabled:            r.Enabled,
 		Platform:           r.Platform,
 		BaseURL:            r.BaseURL,
@@ -86,7 +87,7 @@ func toSyncable(r Repo) syncableRepo {
 func fromSyncable(s syncableRepo, localPath string) Repo {
 	return Repo{
 		AcceptanceSetupCommand: s.AcceptanceSetupCommand,
-		AcceptanceMaxParallel:  s.AcceptanceMaxParallel, AcceptanceWorker: s.AcceptanceWorker, WorkerTags: s.WorkerTags, WorkerTagsByKind: s.WorkerTagsByKind, Priority: s.Priority,
+		AcceptanceMaxParallel:  s.AcceptanceMaxParallel, AcceptanceWorker: s.AcceptanceWorker, WorkerTags: s.WorkerTags, WorkerTagsByKind: s.WorkerTagsByKind, AllowedIssueAuthors: s.AllowedIssueAuthors, Priority: s.Priority,
 		Enabled:            s.Enabled,
 		Platform:           s.Platform,
 		BaseURL:            s.BaseURL,

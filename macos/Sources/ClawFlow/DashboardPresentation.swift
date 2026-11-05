@@ -26,6 +26,8 @@ extension IssueQueueRow {
         case "dependency": return "等待依赖"
         case "max_in_flight": return "仓库名额已满"
         case "area_busy": return argument.map { "和 \($0) 改动范围重叠" } ?? "和打开的 PR 改动范围重叠"
+        case "author_not_admitted": return argument.map { "作者 \($0) 没有写权限，未启动" } ?? "作者没有写权限，未启动"
+        case "author_check_failed": return "作者权限查询失败，本轮未启动"
         default: return nil
         }
     }

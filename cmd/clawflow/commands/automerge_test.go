@@ -162,6 +162,9 @@ func (f *sweepFake) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.
 func (f *sweepFake) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue, error) {
 	return nil, vcs.ErrNotSupported
 }
+func (f *sweepFake) AuthorHasWriteAccess(repo, login string) (bool, error) {
+	return false, vcs.ErrNotSupported
+}
 func (f *sweepFake) AddSubIssue(repo string, parentNumber int, subIssueID int64) error {
 	return vcs.ErrNotSupported
 }
