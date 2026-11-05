@@ -92,6 +92,10 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 			if err := reconcileActionsObservations(reconcileCtx, actions.Ledger{DB: db.DB()}); err != nil && reconcileCtx.Err() == nil {
 				runLog.Warn("coordinator/reconcile", "err", err.Error())
 			}
+			// Execution output of finished tasks expires after the Offload retention window.
+			if _, err := tasks.PurgeLogs(reconcileCtx, time.Now().UTC().Add(-coordinator.LogRetention)); err != nil && reconcileCtx.Err() == nil {
+				runLog.Warn("coordinator/log_retention", "err", err.Error())
+			}
 			select {
 			case <-reconcileCtx.Done():
 				return

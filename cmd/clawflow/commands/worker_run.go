@@ -28,6 +28,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -378,6 +379,9 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 	var sopDigest string
 	if eligible {
 		executionCtx, readiness, sopDigest = workerTestingContext(ctx, t, o.Tags)
+		// Mirror this task's own Offload transcript to the controller for the
+		// dashboard. It is best effort and never part of the task result.
+		executionCtx = execution.WithTranscriptSink(executionCtx, newWorkerLogSink(ctx, api, t))
 	}
 	if !eligible {
 		result.Error = "任务标签与 worker 不匹配"

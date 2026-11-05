@@ -105,7 +105,8 @@ struct TaskDetail: View {
                     if row.issue > 0, let pr = row.prLink(in: snapshot) { Link("Open PR #\(row.pr)", destination: pr) }
                 }.buttonStyle(.bordered).controlSize(.regular)
                 Divider()
-                Label("Full Offload execution output is not available in this build.", systemImage: "terminal").font(.callout).foregroundStyle(.secondary)
+                JobLogView(model: model, row: row)
+                Divider()
                 DisclosureGroup("Coordinator activity", isExpanded: $showEvents) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Scheduling events · refreshes every 5 seconds while connected.").font(.caption).foregroundStyle(.secondary)
