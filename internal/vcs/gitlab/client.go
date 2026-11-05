@@ -1013,3 +1013,26 @@ func (c *Client) PublishAcceptanceComment(repo string, pr int, report vcs.Accept
 			return e
 		})
 }
+
+// BranchHead reads GET /projects/:id/repository/branches/:branch.
+func (c *Client) BranchHead(repo, branch string) (string, error) {
+	data, status, err := c.doJSON("GET", fmt.Sprintf("/projects/%s/repository/branches/%s", projectID(repo), url.PathEscape(branch)), nil)
+	if err != nil {
+		return "", err
+	}
+	if status == 404 {
+		return "", nil
+	}
+	if status != 200 {
+		return "", fmt.Errorf("gitlab branch head: HTTP %d", status)
+	}
+	var ref struct {
+		Commit struct {
+			ID string `json:"id"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal(data, &ref); err != nil {
+		return "", fmt.Errorf("gitlab branch head: %w", err)
+	}
+	return ref.Commit.ID, nil
+}

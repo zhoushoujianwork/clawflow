@@ -385,3 +385,115 @@ func TestOwnerSkipCannotBeConsumedByCoordination(t *testing.T) {
 		t.Fatal("owner skip was removed")
 	}
 }
+
+func TestDevelopmentVerificationCoordinationPreservesPurpose(t *testing.T) {
+	j, c, tasks, _ := coordinationFixture(t)
+	j.op.Name = "repair-ci"
+	j.repair = &ciRepairContext{PR: vcs.PR{Number: 650}, DevelopmentVerification: true}
+	tasks.tasks = []coordinator.Task{{ID: "current-worker-task", Repo: j.repo, Issue: 2, State: "leased"}}
+	c.prs = []vcs.PR{{Number: 650, State: "open", Body: "Fixes #1"}}
+	dispatchCoordinationExecute = func(_ context.Context, prompt string, opts execution.Options) (execution.Result, error) {
+		var s coordination.Snapshot
+		if err := json.Unmarshal([]byte(prompt), &s); err != nil {
+			t.Fatal(err)
+		}
+		if s.Operation != "repair-ci" || s.TargetPR != 650 || s.RepairReason != "development_verification" {
+			t.Fatalf("lost assignment purpose: %+v", s)
+		}
+		if !strings.Contains(opts.Instructions, `["current-worker-task"]`) {
+			t.Fatal("authoritative task references missing")
+		}
+		if !strings.Contains(opts.Instructions, "passing CI is a prerequisite") || !strings.Contains(opts.Instructions, "before independent acceptance") {
+			t.Fatal("verification ordering not explained")
+		}
+		return execution.Result{Text: "```json\n" + `{"outcome":"proceed","reason":"verify missing development evidence","next_action":"verify unchanged head","next_owner":"development","prs":[650]}` + "\n```"}, nil
+	}
+	if ok, err := dispatchCoordination(context.Background(), j, tasks); !ok || err != nil {
+		t.Fatalf("verification blocked: %v %v", ok, err)
+	}
+	if err := validateWorkerCoordination(context.Background(), j, j.coordination); err != nil {
+		t.Fatal(err)
+	}
+	j.repair.DevelopmentVerification = false
+	if err := validateWorkerCoordination(context.Background(), j, j.coordination); !errors.Is(err, errCoordinationChanged) {
+		t.Fatalf("changed purpose reused approval: %v", err)
+	}
+}
+
+func TestCoordinationResponseEnvelope(t *testing.T) {
+	good := `{"outcome":"proceed","reason":"independent","next_action":"verify","next_owner":"development"}`
+	for _, tc := range []struct {
+		name, text string
+		allowed    bool
+	}{
+		{"raw", good, true},
+		{"json fence", "```json\n" + good + "\n```", true},
+		{"plain fence", "```\n" + good + "\n```", true},
+		{"crlf", " \r\n```json\r\n" + good + "\r\n```\r\n", true},
+		{"prose", "Result:\n```json\n" + good + "\n```", false},
+		{"footer", "```json\n" + good + "\n```\nGateway warning", false},
+		{"two objects", "```json\n" + good + good + "\n```", false},
+		{"two fences", "```json\n" + good + "\n```\n```json\n" + good + "\n```", false},
+		{"unclosed", "```json\n" + good, false},
+		{"foreign task", "```json\n" + `{"outcome":"proceed","reason":"independent","next_action":"verify","next_owner":"development","tasks":["invented"]}` + "\n```", false},
+		{"false completion", "```json\n" + `{"outcome":"already-delivered","reason":"CI green","next_action":"close","next_owner":"scheduling"}` + "\n```", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j, c, tasks, _ := coordinationFixture(t)
+			dispatchCoordinationExecute = func(context.Context, string, execution.Options) (execution.Result, error) {
+				return execution.Result{Text: tc.text}, nil
+			}
+			ok, err := dispatchCoordination(context.Background(), j, tasks)
+			if ok != tc.allowed || (err == nil) != tc.allowed {
+				t.Fatalf("allowed=%v err=%v", ok, err)
+			}
+			if !tc.allowed && (j.coordination != nil || len(c.writes) != 0) {
+				t.Fatal("invalid response authorized effects")
+			}
+		})
+	}
+}
+
+func TestWorkerRepairProbeMatchesApprovedReason(t *testing.T) {
+	findings := &acceptanceFindings{Verdict: "failed", AttemptID: "attempt", ContractDigest: "digest"}
+	cases := []struct {
+		name string
+		r    coordinatorRepair
+		want string
+	}{
+		{"merge_conflict", coordinatorRepair{PR: 650, Reason: "merge_conflict"}, "merge_conflict"},
+		{"development_verification", coordinatorRepair{PR: 650, Reason: "development_verification"}, "development_verification"},
+		{"acceptance", coordinatorRepair{PR: 650, Reason: repairReasonAcceptance, Acceptance: findings}, repairReasonAcceptance},
+		{"ci", coordinatorRepair{PR: 650, Reason: repairReasonCI}, repairReasonCI},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			j, c, _, _ := coordinationFixture(t)
+			j.op.Name = "repair-ci"
+			c.prs = []vcs.PR{{Number: 650, State: "open", Body: "Fixes #1"}}
+			// Controller side: snapshot approved from the payload's repair context.
+			j.repair = tc.r.context()
+			approved, err := collectCoordination(context.Background(), j, nil, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if approved.RepairReason != tc.want {
+				t.Fatalf("approved reason %q, want %q", approved.RepairReason, tc.want)
+			}
+			// Worker side: probe built the same way as worker_run.go.
+			probe := &runJob{op: j.op, repo: j.repo, sub: &operator.Subject{Number: 1}, client: c, repair: tc.r.context()}
+			if err := validateWorkerCoordination(context.Background(), probe, &approved); err != nil {
+				t.Fatalf("unchanged remote state rejected: %v", err)
+			}
+			c.comments = append(c.comments, vcs.IssueComment{ID: 9, Body: "new comment"})
+			if err := validateWorkerCoordination(context.Background(), probe, &approved); !errors.Is(err, errCoordinationChanged) {
+				t.Fatalf("new comment accepted: %v", err)
+			}
+			c.comments = nil
+			c.prs[0].Body = "Fixes #1 changed"
+			if err := validateWorkerCoordination(context.Background(), probe, &approved); !errors.Is(err, errCoordinationChanged) {
+				t.Fatalf("PR change accepted: %v", err)
+			}
+		})
+	}
+}

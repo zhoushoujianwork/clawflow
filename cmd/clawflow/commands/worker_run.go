@@ -305,9 +305,21 @@ func runWorker(ctx context.Context, api *workerAPI, o workerOptions, heartbeat, 
 		return nil
 	}
 }
+
+// reportWorkerProgress is best effort and separate from the heartbeat: an older
+// controller rejects unknown heartbeat fields, and a failed heartbeat cancels
+// the task. Any failure here, including 404 from that controller, is ignored.
+func reportWorkerProgress(ctx context.Context, api *workerAPI, path string, fence int64, progress *execution.Progress) {
+	reportCtx, cancel := context.WithTimeout(ctx, workerProgressTimeout)
+	defer cancel()
+	_ = api.postOnce(reportCtx, path+"progress", map[string]any{"fencing_token": fence, "last_event_age_sec": progress.AgeSeconds(time.Now())}, nil)
+}
+
 func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *coordinator.Task, interval time.Duration, build workerBuilder) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	progress := &execution.Progress{}
+	ctx = execution.WithProgress(ctx, progress)
 	stop := make(chan struct{})
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	defer stopHeartbeat()
@@ -351,6 +363,7 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 					done <- true
 					return
 				}
+				reportWorkerProgress(heartbeatCtx, api, path, t.FencingToken, progress)
 			}
 		}
 	}()
@@ -396,8 +409,17 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 			result.InfraKind = "launch"
 			if errors.Is(err, errCoordinationChanged) {
 				result.Status = "blocked"
+				result.InfraKind = "coordination-changed"
 				result.NextAction = "Reassess current issue, PRs and active work on the next scheduler pass"
 				result.NextOwner = "scheduling"
+			}
+			if _, resuming := execution.RecoveryWorkspace(executionCtx); resuming {
+				// A retained session that cannot pass launch checks must not
+				// fall back to a fresh worktree. No new model ran, so do not
+				// manufacture native provenance for this blocked recovery.
+				result.Status, result.InfraKind = "failed", "execution-interrupted"
+				result.NextOwner = "scheduling"
+				result.NextAction = "Reconcile the retained session and current launch requirements before recovery"
 			}
 		} else {
 			spool, spoolErr := os.CreateTemp("", "clawflow-effects-"+t.ID+"-*")
@@ -505,7 +527,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	if p.Coordination != nil {
 		probe := &runJob{op: op, repo: p.Repo, sub: &operator.Subject{Number: p.Issue}, client: client}
 		if p.Repair != nil {
-			probe.repair = &ciRepairContext{PR: vcs.PR{Number: p.Repair.PR}}
+			probe.repair = p.Repair.context()
 		}
 		if err = validateWorkerCoordination(ctx, probe, p.Coordination); err != nil {
 			return nil, 0, err
@@ -540,8 +562,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 		j.reopen = &reopenContext{Event: vcs.IssueEvent{ID: p.ReopenEventID}}
 	}
 	if p.Repair != nil {
-		r := p.Repair
-		j.repair = &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict", DevelopmentVerification: r.Reason == "development_verification"}
+		j.repair = p.Repair.context()
 	}
 	if p.Kind == "repair" && j.repair == nil {
 		return nil, 0, fmt.Errorf("repair task missing repair payload")

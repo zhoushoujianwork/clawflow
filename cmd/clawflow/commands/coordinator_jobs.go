@@ -76,6 +76,13 @@ type coordinatorRepair struct {
 	Acceptance *acceptanceFindings `json:"acceptance,omitempty"`
 }
 
+// context maps the approved payload to the runner's repair context. Worker
+// start validation and job construction both use it so the repair reason
+// cannot diverge between the coordination probe and the executed job.
+func (r *coordinatorRepair) context() *ciRepairContext {
+	return &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict", DevelopmentVerification: r.Reason == "development_verification"}
+}
+
 // skillDigest excludes machine-local paths while covering executable semantics.
 func skillDigest(op *operator.Operator) string {
 	copy := *op
@@ -324,11 +331,18 @@ func (r *coordinatorResults) ReadLog(ctx context.Context, task string, epoch, af
 }
 
 type coordinatorReport struct {
+	// Controller-owned audit data, never converted into publishable intents.
+	// The worker wire schema deliberately does not accept this field.
+	UnappliedEffects   []jobEffect        `json:"unapplied_effects,omitempty"`
 	ProvenanceWarnings []string           `json:"provenance_warnings,omitempty"`
 	TerminalState      string             `json:"coordinator_state,omitempty"`
 	Acceptance         *acceptance.Record `json:"acceptance,omitempty"`
 	jobResult
 	Events []json.RawMessage `json:"events,omitempty"`
+}
+
+func retainedInterruption(t *coordinator.Task, r *coordinatorReport) bool {
+	return coordinator.DurableTask(t) && (t.Kind == "implement" || t.Kind == "repair") && r.Status == "failed" && r.InfraKind == "execution-interrupted"
 }
 
 func (s *coordinatorResults) Task(ctx context.Context, id string) (*coordinator.Task, error) {
@@ -401,6 +415,10 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	if r.Acceptance != nil {
 		return coordinator.ErrInvalid
 	}
+	interrupted := retainedInterruption(t, &r)
+	if interrupted && !failed {
+		return coordinator.ErrInvalid
+	}
 	if r.Status == "blocked" {
 		r.Output = testingBlockedBody(&r.jobResult)
 		r.Effects = []jobEffect{{Kind: "issue-comment", Repo: t.Repo, Number: t.Issue, Body: r.Output}}
@@ -409,19 +427,42 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	if err != nil {
 		return err
 	}
+	if err := resolveReportedHead(t, &r, failed, j.client); err != nil {
+		return err
+	}
+	applicable := make([]jobEffect, 0, len(r.Effects))
+	var unapplied []jobEffect
 	for _, e := range r.Effects {
 		if e.Repo != t.Repo || (e.Kind != "pr-create" && ((e.Number != t.Issue && e.Number != t.PR) || e.Number <= 0)) {
 			return coordinator.ErrInvalid
 		}
 		switch e.Kind {
 		case "pr-create":
-			if !acceptanceSHA(r.HeadSHA) || e.Head == "" || e.Base == "" || e.Title == "" || t.Kind != "implement" {
+			if t.Kind != "implement" {
 				return coordinator.ErrInvalid
+			}
+			if !interrupted && (!acceptanceSHA(r.HeadSHA) || e.Head == "" || e.Base == "" || e.Title == "") {
+				// A durable attempt that already ended in failure can never send a
+				// better report. Rejecting it would hold its lease and repository
+				// slot forever, so keep the request as evidence and end the task.
+				if !failed || !coordinator.DurableTask(t) || r.Status == "failed" || r.Status == "success" {
+					return coordinator.ErrInvalid
+				}
+				unapplied = append(unapplied, e)
+				continue
 			}
 		case "issue-comment", "pr-comment", "add-label", "remove-label", "close-issue":
 		default:
 			return coordinator.ErrInvalid
 		}
+		applicable = append(applicable, e)
+	}
+	r.Effects, r.UnappliedEffects = applicable, unapplied
+	if interrupted {
+		// A timed-out worker may have queued operations before it could seal
+		// a valid head/result. Preserve them as evidence, never publish them.
+		// WithReportDigest still acknowledges the unchanged original report.
+		r.UnappliedEffects, r.Effects = r.Effects, nil
 	}
 	// Keep the most recent events, bounded independently of the HTTP body cap.
 	if len(r.Events) > 100 {
@@ -545,7 +586,9 @@ func applyCoordinatorReport(ctx context.Context, t *coordinator.Task, j *runJob,
 			_ = snapshot.WriteRunMeta(dir, meta)
 		}
 	}()
-	if r.Status == "lease-lost" {
+	if r.Status == "lease-lost" || retainedInterruption(t, r) {
+		// Recovery owns this task; do not turn an execution interruption into
+		// product-failure automation or publish its incomplete operations.
 		return nil
 	}
 	for _, e := range r.Effects {
@@ -646,6 +689,45 @@ func persistDevelopmentEvents(ctx context.Context, t *coordinator.Task, j *runJo
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(r.DevelopmentEvents), 0600)
+}
+
+// resolveReportedHead fills a successful implementation's head from the platform
+// when the worker could not confirm it, for example during a transient network
+// failure. A pushed result must not be lost to that, and the PR's head is defined
+// by the platform anyway; acceptance still verifies it independently. A lookup
+// error is returned so the worker retries; a missing branch stays invalid.
+func resolveReportedHead(t *coordinator.Task, r *coordinatorReport, failed bool, client vcs.Client) error {
+	if failed || r.Status != "success" || t.Kind != "implement" || acceptanceSHA(r.HeadSHA) {
+		return nil
+	}
+	provider, ok := client.(vcs.BranchHeadProvider)
+	if !ok {
+		return nil
+	}
+	for _, e := range r.Effects {
+		if e.Kind != "pr-create" || e.Head == "" {
+			continue
+		}
+		head, err := provider.BranchHead(t.Repo, e.Head)
+		if err != nil {
+			return fmt.Errorf("resolve reported head: %w", err)
+		}
+		if acceptanceSHA(head) {
+			r.HeadSHA = head
+		}
+		return nil
+	}
+	return nil
+}
+
+func (s *coordinatorResults) ReportProgress(ctx context.Context, id, worker string, fence, ageSec int64) error {
+	progress, ok := s.WorkerStore.(interface {
+		ReportProgress(context.Context, string, string, int64, int64) error
+	})
+	if !ok {
+		return coordinator.ErrInvalid
+	}
+	return progress.ReportProgress(ctx, id, worker, fence, ageSec)
 }
 
 func (s *coordinatorResults) RecoverExecution(ctx context.Context, id, worker string, epoch int64) (*coordinator.Task, error) {

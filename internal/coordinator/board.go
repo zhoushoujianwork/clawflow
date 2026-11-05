@@ -16,6 +16,7 @@ type Board struct {
 	Workers     []BoardWorker `json:"workers"`
 	Tasks       []BoardTask   `json:"tasks"`
 	Throughput  Throughput    `json:"throughput"`
+	Findings    []Finding     `json:"findings"`
 }
 type Throughput struct {
 	Since  time.Time `json:"since"`
@@ -55,6 +56,7 @@ type BoardTask struct {
 	Priority            int             `json:"priority"`
 	Worker              string          `json:"worker" gorm:"column:lease_owner"`
 	LeaseExpiresAt      *time.Time      `json:"lease_expires_at"`
+	LastEventAt         *time.Time      `json:"last_event_at,omitempty"`
 	Attempt             int             `json:"attempt"`
 	UpdatedAt           time.Time       `json:"updated_at"`
 }
@@ -62,6 +64,11 @@ type BoardTask struct {
 // Board reads a consistent snapshot without renewing or expiring any lease.
 func (s *Store) Board(ctx context.Context) (Board, error) {
 	var out Board
+	limits := dispatchLimits{known: true}
+	if s.LeaseLimits != nil {
+		total, repos, err := s.LeaseLimits()
+		limits = dispatchLimits{known: err == nil, total: total, repos: repos}
+	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var now time.Time
 		if err := tx.Raw("SELECT transaction_timestamp()").Scan(&now).Error; err != nil {
@@ -87,10 +94,11 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			heartbeats[beat.Worker] = beat.At
 		}
 		tasks := []BoardTask{}
-		if err := tx.Model(&Task{}).Select("(SELECT started_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS started_at, (SELECT ended_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS ended_at, id, COALESCE(payload->>'durable_execution' = 'true', false) AS durable, COALESCE(payload->>'title', '') AS subject, repo, issue, pr, kind, state, tags, jsonb_build_object('acceptance_worker', payload->'acceptance_worker', 'development_worker', payload->'development_worker') AS acceptance_routing, priority, lease_owner, lease_expires_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
+		if err := tx.Model(&Task{}).Select("(SELECT started_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS started_at, (SELECT ended_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS ended_at, id, COALESCE(payload->>'durable_execution' = 'true', false) AS durable, COALESCE(payload->>'title', '') AS subject, repo, issue, pr, kind, state, tags, jsonb_build_object('acceptance_worker', payload->'acceptance_worker', 'development_worker', payload->'development_worker') AS acceptance_routing, priority, lease_owner, lease_expires_at, last_event_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
 			return err
 		}
 		out = deriveBoard(now, workers, tokens, heartbeats, tasks)
+		out.applyFindings(now, workers, limits)
 		return nil
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	return out, err

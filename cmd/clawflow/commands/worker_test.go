@@ -24,6 +24,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
+	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
 	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -111,7 +112,7 @@ func TestCoordinatorDisabled(t *testing.T) {
 
 // Exercise the wire protocol with the same pinned TLS client used by the CLI.
 func TestWorkerClaimExecuteReport(t *testing.T) {
-	for _, mode := range []string{"success", "lease-lost", "heartbeat-error", "tags", "untagged", "digest", "coordination-stale"} {
+	for _, mode := range []string{"success", "lease-lost", "heartbeat-error", "tags", "untagged", "digest", "coordination-stale", "coordination-resume"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
 			ctx, cancel := context.WithCancel(context.Background())
@@ -238,7 +239,7 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 				return true, false, false
 			}
 			build := func(ctx context.Context, task *coordinator.Task) (*runJob, time.Duration, error) {
-				if mode == "coordination-stale" {
+				if mode == "coordination-stale" || mode == "coordination-resume" {
 					return nil, 0, errCoordinationChanged
 				}
 				if mode == "digest" {
@@ -248,6 +249,13 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 			}
 			deadline, stop := context.WithTimeout(ctx, 3*time.Second)
 			defer stop()
+			if mode == "coordination-resume" {
+				path := filepath.Join(t.TempDir(), "execution.json")
+				if err := os.WriteFile(path, []byte(`{"Version":1,"Workspace":"/retained","Profile":"fixture"}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				deadline = execution.WithCheckpoint(deadline, path, true)
+			}
 			if err := runWorker(deadline, api, o, 5*time.Millisecond, time.Millisecond, build); err != nil && !errors.Is(err, context.Canceled) {
 				t.Fatal(err)
 			}
@@ -258,8 +266,12 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 					if result.Status != "success" || len(result.Effects) != 1 {
 						t.Fatalf("bad result: %+v", result)
 					}
+				case "coordination-resume":
+					if executed.Load() || result.Status != "failed" || result.InfraKind != "execution-interrupted" || len(result.Effects) > 0 {
+						t.Fatalf("blocked recovery lost session reservation: %+v", result)
+					}
 				case "coordination-stale":
-					if executed.Load() || result.Status != "blocked" || result.NextOwner != "scheduling" || result.InfraKind != "launch" || len(result.Effects) > 0 {
+					if executed.Load() || result.Status != "blocked" || result.NextOwner != "scheduling" || result.InfraKind != "coordination-changed" || len(result.Effects) > 0 {
 						t.Fatalf("stale context reached execution or terminal outcome: %+v", result)
 					}
 				case "lease-lost", "heartbeat-error":
@@ -526,6 +538,11 @@ func TestWorkerAcceptanceRepairUsesCoordinatorSnapshot(t *testing.T) {
 	if err := recheckAcceptanceRepair(context.Background(), j, j.repair.PR); err == nil {
 		t.Fatal("blocked verdict accepted")
 	}
+	j.repair.Acceptance.NextOwner = "implementer"
+	if err := recheckAcceptanceRepair(context.Background(), j, j.repair.PR); err != nil {
+		t.Fatal(err)
+	}
+	j.repair.Acceptance.NextOwner = ""
 	j.repair.Acceptance.Verdict = "failed"
 	if err := recheckAcceptanceRepair(context.Background(), j, vcs.PR{HeadSHA: "changed"}); err == nil {
 		t.Fatal("changed head accepted")

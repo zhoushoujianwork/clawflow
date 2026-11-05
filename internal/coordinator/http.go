@@ -50,7 +50,7 @@ func NewHandler(store WorkerStore) http.Handler {
 			}
 			if len(parts) == 3 && parts[0] == "tasks" && len(parts[1]) <= 128 && parts[1] != "" {
 				switch parts[2] {
-				case "heartbeat", "complete", "fail", "recover", "inspect", "release", "logs":
+				case "heartbeat", "progress", "complete", "fail", "recover", "inspect", "release", "logs":
 					action = parts[2]
 					task = parts[1]
 				}
@@ -160,14 +160,23 @@ func NewHandler(store WorkerStore) http.Handler {
 				output = ack
 			default:
 				var input struct {
-					FencingToken int64           `json:"fencing_token"`
-					Result       json.RawMessage `json:"result"`
+					FencingToken    int64           `json:"fencing_token"`
+					Result          json.RawMessage `json:"result"`
+					LastEventAgeSec int64           `json:"last_event_age_sec"`
 				}
 				if err := decode(&input); err != nil {
 					status = 400
 					return err
 				}
 				switch action {
+				case "progress":
+					progress, ok := store.(interface {
+						ReportProgress(context.Context, string, string, int64, int64) error
+					})
+					if !ok {
+						return ErrInvalid
+					}
+					err = progress.ReportProgress(ctx, task, worker, input.FencingToken, input.LastEventAgeSec)
 				case "inspect":
 					reader, ok := store.(interface {
 						Task(context.Context, string) (*Task, error)

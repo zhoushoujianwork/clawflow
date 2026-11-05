@@ -10,6 +10,7 @@ Updating the dashboard, controller, or worker must not require terminating healt
 
 - Controller restart: running tasks continue; results wait locally and synchronize when the controller returns. New scheduling pauses during the outage.
 - Worker upgrade: start a new worker generation for new tasks, while the previous generation finishes its existing tasks. Retire it after all results are acknowledged. A single-slot worker may wait for its active task instead of temporarily adding capacity.
+- Execution timeout: retain the original task and reported interruption, then resume the verified native session within the existing retry budget. Unsafe recovery remains blocked instead of starting a new worktree.
 - Abnormal termination: show **Recovering**, then resume the verified worktree/session when supported. Show **Needs recovery** with a reason when safe recovery cannot be established. Never silently start duplicate work.
 - Dashboard: distinguish executing, disconnected/last known, recovering, completed/pending sync, finalizing, and delivered. Show worker generation and recovery history in details.
 

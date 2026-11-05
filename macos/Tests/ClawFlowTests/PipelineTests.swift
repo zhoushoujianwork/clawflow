@@ -21,14 +21,14 @@ final class PipelineTests: XCTestCase {
         XCTAssertEqual(row.issue, 7)
         XCTAssertEqual(Set(row.jobs.map(\.id)), ["dev", "repair", "review"])
         XCTAssertEqual(row.prs, [9])
-        XCTAssertEqual(row.status, "Jobs finished") // execution success is not pipeline delivery success
+        XCTAssertEqual(row.status, "已结束") // execution success is not pipeline delivery success
     }
     func testAmbiguousPRReviewIsNotAttachedToAnArbitraryIssue() throws {
         let rows = try snapshot([job("one", issue: 1, pr: 9), job("two", issue: 2, pr: 9), job("review", issue: 0, pr: 9, kind: "acceptance")]).issuePipelines
         XCTAssertEqual(rows.count, 3)
         let unlinked = try XCTUnwrap(rows.first { $0.issue == 0 })
         XCTAssertEqual(unlinked.jobs.map(\.id), ["review"])
-        XCTAssertTrue(unlinked.reference.contains("issue unavailable"))
+        XCTAssertTrue(unlinked.reference.contains("无关联 Issue"))
     }
     func testRunningJobOutranksOldFailureWithinTheIssue() throws {
         let row = try XCTUnwrap(try snapshot([
@@ -36,7 +36,7 @@ final class PipelineTests: XCTestCase {
             job("new", issue: 7, kind: "repair", state: "leased", stage: "running")
         ]).issuePipelines.first)
         XCTAssertEqual(row.group, .running)
-        XCTAssertEqual(row.status, "Running")
+        XCTAssertEqual(row.status, "运行中")
     }
     func testQueuedIssueWithoutJobsAndSharedProjectMembershipAppearOnce() throws {
         let entry: [String: Any] = ["key": "o/r#42", "position": 1, "number": 42, "title": "Queued work", "tier": "P1", "state": "eligible:capacity"]

@@ -94,7 +94,7 @@ clawflow candidate clean --commit <sha>
 
 `evidence.json`（权限 0600）绑定：候选提交、运行时身份（id、端口、schema、bundle id）、环境（OS、架构、Go 版本、候选二进制 SHA-256）、SOP 摘要与能力、各层结果、worker 身份、命令及结果、稳定宿主差异、状态。令牌、DSN 与密码在写入前脱敏。
 
-层级：`offline`、`environment-ready`、`candidate-loaded`、`lifecycle`、`live-write`、`save-reload`、`native-visual`。`live-write`/`save-reload` 默认 `not-run`，`native-visual` 默认 `pending`；任何一层都不由其他层推断。阻塞之后的步骤保持 `not-run`，整体状态为 `blocked`。稳定宿主的配置、数据（不含 `runs/` 历史）、监听端口或进程身份在运行前后不一致时，整体状态为 `failed`。配置与数据比较实际内容和文件类型/权限；单纯触碰修改时间不会被误判为内容变更。旧记录保存在候选根下的 `attempt-*` 目录中。
+层级：`offline`、`environment-ready`、`candidate-loaded`、`lifecycle`、`live-write`、`save-reload`、`native-visual`。`live-write`/`save-reload` 默认 `not-run`，`native-visual` 默认 `pending`；任何一层都不由其他层推断。阻塞之后的步骤保持 `not-run`，整体状态为 `blocked`。稳定宿主的配置、数据（不含 `runs/` 历史）、监听端口或进程身份在运行前后不一致时，整体状态为 `failed`。配置与数据比较实际内容和文件类型/权限；单纯触碰修改时间不会被误判为内容变更。旧记录保存在候选根下的 `attempt-*` 目录中。 快照另外保存逐路径 SHA-256；发生变化时报告新增、删除或修改的相对路径（每类最多 50 条，余量显示数量），不保存文件内容或符号链接目标。旧快照缺少逐路径摘要时仍按原聚合摘要判定失败。路径证据仅用于定位，不识别写入者，也不将 GitHub 缓存或限流记录变化自动放行。
 
 ## 原生 App 与 GUI
 
@@ -109,6 +109,7 @@ clawflow candidate clean --commit <sha>
 ## 限制
 
 - 稳定宿主快照只读取文件、探测端口与 `ps`；未覆盖稳定宿主上由其他用户启动的进程。
+- 快照比对配置、人工队列顺序及任务、验收和协调记录。健康的调度每轮都会重写的内容不参与比对：运行历史、扫描派生快照、HTTP 缓存和扫描计数（见 `stableActivityData`）。稳定宿主上有任务在写验收或协调记录时，比对仍可能失败，应等任务结束后重跑。
 - 本变更不实现跨机器的权威租约，也不为候选自动安装 launchd 服务；`LabelPrefix`/`ServiceLabel` 只定义命名空间并由 App 与 CLI 强制。
 - 隔离是对协作程序的约束：恶意子进程若自行构造 HTTP 客户端并显式设置 `Transport`，仍可绕过进程内传输守卫；git 与 offload 子进程通过清除的环境变量与 `GIT_ALLOW_PROTOCOL` 约束。
 

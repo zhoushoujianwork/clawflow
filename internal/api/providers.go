@@ -1,31 +1,50 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 )
 
-const retiredProviderMessage = "ClawFlow provider configuration is retired; use offload config to configure credentials/models, then set settings.execution.profile or CLAWFLOW_OFFLOAD_PROFILE"
+const retiredProviderMessage = "ClawFlow provider configuration is retired; use offload config to configure credentials, models and the default profile"
 
 // HandleListProviders reports local readiness without reading legacy credentials.
 func HandleListProviders(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
 	c, err := execution.LoadConfig()
-	readiness := "ready"
-	message := "Offload profile selected; live execution unverified"
-	if err == nil {
-		err = execution.ValidateConfig(c)
+	if r.Method == http.MethodPut {
+		var update struct {
+			DefaultProfile string `json:"default_profile"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		decoder.DisallowUnknownFields()
+		if err != nil || decoder.Decode(&update) != nil || update.DefaultProfile == "" {
+			http.Error(w, "default_profile is required", 400)
+			return
+		}
+		selected, problem := execution.DefaultProfile(r.Context(), c, update.DefaultProfile)
+		if problem != nil {
+			http.Error(w, problem.Error(), 502)
+			return
+		}
+		writeJSON(w, 200, map[string]string{"default_profile": selected})
+		return
 	}
-	if err != nil {
-		readiness = "blocked"
+	defaultProfile, _ := execution.DefaultProfile(r.Context(), c, "")
+	readiness := "blocked"
+	message := "Offload settings unavailable"
+	if err == nil {
+		status := execution.CheckReadiness(r.Context(), c, nil, execution.ReadinessOptions{})
+		readiness, message = status.State, status.Summary
+	} else {
 		message = err.Error()
 	}
-	writeJSON(w, 200, map[string]any{"engine": "offload", "profile": c.Profile, "role_profiles": c.RoleProfiles, "pilot_profile": execution.ProfileForRole(c, config.RolePilot), "codex_sandbox": c.CodexSandbox, "readiness": readiness, "message": message})
+	writeJSON(w, 200, map[string]any{"engine": "offload", "default_profile": defaultProfile, "profile": c.Profile, "role_profiles": c.RoleProfiles, "pilot_profile": execution.ProfileForRole(c, config.RolePilot), "codex_sandbox": c.CodexSandbox, "readiness": readiness, "message": message})
 }
 
 // HandleAddProvider rejects the retired ClawFlow provider operation.

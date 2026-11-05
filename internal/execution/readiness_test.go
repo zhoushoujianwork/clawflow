@@ -51,7 +51,7 @@ esac
 	return writeScript(t, dir, "offload", body)
 }
 
-const oneProfile = `{"schema_version":1,"config_exists":true,"profiles":[{"name":"base"}]}`
+const oneProfile = `{"schema_version":1,"config_exists":true,"active":"base","profiles":[{"name":"base"}]}`
 
 func TestReadinessReadyIsLiveAuthUnverifiedAndSpawnsNoTask(t *testing.T) {
 	shortProbe(t, 30*time.Second)
@@ -141,13 +141,22 @@ func TestReadinessAbsentProfileConfiguration(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	r = CheckReadiness(context.Background(), Config{Command: cmd}, nil, hermetic)
-	if r.Reason != ReasonProfileMissing {
+	if r.Reason != ReasonProfileNotFound {
 		t.Fatalf("empty profile: %+v", r)
 	}
 	// A nonempty string alone is never proof the profile exists.
 	r = CheckReadiness(context.Background(), Config{Command: cmd, Profile: "anything"}, nil, hermetic)
 	if r.State == StateReady {
 		t.Fatalf("nonempty profile string treated as existing: %+v", r)
+	}
+}
+
+func TestReadinessUsesOffloadActiveProfileByDefault(t *testing.T) {
+	shortProbe(t, 30*time.Second)
+	cmd := offloadScript(t, t.TempDir(), oneProfile, true)
+	r := CheckReadiness(context.Background(), Config{Command: cmd}, nil, hermetic)
+	if r.State != StateReady || strings.Join(r.Profiles, ",") != "base" || r.Report.Profile != "base" {
+		t.Fatalf("%+v", r)
 	}
 }
 

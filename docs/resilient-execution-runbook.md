@@ -26,7 +26,7 @@ For service supervision, a pinned manager can also run with `clawflow worker ser
 
 ## Result replay and status
 
-Each task directory retains `journal.json`, `executor.log`, and `execution.json` when a managed development session starts. Files are private. A persisted claim ID makes assignment replay safe after a lost response. The journal stores task identity, epoch, pinned executable paths and result outbox; it contains no worker token value. The checkpoint points to retained native output artifacts, including inputs, which must remain private.
+Each task directory retains `journal.json`, `executor.log`, and `execution.json` when a managed development session starts. Files are private. A persisted claim ID makes assignment replay safe after a lost response. The journal stores task identity, epoch, pinned executable paths and result outbox; it contains no worker token value. The checkpoint points to retained native output artifacts, including inputs, which must remain private. Checkpoint-managed executions keep each invocation in a separate private `execution-artifacts/clawflow-offload-*` directory beside `execution.json`, so an OS temporary-directory cleanup does not remove recovery inputs, event streams or final output. Resuming preserves earlier invocation directories and records the new one in the checkpoint. Existing checkpoints pointing at temporary paths are not rewritten or reconstructed; missing old files remain an explicit evidence limitation. Executions without a checkpoint retain their existing temporary-file cleanup behavior.
 
 ```sh
 clawflow worker executions --root /absolute/execution-root
@@ -44,6 +44,12 @@ Each unsafe or corrupt item is retained and diagnosed independently under `recov
 
 Execution has a fixed deadline based on the task timeout, plus ten minutes for reporting. Heartbeats do not extend execution authority indefinitely. If the controller remains unavailable, the executor stops at the execution deadline and preserves its result. Expired durable tasks retain their reservation rather than being blindly reassigned. This trades automatic replacement availability for duplicate-execution safety.
 
+### 启动前协调快照失效
+
+Worker 在启动开发前发现已批准的协调快照变化时，记录 `blocked / coordination-changed`，由 scheduling 重新评估。Controller 保留该次结果、owner、epoch 和尝试记录，不再把同一份过期 payload 放回 pending。兼容仍固定在旧二进制上的 worker 所发出的 `blocked / launch / next_owner=scheduling` 报告；其他临时启动故障仍按原基础设施上限重试。
+
+这只处理尚未启动模型的普通派发拒绝。已进入原会话恢复的尝试即使启动检查失败，也继续保留任务，不退回新 worktree。检查历史时分别核对启动前拒绝与实际启动过的 Offload session，不能把新任务执行称为原会话续跑。
+
 ## Interrupted execution recovery
 
 Managers detect interrupted executors and mark them `needs_recovery`. After the original authority expires, they attempt guarded recovery of implementation and repair sessions. It can also be requested explicitly:
@@ -57,6 +63,16 @@ Recovery requires exclusive executor and Offload locks, retained canonical workt
 Recovery does not run before the old authority expires. A still-running Offload process inherits the recovery lock, including after executor death, so another invocation cannot be launched concurrently. A completed native result without a complete worker report is deliberately left for result reconciliation rather than guessed from text. Unsupported/missing sessions, changed profiles, corrupt journals and reply/acceptance tasks remain visibly blocked for a fresh, explicitly reviewed retry; they are not silently restarted with a new model session. Existing independent acceptance and provenance requirements still apply.
 
 This supports controller/manager restarts and retained development/repair session continuation. It is not a memory checkpoint, arbitrary process adoption, transparent recovery of every task kind, controller HA, or a verified claim that all Offload backends survive host reboot. Native backend/profile configuration and credentials must remain available; pinning the Offload binary does not snapshot all external dependencies.
+
+## 已回传的超时结果恢复
+
+开发／修复任务报告 `execution-interrupted` 后，控制器完成结果处理，仍保留原任务、worker、epoch 和回执，以过期 durable lease 表示 `recovery_pending`，阻止另一个 worker 或下一轮扫描新建替代任务。worker 在原授权到期、执行锁释放后，核对 journal、checkpoint 与报告的原生 session 一致，归档旧尝试，再申请新 epoch 并在原 worktree 续跑。每次真正授权恢复消耗一次既有基础设施预算；请求重放不重复扣减。
+
+中断报告可以携带运行期间已排队但尚未发布的操作。控制器仍校验项目、目标和操作类型，将这些操作保存到仅控制器可写的 `unapplied_effects` 审计字段，清空可执行 effects；不创建 PR、不发布评论、不生成 effect intent，也不把中断计作产品失败触发自动化。原始报告摘要保持不变，旧 worker 重放仍可确认。恢复后由原会话重新核对 worktree、已提交代码和远端状态，旧操作不会自动重放。
+
+恢复申请只接受已完成结果处理、无可执行 effects 且有 session 的中断报告。取消、被后续任务取代、已成功完成、会话缺失、profile／runtime 变化、预算耗尽均不自动恢复。恢复的启动检查仍生效；旧版固定执行器报告 `launch` 或 `coordination-changed` 时，控制器也根据前一尝试的中断记录保留任务。缺少安全证据时保持阻塞，不能通过改写历史、重置预算或创建新会话消除阻塞。
+
+此路径不导入之前已经终结或被替代的历史超时任务。部署后需单独记录真实 backend 的超时续跑验收；无界面测试验证权限、预算、回执、锁与 worktree 保留，并不代表已做真实模型续跑。
 
 ## Validation boundary
 
@@ -78,6 +94,10 @@ Readiness gates are process-local caches and are excluded from generation and ex
 ## PR 缺少开发来源时的自动恢复
 
 人工协助更新 PR、旧执行主机不可达或本机缺少原开发记录时，CI 全绿也不能替代开发来源。对已开启自动合并、必需 CI 和独立验收的受管 PR，扫描器现在可派发一次真实的 `development_verification`：CC 在隔离 checkout 中按当前 issue 重新核查整个差异并执行相关无界面检查。成功后，再由不同原生会话独立验收，最后仍走准确 head 的 CI 与条件合并。
+
+派发前协调同时携带通用操作名和实际 `repair_reason`，区分开发来源核验、CI 修复、验收修复和合并冲突修复。来源核验需要先有准确 head 的 CI 成功，再进入核验，最后才是独立验收；不能因 CI 已绿而判为已交付，也不能反过来等待尚未具备来源的独立验收。用途参与快照摘要，worker 启动前仍校验一致性。
+
+协调结果允许纯 JSON，或整个响应仅由一个 JSON／无语言代码围栏包裹的 JSON。不会从解释文本中截取结果或忽略尾随内容；解码后仍校验引用、依赖和关闭权限。开发执行的完成标记校验保持不变。
 
 这是新的开发核验记录，不是补写旧会话、不宣称原作者身份，也不修改或挪用历史证据。核验不能修改源码、提交、推送或更改来源文件；需要保留真实 native 工具活动，报告实际命令与限制，并由 runner 确认工作区干净、准确提交仍在原分支发布。成功使用 `no-change`，但仍消耗共享三次修复预算中的一次；原有基础设施上限、冷却、退避和 worker 互斥保留。失败、检查不完整或发现缺陷均不能生成成功来源。
 

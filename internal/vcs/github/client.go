@@ -1542,3 +1542,35 @@ func (c *Client) PublishAcceptanceComment(repo string, pr int, report vcs.Accept
 			return e
 		})
 }
+
+// BranchHead reads GET /repos/:owner/:name/git/ref/heads/:branch, which matches
+// the ref exactly rather than by prefix.
+func (c *Client) BranchHead(repo, branch string) (string, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return "", err
+	}
+	segments := strings.Split(branch, "/")
+	for i := range segments {
+		segments[i] = url.PathEscape(segments[i])
+	}
+	data, status, err := c.do("GET", fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", owner, name, strings.Join(segments, "/")), nil)
+	if err != nil {
+		return "", err
+	}
+	if status == 404 {
+		return "", nil
+	}
+	if status != 200 {
+		return "", fmt.Errorf("github branch head: HTTP %d", status)
+	}
+	var ref struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(data, &ref); err != nil {
+		return "", fmt.Errorf("github branch head: %w", err)
+	}
+	return ref.Object.SHA, nil
+}

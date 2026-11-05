@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/zhoushoujianwork/clawflow/internal/runverdict"
 	"io"
 	"math/rand"
 	"net/url"
@@ -1941,6 +1942,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		confirmedHead, headErr = confirmedDevelopmentHead(ctx, workdir, j)
 		if errors.Is(headErr, gitexec.ErrTimeout) {
 			runErr = headErr
+		} else if headErr != nil {
+			fmt.Fprintf(os.Stderr, "%s ⚠ development head unconfirmed: %v\n", prefix, headErr)
 		}
 	}
 	if runErr == nil && output != "" && !(j.repair != nil && outcome == "agent-failed") {
@@ -2088,80 +2091,28 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		EndedAt:     &endedAt,
 		Summary:     output,
 	}
-	switch {
-	case ctx.Err() != nil:
-		rm.Status, rm.Error = "lease-lost", ctx.Err().Error()
-	case isResourceBusy:
-		// Host contention is scheduling blockage, not an implementation failure.
-		rm.Status, rm.Error = "blocked", runErr.Error()
-	case isCostLimit:
-		// Record as "cost-limit" — deliberately distinct from "rate-limited"
-		// because the two need different operator responses: a rate limit
-		// clears on its own within minutes, a billing cap holds until the
-		// provider's window resets, so the dashboard should read "don't bother
-		// running today" rather than "retrying shortly". Excluded from the
-		// circuit breaker (see snapshot.ConsecutiveFailures) — semantically
-		// this is closer to auth-error than to output-limit: there is no token
-		// bleed to bound, since each capped run is 1 turn at $0 (issue #308).
-		rm.Status = "cost-limit"
-		rm.Error = runErr.Error()
-	case isRateLimit:
-		// Record as "rate-limited" so the dashboard shows the real reason
-		// and ConsecutiveFailures doesn't count this toward the circuit breaker.
-		rm.Status = "rate-limited"
-		rm.Error = runErr.Error()
-	case isAuthError:
-		// Record as "auth-error" — distinct from "failed" so the dashboard
-		// can surface the specific cause. Does NOT count toward circuit breaker
-		// since agent-failed would be misleading (the issue itself is fine;
-		// the credentials are broken). Operator should investigate the session
-		// or configure an independent API key provider (issue #204).
-		rm.Status = "auth-error"
-		rm.Error = runErr.Error()
-	case isOutputLimit:
-		// Record as "output-limit" — distinct from "failed" so the dashboard
-		// surfaces the specific cause (raise max_output_tokens). Unlike
-		// rate-limit (self-resolves) and auth (fails fast), an output-limit run
-		// deterministically fails AND burns a full large-diff generation every
-		// pass, so it DOES count toward the circuit breaker to bound the token
-		// bleed — eventually labeling agent-failed until the owner raises the
-		// ceiling. Each pass also emits a WARN log for patrol (issue #286).
-		rm.Status = "output-limit"
-		rm.Error = runErr.Error()
-	case isNoMarker:
-		// No-marker runs are recorded as "no-marker" (distinct from generic
-		// "failed") so the dashboard can surface the specific cause. They do
-		// NOT count toward the circuit breaker (issue #323): the run completed
-		// and produced a body, only the write-back marker was missing, so
-		// agent-failed would freeze the issue for every operator that excludes
-		// that label instead of letting a human push it forward. The re-fire
-		// behavior remains retryable so a later run can produce a valid marker.
-		rm.Status = "no-marker"
-		rm.Error = runErr.Error()
-	case isDisallowedOutcome:
-		// Recorded as "disallowed-outcome" rather than "success": the comment
-		// landed but no terminal label did, so the run is genuinely degraded.
-		// It DOES count toward the circuit breaker for the same reason
-		// no-marker does — the write-back is incomplete and, if the operator
-		// keeps picking a label outside its whitelist, every pass pays again
-		// (issue #326).
-		rm.Status = "disallowed-outcome"
-		rm.Error = runErr.Error()
-	case runErr != nil:
-		rm.Status = "failed"
-		rm.Error = runErr.Error()
-	case output == "":
-		// Empty output: claude exited cleanly but produced nothing. Like
-		// no-marker, the issue stays unlabeled and will re-fire. Count toward
-		// the circuit breaker so a stuck issue eventually gets agent-failed
-		// instead of looping forever (issue #143).
-		rm.Status = "skipped-empty"
-	case j.repair != nil && outcome == "agent-failed":
-		rm.Status = "failed"
-		rm.Error = j.repair.label() + " repair could not update existing PR"
-	default:
-		rm.Status = "success"
+	repairLabel := ""
+	if j.repair != nil {
+		repairLabel = j.repair.label()
 	}
+	var verdictWritebackErr error
+	if writebackErr != nil {
+		verdictWritebackErr = writebackErr
+	}
+	unmanagedBranch := unmanagedImplementBranch(ctx, j, runErr, outcome, output)
+	verdict := runverdict.Decide(runverdict.Input{
+		UnmanagedBranch: unmanagedBranch,
+		IssueNumber:     j.sub.Number,
+		CtxErr:          ctx.Err(),
+		RunErr:          runErr,
+		ResourceBusy:    isResourceBusy,
+		Output:          output,
+		Outcome:         outcome,
+		IsRepair:        j.repair != nil,
+		RepairLabel:     repairLabel,
+		WritebackErr:    verdictWritebackErr,
+	})
+	rm.Status, rm.Error = verdict.Status, verdict.Error
 
 	if j.repair != nil {
 		rm.RepairReason = j.repair.reason()
@@ -2170,13 +2121,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 		rm.HeadSHA = confirmedHead
 	}
 	rm.Outcome = outcome
-	if outcome == "no-change" {
-		rm.OutcomeReason = output
-	}
-
-	if writebackErr != nil {
-		rm.WritebackError = writebackErr.Error()
-	}
+	rm.OutcomeReason = verdict.OutcomeReason
+	rm.WritebackError = verdict.WritebackError
 	// Conditional cleanup: only remove the worktree on success/skip.
 	// On failure, preserve it so the next run can resume from the
 	// partial work instead of starting from scratch.
@@ -2283,10 +2229,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	// assert a label the issue never received — the most misleading part of
 	// issue #326. Emitted alongside rather than replacing `outcome` so existing
 	// greps over run.log keep working.
-	appliedLabel := outcome
-	if isDisallowedOutcome || writebackErr != nil || outcome == "no-change" || (j.repair != nil && outcome == "agent-failed") {
-		appliedLabel = ""
-	}
+	appliedLabel := verdict.AppliedLabel
 	logFn("run/end",
 		"repo", j.repo,
 		"issue", j.sub.Number,
@@ -2380,6 +2323,24 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 }
 
 var runJobOperator = operator.Run
+
+// unmanagedImplementBranch returns the PR head branch when an implement run
+// opened a PR from a branch that ManagedIssueBranch rejects. ManagedIssueBranch
+// itself stays strict; the run is reported instead of silently losing repair.
+func unmanagedImplementBranch(ctx context.Context, j *runJob, runErr error, outcome, output string) string {
+	if runErr != nil || j.op.Name != "implement" || j.repair != nil || outcome != "agent-implemented" || ctx.Err() != nil {
+		return ""
+	}
+	n := extractPRNumber(output)
+	if n == 0 {
+		return ""
+	}
+	pr, err := j.client.GetPR(j.repo, n)
+	if err != nil || pr.HeadBranch == "" || vcs.ManagedIssueBranch(pr.HeadBranch, j.sub.Number) {
+		return ""
+	}
+	return pr.HeadBranch
+}
 
 var prURLRE = regexp.MustCompile(`(?:pull|merge_requests)/(\d+)`)
 

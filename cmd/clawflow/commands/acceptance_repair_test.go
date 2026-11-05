@@ -860,3 +860,71 @@ func TestMalformedAcceptanceCannotSupplyRepairEvidence(t *testing.T) {
 		}
 	}
 }
+
+func blockedRecord(owner string, withFindings bool) acceptance.Record {
+	r := acceptance.Record{Verdict: acceptance.Blocked, NextOwner: owner}
+	if withFindings {
+		r.Findings = []acceptance.Finding{{Kind: "requirement", Requirement: "AC-1", Summary: "missing execution evidence", Evidence: "no test output"}}
+	}
+	return r
+}
+
+func TestBlockedRepairOnlyForImplementerWithFindings(t *testing.T) {
+	cases := []struct {
+		name  string
+		rec   acceptance.Record
+		field bool
+		want  bool
+	}{
+		{"implementer with findings", blockedRecord("implementer", true), true, true},
+		{"implementer mixed case", blockedRecord(" Implementer ", true), true, true},
+		{"implementer without findings", blockedRecord("implementer", false), false, false},
+		{"owner", blockedRecord("owner", true), true, false},
+		{"human", blockedRecord("human", true), true, false},
+		{"unknown", blockedRecord("somebody", true), true, false},
+		{"empty", blockedRecord("", true), true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := blockedRepairableByImplementer(tc.rec); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+	un := blockedRecord("implementer", true)
+	un.Unstructured = true
+	if blockedRepairableByImplementer(un) {
+		t.Fatal("unstructured record authorized repair")
+	}
+}
+
+func TestRepairableVerdictSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		f    acceptanceFindings
+		want bool
+	}{
+		{acceptanceFindings{Verdict: "failed"}, true},
+		{acceptanceFindings{Verdict: "failed", NextOwner: "owner"}, true},
+		{acceptanceFindings{Verdict: "blocked", NextOwner: "implementer"}, true},
+		{acceptanceFindings{Verdict: "blocked", NextOwner: "owner"}, false},
+		{acceptanceFindings{Verdict: "blocked"}, false},
+		{acceptanceFindings{Verdict: "passed", NextOwner: "implementer"}, false},
+	} {
+		if got := repairableVerdict(&tc.f); got != tc.want {
+			t.Fatalf("%+v: got %v", tc.f, got)
+		}
+	}
+}
+
+func TestBlockedFindingsCarryOwnerAndUntrustedPrompt(t *testing.T) {
+	f := findingsFromRecord(blockedRecord("Implementer", true))
+	if f.Verdict != "blocked" || f.NextOwner != "implementer" || len(f.Evidence) != 1 {
+		t.Fatalf("%+v", f)
+	}
+	p := (&ciRepairContext{Acceptance: f, PR: vcs.PR{HeadSHA: "h"}}).acceptancePrompt("go test")
+	for _, want := range []string{`returned "blocked"`, "BEGIN UNTRUSTED REVIEWER FINDINGS", "UNTRUSTED DATA"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("prompt lacks %q", want)
+		}
+	}
+}

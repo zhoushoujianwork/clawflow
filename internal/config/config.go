@@ -95,7 +95,7 @@ type Repo struct {
 	UpdatedBy string `yaml:"updated_by,omitempty"`
 }
 
-// ExecutionSettings selects machine-local Offload profiles. Profiles own model authentication.
+// ExecutionSettings optionally overrides machine-local Offload execution defaults.
 type ExecutionSettings struct {
 	// TestDatabaseDSN is a machine-local secret passed only through the agent environment.
 	TestDatabaseDSN string            `yaml:"test_database_dsn,omitempty" json:"-"`
@@ -955,22 +955,6 @@ func LoadCredentials() (*Credentials, error) {
 	c.envLightModel = os.Getenv("CLAWFLOW_CLAUDE_LIGHT_MODEL")
 
 	return c, nil
-}
-
-// Save writes the config back to ~/.clawflow/config/config.yaml.
-func (c *Config) Save() error {
-	if c.Repos == nil {
-		c.Repos = make(map[string]Repo)
-	}
-	data, err := yaml.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("cannot marshal config: %w", err)
-	}
-	path := ConfigPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
 }
 
 // SaveCredentials writes credentials with restricted permissions (0600).

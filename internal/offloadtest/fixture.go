@@ -43,7 +43,7 @@ func Setup(t *testing.T) string {
 		t.Fatal(err)
 	}
 	command := filepath.Join(dir, "offload")
-	script := "#!/bin/sh\nexec '" + strings.ReplaceAll(exe, "'", "'\\''") + "' -test.run=^TestOffloadHelper$ -- \"$@\"\n"
+	script := "#!/bin/sh\nif [ \"$1\" = profiles ] && [ \"$2\" = --json ]; then printf '%s\\n' '{\"schema_version\":1,\"config_exists\":true,\"active\":\"test-profile\",\"profiles\":[{\"name\":\"test-profile\"}]}'; exit 0; fi\nexec '" + strings.ReplaceAll(exe, "'", "'\\''") + "' -test.run=^TestOffloadHelper$ -- \"$@\"\n"
 	if err := os.WriteFile(command, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

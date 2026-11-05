@@ -12,6 +12,22 @@ import (
 
 var retiredWorkflowNotice sync.Once
 
+// retiredConfigKeys were once valid. Load accepts them and Save drops them on
+// purpose, so they do not mean a newer binary wrote the file. Wildcards stand
+// for map keys such as repository names.
+var retiredConfigKeys = map[string]bool{
+	"repos.*.workflow":                 true,
+	"repos.*.auto_approve":             true,
+	"repos.*.auto_evaluate_all_issues": true,
+	"repos.*.auto_fix":                 true,
+	"repos.*.bound_machine":            true,
+	"repos.*.queue_issue":              true,
+	"repos.*.queue_scope":              true,
+	"settings.confidence_threshold":    true,
+	"settings.queue.scope":             true,
+	"settings.require_binding":         true,
+}
+
 // UnmarshalYAML accepts retired configuration keys without persisting them.
 func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	type current Config

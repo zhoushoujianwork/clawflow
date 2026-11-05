@@ -103,6 +103,11 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 			}
 		}
 	}()
+	watchdogDone := make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		serveCoordinatorWatchdog(reconcileCtx, tasks.Board, watchdogInterval)
+	}()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -116,6 +121,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		_ = server.Close()
 		<-done
 		<-reconcileDone
+		<-watchdogDone
 		db.Close()
 		return nil, err
 	}
@@ -125,6 +131,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		_ = server.Close()
 		<-done
 		<-reconcileDone
+		<-watchdogDone
 		db.Close()
 	}, nil
 }

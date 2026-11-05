@@ -33,6 +33,18 @@ func TestExecutionEventsHelper(t *testing.T) {
 	mode := os.Getenv("CLAWFLOW_EVENTS_MODE")
 	event := func(seq int, typ string, status string, code int, kind string) {
 		e := map[string]any{"schema_version": 1, "type": typ, "run_id": "stream-run", "caller_run_id": args["-caller-run-id"], "seq": seq, "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "session": "native-actual", "backend": "claude", "model": "profile-model"}
+		if mode == "resolved-final-model" && typ == "final" {
+			e["model"] = "resolved-model"
+		}
+		if mode == "changed-progress-model" && typ == "progress" {
+			e["model"] = "different-model"
+		}
+		if mode == "changed-final-backend" && typ == "final" {
+			e["backend"] = "codex"
+		}
+		if mode == "changed-final-session" && typ == "final" {
+			e["session"] = "different-session"
+		}
 		if typ == "progress" {
 			e["native_type"] = "tool_call"
 			e["tool_category"] = "Read"
@@ -90,7 +102,11 @@ func TestExecutionEventsHelper(t *testing.T) {
 	if mode == "empty-policy" {
 		policy = ""
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(Result{Status: status, ExitCode: code, Text: "final answer", Profile: args["-p"], Backend: "claude", Model: "profile-model", RunID: "stream-run", CallerRunID: args["-caller-run-id"], NativeSessionID: "native-actual", ExecutionPolicy: policy, ErrorKind: kind})
+	model := "profile-model"
+	if mode == "resolved-final-model" {
+		model = "resolved-model"
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(Result{Status: status, ExitCode: code, Text: "final answer", Profile: args["-p"], Backend: "claude", Model: model, RunID: "stream-run", CallerRunID: args["-caller-run-id"], NativeSessionID: "native-actual", ExecutionPolicy: policy, ErrorKind: kind})
 	os.Exit(code)
 }
 
@@ -459,5 +475,35 @@ func TestResumeErrorKindsPreserved(t *testing.T) {
 	}
 	if safeKind("untrusted error with secret") != "execution" {
 		t.Fatal("raw error leaked")
+	}
+}
+
+func TestStreamFinalResolvedModelPreservesIdentityChecks(t *testing.T) {
+	for _, tc := range []struct{ mode, wantError string }{
+		{"resolved-final-model", ""},
+		{"changed-progress-model", "protocol_identity_mismatch"},
+		{"changed-final-backend", "protocol_identity_mismatch"},
+		{"changed-final-session", "protocol_session_mismatch"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			c, req, gate := streamingFixture(t)
+			t.Setenv("CLAWFLOW_EVENTS_MODE", tc.mode)
+			if err := os.WriteFile(gate, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Run(context.Background(), c, req, nil, nil, nil)
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("wanted %s: %v", tc.wantError, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Model != "resolved-model" || result.NativeSessionID != "native-actual" || result.Backend != "claude" {
+				t.Fatalf("incorrect identity: %+v", result)
+			}
+		})
 	}
 }

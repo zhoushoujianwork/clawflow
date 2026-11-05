@@ -3,6 +3,7 @@ package candidate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -564,5 +565,69 @@ func TestVerifyRejectsContradictoryPassingStatus(t *testing.T) {
 	}
 	if _, err := Verify(path, p.Commit); err == nil {
 		t.Fatal("claimed pass accepted despite failed lifecycle")
+	}
+}
+
+func TestStablePathEvidenceRetainsFailureAndLegacyCompatibility(t *testing.T) {
+	stable := testStable(t)
+	data := filepath.Join(stable.Root, "data")
+	if err := os.MkdirAll(data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"modified.json", "removed.json", "mode.json"} {
+		if err := os.WriteFile(filepath.Join(data, name), []byte("private-value"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := TakeStable(stable, StableProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "modified.json"), []byte("changed-value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(data, "removed.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(data, "mode.json"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "added.json"), []byte("new-private-value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := TakeStable(stable, StableProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff := strings.Join(before.Diff(after), "\n")
+	for _, want := range []string{"stable data changed", `path modified: "modified.json"`, `path removed: "removed.json"`, `path modified: "mode.json"`, `path added: "added.json"`} {
+		if !strings.Contains(diff, want) {
+			t.Fatalf("missing %s: %s", want, diff)
+		}
+	}
+	for _, digest := range after.DataPaths {
+		if len(digest) != 64 || strings.Contains(digest, "private") {
+			t.Fatalf("not a digest: %s", digest)
+		}
+	}
+	before.DataPaths = nil // Older installed CLI snapshots have only an aggregate.
+	legacy := before.Diff(after)
+	if len(legacy) != 1 || legacy[0] != "stable data changed" {
+		t.Fatalf("legacy protection changed: %v", legacy)
+	}
+}
+
+func TestStablePathEvidenceBoundsAndEscapesPaths(t *testing.T) {
+	before, after := map[string]string{}, map[string]string{}
+	for i := 0; i < 55; i++ {
+		after[fmt.Sprintf("%02d", i)] = "digest"
+	}
+	diff := changedPaths("data", before, after)
+	if len(diff) != 51 || !strings.Contains(diff[50], "5 additional") {
+		t.Fatal(diff)
+	}
+	diff = changedPaths("data", before, map[string]string{"line\nbreak": "digest"})
+	if len(diff) != 1 || strings.Contains(diff[0], "\n") {
+		t.Fatal(diff)
 	}
 }
