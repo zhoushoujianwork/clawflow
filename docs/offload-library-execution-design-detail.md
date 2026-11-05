@@ -45,6 +45,7 @@
 - `OnRunEvent` 是同步、有序的。它复用 `events.go` 的校验：caller 和 run ID 关联、序号严格递增。run ID 和 session 进 checkpoint 的时机和现在相同。
 - 结果写入 `result.json`，权限 0600，先写临时文件再 rename。恢复时的“已有完成结果等待对账”检查同时认这个文件和旧的 `stdout.json`。
 - 最终回答只取自 `Result.Report`，绝不从进度事件恢复。
+- Library 模式没有 CLI 模式读取 stdout 时的实时大小截止；offload 包会先把 report 保存在内存里，返回后 ClawFlow 再按同一个结果大小上限拒绝过大的输出。
 
 ## 恢复
 
@@ -58,6 +59,8 @@ Checkpoint 增加 `Engine` 和 `RunID`。
 其余检查不变：没有未对账的结果、session 存在、worktree 身份一致、旧 fencing 已过期。
 
 Executor 的锁不再被子进程继承。锁释放只说明 executor 死了，原生进程可能还活着，所以清理这一步不能省。
+
+接受的差异：library 模式下 executor 死亡时，原生进程会失去 supervisor，该次运行的最终结果也会丢失。恢复流程先结束旧 run，再从已有的原生 session 恢复，因此保持单写入者，但无法对账已死亡 attempt 的结果。
 
 ## offload 需要提供的接口
 

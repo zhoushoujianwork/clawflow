@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"context"
 	"os/exec"
 	"sync"
 	"time"
@@ -20,7 +21,13 @@ import (
 var (
 	activeCmdsMu sync.Mutex
 	activeCmds   = map[*exec.Cmd]struct{}{}
+	activeRuns   = map[*activeLibraryRun]struct{}{}
 )
+
+type activeLibraryRun struct {
+	cancel context.CancelFunc
+	done   <-chan struct{}
+}
 
 // registerActiveCmd records a started Offload subprocess. Must be called only
 // after cmd.Start() succeeds — Process is nil before that, and
@@ -37,6 +44,20 @@ func registerActiveCmd(cmd *exec.Cmd) {
 func unregisterActiveCmd(cmd *exec.Cmd) {
 	activeCmdsMu.Lock()
 	delete(activeCmds, cmd)
+	activeCmdsMu.Unlock()
+}
+
+func registerActiveLibraryRun(cancel context.CancelFunc, done <-chan struct{}) *activeLibraryRun {
+	run := &activeLibraryRun{cancel: cancel, done: done}
+	activeCmdsMu.Lock()
+	activeRuns[run] = struct{}{}
+	activeCmdsMu.Unlock()
+	return run
+}
+
+func unregisterActiveLibraryRun(run *activeLibraryRun) {
+	activeCmdsMu.Lock()
+	delete(activeRuns, run)
 	activeCmdsMu.Unlock()
 }
 
@@ -63,8 +84,12 @@ func TerminateAllActiveCmds() {
 	for cmd := range activeCmds {
 		cmds = append(cmds, cmd)
 	}
+	runs := make([]*activeLibraryRun, 0, len(activeRuns))
+	for run := range activeRuns {
+		runs = append(runs, run)
+	}
 	activeCmdsMu.Unlock()
-	if len(cmds) == 0 {
+	if len(cmds) == 0 && len(runs) == 0 {
 		return
 	}
 
@@ -75,6 +100,19 @@ func TerminateAllActiveCmds() {
 			defer wg.Done()
 			terminateProcessGroupSync(cmd, terminateGrace)
 		}(cmd)
+	}
+	for _, run := range runs {
+		wg.Add(1)
+		go func(run *activeLibraryRun) {
+			defer wg.Done()
+			run.cancel()
+			timer := time.NewTimer(terminateGrace + time.Second)
+			defer timer.Stop()
+			select {
+			case <-run.done:
+			case <-timer.C:
+			}
+		}(run)
 	}
 	wg.Wait()
 }

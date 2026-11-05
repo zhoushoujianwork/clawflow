@@ -100,6 +100,7 @@ type Repo struct {
 type ExecutionSettings struct {
 	// TestDatabaseDSN is a machine-local secret passed only through the agent environment.
 	TestDatabaseDSN string            `yaml:"test_database_dsn,omitempty" json:"-"`
+	Engine          string            `yaml:"engine,omitempty" json:"engine,omitempty"`
 	Command         string            `yaml:"command,omitempty" json:"command"`
 	Profile         string            `yaml:"profile,omitempty" json:"profile"`
 	RoleProfiles    map[string]string `yaml:"role_profiles,omitempty" json:"role_profiles,omitempty"`

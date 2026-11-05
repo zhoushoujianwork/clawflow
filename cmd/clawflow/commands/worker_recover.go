@@ -50,23 +50,44 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	if err != nil {
 		return err
 	}
-	if cp.Command != j.OffloadCommand || configuredDevelopmentProfile(roleForOperator(j.Task.Operator)) != cp.Profile {
+	cpEngine := cp.Engine
+	if cpEngine == "" {
+		cpEngine = execution.EngineCLI
+	}
+	journalEngine := workerExecutionEngine(j)
+	if cpEngine != journalEngine || configuredDevelopmentProfile(roleForOperator(j.Task.Operator)) != cp.Profile {
 		return fmt.Errorf("execution profile or pinned runtime changed")
 	}
-	if _, err := os.Stat(cp.Command); err != nil {
-		return fmt.Errorf("pinned Offload runtime unavailable")
+	if cpEngine == execution.EngineCLI {
+		if cp.Command != j.OffloadCommand {
+			return fmt.Errorf("execution profile or pinned runtime changed")
+		}
+		if _, err := os.Stat(cp.Command); err != nil {
+			return fmt.Errorf("pinned Offload runtime unavailable")
+		}
 	}
 	if cp.ArtifactDir != "" {
-		raw, err := os.ReadFile(filepath.Join(cp.ArtifactDir, "stdout.json"))
-		var final struct {
-			Status string `json:"status"`
-		}
-		if err == nil && json.Unmarshal(raw, &final) == nil && final.Status == "ok" {
-			return fmt.Errorf("completed native result retained; reconcile output before resuming")
+		for _, name := range []string{"stdout.json", "result.json"} {
+			raw, err := os.ReadFile(filepath.Join(cp.ArtifactDir, name))
+			if err == nil && completedExecutionResult(raw) {
+				return fmt.Errorf("completed native result retained; reconcile output before resuming")
+			}
 		}
 	}
 	if cp.Completed || cp.Session == "" {
 		return fmt.Errorf("session is missing or already completed; manual result reconciliation required")
+	}
+	if cpEngine == execution.EngineLibrary {
+		if !executionRunID(cp.RunID) {
+			return fmt.Errorf("library execution run ID is missing; orphan state is unknown and recovery is postponed")
+		}
+		state, abandonErr := abandonOrphanedRun(ctx, cp.RunID)
+		if abandonErr != nil {
+			return fmt.Errorf("library execution orphan state is unknown; recovery is postponed: %w", abandonErr)
+		}
+		if state != AbandonEnded && state != AbandonAlreadyEnded {
+			return fmt.Errorf("library execution orphan state is unknown; recovery is postponed")
+		}
 	}
 	if acknowledged {
 		var r struct {
@@ -119,6 +140,27 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	j.Error = ""
 	j.Report, j.Action = nil, ""
 	return writeWorkerJournal(path, j)
+}
+
+func completedExecutionResult(raw []byte) bool {
+	var final struct {
+		Status   string `json:"status"`
+		ExitCode *int   `json:"exit_code"`
+	}
+	return json.Unmarshal(raw, &final) == nil && final.Status == "ok" && final.ExitCode != nil && *final.ExitCode == 0
+}
+
+func executionRunID(id string) bool {
+	if len(id) < 1 || len(id) > 128 {
+		return false
+	}
+	for i, r := range id {
+		if r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || i > 0 && (r == '_' || r == '.' || r == ':' || r == '-') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func recoverAcknowledgedInterruption(o workerOptions, path string, j *workerJournal) error {

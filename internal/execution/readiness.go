@@ -217,25 +217,46 @@ func CheckReadiness(ctx context.Context, c Config, roles []string, opts Readines
 	report, help := probeCapabilities(ctx, base, get)
 	if report.Status == StatusReady {
 		check := Check{ID: CheckProfileConfig, Status: CheckSkipped, Message: "profile listing unavailable; selected profile not verified"}
-		snap, ok := listProfiles(ctx, report.Command, help, get)
 		report.Unverified = append(report.Unverified, "live_authentication")
-		if !ok {
-			report.Unverified = append(report.Unverified, "profile_existence")
-		} else {
+		engine, _ := normalizedEngine(c.Engine)
+		if engine == EngineLibrary {
 			check.Status, check.Message = CheckPassed, "selected profile is defined in Offload configuration (credentials not verified)"
 			resolved := make([]string, 0, len(profiles))
 			for _, p := range profiles {
-				selected, reason, msg := snap.selected(p)
-				if reason != "" {
-					check.Status, check.Message = CheckBlocked, msg
-					report.Status, report.Reason = StatusBlocked, reason
+				probe := c
+				probe.Profile = p
+				profileReport := probeLibraryCapabilities(probe, get)
+				if profileReport.Status != StatusReady {
+					check.Status, check.Message = CheckBlocked, profileReport.Checks[0].Message
+					report.Status, report.Reason = StatusBlocked, profileReport.Reason
 					break
 				}
-				resolved = append(resolved, selected)
+				resolved = append(resolved, profileReport.Profile)
 			}
 			if report.Status == StatusReady {
 				r.Profiles = resolved
 				report.Profile = resolved[0]
+			}
+		} else {
+			snap, ok := listProfiles(ctx, report.Command, help, get)
+			if !ok {
+				report.Unverified = append(report.Unverified, "profile_existence")
+			} else {
+				check.Status, check.Message = CheckPassed, "selected profile is defined in Offload configuration (credentials not verified)"
+				resolved := make([]string, 0, len(profiles))
+				for _, p := range profiles {
+					selected, reason, msg := snap.selected(p)
+					if reason != "" {
+						check.Status, check.Message = CheckBlocked, msg
+						report.Status, report.Reason = StatusBlocked, reason
+						break
+					}
+					resolved = append(resolved, selected)
+				}
+				if report.Status == StatusReady {
+					r.Profiles = resolved
+					report.Profile = resolved[0]
+				}
 			}
 		}
 		report.Checks = append(report.Checks, check)
