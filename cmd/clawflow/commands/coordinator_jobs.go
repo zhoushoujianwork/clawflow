@@ -76,6 +76,13 @@ type coordinatorRepair struct {
 	Acceptance *acceptanceFindings `json:"acceptance,omitempty"`
 }
 
+// context maps the approved payload to the runner's repair context. Worker
+// start validation and job construction both use it so the repair reason
+// cannot diverge between the coordination probe and the executed job.
+func (r *coordinatorRepair) context() *ciRepairContext {
+	return &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict", DevelopmentVerification: r.Reason == "development_verification"}
+}
+
 // skillDigest excludes machine-local paths while covering executable semantics.
 func skillDigest(op *operator.Operator) string {
 	copy := *op
