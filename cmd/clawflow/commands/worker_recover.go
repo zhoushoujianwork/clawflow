@@ -72,6 +72,9 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	if cp.ArtifactDir != "" {
 		for _, name := range []string{"stdout.json", "result.json"} {
 			raw, err := os.ReadFile(filepath.Join(cp.ArtifactDir, name))
+			if name == "result.json" && err == nil {
+				return fmt.Errorf("completed native result retained; reconcile output before resuming")
+			}
 			var final struct {
 				Status string `json:"status"`
 			}

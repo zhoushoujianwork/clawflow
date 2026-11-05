@@ -242,6 +242,13 @@ func TestLibraryRecoveryProceedsAfterOrphanEnded(t *testing.T) {
 
 func TestLibraryRecoveryTreatsResultJSONAsAwaitingReconciliation(t *testing.T) {
 	path, _, api, calls := libraryRecoveryFixture(t, true)
+	cp, err := execution.ReadCheckpoint(filepath.Join(filepath.Dir(path), "execution.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cp.ArtifactDir, "result.json"), []byte(`{"status":"error"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	old := abandonOrphanedRun
 	called := false
 	abandonOrphanedRun = func(context.Context, string) (AbandonState, error) {
@@ -249,7 +256,7 @@ func TestLibraryRecoveryTreatsResultJSONAsAwaitingReconciliation(t *testing.T) {
 		return AbandonEnded, nil
 	}
 	defer func() { abandonOrphanedRun = old }()
-	err := prepareWorkerRecovery(context.Background(), api, path)
+	err = prepareWorkerRecovery(context.Background(), api, path)
 	if err == nil || !strings.Contains(err.Error(), "completed native result retained") || *calls != 0 || called {
 		t.Fatalf("err=%v calls=%d abandon_called=%v", err, *calls, called)
 	}
