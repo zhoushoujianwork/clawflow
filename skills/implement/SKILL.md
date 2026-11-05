@@ -74,6 +74,7 @@ ClawFlow owns labels and comments. Your stdout becomes the issue comment; the la
 - **Never force-push.** Never push to the base branch. Don't bump deps or touch CI unless the issue asks for it.
 - **Minimum viable change.** If your fix touches 10+ files, you're probably missing the root cause.
 - **Resolve routine choices internally.** Follow project direction and existing conventions; choose the smallest reversible implementation and record material assumptions in the PR. Do not request human confirmation for normal implementation decisions. Emit `agent-skipped` with concrete evidence only when a missing prerequisite or unresolved scope conflict makes implementation impossible within the authorized project direction.
+- **Issue body is the requirement source.** Comments (Recent Comments, history) are context only. If a comment conflicts with the issue title/body, implement what the body says, state the conflict in the PR body, and do not treat the comment's requirement as in effect. Do not stop implementing because of the conflict. Scope changes take effect only when written into the body.
 - **Always use `clawflow`**, never `gh`. Git itself is fine.
 - Report only measured cost or usage values; say unavailable when not provided. Never invent cost figures.
 

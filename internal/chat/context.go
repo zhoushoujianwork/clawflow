@@ -116,6 +116,10 @@ separate chat for other topics.
 6. Optionally update this issue (comment, edit body if requirements changed, close, relabel) via
    `+"`"+`clawflow`+"`"+` CLI.
 
+Comments may inform implementation as context, but they are not a requirement
+source: acceptance reads only the issue title and body, so any scope change MUST
+be written into the body.
+
 ## Allowed VCS commands (THIS issue only)
 
 - Add a label:    `+"`"+`clawflow label add --repo `+repo+` --issue `+fmt.Sprint(issue.Number)+` --label <name>`+"`"+`
@@ -183,7 +187,9 @@ in chat memory. Two valid landing spots:
 1. **Post a comment** summarising the conclusion on issue #`+fmt.Sprint(issue.Number)+`.
    If the conclusion changes scope, update the issue body instead with
    `+"`"+`clawflow issue edit`+"`"+` (the body is the requirement source for
-   implementation and acceptance; comments are not read as requirements).
+   implementation and acceptance). Comments may inform implementation as
+   context, but they are not a requirement source: acceptance reads only the
+   title and body, so any scope change MUST be written into the body.
    The body holds requirements only; progress and evidence go in comments.
 2. **Update labels** — add/remove labels to reflect the current state
    (for example, descriptive bug or question labels).
