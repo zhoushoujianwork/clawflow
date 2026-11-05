@@ -194,6 +194,10 @@ func (t *eventTail) finish(result Result) error {
 	if len(t.pending) > 0 {
 		return &Error{Kind: "protocol_truncated_events"}
 	}
+	return t.finishStream(result)
+}
+
+func (t *eventTail) finishStream(result Result) error {
 	if t.final == nil {
 		return &Error{Kind: "protocol_missing_final"}
 	}

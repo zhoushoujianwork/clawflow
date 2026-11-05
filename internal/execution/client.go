@@ -59,7 +59,7 @@ func WithEnvironmentFrom(c Config, lookup func(string) (string, bool)) Config {
 		key string
 		dst *string
 	}{
-		{"CLAWFLOW_OFFLOAD_COMMAND", &c.Command}, {"CLAWFLOW_OFFLOAD_PROFILE", &c.Profile}, {"CLAWFLOW_OFFLOAD_CODEX_SANDBOX", &c.CodexSandbox},
+		{"CLAWFLOW_OFFLOAD_ENGINE", &c.Engine}, {"CLAWFLOW_OFFLOAD_COMMAND", &c.Command}, {"CLAWFLOW_OFFLOAD_PROFILE", &c.Profile}, {"CLAWFLOW_OFFLOAD_CODEX_SANDBOX", &c.CodexSandbox},
 	} {
 		if s, ok := lookup(v.key); ok {
 			*v.dst = s
@@ -378,8 +378,20 @@ func acquireOwnership(workspace, profile, session string, resume bool) (func(), 
 	return release, nil
 }
 
-// Run starts exactly one Offload process. Uncertain failures never replay work.
-func Run(ctx context.Context, c Config, req Request, env []string, events io.Writer, observe func(Observation)) (result Result, runErr error) {
+// Run starts exactly one Offload invocation through the configured engine.
+// Uncertain failures never replay work.
+func Run(ctx context.Context, c Config, req Request, env []string, events io.Writer, observe func(Observation)) (Result, error) {
+	engine, err := normalizedEngine(c.Engine)
+	if err != nil {
+		return Result{}, err
+	}
+	if engine == EngineLibrary {
+		return runLibrary(ctx, c, req, env, events, observe)
+	}
+	return runCLI(ctx, c, req, env, events, observe)
+}
+
+func runCLI(ctx context.Context, c Config, req Request, env []string, events io.Writer, observe func(Observation)) (result Result, runErr error) {
 	// Caller identity and local provenance survive even when no final record arrives.
 	defer func() {
 		result.CallerRunID = req.RequestID
@@ -407,11 +419,10 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if err := ValidateConfig(c); err != nil {
 		return result, err
 	}
-	if env == nil {
-		env = os.Environ()
+	env, err := desiredEnvironment(c, req, env)
+	if err != nil {
+		return result, err
 	}
-	env = withoutSupervisorState(env)
-	var err error
 	c.Profile, err = resolveDefaultProfile(ctx, c, env)
 	if err != nil {
 		return result, err
@@ -543,15 +554,6 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if command == "" {
 		command = "offload"
 	}
-	if c.TestDatabaseDSN != "" && req.PermissionMode == "bypassPermissions" {
-		filtered := make([]string, 0, len(env)+1)
-		for _, kv := range env {
-			if !strings.HasPrefix(kv, "CLAWFLOW_TEST_DATABASE_DSN=") {
-				filtered = append(filtered, kv)
-			}
-		}
-		env = append(filtered, "CLAWFLOW_TEST_DATABASE_DSN="+c.TestDatabaseDSN)
-	}
 	if redact(req.Prompt, env) != req.Prompt || redact(req.Instructions, env) != req.Instructions || redact(strings.Join(args, " "), env) != strings.Join(args, " ") {
 		return result, errors.New("Offload request contains an environment secret")
 	}
@@ -581,12 +583,6 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 		cmd.ExtraFiles = []*os.File{checkpointFile}
 	}
 	cmd.Dir = req.Workspace
-	if req.PermissionMode == "bypassPermissions" {
-		env, err = gitexec.AppEnvironment(env)
-		if err != nil {
-			return result, err
-		}
-	}
 	cmd.Env = env
 	// File descriptors avoid os/exec copy goroutines whose pipes can be held
 	// open by native descendants after Offload has already returned a result.
@@ -783,13 +779,37 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	return result, nil
 }
 
+func desiredEnvironment(c Config, req Request, env []string) ([]string, error) {
+	if env == nil {
+		env = os.Environ()
+	}
+	env = withoutSupervisorState(env)
+	if c.TestDatabaseDSN != "" && req.PermissionMode == "bypassPermissions" {
+		filtered := make([]string, 0, len(env)+1)
+		for _, kv := range env {
+			if !strings.HasPrefix(kv, "CLAWFLOW_TEST_DATABASE_DSN=") {
+				filtered = append(filtered, kv)
+			}
+		}
+		env = append(filtered, "CLAWFLOW_TEST_DATABASE_DSN="+c.TestDatabaseDSN)
+	}
+	if req.PermissionMode == "bypassPermissions" {
+		var err error
+		env, err = gitexec.AppEnvironment(env)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return env, nil
+}
+
 // capacityMessage matches provider capacity/overload refusals reported under
 // the generic "execution" kind by Offload versions without a capacity kind.
 var capacityMessage = regexp.MustCompile(`(?i)\bat capacity\b|\boverloaded\b|\bcapacity (?:exceeded|limit)\b`)
 
 func safeKind(s string) string {
 	switch s {
-	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "session_busy", "unknown_session", "session_expired", "session_not_found", "ownership_mismatch", "backend_mismatch", "profile_mismatch", "resume_rejected", "context_exhausted", "context_limit", "context_length_exceeded", "timeout", "canceled", "execution", "launch", "events_io":
+	case "rate_limit", "capacity", "auth", "output_limit", "cost_limit", "budget_exceeded", "unsupported_budget", "unsupported_tools", "configuration", "globally_disabled", "session_busy", "unknown_session", "session_expired", "session_not_found", "ownership_mismatch", "backend_mismatch", "profile_mismatch", "resume_rejected", "context_exhausted", "context_limit", "context_length_exceeded", "timeout", "canceled", "execution", "launch", "events_io":
 		return s
 	}
 	return "execution"
