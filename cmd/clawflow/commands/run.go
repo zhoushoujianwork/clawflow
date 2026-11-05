@@ -668,6 +668,9 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 				runLog.Warn("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", checkErr.Error())
 			}
 			if allowed && checkErr == nil {
+				if j.op != nil && j.op.Name == "implement" && j.admission != nil {
+					runLog.Info("run/admission", "repo", j.repo, "issue", j.sub.Number, "author", j.admission.Author, "basis", j.admission.Basis)
+				}
 				ready = append(ready, j)
 			}
 		}
@@ -786,6 +789,7 @@ type runJob struct {
 	repo           string
 	repoCfg        config.Repo
 	client         vcs.Client
+	admission      *issueAdmission
 	language       string // Settings.Language propagated from cfg at job creation time
 }
 
@@ -999,6 +1003,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	// implementState records, per scanned issue, why implement would not be
 	// dispatched ("" = eligible). Consulted by the work queue.
 	implementState := map[int]string{}
+	type admissionDecision struct {
+		record *issueAdmission
+		reason string
+	}
+	admissionCache := map[string]admissionDecision{}
 	capturedAt := time.Now().UTC()
 	targetMatch := "" // operator matched for the --issue target, if any
 	for _, iss := range issues {
@@ -1009,6 +1018,7 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			Number:   iss.Number,
 			Title:    iss.Title,
 			Body:     iss.Body,
+			Author:   iss.Author,
 			Labels:   iss.Labels,
 			State:    iss.State,
 			IsPR:     false,
@@ -1029,6 +1039,7 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			}
 		}
 		var firstMatch *operator.Operator
+		var implementAdmission *issueAdmission
 		implementState[sub.Number] = "implement_operator_unavailable"
 		for _, op := range reg.All() {
 			if pendingWriteBacks[sub.Number] {
@@ -1094,6 +1105,29 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 				continue
 			}
 			if op.Name == "implement" {
+				cacheKey := strings.ToLower(strings.TrimSpace(iss.Author))
+				decision, ok := admissionCache[cacheKey]
+				if !ok {
+					decision.record, decision.reason = issueAdmissionFn(client, fullName, repoCfg, iss)
+					admissionCache[cacheKey] = decision
+				} else {
+					// Cache the permission decision, while keeping each task's
+					// author spelling in its audit record and visible reason.
+					if decision.record != nil {
+						record := *decision.record
+						record.Author = strings.TrimSpace(iss.Author)
+						decision.record = &record
+					}
+					if strings.HasPrefix(decision.reason, "author_not_admitted:") {
+						decision.reason = "author_not_admitted:" + strings.TrimSpace(iss.Author)
+					}
+				}
+				if decision.reason != "" {
+					implementState[sub.Number] = decision.reason
+					runLog.Info("run/admission_denied", "repo", fullName, "issue", sub.Number, "author", iss.Author, "reason", decision.reason)
+					continue
+				}
+				implementAdmission = decision.record
 				implementState[sub.Number] = ""
 			}
 			debugf("  ✓ %s matches", op.Name)
@@ -1149,7 +1183,11 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			if firstMatch.Name == "implement" {
 				selectedReopen = reopened
 			}
-			jobs = append(jobs, &runJob{op: firstMatch, sub: sub, repo: fullName, repoCfg: repoCfg, client: client, reopen: selectedReopen})
+			job := &runJob{op: firstMatch, sub: sub, repo: fullName, repoCfg: repoCfg, client: client, reopen: selectedReopen}
+			if firstMatch.Name == "implement" {
+				job.admission = implementAdmission
+			}
+			jobs = append(jobs, job)
 		}
 	}
 
@@ -1564,6 +1602,13 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	if j.op.Name == "implement" {
 		if err := prepareImplementation(j); err != nil {
+			if errors.Is(err, errIssueAdmissionDeferred) {
+				reason := issueAdmissionReason(err)
+				j.result.Status, j.result.Error = "skipped", ""
+				fmt.Fprintf(os.Stderr, "%s → implementation deferred: %v\n", prefix, err)
+				runLog.Info("run/admission_denied", "repo", j.repo, "issue", j.sub.Number, "author", j.sub.Author, "reason", reason, "when", "execution")
+				return false, false, false
+			}
 			j.result.Error = err.Error()
 			fmt.Fprintf(os.Stderr, "%s → implementation skipped: %v\n", prefix, err)
 			runLog.Warn("run/implementation_skip", "repo", j.repo, "issue", j.sub.Number, "err", err.Error())

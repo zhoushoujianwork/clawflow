@@ -542,6 +542,23 @@ func TestCoordinatorHostAffinitySurvivesKindOverride(t *testing.T) {
 	}
 }
 
+func TestCoordinatorImplementPayloadContainsAdmission(t *testing.T) {
+	checkedAt := time.Date(2026, 11, 5, 1, 2, 3, 0, time.UTC)
+	want := &issueAdmission{Author: "alice", Basis: "write_permission", CheckedAt: checkedAt}
+	_, payload := coordinatorTask(&runJob{
+		repo: "o/r", op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7}, admission: want,
+	}, time.Minute)
+	if !reflect.DeepEqual(payload.Admission, want) {
+		t.Fatalf("admission = %#v, want %#v", payload.Admission, want)
+	}
+	_, nonImplement := coordinatorTask(&runJob{
+		repo: "o/r", op: &operator.Operator{Name: "reply-comment"}, sub: &operator.Subject{Number: 7}, admission: want,
+	}, time.Minute)
+	if nonImplement.Admission != nil {
+		t.Fatalf("non-implement payload leaked admission: %#v", nonImplement.Admission)
+	}
+}
+
 func TestCoordinatorPlatformDoesNotAddRoutingTags(t *testing.T) {
 	for _, rc := range []config.Repo{
 		{},
