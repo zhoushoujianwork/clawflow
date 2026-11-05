@@ -30,11 +30,12 @@ type Repo struct {
 	RequiredCapabilities []string `yaml:"required_capabilities,omitempty" json:"required_capabilities,omitempty"`
 	AcceptanceWorker     string   `yaml:"acceptance_worker,omitempty" json:"acceptance_worker,omitempty"`
 	// CoordinatorMode and CoordinatorActive are pass-local scheduling inputs.
-	CoordinatorActive map[int]bool        `yaml:"-" json:"-"`
-	CoordinatorMode   bool                `yaml:"-" json:"-"`
-	WorkerTags        []string            `yaml:"worker_tags,omitempty" json:"worker_tags,omitempty"`
-	WorkerTagsByKind  map[string][]string `yaml:"worker_tags_by_kind,omitempty" json:"worker_tags_by_kind,omitempty"`
-	Priority          int                 `yaml:"priority,omitempty" json:"priority,omitempty"`
+	CoordinatorActive   map[int]bool        `yaml:"-" json:"-"`
+	CoordinatorMode     bool                `yaml:"-" json:"-"`
+	WorkerTags          []string            `yaml:"worker_tags,omitempty" json:"worker_tags,omitempty"`
+	WorkerTagsByKind    map[string][]string `yaml:"worker_tags_by_kind,omitempty" json:"worker_tags_by_kind,omitempty"`
+	AllowedIssueAuthors []string            `yaml:"allowed_issue_authors,omitempty" json:"allowed_issue_authors,omitempty"`
+	Priority            int                 `yaml:"priority,omitempty" json:"priority,omitempty"`
 
 	PilotOverrideMerge bool              `yaml:"pilot_override_merge,omitempty" json:"pilot_override_merge,omitempty"`
 	Enabled            bool              `yaml:"enabled"`

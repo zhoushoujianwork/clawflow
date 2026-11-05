@@ -29,6 +29,7 @@ import (
 
 type coordinatorPayload struct {
 	Coordination *coordination.Snapshot `json:"coordination,omitempty"`
+	Admission    *issueAdmission        `json:"admission,omitempty"`
 
 	Title             string               `json:"title,omitempty"`
 	Testing           testingRequirements  `json:"testing,omitempty"`
@@ -145,6 +146,9 @@ func coordinatorTask(j *runJob, timeout time.Duration) (coordinator.Task, coordi
 	}
 	p := coordinatorPayload{Testing: declaredTesting(j.repo, j.repoCfg), Kind: kind, Operator: j.op.Name, SkillDigest: skillDigest(j.op), Repo: j.repo, Platform: platform, BaseURL: j.repoCfg.BaseURL, Issue: j.sub.Number, Role: roleForOperator(j.op.Name), Language: j.language, TimeoutSec: int64(timeout / time.Second), Tags: unique}
 	p.Coordination = j.coordination
+	if kind == "implement" {
+		p.Admission = j.admission
+	}
 	p.Title = j.sub.Title
 	p.RepoPolicy.AcceptanceSetupCommand = j.repoCfg.AcceptanceSetupCommand
 	p.RepoPolicy.BaseBranch, p.RepoPolicy.TestCommand, p.RepoPolicy.CIRequired = j.repoCfg.BaseBranch, j.repoCfg.TestCommand, j.repoCfg.CIRequired

@@ -354,7 +354,10 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 		UpdatedAt   string    `json:"updated_at"`
 		ClosedAt    string    `json:"closed_at"`
 		PullRequest *struct{} `json:"pull_request"`
-		Labels      []struct {
+		User        struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 	}
@@ -370,7 +373,7 @@ func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
 		// open. Set State explicitly — the list table prints i.State and would
 		// otherwise show a blank STATE column on the default --state open path
 		// (issue #274).
-		issue := vcs.Issue{Number: r.Number, State: "open", Title: r.Title, Body: r.Body, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
+		issue := vcs.Issue{Number: r.Number, State: "open", Title: r.Title, Body: r.Body, Author: r.User.Login, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
 		for _, l := range r.Labels {
 			issue.Labels = append(issue.Labels, l.Name)
 		}
@@ -584,11 +587,14 @@ func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error)
 		Title   string `json:"title"`
 		Body    string `json:"body"`
 		HTMLURL string `json:"html_url"`
+		User    struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.Issue{}, err
 	}
-	return vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Body: raw.Body, URL: raw.HTMLURL}, nil
+	return vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Body: raw.Body, Author: raw.User.Login, URL: raw.HTMLURL}, nil
 }
 
 func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdate) (vcs.Issue, error) {
@@ -620,11 +626,14 @@ func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdat
 		Title  string `json:"title"`
 		Body   string `json:"body"`
 		State  string `json:"state"`
+		User   struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return vcs.Issue{}, err
 	}
-	return vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Body: raw.Body, State: raw.State}, nil
+	return vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Body: raw.Body, Author: raw.User.Login, State: raw.State}, nil
 }
 
 func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.Issue, error) {
@@ -653,7 +662,10 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		UpdatedAt   string    `json:"updated_at"`
 		ClosedAt    string    `json:"closed_at"`
 		PullRequest *struct{} `json:"pull_request"`
-		Labels      []struct {
+		User        struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		SubIssuesSummary *struct {
@@ -669,7 +681,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 		if r.PullRequest != nil {
 			continue
 		}
-		issue := vcs.Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
+		issue := vcs.Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body, Author: r.User.Login, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, ClosedAt: r.ClosedAt}
 		if r.SubIssuesSummary != nil {
 			issue.SubIssuesTotal = r.SubIssuesSummary.Total
 			issue.SubIssuesCompleted = r.SubIssuesSummary.Completed
@@ -1079,7 +1091,10 @@ func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue
 			CreatedAt   string    `json:"created_at"`
 			UpdatedAt   string    `json:"updated_at"`
 			PullRequest *struct{} `json:"pull_request"`
-			Labels      []struct {
+			User        struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Labels []struct {
 				Name string `json:"name"`
 			} `json:"labels"`
 		} `json:"items"`
@@ -1092,13 +1107,43 @@ func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue
 		if r.PullRequest != nil {
 			continue
 		}
-		iss := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		iss := vcs.Issue{Number: r.Number, Title: r.Title, Body: r.Body, Author: r.User.Login, State: r.State, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 		for _, l := range r.Labels {
 			iss.Labels = append(iss.Labels, l.Name)
 		}
 		issues = append(issues, iss)
 	}
 	return issues, nil
+}
+
+func (c *Client) AuthorHasWriteAccess(repo, login string) (bool, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return false, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/collaborators/%s/permission", owner, name, url.PathEscape(login))
+	data, status, err := c.do("GET", path, nil)
+	if err != nil {
+		return false, err
+	}
+	if status == http.StatusNotFound {
+		return false, nil
+	}
+	if status != http.StatusOK {
+		return false, fmt.Errorf("github collaborator permission: HTTP %d: %s", status, data)
+	}
+	var raw struct {
+		Permission string `json:"permission"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false, err
+	}
+	switch strings.ToLower(raw.Permission) {
+	case "admin", "maintain", "write":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func (c *Client) MergePR(repo string, prNumber int) error {
@@ -1315,6 +1360,9 @@ func (c *Client) ListSubIssues(repo string, issueNumber int) ([]vcs.Issue, error
 		Title  string `json:"title"`
 		Body   string `json:"body"`
 		State  string `json:"state"`
+		User   struct {
+			Login string `json:"login"`
+		} `json:"user"`
 		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
@@ -1328,7 +1376,7 @@ func (c *Client) ListSubIssues(repo string, issueNumber int) ([]vcs.Issue, error
 		for j, l := range r.Labels {
 			labels[j] = l.Name
 		}
-		issues[i] = vcs.Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body, State: r.State, Labels: labels}
+		issues[i] = vcs.Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body, Author: r.User.Login, State: r.State, Labels: labels}
 	}
 	return issues, nil
 }
@@ -1354,11 +1402,14 @@ func (c *Client) GetParentIssue(repo string, issueNumber int) (*vcs.Issue, error
 		Number int    `json:"number"`
 		Title  string `json:"title"`
 		State  string `json:"state"`
+		User   struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-	return &vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, State: raw.State}, nil
+	return &vcs.Issue{ID: raw.ID, Number: raw.Number, Title: raw.Title, Author: raw.User.Login, State: raw.State}, nil
 }
 
 // GetRepoID returns GitHub's immutable numeric repository ID. The
@@ -1404,15 +1455,18 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 		return nil, fmt.Errorf("github get issue: HTTP %d: %s", status, data)
 	}
 	var raw struct {
-		ID               int64  `json:"id"`
-		Number           int    `json:"number"`
-		Title            string `json:"title"`
-		Body             string `json:"body"`
-		State            string `json:"state"`
-		HTMLURL          string `json:"html_url"`
-		CreatedAt        string `json:"created_at"`
-		UpdatedAt        string `json:"updated_at"`
-		ClosedAt         string `json:"closed_at"`
+		ID        int64  `json:"id"`
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		State     string `json:"state"`
+		HTMLURL   string `json:"html_url"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		ClosedAt  string `json:"closed_at"`
+		User      struct {
+			Login string `json:"login"`
+		} `json:"user"`
 		SubIssuesSummary struct {
 			Total     int `json:"total"`
 			Completed int `json:"completed"`
@@ -1433,6 +1487,7 @@ func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
 		Number:    raw.Number,
 		Title:     raw.Title,
 		Body:      raw.Body,
+		Author:    raw.User.Login,
 		State:     raw.State,
 		Labels:    labels,
 		URL:       raw.HTMLURL,

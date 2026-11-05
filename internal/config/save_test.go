@@ -67,6 +67,7 @@ repos:
   o/keep:
     enabled: true
     worker_tags: [host-x]
+    allowed_issue_authors: [release-bot]
     acceptance_worker: different
 `)
 	cfg, err := Load()
@@ -80,7 +81,7 @@ repos:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Settings.Database.DSN == "" || !cfg.Settings.Coordinator.LocalWorker.Enabled || len(cfg.Repos["o/keep"].WorkerTags) != 1 || cfg.Repos["o/keep"].AcceptanceWorker != "different" {
+	if cfg.Settings.Database.DSN == "" || !cfg.Settings.Coordinator.LocalWorker.Enabled || len(cfg.Repos["o/keep"].WorkerTags) != 1 || strings.Join(cfg.Repos["o/keep"].AllowedIssueAuthors, ",") != "release-bot" || cfg.Repos["o/keep"].AcceptanceWorker != "different" {
 		t.Fatalf("round trip lost settings: %+v", cfg)
 	}
 	// A known field can still be cleared on purpose.
@@ -99,7 +100,7 @@ repos:
 
 // Everything this binary writes must pass its own guard, for every field.
 func TestSaveAcceptsItsOwnOutput(t *testing.T) {
-	data, err := yaml.Marshal(&Config{Repos: map[string]Repo{"o/r": {Enabled: true, WorkerTags: []string{"t"}}}})
+	data, err := yaml.Marshal(&Config{Repos: map[string]Repo{"o/r": {Enabled: true, WorkerTags: []string{"t"}, AllowedIssueAuthors: []string{"bot"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
