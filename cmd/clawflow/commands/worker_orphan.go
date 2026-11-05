@@ -3,6 +3,10 @@ package commands
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
+
+	offload "github.com/zhoushoujianwork/offload/pkg/execution"
 )
 
 type AbandonState string
@@ -13,8 +17,29 @@ const (
 	AbandonUnknown      AbandonState = "unknown"
 )
 
-// abandonOrphanedRun is the public-package integration seam for Offload run
-// cleanup. offload#100 is not released yet, so recovery must remain conservative.
-var abandonOrphanedRun = func(context.Context, string) (AbandonState, error) {
-	return AbandonUnknown, errors.New("Offload orphan cleanup is unavailable until zhoushoujianwork/offload#100 is released")
+// ReclaimRun allows 5 seconds for SIGTERM and 3 seconds after SIGKILL. Leave
+// enough room for both waits plus process-state polling and slot persistence.
+const orphanReclaimTimeout = 10 * time.Second
+
+var reclaimOffloadRun = offload.ReclaimRun
+
+// abandonOrphanedRun is the public-package integration seam for Offload run cleanup.
+var abandonOrphanedRun = func(ctx context.Context, runID string) (AbandonState, error) {
+	if runID == "" {
+		return AbandonUnknown, errors.New("library execution run ID is missing; orphan state cannot be confirmed")
+	}
+	reclaimCtx, cancel := context.WithTimeout(ctx, orphanReclaimTimeout)
+	defer cancel()
+	outcome, err := reclaimOffloadRun(reclaimCtx, runID)
+	if err != nil {
+		return AbandonUnknown, err
+	}
+	switch outcome {
+	case offload.ReclaimTerminated:
+		return AbandonEnded, nil
+	case offload.ReclaimAlreadyEnded:
+		return AbandonAlreadyEnded, nil
+	default:
+		return AbandonUnknown, fmt.Errorf("Offload could not confirm run %q ended: reclaim outcome %q", runID, outcome)
+	}
 }
