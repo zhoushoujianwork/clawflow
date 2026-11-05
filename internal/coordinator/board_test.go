@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -145,5 +146,45 @@ func TestBoardWaitingForIndependentReviewer(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestBoardSurfacesStuckWorkFindings(t *testing.T) {
+	s, db, _ := setup(t)
+	now := time.Now().UTC()
+	for i := 0; i < 2; i++ {
+		task := Task{ID: fmt.Sprintf("fail-%d", i), Kind: "implement", Repo: "o/r", Issue: 7, Operator: "implement", Payload: json.RawMessage(`{}`), Tags: []string{},
+			State: "failed", Result: json.RawMessage(`{"status":"failed","error":"operator produced no outcome marker"}`), CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Duration(i+1) * time.Minute)}
+		if err := db.DB().Create(&task).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.OrphanedPRs = func(context.Context) ([]OrphanedPR, error) {
+		return []OrphanedPR{{Repo: "o/r", PR: 9, Cause: OrphanIssueUnlinked, Since: now.Add(-time.Hour)}}, nil
+	}
+	has := func(b Board, rule string) bool {
+		for _, f := range b.Findings {
+			if f.Rule == rule {
+				return true
+			}
+		}
+		return false
+	}
+	// Default threshold (3): two failures are not enough; the orphaned PR is reported.
+	b, err := s.Board(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has(b, RuleRepeatedFailure) || !has(b, RuleOrphanedPR) {
+		t.Fatalf("defaults: %+v", b.Findings)
+	}
+	// Configured threshold 2 surfaces repeated_failure; a 2h orphan threshold hides the PR.
+	s.Watchdog = WatchdogConfig{FailureThreshold: 2, OrphanAfter: 2 * time.Hour}
+	b, err = s.Board(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(b, RuleRepeatedFailure) || has(b, RuleOrphanedPR) {
+		t.Fatalf("configured: %+v", b.Findings)
 	}
 }
