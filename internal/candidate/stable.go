@@ -49,39 +49,88 @@ func DefaultStableProbe(stableRoot, candidateBase string) StableProbe {
 		if err != nil {
 			return nil, err
 		}
-		var ids []string
-		for _, line := range strings.Split(string(out), "\n") {
-			// Task executors run from the worker-executions tree; they come and
-			// go with every dispatched task and are not service identity.
-			if isExec := strings.Contains(line, "worker-executions"); isExec != executors {
-				continue
-			}
-			if executors {
-				if candidateBase != "" && strings.Contains(line, candidateBase) {
-					continue
-				}
-			} else if !(strings.Contains(line, "clawflow") && (strings.Contains(line, " controller") || strings.Contains(line, " worker") || strings.Contains(line, "ClawFlow.app"))) {
-				continue
-			}
-			if candidateBase != "" && strings.Contains(line, candidateBase) {
-				continue
-			}
-			f := strings.Fields(line)
-			if len(f) < 6 {
-				continue
-			}
-			if _, err := strconv.Atoi(f[0]); err != nil {
-				continue
-			}
-			ids = append(ids, f[0]+":"+strings.Join(f[1:6], " "))
-		}
-		sort.Strings(ids)
-		return ids, nil
+		return parseProcesses(string(out), candidateBase, executors), nil
 	}
 	return StableProbe{
 		Processes: func() ([]string, error) { return list(false) },
 		Executors: func() ([]string, error) { return list(true) },
 	}
+}
+
+// parseProcesses extracts "pid:start" identities from `ps -axo pid=,lstart=,command=`
+// output. Services are processes whose executable is named clawflow and whose
+// first subcommand is controller or worker (other than "worker execute", which
+// is a task executor), or the ClawFlow.app bundle. Words that merely appear in
+// arguments or paths (a shell cd-ing into a clawflow checkout, grep, git) do
+// not count. Identity stays pid + start time + command line.
+func parseProcesses(out, candidateBase string, executors bool) []string {
+	var ids []string
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 7 {
+			continue
+		}
+		if _, err := strconv.Atoi(f[0]); err != nil {
+			continue
+		}
+		if candidateBase != "" && strings.Contains(line, candidateBase) {
+			continue
+		}
+		// The command starts after the pid and the five lstart fields.
+		command := commandAfter(line, 6)
+		sub := clawflowSubcommand(command)
+		isExec := strings.Contains(line, "worker-executions") || sub == "worker execute"
+		if isExec != executors {
+			continue
+		}
+		if !executors && sub != "controller" && sub != "worker" && !strings.Contains(line, "ClawFlow.app") {
+			continue
+		}
+		ids = append(ids, f[0]+":"+strings.Join(f[1:6], " ")+":"+command)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// commandAfter returns line with its first n whitespace-separated fields removed.
+func commandAfter(line string, n int) string {
+	rest := strings.TrimSpace(line)
+	for i := 0; i < n; i++ {
+		idx := strings.IndexAny(rest, " \t")
+		if idx < 0 {
+			return ""
+		}
+		rest = strings.TrimSpace(rest[idx:])
+	}
+	return rest
+}
+
+// clawflowSubcommand returns "controller", "worker", "worker execute" or ""
+// when command does not run a clawflow executable at its start. Paths may
+// contain spaces, so the executable is the last "/clawflow " whose preceding
+// path has no option-looking token.
+func clawflowSubcommand(command string) string {
+	var rest string
+	switch {
+	case strings.HasPrefix(command, "clawflow "):
+		rest = command[len("clawflow "):]
+	case strings.HasPrefix(command, "/"):
+		idx := strings.LastIndex(command, "/clawflow ")
+		if idx < 0 || strings.Contains(command[:idx], " -") {
+			return ""
+		}
+		rest = command[idx+len("/clawflow "):]
+	default:
+		return ""
+	}
+	args := strings.Fields(rest)
+	if len(args) == 0 || (args[0] != "controller" && args[0] != "worker") {
+		return ""
+	}
+	if args[0] == "worker" && len(args) > 1 && args[1] == "execute" {
+		return "worker execute"
+	}
+	return args[0]
 }
 
 func digestTree(root string, skip func(rel string) bool, entries ...map[string]string) (string, error) {
@@ -148,9 +197,12 @@ func digestTree(root string, skip func(rel string) bool, entries ...map[string]s
 // rewrites on every pass: run history, scan-derived snapshots, HTTP caches and
 // scan counters. A candidate cannot reach them through its own HOME, and they
 // change whether or not one is running, so they cannot show contamination.
-// Configuration, manual queue order and task, acceptance and coordination
-// records stay protected.
+// acceptance-plans and coordination are written by the stable scheduler on
+// dispatch. Configuration, manual queue order and task and acceptance records
+// stay protected.
 var stableActivityData = map[string]bool{
+	"acceptance-plans":  true,
+	"coordination":      true,
 	"git-status.json":   true,
 	"github-http":       true,
 	"harvest":           true,
