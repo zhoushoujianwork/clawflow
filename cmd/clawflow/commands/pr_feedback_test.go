@@ -9,6 +9,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
+	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/prfeedback"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -152,5 +153,69 @@ func TestPRFeedbackReleaseRestoresPending(t *testing.T) {
 	}
 	if _, err := prfeedback.Reserve(root, "o/r", 1, "h", []string{"a"}, now); err != nil {
 		t.Fatalf("released item not retried: %v", err)
+	}
+}
+
+func feedbackResumeJob(sha string) *runJob {
+	return &runJob{repo: "o/r", repoCfg: config.Repo{BaseBranch: "main"}, sub: &operator.Subject{Number: 9, Body: "Acceptance: checks pass"}, op: &operator.Operator{Name: "repair-ci"},
+		repair: &ciRepairContext{PR: vcs.PR{Number: 11, HeadRepo: "o/r", HeadSHA: sha, HeadBranch: "fix/issue-9"}, Attempt: 1,
+			Feedback: &prFeedbackBatch{IDs: []string{"inline:1"}, Items: []vcs.PRFeedback{{ID: "inline:1", Kind: "inline", Author: "alice", Body: "rename", Path: "a.go", Line: 3}}}}}
+}
+
+func TestPRFeedbackResumesOriginalSessionAndFallsBackByExistingRules(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAWFLOW_OFFLOAD_PROFILE", "dev")
+	dir, sha := resumeGitFixture(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	// The original development run finished cleanly.
+	prev := snapshot.RunMeta{Repo: "o/r", IssueNumber: 9, Operator: "implement", StartedAt: start, Status: "success", DevelopmentSession: snapshot.DevelopmentSession{SessionID: "native", Profile: "dev", Backend: "codex", Role: config.RoleOperator, Workdir: dir, BaseSHA: sha}}
+	j := feedbackResumeJob(sha)
+	cur := snapshot.RunMeta{Repo: "o/r", IssueNumber: 9, Operator: "repair-ci", StartedAt: time.Now()}
+	opts := developmentResumeOptions(context.Background(), j, prev, worktreeResult{Path: dir, Resumed: true}, nil, j.repair.prompt(""), &cur, func() {})
+	if opts.SessionKey != "native" || !strings.Contains(opts.ResumePrompt, "UNTRUSTED PR FEEDBACK") || !strings.Contains(opts.ResumePrompt, "rename") {
+		t.Fatalf("original session not resumed with feedback: key=%q", opts.SessionKey)
+	}
+	// A non-resumable session follows the existing rules (fresh session).
+	prev.DevelopmentSession.Profile = "old"
+	opts = developmentResumeOptions(context.Background(), j, prev, worktreeResult{Path: dir, Resumed: true}, nil, j.repair.prompt(""), &cur, func() {})
+	if opts.SessionKey != "" || opts.ResumePrompt != "" {
+		t.Fatal("profile-changed session was resumed")
+	}
+	prev.DevelopmentSession.Profile = "dev"
+	prev.Status = "cancelled"
+	opts = developmentResumeOptions(context.Background(), j, prev, worktreeResult{Path: dir, Resumed: true}, nil, j.repair.prompt(""), &cur, func() {})
+	if opts.SessionKey != "" {
+		t.Fatal("cancelled session was resumed")
+	}
+}
+
+func TestPRFeedbackResultPostsOnSamePR(t *testing.T) {
+	f, _ := feedbackSetup(t)
+	j := feedbackResumeJob(f.pr.HeadSHA)
+	j.client = f
+	postPRFeedbackResult(j, "success", "agent-implemented", "renamed the symbol")
+	if len(f.posted) != 1 || !strings.Contains(f.posted[0], "renamed the symbol") || !strings.Contains(f.posted[0], prFeedbackResultMarker(11)) {
+		t.Fatalf("posted=%v", f.posted)
+	}
+}
+
+func TestPRFeedbackNewHeadIsGatedByCIAgain(t *testing.T) {
+	f, cfg := feedbackSetup(t)
+	reg := repairRegistry(t)
+	f.items = []vcs.PRFeedback{{ID: "comment:1", Author: "alice", Body: "fix"}}
+	jobs := scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, nil)
+	if len(jobs) != 1 {
+		t.Fatal("no feedback job")
+	}
+	if err := reserveJobRepair(context.Background(), jobs[0], time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	// The feedback push produced a new head whose CI fails: the normal CI
+	// repair path (shared budget) applies to it; feedback is not re-run.
+	f.pr.HeadSHA = strings.Repeat("b", 40)
+	f.status = vcs.CIStatusFailure
+	got := scanCIRepairJobs(context.Background(), reg, f, "o/r", cfg, 0, nil)
+	if len(got) != 1 || got[0].repair.Feedback != nil || got[0].repair.PR.HeadSHA != f.pr.HeadSHA {
+		t.Fatalf("new head not gated by CI: %v", got)
 	}
 }
