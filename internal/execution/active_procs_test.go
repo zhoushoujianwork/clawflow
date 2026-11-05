@@ -4,7 +4,10 @@ package execution
 
 import (
 	"bufio"
+	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -65,6 +68,52 @@ func TestTerminateAllActiveCmdsKillsRegisteredGrandchild(t *testing.T) {
 // finish well within budget).
 func TestTerminateAllActiveCmdsNoOpWhenEmpty(t *testing.T) {
 	TerminateAllActiveCmds() // must not panic or block
+}
+
+func TestTerminateAllActiveCmdsStopsLibraryProcessTree(t *testing.T) {
+	orig := terminateGrace
+	terminateGrace = 500 * time.Millisecond
+	defer func() { terminateGrace = orig }()
+
+	pidPath := filepath.Join(t.TempDir(), "native.pid")
+	t.Setenv("LIBRARY_FAKE_PID", pidPath)
+	c, req := libraryFixture(t, `cat >/dev/null
+sleep 60 &
+echo $! > "$LIBRARY_FAKE_PID"
+wait
+`)
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(context.Background(), c, req, nil, nil, nil)
+		done <- err
+	}()
+
+	var nativePID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(pidPath)
+		if err == nil {
+			nativePID, err = strconv.Atoi(strings.TrimSpace(string(raw)))
+			if err == nil {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if nativePID == 0 {
+		t.Fatal("library native process did not start")
+	}
+
+	TerminateAllActiveCmds()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("library Run did not return before termination completed")
+	}
+	if err := syscall.Kill(nativePID, 0); err == nil {
+		_ = syscall.Kill(nativePID, syscall.SIGKILL)
+		t.Fatalf("library native descendant %d survived termination", nativePID)
+	}
 }
 
 // TestRegisterUnregisterActiveCmd pins the bookkeeping contract:

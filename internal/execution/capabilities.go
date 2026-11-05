@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
+	offload "github.com/zhoushoujianwork/offload/pkg/execution"
 )
 
 // CapabilitySchemaVersion is the Report schema version.
@@ -149,6 +151,9 @@ func probeCapabilities(ctx context.Context, c Config, get func(string) (string, 
 		ctx = context.Background()
 	}
 	r := newReport(c.Profile)
+	if engine, err := normalizedEngine(c.Engine); err == nil && engine == EngineLibrary {
+		return probeLibraryCapabilities(c, get), nil
+	}
 	if reason, err := validateConfigWith(c, func(f string) (string, error) { return lookPathIn(f, get) }); err != nil {
 		r.block(CheckConfig, reason, err.Error())
 		return r, nil
@@ -202,6 +207,49 @@ func probeCapabilities(ctx context.Context, c Config, get func(string) (string, 
 	r.set(CheckFlagDeclarations, CheckPassed, "all required flags are declared")
 	r.Status = StatusReady
 	return r, output
+}
+
+func probeLibraryCapabilities(c Config, get func(string) (string, bool)) Report {
+	r := newReport(c.Profile)
+	if reason, err := validateConfigWith(c, func(string) (string, error) { return "", errors.New("library engine does not resolve a command") }); err != nil {
+		r.block(CheckConfig, reason, err.Error())
+		return r
+	}
+	r.set(CheckConfig, CheckPassed, "execution overrides are well formed")
+	r.set(CheckCommand, CheckPassed, "Offload execution is embedded in this ClawFlow binary")
+	r.set(CheckHelpProbe, CheckPassed, "embedded execution API is available")
+	r.set(CheckFlagDeclarations, CheckPassed, "required controls are provided by the embedded execution API")
+	name := c.Profile
+	path := libraryConfigPath(get)
+	if name == "" {
+		var err error
+		name, err = offload.DefaultProfile(path)
+		if err != nil || !validProfile(name) {
+			r.block(CheckConfig, ReasonProfileMissing, "Offload has no active default profile (run offload config).")
+			return r
+		}
+	}
+	loaded, err := offload.LoadConfig(path, name)
+	if err != nil {
+		r.block(CheckConfig, ReasonProfileNotFound, fmt.Sprintf("Profile %q is not defined in Offload configuration.", sanitizeText(name, 64)))
+		return r
+	}
+	r.Profile = loaded.ProfileName
+	r.Status = StatusReady
+	return r
+}
+
+func libraryConfigPath(get func(string) (string, bool)) string {
+	if get == nil {
+		return offload.DefaultConfigPath()
+	}
+	if root, ok := get("XDG_CONFIG_HOME"); ok && root != "" {
+		return filepath.Join(root, "offload", "config.json")
+	}
+	if home, ok := get("HOME"); ok && home != "" {
+		return filepath.Join(home, ".config", "offload", "config.json")
+	}
+	return offload.DefaultConfigPath()
 }
 
 // boundedBuffer keeps at most max bytes and signals once when more is written.

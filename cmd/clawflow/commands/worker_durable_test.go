@@ -18,6 +18,36 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 )
 
+func TestPrepareLibraryExecutorUsesPinnedClawFlowWithoutOffloadRuntime(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := (&config.Config{Repos: map[string]config.Repo{}, Settings: config.Settings{Execution: config.ExecutionSettings{Engine: "library", Profile: "fixture"}}}).Save(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	pinned := filepath.Join(root, "clawflow")
+	if err := os.WriteFile(pinned, []byte("fixture"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	o := workerOptions{StateDir: root, Executable: pinned, TokenFile: filepath.Join(root, "token")}
+	task := coordinator.Task{ID: "task", Payload: []byte(`{"durable_execution":true}`)}
+	j, err := prepareWorkerExecutor(o, &task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Engine != "library" || j.OffloadCommand != "" || j.Executable != pinned {
+		t.Fatalf("journal=%+v", j)
+	}
+	if _, err := os.Stat(filepath.Join(workerJournalRoot(o), "runtimes")); !os.IsNotExist(err) {
+		t.Fatalf("library engine created Offload runtime: %v", err)
+	}
+}
+
+func TestLegacyWorkerJournalUsesCLIEngine(t *testing.T) {
+	if got := workerExecutionEngine(&workerJournal{}); got != "cli" {
+		t.Fatalf("legacy engine=%q", got)
+	}
+}
+
 func TestWorkerOutboxSurvivesLostAcknowledgement(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "journal.json")

@@ -98,7 +98,7 @@ write-back are disabled by default.`}
 			}
 			fx[name] = url
 		}
-		opts := candidate.ConfigOptions{Fixtures: fx}
+		opts := candidate.ConfigOptions{Fixtures: fx, ExecutionEngine: candidateExecutionEngine()}
 		if _, err := p.BuildConfig(opts); err != nil {
 			return err
 		}
@@ -279,6 +279,14 @@ write-back are disabled by default.`}
 func schemaRecorded(p candidate.Plan) bool {
 	_, err := os.Stat(filepath.Join(p.Root, ".schema-created"))
 	return err == nil
+}
+
+func candidateExecutionEngine() string {
+	cfg, err := config.Load()
+	if err != nil {
+		return ""
+	}
+	return cfg.Settings.Execution.Engine
 }
 
 // candidateSOP reads the same machine-local testing.md that development and

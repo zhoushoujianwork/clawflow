@@ -50,6 +50,8 @@ func (p Plan) Env(dsn string) []string {
 type ConfigOptions struct {
 	// Fixtures maps repository names to loopback base URLs of fake forges.
 	Fixtures map[string]string
+	// ExecutionEngine carries only the stable host's portable engine selection.
+	ExecutionEngine string
 	// Dispatch enables the fixture repositories. It is false by default so a
 	// fresh candidate cannot start any work.
 	Dispatch bool
@@ -63,6 +65,7 @@ func (p Plan) BuildConfig(opts ConfigOptions) (*config.Config, error) {
 	cfg.Settings.MaxConcurrentAgents = 2
 	cfg.Settings.RunIntervalMinutes = 0
 	cfg.Settings.Housekeeping.Disabled = true
+	cfg.Settings.Execution.Engine = opts.ExecutionEngine
 	names := make([]string, 0, len(opts.Fixtures))
 	for name := range opts.Fixtures {
 		names = append(names, name)

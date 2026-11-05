@@ -158,7 +158,7 @@ func TestPrepareCreatesPrivateLayoutAndIsIdempotent(t *testing.T) {
 
 func TestConfigIsInertByDefaultAndCarriesNoSecrets(t *testing.T) {
 	p := plan(t, commitA, 0)
-	cfg, err := p.BuildConfig(ConfigOptions{Fixtures: map[string]string{"fix/repo": "http://127.0.0.1:9000"}})
+	cfg, err := p.BuildConfig(ConfigOptions{Fixtures: map[string]string{"fix/repo": "http://127.0.0.1:9000"}, ExecutionEngine: "library"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,6 +168,9 @@ func TestConfigIsInertByDefaultAndCarriesNoSecrets(t *testing.T) {
 	}
 	if !r.AcceptanceRequired || r.AcceptanceWorker != "different" || r.MaxInFlight != 1 || cfg.Settings.MaxConcurrentAgents != 2 {
 		t.Fatalf("lane bounds missing: %+v", r)
+	}
+	if cfg.Settings.Execution.Engine != "library" {
+		t.Fatalf("candidate lost execution engine: %+v", cfg.Settings.Execution)
 	}
 	if r.TestingSOPDigest != p.Pin.SOPDigest || strings.Join(r.RequiredCapabilities, ",") != "build,fixture-runtime" {
 		t.Fatalf("pin not applied: %+v", r)

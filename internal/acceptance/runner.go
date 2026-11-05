@@ -376,6 +376,9 @@ func applyReviewReport(c Contract, record *Record, text string) error {
 			}
 		}
 	}
+	if c.EvidenceSchema == 1 {
+		output.Findings, output.Status, output.NextOwner, output.NextAction, _ = normalizeMissingEvidence(record.Plan.Criteria, output.Checks, output.Findings, output.Status, output.NextOwner, output.NextAction)
+	}
 	failing, findingErr := validateFindings(output.Findings)
 	if findingErr != nil {
 		return findingErr

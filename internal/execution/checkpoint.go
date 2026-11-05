@@ -13,13 +13,13 @@ import (
 
 // Checkpoint is private recovery metadata, not execution evidence or authority.
 type Checkpoint struct {
-	Version                                              int
-	Workspace, Profile, Command, Session, Backend, RunID string
-	ArtifactDir                                          string
-	UpdatedAt                                            time.Time
-	Completed                                            bool
-	ObservationOnly                                      bool
-	CallerRunID                                          string
+	Version                                                      int
+	Workspace, Profile, Engine, Command, Session, Backend, RunID string
+	ArtifactDir                                                  string
+	UpdatedAt                                                    time.Time
+	Completed                                                    bool
+	ObservationOnly                                              bool
+	CallerRunID                                                  string
 }
 type checkpointOptions struct {
 	Path            string
@@ -110,18 +110,33 @@ func recoveryCheckpoint(ctx context.Context, c Config, req *Request) (string, *C
 	} else if req.PermissionMode != "bypassPermissions" || req.ToolsDisabled {
 		return "", nil, nil
 	}
-	cp := Checkpoint{Version: 1, Workspace: req.Workspace, Profile: c.Profile, Command: c.Command, ObservationOnly: option.ObservationOnly, CallerRunID: req.RequestID}
+	engine, err := normalizedEngine(c.Engine)
+	if err != nil {
+		return "", nil, err
+	}
+	command := c.Command
+	if engine == EngineLibrary {
+		command = ""
+	}
+	cp := Checkpoint{Version: 1, Workspace: req.Workspace, Profile: c.Profile, Engine: engine, Command: command, ObservationOnly: option.ObservationOnly, CallerRunID: req.RequestID}
 	if option.Resume {
 		previous, err := ReadCheckpoint(option.Path)
 		if err != nil {
 			return "", nil, err
 		}
-		if previous.ObservationOnly || previous.Completed || previous.Workspace != req.Workspace || previous.Profile != c.Profile || previous.Command != c.Command || !idPattern.MatchString(previous.Session) {
+		previousEngine, err := normalizedEngine(previous.Engine)
+		if err != nil {
+			return "", nil, errors.New("recorded execution cannot safely resume")
+		}
+		commandChanged := engine == EngineCLI && previous.Command != command
+		if previous.ObservationOnly || previous.Completed || previous.Workspace != req.Workspace || previous.Profile != c.Profile || previousEngine != engine || commandChanged || !idPattern.MatchString(previous.Session) {
 			return "", nil, errors.New("recorded execution cannot safely resume")
 		}
 		req.Resume, req.SessionKey = true, previous.Session
 		req.Prompt = "Recover the interrupted task in this same session and worktree. Verify existing edits, commits and external effects before continuing; do not repeat completed actions.\n\n" + req.Prompt
 		cp = previous
+		cp.Engine = engine
+		cp.Command = command
 		cp.CallerRunID = req.RequestID
 	}
 	return option.Path, &cp, nil

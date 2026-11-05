@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/zhoushoujianwork/clawflow/internal/candidate"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/devmode"
@@ -216,6 +218,42 @@ func TestCandidatePrepareRefusesBeforeMutation(t *testing.T) {
 		if _, err := os.Stat(base); err == nil {
 			t.Fatalf("%v created %s before refusing", args, base)
 		}
+	}
+}
+
+func TestCandidatePrepareCarriesLibraryExecutionEngine(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	t.Setenv(devmode.EnvID, "")
+	if err := os.MkdirAll(filepath.Dir(config.ConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.ConfigPath(), []byte("settings:\n  execution:\n    engine: library\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(t.TempDir(), "candidates")
+	commit := strings.Repeat("c", 40)
+	root := NewRootCmd()
+	root.SetArgs([]string{"candidate", "prepare", "--commit", commit, "--base", base})
+	root.SilenceErrors, root.SilenceUsage = true, true
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := candidate.NewPlan(commit, base, 0, candidate.Pin{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(p.Config, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generated config.Config
+	if err := yaml.Unmarshal(raw, &generated); err != nil {
+		t.Fatal(err)
+	}
+	if generated.Settings.Execution.Engine != "library" {
+		t.Fatalf("candidate config engine=%q\n%s", generated.Settings.Execution.Engine, raw)
 	}
 }
 

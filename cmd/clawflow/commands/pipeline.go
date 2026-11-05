@@ -676,6 +676,11 @@ func pipelineAcceptanceRecords(info *pipeline.AcceptanceInfo, c acceptance.Contr
 	}
 	info.Verdict = string(latest.Verdict)
 	info.Unstructured = latest.Unstructured
+	info.BlockedRepairable = !latest.Unstructured && latest.Verdict == acceptance.Blocked && blockedRepairableByImplementer(latest)
+	if latest.Unstructured {
+		info.UnstructuredAttempts = acceptance.TrailingUnstructured(records)
+		info.MaxUnstructuredRetries = acceptance.MaxUnstructuredRetries
+	}
 	info.Valid = current && acceptance.Evaluate(c, latest) == nil
 	return info
 }

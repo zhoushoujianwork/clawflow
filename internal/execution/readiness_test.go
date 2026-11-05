@@ -27,6 +27,23 @@ func env(m map[string]string) func(string) (string, bool) {
 	return func(k string) (string, bool) { v, ok := all[k]; return v, ok }
 }
 
+func TestLibraryReadinessDoesNotRequireExternalCommand(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "offload")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"default":"base","profiles":{"base":{"backend":"codex"}}}`)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := CheckReadiness(context.Background(), Config{Engine: EngineLibrary, Command: filepath.Join(t.TempDir(), "missing"), Profile: "base"}, nil,
+		ReadinessOptions{Env: env(map[string]string{"XDG_CONFIG_HOME": root})})
+	if r.State != StateReady || r.Command != "" || r.Report == nil || r.Report.Profile != "base" {
+		t.Fatalf("readiness=%+v report=%+v", r, r.Report)
+	}
+}
+
 var hermetic = ReadinessOptions{Env: env(nil)}
 
 // offloadScript prints RequiredFlags help for -h and a profiles listing.
