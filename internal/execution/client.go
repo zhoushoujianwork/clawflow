@@ -32,6 +32,11 @@ const MaxInstructionsBytes = 256 << 10
 const MaxEventBytes = 4 << 20
 const MaxOutputBytes = 32 << 20
 
+const (
+	EngineCLI     = "cli"
+	EngineLibrary = "library"
+)
+
 type Config = config.ExecutionSettings
 
 func LoadConfig() (Config, error) {
@@ -88,6 +93,12 @@ func ValidateConfig(c Config) error {
 
 // validateConfigWith returns a stable reason kind alongside the user message.
 func validateConfigWith(c Config, look func(string) (string, error)) (string, error) {
+	if _, err := normalizedEngine(c.Engine); err != nil {
+		return ReasonConfigInvalid, err
+	}
+	if c.Engine == EngineLibrary {
+		return validateNonCommandConfig(c)
+	}
 	command := c.Command
 	if command == "" {
 		command = "offload"
@@ -96,6 +107,10 @@ func validateConfigWith(c Config, look func(string) (string, error)) (string, er
 		kind := lookupKind(err)
 		return kind, &UnavailableError{Reason: kind, Message: "Offload unavailable: install offload or set settings.execution.command / CLAWFLOW_OFFLOAD_COMMAND"}
 	}
+	return validateNonCommandConfig(c)
+}
+
+func validateNonCommandConfig(c Config) (string, error) {
 	if c.Profile != "" && !validProfile(c.Profile) {
 		return ReasonConfigInvalid, &UnavailableError{Reason: ReasonConfigInvalid, Message: "Offload readiness: invalid execution profile"}
 	}
@@ -108,6 +123,17 @@ func validateConfigWith(c Config, look func(string) (string, error)) (string, er
 		return ReasonConfigInvalid, &UnavailableError{Reason: ReasonConfigInvalid, Message: "Offload readiness: codex_sandbox must be workspace-write or danger-full-access"}
 	}
 	return "", nil
+}
+
+func normalizedEngine(engine string) (string, error) {
+	switch engine {
+	case "", EngineCLI:
+		return EngineCLI, nil
+	case EngineLibrary:
+		return EngineLibrary, nil
+	default:
+		return "", &UnavailableError{Reason: ReasonConfigInvalid, Message: fmt.Sprintf("Offload readiness: unknown execution engine %q (must be cli or library)", engine)}
+	}
 }
 
 func validProfile(profile string) bool {

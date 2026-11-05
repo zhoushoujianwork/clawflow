@@ -260,6 +260,34 @@ func TestOffloadConfigurationValidation(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsUnknownEngineBeforeCommandLookup(t *testing.T) {
+	called := false
+	kind, err := validateConfigWith(Config{Engine: "mystery"}, func(string) (string, error) {
+		called = true
+		return "", errors.New("should not be called")
+	})
+	if err == nil || kind != ReasonConfigInvalid || !strings.Contains(err.Error(), "unknown execution engine") {
+		t.Fatalf("kind=%q err=%v", kind, err)
+	}
+	if called {
+		t.Fatal("unknown engine probed the CLI command")
+	}
+}
+
+func TestValidateLibraryConfigDoesNotRequireCLI(t *testing.T) {
+	called := false
+	kind, err := validateConfigWith(Config{Engine: EngineLibrary, Profile: "library-profile"}, func(string) (string, error) {
+		called = true
+		return "", errors.New("should not be called")
+	})
+	if err != nil || kind != "" {
+		t.Fatalf("kind=%q err=%v", kind, err)
+	}
+	if called {
+		t.Fatal("library engine probed the CLI command")
+	}
+}
+
 func TestOffloadDefaultProfileIsResolvedAndPinned(t *testing.T) {
 	c, req := fixture(t)
 	c.Profile = ""

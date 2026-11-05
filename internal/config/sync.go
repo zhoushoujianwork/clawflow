@@ -130,10 +130,10 @@ func MarshalForGist(cfg *Config) ([]byte, error) {
 		Settings: cfg.Settings,
 	}
 	payload.Settings.GitHubApp = GitHubAppSettings{}
-	payload.Settings.Platform = PlatformSettings{}       // platform credentials and trust are machine-local
-	payload.Settings.Execution = ExecutionSettings{}     // execution runtime paths are machine-local
-	payload.Settings.Database = DatabaseSettings{}       // the DSN is a secret and never synced
-	payload.Settings.Coordinator = CoordinatorSettings{} // this host's controller role and listen address
+	payload.Settings.Platform = PlatformSettings{}                                        // platform credentials and trust are machine-local
+	payload.Settings.Execution = ExecutionSettings{Engine: cfg.Settings.Execution.Engine} // only the portable engine selection is synced
+	payload.Settings.Database = DatabaseSettings{}                                        // the DSN is a secret and never synced
+	payload.Settings.Coordinator = CoordinatorSettings{}                                  // this host's controller role and listen address
 	for k, v := range cfg.Repos {
 		payload.Repos[k] = toSyncable(v)
 	}
@@ -186,7 +186,9 @@ func mergeConfigsInternal(local *Config, remoteYAML []byte, conflictFatal bool) 
 
 	merged.Settings.GitHubApp = local.Settings.GitHubApp
 	merged.Settings.Platform = local.Settings.Platform
-	merged.Settings.Execution = local.Settings.Execution     // never import remote execution paths
+	localExecution := local.Settings.Execution
+	localExecution.Engine = remote.Settings.Execution.Engine
+	merged.Settings.Execution = localExecution               // import the engine, but never remote runtime paths
 	merged.Settings.Database = local.Settings.Database       // never import a remote DSN
 	merged.Settings.Coordinator = local.Settings.Coordinator // never adopt or drop another host's controller role
 
