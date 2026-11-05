@@ -189,12 +189,12 @@ func (s *coordinatorResults) recoverResults(ctx context.Context, store coordinat
 		cancel()
 		var limited *retry.HTTPError
 		if errors.As(err, &limited) && limited.RateLimited {
-			runLog.Warn("coordinator/result-apply-deferred", "task", t.ID, "retry_after", limited.After)
+			coordLog().Warn("coordinator/result-apply-deferred", "task", t.ID, "retry_after", limited.After)
 			continue
 		}
 		if err != nil && ctx.Err() == nil {
 			message := sanitizeReviewerText(err.Error(), 4000)
-			runLog.Warn("coordinator/result-apply-failed", "task", t.ID, "err", message)
+			coordLog().Warn("coordinator/result-apply-failed", "task", t.ID, "err", message)
 			if recordErr := store.RecordApplicationFailure(ctx, t.ID, t.FencingToken, message); recordErr != nil && first == nil {
 				first = recordErr
 			}
