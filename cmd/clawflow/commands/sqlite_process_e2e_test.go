@@ -21,12 +21,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 type processE2EIssue struct {
 	Number int
+	Title  string
+	Body   string
 	Labels []string
 }
 
@@ -44,14 +48,18 @@ func newProcessE2EVCS() *processE2EVCS {
 }
 
 func (f *processE2EVCS) addIssue(n int) {
+	f.addIssueWithBody(n, fmt.Sprintf("E2E issue %d", n), "Make the requested change")
+}
+
+func (f *processE2EVCS) addIssueWithBody(n int, title, body string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.issues[n] = &processE2EIssue{Number: n}
+	f.issues[n] = &processE2EIssue{Number: n, Title: title, Body: body}
 }
 
 func (f *processE2EVCS) issueJSON(issue *processE2EIssue) map[string]any {
 	now := "2026-11-05T00:00:00Z"
-	return map[string]any{"id": issue.Number, "iid": issue.Number, "title": fmt.Sprintf("E2E issue %d", issue.Number), "description": "Make the requested change", "state": "opened", "labels": issue.Labels, "created_at": now, "updated_at": now, "author": map[string]any{"username": "tester"}, "web_url": fmt.Sprintf("https://example.invalid/group/repo/-/issues/%d", issue.Number)}
+	return map[string]any{"id": issue.Number, "iid": issue.Number, "title": issue.Title, "description": issue.Body, "state": "opened", "labels": issue.Labels, "created_at": now, "updated_at": now, "author": map[string]any{"username": "tester"}, "web_url": fmt.Sprintf("https://example.invalid/group/repo/-/issues/%d", issue.Number)}
 }
 
 func (f *processE2EVCS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +331,103 @@ func processE2EGit(t *testing.T, root string) (string, string) {
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 
+func copyProcessE2EProfile(t *testing.T, destination, name string) {
+	t.Helper()
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("locate host Offload config: %v", err)
+	}
+	source := filepath.Join(configDir, "offload", "config.json")
+	raw, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read host Offload config %s: %v", source, err)
+	}
+	var host struct {
+		Profiles map[string]json.RawMessage `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &host); err != nil {
+		t.Fatalf("parse host Offload config: %v", err)
+	}
+	profile, ok := host.Profiles[name]
+	if !ok {
+		t.Fatalf("Offload profile %q is not defined in %s", name, source)
+	}
+	var requirements struct {
+		Backend  string `json:"backend"`
+		BaseURL  string `json:"base_url"`
+		Model    string `json:"model"`
+		Token    string `json:"token"`
+		TokenCmd string `json:"token_cmd"`
+	}
+	if err := json.Unmarshal(profile, &requirements); err != nil {
+		t.Fatalf("parse selected Offload profile: %v", err)
+	}
+	if requirements.Backend != "" && requirements.Backend != "claude" {
+		t.Fatalf("Offload profile %q must use the Claude backend", name)
+	}
+	if requirements.BaseURL == "" || requirements.Model == "" || (requirements.Token == "" && requirements.TokenCmd == "") {
+		t.Fatalf("Offload profile %q is not self-contained for an isolated Claude run", name)
+	}
+	isolated, err := json.Marshal(struct {
+		Default  string                     `json:"default"`
+		Profiles map[string]json.RawMessage `json:"profiles"`
+	}{Default: name, Profiles: map[string]json.RawMessage{name: profile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(destination, "offload")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), isolated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeProcessE2EBudgetedClaude(t *testing.T, root string, budgetUSD float64) {
+	t.Helper()
+	realClaude, err := exec.LookPath("claude")
+	if err != nil {
+		t.Fatalf("locate real Claude CLI: %v", err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\nexec %s --max-budget-usd %.2f \"$@\"\n", shellQuote(realClaude), budgetUSD)
+	if err := os.WriteFile(filepath.Join(root, "claude"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedProcessE2ECoordination(t *testing.T, state string, issue vcs.Issue) {
+	t.Helper()
+	snapshot := coordination.Normalize(coordination.Snapshot{Operation: "implement", Repository: "group/repo", Issue: issue})
+	record := coordination.Record{
+		Snapshot:    &snapshot,
+		Version:     coordination.Version,
+		SnapshotID:  coordination.Digest(snapshot),
+		IssueDigest: coordination.Digest([]string{issue.Title, issue.Body}),
+		ObservedAt:  time.Now().UTC(),
+		Decision: coordination.Decision{
+			Outcome:    "proceed",
+			Reason:     "The isolated issue has no competing work or prerequisites",
+			NextAction: "Dispatch the requested implementation",
+			NextOwner:  "implementation",
+		},
+	}
+	if err := coordination.Validate(snapshot, record.Decision); err != nil {
+		t.Fatalf("seed coordination decision: %v", err)
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(state, "data", "coordination", coordination.Digest("group/repo"))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "1.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeProcessE2EClaude(t *testing.T, root, clawflow string) string {
 	t.Helper()
 	path := filepath.Join(root, "claude")
@@ -386,6 +491,211 @@ func TestE2ESQLiteControllerWorkerProcesses(t *testing.T) {
 	for _, engine := range []string{"cli", "library"} {
 		t.Run(engine, func(t *testing.T) { runProcessE2E(t, engine) })
 	}
+	t.Run("real-model", func(t *testing.T) {
+		profile := strings.TrimSpace(os.Getenv("CLAWFLOW_E2E_REAL_MODEL"))
+		if profile == "" {
+			t.Skip("set CLAWFLOW_E2E_REAL_MODEL to an Offload profile to enable paid evidence")
+		}
+		for _, engine := range []string{"library", "cli"} {
+			t.Run(engine, func(t *testing.T) { runProcessE2ERealModel(t, engine, profile) })
+		}
+	})
+}
+
+func runProcessE2ERealModel(t *testing.T, engine, profile string) {
+	const budgetUSD = 1.75
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
+	defer cancel()
+	root := t.TempDir()
+	t.Cleanup(func() { stopProcessE2EChildren(root) })
+	repoRootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoRoot := strings.TrimSpace(string(repoRootBytes))
+	clawflow, offload := filepath.Join(root, "clawflow"), filepath.Join(root, "offload")
+	for _, build := range []struct{ output, pkg string }{{clawflow, "./cmd/clawflow"}, {offload, "github.com/zhoushoujianwork/offload"}} {
+		cmd := exec.CommandContext(ctx, "go", "build", "-o", build.output, build.pkg)
+		cmd.Dir = repoRoot
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("build %s: %v\n%s", build.pkg, err, out)
+		}
+	}
+
+	const issueTitle = "Add hello.txt"
+	const issueBody = "add a file hello.txt containing ok"
+	fake := newProcessE2EVCS()
+	fake.addIssueWithBody(1, issueTitle, issueBody)
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	local, bare := processE2EGit(t, root)
+	fake.bare = bare
+	home, state, xdg := filepath.Join(root, "home"), filepath.Join(root, "state"), filepath.Join(root, "xdg")
+	configDir := filepath.Join(home, ".clawflow", "config")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+	copyProcessE2EProfile(t, xdg, profile)
+	writeProcessE2EBudgetedClaude(t, root, budgetUSD)
+	configYAML := fmt.Sprintf("settings:\n  poll_interval: 1\n  agent_timeout: 480\n  max_concurrent_agents: 1\n  coordinator:\n    enabled: true\n    listen: 127.0.0.1:%d\n  execution:\n    engine: %s\n    command: %q\n    profile: %q\nrepos:\n  group/repo:\n    enabled: true\n    platform: gitlab\n    base_url: %q\n    local_path: %q\n    base_branch: main\n    allowed_issue_authors: [tester]\n", port, engine, offload, profile, server.URL, local)
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(configYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "credentials.yaml"), []byte("gitlab_token: e2e-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seedProcessE2ECoordination(t, state, vcs.Issue{ID: 1, Number: 1, Title: issueTitle, Body: issueBody, Author: "tester", State: "open", URL: "https://example.invalid/group/repo/-/issues/1", CreatedAt: "2026-11-05T00:00:00Z", UpdatedAt: "2026-11-05T00:00:00Z"})
+	env := append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+xdg, "XDG_STATE_HOME="+filepath.Join(root, "xdg-state"), "CLAWFLOW_STATE_DIR="+state, "PATH="+root+string(os.PathListSeparator)+os.Getenv("PATH"), "GIT_TERMINAL_PROMPT=0")
+
+	controllerProc := startProcessE2E(t, root, clawflow, env, "controller")
+	defer controllerProc.stop()
+	processE2EWait(t, 15*time.Second, "real-model controller", func() bool {
+		b, _ := os.ReadFile(controllerProc.log)
+		return bytes.Contains(b, []byte("Controller ready"))
+	})
+	controllerLog, _ := os.ReadFile(controllerProc.log)
+	marker := "SHA-256 fingerprint: "
+	at := strings.Index(string(controllerLog), marker)
+	if at < 0 {
+		t.Fatalf("missing controller fingerprint: %s", controllerLog)
+	}
+	fingerprint := strings.TrimSpace(strings.SplitN(string(controllerLog[at+len(marker):]), "\n", 2)[0])
+	token := strings.TrimSpace(strings.SplitN(processE2ERun(t, clawflow, env, "worker", "token", "create", "--name", "real-model-e2e"), "\n", 2)[0])
+	tokenFile := filepath.Join(root, "worker.token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workerProc := startProcessE2E(t, root, clawflow, env, "worker", "--coordinator", fmt.Sprintf("https://127.0.0.1:%d", port), "--token-file", tokenFile, "--fingerprint", fingerprint, "--state-dir", filepath.Join(root, "worker-state"), "--max-parallel", "1")
+	defer workerProc.stop()
+	databasePath := filepath.Join(state, "data", store.FileName)
+	processE2EWait(t, 15*time.Second, "real-model worker", func() bool {
+		s, err := store.Open(context.Background(), databasePath)
+		if err != nil {
+			return false
+		}
+		defer s.Close()
+		var n int64
+		return s.DB().Model(&coordinator.Worker{}).Count(&n).Error == nil && n == 1
+	})
+
+	t.Log(processE2ERun(t, clawflow, env, "run", "--repo", "group/repo", "--issue", "1"))
+	var task coordinator.Task
+	processE2EWait(t, 8*time.Minute, "real-model terminal task", func() bool {
+		s, err := store.Open(context.Background(), databasePath)
+		if err != nil {
+			return false
+		}
+		defer s.Close()
+		err = s.DB().Where("repo = ? AND issue = ?", "group/repo", 1).Order("created_at DESC").First(&task).Error
+		return err == nil && (task.State == "done" || task.State == "failed" || task.State == "cancelled")
+	})
+
+	s, err := store.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IntegrityCheck(context.Background()); err != nil {
+		_ = s.Close()
+		t.Fatalf("integrity_check: %v", err)
+	}
+	var payload coordinatorPayload
+	if err := json.Unmarshal(task.Payload, &payload); err != nil {
+		_ = s.Close()
+		t.Fatalf("decode task admission: %v", err)
+	}
+	if payload.Admission == nil || payload.Admission.Author != "tester" || payload.Admission.Basis == "" || payload.Admission.CheckedAt.IsZero() {
+		_ = s.Close()
+		t.Fatalf("missing issue admission record: %#v", payload.Admission)
+	}
+	var runs []store.Run
+	if err := s.DB().Where("repo = ? AND issue_number = ?", "group/repo", 1).Order("started_at").Find(&runs).Error; err != nil {
+		_ = s.Close()
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		_ = s.Close()
+		t.Fatalf("real-model invocation count = %d, want exactly 1 for %s", len(runs), engine)
+	}
+	run := runs[0]
+	if !run.UsageReported || run.CostUSD == nil || run.InputTokens == nil || run.OutputTokens == nil || run.CacheReadInputTokens == nil || run.CacheCreationInputTokens == nil {
+		_ = s.Close()
+		t.Fatalf("real usage/cost missing from run row: usage=%t cost=%v", run.UsageReported, run.CostUSD)
+	}
+	if *run.CostUSD < 0 || *run.CostUSD > 2.0 {
+		_ = s.Close()
+		t.Fatalf("run cost %.4f exceeded the bounded evidence budget", *run.CostUSD)
+	}
+	var eventCount int64
+	if err := s.DB().Model(&coordinator.LogEvent{}).Where("task_id = ?", task.ID).Count(&eventCount).Error; err != nil {
+		_ = s.Close()
+		t.Fatal(err)
+	}
+	if eventCount == 0 {
+		_ = s.Close()
+		t.Fatal("real-model execution uploaded no job log events")
+	}
+	_ = s.Close()
+
+	fake.mu.Lock()
+	prCount, createCount, commentCount := len(fake.prs), fake.creates[1], len(fake.comments[1])
+	branch := ""
+	if fake.prs[1] != nil {
+		branch, _ = fake.prs[1]["source_branch"].(string)
+	}
+	fake.mu.Unlock()
+	if prCount > 1 || createCount > 1 || commentCount > 1 {
+		t.Fatalf("duplicate real-model effects: prs=%d creates=%d comments=%d", prCount, createCount, commentCount)
+	}
+	quality := []string{}
+	if task.State != "done" {
+		quality = append(quality, "task ended "+task.State)
+	}
+	if prCount != 1 || createCount != 1 {
+		quality = append(quality, fmt.Sprintf("PR count=%d creates=%d", prCount, createCount))
+	}
+	if commentCount != 1 {
+		quality = append(quality, fmt.Sprintf("result comments=%d", commentCount))
+	}
+	hello := ""
+	if branch != "" {
+		out, err := exec.Command("git", "--git-dir", bare, "show", "refs/heads/"+branch+":hello.txt").CombinedOutput()
+		if err != nil {
+			quality = append(quality, "hello.txt missing from "+branch)
+		} else {
+			hello = strings.TrimSpace(string(out))
+			if hello != "ok" {
+				quality = append(quality, fmt.Sprintf("hello.txt=%q", hello))
+			}
+		}
+	} else {
+		quality = append(quality, "no PR branch recorded")
+	}
+	for _, path := range []string{controllerProc.log, workerProc.log, filepath.Join(home, ".clawflow", "logs", "controller.log"), filepath.Join(home, ".clawflow", "logs", "run.log")} {
+		data, _ := os.ReadFile(path)
+		lower := strings.ToLower(string(data))
+		if strings.Contains(lower, "sqlite_busy") || strings.Contains(lower, "database is locked") {
+			t.Fatalf("SQLite contention in %s", path)
+		}
+	}
+	totalTokens := *run.InputTokens + *run.OutputTokens + *run.CacheReadInputTokens + *run.CacheCreationInputTokens
+	summary := strings.Join(strings.Fields(run.Summary), " ")
+	if len(summary) > 500 {
+		summary = summary[:500] + "…"
+	}
+	t.Logf("REAL MODEL EVIDENCE engine=%s state=%s duration=%s cost_usd=%.4f tokens=%d pr_branch=%q comments=%d log_events=%d hello=%q model_summary=%q grey=%q", engine, task.State, time.Duration(run.DurationMs)*time.Millisecond, *run.CostUSD, totalTokens, branch, commentCount, eventCount, hello, summary, quality)
+
+	workerProc.stop()
+	controllerProc.stop()
+	processE2EWait(t, 5*time.Second, "real-model child cleanup", func() bool {
+		out, _ := exec.Command("ps", "-axo", "command=").Output()
+		return !strings.Contains(string(out), root)
+	})
 }
 
 func runProcessE2E(t *testing.T, engine string) {
