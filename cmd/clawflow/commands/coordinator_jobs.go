@@ -308,6 +308,28 @@ type coordinatorResults struct {
 	apply   func(context.Context, *coordinator.Task, *runJob, *coordinatorReport) error
 }
 
+// Execution output is stored by the underlying coordinator store; the embedded
+// WorkerStore interface would otherwise hide these optional capabilities.
+func (r *coordinatorResults) AppendLog(ctx context.Context, task, worker string, page coordinator.LogPage) (coordinator.LogAck, error) {
+	logs, ok := r.WorkerStore.(interface {
+		AppendLog(context.Context, string, string, coordinator.LogPage) (coordinator.LogAck, error)
+	})
+	if !ok {
+		return coordinator.LogAck{}, coordinator.ErrInvalid
+	}
+	return logs.AppendLog(ctx, task, worker, page)
+}
+
+func (r *coordinatorResults) ReadLog(ctx context.Context, task string, epoch, after int64, limit int) (coordinator.LogRead, error) {
+	logs, ok := r.WorkerStore.(interface {
+		ReadLog(context.Context, string, int64, int64, int) (coordinator.LogRead, error)
+	})
+	if !ok {
+		return coordinator.LogRead{}, coordinator.ErrInvalid
+	}
+	return logs.ReadLog(ctx, task, epoch, after, limit)
+}
+
 type coordinatorReport struct {
 	// Controller-owned audit data, never converted into publishable intents.
 	// The worker wire schema deliberately does not accept this field.

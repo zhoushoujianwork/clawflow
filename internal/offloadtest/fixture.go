@@ -25,7 +25,7 @@ func Args() map[string]string {
 	}
 	for i := start; i < len(os.Args); i++ {
 		a := os.Args[i]
-		if a == "-json" || a == "-no-salvage" || a == "-w" || a == "-tools-disabled" {
+		if a == "-json" || a == "-no-salvage" || a == "-w" || a == "-tools-disabled" || a == "-capture-transcript" {
 			args[a] = "true"
 		} else if i+1 < len(os.Args) {
 			i++

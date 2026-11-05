@@ -50,7 +50,7 @@ func NewHandler(store WorkerStore) http.Handler {
 			}
 			if len(parts) == 3 && parts[0] == "tasks" && len(parts[1]) <= 128 && parts[1] != "" {
 				switch parts[2] {
-				case "heartbeat", "progress", "complete", "fail", "recover", "inspect", "release":
+				case "heartbeat", "progress", "complete", "fail", "recover", "inspect", "release", "logs":
 					action = parts[2]
 					task = parts[1]
 				}
@@ -84,6 +84,9 @@ func NewHandler(store WorkerStore) http.Handler {
 			limit := int64(MaxRequestBytes)
 			if action == "complete" || action == "fail" {
 				limit = MaxReportBytes
+			}
+			if action == "logs" {
+				limit = MaxLogPageBytes
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 			decode := func(v any) error {
@@ -139,6 +142,22 @@ func NewHandler(store WorkerStore) http.Handler {
 					claimed, err = store.Claim(ctx, worker)
 				}
 				output = map[string]any{"task": claimed}
+			case "logs":
+				// Identity is the token's worker; the page must carry the current fence.
+				logs, ok := store.(interface {
+					AppendLog(context.Context, string, string, LogPage) (LogAck, error)
+				})
+				if !ok {
+					return ErrInvalid
+				}
+				var page LogPage
+				if err := decode(&page); err != nil {
+					status = 400
+					return err
+				}
+				var ack LogAck
+				ack, err = logs.AppendLog(ctx, task, worker, page)
+				output = ack
 			default:
 				var input struct {
 					FencingToken    int64           `json:"fencing_token"`
@@ -201,7 +220,7 @@ func NewHandler(store WorkerStore) http.Handler {
 		switch {
 		case errors.Is(err, ErrToken):
 			status = 401
-		case errors.Is(err, ErrStaleLease):
+		case errors.Is(err, ErrStaleLease), errors.Is(err, ErrLogIdentity):
 			status = 409
 		case errors.Is(err, ErrNoTask):
 			status = 200

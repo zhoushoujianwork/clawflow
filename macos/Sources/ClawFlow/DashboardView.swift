@@ -262,7 +262,7 @@ struct TaskDetail: View {
             }
             DSection(rule: false) {
                 DLabel(text: "执行日志", top: 0)
-                Text("这里放 Offload 的消息和工具调用，现在只有调度事件。").font(DS.sub).foregroundStyle(DS.dim).fixedSize(horizontal: false, vertical: true)
+                JobLogView(model: model, row: row)
                 DisclosureGroup("调度事件", isExpanded: $showEvents) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("连接时每 5 秒刷新。").font(DS.small).foregroundStyle(DS.dim)
