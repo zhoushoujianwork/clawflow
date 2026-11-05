@@ -26,25 +26,41 @@ type StableSnapshot struct {
 	Processes   []string          `json:"processes"`
 	ConfigPaths map[string]string `json:"config_paths,omitempty"`
 	DataPaths   map[string]string `json:"data_paths,omitempty"`
+	// Activity and Executors record scheduler work that is deliberately not
+	// compared: preflight/lock-file writes and task executor processes.
+	Activity  map[string]string `json:"activity,omitempty"`
+	Executors []string          `json:"executors,omitempty"`
 }
 
 // StableProbe supplies the process view; replaced in tests.
 type StableProbe struct {
 	// Processes lists "pid:start" identities of stable ClawFlow processes.
 	Processes func() ([]string, error)
+	// Executors lists "pid:start" identities of task executor processes the
+	// stable worker starts and ends during normal dispatch. Optional.
+	Executors func() ([]string, error)
 }
 
 // DefaultStableProbe lists processes whose command line runs a stable
 // clawflow service, using only read-only `ps`.
 func DefaultStableProbe(stableRoot, candidateBase string) StableProbe {
-	return StableProbe{Processes: func() ([]string, error) {
+	list := func(executors bool) ([]string, error) {
 		out, err := exec.Command("ps", "-axo", "pid=,lstart=,command=").Output()
 		if err != nil {
 			return nil, err
 		}
 		var ids []string
 		for _, line := range strings.Split(string(out), "\n") {
-			if !(strings.Contains(line, "clawflow") && (strings.Contains(line, " controller") || strings.Contains(line, " worker") || strings.Contains(line, "ClawFlow.app"))) {
+			// Task executors run from the worker-executions tree; they come and
+			// go with every dispatched task and are not service identity.
+			if isExec := strings.Contains(line, "worker-executions"); isExec != executors {
+				continue
+			}
+			if executors {
+				if candidateBase != "" && strings.Contains(line, candidateBase) {
+					continue
+				}
+			} else if !(strings.Contains(line, "clawflow") && (strings.Contains(line, " controller") || strings.Contains(line, " worker") || strings.Contains(line, "ClawFlow.app"))) {
 				continue
 			}
 			if candidateBase != "" && strings.Contains(line, candidateBase) {
@@ -61,7 +77,11 @@ func DefaultStableProbe(stableRoot, candidateBase string) StableProbe {
 		}
 		sort.Strings(ids)
 		return ids, nil
-	}}
+	}
+	return StableProbe{
+		Processes: func() ([]string, error) { return list(false) },
+		Executors: func() ([]string, error) { return list(true) },
+	}
 }
 
 func digestTree(root string, skip func(rel string) bool, entries ...map[string]string) (string, error) {
@@ -141,6 +161,7 @@ var stableActivityData = map[string]bool{
 	"pending.json":      true,
 	"pipeline-prs":      true,
 	"pipeline.json":     true,
+	"preflight":         true,
 	"queue-state":       true,
 	"repos.json":        true,
 	"runs":              true,
@@ -157,10 +178,11 @@ func TakeStable(s Stable, probe StableProbe) (StableSnapshot, error) {
 		return snap, err
 	}
 	if snap.Data, err = digestTree(filepath.Join(s.Root, "data"), func(rel string) bool {
-		return stableActivityData[strings.Split(rel, string(filepath.Separator))[0]]
+		return stableActivityData[strings.Split(rel, string(filepath.Separator))[0]] || isCoordinationLock(rel)
 	}, snap.DataPaths); err != nil {
 		return snap, err
 	}
+	snap.Activity = stableActivity(filepath.Join(s.Root, "data"))
 	snap.Listeners = map[int]bool{}
 	for _, port := range s.Ports {
 		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 300*time.Millisecond)
@@ -174,7 +196,88 @@ func TakeStable(s Stable, probe StableProbe) (StableSnapshot, error) {
 			return snap, err
 		}
 	}
+	if probe.Executors != nil {
+		if snap.Executors, err = probe.Executors(); err != nil {
+			return snap, err
+		}
+	}
 	return snap, nil
+}
+
+// isCoordinationLock reports whether rel is a lock file the stable scheduler
+// creates beside a coordination record. Record content stays protected.
+func isCoordinationLock(rel string) bool {
+	parts := strings.Split(rel, string(filepath.Separator))
+	return len(parts) > 1 && parts[0] == "coordination" && strings.HasSuffix(parts[len(parts)-1], ".lock")
+}
+
+// stableActivity fingerprints the ignored scheduler files so evidence can show
+// that they changed without letting them affect the verdict.
+func stableActivity(dataRoot string) map[string]string {
+	act := map[string]string{}
+	_ = filepath.WalkDir(dataRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(dataRoot, path)
+		if rel == "." || d.IsDir() {
+			return nil
+		}
+		if stableActivityData[strings.Split(rel, string(filepath.Separator))[0]] || isCoordinationLock(rel) {
+			if info, ierr := d.Info(); ierr == nil {
+				act[rel] = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
+			}
+		}
+		return nil
+	})
+	return act
+}
+
+// Ignored lists stable scheduler activity seen between two snapshots. It is
+// informational and never part of Diff.
+func (a StableSnapshot) Ignored(b StableSnapshot) []string {
+	var out []string
+	if countChanged(a.Activity, b.Activity) > 0 {
+		out = append(out, fmt.Sprintf("stable scheduler files changed (ignored): %d", countChanged(a.Activity, b.Activity)))
+	}
+	before := map[string]bool{}
+	for _, e := range a.Executors {
+		before[e] = true
+	}
+	after := map[string]bool{}
+	for _, e := range b.Executors {
+		after[e] = true
+	}
+	started, ended := 0, 0
+	for e := range after {
+		if !before[e] {
+			started++
+		}
+	}
+	for e := range before {
+		if !after[e] {
+			ended++
+		}
+	}
+	if started+ended > 0 {
+		out = append(out, fmt.Sprintf("stable task executor processes (ignored): %d started, %d exited", started, ended))
+	}
+	return out
+}
+
+func countChanged(a, b map[string]string) int {
+	n := 0
+	for k, v := range a {
+		if b[k] != v {
+			n++
+		}
+	}
+	for k := range b {
+		if _, ok := a[k]; !ok {
+			n++
+		}
+	}
+	return n
 }
 
 // Diff lists what changed between two snapshots; empty means unchanged.

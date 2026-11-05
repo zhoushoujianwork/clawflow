@@ -241,6 +241,7 @@ write-back are disabled by default.`}
 				return terr
 			}
 			ev.StableDiff = before.Diff(after)
+			ev.StableIgnored = before.Ignored(after)
 		} else {
 			ev.StableDiff = []string{"no stable snapshot was recorded before the run"}
 		}

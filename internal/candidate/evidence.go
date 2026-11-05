@@ -44,10 +44,12 @@ type Evidence struct {
 	Workers      map[string]string `json:"workers,omitempty"`
 	Commands     []CommandResult   `json:"commands"`
 	StableDiff   []string          `json:"stable_changes"`
-	Recorded     string            `json:"recorded"`
-	Status       string            `json:"status"`
-	NextOwner    string            `json:"next_owner,omitempty"`
-	NextAction   string            `json:"next_action,omitempty"`
+	// StableIgnored records normal stable scheduler activity; it never affects Status.
+	StableIgnored []string `json:"stable_ignored_activity,omitempty"`
+	Recorded      string   `json:"recorded"`
+	Status        string   `json:"status"`
+	NextOwner     string   `json:"next_owner,omitempty"`
+	NextAction    string   `json:"next_action,omitempty"`
 
 	secrets []string
 }
@@ -128,7 +130,7 @@ func (e *Evidence) Finish() {
 		e.Status = Passed
 	}
 	if len(e.StableDiff) > 0 {
-		e.Status, e.NextOwner, e.NextAction = Failed, "developer", "stable host state changed during the candidate run; investigate before accepting"
+		e.Status, e.NextOwner, e.NextAction = Failed, "developer", "stable host state changed during the candidate run: "+strings.Join(e.StableDiff, "; ")+"; investigate before accepting"
 	}
 	if e.Status == Blocked && e.NextOwner == "" {
 		e.NextOwner, e.NextAction = e.Readiness.NextOwner, e.Readiness.Action
