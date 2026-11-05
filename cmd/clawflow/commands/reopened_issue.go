@@ -112,7 +112,7 @@ func prepareImplementation(j *runJob) error {
 		return fmt.Errorf("issue no longer exists")
 	}
 	j.sub.Author = issue.Author
-	admission, reason := issueAdmissionFn(j.client, j.repo, j.repoCfg, *issue)
+	admission, reason := executionAdmission(j, *issue)
 	if reason != "" {
 		return &issueAdmissionDeferredError{reason: reason}
 	}

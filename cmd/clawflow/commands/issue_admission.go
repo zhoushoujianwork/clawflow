@@ -58,3 +58,18 @@ func checkIssueAdmission(client vcs.Client, repo string, repoCfg config.Repo, is
 	}
 	return &issueAdmission{Author: author, Basis: "write_permission", CheckedAt: time.Now().UTC()}, ""
 }
+
+// executionAdmission decides just before implementation starts. On a coordinator
+// worker the controller's record is authoritative: the worker's own config and
+// token may differ, and a denial there would requeue the issue every pass and
+// spend the task's reopen event. Without a record (a task enqueued before this
+// field existed, or a local run) the check runs here against fresh data.
+func executionAdmission(j *runJob, issue vcs.Issue) (*issueAdmission, string) {
+	if j.hooks != nil && j.admission != nil {
+		if strings.EqualFold(strings.TrimSpace(j.admission.Author), strings.TrimSpace(issue.Author)) {
+			return j.admission, ""
+		}
+		return nil, "author_check_failed"
+	}
+	return issueAdmissionFn(j.client, j.repo, j.repoCfg, issue)
+}

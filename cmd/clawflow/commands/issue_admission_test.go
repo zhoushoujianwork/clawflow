@@ -90,14 +90,64 @@ func TestIssueAdmissionExecutionGateIsQuiet(t *testing.T) {
 	job := &runJob{
 		repo: "o/r", client: client, repoCfg: config.Repo{},
 		op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7, State: "open", Author: "stale-author"},
-		hooks: &jobHooks{SkipIndex: true},
 	}
-	fired, limited, failed := runOneOperator(context.Background(), job, time.Second)
-	if fired || limited || failed || job.result.Status != "skipped" || job.result.Error != "" || client.checks != 1 {
-		t.Fatalf("fired=%v limited=%v failed=%v result=%+v checks=%d", fired, limited, failed, job.result, client.checks)
+	err := prepareImplementation(job)
+	if !errors.Is(err, errIssueAdmissionDeferred) || issueAdmissionReason(err) != "author_not_admitted:guest" || client.checks != 1 {
+		t.Fatalf("err=%v checks=%d", err, client.checks)
 	}
 	if job.sub.Author != "guest" {
 		t.Fatalf("execution did not use fresh author: %q", job.sub.Author)
+	}
+}
+
+// The embedded nil vcs.Client panics on any label or comment write, so reaching
+// the assertions proves the denial wrote nothing.
+func TestIssueAdmissionDenialWritesNothingOnRunPath(t *testing.T) {
+	useRealIssueAdmission(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAWFLOW_STATE_DIR", t.TempDir())
+	client := &admissionClient{issue: &vcs.Issue{Number: 7, State: "open", Author: "guest"}}
+	job := &runJob{
+		repo: "o/r", client: client, repoCfg: config.Repo{},
+		op: &operator.Operator{Name: "implement"}, sub: &operator.Subject{Number: 7, State: "open"},
+		hooks: &jobHooks{SkipIndex: true, AcquireLock: func(context.Context, *runJob) error { return nil }},
+	}
+	ctx := context.WithValue(context.Background(), reservedAgentSlot{}, true)
+	fired, limited, failed := runOneOperator(ctx, job, time.Second)
+	if fired || limited || failed || job.result.Status != "skipped" || job.result.Error != "" || len(job.result.Effects) != 0 || client.checks != 1 {
+		t.Fatalf("fired=%v limited=%v failed=%v result=%+v checks=%d", fired, limited, failed, job.result, client.checks)
+	}
+}
+
+func TestExecutionAdmissionTrustsControllerRecordOnWorker(t *testing.T) {
+	useRealIssueAdmission(t)
+	record := &issueAdmission{Author: "Release-Bot", Basis: "allowlist", CheckedAt: time.Now().UTC()}
+	cases := []struct {
+		name       string
+		hooks      *jobHooks
+		record     *issueAdmission
+		lookupErr  error
+		author     string
+		wantReason string
+		wantChecks int
+	}{
+		{name: "worker uses the controller record even when its own lookup fails", hooks: &jobHooks{}, record: record, lookupErr: errors.New("forbidden"), author: "release-bot"},
+		{name: "worker refuses a record for another author", hooks: &jobHooks{}, record: record, author: "guest", wantReason: "author_check_failed"},
+		{name: "worker without a record checks locally", hooks: &jobHooks{}, author: "guest", wantReason: "author_not_admitted:guest", wantChecks: 1},
+		{name: "local run always checks again", record: record, author: "release-bot", wantReason: "author_not_admitted:release-bot", wantChecks: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &admissionClient{err: tc.lookupErr}
+			job := &runJob{repo: "o/r", client: client, hooks: tc.hooks, admission: tc.record}
+			got, reason := executionAdmission(job, vcs.Issue{Number: 7, Author: tc.author})
+			if reason != tc.wantReason || client.checks != tc.wantChecks {
+				t.Fatalf("reason=%q checks=%d, want %q and %d", reason, client.checks, tc.wantReason, tc.wantChecks)
+			}
+			if tc.wantReason == "" && got != tc.record {
+				t.Fatalf("record not preserved: %+v", got)
+			}
+		})
 	}
 }
 
