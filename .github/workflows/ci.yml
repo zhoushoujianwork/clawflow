@@ -104,19 +104,32 @@ jobs:
           key: playwright-chromium-${{ runner.os }}-1.56.1
 
       - name: Install isolated headless Chromium
-        # Step-level limit is above 3 x 150s attempts, so a persistent hang
-        # fails this step instead of the job being cancelled at its timeout.
-        timeout-minutes: 9
+        # Step-level limit is above 3 x (60s lock wait + 150s attempt) plus
+        # backoff, so a persistent hang fails this step instead of the job
+        # being cancelled at its timeout.
+        timeout-minutes: 12
         env:
           CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}
         run: |
+          # Runner background apt jobs can hold the dpkg lock; wait for it.
+          wait_apt() {
+            for _ in $(seq 1 12); do
+              if ! sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
+                return 0
+              fi
+              echo "Waiting for apt/dpkg lock to be released..."
+              sleep 5
+            done
+            echo "::warning::apt/dpkg lock still held after 60s; continuing"
+          }
           retry() {
             for attempt in 1 2 3; do
+              wait_apt
               if timeout 150 "$@"; then
                 return 0
               fi
               echo "::warning::Attempt $attempt/3 failed or timed out after 150s: $*"
-              sleep 5
+              sleep 15
             done
             echo "::error::All 3 attempts failed: $*"
             return 1
