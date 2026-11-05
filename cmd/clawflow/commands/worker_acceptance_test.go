@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -458,4 +459,151 @@ func TestAcceptanceInheritsCredentialLabelWithKindOverride(t *testing.T) {
 	if !reflect.DeepEqual(task.Tags, want) || !reflect.DeepEqual(payload.Tags, want) {
 		t.Fatalf("credential label lost: task=%v payload=%v", task.Tags, payload.Tags)
 	}
+}
+
+// commentSpy records PR comments so a stale result can be shown to publish nothing.
+type commentSpy struct {
+	*acceptanceFake
+	comments []string
+}
+
+func (c *commentSpy) PostPRComment(_ string, _ int, body string) error {
+	c.comments = append(c.comments, body)
+	return nil
+}
+
+// A requirements edit after a worker claimed the review must reject that
+// worker's late result without any side effect, and the next harvest must
+// replace the cancelled task with one bound to the new requirements.
+func TestWorkerAcceptanceRequirementsChangeRequeuesSameHead(t *testing.T) {
+	f, rc := acceptanceFixture(t)
+	rc.AcceptanceWorker = "different"
+	spy := &commentSpy{acceptanceFake: f}
+	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return spy, nil }
+	ctx := context.Background()
+
+	db, dsn := storetest.NewWithDSN(t)
+	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	oldStore, oldAllowed := requireStore, coordinatorPRAllowedFn
+	t.Cleanup(func() { requireStore, coordinatorPRAllowedFn = oldStore, oldAllowed })
+	requireStore = func(ctx context.Context) (*store.Store, error) { return store.Open(ctx, dsn) }
+	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
+
+	// The result a reviewer would upload for the original requirements. Its
+	// local evidence is removed so only a coordinator-accepted upload can create it.
+	stale := produceAcceptance(t, f)
+	if err := os.RemoveAll(acceptanceStorePath("o/r", 11)); err != nil {
+		t.Fatal(err)
+	}
+
+	s := coordinator.New(db.DB())
+	if err := s.RegisterWorker(ctx, coordinator.Worker{ID: "dev", MaxParallel: 1, RunUntagged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterWorker(ctx, coordinator.Worker{ID: "rev", MaxParallel: 1, RunUntagged: true, Roles: []string{"acceptance"}}); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(coordinatorPayload{Testing: testingRequirements{SOPRequired: true, SOPDigest: "approved-revision"}})
+	if _, err := s.Enqueue(ctx, coordinator.Task{Repo: "o/r", Issue: 42, PR: 11, Kind: "implement", Operator: "implement", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := s.Claim(ctx, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	devResult, _ := json.Marshal(jobResult{Status: "success", HeadSHA: f.pr.HeadSHA, PRNumber: 11, SOPDigest: "approved-revision"})
+	if err := s.Complete(ctx, dev.ID, "dev", dev.FencingToken, devResult); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := enqueueWorkerAcceptance(ctx, spy, "o/r", rc, f.pr, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	old, err := s.Claim(ctx, "rev")
+	if err != nil || old == nil || old.Kind != "acceptance" {
+		t.Fatalf("worker did not claim acceptance: %+v %v", old, err)
+	}
+	var oldPayload coordinatorPayload
+	if err := json.Unmarshal(old.Payload, &oldPayload); err != nil {
+		t.Fatal(err)
+	}
+
+	// The owner edits the issue body after the claim.
+	f.issue.Body = "Meet the NEW goal"
+
+	service := &coordinatorResults{WorkerStore: s, tasks: s}
+	raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "success"}, Acceptance: &stale})
+	if err := service.Complete(ctx, old.ID, "rev", old.FencingToken, raw); err == nil {
+		t.Fatal("stale result was accepted after the requirements changed")
+	}
+	if acceptanceStoreExists("o/r", 11) {
+		t.Fatal("stale result wrote an acceptance record")
+	}
+	if len(spy.comments) != 0 {
+		t.Fatalf("stale result posted PR comments: %q", spy.comments)
+	}
+	if _, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", 11); fileExists(path) {
+		t.Fatal("stale result wrote the repair ledger")
+	}
+	if len(f.expected) != 0 {
+		t.Fatal("stale result merged the PR")
+	}
+	got, err := s.Task(ctx, old.ID)
+	if err != nil || len(got.Result) != 0 {
+		t.Fatalf("stale result was stored: %+v %v", got, err)
+	}
+
+	// Next harvest: same PR and head, new requirements.
+	if err := enqueueWorkerAcceptance(ctx, spy, "o/r", rc, f.pr, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := s.Task(ctx, old.ID)
+	if err != nil || cancelled.State != "cancelled" {
+		t.Fatalf("old task not cancelled: %+v %v", cancelled, err)
+	}
+	active, err := s.Active(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fresh []coordinator.Task
+	for _, task := range active {
+		if task.Kind == "acceptance" {
+			fresh = append(fresh, task)
+		}
+	}
+	if len(fresh) != 1 || fresh[0].ID == old.ID || fresh[0].PR != 11 {
+		t.Fatalf("expected one new acceptance task for PR 11: %+v", fresh)
+	}
+	var newPayload coordinatorPayload
+	if err := json.Unmarshal(fresh[0].Payload, &newPayload); err != nil || newPayload.Acceptance == nil {
+		t.Fatalf("bad new payload: %v", err)
+	}
+	nc, oc := newPayload.Acceptance, oldPayload.Acceptance
+	if nc.HeadSHA != oc.HeadSHA || nc.PRNumber != oc.PRNumber {
+		t.Fatal("new contract is not for the same PR and head")
+	}
+	if !strings.Contains(nc.Requirements, "NEW goal") || strings.Contains(oc.Requirements, "NEW goal") {
+		t.Fatalf("requirements not refreshed: %q", nc.Requirements)
+	}
+	newDigest, _ := nc.Digest()
+	oldDigest, _ := oc.Digest()
+	if newDigest == oldDigest {
+		t.Fatal("contract digest did not change")
+	}
+	as, err := acceptance.OpenStore(acceptanceStorePath("o/r", 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer as.Close()
+	attempts, err := as.InfrastructureAttempts(*nc)
+	if err != nil || attempts.Count != 0 {
+		t.Fatalf("infrastructure attempts should restart at 0: %+v %v", attempts, err)
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

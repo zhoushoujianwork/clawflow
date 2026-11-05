@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"github.com/zhoushoujianwork/clawflow/internal/chat/prompts"
 	"strings"
 	"testing"
 
@@ -122,5 +123,37 @@ func TestChatBuilders_ScopeChangesGoToBody(t *testing.T) {
 	out := BuildIssueModeContext("o/r", issue, nil, "")
 	if !strings.Contains(out, "update the issue body instead") {
 		t.Error("issue mode must tell scope changes to go into the body")
+	}
+}
+
+func TestChatBuilders_CommentsAreContextNotRequirements(t *testing.T) {
+	issue := vcs.Issue{Number: 42, Title: "x", State: "open", Body: "details"}
+	for name, out := range map[string]string{
+		"edit":  BuildIssueContext("o/r", issue, nil, ""),
+		"issue": BuildIssueModeContext("o/r", issue, nil, ""),
+	} {
+		if strings.Contains(out, "comments are not read as requirements") {
+			t.Errorf("%s: stale claim that comments are not read", name)
+		}
+		flat := strings.Join(strings.Fields(out), " ")
+		if !strings.Contains(flat, "not a requirement source") || !strings.Contains(flat, "scope change MUST be written into the body") {
+			t.Errorf("%s: missing comment/body requirement rule", name)
+		}
+	}
+}
+
+func TestCLICheatsheet_IssueCommentAndCloseUseIssueFlag(t *testing.T) {
+	for _, scope := range []prompts.Scope{prompts.ScopeFull, prompts.ScopeSingleIssue, prompts.ScopeRepo} {
+		out := prompts.CLICheatsheet(scope)
+		for _, cmd := range []string{"issue comment", "issue close"} {
+			if !strings.Contains(out, cmd+" --repo <owner/name> --issue <number>") {
+				t.Errorf("scope %v: %s must use --issue <number>", scope, cmd)
+			}
+		}
+		for _, bad := range []string{"issue comment --repo <owner/name> <number>", "issue close --repo <owner/name> <number>"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("scope %v: positional %q", scope, bad)
+			}
+		}
 	}
 }

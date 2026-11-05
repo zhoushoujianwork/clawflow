@@ -46,11 +46,11 @@ func CLICheatsheet(scope Scope) string {
 	fmt.Fprintln(&b, "  (use only when the requirements change; otherwise comment)")
 
 	if scope == ScopeFull || scope == ScopeSingleIssue {
-		fmt.Fprintln(&b, "- `clawflow issue comment --repo <owner/name> <number> --body \"...\"`")
-		fmt.Fprintln(&b, "- `clawflow issue close --repo <owner/name> <number>`")
+		fmt.Fprintln(&b, "- `clawflow issue comment --repo <owner/name> --issue <number> --body \"...\"`")
+		fmt.Fprintln(&b, "- `clawflow issue close --repo <owner/name> --issue <number>`")
 	} else if scope == ScopeRepo {
-		fmt.Fprintln(&b, "- `clawflow issue comment --repo <owner/name> <number> --body \"...\"`")
-		fmt.Fprintln(&b, "- `clawflow issue close --repo <owner/name> <number>`")
+		fmt.Fprintln(&b, "- `clawflow issue comment --repo <owner/name> --issue <number> --body \"...\"`")
+		fmt.Fprintln(&b, "- `clawflow issue close --repo <owner/name> --issue <number>`")
 	}
 
 	// Sub-issue commands — only for scopes that allow cross-issue work
@@ -67,7 +67,7 @@ func CLICheatsheet(scope Scope) string {
 	fmt.Fprintln(&b, "### PRs")
 	fmt.Fprintln(&b, "- `clawflow pr list --repo <owner/name> [--state open]`")
 	fmt.Fprintln(&b, "- `clawflow pr view --repo <owner/name> <number>`")
-	fmt.Fprintln(&b, "- `clawflow pr comment --repo <owner/name> <number> --body \"...\"`")
+	fmt.Fprintln(&b, "- `clawflow pr comment --repo <owner/name> --issue <number> --body \"...\"`")
 	fmt.Fprintln(&b)
 
 	// Labels section
