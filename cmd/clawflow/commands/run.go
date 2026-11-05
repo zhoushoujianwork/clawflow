@@ -2291,6 +2291,10 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	logAcceptanceRepair(j, "end", "status", rm.Status, "outcome", outcome, "infra", repairInfra)
 
+	if j.repair != nil && j.repair.Feedback != nil && j.hooks == nil && !repairInfra {
+		postPRFeedbackResult(j, rm.Status, outcome, output)
+	}
+
 	// Apply successful lifecycle follow-up.
 	if rm.Status == "success" && j.hooks == nil {
 		runPostAutomation(ctx, j, outcome, output, prefix)

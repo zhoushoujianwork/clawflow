@@ -174,7 +174,13 @@ func developmentResumeOptions(ctx context.Context, j *runJob, prev snapshot.RunM
 			newCommits, _ = sessionGit(ctx, wt.Path, "log", "--oneline", "-20", old+".."+baseSHA)
 		}
 	}
-	reason := sessionResumeReason(prev, role, configuredDevelopmentProfile(role), wt.Path, count, j.repair != nil)
+	feedback := j.repair != nil && j.repair.Feedback != nil
+	reason := sessionResumeReason(prev, role, configuredDevelopmentProfile(role), wt.Path, count, j.repair != nil && !feedback)
+	// Human feedback continues the original session even after a clean
+	// finish; every other resume guard still applies.
+	if feedback && reason == "not_resumable" && prev.Status == "success" {
+		reason = ""
+	}
 	logResume := func(outcome, reason string) {
 		runLog.Info("run/session_resume", "repo", j.repo, "issue", j.sub.Number, "outcome", outcome, "reason", reason)
 	}

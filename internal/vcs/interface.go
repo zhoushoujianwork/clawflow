@@ -293,3 +293,23 @@ type PRFileProvider interface {
 type BranchHeadProvider interface {
 	BranchHead(repo, branch string) (string, error)
 }
+
+// PRFeedback is one human-visible review item on a PR: a review body, an
+// inline review comment or a conversation comment.
+type PRFeedback struct {
+	ID         string `json:"id"` // kind-qualified, e.g. "review:12"
+	Kind       string `json:"kind"`
+	Author     string `json:"author"`
+	AuthorType string `json:"author_type,omitempty"` // "Bot" for apps
+	Body       string `json:"body"`
+	Path       string `json:"path,omitempty"`
+	Line       int    `json:"line,omitempty"`
+	State      string `json:"state,omitempty"`
+	CommitID   string `json:"commit_id,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+}
+
+// PRFeedbackLister optionally reads reviews and comments on a PR.
+type PRFeedbackLister interface {
+	ListPRFeedback(repo string, prNumber int) ([]PRFeedback, error)
+}
