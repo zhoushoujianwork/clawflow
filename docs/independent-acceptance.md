@@ -53,7 +53,7 @@ clawflow repo set zhoushoujianwork/clawflow --acceptance-setup-command 'cd web &
 - 验收通过后，由后续 sweep 串行合并；每次合并前重新检查当前 head、base 和证据。一个 PR 合并导致 base 变化后，其他 PR 的旧验收不能用于合并。
 - 每次完成审查后更新 PR 上由当前认证账号拥有的一条验收评论，包含提交、结论、逐项证据、未解决问题与下一步负责人；旧 attempt 保留在私有审计记录中。发布失败可由后续 harvest 重试。
 - 启动失败使 `clawflow run` 返回非零；后台审查中的基础设施错误（包括提供者失败和无效评审报告）记录在日志和验收记录中，不改变已经返回的调度命令退出码，15 分钟后可重试。同一 PR head 最多连续失败 2 次，随后以一条评论和看板原因 `acceptance-infra` 暂停。新 head、issue 正文变化或新 ClawFlow 二进制会重置计数；手动验收命令也遵守此上限。这些错误不消耗产品修复次数。
-- A `failed` verdict is repaired on the same PR, see [Repair after a failed verdict](#repair-after-a-failed-verdict). A `blocked` verdict is repaired only when its `next_owner` is `implementer` and it has structured failing findings; every other `blocked` verdict (environment, human judgment, unknown or empty owner, no findings) is not: the comment says a human decision is needed. Both share the per-PR three-attempt budget and cooldown.
+- A `failed` verdict is repaired on the same PR, see [Repair after a failed verdict](#repair-after-a-failed-verdict). A `blocked` verdict is repaired only when its `next_owner` is `implementer` and it has structured failing findings or at least one blocked/failed requirement check (whose id, requirement text, `missing` and the record's `next_action` are passed to the repair as untrusted data); every other `blocked` verdict (environment, human judgment, unknown or empty owner, neither findings nor unpassed checks) is not: the comment says a human decision is needed. Both share the per-PR three-attempt budget and cooldown.
 
 The PR must be open, non-draft, from the same repository, and reference an open issue with a closing keyword. A successful managed development run must have captured that issue's requirements and trustworthy native execution events. Historical runs missing the requirements snapshot need a new managed development run. The configured acceptance profile must support the existing Offload execution protocol.
 
@@ -102,7 +102,7 @@ Local fixture tests do not establish a live provider or GitHub Actions result. S
 
 每项 `checks` 记录检查内容、证据类型（source/unit/integration/live）、引用、适用提交、观察结果（inspected/exists/passed/failed/unverified）及缺失证明。已有测试在提交 head 上的可信成功结果可以复用，无须重复执行；测试文件存在、源码推断和实际执行结果分别报告。无关测试不能覆盖需求。没有成功 CI 也不默认要求全量测试，只补有意义的证据缺口。保留原有 CI 和合并门禁；此变更不实现 #350 的 workflow/job 来源认证。
 
-`passed` 要求每项证据与提交及所需证明一致且没有未解决缺口。`failed` 要求有结构化、精确提交上的具体缺陷证据，进入既有有界修复。`blocked` 要求明确的缺失证明、负责人及下一步行动；仅当 `next_owner` 为 `implementer` 且带有结构化失败 findings 时进入同一修复流程（共用每 PR 三次额度），其余 `blocked` 不进入修复，需人工决定。工具/基础设施错误按既有重试政策处理。审查建议不扩展需求；仅在批准标准有要求且明确授权的窗口内做 visual/live 验证。
+`passed` 要求每项证据与提交及所需证明一致且没有未解决缺口。`failed` 要求有结构化、精确提交上的具体缺陷证据，进入既有有界修复。`blocked` 要求明确的缺失证明、负责人及下一步行动；仅当 `next_owner` 为 `implementer` 且带有结构化失败 findings 或至少一条 blocked/failed 的需求 Check 时进入同一修复流程（共用每 PR 三次额度），其余 `blocked` 不进入修复，需人工决定。工具/基础设施错误按既有重试政策处理。审查建议不扩展需求；仅在批准标准有要求且明确授权的窗口内做 visual/live 验证。
 
 PR 评论只更新当前认证账号拥有的 `clawflow:acceptance-report` 评论；同一 attempt 重发无副作用，较旧或时间顺序冲突的结果被拒绝。发布前重新核对当前合约及最新 attempt；本机使用现有 PR 锁，分布式 worker 由 coordinator 接收 fenced 结果后发布。它不是跨多个独立 coordinator 的远端原子 CAS；继续遵循现有单 authority 部署边界。旧 issue 评论不删除。私有 store 保留每次审查；不会把未经清理的原始 transcript 发布到 PR。
 

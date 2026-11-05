@@ -905,7 +905,9 @@ func TestRepairableVerdictSnapshot(t *testing.T) {
 	}{
 		{acceptanceFindings{Verdict: "failed"}, true},
 		{acceptanceFindings{Verdict: "failed", NextOwner: "owner"}, true},
-		{acceptanceFindings{Verdict: "blocked", NextOwner: "implementer"}, true},
+		{acceptanceFindings{Verdict: "blocked", NextOwner: "implementer"}, false},
+		{acceptanceFindings{Verdict: "blocked", NextOwner: "implementer", Evidence: []string{"x"}}, true},
+		{acceptanceFindings{Verdict: "blocked", NextOwner: "implementer", Checks: []acceptanceCheckFinding{{ID: "AT-1"}}}, true},
 		{acceptanceFindings{Verdict: "blocked", NextOwner: "owner"}, false},
 		{acceptanceFindings{Verdict: "blocked"}, false},
 		{acceptanceFindings{Verdict: "passed", NextOwner: "implementer"}, false},
@@ -926,5 +928,62 @@ func TestBlockedFindingsCarryOwnerAndUntrustedPrompt(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Fatalf("prompt lacks %q", want)
 		}
+	}
+}
+
+func blockedCheckRecord(owner string) acceptance.Record {
+	return acceptance.Record{
+		Verdict:    acceptance.Blocked,
+		NextOwner:  owner,
+		NextAction: "add an execution test for CFG-01",
+		Plan:       acceptance.Plan{Criteria: []acceptance.Criterion{{ID: "CFG-01", Requirement: "Board shows config", Proof: "execution"}}},
+		Checks: []acceptance.RequirementCheck{
+			{ID: "CFG-01", Status: acceptance.Blocked, Missing: "no execution test for Board"},
+			{ID: "CFG-02", Status: acceptance.Passed},
+		},
+		Findings: []acceptance.Finding{{Kind: "advisory", Summary: "note"}},
+	}
+}
+
+func TestBlockedCheckRepairableWithAdvisoryFindings(t *testing.T) {
+	rec := blockedCheckRecord(" Implementer ")
+	if !blockedRepairableByImplementer(rec) {
+		t.Fatal("blocked check with implementer owner should be repairable")
+	}
+	f := findingsFromRecord(rec)
+	if len(f.Checks) != 1 || f.Checks[0].ID != "CFG-01" || f.Checks[0].Requirement != "Board shows config" || f.Checks[0].Missing != "no execution test for Board" {
+		t.Fatalf("checks: %+v", f.Checks)
+	}
+	if !repairableVerdict(f) {
+		t.Fatal("sealed snapshot should be repairable")
+	}
+	p := (&ciRepairContext{Acceptance: f, PR: vcs.PR{HeadSHA: "h"}}).acceptancePrompt("go test")
+	for _, want := range []string{"no execution test for Board", "add an execution test for CFG-01", "BEGIN UNTRUSTED REVIEWER FINDINGS"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
+	}
+}
+
+func TestBlockedCheckNotRepairable(t *testing.T) {
+	for _, owner := range []string{"owner", "human", ""} {
+		if blockedRepairableByImplementer(blockedCheckRecord(owner)) {
+			t.Fatalf("owner %q authorized repair", owner)
+		}
+	}
+	for _, mut := range []func(*acceptance.Record){
+		func(r *acceptance.Record) { r.Unstructured = true },
+		func(r *acceptance.Record) { r.ValidationError = "bad" },
+	} {
+		r := blockedCheckRecord("implementer")
+		mut(&r)
+		if blockedRepairableByImplementer(r) {
+			t.Fatal("invalid record authorized repair")
+		}
+	}
+	r := blockedCheckRecord("implementer")
+	r.Checks = []acceptance.RequirementCheck{{ID: "CFG-02", Status: acceptance.Passed}}
+	if blockedRepairableByImplementer(r) {
+		t.Fatal("no unpassed check or failing finding authorized repair")
 	}
 }

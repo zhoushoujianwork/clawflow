@@ -544,9 +544,14 @@ func TestWorkerAcceptanceRepairUsesCoordinatorSnapshot(t *testing.T) {
 		t.Fatal("blocked verdict accepted")
 	}
 	j.repair.Acceptance.NextOwner = "implementer"
+	if err := recheckAcceptanceRepair(context.Background(), j, j.repair.PR); err == nil {
+		t.Fatal("blocked snapshot without findings or unpassed checks accepted")
+	}
+	j.repair.Acceptance.Checks = []acceptanceCheckFinding{{ID: "AT-1", Status: "blocked", Missing: "no execution test"}}
 	if err := recheckAcceptanceRepair(context.Background(), j, j.repair.PR); err != nil {
 		t.Fatal(err)
 	}
+	j.repair.Acceptance.Checks = nil
 	j.repair.Acceptance.NextOwner = ""
 	j.repair.Acceptance.Verdict = "failed"
 	if err := recheckAcceptanceRepair(context.Background(), j, vcs.PR{HeadSHA: "changed"}); err == nil {
