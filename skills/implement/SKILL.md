@@ -47,6 +47,8 @@ ClawFlow owns labels and comments. Your stdout becomes the issue comment; the la
    ```
    git checkout -b fix/issue-{N}
    ```
+   The branch name must be exactly `fix/issue-{N}` (or `feat/issue-{N}`, or the named reopen branch). If that name is already taken by an older branch, or the issue has an older unmanaged branch (e.g. `fix/issue-{N}-something`), do NOT pick another name and do NOT open a PR from it: stop, report the branch name, and end with `<!-- clawflow:outcome=agent-failed -->`.
+
    Do NOT run `git checkout <base_branch>` or `git pull` first. The base branch is already checked out in the user's primary clone, so checkout here would fail with "already checked out". That's why ClawFlow gives you a worktree.
 3. **IMPLEMENT** — Minimum change to fix the issue. No unrelated refactoring.
 4. **TEST AND REPAIR** — Run focused headless checks and repair failures before committing or opening the PR. Do not open, focus, restart, or control desktop apps. Live/desktop acceptance requires explicit authorization for that check. Two layers, in order:

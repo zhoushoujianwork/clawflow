@@ -3,6 +3,7 @@ package runverdict
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
@@ -39,5 +40,15 @@ func TestDecide(t *testing.T) {
 				t.Fatalf("got %+v", v)
 			}
 		})
+	}
+}
+
+func TestDecideUnmanagedBranch(t *testing.T) {
+	v := Decide(Input{Output: "ok", Outcome: "agent-implemented", UnmanagedBranch: "fix/issue-639-job-logs", IssueNumber: 639})
+	if v.Status != "blocked" || !strings.Contains(v.Error, "fix/issue-639-job-logs") || !strings.Contains(v.Error, "fix/issue-639") {
+		t.Fatalf("got %+v", v)
+	}
+	if v := Decide(Input{Output: "ok", Outcome: "agent-implemented", IssueNumber: 639}); v.Status != "success" {
+		t.Fatalf("managed branch changed: %+v", v)
 	}
 }
