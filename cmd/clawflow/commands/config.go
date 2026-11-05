@@ -174,10 +174,10 @@ func newConfigShowCmd() *cobra.Command {
 				billingDay = 1
 			}
 			fmt.Printf("  billing_cycle_day:    %d\n", billingDay)
-			if dsn, err := store.ResolveDSN(cfg); err == nil {
-				fmt.Printf("  database.dsn:         %s\n", store.MaskDSN(dsn))
+			if path, err := store.ResolvePath(cfg); err == nil {
+				fmt.Printf("  database:             SQLite %s\n", path)
 			} else {
-				fmt.Printf("  database.dsn:         not set\n")
+				fmt.Printf("  database:             %v\n", err)
 			}
 			fmt.Println()
 

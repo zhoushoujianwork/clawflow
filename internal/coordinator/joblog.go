@@ -8,7 +8,6 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/joblog"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // Bounds that keep one execution's output from exhausting controller storage.
@@ -37,7 +36,7 @@ type LogStream struct {
 	Reason        string
 	State         string
 	Completeness  string
-	Summary       json.RawMessage `gorm:"type:jsonb"`
+	Summary       json.RawMessage `gorm:"serializer:rawjson"`
 	LastSeq       int64
 	EventCount    int
 	BytesTotal    int64
@@ -57,7 +56,7 @@ type LogEvent struct {
 	LeaseEpoch int64
 	Invocation string
 	Seq        int64
-	Event      json.RawMessage `gorm:"type:jsonb"`
+	Event      json.RawMessage `gorm:"serializer:rawjson"`
 	Size       int
 }
 
@@ -129,16 +128,15 @@ func (s *Store) AppendLog(ctx context.Context, taskID, worker string, page LogPa
 	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var t Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&t, "id = ?", taskID).Error; err != nil {
+		// The store's BEGIN IMMEDIATE transaction serializes every writer. Reading
+		// the stream after acquiring that lock keeps sequence acceptance gap-free.
+		if err := tx.First(&t, "id = ?", taskID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrStaleLease
 			}
 			return err
 		}
-		var now time.Time
-		if err := tx.Raw("SELECT clock_timestamp()").Scan(&now).Error; err != nil {
-			return err
-		}
+		now := controllerNow()
 		if t.State != "leased" || t.LeaseOwner != worker || t.FencingToken != page.FencingToken || t.LeaseExpiresAt == nil || (!t.LeaseExpiresAt.After(now) && !DurableTask(&t)) {
 			return ErrStaleLease
 		}

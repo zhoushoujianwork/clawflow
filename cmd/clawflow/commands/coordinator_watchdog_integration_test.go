@@ -77,9 +77,10 @@ func TestCoordinatorWatchdogEndToEnd(t *testing.T) {
 	waiting := enqueue(5)
 	progress(silent, 2400)
 	progress(healthy, 5)
-	exec("UPDATE coordinator_tasks SET lease_expires_at = NULL, updated_at = now() - interval '15 minutes' WHERE id = ?", finalizing.ID)
-	exec(`UPDATE coordinator_tasks SET payload = payload || '{"durable_execution":true}', lease_expires_at = now() - interval '45 minutes' WHERE id = ?`, recovering.ID)
-	exec("UPDATE coordinator_tasks SET updated_at = now() - interval '15 minutes' WHERE id = ?", waiting.ID)
+	now := time.Now().UTC()
+	exec("UPDATE coordinator_tasks SET lease_expires_at = NULL, updated_at = ? WHERE id = ?", now.Add(-15*time.Minute), finalizing.ID)
+	exec("UPDATE coordinator_tasks SET payload = json_set(payload, '$.durable_execution', json('true')), lease_expires_at = ? WHERE id = ?", now.Add(-45*time.Minute), recovering.ID)
+	exec("UPDATE coordinator_tasks SET updated_at = ? WHERE id = ?", now.Add(-15*time.Minute), waiting.ID)
 
 	// A stale fence and a wrong token are rejected over HTTP.
 	if err := api.postOnce(ctx, "tasks/"+silent.ID+"/progress", map[string]any{"fencing_token": silent.FencingToken + 1, "last_event_age_sec": 0}, nil); err == nil {

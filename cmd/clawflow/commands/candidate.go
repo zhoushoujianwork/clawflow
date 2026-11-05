@@ -154,27 +154,12 @@ write-back are disabled by default.`}
 				}
 			}
 		}()
-		admin := strings.TrimSpace(os.Getenv(adminDSNEnv))
-		if admin == "" {
-			return fmt.Errorf("blocked (environment-maintainer): %s is not set; a PostgreSQL server is required to own the candidate schema", adminDSNEnv)
-		}
-		pinned, err := candidate.PinDSN(admin, p.Schema)
-		if err != nil {
-			return err
-		}
-		ev.Redact(admin, pinned)
 		ev.Layers["environment-ready"] = candidate.Passed
 		stableBefore, err := candidate.TakeStable(stableHost(), candidate.DefaultStableProbe(config.RootDir(), p.Base))
 		if err != nil {
 			return err
 		}
 		if err := writeJSON0600(filepath.Join(p.Root, "stable-before.json"), stableBefore); err != nil {
-			return err
-		}
-		if err := (candidate.PostgresSchemas{DSN: admin}).Ensure(cmd.Context(), p.Schema, schemaRecorded(p)); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(p.Root, ".schema-created"), []byte(p.Schema+"\n"), 0o600); err != nil {
 			return err
 		}
 		binary, sha, err := candidate.BuildBinary(cmd.Context(), p, checkout)
@@ -184,7 +169,7 @@ write-back are disabled by default.`}
 		ev.Environment["binary_sha256"] = sha
 		ev.Command("build", []string{"go", "build", "./cmd/clawflow"}, 0, "ok")
 		ev.Layers["candidate-loaded"] = candidate.Passed
-		res, err := m.Up(cmd.Context(), binary, pinned)
+		res, err := m.Up(cmd.Context(), binary, "")
 		if err != nil {
 			return err
 		}
@@ -268,10 +253,8 @@ write-back are disabled by default.`}
 		if _, err := m.Down(); err != nil {
 			return err
 		}
-		if admin := strings.TrimSpace(os.Getenv(adminDSNEnv)); admin != "" && !keepSchema && schemaRecorded(p) {
-			if err := (candidate.PostgresSchemas{DSN: admin}).Drop(cmd.Context(), p.Schema); err != nil {
-				return err
-			}
+		if schemaRecorded(p) {
+			return fmt.Errorf("legacy PostgreSQL candidate schema is recorded; preserve this runtime and retire its schema separately")
 		}
 		return m.Remove()
 	}}

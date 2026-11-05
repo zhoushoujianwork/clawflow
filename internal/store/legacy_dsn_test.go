@@ -1,11 +1,9 @@
 package store
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
@@ -58,28 +56,6 @@ func TestMaskDSN(t *testing.T) {
 	for _, c := range cases {
 		if got := MaskDSN(c.in); got != c.want {
 			t.Errorf("MaskDSN(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
-func TestOpenErrorsDoNotLeakPassword(t *testing.T) {
-	const pw = "sup3r-s3cret-pw"
-	dsns := []string{
-		"postgres://u:" + pw + "@127.0.0.1:1/db?sslmode=disable&connect_timeout=2",
-		"host=127.0.0.1 port=1 user=u password=" + pw + " dbname=db sslmode=disable connect_timeout=2",
-		"postgres://u:" + pw + "@no-such-host.invalid/db?sslmode=disable&connect_timeout=2",
-		"postgres://u:" + pw + "@127.0.0.1:1/db?sslmode=bogus",
-	}
-	for _, dsn := range dsns {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		s, err := Open(ctx, dsn)
-		cancel()
-		if err == nil {
-			_ = s.Close()
-			t.Fatalf("Open(%q) unexpectedly succeeded", MaskDSN(dsn))
-		}
-		if strings.Contains(err.Error(), pw) {
-			t.Errorf("error leaks password: %v", err)
 		}
 	}
 }

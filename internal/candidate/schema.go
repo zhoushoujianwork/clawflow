@@ -48,7 +48,7 @@ func (p PostgresSchemas) admin(ctx context.Context) (*store.Store, error) {
 	if devmode.Active() {
 		return nil, fmt.Errorf("%w: a candidate cannot administer schemas", devmode.ErrBlocked)
 	}
-	return store.Open(ctx, p.DSN)
+	return nil, fmt.Errorf("legacy PostgreSQL candidate schemas are retired; use the candidate's isolated SQLite file")
 }
 
 func (p PostgresSchemas) Ensure(ctx context.Context, schema string, owned bool) error {

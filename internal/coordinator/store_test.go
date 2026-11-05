@@ -20,7 +20,7 @@ var ctx = context.Background()
 
 func setup(t *testing.T) (*Store, *store.Store, string) {
 	t.Helper()
-	db, dsn := storetest.NewWithDSN(t)
+	db, dsn := storetest.NewWithPath(t)
 	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
 		t.Fatal(err)
 	}

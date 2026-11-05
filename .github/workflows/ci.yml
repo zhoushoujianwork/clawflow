@@ -8,20 +8,6 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: clawflow
-          POSTGRES_PASSWORD: clawflow
-          POSTGRES_DB: clawflow_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U clawflow -d clawflow_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -29,10 +15,22 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The suite runs on isolated SQLite files and needs no database service.
       - name: Unit tests
+        run: go test -v -race ./...
+
+      # The one-time PostgreSQL importer is tested against an isolated schema in a
+      # throwaway PostgreSQL service. The service exists only for this step.
+      - name: Start PostgreSQL for importer tests
+        run: |
+          docker run -d --name import-fixture -e POSTGRES_USER=clawflow -e POSTGRES_PASSWORD=clawflow \
+            -e POSTGRES_DB=clawflow_test -p 5432:5432 postgres:17
+          for i in $(seq 1 30); do docker exec import-fixture pg_isready -U clawflow -d clawflow_test && break; sleep 2; done
+
+      - name: Importer tests (PostgreSQL fixture)
         env:
           CLAWFLOW_TEST_DATABASE_DSN: postgres://clawflow:clawflow@localhost:5432/clawflow_test?sslmode=disable
-        run: go test -v -race ./...
+        run: go test -v -race -count=1 -run 'Import|Cutover|Rollback|Verify' ./internal/store/...
 
       - name: CLI smoke tests
         run: |

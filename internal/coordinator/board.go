@@ -41,7 +41,7 @@ type BoardTask struct {
 	Subject   string     `json:"subject"`
 	Durable   bool       `json:"durable" gorm:"->"`
 	// Routing contains only private acceptance routing fields, never the full payload.
-	Routing             json.RawMessage `json:"-" gorm:"column:acceptance_routing;type:jsonb"`
+	Routing             json.RawMessage `json:"-" gorm:"column:acceptance_routing;serializer:rawjson"`
 	ApplicationAttempts int             `json:"application_attempts"`
 	ApplicationError    string          `json:"application_error,omitempty"`
 	WaitingReason       string          `json:"waiting_reason,omitempty" gorm:"-"`
@@ -70,10 +70,7 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 		limits = dispatchLimits{known: err == nil, total: total, repos: repos}
 	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var now time.Time
-		if err := tx.Raw("SELECT transaction_timestamp()").Scan(&now).Error; err != nil {
-			return err
-		}
+		now := controllerNow()
 		var workers []Worker
 		if err := tx.Select("id, tags, roles, run_untagged, max_parallel, paused").Order("id").Find(&workers).Error; err != nil {
 			return err
@@ -94,14 +91,14 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			heartbeats[beat.Worker] = beat.At
 		}
 		tasks := []BoardTask{}
-		if err := tx.Model(&Task{}).Select("(SELECT started_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS started_at, (SELECT ended_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS ended_at, id, COALESCE(payload->>'durable_execution' = 'true', false) AS durable, COALESCE(payload->>'title', '') AS subject, repo, issue, pr, kind, state, tags, jsonb_build_object('acceptance_worker', payload->'acceptance_worker', 'development_worker', payload->'development_worker') AS acceptance_routing, priority, lease_owner, lease_expires_at, last_event_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
+		if err := tx.Model(&Task{}).Select("(SELECT started_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS started_at, (SELECT ended_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS ended_at, id, COALESCE(json_extract(payload, '$.durable_execution') = 1, 0) AS durable, COALESCE(json_extract(payload, '$.title'), '') AS subject, repo, issue, pr, kind, state, tags, json_object('acceptance_worker', json_extract(payload, '$.acceptance_worker'), 'development_worker', json_extract(payload, '$.development_worker')) AS acceptance_routing, priority, lease_owner, lease_expires_at, last_event_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
 			return err
 		}
 		out = deriveBoard(now, workers, tokens, heartbeats, tasks)
 		out.applyFindings(now, workers, limits)
 		cfg := s.Watchdog.withDefaults()
 		var history []FinishedTask
-		if err := tx.Model(&Task{}).Select("repo, issue, pr, state, updated_at, COALESCE(result->>'infra_kind', '') AS infra_kind, COALESCE(result->>'error', '') AS err, COALESCE(result->>'head_sha', '') AS head").
+		if err := tx.Model(&Task{}).Select("repo, issue, pr, state, updated_at, COALESCE(json_extract(result, '$.infra_kind'), '') AS infra_kind, COALESCE(json_extract(result, '$.error'), '') AS err, COALESCE(json_extract(result, '$.head_sha'), '') AS head").
 			Where("state IN ('failed', 'done') AND updated_at > ?", now.Add(-cfg.FailureWindow)).Order("updated_at DESC").Scan(&history).Error; err != nil {
 			return err
 		}
@@ -113,7 +110,7 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			}
 		}
 		return nil
-	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	}, &sql.TxOptions{ReadOnly: true})
 	return out, err
 }
 

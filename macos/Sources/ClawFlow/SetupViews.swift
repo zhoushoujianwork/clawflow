@@ -30,7 +30,7 @@ struct ConnectionView: View {
                 Button("Test and Save") { Task { await save() } }.disabled(testing || model.busy).keyboardShortcut(.defaultAction)
             }
             Section("Host a controller") {
-                Text("On the host, configure PostgreSQL and enable settings.coordinator.enabled, then run:").font(.caption)
+                Text("On the host, enable settings.coordinator.enabled (no database server is needed), then run:").font(.caption)
                 Text("clawflow controller service install\nclawflow worker token create --name dashboard --scope admin").font(.caption.monospaced()).textSelection(.enabled)
                 Text("Save the admin token to a private file and enter its path above. Stop the legacy web service before installing the controller. Install host services once; future app launches start missing installed local services.").font(.caption).foregroundStyle(.secondary)
             }
