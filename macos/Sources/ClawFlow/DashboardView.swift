@@ -226,10 +226,6 @@ struct TaskDetail: View {
     @ObservedObject var model: DashboardModel
     let snapshot: DashboardSnapshot
     let row: TaskRow
-    @State private var showEvents = true
-    @State private var events: [TaskEvent] = []
-    @State private var eventError: String?
-    @State private var loading = false
     private var state: StageState { IssuePipeline.jobState(row).0 }
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -262,43 +258,9 @@ struct TaskDetail: View {
             }
             DSection(rule: false) {
                 DLabel(text: "执行日志", top: 0)
-                Text("这里放 Offload 的消息和工具调用，现在只有调度事件。").font(DS.sub).foregroundStyle(DS.dim).fixedSize(horizontal: false, vertical: true)
-                DisclosureGroup("调度事件", isExpanded: $showEvents) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("连接时每 5 秒刷新。").font(DS.small).foregroundStyle(DS.dim)
-                        if loading { ProgressView().controlSize(.small) }
-                        if let eventError { Text(eventError).font(DS.small).foregroundStyle(DS.warn).textSelection(.enabled) }
-                        ForEach(Array(events.enumerated()), id: \.offset) { _, event in
-                            HStack(alignment: .top) {
-                                Text(event.at, format: .dateTime.hour().minute().second()).foregroundStyle(DS.dim)
-                                Text(event.action).textSelection(.enabled)
-                            }.font(.caption.monospaced())
-                        }
-                        Button("刷新事件") { Task { await loadEvents() } }.buttonStyle(DButtonStyle()).disabled(!model.summary.connected || loading)
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
-                }
-                .font(DS.sub).padding(.top, 8)
-                .onChange(of: showEvents) { _, expanded in if expanded { Task { await loadEvents() } } }
+                JobLogView(model: model, row: row)
                 Text("Task ID：\(row.id)").font(DS.small).foregroundStyle(DS.faint).textSelection(.enabled).padding(.top, 10)
             }
-        }
-        .task(id: row.id) {
-            while !Task.isCancelled {
-                if showEvents { await loadEvents() }
-                do { try await Task.sleep(for: .seconds(5)) } catch { break }
-            }
-        }
-    }
-    private func loadEvents() async {
-        guard model.summary.connected, !loading else { return }
-        loading = true; eventError = nil; defer { loading = false }
-        let connection = model.connection
-        do {
-            let next = try decoder().decode([TaskEvent].self, from: await model.request(["events", row.id]))
-            guard !Task.isCancelled, connection == model.connection else { return }
-            events = next
-        } catch {
-            if !Task.isCancelled, connection == model.connection { eventError = error.localizedDescription }
         }
     }
 }

@@ -76,6 +76,13 @@ type coordinatorRepair struct {
 	Acceptance *acceptanceFindings `json:"acceptance,omitempty"`
 }
 
+// context maps the approved payload to the runner's repair context. Worker
+// start validation and job construction both use it so the repair reason
+// cannot diverge between the coordination probe and the executed job.
+func (r *coordinatorRepair) context() *ciRepairContext {
+	return &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict", DevelopmentVerification: r.Reason == "development_verification"}
+}
+
 // skillDigest excludes machine-local paths while covering executable semantics.
 func skillDigest(op *operator.Operator) string {
 	copy := *op
@@ -301,6 +308,28 @@ type coordinatorResults struct {
 	apply   func(context.Context, *coordinator.Task, *runJob, *coordinatorReport) error
 }
 
+// Execution output is stored by the underlying coordinator store; the embedded
+// WorkerStore interface would otherwise hide these optional capabilities.
+func (r *coordinatorResults) AppendLog(ctx context.Context, task, worker string, page coordinator.LogPage) (coordinator.LogAck, error) {
+	logs, ok := r.WorkerStore.(interface {
+		AppendLog(context.Context, string, string, coordinator.LogPage) (coordinator.LogAck, error)
+	})
+	if !ok {
+		return coordinator.LogAck{}, coordinator.ErrInvalid
+	}
+	return logs.AppendLog(ctx, task, worker, page)
+}
+
+func (r *coordinatorResults) ReadLog(ctx context.Context, task string, epoch, after int64, limit int) (coordinator.LogRead, error) {
+	logs, ok := r.WorkerStore.(interface {
+		ReadLog(context.Context, string, int64, int64, int) (coordinator.LogRead, error)
+	})
+	if !ok {
+		return coordinator.LogRead{}, coordinator.ErrInvalid
+	}
+	return logs.ReadLog(ctx, task, epoch, after, limit)
+}
+
 type coordinatorReport struct {
 	// Controller-owned audit data, never converted into publishable intents.
 	// The worker wire schema deliberately does not accept this field.
@@ -392,7 +421,11 @@ func (s *coordinatorResults) finish(ctx context.Context, id, worker string, fenc
 	}
 	if r.Status == "blocked" {
 		r.Output = testingBlockedBody(&r.jobResult)
-		r.Effects = []jobEffect{{Kind: "issue-comment", Repo: t.Repo, Number: t.Issue, Body: r.Output}}
+		// A coordination re-check ran no model and must not write to the issue:
+		// the comment would itself change the next comparison.
+		if r.InfraKind != repairledger.ReleaseCoordinationChanged {
+			r.Effects = []jobEffect{{Kind: "issue-comment", Repo: t.Repo, Number: t.Issue, Body: r.Output}}
+		}
 	}
 	j, err := s.loadJob(ctx, t)
 	if err != nil {

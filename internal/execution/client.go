@@ -529,6 +529,19 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	if err != nil {
 		return result, &UnavailableError{Reason: ReasonMissing, Message: "Offload executable path unavailable"}
 	}
+	// Capture is opt-in per managed invocation and never changes the event,
+	// result or acceptance protocol. An Offload without the flag keeps running.
+	var transcriptEnd func(Result, error)
+	sink := transcriptSink(ctx)
+	target := TranscriptTarget{CallerRunID: req.RequestID, Command: command, Env: env}
+	if sink != nil {
+		if captureSupported(ctx, command) {
+			args = append(args, "-capture-transcript")
+			target.Capture = true
+		} else {
+			target.Unsupported = "unsupported_offload"
+		}
+	}
 	cmd := exec.Command(command, args...)
 	if checkpointFile != nil {
 		cmd.ExtraFiles = []*os.File{checkpointFile}
@@ -573,6 +586,13 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 	}
 	registerActiveCmd(cmd)
 	defer unregisterActiveCmd(cmd)
+	if sink != nil {
+		if end := sink.Begin(target); end != nil {
+			transcriptEnd = end
+			// Named results are final here; the process has already been waited on.
+			defer func() { transcriptEnd(result, runErr) }()
+		}
+	}
 	progress := ProgressFrom(ctx)
 	progress.begin()
 	defer progress.end()

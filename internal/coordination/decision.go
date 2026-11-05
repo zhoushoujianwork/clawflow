@@ -216,3 +216,40 @@ func Comment(r Record) string {
 	d.NextOwner = clean.Replace(d.NextOwner)
 	return fmt.Sprintf("Dispatch coordination: **%s**\n\n%s\n\nNext action: %s\nNext owner: %s\nRelated issues: %v · PRs: %v · tasks: %v\n\nSnapshot: `%s`\n\n<!-- clawflow:coordination=%s -->", d.Outcome, d.Reason, d.NextAction, d.NextOwner, d.Issues, d.PRs, d.Tasks, r.SnapshotID, r.SnapshotID)
 }
+
+// Relevant narrows a snapshot to the facts that can change a dispatch decision
+// for its own task: the issue, human comments, the target PR, PRs that touch the
+// target PR's files or reference the issue, and explicitly referenced issues and
+// PRs. New unrelated issues, closed-history search hits, active tasks and
+// truncation notes (all derived from unrelated repository activity) are dropped.
+// Comments carrying a ClawFlow marker are never part of the comparison.
+func Relevant(s Snapshot, refs []int) Snapshot {
+	s = Normalize(s)
+	s.Tasks, s.Incomplete = nil, nil
+	s.Comments = slices.DeleteFunc(slices.Clone(s.Comments), func(c vcs.IssueComment) bool {
+		return strings.Contains(c.Body, "<!-- clawflow:")
+	})
+	if len(s.Comments) == 0 {
+		s.Comments = nil
+	}
+	s.Issues = slices.DeleteFunc(slices.Clone(s.Issues), func(i vcs.Issue) bool { return !slices.Contains(refs, i.Number) })
+	if len(s.Issues) == 0 {
+		s.Issues = nil
+	}
+	var target []string
+	for _, p := range s.PRs {
+		if p.Number == s.TargetPR {
+			target = p.Files
+		}
+	}
+	s.PRs = slices.DeleteFunc(slices.Clone(s.PRs), func(p PullRequest) bool {
+		if p.Number == s.TargetPR || slices.Contains(refs, p.Number) || vcs.PRReferencesIssue(p.PR, s.Issue.Number) {
+			return false
+		}
+		return !slices.ContainsFunc(p.Files, func(f string) bool { return slices.Contains(target, f) })
+	})
+	if len(s.PRs) == 0 {
+		s.PRs = nil
+	}
+	return s
+}

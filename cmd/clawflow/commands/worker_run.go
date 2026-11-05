@@ -392,6 +392,9 @@ func runWorkerTask(parent context.Context, api *workerAPI, o workerOptions, t *c
 	var sopDigest string
 	if eligible {
 		executionCtx, readiness, sopDigest = workerTestingContext(ctx, t, o.Tags)
+		// Mirror this task's own Offload transcript to the controller for the
+		// dashboard. It is best effort and never part of the task result.
+		executionCtx = execution.WithTranscriptSink(executionCtx, newWorkerLogSink(ctx, api, t))
 	}
 	if !eligible {
 		result.Error = "任务标签与 worker 不匹配"
@@ -524,7 +527,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 	if p.Coordination != nil {
 		probe := &runJob{op: op, repo: p.Repo, sub: &operator.Subject{Number: p.Issue}, client: client}
 		if p.Repair != nil {
-			probe.repair = &ciRepairContext{PR: vcs.PR{Number: p.Repair.PR}}
+			probe.repair = p.Repair.context()
 		}
 		if err = validateWorkerCoordination(ctx, probe, p.Coordination); err != nil {
 			return nil, 0, err
@@ -559,8 +562,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 		j.reopen = &reopenContext{Event: vcs.IssueEvent{ID: p.ReopenEventID}}
 	}
 	if p.Repair != nil {
-		r := p.Repair
-		j.repair = &ciRepairContext{PR: vcs.PR{Number: r.PR, HeadSHA: r.HeadSHA, HeadBranch: r.HeadBranch, HeadRepo: r.HeadRepo, BaseSHA: r.BaseSHA, BaseBranch: r.BaseBranch}, Attempt: r.Attempt, Acceptance: r.Acceptance, MergeConflict: r.Reason == "merge_conflict", DevelopmentVerification: r.Reason == "development_verification"}
+		j.repair = p.Repair.context()
 	}
 	if p.Kind == "repair" && j.repair == nil {
 		return nil, 0, fmt.Errorf("repair task missing repair payload")
