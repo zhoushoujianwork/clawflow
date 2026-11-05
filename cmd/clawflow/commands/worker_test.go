@@ -182,6 +182,11 @@ func TestWorkerClaimExecuteReport(t *testing.T) {
 						w.WriteHeader(status)
 						return
 					}
+					// Only terminal reports are assertions; progress must not displace them.
+					if !strings.HasSuffix(r.URL.Path, "/complete") && !strings.HasSuffix(r.URL.Path, "/fail") {
+						_, _ = io.WriteString(w, `{}`)
+						return
+					}
 					reports <- input.Result
 					_, _ = io.WriteString(w, `{}`)
 					cancel()
