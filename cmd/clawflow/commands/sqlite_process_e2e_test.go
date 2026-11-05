@@ -692,7 +692,7 @@ func runProcessE2ERealModel(t *testing.T, engine, profile string) {
 	if len(summary) > 500 {
 		summary = summary[:500] + "…"
 	}
-	t.Logf("REAL MODEL EVIDENCE engine=%s state=%s duration=%s cost_usd=%.4f tokens=%d pr_branch=%q comments=%d log_events=%d hello=%q model_summary=%q grey=%q", engine, task.State, time.Duration(run.DurationMs)*time.Millisecond, *run.CostUSD, totalTokens, branch, commentCount, eventCount, hello, summary, quality)
+	t.Logf("REAL MODEL EVIDENCE engine=%s state=%s session=%q duration=%s cost_usd=%.4f tokens=%d pr_branch=%q comments=%d log_events=%d hello=%q model_summary=%q grey=%q", engine, task.State, run.SessionID, time.Duration(run.DurationMs)*time.Millisecond, *run.CostUSD, totalTokens, branch, commentCount, eventCount, hello, summary, quality)
 
 	workerProc.stop()
 	controllerProc.stop()
