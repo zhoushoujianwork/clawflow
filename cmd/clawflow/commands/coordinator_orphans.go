@@ -10,6 +10,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -21,7 +22,7 @@ import (
 // automatic fresh reviews are used up.
 const orphanUnstructuredExhausted = "unstructured_exhausted"
 
-func orphanCause(pr vcs.PR, acceptanceRequired bool, acceptanceVerdict func() string, budgetErr error) string {
+func orphanCause(pr vcs.PR, acceptanceRequired bool, acceptanceVerdict func() string, budgetErr error, cancelledExhausted ...bool) string {
 	// Intentional drafts (platform flag or WIP/DRAFT title) are not abandoned.
 	if pr.Draft || isDraftPR(pr.Title) {
 		return ""
@@ -35,6 +36,9 @@ func orphanCause(pr vcs.PR, acceptanceRequired bool, acceptanceVerdict func() st
 	}
 	if budgetErr != nil {
 		return coordinator.OrphanRepairExhausted
+	}
+	if len(cancelledExhausted) > 0 && cancelledExhausted[0] {
+		return coordinator.OrphanCICancelled
 	}
 	if acceptanceRequired && acceptanceVerdict() == orphanUnstructuredExhausted {
 		return coordinator.OrphanAcceptanceUnstructured
@@ -101,7 +105,13 @@ func newOrphanedPRProvider() func(context.Context) ([]coordinator.OrphanedPR, er
 				if budget != nil && !isTerminalBudget(budget) {
 					budget = nil // cooldown and backoff are temporary waits
 				}
-				cause := orphanCause(pr, rc.AcceptanceRequired, verdict, budget)
+				cancelled := false
+				if rc.CIRequired {
+					if st, err := repairCIStatus(client, repo, pr); err == nil && st == vcs.CIStatusCancelled {
+						cancelled = repairledger.CancelRerunsExhausted(snapshot.DataDir(), repo, pr)
+					}
+				}
+				cause := orphanCause(pr, rc.AcceptanceRequired, verdict, budget, cancelled)
 				if cause == "" {
 					continue
 				}

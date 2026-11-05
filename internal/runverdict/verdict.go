@@ -5,6 +5,7 @@ package runverdict
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 )
@@ -65,6 +66,13 @@ func Decide(in Input) Verdict {
 	case in.IsRepair && in.Outcome == "agent-failed":
 		v.Status = "failed"
 		v.Error = in.RepairLabel + " repair could not update existing PR"
+		// Record why: the agent's own explanation, so "nothing to fix" is visible.
+		if reason := strings.Join(strings.Fields(in.Output), " "); reason != "" {
+			if len(reason) > 300 {
+				reason = reason[:300] + "..."
+			}
+			v.Error += ": " + reason
+		}
 	case in.UnmanagedBranch != "" && in.Outcome == "agent-implemented":
 		v.Status = "blocked"
 		v.Error = fmt.Sprintf("implement opened a PR from unmanaged branch %q; expected fix/issue-%d, feat/issue-%d or a fix/issue-%d-reopen-<cycle> branch, so automatic repair would skip it. Resolve the stale branch and rerun", in.UnmanagedBranch, in.IssueNumber, in.IssueNumber, in.IssueNumber)

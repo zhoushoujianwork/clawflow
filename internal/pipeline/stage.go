@@ -154,6 +154,11 @@ func derivePROpen(e Evidence, ev []string) (Stage, string, []string) {
 			}
 		}
 		return StageCIFailed, why, ev
+	case "cancelled":
+		if pr.CICancelExhausted {
+			return StageBlocked, "CI was cancelled and automatic reruns are used up; waiting for a person", ev
+		}
+		return StageCIPending, "CI was cancelled; a rerun is requested automatically", ev
 	case "pending":
 		return StageCIPending, "CI is still running on the current head", ev
 	case "no-checks":

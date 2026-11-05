@@ -73,7 +73,7 @@ func TestMRHeadPipelineEvidence(t *testing.T) {
 			case "success":
 				want = vcs.CIStatusSuccess
 			case "canceled":
-				want = vcs.CIStatusPending
+				want = vcs.CIStatusCancelled
 			case "stale", "fork", "missing", "mismatch":
 				want = vcs.CIStatusNone
 			}
@@ -122,5 +122,35 @@ func TestMRHeadPipelineEvidence(t *testing.T) {
 				t.Fatalf("accepted old head: %s %v", status, err)
 			}
 		})
+	}
+}
+
+func TestPlanCancelledRerunAndRetry(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	retried := []string{}
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET " + projectPath + "/merge_requests/11": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 200, map[string]any{"sha": sha, "source_project_id": 1, "target_project_id": 1, "head_pipeline": map[string]any{"id": 5, "sha": sha}})
+		},
+		"GET " + projectPath + "/pipelines/5": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 200, map[string]any{"id": 5, "sha": sha, "status": "canceled"})
+		},
+		"GET " + projectPath + "/pipelines/5/jobs": func(w http.ResponseWriter, r *http.Request) {
+			jsonResp(w, 200, []any{map[string]any{"id": 6, "name": "web", "status": "canceled"}, map[string]any{"id": 7, "name": "ok", "status": "success"}, map[string]any{"id": 8, "name": "bad", "status": "failed"}})
+		},
+		"POST " + projectPath + "/jobs/6/retry": func(w http.ResponseWriter, r *http.Request) {
+			retried = append(retried, r.URL.Path)
+			jsonResp(w, 201, map[string]any{"id": 9})
+		},
+	})
+	plan, err := client.PlanCancelledRerun("ns/group/repo", 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.RunIDs) != 1 || plan.RunIDs[0] != 6 || plan.RunKeys[0] != "job:web" || plan.HeadSHA != sha {
+		t.Fatalf("%+v", plan)
+	}
+	if err := client.RerunCancelled("ns/group/repo", 6); err != nil || len(retried) != 1 {
+		t.Fatalf("%v %v", err, retried)
 	}
 }

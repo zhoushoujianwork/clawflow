@@ -154,7 +154,9 @@ type PRInfo struct {
 	UpdatedAt  string `json:"updated_at,omitempty"`
 	CI         string `json:"ci,omitempty"` // success | failure | pending | no-checks | unknown
 	CIError    string `json:"ci_error,omitempty"`
-	Mergeable  string `json:"mergeable,omitempty"` // clean | conflict | pending | unknown
+	// CICancelExhausted is set when CI is cancelled and automatic reruns on this head are used up.
+	CICancelExhausted bool   `json:"ci_cancel_exhausted,omitempty"`
+	Mergeable         string `json:"mergeable,omitempty"` // clean | conflict | pending | unknown
 }
 
 // AcceptanceInfo is the latest acceptance record for the PR's current contract.

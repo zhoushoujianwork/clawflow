@@ -127,3 +127,17 @@ func TestUnstructuredRetryThenHuman(t *testing.T) {
 		t.Fatalf("%s %s", s, why)
 	}
 }
+
+func TestCancelledCIStage(t *testing.T) {
+	pr := openPR("cancelled")
+	stage, why, _ := Derive(Evidence{IssueState: "open", CIRequired: true, PR: pr})
+	if stage != StageCIPending || !strings.Contains(why, "rerun") {
+		t.Fatalf("stage=%s why=%s", stage, why)
+	}
+	pr = openPR("cancelled")
+	pr.CICancelExhausted = true
+	stage, why, _ = Derive(Evidence{IssueState: "open", CIRequired: true, PR: pr})
+	if stage != StageBlocked || !strings.Contains(why, "cancelled") || !strings.Contains(why, "waiting for a person") {
+		t.Fatalf("stage=%s why=%s", stage, why)
+	}
+}
