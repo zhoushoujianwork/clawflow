@@ -215,7 +215,7 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 			continue
 		}
 		if source, ok := s.(coordinationTasks); ok {
-			allowed, checkErr := coordinateDispatch(ctx, j, source)
+			allowed, checkErr := prepareDispatch(ctx, j, source)
 			if checkErr != nil {
 				runLog.Warn("run/coordination_wait", "repo", j.repo, "issue", j.sub.Number, "err", checkErr.Error())
 			}
@@ -223,11 +223,13 @@ func dispatchCoordinatorJobs(ctx context.Context, s coordinatorQueue, jobs []*ru
 				continue
 			}
 		}
-		plan, err := prepareImplementationPlan(ctx, j)
-		if err != nil {
-			return fired, failed, err
+		if _, coordinated := s.(coordinationTasks); !coordinated {
+			plan, err := prepareImplementationPlan(ctx, j)
+			if err != nil {
+				return fired, failed, err
+			}
+			j.acceptancePlan = plan
 		}
-		j.acceptancePlan = plan
 		t, p := coordinatorTask(j, timeout)
 		if p.ReopenEventID != "" {
 			t.EventSource = t.Repo + "/reopen"

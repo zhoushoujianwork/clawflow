@@ -413,6 +413,14 @@ func Run(ctx context.Context, c Config, req Request, env []string, events io.Wri
 			return result, err
 		}
 		defer checkpointFile.Close()
+		if checkpoint.ObservationOnly {
+			if _, statErr := os.Lstat(checkpointPath); !os.IsNotExist(statErr) {
+				if statErr != nil {
+					return result, statErr
+				}
+				return result, errors.New("observation checkpoint already exists; reconcile the original invocation")
+			}
+		}
 		if err := writeCheckpoint(checkpointPath, *checkpoint); err != nil {
 			return result, err
 		}
