@@ -453,3 +453,47 @@ func TestCoordinationResponseEnvelope(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerRepairProbeMatchesApprovedReason(t *testing.T) {
+	findings := &acceptanceFindings{Verdict: "failed", AttemptID: "attempt", ContractDigest: "digest"}
+	cases := []struct {
+		name string
+		r    coordinatorRepair
+		want string
+	}{
+		{"merge_conflict", coordinatorRepair{PR: 650, Reason: "merge_conflict"}, "merge_conflict"},
+		{"development_verification", coordinatorRepair{PR: 650, Reason: "development_verification"}, "development_verification"},
+		{"acceptance", coordinatorRepair{PR: 650, Reason: repairReasonAcceptance, Acceptance: findings}, repairReasonAcceptance},
+		{"ci", coordinatorRepair{PR: 650, Reason: repairReasonCI}, repairReasonCI},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			j, c, _, _ := coordinationFixture(t)
+			j.op.Name = "repair-ci"
+			c.prs = []vcs.PR{{Number: 650, State: "open", Body: "Fixes #1"}}
+			// Controller side: snapshot approved from the payload's repair context.
+			j.repair = tc.r.context()
+			approved, err := collectCoordination(context.Background(), j, nil, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if approved.RepairReason != tc.want {
+				t.Fatalf("approved reason %q, want %q", approved.RepairReason, tc.want)
+			}
+			// Worker side: probe built the same way as worker_run.go.
+			probe := &runJob{op: j.op, repo: j.repo, sub: &operator.Subject{Number: 1}, client: c, repair: tc.r.context()}
+			if err := validateWorkerCoordination(context.Background(), probe, &approved); err != nil {
+				t.Fatalf("unchanged remote state rejected: %v", err)
+			}
+			c.comments = append(c.comments, vcs.IssueComment{ID: 9, Body: "new comment"})
+			if err := validateWorkerCoordination(context.Background(), probe, &approved); !errors.Is(err, errCoordinationChanged) {
+				t.Fatalf("new comment accepted: %v", err)
+			}
+			c.comments = nil
+			c.prs[0].Body = "Fixes #1 changed"
+			if err := validateWorkerCoordination(context.Background(), probe, &approved); !errors.Is(err, errCoordinationChanged) {
+				t.Fatalf("PR change accepted: %v", err)
+			}
+		})
+	}
+}
