@@ -19,6 +19,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
+	"github.com/zhoushoujianwork/clawflow/internal/upgrade"
 )
 
 // controllerLog is the controller process's own log (controller.log). runLog is
@@ -35,9 +36,32 @@ func coordLog() *clog.Logger {
 	return controllerLog
 }
 
-// logReconcileFailure records only the error text, never task payloads.
+// logReconcileFailure records only the redacted, clipped error text, never
+// task payloads.
 func logReconcileFailure(err error) {
-	coordLog().Warn("coordinator/reconcile", "err", pipelineClip(err.Error(), pipelineErrLimit))
+	coordLog().Warn("coordinator/reconcile", "err", pipelineClip(upgrade.Redact(err.Error()), pipelineErrLimit))
+}
+
+// runReconcilePass runs each step and logs failures unless ctx is done.
+func runReconcilePass(ctx context.Context, steps ...func(context.Context) error) {
+	for _, step := range steps {
+		if err := step(ctx); err != nil && ctx.Err() == nil {
+			logReconcileFailure(err)
+		}
+	}
+}
+
+// openControllerLog opens controller.log when no run log is installed.
+func openControllerLog(out io.Writer) {
+	if runLog != nil {
+		return
+	}
+	lg, err := clog.Open("controller")
+	if err != nil {
+		fmt.Fprintf(out, "controller log unavailable: %v\n", err)
+		return
+	}
+	controllerLog = lg
 }
 
 // startCoordinator binds synchronously so startup failures reach the CLI.
@@ -46,9 +70,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 	if !settings.Enabled {
 		return func() {}, nil
 	}
-	if runLog == nil {
-		controllerLog, _ = clog.Open("controller")
-	}
+	openControllerLog(out)
 	db, err := requireStore(ctx)
 	if err != nil {
 		return nil, err
@@ -109,12 +131,12 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		tick := time.NewTicker(30 * time.Second)
 		defer tick.Stop()
 		for {
-			if err := results.recoverResults(reconcileCtx, tasks); err != nil && reconcileCtx.Err() == nil {
-				coordLog().Warn("coordinator/reconcile", "err", err.Error())
-			}
-			if err := reconcileActionsObservations(reconcileCtx, actions.Ledger{DB: db.DB()}); err != nil && reconcileCtx.Err() == nil {
-				coordLog().Warn("coordinator/reconcile", "err", err.Error())
-			}
+			runReconcilePass(reconcileCtx,
+				func(c context.Context) error { return results.recoverResults(c, tasks) },
+				func(c context.Context) error {
+					return reconcileActionsObservations(c, actions.Ledger{DB: db.DB()})
+				},
+			)
 			select {
 			case <-reconcileCtx.Done():
 				return
