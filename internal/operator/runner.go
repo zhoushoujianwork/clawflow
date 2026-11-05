@@ -138,7 +138,7 @@ var thinkingRE = regexp.MustCompile(`(?s)<thinking>.*?</thinking>\s*`)
 // only *mentions* a marker into the no-marker path rather than labeling
 // the issue with a fragment of prose.
 func parseOutcome(body string) (label, cleaned string) {
-	lines := strings.Split(body, "\n")
+	lines := dropGatewayNotice(strings.Split(body, "\n"))
 
 	// Walk backwards over the trailing non-blank lines looking for the verdict.
 	markerIdx, scanned := -1, 0
@@ -167,6 +167,40 @@ func parseOutcome(body string) (label, cleaned string) {
 	cleaned = strings.Join(append(lines[:markerIdx:markerIdx], rest...), "\n")
 	cleaned = thinkingRE.ReplaceAllString(cleaned, "")
 	return label, strings.TrimSpace(cleaned)
+}
+
+// dropGatewayNotice removes a notice that a model gateway appended after the
+// operator finished: a "---" rule followed only by blockquote lines, directly
+// after a verdict marker. Such a notice pushes a valid marker out of the
+// trailing window, so the paid-for result was discarded as no-marker, and it
+// does not belong in a posted comment. The marker must sit right before the
+// rule, so this cannot promote a marker quoted earlier in the body.
+func dropGatewayNotice(lines []string) []string {
+	i := len(lines) - 1
+	quoted := false
+	for ; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, ">") {
+			break
+		}
+		quoted = true
+	}
+	if !quoted || i < 0 || strings.TrimSpace(lines[i]) != "---" {
+		return lines
+	}
+	for j := i - 1; j >= 0; j-- {
+		if strings.TrimSpace(lines[j]) == "" {
+			continue
+		}
+		if trailingOutcomeRE.MatchString(lines[j]) {
+			return lines[:j+1]
+		}
+		break
+	}
+	return lines
 }
 
 // VCS is the subset of vcs.Client the runner needs. Kept intentionally
