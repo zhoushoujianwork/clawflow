@@ -89,6 +89,12 @@ Transaction-boundary regression verification on 2026-11-05:
 - Cancellation between a remote callback and its recording transaction returns `ErrStaleLease`; finalization replay preserves one run row; same-task appliers serialize while different tasks proceed concurrently.
 - A deferred dashboard read snapshot remains open for two seconds while a heartbeat writer succeeds below one second; orphan-provider cache tests separately prove Board reads do not wait on VCS.
 
+Real-process SQLite verification on 2026-11-05:
+
+- The opt-in `TestE2ESQLiteControllerWorkerProcesses` test builds and runs the real controller, durable worker and Offload CLI against isolated state for both `cli` and `library` execution engines. A local GitLab HTTP fixture, bare Git remote and Claude stream-JSON backend replace external services.
+- Each engine proves scan, claim, native execution, transcript upload, effect application, terminal run/log persistence, duplicate-scan suppression, a terminal failure without a retry storm, and controller `SIGKILL` recovery without duplicate effects. It also checks SQLite integrity and rejects any `SQLITE_BUSY` or `database is locked` log.
+- Durable-executor crash recovery remains covered by the focused library-engine process tests; the end-to-end fixture does not kill the native executor separately.
+
 ## Not verified by this change
 
 Recorded separately from fixtures so they are not mistaken for observed acceptance:
