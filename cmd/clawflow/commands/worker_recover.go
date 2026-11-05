@@ -54,10 +54,7 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	if cpEngine == "" {
 		cpEngine = execution.EngineCLI
 	}
-	journalEngine := j.Engine
-	if journalEngine == "" {
-		journalEngine = execution.EngineCLI
-	}
+	journalEngine := workerExecutionEngine(j)
 	if cpEngine != journalEngine || configuredDevelopmentProfile(roleForOperator(j.Task.Operator)) != cp.Profile {
 		return fmt.Errorf("execution profile or pinned runtime changed")
 	}

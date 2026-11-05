@@ -40,6 +40,13 @@ type workerJournal struct {
 
 type workerJournalKey struct{}
 
+func workerExecutionEngine(j *workerJournal) string {
+	if j.Engine == "" {
+		return execution.EngineCLI
+	}
+	return j.Engine
+}
+
 func writeWorkerJournal(path string, value *workerJournal) error {
 	value.UpdatedAt = time.Now().UTC()
 	raw, err := json.Marshal(value)
@@ -308,10 +315,9 @@ func newWorkerExecuteCmd() *cobra.Command {
 				return err
 			}
 		}
-		if j.Engine != "" {
-			if err := os.Setenv("CLAWFLOW_OFFLOAD_ENGINE", j.Engine); err != nil {
-				return err
-			}
+		engine := workerExecutionEngine(j)
+		if err := os.Setenv("CLAWFLOW_OFFLOAD_ENGINE", engine); err != nil {
+			return err
 		}
 		if j.OffloadCommand != "" {
 			if err := os.Setenv("CLAWFLOW_OFFLOAD_COMMAND", j.OffloadCommand); err != nil {

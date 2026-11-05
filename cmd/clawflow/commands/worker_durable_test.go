@@ -42,6 +42,12 @@ func TestPrepareLibraryExecutorUsesPinnedClawFlowWithoutOffloadRuntime(t *testin
 	}
 }
 
+func TestLegacyWorkerJournalUsesCLIEngine(t *testing.T) {
+	if got := workerExecutionEngine(&workerJournal{}); got != "cli" {
+		t.Fatalf("legacy engine=%q", got)
+	}
+}
+
 func TestWorkerOutboxSurvivesLostAcknowledgement(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "journal.json")
