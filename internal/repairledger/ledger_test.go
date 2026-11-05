@@ -1,6 +1,7 @@
 package repairledger
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -150,5 +151,62 @@ func TestCoordinationChangedConsumesNoBudgetOrBackoff(t *testing.T) {
 	}
 	if err := Budget(old, now.Add(time.Hour)); err != nil {
 		t.Fatalf("legacy charged ledger stays locked: %v", err)
+	}
+}
+
+func TestAcceptanceNoChangeSpendsBudgetAndStopsHead(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().UTC().Add(-48 * time.Hour)
+	pr := vcs.PR{Number: 9, HeadSHA: "h1"}
+	for i := 1; i <= MaxAttempts; i++ {
+		now = now.Add(time.Hour)
+		n, err := Reserve(root, "o/r", pr, ReasonAcceptance, now)
+		if err != nil || n != i {
+			t.Fatalf("reserve %d: %d %v", i, n, err)
+		}
+		if err := Release(root, "o/r", pr, n, ReleaseNoChange, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !NoChangeAtHead(root, "o/r", 9, "h1") || NoChangeAtHead(root, "o/r", 9, "h2") {
+		t.Fatal("no-change must bind to the exact head")
+	}
+	// Repeated no-change is bounded: the budget is spent after MaxAttempts.
+	if _, err := Reserve(root, "o/r", pr, ReasonAcceptance, now.Add(time.Hour)); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("want exhausted, got %v", err)
+	}
+}
+
+func TestNoChangeForCIReasonAndInfraStayNonConsuming(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().UTC().Add(-48 * time.Hour)
+	pr := vcs.PR{Number: 10, HeadSHA: "h1"}
+	for i, kind := range []string{"capacity", "launch"} {
+		now = now.Add(3 * time.Hour)
+		n, err := Reserve(root, "o/r", pr, ReasonAcceptance, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Release(root, "o/r", pr, n, kind, now); err != nil {
+			t.Fatal(err)
+		}
+		_, path := Path(root, "o/r", 10)
+		l, _ := Load(path)
+		if c, inf := l.Counts(); c != 0 || inf != i+1 {
+			t.Fatalf("%s: consumed=%d infra=%d", kind, c, inf)
+		}
+		if l.NoChangeAtHead("h1") {
+			t.Fatal("infra release is not a no-change conclusion")
+		}
+	}
+	now = now.Add(3 * time.Hour)
+	n, _ := Reserve(root, "o/r", pr, "ci", now)
+	if err := Release(root, "o/r", pr, n, ReleaseNoChange, now); err != nil {
+		t.Fatal(err)
+	}
+	_, path := Path(root, "o/r", 10)
+	l, _ := Load(path)
+	if c, _ := l.Counts(); c != 0 || l.NoChangeAtHead("h1") {
+		t.Fatal("non-acceptance no-change keeps old behavior")
 	}
 }

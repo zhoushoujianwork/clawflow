@@ -14,6 +14,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -239,6 +240,12 @@ func scanAcceptanceRepair(ctx context.Context, client vcs.Client, repo string, c
 		}
 		return nil
 	}
+	if repairledger.NoChangeAtHead(snapshot.DataDir(), repo, pr.Number, pr.HeadSHA) {
+		// A repair already found nothing to change for this head and verdict.
+		log("repair_no_change_needs_human", "attempt_id", rec.AttemptID, "head", pr.HeadSHA)
+		repairNotifier(client, repo, cfg, pr.Number, issueNum).notify(repairNoChangeComment(pr, rec), repairNoChangeMarker(pr))
+		return nil
+	}
 	budgetErr := checkRepairBudget(snapshot.DataDir(), repo, pr.Number, time.Now().UTC())
 	switch {
 	case budgetErr == nil:
@@ -292,6 +299,21 @@ func repairExhaustedNotice(ctx context.Context, client vcs.Client, repo string, 
 	if err := finishRepairFailure(ctx, j, "shared repair budget spent"); err != nil {
 		runLog.Warn("run/ci_repair_notice_failed", "repo", repo, "pr", pr.Number, "err", err.Error())
 	}
+}
+
+func repairNoChangeMarker(pr vcs.PR) string {
+	return fmt.Sprintf("<!-- clawflow:repair-no-change=pr-%d-head-%s -->", pr.Number, pr.HeadSHA)
+}
+
+// repairNoChangeComment tells a person why automation stopped on this head.
+func repairNoChangeComment(pr vcs.PR, rec acceptance.Record) string {
+	f := findingsFromRecord(rec)
+	missing := sanitizeReviewerText(f.Summary, 400)
+	if missing == "" {
+		missing = "the reviewer did not record which evidence is missing"
+	}
+	return fmt.Sprintf("🤖 PR #%d needs a person. The reviewer verdict is %s, but an automatic repair checked head %s and found nothing to change, so ClawFlow will not repair or re-review this head again. Missing evidence or open question: %s\n\nPush a new commit, update the requirements or acceptance plan, or decide manually.\n\n%s",
+		pr.Number, rec.Verdict, pr.HeadSHA, missing, repairNoChangeMarker(pr))
 }
 
 func acceptanceRepairExhaustedMarker(pr int) string {

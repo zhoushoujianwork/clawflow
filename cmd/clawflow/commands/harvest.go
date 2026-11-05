@@ -11,6 +11,8 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
+	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/github"
 )
@@ -220,6 +222,11 @@ func harvestCandidates(ctx context.Context, fullName string, repoCfg config.Repo
 		case evErr == nil:
 			// Already accepted: the sweep merges it.
 			skip("evidence_present", "pr", pr.Number, "issue", issueNum)
+			continue
+		case repairledger.NoChangeAtHead(snapshot.DataDir(), fullName, pr.Number, pr.HeadSHA):
+			// Repair found nothing to change for this head; another review of the
+			// same head would only repeat the verdict.
+			skip("repair_no_change", "pr", pr.Number, "issue", issueNum)
 			continue
 		case !errors.Is(evErr, errAcceptanceMissing) || acceptanceStoreExists(fullName, pr.Number):
 			// An existing record, unreadable evidence or a contract that cannot

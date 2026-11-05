@@ -102,11 +102,12 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 		out.applyFindings(now, workers, limits)
 		cfg := s.Watchdog.withDefaults()
 		var history []FinishedTask
-		if err := tx.Model(&Task{}).Select("repo, issue, pr, state, updated_at, COALESCE(json_extract(result, '$.infra_kind'), '') AS infra_kind, COALESCE(json_extract(result, '$.error'), '') AS err, COALESCE(json_extract(result, '$.head_sha'), '') AS head").
+		if err := tx.Model(&Task{}).Select("repo, issue, pr, state, kind, updated_at, COALESCE(json_extract(result, '$.infra_kind'), '') AS infra_kind, COALESCE(json_extract(result, '$.error'), '') AS err, COALESCE(json_extract(result, '$.head_sha'), '') AS head").
 			Where("state IN ('failed', 'done') AND updated_at > ?", now.Add(-cfg.FailureWindow)).Order("updated_at DESC").Scan(&history).Error; err != nil {
 			return err
 		}
 		out.Findings = append(out.Findings, repeatedFailureFindings(now, history, cfg)...)
+		out.Findings = append(out.Findings, sameHeadCycleFindings(now, history, cfg)...)
 		out.Findings = append(out.Findings, orphanedPRFindings(now, orphans, out.Tasks, cfg)...)
 		return nil
 	})

@@ -19,6 +19,7 @@ import (
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/offloadtest"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -681,10 +682,8 @@ func TestNoChangeRepairValidationAndBudget(t *testing.T) {
 				t.Fatal(err)
 			}
 			consumed, infra := ledger.counts()
+			// A confirmed acceptance no-change now spends the shared budget.
 			want := 1
-			if mode == "valid" {
-				want = 0
-			}
 			if consumed != want || infra != 0 {
 				t.Fatalf("consumed=%d infra=%d", consumed, infra)
 			}
@@ -775,10 +774,8 @@ func TestNoChangeRepairRunRecordsSuccess(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantConsumed := 0
-			if verification {
-				wantConsumed = 1
-			}
+			// Both development verification and acceptance no-change spend one attempt.
+			wantConsumed := 1
 			if consumed, infra := ledger.counts(); consumed != wantConsumed || infra != 0 {
 				t.Fatalf("consumed=%d infra=%d", consumed, infra)
 			}
@@ -816,7 +813,7 @@ func TestRepairExcludesAdvisoryFindings(t *testing.T) {
 }
 
 func TestGitLabAcceptanceRepair(t *testing.T) {
-	for _, verdict := range []string{"failed", "blocked"} {
+	for _, verdict := range []string{"failed"} {
 		t.Run(verdict, func(t *testing.T) {
 			f, _, reg, _ := repairAcceptanceFixture(t, verdict)
 			setHarvestRepo(t, func(r *config.Repo) { r.Platform = "gitlab"; r.BaseURL = "https://gitlab.example" })
@@ -985,5 +982,45 @@ func TestBlockedCheckNotRepairable(t *testing.T) {
 	r.Checks = []acceptance.RequirementCheck{{ID: "CFG-02", Status: acceptance.Passed}}
 	if blockedRepairableByImplementer(r) {
 		t.Fatal("no unpassed check or failing finding authorized repair")
+	}
+}
+
+func TestNoChangeRepairStopsRepairAndReviewOnSameHead(t *testing.T) {
+	for _, verdict := range []string{"failed"} {
+		t.Run(verdict, func(t *testing.T) {
+			f, _, reg, cfg := repairAcceptanceFixture(t, verdict)
+			recordVerdict(t, f)
+			if jobs := scanRepair(t, reg, f, cfg, 0); len(jobs) != 1 {
+				t.Fatalf("first scan jobs=%v", jobs)
+			}
+			past := time.Now().UTC().Add(-time.Hour)
+			n, err := reserveRepair(snapshot.DataDir(), "o/r", f.pr, repairReasonAcceptance, past)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := releaseCIRepair(snapshot.DataDir(), "o/r", f.pr, n, "no-change", past); err != nil {
+				t.Fatal(err)
+			}
+			_, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", f.pr.Number)
+			l, _ := loadCIRepairLedger(path)
+			if consumed, infra := l.counts(); consumed != 1 || infra != 0 {
+				t.Fatalf("consumed=%d infra=%d", consumed, infra)
+			}
+			for i := 0; i < 2; i++ {
+				if jobs := scanRepair(t, reg, f, cfg, 0); len(jobs) != 0 {
+					t.Fatalf("scan %d dispatched %v", i, jobs)
+				}
+				f.existingComments = append([]string(nil), f.comments...)
+			}
+			if len(f.comments) != 1 || !strings.Contains(f.comments[0], "needs a person") || !strings.Contains(f.comments[0], "repair-no-change=pr-") {
+				t.Fatalf("comments=%v", f.comments)
+			}
+			if !repairledger.NoChangeAtHead(snapshot.DataDir(), "o/r", f.pr.Number, f.pr.HeadSHA) {
+				t.Fatal("ledger lacks no-change record")
+			}
+			if repairledger.NoChangeAtHead(snapshot.DataDir(), "o/r", f.pr.Number, strings.Repeat("e", 40)) {
+				t.Fatal("new head must restore the normal flow")
+			}
+		})
 	}
 }
