@@ -99,6 +99,19 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 		}
 		out = deriveBoard(now, workers, tokens, heartbeats, tasks)
 		out.applyFindings(now, workers, limits)
+		cfg := s.Watchdog.withDefaults()
+		var history []FinishedTask
+		if err := tx.Model(&Task{}).Select("repo, issue, pr, state, updated_at, COALESCE(result->>'infra_kind', '') AS infra_kind, COALESCE(result->>'error', '') AS err, COALESCE(result->>'head_sha', '') AS head").
+			Where("state IN ('failed', 'done') AND updated_at > ?", now.Add(-cfg.FailureWindow)).Order("updated_at DESC").Scan(&history).Error; err != nil {
+			return err
+		}
+		out.Findings = append(out.Findings, repeatedFailureFindings(now, history, cfg)...)
+		if s.OrphanedPRs != nil {
+			// A provider error disables only this rule for the snapshot.
+			if prs, err := s.OrphanedPRs(ctx); err == nil {
+				out.Findings = append(out.Findings, orphanedPRFindings(now, prs, out.Tasks, cfg)...)
+			}
+		}
 		return nil
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	return out, err

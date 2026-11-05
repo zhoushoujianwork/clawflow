@@ -1,7 +1,9 @@
 package coordinator
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"time"
 )
@@ -98,17 +100,60 @@ func (b *Board) claimable(t *BoardTask, workers []Worker, limits dispatchLimits,
 	return false
 }
 
+// key identifies a finding across snapshots. Task findings use the task ID;
+// subject findings (no task) use repo, issue and PR.
+func (f Finding) key() string {
+	if f.TaskID == "" {
+		return fmt.Sprintf("%s#%d!%d/%s", f.Repo, f.Issue, f.PR, f.Rule)
+	}
+	return f.TaskID + "/" + f.Rule
+}
+
 // FindingTracker turns repeated snapshots into open and resolve transitions.
-// It is memory-only: a restart may report an existing finding once more.
+// With a state file it survives restarts, so an existing finding is not opened again.
 type FindingTracker struct {
 	active map[string]Finding
+	path   string
+}
+
+// NewFileFindingTracker loads the active findings saved at path, if any.
+func NewFileFindingTracker(path string) *FindingTracker {
+	f := &FindingTracker{path: path}
+	if data, err := os.ReadFile(path); err == nil {
+		var saved []Finding
+		if json.Unmarshal(data, &saved) == nil {
+			f.active = make(map[string]Finding, len(saved))
+			for _, s := range saved {
+				f.active[s.key()] = s
+			}
+		}
+	}
+	return f
+}
+
+func (f *FindingTracker) save() {
+	if f.path == "" {
+		return
+	}
+	saved := make([]Finding, 0, len(f.active))
+	for _, v := range f.active {
+		saved = append(saved, v)
+	}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		return
+	}
+	tmp := f.path + ".tmp"
+	if os.WriteFile(tmp, data, 0o600) == nil {
+		_ = os.Rename(tmp, f.path)
+	}
 }
 
 // Update returns findings that appeared and those that disappeared since the last call.
 func (f *FindingTracker) Update(current []Finding) (opened, resolved []Finding) {
 	next := make(map[string]Finding, len(current))
 	for _, finding := range current {
-		key := finding.TaskID + "/" + finding.Rule
+		key := finding.key()
 		next[key] = finding
 		if _, ok := f.active[key]; !ok {
 			opened = append(opened, finding)
@@ -120,11 +165,12 @@ func (f *FindingTracker) Update(current []Finding) (opened, resolved []Finding) 
 		}
 	}
 	sort.Slice(resolved, func(i, j int) bool {
-		if resolved[i].TaskID != resolved[j].TaskID {
-			return resolved[i].TaskID < resolved[j].TaskID
+		if resolved[i].key() != resolved[j].key() {
+			return resolved[i].key() < resolved[j].key()
 		}
 		return resolved[i].Rule < resolved[j].Rule
 	})
 	f.active = next
+	f.save()
 	return opened, resolved
 }
