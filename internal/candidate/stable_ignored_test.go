@@ -142,26 +142,32 @@ func TestStableEvidencePassesOnPlanAndCoordinationWrites(t *testing.T) {
 func TestParseProcesses(t *testing.T) {
 	const ts = "Mon Jan  1 00:00:00 2026"
 	line := func(pid, cmd string) string { return pid + " " + ts + " " + cmd }
+	const root = "/Users/u/Library/Application Support/ClawFlow"
 	out := strings.Join([]string{
 		line("1", "/bin/zsh -c 'cd /x/clawflow-1 && go test ./... worker'"),
 		line("2", "grep clawflow worker"),
 		line("3", "git -C /x/clawflow log worker"),
 		line("4", "/usr/bin/git -C /x/clawflow log worker"),
-		line("5", "/a/b/clawflow controller"),
-		line("6", "/a b/clawflow worker --coordinator http://x"),
-		line("7", "/a/b/clawflow worker execute --task 1"),
+		line("5", root+"/bin/clawflow controller"),
+		line("6", root+"/upgrade/artifacts/x/clawflow worker --coordinator http://x"),
+		line("7", root+"/bin/clawflow worker execute --task 1"),
+		line("8", "/private/tmp/x/clawflow worker --coordinator http://x"),
+		line("9", "/var/folders/y/clawflow controller"),
+		line("10", "/Users/u/src/clawflow/clawflow controller"),
+		line("11", "clawflow controller"),
+		line("12", "/private/tmp/x/clawflow worker execute --task 2"),
 	}, "\n")
-	got := parseProcesses(out, "", false)
+	got := parseProcesses(out, root, "", false)
 	if len(got) != 2 || !strings.HasPrefix(got[0], "5:") || !strings.HasPrefix(got[1], "6:") {
 		t.Fatalf("services = %v", got)
 	}
-	ex := parseProcesses(out, "", true)
+	ex := parseProcesses(out, root, "", true)
 	if len(ex) != 1 || !strings.HasPrefix(ex[0], "7:") {
 		t.Fatalf("executors = %v", ex)
 	}
 	// Same pid and start but a different command line is a different identity.
-	a := parseProcesses(line("5", "/a/b/clawflow controller"), "", false)
-	b := parseProcesses(line("5", "/a/b/clawflow controller --x"), "", false)
+	a := parseProcesses(line("5", root+"/bin/clawflow controller"), root, "", false)
+	b := parseProcesses(line("5", root+"/bin/clawflow controller --x"), root, "", false)
 	if a[0] == b[0] {
 		t.Fatal("command line not part of identity")
 	}
