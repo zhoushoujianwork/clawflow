@@ -69,13 +69,7 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	if cp.ArtifactDir != "" {
 		for _, name := range []string{"stdout.json", "result.json"} {
 			raw, err := os.ReadFile(filepath.Join(cp.ArtifactDir, name))
-			if name == "result.json" && err == nil {
-				return fmt.Errorf("completed native result retained; reconcile output before resuming")
-			}
-			var final struct {
-				Status string `json:"status"`
-			}
-			if err == nil && json.Unmarshal(raw, &final) == nil && final.Status == "ok" {
+			if err == nil && completedExecutionResult(raw) {
 				return fmt.Errorf("completed native result retained; reconcile output before resuming")
 			}
 		}
@@ -146,6 +140,14 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	j.Error = ""
 	j.Report, j.Action = nil, ""
 	return writeWorkerJournal(path, j)
+}
+
+func completedExecutionResult(raw []byte) bool {
+	var final struct {
+		Status   string `json:"status"`
+		ExitCode *int   `json:"exit_code"`
+	}
+	return json.Unmarshal(raw, &final) == nil && final.Status == "ok" && final.ExitCode != nil && *final.ExitCode == 0
 }
 
 func executionRunID(id string) bool {

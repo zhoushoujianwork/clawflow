@@ -189,7 +189,7 @@ func libraryRecoveryFixture(t *testing.T, withResult bool) (string, *workerJourn
 		if err := os.MkdirAll(cp.ArtifactDir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(cp.ArtifactDir, "result.json"), []byte(`{"status":"ok"}`), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(cp.ArtifactDir, "result.json"), []byte(`{"status":"ok","exit_code":0}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -242,13 +242,6 @@ func TestLibraryRecoveryProceedsAfterOrphanEnded(t *testing.T) {
 
 func TestLibraryRecoveryTreatsResultJSONAsAwaitingReconciliation(t *testing.T) {
 	path, _, api, calls := libraryRecoveryFixture(t, true)
-	cp, err := execution.ReadCheckpoint(filepath.Join(filepath.Dir(path), "execution.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cp.ArtifactDir, "result.json"), []byte(`{"status":"error"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
 	old := abandonOrphanedRun
 	called := false
 	abandonOrphanedRun = func(context.Context, string) (AbandonState, error) {
@@ -256,8 +249,41 @@ func TestLibraryRecoveryTreatsResultJSONAsAwaitingReconciliation(t *testing.T) {
 		return AbandonEnded, nil
 	}
 	defer func() { abandonOrphanedRun = old }()
-	err = prepareWorkerRecovery(context.Background(), api, path)
+	err := prepareWorkerRecovery(context.Background(), api, path)
 	if err == nil || !strings.Contains(err.Error(), "completed native result retained") || *calls != 0 || called {
 		t.Fatalf("err=%v calls=%d abandon_called=%v", err, *calls, called)
+	}
+}
+
+func TestLibraryRecoveryResumesAfterIncompleteResult(t *testing.T) {
+	for _, result := range []string{
+		`{"status":"error","exit_code":1,"error_kind":"execution"}`,
+		`{"status":"timeout","exit_code":124,"error_kind":"timeout"}`,
+		`{"status":"cancelled","exit_code":130,"error_kind":"canceled"}`,
+	} {
+		t.Run(result, func(t *testing.T) {
+			path, _, api, calls := libraryRecoveryFixture(t, true)
+			cp, err := execution.ReadCheckpoint(filepath.Join(filepath.Dir(path), "execution.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cp.ArtifactDir, "result.json"), []byte(result), 0600); err != nil {
+				t.Fatal(err)
+			}
+			old := abandonOrphanedRun
+			called := false
+			abandonOrphanedRun = func(context.Context, string) (AbandonState, error) {
+				called = true
+				return AbandonEnded, nil
+			}
+			defer func() { abandonOrphanedRun = old }()
+			if err := prepareWorkerRecovery(context.Background(), api, path); err != nil {
+				t.Fatal(err)
+			}
+			j, err := readWorkerJournal(path)
+			if err != nil || !called || *calls != 1 || !j.Resume || j.State != "prepared" {
+				t.Fatalf("journal=%+v calls=%d abandon_called=%v err=%v", j, *calls, called, err)
+			}
+		})
 	}
 }
