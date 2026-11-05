@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"path/filepath"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
@@ -19,8 +20,8 @@ const (
 func serveCoordinatorWatchdog(ctx context.Context, board func(context.Context) (coordinator.Board, error), interval time.Duration) {
 	lg, _ := clog.Open("watchdog")
 	defer lg.Close()
-	runCoordinatorWatchdog(ctx, board, interval, func(event string, f coordinator.Finding) {
-		kv := []any{"event", event, "task", f.TaskID, "repo", f.Repo, "issue", f.Issue, "pr", f.PR, "rule", f.Rule, "age_sec", f.AgeSec}
+	runCoordinatorWatchdogWith(ctx, board, interval, coordinator.NewFileFindingTracker(filepath.Join(clog.LogsDir(), "watchdog-state.json")), func(event string, f coordinator.Finding) {
+		kv := []any{"event", event, "task", f.TaskID, "repo", f.Repo, "issue", f.Issue, "pr", f.PR, "rule", f.Rule, "age_sec", f.AgeSec, "reason", f.Reason}
 		if event == "open" {
 			lg.Warn("coordinator/watchdog", kv...)
 			return
@@ -34,7 +35,10 @@ func serveCoordinatorWatchdog(ctx context.Context, board func(context.Context) (
 // runCoordinatorWatchdog is separate from result reconciliation, so a blocked
 // reconcile pass cannot silence the check meant to notice it.
 func runCoordinatorWatchdog(ctx context.Context, board func(context.Context) (coordinator.Board, error), interval time.Duration, report func(string, coordinator.Finding), fail func(error)) {
-	tracker := &coordinator.FindingTracker{}
+	runCoordinatorWatchdogWith(ctx, board, interval, &coordinator.FindingTracker{}, report, fail)
+}
+
+func runCoordinatorWatchdogWith(ctx context.Context, board func(context.Context) (coordinator.Board, error), interval time.Duration, tracker *coordinator.FindingTracker, report func(string, coordinator.Finding), fail func(error)) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {

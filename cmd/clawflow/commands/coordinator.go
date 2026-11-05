@@ -100,6 +100,11 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		}
 		return total, repos, nil
 	}
+	if cfg, err := config.Load(); err == nil {
+		w := cfg.Settings.Watchdog
+		tasks.Watchdog = coordinator.WatchdogConfig{FailureThreshold: w.FailureThreshold, FailureWindow: time.Duration(w.FailureWindowMin) * time.Minute, OrphanAfter: time.Duration(w.OrphanedAfterMinute) * time.Minute}
+	}
+	tasks.OrphanedPRs = newOrphanedPRProvider()
 	results := &coordinatorResults{WorkerStore: tasks, tasks: tasks, loadJob: loadCoordinatorJob, apply: applyCoordinatorReport}
 	server := coordinator.NewServer(settings.ListenAddress(), results, cert)
 	adminHandler := coordinator.NewPlatformHandler(results, &platformAdmin{board: tasks.Board, workers: tasks})

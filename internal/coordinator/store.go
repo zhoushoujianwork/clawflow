@@ -83,6 +83,10 @@ type Store struct {
 	db *gorm.DB
 	// LeaseLimits supplies current platform capacity; nil leaves standalone stores unrestricted.
 	LeaseLimits func() (int, map[string]int, error)
+	// Watchdog sets the stuck-work thresholds; zero fields use defaults.
+	Watchdog WatchdogConfig
+	// OrphanedPRs lists open managed PRs no automatic flow will advance; nil disables orphaned_pr.
+	OrphanedPRs func(context.Context) ([]OrphanedPR, error)
 }
 
 func New(db *gorm.DB) *Store { return &Store{db: db} }
