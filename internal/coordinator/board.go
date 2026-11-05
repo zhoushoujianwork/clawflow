@@ -69,6 +69,8 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 		total, repos, err := s.LeaseLimits()
 		limits = dispatchLimits{known: err == nil, total: total, repos: repos}
 	}
+	// Cached outside the transaction: board reads never wait on VCS.
+	orphans := s.cachedOrphanedPRs()
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var now time.Time
 		if err := tx.Raw("SELECT transaction_timestamp()").Scan(&now).Error; err != nil {
@@ -106,12 +108,7 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			return err
 		}
 		out.Findings = append(out.Findings, repeatedFailureFindings(now, history, cfg)...)
-		if s.OrphanedPRs != nil {
-			// A provider error disables only this rule for the snapshot.
-			if prs, err := s.OrphanedPRs(ctx); err == nil {
-				out.Findings = append(out.Findings, orphanedPRFindings(now, prs, out.Tasks, cfg)...)
-			}
-		}
+		out.Findings = append(out.Findings, orphanedPRFindings(now, orphans, out.Tasks, cfg)...)
 		return nil
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	return out, err

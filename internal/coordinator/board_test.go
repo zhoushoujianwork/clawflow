@@ -162,6 +162,7 @@ func TestBoardSurfacesStuckWorkFindings(t *testing.T) {
 	s.OrphanedPRs = func(context.Context) ([]OrphanedPR, error) {
 		return []OrphanedPR{{Repo: "o/r", PR: 9, Cause: OrphanIssueUnlinked, Since: now.Add(-time.Hour)}}, nil
 	}
+	s.RefreshOrphanedPRs(ctx)
 	has := func(b Board, rule string) bool {
 		for _, f := range b.Findings {
 			if f.Rule == rule {
