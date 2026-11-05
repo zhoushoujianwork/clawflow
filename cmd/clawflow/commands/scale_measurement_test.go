@@ -53,7 +53,7 @@ func TestMeasureControllerScale(t *testing.T) {
 
 	var previousFailed bool
 	for _, workers := range tiers {
-		if previousFailed {
+		if previousFailed && os.Getenv("CLAWFLOW_SCALE_NO_EARLY_STOP") != "1" {
 			t.Logf("TIER workers=%d stopped_before_start reason=previous_tier_SLO_failure", workers)
 			continue
 		}
@@ -178,7 +178,7 @@ func measureScaleTier(t *testing.T, root, bin string, workers int, duration time
 
 	var killedTasks []string
 	var killedAt time.Time
-	if workers == 100 {
+	if workers == 100 && os.Getenv("CLAWFLOW_SCALE_SKIP_WORKER_FAULT") != "1" {
 		ready := filepath.Join(tierRoot, "worker-group-ready.json")
 		group := exec.Command(os.Args[0], "-test.run=^TestMeasureControllerScale$")
 		group.Env = append(os.Environ(), "CLAWFLOW_MEASURE_SCALE=1", "CLAWFLOW_SCALE_WORKER_GROUP=1", "CLAWFLOW_SCALE_BASE="+c.base, "CLAWFLOW_SCALE_SECRETS="+strings.Join(secrets[:5], ","), "CLAWFLOW_SCALE_READY="+ready)
