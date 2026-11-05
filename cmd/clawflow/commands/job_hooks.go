@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"github.com/zhoushoujianwork/clawflow/internal/prfeedback"
 	"regexp"
 	"strings"
 	"sync"
@@ -193,6 +194,9 @@ func (j *runJob) releaseRepair(kind string, now time.Time) error {
 			return j.hooks.ReleaseRepair(j, kind, now)
 		}
 		return nil
+	}
+	if j.repair.Feedback != nil {
+		return prfeedback.Release(snapshot.DataDir(), j.repo, j.repair.PR.Number, j.repair.Feedback.IDs)
 	}
 	return releaseCIRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.Attempt, kind, now)
 }
