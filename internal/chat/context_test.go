@@ -155,5 +155,10 @@ func TestCLICheatsheet_IssueCommentAndCloseUseIssueFlag(t *testing.T) {
 				t.Errorf("scope %v: positional %q", scope, bad)
 			}
 		}
+		for _, cmd := range []string{"pr view", "pr comment"} {
+			if !strings.Contains(out, cmd+" --repo <owner/name> --pr <number>") {
+				t.Errorf("scope %v: %s must use --pr <number>", scope, cmd)
+			}
+		}
 	}
 }

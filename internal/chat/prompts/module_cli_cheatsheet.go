@@ -66,8 +66,8 @@ func CLICheatsheet(scope Scope) string {
 	// PRs section
 	fmt.Fprintln(&b, "### PRs")
 	fmt.Fprintln(&b, "- `clawflow pr list --repo <owner/name> [--state open]`")
-	fmt.Fprintln(&b, "- `clawflow pr view --repo <owner/name> <number>`")
-	fmt.Fprintln(&b, "- `clawflow pr comment --repo <owner/name> --issue <number> --body \"...\"`")
+	fmt.Fprintln(&b, "- `clawflow pr view --repo <owner/name> --pr <number>`")
+	fmt.Fprintln(&b, "- `clawflow pr comment --repo <owner/name> --pr <number> --body \"...\"`")
 	fmt.Fprintln(&b)
 
 	// Labels section
