@@ -75,7 +75,7 @@ func TestEnqueuePreparationAndLeaseLimitsAllowSecondConnectionWrites(t *testing.
 	s, db, _ := setup(t)
 	var preparedID string
 	start := time.Now()
-	_, err := s.EnqueuePrepared(ctx, Task{Repo: "owner/repo", Issue: 1, Kind: "implement", Operator: "implement"}, func(task *Task) error {
+	_, _, err := s.EnqueuePrepared(ctx, Task{Repo: "owner/repo", Issue: 1, Kind: "implement", Operator: "implement"}, func(task *Task) error {
 		preparedID = task.ID
 		_, err := db.UpsertRun(ctx, filepath.Join(t.TempDir(), "prepare"), "run", runMeta("prepare/repo"))
 		return err

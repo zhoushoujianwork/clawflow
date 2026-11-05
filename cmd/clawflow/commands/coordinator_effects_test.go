@@ -193,7 +193,7 @@ func TestCoordinatorAcceptanceSQLiteLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := coordinator.Task{Repo: "o/r", Issue: 42, PR: 11, Kind: "acceptance", Operator: "acceptance"}
-	queued, err := tasks.EnqueuePrepared(ctx, input, func(task *coordinator.Task) error {
+	queued, _, err := tasks.EnqueuePrepared(ctx, input, func(task *coordinator.Task) error {
 		payload := coordinatorPayload{TaskID: task.ID, Kind: "acceptance", Repo: "o/r", Issue: 42, Acceptance: &record.Contract, AcceptanceWorker: "different", DevelopmentWorker: "developer"}
 		var marshalErr error
 		task.Payload, marshalErr = json.Marshal(payload)

@@ -136,27 +136,28 @@ func (s *Store) RegisterWorker(ctx context.Context, w Worker) error {
 
 // Enqueue returns the existing active task on a dedupe conflict, without replacing its payload.
 func (s *Store) Enqueue(ctx context.Context, input Task) (*Task, error) {
-	return s.EnqueuePrepared(ctx, input, nil)
+	t, _, err := s.EnqueuePrepared(ctx, input, nil)
+	return t, err
 }
 
 // EnqueuePrepared prepares a new payload only after an initial active-task
 // deduplication. Preparation may read providers or reserve external bookkeeping,
 // so it runs without a SQLite transaction. The short write transaction repeats
 // deduplication before insert to preserve cross-process correctness.
-func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*Task) error) (*Task, error) {
+func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*Task) error) (*Task, bool, error) {
 	if input.Repo == "" || input.Issue < 0 || input.PR < 0 || (input.Issue == 0 && input.PR == 0) || input.Operator == "" {
-		return nil, ErrInvalid
+		return nil, false, ErrInvalid
 	}
 	switch input.Kind {
 	case "implement", "repair", "acceptance", "reply":
 	default:
-		return nil, ErrInvalid
+		return nil, false, ErrInvalid
 	}
 	if len(input.Payload) == 0 {
 		input.Payload = json.RawMessage("{}")
 	}
 	if !json.Valid(input.Payload) {
-		return nil, ErrInvalid
+		return nil, false, ErrInvalid
 	}
 	// There is one controller process. Serialize its provider preparation for a
 	// logical queue slot; the transaction below remains the cross-process guard.
@@ -164,7 +165,7 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 	defer unlock()
 	id, err := randomID()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	t := Task{ID: id, Kind: input.Kind, Repo: input.Repo, Issue: input.Issue, PR: input.PR, Operator: input.Operator, Payload: input.Payload, Tags: input.Tags, Priority: input.Priority, QueuePosition: input.QueuePosition, State: "pending"}
 	if t.Tags == nil {
@@ -182,33 +183,34 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 	// Avoid provider preparation for work that is already known to be present.
 	if input.ExternalID != "" {
 		if input.EventSource == "" {
-			return nil, ErrInvalid
+			return nil, false, ErrInvalid
 		}
 		var event InboxEvent
 		if err := s.db.WithContext(ctx).First(&event, "source = ? AND external_id = ?", input.EventSource, input.ExternalID).Error; err == nil {
 			var duplicate Task
 			if err := s.db.WithContext(ctx).First(&duplicate, "id = ?", event.TaskID).Error; err != nil {
-				return nil, err
+				return nil, false, err
 			}
-			return &duplicate, nil
+			return &duplicate, false, nil
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	var existing Task
 	if err := active(s.db.WithContext(ctx), &existing); err == nil {
-		return &existing, nil
+		return &existing, false, nil
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
+		return nil, false, err
 	}
 	if prepare != nil {
 		if err := prepare(&t); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	if !json.Valid(t.Payload) {
-		return nil, ErrInvalid
+		return nil, false, ErrInvalid
 	}
+	inserted := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if input.ExternalID != "" {
 			if input.EventSource == "" {
@@ -264,6 +266,7 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 			return r.Error
 		}
 		if r.RowsAffected == 1 {
+			inserted = true
 			if err := remember(); err != nil {
 				return err
 			}
@@ -276,7 +279,7 @@ func (s *Store) EnqueuePrepared(ctx context.Context, input Task, prepare func(*T
 		t = conflict
 		return remember()
 	})
-	return &t, err
+	return &t, inserted, err
 }
 
 func eligible(tags []string, w Worker) bool {
