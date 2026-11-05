@@ -187,7 +187,9 @@ func mergeConfigsInternal(local *Config, remoteYAML []byte, conflictFatal bool) 
 	merged.Settings.GitHubApp = local.Settings.GitHubApp
 	merged.Settings.Platform = local.Settings.Platform
 	localExecution := local.Settings.Execution
-	localExecution.Engine = remote.Settings.Execution.Engine
+	if remote.Settings.Execution.Engine != "" {
+		localExecution.Engine = remote.Settings.Execution.Engine
+	}
 	merged.Settings.Execution = localExecution               // import the engine, but never remote runtime paths
 	merged.Settings.Database = local.Settings.Database       // never import a remote DSN
 	merged.Settings.Coordinator = local.Settings.Coordinator // never adopt or drop another host's controller role

@@ -28,6 +28,17 @@ func TestExecutionRuntimeSettingsStayMachineLocalAndEngineSyncs(t *testing.T) {
 	}
 }
 
+func TestExecutionEngineStaysLocalWhenRemoteOmitsIt(t *testing.T) {
+	local := &Config{Repos: map[string]Repo{}, Settings: Settings{Execution: ExecutionSettings{Engine: "library", Command: "/local/offload", Profile: "local"}}}
+	merged, err := MergeConfigs(local, []byte("settings:\n  execution:\n    command: /remote/offload\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(merged.Settings.Execution, local.Settings.Execution) {
+		t.Fatalf("remote omission reset local engine: got %+v want %+v", merged.Settings.Execution, local.Settings.Execution)
+	}
+}
+
 func TestOffloadLegacyCredentialsRemainUnchanged(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	path := CredentialsPath()
