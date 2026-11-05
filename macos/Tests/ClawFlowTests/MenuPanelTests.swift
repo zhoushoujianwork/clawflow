@@ -35,6 +35,8 @@ final class MenuPanelTests: XCTestCase {
         let disconnected = MenuPanelPresentation.make(snapshot: try fixture(), received: now, error: "offline", now: now, selectedScope: "")
         XCTAssertEqual(disconnected.status, "连接中断")
         XCTAssertFalse(disconnected.connected)
+        XCTAssertTrue(disconnected.dimsLiveData)
+        XCTAssertEqual(disconnected.capacity?.rightText, "最后已知")
         let noData = MenuPanelPresentation.make(snapshot: nil, received: nil, error: nil, now: now, selectedScope: "")
         XCTAssertEqual(noData.status, "没有数据")
         XCTAssertFalse(noData.hasSnapshot)
@@ -77,6 +79,15 @@ final class MenuPanelTests: XCTestCase {
         let full = panel(try fixture(tasks: [task("q", state: "pending", stage: "pending")],
                                      workers: [worker("mac", tags: ["host-mac"], slots: 1, running: ["other"])]), scope: "acme/app")
         XCTAssertEqual(full.queue?.reason, "Worker 容量已满")
+
+        let empty = panel(try fixture())
+        XCTAssertEqual(empty.queue?.summary, "运行 0 · 等待 0")
+        XCTAssertNil(empty.queue?.reason)
+    }
+
+    func testPausedProjectUsesPausedHeaderState() throws {
+        let value = panel(try fixture(enabled: ["acme/web": false]), scope: "acme/web")
+        XCTAssertEqual(value.status, "已暂停监控")
     }
 
     func testPendingActionTextStillExplainsMonitoringSemantics() {
@@ -95,22 +106,37 @@ final class MenuPanelTests: XCTestCase {
                 task("running-api", repo: "acme/api", state: "leased", stage: "running", subject: "缩短队列延迟"),
                 task("attention", repo: "acme/api", state: "leased", stage: "lease_expired", subject: "恢复中断任务"),
                 task("waiting", repo: "acme/web", state: "pending", stage: "pending", subject: "更新设置页面", wait: "等待 host-web 标签的 Worker")
+            ] + (1...7).map {
+                task("done-\($0)", repo: "acme/app", state: "done", stage: "done", subject: "今日完成 \($0)")
+            } + [
+                task("failed-today", repo: "acme/api", state: "failed", stage: "failed", subject: "今日失败")
             ],
             workers: [worker("mac", tags: ["host-mac"], slots: 3, running: ["running-app"]),
                       worker("linux", tags: ["host-linux"], slots: 2, running: ["running-api"])])
         let paused = try fixture(enabled: ["acme/app": true, "acme/api": true, "acme/web": false])
-        let cases: [(String, MenuPanelPresentation)] = [
-            ("all-idle", panel(try fixture())),
-            ("all-running", panel(mixed)),
-            ("single-project", panel(mixed, scope: "acme/app")),
-            ("single-paused-project", panel(paused, scope: "acme/web")),
-            ("disconnected", MenuPanelPresentation.make(snapshot: mixed, received: now.addingTimeInterval(-90), error: "Controller 连接失败", now: now, selectedScope: "")),
-            ("no-data", MenuPanelPresentation.make(snapshot: nil, received: nil, error: nil, now: now, selectedScope: ""))
+        let longRepos = (1...7).map { repo("acme/very-long-project-\($0)", enabled: true, tags: []) }
+        let many = try fixture(repositoryRows: longRepos)
+        let services = LocalServices()
+        var controller = LocalService(id: "com.zhoushoujianwork.clawflow.controller", path: "/tmp/controller.plist")
+        controller.loaded = true; controller.running = true; controller.pid = "4242"
+        services.rows = [controller]
+        let readiness = ExecutionReadiness()
+        let localControls = AnyView(LocalServiceControls(services: services, readiness: readiness))
+        let cases: [(String, MenuPanelPresentation, Bool, AnyView)] = [
+            ("all-idle", panel(try fixture()), false, AnyView(EmptyView())),
+            ("all-running", panel(mixed), false, AnyView(EmptyView())),
+            ("single-project", panel(mixed, scope: "acme/app"), false, AnyView(EmptyView())),
+            ("single-paused-project", panel(paused, scope: "acme/web"), false, AnyView(EmptyView())),
+            ("many-projects", panel(many, scope: "acme/very-long-project-7"), false, AnyView(EmptyView())),
+            ("local-services-expanded", panel(try fixture()), true, localControls),
+            ("disconnected", MenuPanelPresentation.make(snapshot: mixed, received: now.addingTimeInterval(-90), error: "Controller 连接失败", now: now, selectedScope: ""), false, AnyView(EmptyView())),
+            ("no-data", MenuPanelPresentation.make(snapshot: nil, received: nil, error: nil, now: now, selectedScope: ""), false, AnyView(EmptyView()))
         ]
-        for (name, presentation) in cases {
+        for (name, presentation, expanded, controls) in cases {
             for scheme in [ColorScheme.light, .dark] {
                 let suffix = scheme == .light ? "light" : "dark"
-                let view = MenuPanelView(presentation: presentation, snapshotRendering: true)
+                let view = MenuPanelView(presentation: presentation, localServiceControls: controls,
+                                         snapshotRendering: true, servicesInitiallyExpanded: expanded)
                     .environment(\.colorScheme, scheme)
                     .fixedSize(horizontal: false, vertical: true)
                 let renderer = ImageRenderer(content: view)
@@ -131,8 +157,8 @@ final class MenuPanelTests: XCTestCase {
     }
 
     private func fixture(tasks: [[String: Any]] = [], workers: [[String: Any]]? = nil,
-                         enabled: [String: Bool] = [:]) throws -> DashboardSnapshot {
-        let repos = [
+                         enabled: [String: Bool] = [:], repositoryRows: [[String: Any]]? = nil) throws -> DashboardSnapshot {
+        let defaultRepos = [
             repo("acme/app", enabled: enabled["acme/app"] ?? true, tags: ["host-mac"]),
             repo("acme/api", enabled: enabled["acme/api"] ?? true, tags: ["host-linux"]),
             repo("acme/web", enabled: enabled["acme/web"] ?? false, tags: ["host-web"])
@@ -141,7 +167,7 @@ final class MenuPanelTests: XCTestCase {
         let object: [String: Any] = [
             "schema_version": 1, "version": "fixture", "controller": "本机 Controller",
             "board": ["generated_at": iso(now), "workers": boardWorkers, "tasks": tasks],
-            "projects": [["name": "ClawFlow", "repos": repos]]
+            "projects": [["name": "ClawFlow", "repos": repositoryRows ?? defaultRepos]]
         ]
         return try DashboardSnapshot.decode(JSONSerialization.data(withJSONObject: object))
     }
