@@ -14,9 +14,78 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
+// NoJobEvidence prefixes every "nothing collected" result; a reason list follows
+// so callers and the repair prompt can tell why (HTTP status, no matching job...).
 const NoJobEvidence = "no evidence (logs unavailable or no matching failed jobs)"
+
+func noEvidence(reasons []string) string {
+	if len(reasons) == 0 {
+		return NoJobEvidence
+	}
+	return NoJobEvidence + "; reasons: " + strings.Join(reasons, "; ")
+}
+
+// IsNoEvidence reports whether s is a NoJobEvidence result, with or without reasons.
+func IsNoEvidence(s string) bool { return strings.HasPrefix(s, NoJobEvidence) }
+
+var evidenceErrorLine = regexp.MustCompile(`##\[error\][^\r\n]*`)
+
+// logErrorLines returns up to max GitHub "##[error]" annotations, which name the
+// failing command's outcome, plus the last "##[group]" title before the first one
+// (the step that was running). Input must already be redacted.
+func logErrorLines(log string, max int) (step string, errs []string) {
+	idx := evidenceErrorLine.FindAllStringIndex(log, -1)
+	for _, m := range idx {
+		if len(errs) == max {
+			break
+		}
+		errs = append(errs, strings.TrimSpace(log[m[0]:m[1]]))
+	}
+	if len(idx) > 0 {
+		before := log[:idx[0][0]]
+		if g := strings.LastIndex(before, "##[group]"); g >= 0 {
+			line := before[g+len("##[group]"):]
+			if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+				line = line[:nl]
+			}
+			step = strings.TrimSpace(line)
+		}
+	}
+	return step, errs
+}
+
 const evidenceTailBytes = 4096
 const evidenceDownloadBytes = 4 << 20
+const evidenceStreamBytes = 256 << 20 // upper bound on bytes read from one log
+
+// readTail reads r and returns at most keep trailing bytes. It fails if r exceeds
+// maxTotal bytes, so a hostile endpoint cannot stream forever.
+func readTail(r io.Reader, keep, maxTotal int) ([]byte, error) {
+	buf := make([]byte, 0, 64<<10)
+	chunk := make([]byte, 64<<10)
+	total := 0
+	for {
+		n, err := r.Read(chunk)
+		total += n
+		if total > maxTotal {
+			return nil, fmt.Errorf("log over %d bytes", maxTotal)
+		}
+		buf = append(buf, chunk[:n]...)
+		if len(buf) > 2*keep {
+			buf = append(buf[:0], buf[len(buf)-keep:]...)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("log read incomplete: %v", err)
+		}
+	}
+	if len(buf) > keep {
+		buf = buf[len(buf)-keep:]
+	}
+	return buf, nil
+}
 
 var evidenceSHA = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 var evidenceANSI = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -61,7 +130,7 @@ func (c *Client) evidenceGET(path string, logs bool) ([]byte, error) {
 	for hop := 0; hop < 3; hop++ {
 		req, err := http.NewRequestWithContext(c.reqContext(), "GET", target, nil)
 		if err != nil {
-			return nil, fmt.Errorf("evidence request unavailable")
+			return nil, fmt.Errorf("request could not be built")
 		}
 		if hop == 0 {
 			req.Header.Set("Authorization", "Bearer "+c.token)
@@ -69,29 +138,44 @@ func (c *Client) evidenceGET(path string, logs bool) ([]byte, error) {
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("evidence transport unavailable")
+			return nil, fmt.Errorf("transport error")
 		}
-		if logs && resp.StatusCode == http.StatusFound {
+		switch resp.StatusCode {
+		case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+			if !logs {
+				resp.Body.Close()
+				return nil, fmt.Errorf("unexpected HTTP %d redirect", resp.StatusCode)
+			}
 			location, err := resp.Location()
 			resp.Body.Close()
 			if err != nil || location.Scheme != "https" || location.User != nil {
-				return nil, fmt.Errorf("evidence redirect unavailable")
+				return nil, fmt.Errorf("HTTP %d redirect with missing or non-https location", resp.StatusCode)
 			}
 			target = location.String()
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return nil, fmt.Errorf("evidence unavailable")
+			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		if logs {
+			// Job logs routinely exceed the cap (verbose -race runs); the failure is
+			// at the end, so stream the body and keep only its tail.
+			data, err := readTail(resp.Body, evidenceDownloadBytes, evidenceStreamBytes)
+			resp.Body.Close()
+			if err != nil {
+				return nil, err
+			}
+			return data, nil
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, evidenceDownloadBytes+1))
 		resp.Body.Close()
 		if err != nil || len(data) > evidenceDownloadBytes {
-			return nil, fmt.Errorf("evidence incomplete or oversized")
+			return nil, fmt.Errorf("response incomplete or over %d bytes", evidenceDownloadBytes)
 		}
 		return data, nil
 	}
-	return nil, fmt.Errorf("evidence redirect limit")
+	return nil, fmt.Errorf("too many redirects")
 }
 
 type evidenceRun struct {
@@ -132,16 +216,29 @@ func (c *Client) GetFailedJobEvidence(repo, sha string, jobID int64) (string, er
 	bounded := *c
 	bounded.ctx = ctx
 	c = &bounded
+	var reasons []string
+	why := func(f string, a ...any) {
+		if len(reasons) < 8 {
+			reasons = append(reasons, fmt.Sprintf(f, a...))
+		}
+	}
 	data, err := c.evidenceGET("/repos/"+repo+"/actions/runs?head_sha="+url.QueryEscape(sha)+"&per_page=100", false)
 	if err != nil {
-		return NoJobEvidence, nil
+		return noEvidence([]string{"listing workflow runs failed: " + err.Error()}), nil
 	}
 	var runs struct {
 		Total int           `json:"total_count"`
 		Runs  []evidenceRun `json:"workflow_runs"`
 	}
-	if json.Unmarshal(data, &runs) != nil || runs.Total != len(runs.Runs) || runs.Total > 100 {
-		return NoJobEvidence, nil
+	if json.Unmarshal(data, &runs) != nil {
+		return noEvidence([]string{"workflow run list was not valid JSON"}), nil
+	}
+	if len(runs.Runs) == 0 {
+		return noEvidence([]string{"no workflow runs for head " + sha[:12]}), nil
+	}
+	if runs.Total > len(runs.Runs) {
+		// More runs than one page: inspect the newest page instead of giving up.
+		why("run list truncated (%d of %d runs)", len(runs.Runs), runs.Total)
 	}
 	// Retain the newest run for each workflow, including successful/pending reruns.
 	latest := map[int64]int64{}
@@ -156,6 +253,9 @@ func (c *Client) GetFailedJobEvidence(repo, sha string, jobID int64) (string, er
 	for _, r := range runs.Runs {
 		// 已取消的 workflow 仍可能包含先前失败的 job；仅下方失败 job 的日志可作为证据。
 		if r.WorkflowID <= 0 || r.ID != latest[r.WorkflowID] || r.HeadSHA != sha || !strings.EqualFold(r.HeadRepository.FullName, repo) || r.Status != "completed" || (r.Conclusion != "failure" && r.Conclusion != "timed_out" && r.Conclusion != "cancelled") || r.RunAttempt < 1 {
+			if r.ID == latest[r.WorkflowID] {
+				why("run %d skipped (status=%s conclusion=%s head_repo=%s)", r.ID, r.Status, r.Conclusion, r.HeadRepository.FullName)
+			}
 			continue
 		}
 		inspected++
@@ -164,25 +264,37 @@ func (c *Client) GetFailedJobEvidence(repo, sha string, jobID int64) (string, er
 		}
 		data, err = c.evidenceGET(fmt.Sprintf("/repos/%s/actions/runs/%d/attempts/%d/jobs?per_page=100", repo, r.ID, r.RunAttempt), false)
 		if err != nil {
+			why("run %d jobs: %v", r.ID, err)
 			continue
 		}
 		var jobs struct {
 			Total int `json:"total_count"`
 			Jobs  []evidenceJob
 		}
-		if json.Unmarshal(data, &jobs) != nil || jobs.Total != len(jobs.Jobs) || jobs.Total > 100 {
+		if json.Unmarshal(data, &jobs) != nil {
+			why("run %d jobs response was not valid JSON", r.ID)
 			continue
 		}
+		if jobs.Total > len(jobs.Jobs) {
+			why("run %d job list truncated (%d of %d)", r.ID, len(jobs.Jobs), jobs.Total)
+		}
+		matched := 0
 		for _, j := range jobs.Jobs {
 			if j.ID <= 0 || (jobID > 0 && j.ID != jobID) || j.RunID != r.ID || j.HeadSHA != sha || j.Status != "completed" || (j.Conclusion != "failure" && j.Conclusion != "timed_out") {
 				continue
 			}
+			matched++
 			downloads++
 			if downloads > 10 {
 				break
 			}
 			data, err = c.evidenceGET(fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", repo, j.ID), true)
-			if err != nil || strings.TrimSpace(string(data)) == "" {
+			if err != nil {
+				why("job %d logs: %v", j.ID, err)
+				continue
+			}
+			if strings.TrimSpace(string(data)) == "" {
+				why("job %d logs were empty", j.ID)
 				continue
 			}
 			steps := ""
@@ -192,16 +304,31 @@ func (c *Client) GetFailedJobEvidence(repo, sha string, jobID int64) (string, er
 				}
 			}
 			// JSON quoting prevents embedded delimiters from impersonating prompt structure.
-			item := map[string]any{"run_id": r.ID, "attempt": r.RunAttempt, "job_id": j.ID, "head_sha": sha, "job": c.evidenceText(j.Name, 256), "failed_steps": c.evidenceText(steps, 512), "tail": c.evidenceText(string(data), evidenceTailBytes)}
+			redacted := c.evidenceText(string(data), evidenceTailBytes)
+			item := map[string]any{"run_id": r.ID, "attempt": r.RunAttempt, "job_id": j.ID, "head_sha": sha, "job": c.evidenceText(j.Name, 256), "failed_steps": c.evidenceText(steps, 512), "tail": redacted}
+			// Error annotations come from the redacted full-size tail, then are re-bounded.
+			if step, errs := logErrorLines(c.evidenceText(string(data), evidenceDownloadBytes), 5); len(errs) > 0 {
+				item["log_step"] = c.evidenceText(step, 256)
+				item["error_lines"] = c.evidenceText(strings.Join(errs, "\n"), 1024)
+			}
 			encoded, _ := json.Marshal(item)
 			excerpts = append(excerpts, string(encoded))
 			if len(excerpts) == 3 {
 				return strings.Join(excerpts, "\n"), nil
 			}
 		}
+		if matched == 0 && jobID == 0 {
+			why("run %d attempt %d has no failed job", r.ID, r.RunAttempt)
+		}
+		if matched == 0 && jobID > 0 {
+			why("run %d has no failed job with id %d", r.ID, jobID)
+		}
 	}
 	if len(excerpts) == 0 {
-		return NoJobEvidence, nil
+		if inspected == 0 {
+			why("no completed failed workflow run for this head")
+		}
+		return noEvidence(reasons), nil
 	}
 	return strings.Join(excerpts, "\n"), nil
 }
