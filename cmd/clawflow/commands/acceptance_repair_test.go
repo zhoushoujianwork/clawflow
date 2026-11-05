@@ -1024,3 +1024,65 @@ func TestNoChangeRepairStopsRepairAndReviewOnSameHead(t *testing.T) {
 		})
 	}
 }
+
+// setBlockedImplementerVerdict makes the reviewer return blocked with
+// next_owner=implementer and a structured requirement finding.
+func setBlockedImplementerVerdict() {
+	setReviewerVerdict("blocked")
+	base := acceptanceNativeRun
+	acceptanceNativeRun = func(ctx context.Context, c execution.Config, req execution.Request, env []string, w io.Writer, observe func(execution.Observation)) (execution.Result, error) {
+		r, err := base(ctx, c, req, env, w, observe)
+		if !req.ToolsDisabled {
+			r.Text = strings.Replace(r.Text, `"findings":`, `"next_owner":"implementer","next_action":"add execution evidence","findings":`, 1)
+		}
+		return r, err
+	}
+}
+
+func TestBlockedImplementerNoChangeStopsRepairAndReviewOnSameHead(t *testing.T) {
+	f, readLog, reg, cfg := repairAcceptanceFixture(t, "blocked")
+	setBlockedImplementerVerdict()
+	rec := recordVerdict(t, f)
+	if !blockedRepairableByImplementer(rec) {
+		t.Fatalf("fixture not repairable: %+v", rec)
+	}
+	if jobs := scanRepair(t, reg, f, cfg, 0); len(jobs) != 1 {
+		t.Fatalf("first scan jobs=%v", jobs)
+	}
+	past := time.Now().UTC().Add(-time.Hour)
+	n, err := reserveRepair(snapshot.DataDir(), "o/r", f.pr, repairReasonAcceptance, past)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := releaseCIRepair(snapshot.DataDir(), "o/r", f.pr, n, "no-change", past); err != nil {
+		t.Fatal(err)
+	}
+	_, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", f.pr.Number)
+	l, _ := loadCIRepairLedger(path)
+	if consumed, infra := l.counts(); consumed != 1 || infra != 0 {
+		t.Fatalf("consumed=%d infra=%d", consumed, infra)
+	}
+	for i := 0; i < 2; i++ {
+		if jobs := scanRepair(t, reg, f, cfg, 0); len(jobs) != 0 {
+			t.Fatalf("scan %d dispatched %v", i, jobs)
+		}
+		f.existingComments = append([]string(nil), f.comments...)
+	}
+	if len(f.comments) != 1 || !strings.Contains(f.comments[0], "needs a person") {
+		t.Fatalf("comments=%v", f.comments)
+	}
+	if !repairledger.NoChangeAtHead(snapshot.DataDir(), "o/r", f.pr.Number, f.pr.HeadSHA) || repairledger.NoChangeAtHead(snapshot.DataDir(), "o/r", f.pr.Number, strings.Repeat("e", 40)) {
+		t.Fatal("no-change must bind to the exact head")
+	}
+	// Harvest must not queue another review of the same head.
+	before := len(f.comments)
+	if failed := harvest(t, "", 0); len(failed) != 0 {
+		t.Fatalf("harvest failures: %v", failed)
+	}
+	if len(f.comments) != before || len(f.expected) != 0 {
+		t.Fatalf("harvest acted: comments=%v expected=%v", f.comments, f.expected)
+	}
+	if !strings.Contains(readLog(), "reason=repair_no_change") {
+		t.Fatalf("run.log lacks repair_no_change skip:\n%s", readLog())
+	}
+}
