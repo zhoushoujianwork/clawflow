@@ -213,7 +213,7 @@ func libraryRecoveryFixture(t *testing.T, withResult bool) (string, *workerJourn
 func TestLibraryRecoveryRequiresKnownEndedOrphan(t *testing.T) {
 	path, _, api, calls := libraryRecoveryFixture(t, false)
 	err := prepareWorkerRecovery(context.Background(), api, path)
-	if err == nil || !strings.Contains(err.Error(), "offload#100") || *calls != 0 {
+	if err == nil || !strings.Contains(err.Error(), "no worker slot records this run") || *calls != 0 {
 		t.Fatalf("err=%v calls=%d", err, *calls)
 	}
 	j, readErr := readWorkerJournal(path)
