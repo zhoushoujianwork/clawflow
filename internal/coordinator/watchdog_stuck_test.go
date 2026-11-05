@@ -88,3 +88,26 @@ func TestFileTrackerDoesNotReopenAfterRestart(t *testing.T) {
 		t.Fatalf("resolve after restart: %+v", resolved)
 	}
 }
+
+func TestSameHeadCycle(t *testing.T) {
+	now := time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)
+	cfg := WatchdogConfig{FailureThreshold: 3}
+	mk := func(kind, head string, i int) FinishedTask {
+		return FinishedTask{Repo: "o/r", Issue: 7, PR: 11, State: "done", Kind: kind, Head: head, UpdatedAt: now.Add(-time.Duration(i) * time.Minute)}
+	}
+	cycle := []FinishedTask{mk("repair", "h1", 1), mk("acceptance", "h1", 2), mk("repair", "h1", 3)}
+	got := sameHeadCycleFindings(now, cycle, cfg)
+	if len(got) != 1 || got[0].Rule != RuleSameHeadCycle || got[0].PR != 11 {
+		t.Fatalf("cycle: %+v", got)
+	}
+	// Different heads, too few tasks, or no repair involved: no finding.
+	if got := sameHeadCycleFindings(now, []FinishedTask{mk("repair", "h1", 1), mk("acceptance", "h2", 2), mk("repair", "h3", 3)}, cfg); len(got) != 0 {
+		t.Fatalf("new heads: %+v", got)
+	}
+	if got := sameHeadCycleFindings(now, cycle[:2], cfg); len(got) != 0 {
+		t.Fatalf("below threshold: %+v", got)
+	}
+	if got := sameHeadCycleFindings(now, []FinishedTask{mk("acceptance", "h1", 1), mk("acceptance", "h1", 2), mk("acceptance", "h1", 3)}, cfg); len(got) != 0 {
+		t.Fatalf("no repair: %+v", got)
+	}
+}

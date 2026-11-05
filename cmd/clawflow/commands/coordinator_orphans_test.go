@@ -72,3 +72,12 @@ func TestOrphanVerdict(t *testing.T) {
 		}
 	}
 }
+
+func TestOrphanNoChangeCause(t *testing.T) {
+	if orphanNoChangeCause("") != coordinator.OrphanRepairNoChange || orphanNoChangeCause(coordinator.OrphanAcceptanceBlocked) != coordinator.OrphanRepairNoChange {
+		t.Fatal("no-change must surface as orphaned")
+	}
+	if orphanNoChangeCause(coordinator.OrphanRepairExhausted) != coordinator.OrphanRepairExhausted {
+		t.Fatal("other causes keep their wording")
+	}
+}

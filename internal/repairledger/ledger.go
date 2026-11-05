@@ -58,10 +58,41 @@ const ReleaseCoordinationChanged = "coordination-changed"
 // repair ran, so it consumes no repair or infrastructure budget.
 const ReleaseEnqueueDeduplicated = "enqueue-deduplicated"
 
+// ReleaseNoChange marks a repair that verified the published head needs no change.
+const ReleaseNoChange = "no-change"
+
+// ReasonAcceptance is the Attempt.Reason of a reviewer-verdict repair.
+const ReasonAcceptance = "acceptance"
+
+// NoChangeAtHead reports whether an acceptance repair already concluded
+// no-change for this exact head. The same verdict is then not repaired or
+// re-reviewed again until the head changes.
+func (l Ledger) NoChangeAtHead(head string) bool {
+	if head == "" {
+		return false
+	}
+	for _, a := range l.Attempts {
+		if a.Head == head && a.Released == ReleaseNoChange && a.Reason == ReasonAcceptance {
+			return true
+		}
+	}
+	return false
+}
+
+// NoChangeAtHead loads the PR's ledger and applies Ledger.NoChangeAtHead.
+// An unreadable ledger reports false.
+func NoChangeAtHead(root, repo string, pr int, head string) bool {
+	_, path := Path(root, repo, pr)
+	l, err := Load(path)
+	return err == nil && l.NoChangeAtHead(head)
+}
+
 // Counts returns (consumed repair attempts, released infrastructure outcomes).
 func (l Ledger) Counts() (consumed, infra int) {
 	for _, a := range l.Attempts {
-		if a.Released == "" {
+		if a.Released == "" || (a.Released == ReleaseNoChange && a.Reason == ReasonAcceptance) {
+			// A confirmed acceptance no-change ran a real repair investigation, so
+			// it spends the PR's repair budget like any other acceptance repair.
 			consumed++
 		} else if a.Released != "no-change" && a.Released != "resource-busy" && a.Released != ReleaseOffloadUnavailable && a.Released != ReleaseCoordinationChanged && a.Released != ReleaseEnqueueDeduplicated {
 			infra++

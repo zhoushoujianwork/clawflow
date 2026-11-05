@@ -49,6 +49,15 @@ func orphanCause(pr vcs.PR, acceptanceRequired bool, acceptanceVerdict func() st
 	return ""
 }
 
+// orphanNoChangeCause upgrades an unowned (empty) or blocked PR whose
+// acceptance repair concluded no-change; other causes keep their own wording.
+func orphanNoChangeCause(cause string) string {
+	if cause == "" || cause == coordinator.OrphanAcceptanceBlocked {
+		return coordinator.OrphanRepairNoChange
+	}
+	return cause
+}
+
 // orphanVerdict maps acceptance evidence to the verdict token orphanCause uses.
 // Verdicts that repair or a fresh same-head review will still advance map to "".
 func orphanVerdict(info *pipeline.AcceptanceInfo) string {
@@ -112,6 +121,9 @@ func newOrphanedPRProvider() func(context.Context) ([]coordinator.OrphanedPR, er
 					}
 				}
 				cause := orphanCause(pr, rc.AcceptanceRequired, verdict, budget, cancelled)
+				if rc.AcceptanceRequired && !pr.Draft && !isDraftPR(pr.Title) && repairledger.NoChangeAtHead(snapshot.DataDir(), repo, pr.Number, pr.HeadSHA) {
+					cause = orphanNoChangeCause(cause)
+				}
 				if cause == "" {
 					continue
 				}

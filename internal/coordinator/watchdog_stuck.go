@@ -12,6 +12,8 @@ import (
 const (
 	RuleRepeatedFailure = "repeated_failure"
 	RuleOrphanedPR      = "orphaned_pr"
+	// RuleSameHeadCycle: repair and acceptance tasks keep ending on one unchanged head.
+	RuleSameHeadCycle = "same_head_cycle"
 )
 
 // Orphaned PR causes reported by the PR state provider.
@@ -24,6 +26,8 @@ const (
 	OrphanCICancelled     = "ci_cancelled_reruns_exhausted"
 	OrphanBranchUnmanaged = "branch_unmanaged"
 	OrphanIssueUnlinked   = "issue_unlinked"
+	// OrphanRepairNoChange: an acceptance repair found nothing to change for this head.
+	OrphanRepairNoChange = "repair_no_change_needs_human"
 )
 
 // WatchdogConfig holds the observation thresholds of the stuck-work rules.
@@ -59,6 +63,7 @@ type FinishedTask struct {
 	Issue     int       `json:"issue"`
 	PR        int       `json:"pr"`
 	State     string    `json:"state"`
+	Kind      string    `json:"kind"`
 	InfraKind string    `json:"infra_kind"`
 	Err       string    `json:"err"`
 	Head      string    `json:"head"`
@@ -175,4 +180,50 @@ func activeFor(tasks []BoardTask, p OrphanedPR) bool {
 		}
 	}
 	return false
+}
+
+// sameHeadCycleFindings reports PRs (or issues) where repair and acceptance
+// tasks keep finishing, in any state, on one unchanged head. A done task does
+// not break the run, because no-change repairs end as done. Tasks without a
+// recorded head are not counted.
+func sameHeadCycleFindings(now time.Time, history []FinishedTask, cfg WatchdogConfig) []Finding {
+	cfg = cfg.withDefaults()
+	type group struct {
+		first          FinishedTask
+		count, repairs int
+		since          time.Time
+	}
+	groups := map[string]*group{}
+	var keys []string
+	for _, h := range history {
+		if h.Head == "" || (h.Kind != "repair" && h.Kind != "acceptance") || now.Sub(h.UpdatedAt) > cfg.FailureWindow {
+			continue
+		}
+		k := subjectKey(h.Repo, h.Issue, h.PR) + "@" + h.Head
+		g := groups[k]
+		if g == nil {
+			g = &group{first: h, since: h.UpdatedAt}
+			groups[k] = g
+			keys = append(keys, k)
+		}
+		g.count++
+		if h.Kind == "repair" {
+			g.repairs++
+		}
+		if h.UpdatedAt.Before(g.since) {
+			g.since = h.UpdatedAt
+		}
+	}
+	sort.Strings(keys)
+	var out []Finding
+	for _, k := range keys {
+		g := groups[k]
+		if g.count < cfg.FailureThreshold || g.repairs == 0 {
+			continue
+		}
+		f := g.first
+		out = append(out, Finding{Repo: f.Repo, Issue: f.Issue, PR: f.PR, Rule: RuleSameHeadCycle, Since: g.since, AgeSec: int64(now.Sub(g.since).Seconds()),
+			Reason: fmt.Sprintf("Watchdog: %d repair and acceptance tasks (%d repairs) ended on head %s without a new head (threshold %d, window %s).", g.count, g.repairs, f.Head, cfg.FailureThreshold, cfg.FailureWindow)})
+	}
+	return out
 }
