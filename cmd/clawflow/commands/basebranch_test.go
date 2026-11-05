@@ -79,8 +79,8 @@ func TestParseBaseBranchOverride(t *testing.T) {
 			wantErrFrag: "must not start with '-'",
 		},
 		{
-			name:    "invalid marker — path traversal",
-			body:    "ClawFlow-Base-Branch: ../etc/passwd",
+			name:     "invalid marker — path traversal",
+			body:     "ClawFlow-Base-Branch: ../etc/passwd",
 			comments: nil,
 			// "../etc/passwd" starts with "." so the leading-dot check fires
 			// before the ".." check. Both are valid rejections.
@@ -88,8 +88,8 @@ func TestParseBaseBranchOverride(t *testing.T) {
 			wantErrFrag: "must not start with '.'",
 		},
 		{
-			name:    "invalid marker — shell injection semicolon (no spaces)",
-			body:    "ClawFlow-Base-Branch: foo;bar",
+			name:     "invalid marker — shell injection semicolon (no spaces)",
+			body:     "ClawFlow-Base-Branch: foo;bar",
 			comments: nil,
 			// "foo;bar" is captured as a single \S+ token; semicolon is not
 			// in the allowed character set so validation rejects it.
@@ -97,8 +97,8 @@ func TestParseBaseBranchOverride(t *testing.T) {
 			wantErrFrag: "invalid characters",
 		},
 		{
-			name:    "shell injection with spaces — no marker match",
-			body:    "ClawFlow-Base-Branch: foo;rm -rf /",
+			name:     "shell injection with spaces — no marker match",
+			body:     "ClawFlow-Base-Branch: foo;rm -rf /",
 			comments: nil,
 			// The regex requires \S+\s*$ so trailing " -rf /" prevents a match.
 			// No marker is found — ok == false, no error.

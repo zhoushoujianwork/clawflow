@@ -30,7 +30,7 @@ func TestUpdateGist_DropsEmptyContent(t *testing.T) {
 	})
 
 	_, err := client.UpdateGist("abc", map[string]string{
-		"config.yaml":   "real content",
+		"config.yaml":    "real content",
 		"projects--x.md": "", // empty → must not be sent (would delete the file)
 	})
 	if err != nil {

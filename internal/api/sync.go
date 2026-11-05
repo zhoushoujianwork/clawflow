@@ -66,8 +66,8 @@ func loadOperatorRegistry() (*operator.Registry, error) {
 // syncStatusResponse is returned by GET /api/sync/status.
 // Credentials and local_path are intentionally absent.
 type syncStatusResponse struct {
-	GistID      string `json:"gist_id"`
-	GHTokenSet  bool   `json:"gh_token_set"`
+	GistID       string `json:"gist_id"`
+	GHTokenSet   bool   `json:"gh_token_set"`
 	LastSyncedAt string `json:"last_synced_at,omitempty"`
 }
 
