@@ -18,6 +18,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
+	"github.com/zhoushoujianwork/clawflow/internal/prfeedback"
 	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
@@ -34,10 +35,17 @@ type ciRepairContext struct {
 	MergeConflict bool
 	// A fresh managed session rechecks an unproven head without changing it.
 	DevelopmentVerification bool
+	// Feedback carries human PR review items handed to the original
+	// development session. It uses its own attempt ledger, not the shared
+	// repair budget.
+	Feedback *prFeedbackBatch
 }
 
 // reason names the repair input for the shared ledger and logs.
 func (r *ciRepairContext) reason() string {
+	if r != nil && r.Feedback != nil {
+		return repairReasonPRFeedback
+	}
 	if r != nil && r.MergeConflict {
 		return "merge_conflict"
 	}
@@ -52,6 +60,9 @@ func (r *ciRepairContext) reason() string {
 
 // label is the human-facing prefix for runner messages.
 func (r *ciRepairContext) label() string {
+	if r.Feedback != nil {
+		return "PR feedback"
+	}
 	if r.MergeConflict {
 		return "Merge conflict"
 	}
@@ -160,6 +171,12 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 			skip(pr.Number, err)
 			continue
 		}
+		if batch := scanPRFeedback(ctx, client, repo, cfg, pr, n); batch != nil {
+			seen[n] = true
+			sub := &operator.Subject{Number: n, Title: issue.Title, Body: issue.Body, Labels: issue.Labels, State: issue.State}
+			jobs = append(jobs, &runJob{op: op, sub: sub, repo: repo, repoCfg: cfg, client: client, repair: &ciRepairContext{PR: pr, Feedback: batch}})
+			continue
+		}
 		var findings *acceptanceFindings
 		verification := false
 		conflict := false
@@ -237,7 +254,7 @@ func prepareCIRepairContext(ctx context.Context, j *runJob, now time.Time) error
 		j.result.FailingCheck = j.repair.FailingCheck
 	}
 	j.repair.Evidence = ""
-	if j.repair.Acceptance == nil && !j.repair.MergeConflict && !j.repair.DevelopmentVerification {
+	if j.repair.Acceptance == nil && !j.repair.MergeConflict && !j.repair.DevelopmentVerification && j.repair.Feedback == nil {
 		if reader, ok := j.client.(interface {
 			GetMRFailedJobEvidence(string, int, string) (string, error)
 		}); ok {
@@ -276,7 +293,9 @@ func checkCIRepair(ctx context.Context, j *runJob) error {
 	if pr.HeadSHA != j.repair.PR.HeadSHA || pr.HeadBranch != j.repair.PR.HeadBranch {
 		return fmt.Errorf("PR head changed since scan")
 	}
-	if j.repair.MergeConflict {
+	if j.repair.Feedback != nil {
+		// Eligibility was established at scan time against this exact head.
+	} else if j.repair.MergeConflict {
 		status, err := j.client.GetPRMergeability(j.repo, pr.Number)
 		if err != nil {
 			return err
@@ -422,6 +441,9 @@ func repairToolActivity(path string) (bool, error) {
 }
 
 func (r *ciRepairContext) prompt(testCommand string) string {
+	if r.Feedback != nil {
+		return r.feedbackPrompt(testCommand)
+	}
 	if r.DevelopmentVerification {
 		return fmt.Sprintf("Development verification context:\nReason: development_verification\nExisting PR: %s\nHead branch: %s\nExpected head SHA: %s\nReserved attempt: %d of 3 (shared repair budget)\nConfigured headless test command: %s\nThe current published head lacks trusted completed development evidence. This is a NEW real developer re-evaluation, not recovery or attribution of an old session. Review the entire PR diff against the issue, inspect its implementation, and run the relevant headless tests. Exact-head CI has succeeded, but it is not a substitute for your investigation. Keep the published head and checkout unchanged: no source edits, commits, pushes, rebases, merges, metadata edits, deployments or desktop interaction. Do not create a new PR. Report actual commands/results and any limitations. Only after a complete successful investigation with passing relevant checks emit no-change; otherwise emit agent-failed with concrete findings. An independent reviewer must still accept this head afterward.\n", r.prURL(), r.PR.HeadBranch, r.PR.HeadSHA, r.Attempt, testCommand)
 	}
@@ -665,7 +687,7 @@ func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outco
 	if outcome != "no-change" {
 		return "", nil
 	}
-	if j.repair == nil || (j.repair.Acceptance == nil && !j.repair.DevelopmentVerification) || strings.TrimSpace(body) == "" {
+	if j.repair == nil || (j.repair.Acceptance == nil && !j.repair.DevelopmentVerification && j.repair.Feedback == nil) || strings.TrimSpace(body) == "" {
 		return "", fmt.Errorf("no-change requires acceptance repair or development verification and a reason")
 	}
 	head, err := confirmedDevelopmentHead(ctx, workdir, j)
@@ -679,7 +701,7 @@ func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outco
 	if err != nil || clean != "" {
 		return "", fmt.Errorf("no-change repair left local changes")
 	}
-	if !j.repair.DevelopmentVerification {
+	if !j.repair.DevelopmentVerification && j.repair.Feedback == nil {
 		if err := j.releaseRepair("no-change", time.Now().UTC()); err != nil {
 			return "", err
 		}
@@ -697,6 +719,13 @@ func reserveJobRepair(ctx context.Context, j *runJob, now time.Time) error {
 			return j.hooks.ReserveRepair(ctx, j, now)
 		}
 		return nil
+	}
+	if j.repair.Feedback != nil {
+		attempt, err := prfeedback.Reserve(snapshot.DataDir(), j.repo, j.repair.PR.Number, j.repair.PR.HeadSHA, j.repair.Feedback.IDs, now)
+		if err == nil {
+			j.repair.Attempt = attempt
+		}
+		return err
 	}
 	attempt, err := reserveRepair(snapshot.DataDir(), j.repo, j.repair.PR, j.repair.reason(), now)
 	if err == nil {

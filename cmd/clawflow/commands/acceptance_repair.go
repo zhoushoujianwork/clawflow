@@ -21,6 +21,7 @@ import (
 // Repair reasons recorded in the shared per-PR ledger.
 const (
 	repairReasonCI         = "ci"
+	repairReasonPRFeedback = "pr_feedback"
 	repairReasonAcceptance = "acceptance"
 )
 
