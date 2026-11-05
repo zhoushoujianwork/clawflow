@@ -41,6 +41,17 @@ type acceptanceFindings struct {
 	Evidence       []string `json:"evidence"`
 	ContractDigest string   `json:"contract_digest"`
 	NextOwner      string   `json:"next_owner,omitempty"`
+	// Checks lists requirement checks that did not pass (blocked or failed).
+	Checks     []acceptanceCheckFinding `json:"checks,omitempty"`
+	NextAction string                   `json:"next_action,omitempty"`
+}
+
+// acceptanceCheckFinding is one unpassed requirement check, bounded and redacted.
+type acceptanceCheckFinding struct {
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	Requirement string `json:"requirement,omitempty"`
+	Missing     string `json:"missing,omitempty"`
 }
 
 // acceptanceRepairEnabled reports whether failed acceptance verdicts are
@@ -110,6 +121,27 @@ func findingsFromRecord(r acceptance.Record) *acceptanceFindings {
 		f.Evidence = append(f.Evidence, sanitizeReviewerText(string(finding.Evidence), acceptanceFindingEntryLimit))
 	}
 	f.Summary = sanitizeReviewerText(f.Summary, acceptanceFindingSummaryLimit)
+	requirements := map[string]string{}
+	for _, c := range r.Plan.Criteria {
+		requirements[c.ID] = c.Requirement
+	}
+	for _, check := range r.Checks {
+		if check.Status != acceptance.Blocked && check.Status != acceptance.Failed {
+			continue
+		}
+		if len(f.Checks) >= acceptanceFindingEvidenceLimit {
+			break
+		}
+		f.Checks = append(f.Checks, acceptanceCheckFinding{
+			ID:          sanitizeReviewerText(check.ID, acceptanceFindingEntryLimit),
+			Status:      string(check.Status),
+			Requirement: sanitizeReviewerText(requirements[check.ID], acceptanceFindingEntryLimit),
+			Missing:     sanitizeReviewerText(string(check.Missing), acceptanceFindingEntryLimit),
+		})
+	}
+	if len(f.Checks) > 0 {
+		f.NextAction = sanitizeReviewerText(r.NextAction, acceptanceFindingEntryLimit)
+	}
 	return f
 }
 
@@ -151,7 +183,7 @@ func classifyAcceptanceForRepair(ctx context.Context, client vcs.Client, repo st
 		return acceptanceRepairFailed, rec, c, nil
 	case acceptance.Blocked:
 		// Only a blocked verdict that names the implementer as next owner and
-		// carries structured failing findings is repairable. Any other owner
+		// carries structured failing findings or unpassed checks is repairable. Any other owner
 		// (environment, human judgment, unknown or empty) needs a human.
 		if blockedRepairableByImplementer(rec) {
 			return acceptanceRepairFailed, rec, c, nil
@@ -162,14 +194,19 @@ func classifyAcceptanceForRepair(ctx context.Context, client vcs.Client, repo st
 }
 
 // blockedRepairableByImplementer reports whether a blocked record explicitly
-// hands the next step to the implementer and has structured failing findings.
+// hands the next step to the implementer and has structured failing findings
+// or at least one blocked/failed requirement check.
 func blockedRepairableByImplementer(rec acceptance.Record) bool {
-	return strings.EqualFold(strings.TrimSpace(rec.NextOwner), "implementer") && len(findingsFromRecord(rec).Evidence) > 0
+	if !strings.EqualFold(strings.TrimSpace(rec.NextOwner), "implementer") {
+		return false
+	}
+	f := findingsFromRecord(rec)
+	return len(f.Evidence) > 0 || len(f.Checks) > 0
 }
 
 // repairableVerdict reports whether a sealed findings snapshot may be repaired.
 func repairableVerdict(f *acceptanceFindings) bool {
-	return f.Verdict == "failed" || f.Verdict == "blocked" && f.NextOwner == "implementer"
+	return f.Verdict == "failed" || f.Verdict == "blocked" && f.NextOwner == "implementer" && (len(f.Evidence) > 0 || len(f.Checks) > 0)
 }
 
 // scanAcceptanceRepair returns repair findings for a PR whose latest reviewer
