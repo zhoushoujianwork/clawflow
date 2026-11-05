@@ -3,6 +3,7 @@ import { useConfigChanged } from '../lib/configEvents'
 import type { Board } from '../routes/_app.pipeline'
 
 type ExecutionReadiness = {
+  default_profile?: string
   profile: string
   role_profiles?: Record<string, string>
   pilot_profile?: string
@@ -22,10 +23,11 @@ export function ExecutionView({ execution, observed, error, observedError }: {
 }) {
   return <section aria-label="Execution" className="rounded-xl border border-border bg-card p-5 space-y-3 [overflow-wrap:anywhere]">
     <h2 className="font-semibold">Execution</h2>
-    <p className="text-sm text-muted-foreground">Offload owns credentials and models. Configure them locally with <code>offload config</code>; select the machine’s profile in <code>settings.execution.profile</code> or <code>CLAWFLOW_OFFLOAD_PROFILE</code>.</p>
+    <p className="text-sm text-muted-foreground">Execution follows Offload’s default configuration. Explicit machine or role overrides take precedence.</p>
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     {execution ? <div className="text-sm space-y-2">
-      <p>Configured profile (effective on this machine): <code>{execution.profile || 'Not configured'}</code></p>
+      <p>Offload default: <code>{execution.default_profile || 'Unavailable'}</code></p>
+      <p>Machine override: <code>{execution.profile || 'Follow Offload default'}</code></p>
       <p>Configuration readiness: {execution.readiness}. Live execution is unverified by this check.</p>
     </div> : !error && <p className="text-sm text-muted-foreground">Loading execution settings…</p>}
     <div className="text-sm space-y-2">
@@ -47,6 +49,7 @@ export function ExecutionView({ execution, observed, error, observedError }: {
 }
 
 export function ExecutionSection() {
+  const [profile, setProfile] = useState('')
   const [execution, setExecution] = useState<ExecutionReadiness | null>(null)
   const [observed, setObserved] = useState<ObservedExecution | null>(null)
   const [error, setError] = useState('')
@@ -73,6 +76,17 @@ export function ExecutionSection() {
   }, [refresh])
   return <div className="space-y-2">
     <ExecutionView execution={execution} observed={observed} error={error} observedError={observedError} />
+    <form onSubmit={async event => {
+      event.preventDefault()
+      try {
+        const response = await fetch('/api/providers', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ default_profile: profile }) })
+        if (!response.ok) throw new Error()
+        setProfile(''); reload()
+      } catch { setError('Could not update the Offload default profile.') }
+    }}>
+      <label>Offload default profile <input value={profile} onChange={event => setProfile(event.target.value)} required /></label>
+      <button type="submit">Save to Offload</button>
+    </form>
     <button type="button" onClick={reload} className="text-xs px-2 py-1 rounded border border-border hover:bg-secondary/50">Refresh execution status</button>
   </div>
 }

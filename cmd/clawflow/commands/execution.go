@@ -24,8 +24,26 @@ func NewExecutionCmd() *cobra.Command {
 		Use:   "execution",
 		Short: "Inspect the configured Offload execution engine",
 	}
-	cmd.AddCommand(newExecutionCheckCmd(), newExecutionStatusCmd())
+	cmd.AddCommand(newExecutionCheckCmd(), newExecutionStatusCmd(), newExecutionDefaultCmd())
 	return cmd
+}
+
+func newExecutionDefaultCmd() *cobra.Command {
+	return &cobra.Command{Use: "default [profile]", Short: "Read or update Offload's shared default profile", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		c, err := loadExecutionCheckConfig()
+		if err != nil {
+			return err
+		}
+		selected := ""
+		if len(args) > 0 {
+			selected = args[0]
+		}
+		value, err := execution.DefaultProfile(cmd.Context(), c, selected)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{"default_profile": value})
+	}}
 }
 
 func newExecutionCheckCmd() *cobra.Command {
