@@ -177,6 +177,7 @@ func TestCertificateReuse(t *testing.T) {
 
 func TestWorkerHTTPSPostgres(t *testing.T) {
 	store, db, _ := setup(t)
+	store.AuditSampleWindow = -1 // count every request
 	secret, err := store.CreateToken(ctx, "worker")
 	if err != nil {
 		t.Fatal(err)

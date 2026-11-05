@@ -137,6 +137,10 @@ type CoordinatorSettings struct {
 	Enabled     bool                `yaml:"enabled,omitempty"`
 	Listen      string              `yaml:"listen,omitempty"`
 	LocalWorker LocalWorkerSettings `yaml:"local_worker,omitempty"`
+	// AuditRetentionDays keeps routine audit rows (default 30); AuditSecurityRetentionDays keeps
+	// task-state, cancel, token and failed-request rows (default 180).
+	AuditRetentionDays         int `yaml:"audit_retention_days,omitempty"`
+	AuditSecurityRetentionDays int `yaml:"audit_security_retention_days,omitempty"`
 }
 
 // WatchdogSettings tunes the repeated_failure and orphaned_pr rules.
