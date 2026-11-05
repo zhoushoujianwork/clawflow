@@ -572,51 +572,58 @@ func TestVerifyRejectsContradictoryPassingStatus(t *testing.T) {
 }
 
 func TestStablePathEvidenceRetainsFailureAndLegacyCompatibility(t *testing.T) {
-	stable := testStable(t)
-	data := filepath.Join(stable.Root, "data")
-	if err := os.MkdirAll(data, 0700); err != nil {
-		t.Fatal(err)
+	// queue.json is the only protected data/ file.
+	scenarios := map[string]struct {
+		setup  bool
+		mutate func(path string) error
+		want   string
+	}{
+		"modified": {true, func(p string) error { return os.WriteFile(p, []byte("changed-value"), 0600) }, `path modified: "queue.json"`},
+		"removed":  {true, os.Remove, `path removed: "queue.json"`},
+		"mode":     {true, func(p string) error { return os.Chmod(p, 0640) }, `path modified: "queue.json"`},
+		"added":    {false, func(p string) error { return os.WriteFile(p, []byte("new-private-value"), 0600) }, `path added: "queue.json"`},
 	}
-	for _, name := range []string{"modified.json", "removed.json", "mode.json"} {
-		if err := os.WriteFile(filepath.Join(data, name), []byte("private-value"), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	before, err := TakeStable(stable, StableProbe{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(data, "modified.json"), []byte("changed-value"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(data, "removed.json")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(filepath.Join(data, "mode.json"), 0640); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(data, "added.json"), []byte("new-private-value"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	after, err := TakeStable(stable, StableProbe{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	diff := strings.Join(before.Diff(after), "\n")
-	for _, want := range []string{"stable data changed", `path modified: "modified.json"`, `path removed: "removed.json"`, `path modified: "mode.json"`, `path added: "added.json"`} {
-		if !strings.Contains(diff, want) {
-			t.Fatalf("missing %s: %s", want, diff)
-		}
-	}
-	for _, digest := range after.DataPaths {
-		if len(digest) != 64 || strings.Contains(digest, "private") {
-			t.Fatalf("not a digest: %s", digest)
-		}
-	}
-	before.DataPaths = nil // Older installed CLI snapshots have only an aggregate.
-	legacy := before.Diff(after)
-	if len(legacy) != 1 || legacy[0] != "stable data changed" {
-		t.Fatalf("legacy protection changed: %v", legacy)
+	for name, sc := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			stable := testStable(t)
+			data := filepath.Join(stable.Root, "data")
+			if err := os.MkdirAll(data, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(data, "queue.json")
+			if sc.setup {
+				if err := os.WriteFile(path, []byte("private-value"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := TakeStable(stable, StableProbe{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sc.mutate(path); err != nil {
+				t.Fatal(err)
+			}
+			after, err := TakeStable(stable, StableProbe{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			diff := strings.Join(before.Diff(after), "\n")
+			for _, want := range []string{"stable data changed", sc.want} {
+				if !strings.Contains(diff, want) {
+					t.Fatalf("missing %s: %s", want, diff)
+				}
+			}
+			for _, digest := range after.DataPaths {
+				if len(digest) != 64 || strings.Contains(digest, "private") {
+					t.Fatalf("not a digest: %s", digest)
+				}
+			}
+			before.DataPaths = nil // Older installed CLI snapshots have only an aggregate.
+			legacy := before.Diff(after)
+			if len(legacy) != 1 || legacy[0] != "stable data changed" {
+				t.Fatalf("legacy protection changed: %v", legacy)
+			}
+		})
 	}
 }
 

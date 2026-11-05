@@ -7,82 +7,65 @@ import (
 	"testing"
 )
 
-// A healthy scheduler rewrites these constantly, so they must not fail evidence
-// for a candidate that never touched the stable host.
-func TestStableSnapshotIgnoresSchedulerActivity(t *testing.T) {
+// The stable controller keeps writing data/ (SQLite, records, caches). None of
+// it may fail evidence, and the evidence names the ignored top-level entries.
+func TestStableSnapshotIgnoresUnprotectedData(t *testing.T) {
+	paths := []string{
+		"clawflow.sqlite3", "clawflow.sqlite3-wal", "clawflow.sqlite3-shm",
+		"acceptance/o__r/1.json", "preflight/o__r/7.json", "coordination/d/1.json",
+		"tasks/1.json", "some-new-dir/deep/x", "arbitrary.json",
+	}
 	stable := testStable(t)
-	data := filepath.Join(stable.Root, "data")
-	write := func(rel, content string) {
-		t.Helper()
-		path := filepath.Join(data, rel)
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	for _, rel := range paths {
+		writeData(t, stable, rel, "before")
 	}
-	// JSON names are files; the others are directories with nested entries.
-	entry := func(name string) string {
-		if strings.HasSuffix(name, ".json") {
-			return name
-		}
-		return filepath.Join(name, "nested", "entry.json")
-	}
-	for name := range stableActivityData {
-		write(entry(name), "before")
-	}
+	writeData(t, stable, "queue.json", "[1,2]")
 	before, err := TakeStable(stable, StableProbe{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name := range stableActivityData {
-		write(entry(name), "after")
+	for _, rel := range paths {
+		writeData(t, stable, rel, "after, longer")
 	}
-	write("queue-state/o@r.json", "new")
-	write("pipeline-prs/o__r.json", "new")
+	writeData(t, stable, "brand-new/file", "new")
 	after, err := TakeStable(stable, StableProbe{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d := before.Diff(after); len(d) != 0 {
-		t.Fatalf("scheduler activity reported as contamination: %v", d)
+		t.Fatalf("stable data activity reported as contamination: %v", d)
+	}
+	ign := strings.Join(before.Ignored(after), ";")
+	for _, want := range []string{"stable data activity (ignored)", "clawflow.sqlite3-wal", "acceptance", "brand-new"} {
+		if !strings.Contains(ign, want) {
+			t.Fatalf("ignored evidence %q lacks %q", ign, want)
+		}
+	}
+	if strings.Contains(ign, "queue.json") || strings.Contains(ign, "o__r") {
+		t.Fatalf("ignored evidence lists protected or nested paths: %q", ign)
+	}
+	ev := &Evidence{Layers: map[string]string{"offline": Passed, "environment-ready": Passed, "candidate-loaded": Passed, "lifecycle": Passed}, StableDiff: before.Diff(after), StableIgnored: before.Ignored(after)}
+	ev.Finish()
+	if ev.Status != Passed {
+		t.Fatalf("status=%s", ev.Status)
 	}
 }
 
-// The exclusion must not widen into state a candidate could damage.
-func TestStableSnapshotStillProtectsDurableState(t *testing.T) {
-	for _, rel := range []string{
-		"queue.json",
-		"projects.json",
-		"acceptance/o__r/1.json",
-		"coordinator/key.pem",
-		"ci-repair/o__r.json",
-		// A lookalike of an excluded name is not excluded.
-		"pipeline.json.bak",
-		"runs-archive/old.json",
-	} {
-		t.Run(rel, func(t *testing.T) {
-			stable := testStable(t)
-			before, err := TakeStable(stable, StableProbe{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			path := filepath.Join(stable.Root, "data", rel)
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(path, []byte("changed"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			after, err := TakeStable(stable, StableProbe{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if d := strings.Join(before.Diff(after), ";"); !strings.Contains(d, "stable data") {
-				t.Fatalf("change missed: %q", d)
-			}
-		})
+// Only the manual queue order file in data/ is compared.
+func TestStableSnapshotProtectsQueueOrder(t *testing.T) {
+	stable := testStable(t)
+	writeData(t, stable, "queue.json", "[1,2]")
+	before, err := TakeStable(stable, StableProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeData(t, stable, "queue.json", "[2,1]")
+	after, err := TakeStable(stable, StableProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := strings.Join(before.Diff(after), ";"); !strings.Contains(d, `stable data path modified: "queue.json"`) {
+		t.Fatalf("change missed: %q", d)
 	}
 }
 

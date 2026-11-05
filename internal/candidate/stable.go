@@ -26,8 +26,8 @@ type StableSnapshot struct {
 	Processes   []string          `json:"processes"`
 	ConfigPaths map[string]string `json:"config_paths,omitempty"`
 	DataPaths   map[string]string `json:"data_paths,omitempty"`
-	// Activity and Executors record scheduler work that is deliberately not
-	// compared: preflight/lock-file writes and task executor processes.
+	// Activity and Executors record stable activity that is deliberately not
+	// compared: per-top-level summaries of unprotected data/ and executor processes.
 	Activity  map[string]string `json:"activity,omitempty"`
 	Executors []string          `json:"executors,omitempty"`
 }
@@ -222,34 +222,16 @@ func digestTree(root string, skip func(rel string) bool, entries ...map[string]s
 	return hex.EncodeToString(h.Sum(nil)), err
 }
 
-// stableActivityData names top-level data entries a healthy stable scheduler
-// rewrites on every pass: run history, scan-derived snapshots, HTTP caches and
-// scan counters. A candidate cannot reach them through its own HOME, and they
-// change whether or not one is running, so they cannot show contamination.
-// acceptance-plans and coordination are written by the stable scheduler on
-// dispatch. Configuration, manual queue order and task and acceptance records
-// stay protected.
-var stableActivityData = map[string]bool{
-	"acceptance-plans":  true,
-	"coordination":      true,
-	"git-status.json":   true,
-	"github-http":       true,
-	"harvest":           true,
-	"housekeeping.json": true,
-	"issues.json":       true,
-	"meta.json":         true,
-	"operators.json":    true,
-	"pending.json":      true,
-	"pipeline-prs":      true,
-	"pipeline.json":     true,
-	"preflight":         true,
-	"queue-state":       true,
-	"repos.json":        true,
-	"runs":              true,
-	"runs.json":         true,
-	"usage.json":        true,
-	"vcs-usage.json":    true,
+// protectedData lists the only data/ files compared. The stable scheduler and
+// its SQLite database (clawflow.sqlite3, -wal, -shm) write data/ continuously,
+// so everything else there is treated as stable activity and never affects the
+// verdict. Candidate isolation relies on its own HOME and CLAWFLOW_STATE_DIR
+// and on devmode.CheckWritePath, not on this comparison.
+var protectedData = map[string]bool{
+	"queue.json": true,
 }
+
+func isProtectedData(rel string) bool { return protectedData[rel] }
 
 // TakeStable records the stable host's observable state. Reads only.
 func TakeStable(s Stable, probe StableProbe) (StableSnapshot, error) {
@@ -258,9 +240,7 @@ func TakeStable(s Stable, probe StableProbe) (StableSnapshot, error) {
 	if snap.Config, err = digestTree(filepath.Join(s.Root, "config"), nil, snap.ConfigPaths); err != nil {
 		return snap, err
 	}
-	if snap.Data, err = digestTree(filepath.Join(s.Root, "data"), func(rel string) bool {
-		return stableActivityData[strings.Split(rel, string(filepath.Separator))[0]] || isCoordinationLock(rel)
-	}, snap.DataPaths); err != nil {
+	if snap.Data, err = digestTree(filepath.Join(s.Root, "data"), func(rel string) bool { return !isProtectedData(rel) }, snap.DataPaths); err != nil {
 		return snap, err
 	}
 	snap.Activity = stableActivity(filepath.Join(s.Root, "data"))
@@ -285,32 +265,40 @@ func TakeStable(s Stable, probe StableProbe) (StableSnapshot, error) {
 	return snap, nil
 }
 
-// isCoordinationLock reports whether rel is a lock file the stable scheduler
-// creates beside a coordination record. Record content stays protected.
-func isCoordinationLock(rel string) bool {
-	parts := strings.Split(rel, string(filepath.Separator))
-	return len(parts) > 1 && parts[0] == "coordination" && strings.HasSuffix(parts[len(parts)-1], ".lock")
-}
-
-// stableActivity fingerprints the ignored scheduler files so evidence can show
-// that they changed without letting them affect the verdict.
+// stableActivity summarizes ignored data/ content per top-level entry as
+// "paths:bytes:latest-mtime", so evidence stays small however many files exist.
 func stableActivity(dataRoot string) map[string]string {
-	act := map[string]string{}
+	type agg struct {
+		n, size, mtime int64
+	}
+	sums := map[string]*agg{}
 	_ = filepath.WalkDir(dataRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		rel, _ := filepath.Rel(dataRoot, path)
-		if rel == "." || d.IsDir() {
+		if rel == "." || d.IsDir() || isProtectedData(rel) {
 			return nil
 		}
-		if stableActivityData[strings.Split(rel, string(filepath.Separator))[0]] || isCoordinationLock(rel) {
-			if info, ierr := d.Info(); ierr == nil {
-				act[rel] = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
+		top := strings.Split(rel, string(filepath.Separator))[0]
+		if info, ierr := d.Info(); ierr == nil {
+			a := sums[top]
+			if a == nil {
+				a = &agg{}
+				sums[top] = a
+			}
+			a.n++
+			a.size += info.Size()
+			if m := info.ModTime().UnixNano(); m > a.mtime {
+				a.mtime = m
 			}
 		}
 		return nil
 	})
+	act := map[string]string{}
+	for k, a := range sums {
+		act[k] = fmt.Sprintf("%d:%d:%d", a.n, a.size, a.mtime)
+	}
 	return act
 }
 
@@ -318,8 +306,8 @@ func stableActivity(dataRoot string) map[string]string {
 // informational and never part of Diff.
 func (a StableSnapshot) Ignored(b StableSnapshot) []string {
 	var out []string
-	if countChanged(a.Activity, b.Activity) > 0 {
-		out = append(out, fmt.Sprintf("stable scheduler files changed (ignored): %d", countChanged(a.Activity, b.Activity)))
+	if tops := changedKeys(a.Activity, b.Activity); len(tops) > 0 {
+		out = append(out, fmt.Sprintf("stable data activity (ignored): %d top-level entries changed: %s", len(tops), strings.Join(tops, ", ")))
 	}
 	before := map[string]bool{}
 	for _, e := range a.Executors {
@@ -346,19 +334,24 @@ func (a StableSnapshot) Ignored(b StableSnapshot) []string {
 	return out
 }
 
-func countChanged(a, b map[string]string) int {
-	n := 0
+func changedKeys(a, b map[string]string) []string {
+	var keys []string
 	for k, v := range a {
-		if b[k] != v {
-			n++
+		if bv, ok := b[k]; !ok || bv != v {
+			keys = append(keys, k)
 		}
 	}
 	for k := range b {
 		if _, ok := a[k]; !ok {
-			n++
+			keys = append(keys, k)
 		}
 	}
-	return n
+	sort.Strings(keys)
+	// Keep evidence small: name at most 20 entries.
+	if len(keys) > 20 {
+		keys = append(keys[:20], fmt.Sprintf("... %d more", len(keys)-20))
+	}
+	return keys
 }
 
 // Diff lists what changed between two snapshots; empty means unchanged.
