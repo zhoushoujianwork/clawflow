@@ -16,6 +16,10 @@ import (
 // orphanCause reports why no automatic flow will advance an open PR, or "".
 // acceptanceVerdict returns the latest stored verdict ("" when unknown);
 // budgetErr is the repair ledger check for the PR. Read-only: it only reads.
+// orphanUnstructuredExhausted is the verdict token for an invalid report whose
+// automatic fresh reviews are used up.
+const orphanUnstructuredExhausted = "unstructured_exhausted"
+
 func orphanCause(pr vcs.PR, acceptanceRequired bool, acceptanceVerdict func() string, budgetErr error) string {
 	issue := pipelinePRIssue(pr)
 	if !pipelineBranchIssue.MatchString(pr.HeadBranch) {
@@ -26,6 +30,9 @@ func orphanCause(pr vcs.PR, acceptanceRequired bool, acceptanceVerdict func() st
 	}
 	if budgetErr != nil {
 		return coordinator.OrphanRepairExhausted
+	}
+	if acceptanceRequired && acceptanceVerdict() == orphanUnstructuredExhausted {
+		return coordinator.OrphanAcceptanceUnstructured
 	}
 	if acceptanceRequired && acceptanceVerdict() == "blocked" {
 		return coordinator.OrphanAcceptanceBlocked
@@ -67,6 +74,9 @@ func newOrphanedPRProvider() func(context.Context) ([]coordinator.OrphanedPR, er
 					info, _ := pipelineAcceptance(ctx, client, repo, rc, pr, now)
 					if info == nil {
 						return ""
+					}
+					if info.Unstructured && info.UnstructuredAttempts > info.MaxUnstructuredRetries {
+						return orphanUnstructuredExhausted
 					}
 					return info.Verdict
 				}

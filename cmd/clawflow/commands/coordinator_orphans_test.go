@@ -37,3 +37,11 @@ func TestOrphanCause(t *testing.T) {
 		t.Fatal("isTerminalBudget")
 	}
 }
+
+func TestOrphanCauseUnstructuredExhausted(t *testing.T) {
+	pr := vcs.PR{Number: 1, HeadBranch: "feat/issue-7"}
+	got := orphanCause(pr, true, func() string { return orphanUnstructuredExhausted }, nil)
+	if got != coordinator.OrphanAcceptanceUnstructured {
+		t.Fatalf("got %q", got)
+	}
+}
