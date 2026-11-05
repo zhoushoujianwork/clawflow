@@ -4,6 +4,7 @@ package runverdict
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 )
@@ -18,6 +19,10 @@ type Input struct {
 	IsRepair     bool   // the job is a CI/acceptance repair
 	RepairLabel  string // human label of the repair kind
 	WritebackErr error  // error from comment/label write-back
+	// UnmanagedBranch is the head branch of an implement PR that
+	// vcs.ManagedIssueBranch rejects; such a run is never a normal completion.
+	UnmanagedBranch string
+	IssueNumber     int
 }
 
 // Verdict is the decision derived from Input.
@@ -60,6 +65,9 @@ func Decide(in Input) Verdict {
 	case in.IsRepair && in.Outcome == "agent-failed":
 		v.Status = "failed"
 		v.Error = in.RepairLabel + " repair could not update existing PR"
+	case in.UnmanagedBranch != "" && in.Outcome == "agent-implemented":
+		v.Status = "blocked"
+		v.Error = fmt.Sprintf("implement opened a PR from unmanaged branch %q; expected fix/issue-%d, feat/issue-%d or a fix/issue-%d-reopen-<cycle> branch, so automatic repair would skip it. Resolve the stale branch and rerun", in.UnmanagedBranch, in.IssueNumber, in.IssueNumber, in.IssueNumber)
 	default:
 		v.Status = "success"
 	}

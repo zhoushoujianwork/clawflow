@@ -2099,15 +2099,18 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 	if writebackErr != nil {
 		verdictWritebackErr = writebackErr
 	}
+	unmanagedBranch := unmanagedImplementBranch(ctx, j, runErr, outcome, output)
 	verdict := runverdict.Decide(runverdict.Input{
-		CtxErr:       ctx.Err(),
-		RunErr:       runErr,
-		ResourceBusy: isResourceBusy,
-		Output:       output,
-		Outcome:      outcome,
-		IsRepair:     j.repair != nil,
-		RepairLabel:  repairLabel,
-		WritebackErr: verdictWritebackErr,
+		UnmanagedBranch: unmanagedBranch,
+		IssueNumber:     j.sub.Number,
+		CtxErr:          ctx.Err(),
+		RunErr:          runErr,
+		ResourceBusy:    isResourceBusy,
+		Output:          output,
+		Outcome:         outcome,
+		IsRepair:        j.repair != nil,
+		RepairLabel:     repairLabel,
+		WritebackErr:    verdictWritebackErr,
 	})
 	rm.Status, rm.Error = verdict.Status, verdict.Error
 
@@ -2320,6 +2323,24 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 }
 
 var runJobOperator = operator.Run
+
+// unmanagedImplementBranch returns the PR head branch when an implement run
+// opened a PR from a branch that ManagedIssueBranch rejects. ManagedIssueBranch
+// itself stays strict; the run is reported instead of silently losing repair.
+func unmanagedImplementBranch(ctx context.Context, j *runJob, runErr error, outcome, output string) string {
+	if runErr != nil || j.op.Name != "implement" || j.repair != nil || outcome != "agent-implemented" || ctx.Err() != nil {
+		return ""
+	}
+	n := extractPRNumber(output)
+	if n == 0 {
+		return ""
+	}
+	pr, err := j.client.GetPR(j.repo, n)
+	if err != nil || pr.HeadBranch == "" || vcs.ManagedIssueBranch(pr.HeadBranch, j.sub.Number) {
+		return ""
+	}
+	return pr.HeadBranch
+}
 
 var prURLRE = regexp.MustCompile(`(?:pull|merge_requests)/(\d+)`)
 
