@@ -14,6 +14,7 @@ type Dashboard struct {
 	Controller    string             `json:"controller"`
 	Board         Board              `json:"board"`
 	Projects      []DashboardProject `json:"projects"`
+	Usage         *DashboardUsage    `json:"usage,omitempty"`
 }
 type DashboardProject struct {
 	Name  string          `json:"name"`

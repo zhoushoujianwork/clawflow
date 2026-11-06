@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -89,6 +90,18 @@ func (a *platformAdmin) Dashboard(ctx context.Context) (coordinator.Dashboard, e
 	}
 	host, _ := os.Hostname()
 	out := coordinator.Dashboard{SchemaVersion: 1, Version: Version, Controller: host, Board: board, Projects: []coordinator.DashboardProject{}}
+	now := time.Now()
+	if a.workers != nil {
+		if a.usageCache == nil || !now.Before(a.usageExpires) {
+			// Usage is additive: a failed read keeps the last known value, or
+			// omits the field, and never fails the dashboard snapshot.
+			if usage, err := a.workers.DashboardUsage(ctx, now, time.Local); err == nil {
+				a.usageCache = &usage
+			}
+			a.usageExpires = now.Add(15 * time.Second)
+		}
+		out.Usage = a.usageCache
+	}
 	seen := map[string]bool{}
 	for _, p := range projects {
 		row := coordinator.DashboardProject{Name: p.Name, Repos: []coordinator.DashboardRepo{}}

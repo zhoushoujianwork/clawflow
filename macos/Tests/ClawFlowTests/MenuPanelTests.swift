@@ -25,7 +25,7 @@ final class MenuPanelTests: XCTestCase {
         let fallback = panel(snapshot, scope: "missing/repo")
         XCTAssertEqual(fallback.scopeID, "")
         XCTAssertNil(fallback.repository)
-        XCTAssertEqual(fallback.tabs.map(\.fullName), ["全部项目", "acme/api", "acme/app", "acme/web"])
+        XCTAssertEqual(fallback.tabs.map(\.fullName), ["项目概览", "acme/api", "acme/app", "acme/web"])
     }
 
     func testIdleRunningAttentionDisconnectedAndNoDataText() throws {
@@ -49,9 +49,63 @@ final class MenuPanelTests: XCTestCase {
         XCTAssertEqual(value.today?.done, 1)
         XCTAssertEqual(value.today?.failed, 1)
         XCTAssertEqual(value.today?.success, 50)
-        XCTAssertEqual(value.attention.items.count, 4)
-        XCTAssertEqual(value.attention.hidden, 2)
+        XCTAssertEqual(value.attention.items.count, 3)
+        XCTAssertEqual(value.attention.hidden, 3)
         XCTAssertNil(value.cost)
+    }
+
+    func testOverviewLimitsAttentionAndRunningToThreeRowsTotal() throws {
+        let tasks = (0..<2).map { task("attention-\($0)", state: "leased", stage: "lease_expired") }
+            + (0..<4).map { task("running-\($0)", state: "leased", stage: "running") }
+        let overview = panel(try fixture(tasks: tasks))
+        XCTAssertEqual(overview.attention.items.count + overview.running.items.count, 3)
+        XCTAssertEqual(overview.attention.hidden, 0)
+        XCTAssertEqual(overview.running.items.count, 1)
+        XCTAssertEqual(overview.running.hidden, 3)
+
+        let project = panel(try fixture(tasks: tasks), scope: "acme/app")
+        XCTAssertEqual(project.attention.items.count, 2)
+        XCTAssertEqual(project.running.items.count, 4)
+    }
+
+    func testUsageScopesAndOlderControllerCompatibility() throws {
+        let oldSnapshot = try fixture()
+        XCTAssertNil(oldSnapshot.usage)
+        XCTAssertNil(panel(oldSnapshot).cost)
+
+        let snapshot = try fixture(usage: usageFixture())
+        let overview = panel(snapshot)
+        XCTAssertEqual(overview.scopeTitle, "概览")
+        XCTAssertEqual(overview.cost?.todayUSD, 12.34)
+        XCTAssertEqual(overview.cost?.todayTokens, 47_000_000)
+        XCTAssertEqual(overview.cost?.sevenDaysUSD, 115.74)
+        XCTAssertEqual(overview.cost?.sevenDaysTokens, 1_800_000_000)
+        XCTAssertEqual(overview.cost?.thirtyDaysUSD, 166)
+        XCTAssertEqual(overview.cost?.thirtyDaysTokens, 5_500_000_000)
+        XCTAssertEqual(overview.cost?.daily.count, 30)
+        XCTAssertEqual(overview.cost?.mostUsedModel, "gpt-6-astra")
+        XCTAssertEqual(overview.cost?.estimated, true)
+        XCTAssertEqual(overview.cost?.footer, "根据 token 用量估算 · 不是账单")
+        XCTAssertEqual(overview.cost?.recent.map(\.title), ["今天", "昨天", "2 天前", "3 天前"])
+        XCTAssertEqual(overview.cost?.recent[0].summary, "$12.34 · 47M")
+        XCTAssertEqual(overview.cost?.recent[1].summary, "$0 · 0")
+        XCTAssertEqual(overview.cost?.recent[0].date.isEmpty, false)
+
+        let app = panel(snapshot, scope: "acme/app")
+        XCTAssertEqual(app.cost?.todayUSD, 8.1)
+        XCTAssertEqual(app.cost?.thirtyDaysUSD, 100)
+    }
+
+    func testRecentUsageFillsMissingCalendarDaysAndKnownFooter() throws {
+        let snapshot = try fixture(usage: usageFixture(missingYesterday: true, estimated: false))
+        let cost = try XCTUnwrap(panel(snapshot).cost)
+        XCTAssertEqual(cost.recent.count, 4)
+        XCTAssertEqual(cost.recent[1].title, "昨天")
+        XCTAssertEqual(cost.recent[1].summary, "—")
+        XCTAssertEqual(cost.recent[2].summary, "$30 · 60M")
+        XCTAssertEqual(cost.footer, "根据运行记录汇总 · 不是账单")
+        XCTAssertEqual(menuCurrency(78.77), "$78.77")
+        XCTAssertEqual(menuTokens(1_500_000_000), "1.5B")
     }
 
     func testSingleProjectCapacityUsesMatchingWorkerTags() throws {
@@ -100,6 +154,7 @@ final class MenuPanelTests: XCTestCase {
             throw XCTSkip("Set CLAWFLOW_MENU_SNAPSHOT_DIR to render menu snapshots")
         }
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        let usage = usageFixture()
         let mixed = try fixture(
             tasks: [
                 task("running-app", repo: "acme/app", state: "leased", stage: "running", subject: "改进状态面板"),
@@ -112,10 +167,11 @@ final class MenuPanelTests: XCTestCase {
                 task("failed-today", repo: "acme/api", state: "failed", stage: "failed", subject: "今日失败")
             ],
             workers: [worker("mac", tags: ["host-mac"], slots: 3, running: ["running-app"]),
-                      worker("linux", tags: ["host-linux"], slots: 2, running: ["running-api"])])
-        let paused = try fixture(enabled: ["acme/app": true, "acme/api": true, "acme/web": false])
+                      worker("linux", tags: ["host-linux"], slots: 2, running: ["running-api"])],
+            usage: usage)
+        let paused = try fixture(enabled: ["acme/app": true, "acme/api": true, "acme/web": false], usage: usage)
         let longRepos = (1...7).map { repo("acme/very-long-project-\($0)", enabled: true, tags: []) }
-        let many = try fixture(repositoryRows: longRepos)
+        let many = try fixture(repositoryRows: longRepos, usage: usage)
         let services = LocalServices()
         var controller = LocalService(id: "com.zhoushoujianwork.clawflow.controller", path: "/tmp/controller.plist")
         controller.loaded = true; controller.running = true; controller.pid = "4242"
@@ -123,13 +179,14 @@ final class MenuPanelTests: XCTestCase {
         let readiness = ExecutionReadiness()
         let localControls = AnyView(LocalServiceControls(services: services, readiness: readiness, showsTitle: false))
         let cases: [(String, MenuPanelPresentation, Bool, AnyView)] = [
-            ("all-idle", panel(try fixture()), false, AnyView(EmptyView())),
+            ("all-idle", panel(try fixture(usage: usage)), false, AnyView(EmptyView())),
             ("all-running", panel(mixed), false, AnyView(EmptyView())),
             ("single-project", panel(mixed, scope: "acme/app"), false, AnyView(EmptyView())),
             ("single-paused-project", panel(paused, scope: "acme/web"), false, AnyView(EmptyView())),
             ("many-projects", panel(many, scope: "acme/very-long-project-7"), false, AnyView(EmptyView())),
-            ("local-services-expanded", panel(try fixture()), true, localControls),
+            ("local-services-expanded", panel(try fixture(usage: usage)), true, localControls),
             ("disconnected", MenuPanelPresentation.make(snapshot: mixed, received: now.addingTimeInterval(-90), error: "Controller 连接失败", now: now, selectedScope: ""), false, AnyView(EmptyView())),
+            ("no-cost-data", panel(try fixture()), false, AnyView(EmptyView())),
             ("no-data", MenuPanelPresentation.make(snapshot: nil, received: nil, error: nil, now: now, selectedScope: ""), false, AnyView(EmptyView()))
         ]
         for (name, presentation, expanded, controls) in cases {
@@ -157,19 +214,62 @@ final class MenuPanelTests: XCTestCase {
     }
 
     private func fixture(tasks: [[String: Any]] = [], workers: [[String: Any]]? = nil,
-                         enabled: [String: Bool] = [:], repositoryRows: [[String: Any]]? = nil) throws -> DashboardSnapshot {
+                         enabled: [String: Bool] = [:], repositoryRows: [[String: Any]]? = nil,
+                         usage: [String: Any]? = nil) throws -> DashboardSnapshot {
         let defaultRepos = [
             repo("acme/app", enabled: enabled["acme/app"] ?? true, tags: ["host-mac"]),
             repo("acme/api", enabled: enabled["acme/api"] ?? true, tags: ["host-linux"]),
             repo("acme/web", enabled: enabled["acme/web"] ?? false, tags: ["host-web"])
         ]
         let boardWorkers = workers ?? [worker("mac", tags: ["host-mac", "host-web"], slots: 3)]
-        let object: [String: Any] = [
+        var object: [String: Any] = [
             "schema_version": 1, "version": "fixture", "controller": "本机 Controller",
             "board": ["generated_at": iso(now), "workers": boardWorkers, "tasks": tasks],
             "projects": [["name": "ClawFlow", "repos": repositoryRows ?? defaultRepos]]
         ]
+        if let usage { object["usage"] = usage }
         return try DashboardSnapshot.decode(JSONSerialization.data(withJSONObject: object))
+    }
+
+    private func usageFixture(missingYesterday: Bool = false, estimated: Bool = true) -> [String: Any] {
+        let costs: [Double] = [0, 0, 0.2, 0, 0, 0.5, 0, 0, 1.1, 0, 0, 0, 2.2, 0, 0.6,
+                               0, 0, 4.5, 12, 3.2, 0, 0.8, 25, 52, 0.4, 0, 21, 30, 0, 12.34]
+        let calendar = Calendar(identifier: .gregorian)
+        let start = calendar.date(byAdding: .day, value: -29, to: now)!
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        func daily(scale: Double, todayCost: Double, todayTokens: Int64) -> [[String: Any]] {
+            costs.enumerated().compactMap { index, cost in
+                if missingYesterday && index == costs.count - 2 { return nil }
+                return ["date": formatter.string(from: calendar.date(byAdding: .day, value: index, to: start)!),
+                        "cost_usd": index == costs.count - 1 ? todayCost : cost * scale,
+                        "total_tokens": index == costs.count - 1 ? todayTokens : Int64(cost * scale * 2_000_000)] as [String: Any]
+            }
+        }
+        func aggregate(_ cost: Double, _ tokens: Int64) -> [String: Any] {
+            ["cost_usd": cost, "total_tokens": tokens, "input_tokens": tokens / 2,
+             "output_tokens": tokens / 4, "cache_read_input_tokens": tokens / 4,
+             "cache_creation_input_tokens": 0, "cost_is_estimate": estimated]
+        }
+        func scope(todayCost: Double, todayTokens: Int64, cost: Double, tokens: Int64,
+                   model: String = "gpt-6-astra") -> [String: Any] {
+            let ratio = cost / 166
+            return ["today": aggregate(todayCost, todayTokens),
+                    "seven_days": aggregate(115.74 * ratio, Int64(Double(tokens) * 1_800_000_000 / 5_500_000_000)),
+                    "thirty_days": aggregate(cost, tokens),
+                    "daily": daily(scale: ratio, todayCost: todayCost, todayTokens: todayTokens), "most_used_model": model]
+        }
+        return [
+            "generated_at": iso(now),
+            "total": scope(todayCost: 12.34, todayTokens: 47_000_000, cost: 166, tokens: 5_500_000_000),
+            "by_repo": [
+                "acme/app": scope(todayCost: 8.1, todayTokens: 32_000_000, cost: 100, tokens: 3_000_000_000),
+                "acme/api": scope(todayCost: 4.24, todayTokens: 15_000_000, cost: 50, tokens: 2_000_000_000),
+                "acme/web": scope(todayCost: 0, todayTokens: 0, cost: 16, tokens: 500_000_000, model: "gpt-6.1-sol")
+            ]
+        ]
     }
 
     private func repo(_ name: String, enabled: Bool, tags: [String]) -> [String: Any] {

@@ -6,12 +6,14 @@ struct DashboardSnapshot: Decodable, Sendable {
     let controller: String
     let board: WorkerBoard
     let projects: [ProjectRow]
+    /// Optional because the native app may connect to a controller predating usage snapshots.
+    let usage: DashboardUsage?
     private(set) var issuePipelines: [IssuePipeline] = []
     /// Metrics per repository filter, computed once at decode.
     private(set) var metricsByRepo: [String: DashboardMetrics] = [:]
     private(set) var capacity = WorkerCapacity(workers: [], live: 0, total: 0, running: 0, held: 0)
 
-    private enum CodingKeys: String, CodingKey { case schemaVersion, version, controller, board, projects }
+    private enum CodingKeys: String, CodingKey { case schemaVersion, version, controller, board, projects, usage }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
@@ -19,6 +21,7 @@ struct DashboardSnapshot: Decodable, Sendable {
         controller = try values.decode(String.self, forKey: .controller)
         board = try values.decode(WorkerBoard.self, forKey: .board)
         projects = try values.decode([ProjectRow].self, forKey: .projects)
+        usage = try values.decodeIfPresent(DashboardUsage.self, forKey: .usage)
         issuePipelines = makeIssuePipelines()
         metricsByRepo = makeMetrics()
         capacity = WorkerCapacity.make(board)
@@ -37,6 +40,40 @@ struct DashboardSnapshot: Decodable, Sendable {
     var projectRepositories: [ProjectRepository] {
         projects.flatMap { project in project.repos.map { ProjectRepository(project: project.name, repo: $0) } }
     }
+}
+
+struct DashboardUsage: Decodable, Sendable {
+    let generatedAt: Date
+    let total: DashboardUsageScope
+    let byRepo: [String: DashboardUsageScope]
+
+    func scope(repo: String) -> DashboardUsageScope? {
+        repo.isEmpty ? total : byRepo[repo]
+    }
+}
+
+struct DashboardUsageScope: Decodable, Sendable {
+    let today: DashboardUsageAggregate
+    let sevenDays: DashboardUsageAggregate?
+    let thirtyDays: DashboardUsageAggregate
+    let daily: [DashboardUsageDay]
+    let mostUsedModel: String?
+}
+
+struct DashboardUsageAggregate: Decodable, Sendable {
+    let costUsd: Double?
+    let totalTokens: Int64?
+    let inputTokens: Int64?
+    let outputTokens: Int64?
+    let cacheReadInputTokens: Int64?
+    let cacheCreationInputTokens: Int64?
+    let costIsEstimate: Bool
+}
+
+struct DashboardUsageDay: Decodable, Sendable {
+    let date: String
+    let costUsd: Double?
+    let totalTokens: Int64?
 }
 
 /// A repository can belong to several projects. List sections must identify the membership.
