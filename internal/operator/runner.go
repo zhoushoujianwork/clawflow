@@ -345,6 +345,7 @@ func Run(ctx context.Context, op *Operator, sub *Subject, v VCS, opts RunOptions
 					options.Instructions = instructions[0]
 				}
 				result, err := execution.Execute(ctx, prompt, options)
+				observeExecutionResult(ctx, result)
 				return result.Text, err
 			}
 		}
