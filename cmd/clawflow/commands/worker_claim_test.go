@@ -194,3 +194,47 @@ func TestWorkerClaimReplaysReleasedAttemptWithoutOldSession(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerClaimArchiveKeepsExecutionArtifacts(t *testing.T) {
+	o, _, path := workerClaimFixture(t)
+	artifacts := filepath.Join(filepath.Dir(path), "execution-artifacts", "clawflow-offload-fixture")
+	if err := os.MkdirAll(artifacts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifacts, "result.json"), []byte(`{"status":"timeout"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveWorkerAttempt(o, path, 2); err != nil {
+		t.Fatal(err)
+	}
+	archived := filepath.Join(workerJournalRoot(o), "history", filepath.Base(filepath.Dir(path)), "epoch-2", "execution-artifacts", "clawflow-offload-fixture", "result.json")
+	raw, err := os.ReadFile(archived)
+	if err != nil || string(raw) != `{"status":"timeout"}` {
+		t.Fatalf("artifact not archived: %q %v", raw, err)
+	}
+	if _, err := os.Stat(filepath.Join(artifacts, "result.json")); err != nil {
+		t.Fatal("archive removed the live evidence", err)
+	}
+}
+
+func TestWorkerClaimArchiveRefusesLinkedArtifacts(t *testing.T) {
+	o, _, path := workerClaimFixture(t)
+	dir := filepath.Dir(path)
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(dir, "execution-artifacts", "clawflow-offload-fixture")
+	if err := os.MkdirAll(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(nested, "link")); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	if err := archiveWorkerAttempt(o, path, 2); err == nil {
+		t.Fatal("linked artifact archived")
+	}
+	if _, err := os.Stat(filepath.Join(workerJournalRoot(o), "history", filepath.Base(dir), "epoch-2")); !os.IsNotExist(err) {
+		t.Fatal("partial archive published", err)
+	}
+}

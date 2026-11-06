@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/filelock"
+	offload "github.com/zhoushoujianwork/offload/pkg/execution"
 )
 
 func TestWorkerRecoveryPreservesDirtyWorktree(t *testing.T) {
@@ -185,7 +188,7 @@ func libraryRecoveryFixture(t *testing.T, withResult bool) (string, *workerJourn
 	}
 	cp := execution.Checkpoint{Version: 1, Workspace: work, Engine: execution.EngineLibrary, Profile: "fixture", Session: "native-retained", Backend: "claude", RunID: "run-retained"}
 	if withResult {
-		cp.ArtifactDir = filepath.Join(root, "artifacts")
+		cp.ArtifactDir = filepath.Join(root, "execution-artifacts", "clawflow-offload-fixture")
 		if err := os.MkdirAll(cp.ArtifactDir, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -283,6 +286,96 @@ func TestLibraryRecoveryResumesAfterIncompleteResult(t *testing.T) {
 			j, err := readWorkerJournal(path)
 			if err != nil || !called || *calls != 1 || !j.Resume || j.State != "prepared" {
 				t.Fatalf("journal=%+v calls=%d abandon_called=%v err=%v", j, *calls, called, err)
+			}
+		})
+	}
+}
+
+const libraryTimeoutRecord = `{"status":"timeout","exit_code":124,"error_kind":"timeout"}`
+
+// libraryJournalFixture returns a library recovery fixture whose journal is in
+// the given state. An acknowledged journal carries the interruption receipt the
+// executor reports after Run returns, and the retained Offload run record holds
+// the given result.json (empty means no record).
+func libraryJournalFixture(t *testing.T, state, record string) (string, *workerAPI, *int) {
+	t.Helper()
+	path, j, api, calls := libraryRecoveryFixture(t, record != "")
+	if record != "" {
+		cp, err := execution.ReadCheckpoint(filepath.Join(filepath.Dir(path), "execution.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cp.ArtifactDir, "result.json"), []byte(record), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	j.State = state
+	if state == "acknowledged" {
+		j.Action = "fail"
+		j.Report = json.RawMessage(`{"fencing_token":1,"result":{"status":"failed","infra_kind":"execution-interrupted","provenance":{"session_id":"native-retained"}}}`)
+	}
+	if err := writeWorkerJournal(path, j); err != nil {
+		t.Fatal(err)
+	}
+	return path, api, calls
+}
+
+func TestLibraryRecoveryOrphanErrorDependsOnJournalState(t *testing.T) {
+	notFound := offload.ErrRunNotFound
+	tests := []struct {
+		name    string
+		state   string
+		record  string
+		abandon func() (AbandonState, error)
+		resume  bool
+		wantErr error
+	}{
+		{name: "acknowledged run not found", state: "acknowledged", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, notFound }, resume: true},
+		{name: "acknowledged wrapped run not found", state: "acknowledged", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) {
+			return AbandonUnknown, fmt.Errorf("reclaim: %w", notFound)
+		}, resume: true},
+		{name: "acknowledged run not found without run record", state: "acknowledged", abandon: func() (AbandonState, error) { return AbandonUnknown, notFound }, resume: true},
+		{name: "needs_recovery run not found", state: "needs_recovery", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, notFound }, wantErr: offload.ErrRunNotFound},
+		{name: "running run not found", state: "running", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, notFound }, wantErr: offload.ErrRunNotFound},
+		{name: "acknowledged still owned", state: "acknowledged", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, offload.ErrRunStillOwned }, wantErr: offload.ErrRunStillOwned},
+		{name: "acknowledged start unrecorded", state: "acknowledged", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, offload.ErrRunStartUnrecorded }, wantErr: offload.ErrRunStartUnrecorded},
+		{name: "acknowledged other error", state: "acknowledged", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, errors.New("reclaim failed") }},
+		{name: "acknowledged unconfirmed without error", state: "acknowledged", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, nil }},
+		{name: "needs_recovery still owned", state: "needs_recovery", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, offload.ErrRunStillOwned }, wantErr: offload.ErrRunStillOwned},
+		{name: "needs_recovery start unrecorded", state: "needs_recovery", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, offload.ErrRunStartUnrecorded }, wantErr: offload.ErrRunStartUnrecorded},
+		{name: "running start unrecorded", state: "running", record: libraryTimeoutRecord, abandon: func() (AbandonState, error) { return AbandonUnknown, offload.ErrRunStartUnrecorded }, wantErr: offload.ErrRunStartUnrecorded},
+		// Run left a cleanup record: its native processes were not confirmed gone.
+		{name: "acknowledged run not found with unresolved cleanup", state: "acknowledged",
+			record:  `{"status":"timeout","exit_code":124,"error_kind":"timeout","cleanup":"unresolved: worker processes are still running in process group 4242"}`,
+			abandon: func() (AbandonState, error) { return AbandonUnknown, notFound }, wantErr: offload.ErrRunNotFound},
+		{name: "acknowledged run not found with unreadable run record", state: "acknowledged", record: `{not json`, abandon: func() (AbandonState, error) { return AbandonUnknown, notFound }, wantErr: offload.ErrRunNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path, api, calls := libraryJournalFixture(t, tt.state, tt.record)
+			old := abandonOrphanedRun
+			abandonOrphanedRun = func(context.Context, string) (AbandonState, error) { return tt.abandon() }
+			defer func() { abandonOrphanedRun = old }()
+			err := prepareWorkerRecovery(context.Background(), api, path)
+			j, readErr := readWorkerJournal(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if tt.resume {
+				if err != nil || *calls != 1 || !j.Resume || j.State != "prepared" || j.Task.FencingToken != 2 {
+					t.Fatalf("err=%v calls=%d journal=%+v", err, *calls, j)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "recovery is postponed") || *calls != 0 {
+				t.Fatalf("err=%v calls=%d", err, *calls)
+			}
+			if j.State != tt.state || j.Resume || j.Task.FencingToken != 1 {
+				t.Fatalf("postponed recovery changed the journal: %+v", j)
+			}
+			// The visible reason keeps the Offload error for the operator.
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("postponed error %v does not preserve %v", err, tt.wantErr)
 			}
 		})
 	}

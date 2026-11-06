@@ -120,14 +120,7 @@ func archiveWorkerAttempt(o workerOptions, path string, epoch int64) error {
 		if strings.HasSuffix(entry.Name(), ".lock") {
 			continue // Lock inodes stay at their original, persistent paths.
 		}
-		if !entry.Type().IsRegular() {
-			return fmt.Errorf("unexpected attempt artifact: %s", entry.Name())
-		}
-		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return err
-		}
-		if err := writeDurableFile(filepath.Join(staged, entry.Name()), raw, 0600); err != nil {
+		if err := copyAttemptEntry(dir, staged, entry); err != nil {
 			return err
 		}
 	}
@@ -140,6 +133,38 @@ func archiveWorkerAttempt(o workerOptions, path string, epoch int64) error {
 	}
 	defer f.Close()
 	return f.Sync()
+}
+
+// copyAttemptEntry copies one retained attempt entry into the archive. Regular
+// files and directories of regular files (the execution-artifacts evidence the
+// execution engines keep beside the journal) are preserved; symlinks and other
+// special files are refused, as before.
+func copyAttemptEntry(srcDir, dstDir string, entry os.DirEntry) error {
+	name := entry.Name()
+	switch {
+	case entry.Type().IsRegular():
+		raw, err := os.ReadFile(filepath.Join(srcDir, name))
+		if err != nil {
+			return err
+		}
+		return writeDurableFile(filepath.Join(dstDir, name), raw, 0600)
+	case entry.IsDir():
+		children, err := os.ReadDir(filepath.Join(srcDir, name))
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Join(dstDir, name), 0700); err != nil {
+			return err
+		}
+		for _, child := range children {
+			if err := copyAttemptEntry(filepath.Join(srcDir, name), filepath.Join(dstDir, name), child); err != nil {
+				return fmt.Errorf("%s/%w", name, err)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unexpected attempt artifact: %s", name)
+	}
 }
 
 func recoverWorkerClaims(ctx context.Context, api *workerAPI, o workerOptions) error {
