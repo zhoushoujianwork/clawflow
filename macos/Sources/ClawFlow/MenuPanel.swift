@@ -48,7 +48,15 @@ struct MenuPanelPresentation {
         let url: URL?
         let monitoring: Bool
     }
-    struct Cost {}
+    struct Cost {
+        let todayUSD: Double?
+        let todayTokens: Int64?
+        let thirtyDaysUSD: Double
+        let thirtyDaysTokens: Int64?
+        let daily: [DashboardUsageDay]
+        let mostUsedModel: String?
+        let estimated: Bool
+    }
 
     let scopeID: String
     let scopeTitle: String
@@ -73,7 +81,7 @@ struct MenuPanelPresentation {
         let summary = StatusSummary.reduce(snapshot: snapshot, received: received, error: error, now: now)
         guard let snapshot, let received else {
             let unavailable = summary.kind == .unavailable
-            return Self(scopeID: "", scopeTitle: "全部", tabs: [], hasSnapshot: false, connected: false, frozenAt: now,
+            return Self(scopeID: "", scopeTitle: "概览", tabs: [], hasSnapshot: false, connected: false, frozenAt: now,
                         freshness: unavailable ? "Controller 不可用" : "尚未连接",
                         status: "没有数据", detail: firstLine(error), capacity: nil, today: nil, queue: nil,
                         attention: TaskSection(items: [], total: 0), running: TaskSection(items: [], total: 0),
@@ -93,7 +101,7 @@ struct MenuPanelPresentation {
                        running: rows.filter { $0.group == .running }.count,
                        attention: rows.filter { $0.group == .attention }.count)
         }
-        let all = Tab(id: "", title: "全部", fullName: "全部项目", enabled: true,
+        let all = Tab(id: "", title: "概览", fullName: "项目概览", enabled: true,
                       running: snapshot.board.tasks.filter { $0.group == .running }.count,
                       attention: snapshot.board.tasks.filter { $0.group == .attention }.count)
         let metrics = snapshot.metrics(repo: validScope)
@@ -102,10 +110,18 @@ struct MenuPanelPresentation {
         } else { nil }
         let selectedRepo = validScope.isEmpty ? nil : repos.first { $0.name == validScope }
         let repository = selectedRepo.map { RepositoryAction(name: $0.name, url: safeWebURL($0.url), monitoring: $0.enabled) }
+        let usageScope = snapshot.usage?.scope(repo: validScope)
+        let cost = usageScope.flatMap { usage -> Cost? in
+            guard let thirtyDaysUSD = usage.thirtyDays.costUsd else { return nil }
+            return Cost(todayUSD: usage.today.costUsd, todayTokens: usage.today.totalTokens,
+                        thirtyDaysUSD: thirtyDaysUSD, thirtyDaysTokens: usage.thirtyDays.totalTokens,
+                        daily: usage.daily, mostUsedModel: usage.mostUsedModel,
+                        estimated: usage.thirtyDays.costIsEstimate)
+        }
         let age = relativeAge(received, now: now)
         return Self(
             scopeID: validScope,
-            scopeTitle: validScope.isEmpty ? "全部" : (selectedRepo?.shortName ?? validScope),
+            scopeTitle: validScope.isEmpty ? "概览" : (selectedRepo?.shortName ?? validScope),
             tabs: [all] + tabs,
             hasSnapshot: true,
             connected: !stale,
@@ -121,7 +137,7 @@ struct MenuPanelPresentation {
             attention: section(attentionRows, snapshot: snapshot),
             running: section(runningRows, snapshot: snapshot),
             repository: repository,
-            cost: nil)
+            cost: cost)
     }
 
     private static func uniqueRepositories(_ snapshot: DashboardSnapshot) -> [RepoRow] {
@@ -190,6 +206,8 @@ struct MenuPanelView: View {
     var maximumHeight: CGFloat?
     var snapshotRendering: Bool
     @State private var servicesExpanded = false
+    @State private var panelBottom: CGFloat = 0
+    @State private var viewportHeight: CGFloat = 0
 
     init(presentation: MenuPanelPresentation, offloadWarning: String? = nil, pendingText: String? = nil,
          actionError: String? = nil, actions: MenuPanelActions = .init(),
@@ -211,12 +229,38 @@ struct MenuPanelView: View {
         if snapshotRendering {
             panelContent.frame(width: 340).foregroundStyle(DS.fg).background(DS.panel)
         } else {
-            ScrollView(.vertical) { panelContent }
+            ScrollView(.vertical) {
+                panelContent.background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: MenuPanelBottomKey.self,
+                                               value: proxy.frame(in: .named("menu-panel-scroll")).maxY)
+                    }
+                }
+            }
+                .coordinateSpace(name: "menu-panel-scroll")
                 .scrollIndicators(.hidden)
                 .frame(width: 340)
                 .frame(maxHeight: maximumHeight)
                 .foregroundStyle(DS.fg)
                 .background(DS.panel)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: MenuPanelViewportKey.self, value: proxy.size.height)
+                    }
+                }
+                .onPreferenceChange(MenuPanelBottomKey.self) { panelBottom = $0 }
+                .onPreferenceChange(MenuPanelViewportKey.self) { viewportHeight = $0 }
+                .overlay(alignment: .bottom) {
+                    if panelBottom > viewportHeight + 6 {
+                        LinearGradient(colors: [DS.panel.opacity(0), DS.panel], startPoint: .top, endPoint: .bottom)
+                            .frame(height: 30)
+                            .overlay(alignment: .bottom) {
+                                Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(DS.dim).padding(.bottom, 4)
+                            }
+                            .allowsHitTesting(false)
+                    }
+                }
         }
     }
 
@@ -228,6 +272,7 @@ struct MenuPanelView: View {
             if presentation.hasSnapshot {
                 if let capacity = presentation.capacity { capacitySection(capacity) }
                 if let today = presentation.today { todaySection(today) }
+                if let cost = presentation.cost { MenuUsageSection(value: cost, dimmed: presentation.dimsLiveData) }
                 if let queue = presentation.queue { queueSection(queue) }
                 taskSection("需要关注", symbol: "exclamationmark.triangle", section: presentation.attention, tone: DS.warn)
                 taskSection("运行中", symbol: "arrow.triangle.2.circlepath", section: presentation.running, tone: DS.bar)
@@ -369,6 +414,93 @@ struct MenuPanelView: View {
         }
         .padding(.top, 7)
     }
+}
+
+private struct MenuUsageSection: View {
+    let value: MenuPanelPresentation.Cost
+    let dimmed: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("用量").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                if value.estimated { Text("估算").font(DS.small).foregroundStyle(DS.dim) }
+            }
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible())], alignment: .leading, spacing: 12) {
+                Fact("今日费用", value.todayUSD.map(menuCurrency) ?? "—")
+                Fact("今日 Token", value.todayTokens.map(menuTokens) ?? "—")
+                Fact("最近 30 天费用", menuCurrency(value.thirtyDaysUSD))
+                Fact("最近 30 天 Token", value.thirtyDaysTokens.map(menuTokens) ?? "—")
+            }
+            MenuUsageChart(days: value.daily)
+            if let model = value.mostUsedModel, !model.isEmpty {
+                Text("最常用模型：\(model)").font(DS.small).foregroundStyle(DS.dim).lineLimit(1)
+            }
+            Text("根据运行记录汇总 · 不是订阅账单")
+                .font(DS.small).foregroundStyle(DS.dim)
+        }
+        .opacity(dimmed ? 0.5 : 1)
+        .menuGroup()
+    }
+}
+
+private struct MenuUsageChart: View {
+    let days: [DashboardUsageDay]
+
+    var body: some View {
+        let maximum = days.compactMap(\.costUsd).max() ?? 0
+        GeometryReader { proxy in
+            let chartHeight = max(1, proxy.size.height - 15)
+            ZStack(alignment: .bottom) {
+                Rectangle().fill(DS.line).frame(height: 1)
+                HStack(alignment: .bottom, spacing: 2) {
+                    ForEach(Array(days.enumerated()), id: \.offset) { _, day in
+                        let cost = max(0, day.costUsd ?? 0)
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(cost > 0 ? DS.bar : DS.bar.opacity(0.28))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: cost > 0 && maximum > 0 ? max(2, chartHeight * cost / maximum) : 2)
+                    }
+                }
+                .frame(height: chartHeight)
+                .padding(.top, 15)
+                Text(menuCurrency(maximum))
+                    .font(DS.tiny).foregroundStyle(DS.dim).monospacedDigit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            }
+        }
+        .frame(height: 60)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("最近 30 天费用图表，单日最高 \(menuCurrency(maximumCost))")
+    }
+
+    private var maximumCost: Double { days.compactMap(\.costUsd).max() ?? 0 }
+}
+
+private func menuCurrency(_ value: Double) -> String {
+    value.rounded() == value
+        ? String(format: "$%.0f", locale: Locale(identifier: "en_US_POSIX"), value)
+        : String(format: "$%.2f", locale: Locale(identifier: "en_US_POSIX"), value)
+}
+
+private func menuTokens(_ value: Int64) -> String {
+    let amount = Double(value)
+    for (threshold, suffix) in [(1_000_000_000.0, "B"), (1_000_000.0, "M"), (1_000.0, "K")] where amount >= threshold {
+        let scaled = amount / threshold
+        return scaled < 10 && scaled.rounded() != scaled ? String(format: "%.1f%@", scaled, suffix) : String(format: "%.0f%@", scaled, suffix)
+    }
+    return "\(value)"
+}
+
+private struct MenuPanelBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+private struct MenuPanelViewportKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 private struct MenuScopeTab: View {
