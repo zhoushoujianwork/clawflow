@@ -49,9 +49,23 @@ final class MenuPanelTests: XCTestCase {
         XCTAssertEqual(value.today?.done, 1)
         XCTAssertEqual(value.today?.failed, 1)
         XCTAssertEqual(value.today?.success, 50)
-        XCTAssertEqual(value.attention.items.count, 4)
-        XCTAssertEqual(value.attention.hidden, 2)
+        XCTAssertEqual(value.attention.items.count, 3)
+        XCTAssertEqual(value.attention.hidden, 3)
         XCTAssertNil(value.cost)
+    }
+
+    func testOverviewLimitsAttentionAndRunningToThreeRowsTotal() throws {
+        let tasks = (0..<2).map { task("attention-\($0)", state: "leased", stage: "lease_expired") }
+            + (0..<4).map { task("running-\($0)", state: "leased", stage: "running") }
+        let overview = panel(try fixture(tasks: tasks))
+        XCTAssertEqual(overview.attention.items.count + overview.running.items.count, 3)
+        XCTAssertEqual(overview.attention.hidden, 0)
+        XCTAssertEqual(overview.running.items.count, 1)
+        XCTAssertEqual(overview.running.hidden, 3)
+
+        let project = panel(try fixture(tasks: tasks), scope: "acme/app")
+        XCTAssertEqual(project.attention.items.count, 2)
+        XCTAssertEqual(project.running.items.count, 4)
     }
 
     func testUsageScopesAndOlderControllerCompatibility() throws {
@@ -64,15 +78,34 @@ final class MenuPanelTests: XCTestCase {
         XCTAssertEqual(overview.scopeTitle, "概览")
         XCTAssertEqual(overview.cost?.todayUSD, 12.34)
         XCTAssertEqual(overview.cost?.todayTokens, 47_000_000)
+        XCTAssertEqual(overview.cost?.sevenDaysUSD, 115.74)
+        XCTAssertEqual(overview.cost?.sevenDaysTokens, 1_800_000_000)
         XCTAssertEqual(overview.cost?.thirtyDaysUSD, 166)
         XCTAssertEqual(overview.cost?.thirtyDaysTokens, 5_500_000_000)
         XCTAssertEqual(overview.cost?.daily.count, 30)
         XCTAssertEqual(overview.cost?.mostUsedModel, "gpt-6-astra")
         XCTAssertEqual(overview.cost?.estimated, true)
+        XCTAssertEqual(overview.cost?.footer, "根据 token 用量估算 · 不是账单")
+        XCTAssertEqual(overview.cost?.recent.map(\.title), ["今天", "昨天", "2 天前", "3 天前"])
+        XCTAssertEqual(overview.cost?.recent[0].summary, "$12.34 · 47M")
+        XCTAssertEqual(overview.cost?.recent[1].summary, "$0 · 0")
+        XCTAssertEqual(overview.cost?.recent[0].date.isEmpty, false)
 
         let app = panel(snapshot, scope: "acme/app")
         XCTAssertEqual(app.cost?.todayUSD, 8.1)
         XCTAssertEqual(app.cost?.thirtyDaysUSD, 100)
+    }
+
+    func testRecentUsageFillsMissingCalendarDaysAndKnownFooter() throws {
+        let snapshot = try fixture(usage: usageFixture(missingYesterday: true, estimated: false))
+        let cost = try XCTUnwrap(panel(snapshot).cost)
+        XCTAssertEqual(cost.recent.count, 4)
+        XCTAssertEqual(cost.recent[1].title, "昨天")
+        XCTAssertEqual(cost.recent[1].summary, "—")
+        XCTAssertEqual(cost.recent[2].summary, "$30 · 60M")
+        XCTAssertEqual(cost.footer, "根据运行记录汇总 · 不是账单")
+        XCTAssertEqual(menuCurrency(78.77), "$78.77")
+        XCTAssertEqual(menuTokens(1_500_000_000), "1.5B")
     }
 
     func testSingleProjectCapacityUsesMatchingWorkerTags() throws {
@@ -198,7 +231,7 @@ final class MenuPanelTests: XCTestCase {
         return try DashboardSnapshot.decode(JSONSerialization.data(withJSONObject: object))
     }
 
-    private func usageFixture() -> [String: Any] {
+    private func usageFixture(missingYesterday: Bool = false, estimated: Bool = true) -> [String: Any] {
         let costs: [Double] = [0, 0, 0.2, 0, 0, 0.5, 0, 0, 1.1, 0, 0, 0, 2.2, 0, 0.6,
                                0, 0, 4.5, 12, 3.2, 0, 0.8, 25, 52, 0.4, 0, 21, 30, 0, 12.34]
         let calendar = Calendar(identifier: .gregorian)
@@ -207,21 +240,26 @@ final class MenuPanelTests: XCTestCase {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyy-MM-dd"
-        func daily(scale: Double) -> [[String: Any]] {
-            costs.enumerated().map { index, cost in
-                ["date": formatter.string(from: calendar.date(byAdding: .day, value: index, to: start)!),
-                 "cost_usd": cost * scale, "total_tokens": Int64(cost * scale * 2_000_000)] as [String: Any]
+        func daily(scale: Double, todayCost: Double, todayTokens: Int64) -> [[String: Any]] {
+            costs.enumerated().compactMap { index, cost in
+                if missingYesterday && index == costs.count - 2 { return nil }
+                return ["date": formatter.string(from: calendar.date(byAdding: .day, value: index, to: start)!),
+                        "cost_usd": index == costs.count - 1 ? todayCost : cost * scale,
+                        "total_tokens": index == costs.count - 1 ? todayTokens : Int64(cost * scale * 2_000_000)] as [String: Any]
             }
         }
         func aggregate(_ cost: Double, _ tokens: Int64) -> [String: Any] {
             ["cost_usd": cost, "total_tokens": tokens, "input_tokens": tokens / 2,
              "output_tokens": tokens / 4, "cache_read_input_tokens": tokens / 4,
-             "cache_creation_input_tokens": 0, "cost_is_estimate": true]
+             "cache_creation_input_tokens": 0, "cost_is_estimate": estimated]
         }
         func scope(todayCost: Double, todayTokens: Int64, cost: Double, tokens: Int64,
                    model: String = "gpt-6-astra") -> [String: Any] {
-            ["today": aggregate(todayCost, todayTokens), "thirty_days": aggregate(cost, tokens),
-             "daily": daily(scale: cost / 166), "most_used_model": model]
+            let ratio = cost / 166
+            return ["today": aggregate(todayCost, todayTokens),
+                    "seven_days": aggregate(115.74 * ratio, Int64(Double(tokens) * 1_800_000_000 / 5_500_000_000)),
+                    "thirty_days": aggregate(cost, tokens),
+                    "daily": daily(scale: ratio, todayCost: todayCost, todayTokens: todayTokens), "most_used_model": model]
         }
         return [
             "generated_at": iso(now),

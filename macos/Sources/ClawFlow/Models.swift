@@ -54,6 +54,7 @@ struct DashboardUsage: Decodable, Sendable {
 
 struct DashboardUsageScope: Decodable, Sendable {
     let today: DashboardUsageAggregate
+    let sevenDays: DashboardUsageAggregate?
     let thirtyDays: DashboardUsageAggregate
     let daily: [DashboardUsageDay]
     let mostUsedModel: String?
