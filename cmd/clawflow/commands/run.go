@@ -1032,7 +1032,12 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 		// post-run state.
 		var reopened *reopenContext
 		var reopenErr error
-		if implementationSubjectAllowed(sub) {
+		// ListOpenIssues carries no sub-issue summary, so sub.SubTotal alone
+		// cannot tell a parent from a leaf. The work queue drops parents via
+		// issueIsParent; using the same test here keeps pending.json from
+		// listing implement work that dispatch always skips.
+		parent := issueIsParent(iss, hasChildren)
+		if !parent && implementationSubjectAllowed(sub) {
 			reopened, reopenErr = discoverReopen(client, fullName, sub)
 			if reopenErr != nil {
 				logReopenSkip(fullName, sub.Number, reopenErr)
@@ -1048,6 +1053,9 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 			}
 			isImplement := op.Name == "implement"
 			op = effectiveOperator(op, sub)
+			if isImplement && parent {
+				op = nil
+			}
 			if op == nil {
 				if isImplement {
 					implementState[sub.Number] = "not_eligible_leaf_issue"

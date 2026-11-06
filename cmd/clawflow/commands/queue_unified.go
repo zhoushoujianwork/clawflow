@@ -119,7 +119,7 @@ func planRepoQueue(in repoQueueInput) repoQueuePlan {
 		if skipped && !locked {
 			continue
 		}
-		if in.HasChildren[is.Number] || is.SubIssuesTotal > 0 {
+		if issueIsParent(is, in.HasChildren) {
 			continue // parents are coordinated by track-progress, not queued
 		}
 		reason, scanned := in.ImplementState[is.Number]
@@ -273,6 +273,14 @@ func queueReasonSlug(reason string) string {
 		reason = string(r[:80]) + "…"
 	}
 	return reason
+}
+
+// issueIsParent reports whether an issue has sub-issues, either from the list
+// response summary or from a ListSubIssues lookup recorded in hasChildren.
+// The work queue and the scan's implement eligibility both use it, so an
+// issue that dispatch always skips never reaches pending.json.
+func issueIsParent(is vcs.Issue, hasChildren map[int]bool) bool {
+	return hasChildren[is.Number] || is.SubIssuesTotal > 0
 }
 
 // applyUnifiedQueue drops every implement job the plan did not pick, logs the
