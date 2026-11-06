@@ -145,17 +145,33 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 			return err
 		}
 		trace.enter("query_heartbeats")
-		var beats []struct {
-			Worker string
-			At     time.Time
-		}
-		if err := tx.Model(&Audit{}).Select("worker, MAX(created_at) AS at").Where("action = ?", "heartbeat").Group("worker").Scan(&beats).Error; err != nil {
+		// Per-worker subquery uses the (worker, action, created_at) index instead
+		// of scanning every heartbeat row. MAX() drops the column type, so the
+		// value may arrive as text and is parsed explicitly.
+		rows, err := tx.Raw("SELECT w.id AS id, (SELECT MAX(a.created_at) FROM coordinator_audit a WHERE a.worker = w.id AND a.action = 'heartbeat') AS at FROM coordinator_workers w").Rows()
+		if err != nil {
 			return err
 		}
+		defer rows.Close()
 		heartbeats := map[string]time.Time{}
-		for _, beat := range beats {
-			heartbeats[beat.Worker] = beat.At
+		for rows.Next() {
+			var id string
+			var raw any
+			if err := rows.Scan(&id, &raw); err != nil {
+				return err
+			}
+			at, ok, err := parseHeartbeatTime(raw)
+			if err != nil {
+				return err
+			}
+			if ok {
+				heartbeats[id] = at
+			}
 		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		rows.Close()
 		trace.enter("query_tasks")
 		tasks := []BoardTask{}
 		if err := tx.Model(&Task{}).Select("(SELECT started_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS started_at, (SELECT ended_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS ended_at, id, COALESCE(json_extract(payload, '$.durable_execution') = 1, 0) AS durable, COALESCE(json_extract(payload, '$.title'), '') AS subject, repo, issue, pr, kind, state, tags, json_object('acceptance_worker', json_extract(payload, '$.acceptance_worker'), 'development_worker', json_extract(payload, '$.development_worker')) AS acceptance_routing, priority, lease_owner, lease_expires_at, last_event_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
@@ -295,4 +311,36 @@ func deriveBoard(now time.Time, workers []Worker, tokens []Token, heartbeats map
 		}
 	}
 	return out
+}
+
+// parseHeartbeatTime converts a MAX(created_at) result, which may be a
+// time.Time, text or bytes depending on the driver, into a time. A nil value
+// (worker without heartbeats) reports ok=false.
+func parseHeartbeatTime(v any) (time.Time, bool, error) {
+	var raw string
+	switch x := v.(type) {
+	case nil:
+		return time.Time{}, false, nil
+	case time.Time:
+		return x, true, nil
+	case string:
+		raw = x
+	case []byte:
+		raw = string(x)
+	default:
+		return time.Time{}, false, fmt.Errorf("unsupported heartbeat time type %T", v)
+	}
+	if raw == "" {
+		return time.Time{}, false, nil
+	}
+	// Strip the monotonic suffix some drivers serialize ("m=+0.1").
+	if i := strings.Index(raw, " m="); i >= 0 {
+		raw = raw[:i]
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05.999999999 -0700 MST", "2006-01-02 15:04:05.999999999-07:00", time.RFC3339Nano, "2006-01-02 15:04:05.999999999", "2006-01-02T15:04:05.999999999"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true, nil
+		}
+	}
+	return time.Time{}, false, fmt.Errorf("unparseable heartbeat time %q", raw)
 }
