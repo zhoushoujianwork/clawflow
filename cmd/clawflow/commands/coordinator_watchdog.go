@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -43,11 +44,13 @@ func runCoordinatorWatchdogWith(ctx context.Context, board func(context.Context)
 	defer tick.Stop()
 	for {
 		passCtx, cancel := context.WithTimeout(ctx, watchdogPassTimeout)
+		started := time.Now()
 		current, err := board(passCtx)
+		elapsed := time.Since(started)
 		cancel()
 		switch {
 		case err != nil && ctx.Err() == nil:
-			fail(err)
+			fail(fmt.Errorf("watchdog pass failed after %s (timeout %s): %w", elapsed.Round(time.Millisecond), watchdogPassTimeout, err))
 		case err == nil:
 			opened, resolved := tracker.Update(current.Findings)
 			for _, finding := range opened {

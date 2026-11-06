@@ -124,3 +124,30 @@ func TestCoordinatorWatchdogReportsTransitionsAndSurvivesErrors(t *testing.T) {
 		t.Fatalf("failures=%d events=%v", failures, events)
 	}
 }
+
+func TestWatchdogPassFailureReportsElapsedAndTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	boardErr := context.DeadlineExceeded
+	failed := make(chan error, 1)
+	go runCoordinatorWatchdog(ctx, func(context.Context) (coordinator.Board, error) {
+		return coordinator.Board{}, boardErr
+	}, time.Hour, func(string, coordinator.Finding) {}, func(err error) {
+		select {
+		case failed <- err:
+		default:
+		}
+	})
+	select {
+	case err := <-failed:
+		if !errors.Is(err, boardErr) {
+			t.Fatalf("errors.Is lost the original error: %v", err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "after ") || !strings.Contains(msg, "timeout "+watchdogPassTimeout.String()) {
+			t.Fatalf("error lacks elapsed time or timeout: %q", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fail was not called")
+	}
+}
