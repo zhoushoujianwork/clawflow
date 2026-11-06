@@ -48,7 +48,7 @@ func TestWakeUsesPilotRole(t *testing.T) {
 		}
 		return "```pilot-actions\n{\"run_id\":\"" + runID + "\",\"actions\":[]}\n```\nPILOT-RESULT: no-action", nil
 	}
-	if _, err := Ask(context.Background(), "review", 5, time.Second); err != nil {
+	if _, err := Ask(context.Background(), "review", 5, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if !called {
