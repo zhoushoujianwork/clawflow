@@ -30,6 +30,9 @@ func TestDashboardUsageBucketsInControllerLocalDayAndScopesRepos(t *testing.T) {
 	if err := db.DB().Exec(insert, "yesterday", "o/b", time.Date(2026, 11, 5, 15, 30, 0, 0, time.UTC), 2.75, 100, 200, 300, 400, "gpt-b", unknown).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := db.DB().Exec(insert, "eight-days-ago", "o/a", time.Date(2026, 10, 28, 18, 0, 0, 0, time.UTC), 5.0, 1, 1, 1, 1, "gpt-a", known).Error; err != nil {
+		t.Fatal(err)
+	}
 	usage, err := s.DashboardUsage(context.Background(), now, loc)
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +40,10 @@ func TestDashboardUsageBucketsInControllerLocalDayAndScopesRepos(t *testing.T) {
 	if usage.Total.Today.CostUSD == nil || *usage.Total.Today.CostUSD != 1.25 || usage.Total.Today.TotalTokens == nil || *usage.Total.Today.TotalTokens != 100 {
 		t.Fatalf("wrong local today aggregate: %+v", usage.Total.Today)
 	}
-	if usage.Total.ThirtyDays.CostUSD == nil || *usage.Total.ThirtyDays.CostUSD != 4 || !usage.Total.ThirtyDays.CostIsEstimate {
+	if usage.Total.SevenDays.CostUSD == nil || *usage.Total.SevenDays.CostUSD != 4 || usage.Total.SevenDays.TotalTokens == nil || *usage.Total.SevenDays.TotalTokens != 1100 || !usage.Total.SevenDays.CostIsEstimate {
+		t.Fatalf("wrong 7-day aggregate: %+v", usage.Total.SevenDays)
+	}
+	if usage.Total.ThirtyDays.CostUSD == nil || *usage.Total.ThirtyDays.CostUSD != 9 || usage.Total.ThirtyDays.TotalTokens == nil || *usage.Total.ThirtyDays.TotalTokens != 1104 || !usage.Total.ThirtyDays.CostIsEstimate {
 		t.Fatalf("wrong 30-day cost semantics: %+v", usage.Total.ThirtyDays)
 	}
 	if got := usage.ByRepo["o/a"].MostUsedModel; got != "gpt-a" {

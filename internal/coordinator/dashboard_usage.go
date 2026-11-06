@@ -15,6 +15,7 @@ type DashboardUsage struct {
 
 type DashboardUsageScope struct {
 	Today         DashboardUsageAggregate `json:"today"`
+	SevenDays     DashboardUsageAggregate `json:"seven_days"`
 	ThirtyDays    DashboardUsageAggregate `json:"thirty_days"`
 	Daily         []DashboardUsageDay     `json:"daily"`
 	MostUsedModel string                  `json:"most_used_model,omitempty"`
@@ -101,7 +102,7 @@ func (s *Store) DashboardUsage(ctx context.Context, now time.Time, loc *time.Loc
 		}
 		day := dayStart.Format("2006-01-02")
 		for _, row := range rows {
-			addDashboardUsage(total, row, day, i == 29)
+			addDashboardUsage(total, row, day, i == 29, i >= 23)
 			if row.Repo == "" {
 				continue
 			}
@@ -110,7 +111,7 @@ func (s *Store) DashboardUsage(ctx context.Context, now time.Time, loc *time.Loc
 				a = newDashboardUsageAccumulator(start)
 				repos[row.Repo] = a
 			}
-			addDashboardUsage(a, row, day, i == 29)
+			addDashboardUsage(a, row, day, i == 29, i >= 23)
 		}
 	}
 	out := DashboardUsage{GeneratedAt: now.UTC(), Total: total.finish(), ByRepo: map[string]DashboardUsageScope{}}
@@ -120,9 +121,12 @@ func (s *Store) DashboardUsage(ctx context.Context, now time.Time, loc *time.Loc
 	return out, nil
 }
 
-func addDashboardUsage(a *dashboardUsageAccumulator, row dashboardUsageRow, day string, today bool) {
+func addDashboardUsage(a *dashboardUsageAccumulator, row dashboardUsageRow, day string, today, sevenDays bool) {
 	estimate := row.EstimatedCostRows > 0
 	addDashboardAggregate(&a.scope.ThirtyDays, row, estimate)
+	if sevenDays {
+		addDashboardAggregate(&a.scope.SevenDays, row, estimate)
+	}
 	if today {
 		addDashboardAggregate(&a.scope.Today, row, estimate)
 	}
