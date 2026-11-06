@@ -81,7 +81,7 @@ func TestRunnerReportCorrection(t *testing.T) {
 					t.Fatalf("correction prompt: %s", prompt)
 				}
 				result.RunID, result.Text = "correction-run", valid
-				result.Usage = json.RawMessage(`{"input_tokens":12,"output_tokens":7}`)
+				result.Usage = json.RawMessage(`{"input_tokens":12,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":7}`)
 				switch mode {
 				case "unstructured":
 					result.Text = `{"status":"passed","findings":[{"kind":"defect","summary":"wrong result","defect":"wrong value","evidence":"observed wrong result"}]}`

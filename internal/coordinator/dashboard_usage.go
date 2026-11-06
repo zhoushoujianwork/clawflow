@@ -29,6 +29,9 @@ type DashboardUsageAggregate struct {
 	CacheReadInputTokens     *int64   `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens *int64   `json:"cache_creation_input_tokens,omitempty"`
 	CostIsEstimate           bool     `json:"cost_is_estimate"`
+	// RunsMissingCost counts finished runs without a known cost. CostUSD sums
+	// known values only; missing costs are never treated as zero.
+	RunsMissingCost int `json:"runs_missing_cost"`
 }
 
 type DashboardUsageDay struct {
@@ -47,6 +50,7 @@ type dashboardUsageRow struct {
 	TotalTokens              *int64
 	Model                    string
 	EstimatedCostRows        int
+	MissingCostRows          int
 }
 
 type dashboardUsageAccumulator struct {
@@ -94,7 +98,8 @@ func (s *Store) DashboardUsage(ctx context.Context, now time.Time, loc *time.Loc
  SUM(CASE WHEN cost_usd IS NOT NULL
                AND (COALESCE(json_extract(NULLIF(payload, ''), '$.usage.cost_is_estimate'), 0) <> 0
                     OR COALESCE(json_extract(NULLIF(payload, ''), '$.usage.cost_basis'), '') = '')
-          THEN 1 ELSE 0 END) AS estimated_cost_rows`).
+          THEN 1 ELSE 0 END) AS estimated_cost_rows,
+ SUM(CASE WHEN cost_usd IS NULL AND ended_at IS NOT NULL THEN 1 ELSE 0 END) AS missing_cost_rows`).
 			Where("started_at >= ? AND started_at < ?", dayStart.UTC(), dayEnd.UTC()).
 			Group("repo, model").Find(&rows).Error
 		if err != nil {
@@ -146,6 +151,7 @@ func addDashboardUsage(a *dashboardUsageAccumulator, row dashboardUsageRow, day 
 }
 
 func addDashboardAggregate(a *DashboardUsageAggregate, row dashboardUsageRow, estimate bool) {
+	a.RunsMissingCost += row.MissingCostRows
 	if row.CostUSD != nil {
 		addFloat64(&a.CostUSD, *row.CostUSD)
 		if estimate {

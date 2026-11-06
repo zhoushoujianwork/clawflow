@@ -104,6 +104,7 @@ func runDevelopment(ctx context.Context, prompt string, opts RunOptions, instruc
 				if opts.OnExecutionResult != nil {
 					opts.OnExecutionResult(result, resetErr, true)
 				}
+				observeExecutionResult(ctx, result)
 				return result.Text, resetErr
 			}
 		}

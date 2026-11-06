@@ -63,7 +63,7 @@ func TestRunnerRecordsExecutions(t *testing.T) {
 				result.ReportedExitCode, result.ElapsedMs = &code, &elapsed
 				result.CallerRunID = "acceptance-caller"
 				result.Machine = "source-machine"
-				result.Usage = json.RawMessage(`{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}`)
+				result.Usage = json.RawMessage(`{"input_tokens":140,"cached_input_tokens":40,"cache_write_input_tokens":0,"output_tokens":20}`)
 				return result, err
 			}
 			_, err := r.Run(context.Background(), contract(), scratch, workspace)
@@ -121,7 +121,7 @@ func TestRunnerPersistsDatabaseRuns(t *testing.T) {
 	original := r.Execute
 	r.Execute = func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
 		result, err := original(ctx, prompt, opts)
-		result.Usage = json.RawMessage(`{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}`)
+		result.Usage = json.RawMessage(`{"input_tokens":140,"cached_input_tokens":40,"cache_write_input_tokens":0,"output_tokens":20}`)
 		return result, err
 	}
 	if _, err := r.Run(context.Background(), contract(), scratch, workspace); err != nil {
@@ -148,20 +148,28 @@ func TestRunnerPersistsDatabaseRuns(t *testing.T) {
 	}
 }
 
-func TestRunUsageUnavailable(t *testing.T) {
-	for _, raw := range []string{"", "null", "invalid"} {
-		if runUsage(json.RawMessage(raw)) != nil {
-			t.Fatalf("unexpected usage for %q", raw)
-		}
+// Cost arrives as Result.CostUSD, not inside the usage JSON; the recorded run
+// must carry it (previously every acceptance run lost its cost).
+func TestExecuteRecordedKeepsReportedCost(t *testing.T) {
+	r, scratch, workspace := setupRunner(t)
+	original := r.Execute
+	cost := 0.25
+	r.Execute = func(ctx context.Context, prompt string, opts execution.Options) (execution.Result, error) {
+		result, err := original(ctx, prompt, opts)
+		result.Usage = json.RawMessage(`{"input_tokens":140,"cached_input_tokens":40,"cache_write_input_tokens":0,"output_tokens":20}`)
+		result.CostUSD, result.CostBasis = &cost, "reported"
+		return result, err
 	}
-	for _, raw := range []string{`{}`, `{"tokens_unavailable":true,"input_tokens":0}`} {
-		u := runUsage(json.RawMessage(raw))
-		if u == nil || !u.TokensUnavailable || !u.CostUnavailable {
-			t.Fatalf("usage=%+v", u)
-		}
+	if _, err := r.Run(context.Background(), contract(), scratch, workspace); err != nil {
+		t.Fatal(err)
 	}
-	u := runUsage(json.RawMessage(`{"input_tokens":0,"output_tokens":0,"total_cost_usd":0}`))
-	if u == nil || u.TokensUnavailable || u.CostUnavailable {
-		t.Fatalf("measured zero=%+v", u)
+	rows := recordedRows(t)
+	if len(rows) == 0 {
+		t.Fatal("no rows")
+	}
+	for _, row := range rows {
+		if row.CostUSD == nil || *row.CostUSD != cost || row.InputTokens == nil || *row.InputTokens != 100 {
+			t.Fatalf("cost/tokens lost: %+v", row)
+		}
 	}
 }

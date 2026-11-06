@@ -97,3 +97,39 @@ SELECT printf('fixture/%06d', n), CASE WHEN n % 2 = 0 THEN 'o/a' ELSE 'o/b' END,
 		t.Fatalf("dashboard usage cold query too slow: %s", elapsed)
 	}
 }
+
+// Finished runs without a cost are counted, never summed as zero; running
+// runs (no ended_at) are not counted as missing.
+func TestDashboardUsageCountsRunsMissingCost(t *testing.T) {
+	db := storetest.New(t)
+	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	s := New(db.DB())
+	loc := time.FixedZone("controller", 8*60*60)
+	now := time.Date(2026, 11, 6, 2, 0, 0, 0, loc)
+	at := time.Date(2026, 11, 5, 16, 30, 0, 0, time.UTC)
+	insert := `INSERT INTO runs (run_dir, repo, status, started_at, ended_at, cost_usd, model, payload)
+ VALUES (?, ?, 'success', ?, ?, ?, 'm', '{"usage":{"cost_basis":"api"}}')`
+	end := at.Add(time.Minute)
+	var none *float64
+	cost := 1.5
+	for _, r := range []struct {
+		dir   string
+		ended any
+		cost  *float64
+	}{{"known", end, &cost}, {"missing-a", end, none}, {"missing-b", end, none}, {"running", nil, none}} {
+		if err := db.DB().Exec(insert, r.dir, "o/a", at, r.ended, r.cost).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	usage, err := s.DashboardUsage(context.Background(), now, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, a := range map[string]DashboardUsageAggregate{"today": usage.Total.Today, "7d": usage.Total.SevenDays, "30d": usage.Total.ThirtyDays, "repo": usage.ByRepo["o/a"].Today} {
+		if a.RunsMissingCost != 2 || a.CostUSD == nil || *a.CostUSD != 1.5 {
+			t.Fatalf("%s: %+v", name, a)
+		}
+	}
+}
