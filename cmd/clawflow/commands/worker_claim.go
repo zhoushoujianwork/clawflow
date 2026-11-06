@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,11 +144,7 @@ func copyAttemptEntry(srcDir, dstDir string, entry os.DirEntry) error {
 	name := entry.Name()
 	switch {
 	case entry.Type().IsRegular():
-		raw, err := os.ReadFile(filepath.Join(srcDir, name))
-		if err != nil {
-			return err
-		}
-		return writeDurableFile(filepath.Join(dstDir, name), raw, 0600)
+		return copyAttemptFile(filepath.Join(srcDir, name), filepath.Join(dstDir, name))
 	case entry.IsDir():
 		children, err := os.ReadDir(filepath.Join(srcDir, name))
 		if err != nil {
@@ -208,4 +205,26 @@ func recoverWorkerClaim(ctx context.Context, api *workerAPI, o workerOptions, pa
 		}
 	}
 	return os.Remove(path)
+}
+
+// copyAttemptFile streams because executor logs and artifacts have no size
+// bound. The stage directory is renamed only after every entry is copied and
+// synced, so a crash midway leaves no partial archive.
+func copyAttemptFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Sync()
+	}
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
