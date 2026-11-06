@@ -167,9 +167,11 @@ func routePlatformRepo(cmd *cobra.Command) {
 // platformAdmin invokes the same local commands, never their client wrappers.
 // Only allowlisted flags reach Cobra; local paths and label writes are excluded.
 type platformAdmin struct {
-	mu      sync.Mutex
-	board   func(context.Context) (coordinator.Board, error)
-	workers *coordinator.Store
+	mu           sync.Mutex
+	board        func(context.Context) (coordinator.Board, error)
+	workers      *coordinator.Store
+	usageCache   *coordinator.DashboardUsage
+	usageExpires time.Time
 }
 
 func (a *platformAdmin) Repos(ctx context.Context, input coordinator.RepoRequest) (any, error) {
