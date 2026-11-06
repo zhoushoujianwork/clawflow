@@ -91,7 +91,9 @@ SELECT printf('fixture/%06d', n), CASE WHEN n % 2 = 0 THEN 'o/a' ELSE 'o/b' END,
 		t.Fatalf("100k aggregate wrong: %+v", usage.Total.ThirtyDays)
 	}
 	t.Logf("dashboard usage 100k-row cold query: %s", elapsed)
-	if elapsed > 2*time.Second {
+	// The race detector slows pure-Go SQLite by about 40x, so the budget only
+	// holds without it.
+	if !raceEnabled && elapsed > 2*time.Second {
 		t.Fatalf("dashboard usage cold query too slow: %s", elapsed)
 	}
 }
