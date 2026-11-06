@@ -376,7 +376,7 @@ struct MenuPanelView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             Button(action: actions.openDashboard) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(presentation.scopeTitle).font(.system(size: 15, weight: .semibold)).foregroundStyle(DS.fg)
@@ -397,7 +397,7 @@ struct MenuPanelView: View {
             .font(DS.sub).foregroundStyle(presentation.connected ? DS.dim : DS.warn)
             if let detail = presentation.detail { Text(detail).font(DS.small).foregroundStyle(DS.warn).lineLimit(2) }
         }
-        .padding(.bottom, 6)
+        .padding(.top, 4).padding(.bottom, 10)
         .overlay(alignment: .bottom) { DS.line.frame(height: 1) }
     }
 
@@ -411,7 +411,7 @@ struct MenuPanelView: View {
     }
 
     private var progressBlock: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 9) {
             if let value = presentation.today {
                 MenuCompactProgress(left: "今日  完成 \(value.done) · 失败 \(value.failed)",
                                     right: value.success.map { "成功率 \($0)%" } ?? "暂无结果",
@@ -433,13 +433,13 @@ struct MenuPanelView: View {
                                     total: value.waiting + value.running, dimmed: presentation.dimsLiveData)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 10)
         .overlay(alignment: .bottom) { DS.line.frame(height: 1) }
     }
 
     @ViewBuilder private func taskSection(_ title: String, symbol: String, section: MenuPanelPresentation.TaskSection, tone: Color) -> some View {
         if section.total > 0 {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Image(systemName: symbol).frame(width: 18)
                     Text(title)
@@ -488,8 +488,8 @@ private struct MenuUsageSection: View {
     let dimmed: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible())], alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 10) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible())], alignment: .leading, spacing: 8) {
                 Fact("今日", value.todayUSD.map(menuCurrency) ?? "—")
                 Fact("今日 token", value.todayTokens.map(menuTokens) ?? "—")
                 Fact("近 7 天", value.sevenDaysUSD.map(menuCurrency) ?? "—")
@@ -498,11 +498,11 @@ private struct MenuUsageSection: View {
                 Fact("30 天 token", value.thirtyDaysTokens.map(menuTokens) ?? "—")
             }
             MenuUsageChart(days: value.daily)
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 7) {
                 Text("最近").font(DS.small).foregroundStyle(DS.dim)
                 ForEach(value.recent) { day in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        VStack(alignment: .leading, spacing: -1) {
+                        VStack(alignment: .leading, spacing: 1) {
                             Text(day.title).font(DS.small).fontWeight(.semibold)
                             Text(day.date).font(DS.tiny).foregroundStyle(DS.dim)
                         }
@@ -518,7 +518,7 @@ private struct MenuUsageSection: View {
                 .font(DS.small).foregroundStyle(DS.dim)
         }
         .opacity(dimmed ? 0.5 : 1)
-        .padding(.vertical, 4)
+        .padding(.vertical, 10)
         .overlay(alignment: .bottom) { DS.line.frame(height: 1) }
     }
 }
@@ -633,7 +633,7 @@ private struct MenuCompactProgress: View {
     let total: Int
     let dimmed: Bool
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(left).foregroundStyle(DS.fg).fontWeight(.semibold)
                 Spacer(minLength: 4)
@@ -683,7 +683,7 @@ private struct MenuTaskRow: View {
                     Text(reason).font(DS.small).foregroundStyle(DS.warn).lineLimit(1)
                 }
             }
-            .padding(.horizontal, 8).padding(.vertical, 1)
+            .padding(.horizontal, 8).padding(.vertical, 3)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(hovering ? DS.tab.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
             .contentShape(RoundedRectangle(cornerRadius: 7))
@@ -724,7 +724,7 @@ private struct MenuActionRow: View {
 
 private extension View {
     func compactMenuGroup() -> some View {
-        padding(.vertical, 2).overlay(alignment: .bottom) { DS.line.frame(height: 1) }
+        padding(.vertical, 7).overlay(alignment: .bottom) { DS.line.frame(height: 1) }
     }
 }
 
