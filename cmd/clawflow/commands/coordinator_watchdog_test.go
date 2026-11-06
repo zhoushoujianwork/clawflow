@@ -151,3 +151,39 @@ func TestWatchdogPassFailureReportsElapsedAndTimeout(t *testing.T) {
 		t.Fatal("fail was not called")
 	}
 }
+
+func runOneWatchdogPass(t *testing.T, elapsed time.Duration, phases []coordinator.BoardPhase) (slowCalls int, summary string) {
+	t.Helper()
+	old := watchdogSlowPass
+	watchdogSlowPass = 20 * time.Millisecond
+	defer func() { watchdogSlowPass = old }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCoordinatorWatchdogWith(ctx, func(context.Context) (coordinator.Board, error) {
+			time.Sleep(elapsed)
+			cancel()
+			return coordinator.Board{Phases: phases}, nil
+		}, time.Hour, &coordinator.FindingTracker{}, func(string, coordinator.Finding) {}, func(error) {}, func(_ time.Duration, s string) {
+			slowCalls++
+			summary = s
+		})
+	}()
+	<-done
+	return
+}
+
+func TestWatchdogLogsSlowSuccessfulPassWithPhases(t *testing.T) {
+	calls, summary := runOneWatchdogPass(t, 40*time.Millisecond, []coordinator.BoardPhase{{Name: "lease_limits", Duration: 35 * time.Millisecond}})
+	if calls != 1 || !strings.Contains(summary, "lease_limits=35ms") {
+		t.Fatalf("calls=%d summary=%q", calls, summary)
+	}
+}
+
+func TestWatchdogFastPassWritesNoLog(t *testing.T) {
+	if calls, _ := runOneWatchdogPass(t, 0, nil); calls != 0 {
+		t.Fatalf("fast pass logged %d times", calls)
+	}
+}

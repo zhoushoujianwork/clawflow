@@ -16,6 +16,9 @@ const (
 	workerProgressTimeout = 5 * time.Second
 )
 
+// watchdogSlowPass is the pass duration above which a successful pass is still logged.
+var watchdogSlowPass = 5 * time.Second
+
 // serveCoordinatorWatchdog owns its log: runLog is only set by `clawflow run`,
 // so it is nil in the controller process and would silently drop every line.
 func serveCoordinatorWatchdog(ctx context.Context, board func(context.Context) (coordinator.Board, error), interval time.Duration) {
@@ -30,16 +33,18 @@ func serveCoordinatorWatchdog(ctx context.Context, board func(context.Context) (
 		lg.Info("coordinator/watchdog", kv...)
 	}, func(err error) {
 		lg.Warn("coordinator/watchdog", "err", err.Error())
+	}, func(elapsed time.Duration, phases string) {
+		lg.Warn("coordinator/watchdog", "msg", "slow watchdog pass", "elapsed", elapsed.Round(time.Millisecond).String(), "phases", phases)
 	})
 }
 
 // runCoordinatorWatchdog is separate from result reconciliation, so a blocked
 // reconcile pass cannot silence the check meant to notice it.
 func runCoordinatorWatchdog(ctx context.Context, board func(context.Context) (coordinator.Board, error), interval time.Duration, report func(string, coordinator.Finding), fail func(error)) {
-	runCoordinatorWatchdogWith(ctx, board, interval, &coordinator.FindingTracker{}, report, fail)
+	runCoordinatorWatchdogWith(ctx, board, interval, &coordinator.FindingTracker{}, report, fail, nil)
 }
 
-func runCoordinatorWatchdogWith(ctx context.Context, board func(context.Context) (coordinator.Board, error), interval time.Duration, tracker *coordinator.FindingTracker, report func(string, coordinator.Finding), fail func(error)) {
+func runCoordinatorWatchdogWith(ctx context.Context, board func(context.Context) (coordinator.Board, error), interval time.Duration, tracker *coordinator.FindingTracker, report func(string, coordinator.Finding), fail func(error), slow func(time.Duration, string)) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
@@ -52,6 +57,9 @@ func runCoordinatorWatchdogWith(ctx context.Context, board func(context.Context)
 		case err != nil && ctx.Err() == nil:
 			fail(fmt.Errorf("watchdog pass failed after %s (timeout %s): %w", elapsed.Round(time.Millisecond), watchdogPassTimeout, err))
 		case err == nil:
+			if slow != nil && elapsed > watchdogSlowPass {
+				slow(elapsed, current.PhaseSummary())
+			}
 			opened, resolved := tracker.Update(current.Findings)
 			for _, finding := range opened {
 				report("open", finding)
