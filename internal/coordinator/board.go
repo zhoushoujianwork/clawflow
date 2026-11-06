@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,7 +17,63 @@ type Board struct {
 	Tasks       []BoardTask   `json:"tasks"`
 	Throughput  Throughput    `json:"throughput"`
 	Findings    []Finding     `json:"findings"`
+	// Phases records how long each stage of Store.Board took. It is diagnostic only
+	// and never serialized.
+	Phases []BoardPhase `json:"-"`
 }
+
+// BoardPhase is the elapsed time of one named stage of a board read.
+type BoardPhase struct {
+	Name     string
+	Duration time.Duration
+}
+
+// PhaseSummary renders phases as "name=1.2s name2=3ms"; empty when none were recorded.
+func (b Board) PhaseSummary() string { return formatPhases(b.Phases) }
+
+func formatPhases(phases []BoardPhase) string {
+	parts := make([]string, 0, len(phases))
+	for _, p := range phases {
+		parts = append(parts, fmt.Sprintf("%s=%s", p.Name, p.Duration.Round(time.Millisecond)))
+	}
+	return strings.Join(parts, " ")
+}
+
+// phaseTrace times consecutive stages; enter closes the running stage and opens the next.
+type phaseTrace struct {
+	done    []BoardPhase
+	current string
+	started time.Time
+}
+
+func (t *phaseTrace) enter(name string) {
+	t.finish()
+	t.current, t.started = name, time.Now()
+}
+
+func (t *phaseTrace) finish() {
+	if t.current == "" {
+		return
+	}
+	t.done = append(t.done, BoardPhase{Name: t.current, Duration: time.Since(t.started)})
+	t.current = ""
+}
+
+// wrap adds completed and in-progress stages to err. The in-progress stage is
+// the one that was running when the error surfaced.
+func (t *phaseTrace) wrap(err error) error {
+	if err == nil {
+		return nil
+	}
+	running := t.current
+	if running == "" {
+		running = "none"
+	} else {
+		running = fmt.Sprintf("%s (running %s)", running, time.Since(t.started).Round(time.Millisecond))
+	}
+	return fmt.Errorf("%w [board phases done: %s; in progress: %s]", err, formatPhases(t.done), running)
+}
+
 type Throughput struct {
 	Since  time.Time `json:"since"`
 	Done   int       `json:"done"`
@@ -63,8 +120,10 @@ type BoardTask struct {
 // Board reads a consistent snapshot without renewing or expiring any lease.
 func (s *Store) Board(ctx context.Context) (Board, error) {
 	var out Board
+	trace := &phaseTrace{}
 	limits := dispatchLimits{known: true}
 	if s.LeaseLimits != nil {
+		trace.enter("lease_limits")
 		total, repos, err := s.LeaseLimits()
 		limits = dispatchLimits{known: err == nil, total: total, repos: repos}
 	}
@@ -73,16 +132,19 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 	// The store DSN makes ordinary GORM transactions BEGIN IMMEDIATE. Board is
 	// read-only, so use an explicit deferred transaction on one connection: WAL
 	// readers get a consistent snapshot without acquiring the writer lock.
-	err := deferredReadTransaction(s.db.WithContext(ctx), func(tx *gorm.DB) error {
+	err := deferredReadTransactionTraced(s.db.WithContext(ctx), trace.enter, func(tx *gorm.DB) error {
 		now := controllerNow()
+		trace.enter("query_workers")
 		var workers []Worker
 		if err := tx.Select("id, tags, roles, run_untagged, max_parallel, paused").Order("id").Find(&workers).Error; err != nil {
 			return err
 		}
+		trace.enter("query_tokens")
 		var tokens []Token
 		if err := tx.Select("name, last_seen, revoked").Find(&tokens).Error; err != nil {
 			return err
 		}
+		trace.enter("query_heartbeats")
 		var beats []struct {
 			Worker string
 			At     time.Time
@@ -94,28 +156,43 @@ func (s *Store) Board(ctx context.Context) (Board, error) {
 		for _, beat := range beats {
 			heartbeats[beat.Worker] = beat.At
 		}
+		trace.enter("query_tasks")
 		tasks := []BoardTask{}
 		if err := tx.Model(&Task{}).Select("(SELECT started_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS started_at, (SELECT ended_at FROM task_attempts WHERE task_id = coordinator_tasks.id AND lease_epoch = coordinator_tasks.fencing_token LIMIT 1) AS ended_at, id, COALESCE(json_extract(payload, '$.durable_execution') = 1, 0) AS durable, COALESCE(json_extract(payload, '$.title'), '') AS subject, repo, issue, pr, kind, state, tags, json_object('acceptance_worker', json_extract(payload, '$.acceptance_worker'), 'development_worker', json_extract(payload, '$.development_worker')) AS acceptance_routing, priority, lease_owner, lease_expires_at, last_event_at, attempt, application_attempts, application_error, updated_at").Order("priority, queue_position, created_at, id").Find(&tasks).Error; err != nil {
 			return err
 		}
+		trace.enter("derive_board")
 		out = deriveBoard(now, workers, tokens, heartbeats, tasks)
 		out.applyFindings(now, workers, limits)
 		cfg := s.Watchdog.withDefaults()
+		trace.enter("query_history")
 		var history []FinishedTask
 		if err := tx.Model(&Task{}).Select("repo, issue, pr, state, kind, updated_at, COALESCE(json_extract(result, '$.infra_kind'), '') AS infra_kind, COALESCE(json_extract(result, '$.error'), '') AS err, COALESCE(json_extract(result, '$.head_sha'), '') AS head").
 			Where("state IN ('failed', 'done') AND updated_at > ?", now.Add(-cfg.FailureWindow)).Order("updated_at DESC").Scan(&history).Error; err != nil {
 			return err
 		}
+		trace.enter("findings")
 		out.Findings = append(out.Findings, repeatedFailureFindings(now, history, cfg)...)
 		out.Findings = append(out.Findings, sameHeadCycleFindings(now, history, cfg)...)
 		out.Findings = append(out.Findings, orphanedPRFindings(now, orphans, out.Tasks, cfg)...)
 		return nil
 	})
+	err = trace.wrap(err)
+	trace.finish()
+	out.Phases = trace.done
 	return out, err
 }
 
 func deferredReadTransaction(db *gorm.DB, read func(*gorm.DB) error) error {
+	return deferredReadTransactionTraced(db, func(string) {}, read)
+}
+
+// deferredReadTransactionTraced reports stage names to enter as it goes:
+// connection acquisition, BEGIN, then (via read) its own stages, then COMMIT.
+func deferredReadTransactionTraced(db *gorm.DB, enter func(string), read func(*gorm.DB) error) error {
+	enter("acquire_connection")
 	return db.Connection(func(conn *gorm.DB) error {
+		enter("begin")
 		if err := conn.Exec("BEGIN DEFERRED").Error; err != nil {
 			return err
 		}
@@ -129,6 +206,7 @@ func deferredReadTransaction(db *gorm.DB, read func(*gorm.DB) error) error {
 		if err := read(conn.Session(&gorm.Session{NewDB: true})); err != nil {
 			return err
 		}
+		enter("commit")
 		if err := conn.Exec("COMMIT").Error; err != nil {
 			return err
 		}
