@@ -93,11 +93,11 @@ func (a *platformAdmin) Dashboard(ctx context.Context) (coordinator.Dashboard, e
 	now := time.Now()
 	if a.workers != nil {
 		if a.usageCache == nil || !now.Before(a.usageExpires) {
-			usage, err := a.workers.DashboardUsage(ctx, now, time.Local)
-			if err != nil {
-				return coordinator.Dashboard{}, err
+			// Usage is additive: a failed read keeps the last known value, or
+			// omits the field, and never fails the dashboard snapshot.
+			if usage, err := a.workers.DashboardUsage(ctx, now, time.Local); err == nil {
+				a.usageCache = &usage
 			}
-			a.usageCache = &usage
 			a.usageExpires = now.Add(15 * time.Second)
 		}
 		out.Usage = a.usageCache
