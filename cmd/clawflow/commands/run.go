@@ -2215,10 +2215,8 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 
 	// u != nil guard: ExtractUsage returns (nil, nil) when there is nothing to
 	// account for, and assigning that would blank a recorded Usage (issue #322).
-	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil && u != nil && rm.Usage == nil {
-		// Offload's authoritative result usage wins; the events fallback only
-		// fills in when none was reported (it can only estimate tokens).
-		rm.Usage = u
+	if u, uerr := snapshot.ExtractUsage(filepath.Join(runDir, "events.jsonl")); uerr == nil {
+		rm.Usage = usageWithEventsFallback(rm.Usage, u)
 	}
 	if j.hooks != nil && rm.Status == "success" && ctx.Err() == nil && (j.op.Name == "implement" || j.repair != nil) {
 		if events, err := acceptanceRead(filepath.Join(runDir, "events.jsonl"), acceptanceFileLimit); err == nil {
@@ -3521,4 +3519,13 @@ func cleanClaudeWorktrees(localPath, wtPath string) {
 			fmt.Fprintf(os.Stderr, "  ✓ claude worktree removed: %s\n", sub)
 		}
 	}
+}
+
+// usageWithEventsFallback keeps Offload's authoritative result usage and only
+// falls back to the events-derived estimate when none was reported.
+func usageWithEventsFallback(reported, fromEvents *snapshot.Usage) *snapshot.Usage {
+	if reported != nil || fromEvents == nil {
+		return reported
+	}
+	return fromEvents
 }
