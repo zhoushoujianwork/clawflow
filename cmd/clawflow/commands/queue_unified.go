@@ -13,6 +13,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
+	"github.com/zhoushoujianwork/clawflow/internal/repairledger"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
@@ -361,7 +362,9 @@ func flightBlockedReason(ctx context.Context, client vcs.Client, repo string, re
 	}
 	if repoCfg.CIRequired {
 		if st, err := client.GetCIStatus(repo, pr.Number); err == nil && st == vcs.CIStatusFailure {
-			if !ciRepairEnabled(repoCfg) || checkRepairBudget(snapshot.DataDir(), repo, pr.Number, now) != nil {
+			// A CI no-change at this head also ends repair: nothing will follow.
+			if !ciRepairEnabled(repoCfg) || checkRepairBudget(snapshot.DataDir(), repo, pr.Number, now) != nil ||
+				repairledger.CINoChangeAtHead(snapshot.DataDir(), repo, pr.Number, pr.HeadSHA) {
 				return mergeReasonCIFailed
 			}
 		}

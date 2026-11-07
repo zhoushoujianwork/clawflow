@@ -206,7 +206,116 @@ func TestNoChangeForCIReasonAndInfraStayNonConsuming(t *testing.T) {
 	}
 	_, path := Path(root, "o/r", 10)
 	l, _ := Load(path)
-	if c, _ := l.Counts(); c != 0 || l.NoChangeAtHead("h1") {
-		t.Fatal("non-acceptance no-change keeps old behavior")
+	// A CI no-change spends the budget (#768) but never counts as an
+	// acceptance conclusion: acceptance review and repair stay untouched.
+	if c, _ := l.Counts(); c != 1 || l.NoChangeAtHead("h1") || !l.CINoChangeAtHead("h1") {
+		t.Fatalf("ci no-change: consumed=%d acceptance=%v ci=%v", c, l.NoChangeAtHead("h1"), l.CINoChangeAtHead("h1"))
+	}
+}
+
+func TestCINoChangeBindsToHeadSpendsBudgetAndNotifiesOnce(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().UTC().Add(-48 * time.Hour)
+	pr := vcs.PR{Number: 12, HeadSHA: "h1"}
+	if CINoChangeAtHead(root, "o/r", 12, "h1") || CINoChangeNeedsNotice(root, "o/r", 12, "h1") {
+		t.Fatal("empty ledger reports a conclusion")
+	}
+	if err := MarkCINoChangeNotified(root, "o/r", 12, "h1"); err != nil {
+		t.Fatalf("mark on empty ledger: %v", err)
+	}
+	n, err := Reserve(root, "o/r", pr, ReasonCI, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if CINoChangeAtHead(root, "o/r", 12, "h1") {
+		t.Fatal("an open reservation is not a conclusion")
+	}
+	if err := Release(root, "o/r", pr, n, ReleaseNoChange, now); err != nil {
+		t.Fatal(err)
+	}
+	if !CINoChangeAtHead(root, "o/r", 12, "h1") || CINoChangeAtHead(root, "o/r", 12, "h2") || CINoChangeAtHead(root, "o/r", 12, "") {
+		t.Fatal("conclusion must bind to the exact head")
+	}
+	if NoChangeAtHead(root, "o/r", 12, "h1") {
+		t.Fatal("CI conclusion leaked into the acceptance gate")
+	}
+	if !CINoChangeNeedsNotice(root, "o/r", 12, "h1") {
+		t.Fatal("a fresh conclusion needs a notice")
+	}
+	if err := MarkCINoChangeNotified(root, "o/r", 12, "h1"); err != nil {
+		t.Fatal(err)
+	}
+	if CINoChangeNeedsNotice(root, "o/r", 12, "h1") || !CINoChangeAtHead(root, "o/r", 12, "h1") {
+		t.Fatal("notice flag must not clear the conclusion")
+	}
+	// A different head's conclusion is noticed independently.
+	pr2 := vcs.PR{Number: 12, HeadSHA: "h2"}
+	n, err = Reserve(root, "o/r", pr2, ReasonCI, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(root, "o/r", pr2, n, ReleaseNoChange, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if !CINoChangeNeedsNotice(root, "o/r", 12, "h2") || CINoChangeNeedsNotice(root, "o/r", 12, "h1") {
+		t.Fatal("notice state must be per head")
+	}
+	// Both no-changes spent budget; the third attempt is the last, then exhausted.
+	if c, infra := loadCounts(t, root, 12); c != 2 || infra != 0 {
+		t.Fatalf("consumed=%d infra=%d", c, infra)
+	}
+	later := now.Add(3 * time.Hour)
+	pr3 := vcs.PR{Number: 12, HeadSHA: "h3"}
+	n, err = Reserve(root, "o/r", pr3, ReasonCI, later)
+	if err != nil || n != 3 {
+		t.Fatalf("third attempt: %d %v", n, err)
+	}
+	if err := Release(root, "o/r", pr3, n, ReleaseNoChange, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Reserve(root, "o/r", vcs.PR{Number: 12, HeadSHA: "h4"}, ReasonCI, later.Add(24*time.Hour)); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("a new head must not bypass the per-PR cap, got %v", err)
+	}
+}
+
+func loadCounts(t *testing.T, root string, pr int) (int, int) {
+	t.Helper()
+	_, path := Path(root, "o/r", pr)
+	l, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l.Counts()
+}
+
+// Coordinator mode: the worker reports kind "no-change" and the controller's
+// ledger records the conclusion through ApplyResult, with or without a prior
+// reservation, and replaying the result changes nothing.
+func TestApplyResultRecordsCINoChangeForCoordinator(t *testing.T) {
+	for _, reserved := range []bool{false, true} {
+		root := t.TempDir()
+		now := time.Now().UTC().Add(-time.Hour)
+		pr := vcs.PR{Number: 13, HeadSHA: "h1"}
+		if reserved {
+			if n, err := Reserve(root, "o/r", pr, ReasonCI, now); err != nil || n != 1 {
+				t.Fatalf("reserve: %d %v", n, err)
+			}
+		}
+		for i := 0; i < 2; i++ {
+			if err := ApplyResult(root, "o/r", pr, 1, "task-1", ReasonCI, ReleaseNoChange, now.Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !CINoChangeAtHead(root, "o/r", 13, "h1") || CINoChangeAtHead(root, "o/r", 13, "h2") || NoChangeAtHead(root, "o/r", 13, "h1") {
+			t.Fatalf("reserved=%v: conclusion not bound to the CI gate at this head", reserved)
+		}
+		_, path := Path(root, "o/r", 13)
+		l, _ := Load(path)
+		if len(l.Attempts) != 1 {
+			t.Fatalf("reserved=%v: replay duplicated the attempt: %+v", reserved, l.Attempts)
+		}
+		if c, infra := l.Counts(); c != 1 || infra != 0 {
+			t.Fatalf("reserved=%v: consumed=%d infra=%d", reserved, c, infra)
+		}
 	}
 }

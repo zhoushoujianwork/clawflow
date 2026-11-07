@@ -63,7 +63,15 @@ failing job/step broke outside the PR's code (for example package-manager lock
 contention, network or registry errors, runner setup or install steps failing)
 and the PR diff does not touch what that step uses, do not run long local test
 suites. Say plainly that this is a CI environment problem unrelated to the PR,
-cite the evidence lines, make no code change, and finish promptly with
+cite the evidence lines, make no code change, leave the working tree clean, and
+finish promptly with `<!-- clawflow:outcome=no-change -->`. The same applies to a
+failing test that you have shown does not exercise anything this PR changed and
+that passes locally (a flaky or pre-existing failure). The runner verifies the
+unchanged published head, counts this as one of the PR's repair attempts, posts
+one PR comment asking a person to rerun CI or look at the failure, and does not
+dispatch another CI repair for this head. It never reruns CI itself, and a new
+head restores automatic repair. Use `no-change` only when the evidence and diff
+support "unrelated"; a failure you cannot explain or reproduce stays
 `<!-- clawflow:outcome=agent-failed -->`. This is your judgment from the
 evidence and diff, not a fixed rule; if the diff plausibly affects the step,
 reproduce locally as above.
