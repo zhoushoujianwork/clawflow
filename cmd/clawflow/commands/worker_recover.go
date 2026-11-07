@@ -114,6 +114,11 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	if j.Task.LeaseExpiresAt == nil || j.Task.LeaseExpiresAt.After(time.Now()) {
 		return fmt.Errorf("previous execution authority has not expired; recovery postponed")
 	}
+	// Offload cannot see processes that detached from the native process group
+	// (setsid). Refuse to hand the worktree to a second writer; nothing is killed.
+	if err := ensureWorktreeHasNoWriters(ctx, cp.Workspace); err != nil {
+		return err
+	}
 	if acknowledged {
 		// Archive before requesting authority; a lost response can be retried
 		// against the unchanged journal without losing the original receipt.
