@@ -81,18 +81,20 @@ func (s *Store) UpgradeSnapshot(ctx context.Context, watch []string) (UpgradeSna
 		Unsettled                  int
 		Result                     []byte
 		ResultDigest               string
+		PriorInterrupted           bool
 	}
 	if err := s.db.WithContext(ctx).Raw(`SELECT t.id, t.repo, t.issue, t.kind, t.lease_owner, t.fencing_token, t.attempt, t.result, t.result_digest,
  COALESCE(json_extract(t.payload, '$.durable_execution') = 1, false) AS durable,
  (t.lease_expires_at IS NOT NULL AND t.lease_expires_at <= ?) AS expired,
  (t.lease_expires_at IS NULL AND t.result IS NOT NULL) AS accepted,
+ EXISTS (SELECT 1 FROM task_attempts a WHERE a.task_id = t.id AND a.lease_epoch = t.fencing_token - 1 AND a.worker_id = t.lease_owner AND a.status = 'interrupted') AS prior_interrupted,
  (SELECT count(*) FROM effect_intents e WHERE e.task_id = t.id AND e.lease_epoch = t.fencing_token AND e.status IN ('pending','uncertain')) AS unsettled
  FROM coordinator_tasks t WHERE t.state = 'leased' ORDER BY t.id`, out.Now.UTC()).Scan(&rows).Error; err != nil {
 		return out, err
 	}
 	for _, r := range rows {
 		out.Leases = append(out.Leases, UpgradeLease{TaskID: r.ID, Repo: r.Repo, Issue: r.Issue, Kind: r.Kind, Owner: r.LeaseOwner, Fence: r.FencingToken, Durable: r.Durable, ResultAccepted: r.Accepted, UnsettledEffects: r.Unsettled,
-			AwaitingRecovery: r.Durable && r.Expired && recoveryEligible(r.Kind, r.Attempt, r.Result, r.ResultDigest)})
+			AwaitingRecovery: r.Durable && r.Expired && recoveryEligible(r.Kind, r.Attempt, r.Result, r.ResultDigest, r.PriorInterrupted)})
 	}
 	if len(watch) > 0 {
 		var tasks []Task
@@ -110,9 +112,9 @@ func (s *Store) UpgradeSnapshot(ctx context.Context, watch []string) (UpgradeSna
 // RecoverExecution accepts an expired durable lease. It only reads; recovery
 // itself is unchanged. The worker identity and executor presence are not
 // visible here, so the answer is "eligible", not a guarantee.
-func recoveryEligible(kind string, attempt int, result []byte, digest string) bool {
+func recoveryEligible(kind string, attempt int, result []byte, digest string, priorInterrupted bool) bool {
 	if kind != "implement" && kind != "repair" || attempt >= MaxInfrastructureAttempts-1 {
 		return false
 	}
-	return len(result) == 0 || (digest != "" && recoverableReport(result))
+	return len(result) == 0 || (digest != "" && (recoverableReport(result) || (priorInterrupted && blockedResumeReport(result))))
 }

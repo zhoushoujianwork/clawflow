@@ -84,6 +84,20 @@ func recoverableReport(raw json.RawMessage) bool {
 	return InterruptedResult(raw) && json.Unmarshal(raw, &r) == nil && len(r.Effects) == 0 && r.Provenance.Session != ""
 }
 
+// blockedResumeReport identifies a report from a resumed session whose launch
+// checks failed: no model ran, so it names no session and has no effects. It
+// only counts together with a recorded interruption on the attempt before it,
+// which is what proves a retained session exists to resume.
+func blockedResumeReport(raw json.RawMessage) bool {
+	var r struct {
+		Effects    []json.RawMessage `json:"effects"`
+		Provenance struct {
+			Session string `json:"session_id"`
+		} `json:"provenance"`
+	}
+	return InterruptedResult(raw) && json.Unmarshal(raw, &r) == nil && len(r.Effects) == 0 && r.Provenance.Session == ""
+}
+
 // RecoverExecution reauthorizes only the same worker after the old authority
 // has ended. Only finalized interruption receipts may resume after reporting;
 // active, cancelled, successful and superseded tasks remain fenced out.
@@ -103,7 +117,16 @@ func (s *Store) RecoverExecution(ctx context.Context, id, worker string, epoch i
 			}
 		}
 		reported := len(task.Result) > 0
-		if !DurableTask(&task) || task.State != "leased" || task.LeaseOwner != worker || task.FencingToken != epoch || (reported && (!recoverableReport(task.Result) || task.ResultDigest == "")) || task.LeaseExpiresAt == nil || task.LeaseExpiresAt.After(now) || task.Attempt >= MaxInfrastructureAttempts-1 || (task.Kind != "implement" && task.Kind != "repair") {
+		recoverable := recoverableReport(task.Result)
+		if reported && !recoverable && blockedResumeReport(task.Result) {
+			var previous TaskAttempt
+			err := tx.First(&previous, "task_id = ? AND lease_epoch = ? AND worker_id = ? AND status = 'interrupted'", id, epoch-1, worker).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			recoverable = err == nil
+		}
+		if !DurableTask(&task) || task.State != "leased" || task.LeaseOwner != worker || task.FencingToken != epoch || (reported && (!recoverable || task.ResultDigest == "")) || task.LeaseExpiresAt == nil || task.LeaseExpiresAt.After(now) || task.Attempt >= MaxInfrastructureAttempts-1 || (task.Kind != "implement" && task.Kind != "repair") {
 			return ErrStaleLease
 		}
 		var payload struct {
