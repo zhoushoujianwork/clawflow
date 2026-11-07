@@ -83,7 +83,7 @@ func TestHousekeepingLimits(t *testing.T) {
 	if defaults.TempMaxAgeHours != 24 || defaults.ReviewCacheMaxBytes != 2<<30 || defaults.MinFreeBytes != 2<<30 || defaults.DiskWarningPercent != 85 {
 		t.Fatalf("%+v", defaults)
 	}
-	custom := config.HousekeepingSettings{TempMaxAgeHours: 48, ReviewCacheMaxBytes: 1024, MinFreeBytes: 2048, DiskWarningPercent: 90}
+	custom := config.HousekeepingSettings{TempMaxAgeHours: 48, ReviewCacheMaxBytes: 1024, MinFreeBytes: 2048, DiskWarningPercent: 90, WorktreeGraceHours: 12}
 	invalid := config.HousekeepingSettings{TempMaxAgeHours: 1<<31 - 1, DiskWarningPercent: 101}.Limits()
 	if invalid.TempMaxAgeHours != 24 || invalid.DiskWarningPercent != 85 {
 		t.Fatalf("unsafe limits: %+v", invalid)

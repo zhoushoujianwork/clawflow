@@ -187,11 +187,17 @@ type HousekeepingSettings struct {
 	ReviewCacheMaxBytes int64   `yaml:"review_cache_max_bytes,omitempty"`
 	MinFreeBytes        uint64  `yaml:"min_free_bytes,omitempty"`
 	DiskWarningPercent  float64 `yaml:"disk_warning_percent,omitempty"`
+	// WorktreeGraceHours is how long an issue worktree must be idle before a
+	// clean, merged one is reclaimed.
+	WorktreeGraceHours int `yaml:"worktree_grace_hours,omitempty"`
 }
 
 func (s HousekeepingSettings) Limits() HousekeepingSettings {
 	if s.TempMaxAgeHours <= 0 || int64(s.TempMaxAgeHours) > int64((1<<63-1)/time.Hour) {
 		s.TempMaxAgeHours = 24
+	}
+	if s.WorktreeGraceHours <= 0 || int64(s.WorktreeGraceHours) > int64((1<<63-1)/time.Hour) {
+		s.WorktreeGraceHours = 24
 	}
 	if s.ReviewCacheMaxBytes <= 0 {
 		s.ReviewCacheMaxBytes = 2 << 30
