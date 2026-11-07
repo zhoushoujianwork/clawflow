@@ -14,6 +14,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/execution"
 	"github.com/zhoushoujianwork/clawflow/internal/filelock"
+	offload "github.com/zhoushoujianwork/offload/pkg/execution"
 )
 
 func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) error {
@@ -81,12 +82,8 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 		if !executionRunID(cp.RunID) {
 			return fmt.Errorf("library execution run ID is missing; orphan state is unknown and recovery is postponed")
 		}
-		state, abandonErr := abandonOrphanedRun(ctx, cp.RunID)
-		if abandonErr != nil {
-			return fmt.Errorf("library execution orphan state is unknown; recovery is postponed: %w", abandonErr)
-		}
-		if state != AbandonEnded && state != AbandonAlreadyEnded {
-			return fmt.Errorf("library execution orphan state is unknown; recovery is postponed")
+		if err := confirmLibraryRunEnded(ctx, cp.RunID, cp.ArtifactDir, acknowledged); err != nil {
+			return err
 		}
 	}
 	if acknowledged {
@@ -140,6 +137,57 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	j.Error = ""
 	j.Report, j.Action = nil, ""
 	return writeWorkerJournal(path, j)
+}
+
+// confirmLibraryRunEnded returns nil only when the native processes of a
+// library run are known to be gone. Any other outcome postpones recovery.
+//
+// Offload reports ErrRunNotFound when no worker slot records the run, for
+// example after a later run reused the slot. That is "unknown" for a journal
+// whose executor may have died mid-run (running, needs_recovery). It is "ended"
+// for an acknowledged interruption: the receipt exists only because the
+// executor survived until Run returned, and Run returns after it has stopped
+// the native process group (SIGTERM, then SIGKILL). If Run could not confirm
+// that, Offload keeps the group in the slot and records "cleanup" in the run
+// record, so a missing slot with no recorded cleanup means nothing is left.
+// ErrRunStillOwned, ErrRunStartUnrecorded and unconfirmed outcomes postpone
+// recovery in every state.
+func confirmLibraryRunEnded(ctx context.Context, runID, artifactDir string, acknowledged bool) error {
+	state, err := abandonOrphanedRun(ctx, runID)
+	if err == nil {
+		if state == AbandonEnded || state == AbandonAlreadyEnded {
+			return nil
+		}
+		return fmt.Errorf("library execution orphan state is unknown; recovery is postponed")
+	}
+	if acknowledged && errors.Is(err, offload.ErrRunNotFound) {
+		if libraryCleanupUnresolved(artifactDir) {
+			return fmt.Errorf("library execution orphan state is unknown; recovery is postponed: Offload recorded unresolved native process cleanup: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("library execution orphan state is unknown; recovery is postponed: %w", err)
+}
+
+// libraryCleanupUnresolved reports whether the retained Offload run record says
+// native processes survived Run's own cleanup. A record that exists but cannot
+// be read or parsed counts as unresolved (fail closed). A missing record makes
+// no such claim, so the executor-liveness guarantee above applies.
+func libraryCleanupUnresolved(artifactDir string) bool {
+	if artifactDir == "" {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join(artifactDir, "result.json"))
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	var record struct {
+		Cleanup string `json:"cleanup"`
+	}
+	return json.Unmarshal(raw, &record) != nil || record.Cleanup != ""
 }
 
 func completedExecutionResult(raw []byte) bool {

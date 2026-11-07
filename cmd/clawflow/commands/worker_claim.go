@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,14 +121,7 @@ func archiveWorkerAttempt(o workerOptions, path string, epoch int64) error {
 		if strings.HasSuffix(entry.Name(), ".lock") {
 			continue // Lock inodes stay at their original, persistent paths.
 		}
-		if !entry.Type().IsRegular() {
-			return fmt.Errorf("unexpected attempt artifact: %s", entry.Name())
-		}
-		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return err
-		}
-		if err := writeDurableFile(filepath.Join(staged, entry.Name()), raw, 0600); err != nil {
+		if err := copyAttemptEntry(dir, staged, entry); err != nil {
 			return err
 		}
 	}
@@ -140,6 +134,34 @@ func archiveWorkerAttempt(o workerOptions, path string, epoch int64) error {
 	}
 	defer f.Close()
 	return f.Sync()
+}
+
+// copyAttemptEntry copies one retained attempt entry into the archive. Regular
+// files and directories of regular files (the execution-artifacts evidence the
+// execution engines keep beside the journal) are preserved; symlinks and other
+// special files are refused, as before.
+func copyAttemptEntry(srcDir, dstDir string, entry os.DirEntry) error {
+	name := entry.Name()
+	switch {
+	case entry.Type().IsRegular():
+		return copyAttemptFile(filepath.Join(srcDir, name), filepath.Join(dstDir, name))
+	case entry.IsDir():
+		children, err := os.ReadDir(filepath.Join(srcDir, name))
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Join(dstDir, name), 0700); err != nil {
+			return err
+		}
+		for _, child := range children {
+			if err := copyAttemptEntry(filepath.Join(srcDir, name), filepath.Join(dstDir, name), child); err != nil {
+				return fmt.Errorf("%s/%w", name, err)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unexpected attempt artifact: %s", name)
+	}
 }
 
 func recoverWorkerClaims(ctx context.Context, api *workerAPI, o workerOptions) error {
@@ -183,4 +205,26 @@ func recoverWorkerClaim(ctx context.Context, api *workerAPI, o workerOptions, pa
 		}
 	}
 	return os.Remove(path)
+}
+
+// copyAttemptFile streams because executor logs and artifacts have no size
+// bound. The stage directory is renamed only after every entry is copied and
+// synced, so a crash midway leaves no partial archive.
+func copyAttemptFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Sync()
+	}
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }

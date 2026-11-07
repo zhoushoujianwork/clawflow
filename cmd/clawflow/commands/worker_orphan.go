@@ -24,6 +24,8 @@ const orphanReclaimTimeout = 10 * time.Second
 var reclaimOffloadRun = offload.ReclaimRun
 
 // abandonOrphanedRun is the public-package integration seam for Offload run cleanup.
+// Offload errors are returned unwrapped so callers can tell them apart with
+// errors.Is (ErrRunNotFound, ErrRunStillOwned, ErrRunStartUnrecorded).
 var abandonOrphanedRun = func(ctx context.Context, runID string) (AbandonState, error) {
 	if runID == "" {
 		return AbandonUnknown, errors.New("library execution run ID is missing; orphan state cannot be confirmed")
