@@ -82,7 +82,13 @@ func applyCoordinatorEffect(t *coordinator.Task, j *runJob, r *coordinatorReport
 // findCoordinatorPR prefers an open same-repository PR. Closed PRs are only
 // recovered for this exact intent, so replay cannot duplicate a completed write.
 func findCoordinatorPR(client vcs.Client, e jobEffect) (vcs.PR, error) {
-	prs, err := client.ListPRs(e.Repo, "all")
+	var prs []vcs.PR
+	var err error
+	if lister, ok := client.(vcs.PRHeadLister); ok {
+		prs, err = lister.ListPRsForHead(e.Repo, e.Head)
+	} else {
+		prs, err = client.ListPRs(e.Repo, "all")
+	}
 	if err != nil {
 		return vcs.PR{}, err
 	}

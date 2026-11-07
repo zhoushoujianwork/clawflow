@@ -322,6 +322,12 @@ type PRFeedback struct {
 	CreatedAt  string `json:"created_at,omitempty"`
 }
 
+// PRHeadLister finds PRs by head branch without walking the repository's PR
+// history. Providers that lack it fall back to ListPRs.
+type PRHeadLister interface {
+	ListPRsForHead(repo, branch string) ([]PR, error)
+}
+
 // PRFeedbackLister optionally reads reviews and comments on a PR.
 type PRFeedbackLister interface {
 	ListPRFeedback(repo string, prNumber int) ([]PRFeedback, error)
