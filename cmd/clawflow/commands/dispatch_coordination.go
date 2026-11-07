@@ -534,6 +534,12 @@ func validateWorkerCoordination(ctx context.Context, j *runJob, approved *coordi
 	if err != nil {
 		return fmt.Errorf("%w: %v", errCoordinationChanged, err)
 	}
+	// A resumed session already passed this gate when it first started, and
+	// collecting above still refuses a closed or owner-skipped issue. Comparing
+	// again would strand its retained work whenever a referenced issue changed.
+	if _, resuming := execution.RecoveryWorkspace(ctx); resuming {
+		return nil
+	}
 	// Compare only task-relevant facts so unrelated repository activity does
 	// not invalidate an approved snapshot.
 	var refs []int

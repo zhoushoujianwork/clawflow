@@ -380,3 +380,22 @@ func TestLibraryRecoveryOrphanErrorDependsOnJournalState(t *testing.T) {
 		})
 	}
 }
+
+func TestInterruptionSessionDiffers(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		result string
+		want   bool
+	}{
+		{"same session", `{"provenance":{"session_id":"native"}}`, false},
+		{"blocked before launch reports none", `{"status":"failed","infra_kind":"execution-interrupted"}`, false},
+		{"different session", `{"provenance":{"session_id":"other"}}`, true},
+		{"unreadable", `not json`, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := interruptionSessionDiffers(json.RawMessage(c.result), "native"); got != c.want {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}

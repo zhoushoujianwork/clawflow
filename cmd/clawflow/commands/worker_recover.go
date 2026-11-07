@@ -87,12 +87,7 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 		}
 	}
 	if acknowledged {
-		var r struct {
-			Provenance struct {
-				Session string `json:"session_id"`
-			} `json:"provenance"`
-		}
-		if json.Unmarshal(report.Result, &r) != nil || r.Provenance.Session != cp.Session {
+		if interruptionSessionDiffers(report.Result, cp.Session) {
 			return fmt.Errorf("checkpoint session differs from acknowledged interruption")
 		}
 	}
@@ -296,4 +291,20 @@ func newWorkerRecoveryCommands() []*cobra.Command {
 	status.Flags().StringVar(&root, "root", "", "Worker execution root (from generation descriptor location)")
 	_ = status.MarkFlagRequired("root")
 	return []*cobra.Command{recover, status}
+}
+
+// interruptionSessionDiffers reports whether an acknowledged interruption names
+// a session other than the checkpoint's. A recovery blocked before launch ran
+// no model and reports no session, which is not a mismatch: the checkpoint
+// still identifies the retained session.
+func interruptionSessionDiffers(result json.RawMessage, session string) bool {
+	var r struct {
+		Provenance struct {
+			Session string `json:"session_id"`
+		} `json:"provenance"`
+	}
+	if json.Unmarshal(result, &r) != nil {
+		return true
+	}
+	return r.Provenance.Session != "" && r.Provenance.Session != session
 }

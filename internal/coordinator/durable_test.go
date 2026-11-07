@@ -316,3 +316,72 @@ func TestDurableClaimReplaySharesCapacity(t *testing.T) {
 		t.Fatal("invalid identity accepted", err)
 	}
 }
+
+// A resumed session whose launch checks failed ran no model and reports no
+// session. The interruption recorded before it proves a session exists, so it
+// may resume again, up to the bound. Without that record it stays reserved.
+func TestBlockedResumeRecoversWithRecordedInterruption(t *testing.T) {
+	blocked := json.RawMessage(`{"status":"failed","infra_kind":"execution-interrupted","next_owner":"scheduling"}`)
+	report := func(t *testing.T, s *Store, task *Task, raw json.RawMessage) {
+		t.Helper()
+		if err := s.AcceptResult(WithReportDigest(ctx, raw, true), task.ID, "w", task.FencingToken, raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.FinalizeApplication(ctx, task.ID, task.FencingToken, true, func(Task) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := func(t *testing.T) (*Store, *Task) {
+		t.Helper()
+		s, _, _ := setup(t)
+		if err := s.RegisterWorker(ctx, Worker{ID: "w", Durable: true, MaxParallel: 1, RunUntagged: true, Roles: []string{"operator"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Enqueue(ctx, Task{Repo: "o/r", Issue: 646, Kind: "implement", Operator: "implement", Payload: json.RawMessage(`{"timeout_sec":60,"durable_execution":true}`)}); err != nil {
+			t.Fatal(err)
+		}
+		return s, claim(t, s, "w")
+	}
+
+	t.Run("after a recorded interruption", func(t *testing.T) {
+		s, task := start(t)
+		report(t, s, task, json.RawMessage(`{"status":"failed","infra_kind":"execution-interrupted","provenance":{"session_id":"retained"}}`))
+		next, err := s.RecoverExecution(ctx, task.ID, "w", task.FencingToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report(t, s, next, blocked)
+		again, err := s.RecoverExecution(ctx, next.ID, "w", next.FencingToken)
+		if err != nil {
+			t.Fatal("blocked resume stranded", err)
+		}
+		if again.FencingToken != next.FencingToken+1 || again.Attempt != next.Attempt+1 {
+			t.Fatalf("recovered %+v from %+v", again, next)
+		}
+		report(t, s, again, blocked)
+		if _, err := s.RecoverExecution(ctx, again.ID, "w", again.FencingToken); !errors.Is(err, ErrStaleLease) {
+			t.Fatal("recovery exceeded the attempt bound", err)
+		}
+	})
+
+	t.Run("without one", func(t *testing.T) {
+		s, task := start(t)
+		report(t, s, task, blocked)
+		if _, err := s.RecoverExecution(ctx, task.ID, "w", task.FencingToken); !errors.Is(err, ErrStaleLease) {
+			t.Fatal("missing session evidence resumed", err)
+		}
+	})
+}
+
+func TestRecoveryEligibleAcceptsBlockedResumeOnlyAfterInterruption(t *testing.T) {
+	blocked := []byte(`{"status":"failed","infra_kind":"execution-interrupted"}`)
+	if !recoveryEligible("implement", 1, blocked, "digest", true) {
+		t.Fatal("blocked resume after an interruption must be eligible")
+	}
+	if recoveryEligible("implement", 1, blocked, "digest", false) {
+		t.Fatal("no recorded interruption must not be eligible")
+	}
+	if recoveryEligible("implement", MaxInfrastructureAttempts-1, blocked, "digest", true) {
+		t.Fatal("the attempt bound must still apply")
+	}
+}

@@ -535,3 +535,28 @@ func TestWorkerCoordinationIgnoresUnrelatedActivity(t *testing.T) {
 		t.Fatalf("target PR head change must invalidate: %v", e)
 	}
 }
+
+func TestResumedWorkerSkipsCoordinationComparison(t *testing.T) {
+	j, c, _, _ := coordinationFixture(t)
+	approved, e := collectCoordination(context.Background(), j, nil, "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	path := filepath.Join(t.TempDir(), "execution.json")
+	raw, _ := json.Marshal(execution.Checkpoint{Version: 1, Workspace: t.TempDir(), Profile: "fixture", Session: "native"})
+	if e = os.WriteFile(path, raw, 0o600); e != nil {
+		t.Fatal(e)
+	}
+	ctx := execution.WithCheckpoint(context.Background(), path, true)
+	c.issue.Body = "a referenced fact changed while the session ran"
+	if e = validateWorkerCoordination(ctx, j, &approved); e != nil {
+		t.Fatalf("resumed session stranded: %v", e)
+	}
+	if e = validateWorkerCoordination(context.Background(), j, &approved); !errors.Is(e, errCoordinationChanged) {
+		t.Fatalf("a fresh start must still compare: %v", e)
+	}
+	c.issue.State = "closed"
+	if e = validateWorkerCoordination(ctx, j, &approved); !errors.Is(e, errCoordinationChanged) {
+		t.Fatalf("a closed issue must still stop the resume: %v", e)
+	}
+}
