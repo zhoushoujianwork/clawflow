@@ -637,16 +637,25 @@ func TestRequirementsChangeDispatchesAcceptanceAfterFailedRepair(t *testing.T) {
 }
 
 func TestNoChangeRepairValidationAndBudget(t *testing.T) {
-	for _, mode := range []string{"valid", "dirty", "changed", "unpublished", "no-reason", "ci"} {
+	for _, mode := range []string{"valid", "dirty", "changed", "unpublished", "no-reason", "ci", "merge-conflict"} {
 		t.Run(mode, func(t *testing.T) {
 			f, _, _, _ := repairAcceptanceFixture(t, "failed")
-			attempt, err := reserveRepair(snapshot.DataDir(), "o/r", f.pr, repairReasonAcceptance, time.Now())
+			ledgerReason := repairReasonAcceptance
+			if mode == "ci" || mode == "merge-conflict" {
+				ledgerReason = repairReasonCI
+			}
+			attempt, err := reserveRepair(snapshot.DataDir(), "o/r", f.pr, ledgerReason, time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
 			j := &runJob{repo: "o/r", repair: &ciRepairContext{PR: f.pr, Attempt: attempt, Acceptance: &acceptanceFindings{}}}
-			if mode == "ci" {
+			if mode == "ci" || mode == "merge-conflict" {
+				// A plain CI repair (#768) may end with no change; a merge
+				// conflict can only be resolved by a merge commit.
 				j.repair.Acceptance = nil
+			}
+			if mode == "merge-conflict" {
+				j.repair.MergeConflict = true
 			}
 			acceptanceGit = func(_ context.Context, _ string, args ...string) (string, error) {
 				switch args[0] {
@@ -673,7 +682,7 @@ func TestNoChangeRepairValidationAndBudget(t *testing.T) {
 				reason = ""
 			}
 			head, err := validateRepairOutcome(context.Background(), "unused", j, "no-change", reason)
-			if (err == nil) != (mode == "valid") {
+			if wantValid := mode == "valid" || mode == "ci"; (err == nil) != wantValid {
 				t.Fatalf("head=%s err=%v", head, err)
 			}
 			_, path := ciRepairLedgerPath(snapshot.DataDir(), "o/r", f.pr.Number)

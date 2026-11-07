@@ -36,6 +36,9 @@ type Attempt struct {
 	Released string `json:"released,omitempty"`
 	// Reason is ci, acceptance, merge_conflict, or rerun_ci. All share one ledger per PR.
 	Reason string `json:"reason,omitempty"`
+	// Notified records that the PR comment explaining a CI no-change at this
+	// head was posted, so later scans stay silent.
+	Notified bool `json:"notified,omitempty"`
 }
 type Ledger struct {
 	Attempts []Attempt `json:"attempts"`
@@ -87,12 +90,80 @@ func NoChangeAtHead(root, repo string, pr int, head string) bool {
 	return err == nil && l.NoChangeAtHead(head)
 }
 
+// ReasonCI is the Attempt.Reason of a failed-CI repair.
+const ReasonCI = "ci"
+
+// CINoChangeAtHead reports whether a CI repair already concluded that the
+// failing CI at this exact head needs no code change (for example a flaky or
+// environmental failure). CI repair is then not dispatched for this head again
+// until the head changes. It is deliberately separate from NoChangeAtHead:
+// that one gates acceptance review and acceptance repair, which a CI
+// conclusion must not affect.
+func (l Ledger) CINoChangeAtHead(head string) bool {
+	return l.ciNoChange(head, false)
+}
+
+func (l Ledger) ciNoChange(head string, needUnnotified bool) bool {
+	if head == "" {
+		return false
+	}
+	for _, a := range l.Attempts {
+		if a.Head == head && a.Released == ReleaseNoChange && a.Reason == ReasonCI && (!needUnnotified || !a.Notified) {
+			return true
+		}
+	}
+	return false
+}
+
+// CINoChangeAtHead loads the PR's ledger and applies Ledger.CINoChangeAtHead.
+// An unreadable ledger reports false.
+func CINoChangeAtHead(root, repo string, pr int, head string) bool {
+	_, path := Path(root, repo, pr)
+	l, err := Load(path)
+	return err == nil && l.CINoChangeAtHead(head)
+}
+
+// CINoChangeNeedsNotice reports whether the CI no-change at this head has not
+// yet been explained on the PR.
+func CINoChangeNeedsNotice(root, repo string, pr int, head string) bool {
+	_, path := Path(root, repo, pr)
+	l, err := Load(path)
+	return err == nil && l.ciNoChange(head, true)
+}
+
+// MarkCINoChangeNotified records that the PR comment for the CI no-change at
+// head was posted. It is a no-op when the ledger holds no such conclusion.
+func MarkCINoChangeNotified(root, repo string, pr int, head string) error {
+	unlock, err := Lock(root, repo, pr)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	dir, path := Path(root, repo, pr)
+	l, err := Load(path)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for i := range l.Attempts {
+		a := &l.Attempts[i]
+		if a.Head == head && a.Released == ReleaseNoChange && a.Reason == ReasonCI && !a.Notified {
+			a.Notified, changed = true, true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return Save(dir, path, l)
+}
+
 // Counts returns (consumed repair attempts, released infrastructure outcomes).
 func (l Ledger) Counts() (consumed, infra int) {
 	for _, a := range l.Attempts {
-		if a.Released == "" || (a.Released == ReleaseNoChange && a.Reason == ReasonAcceptance) {
-			// A confirmed acceptance no-change ran a real repair investigation, so
-			// it spends the PR's repair budget like any other acceptance repair.
+		if a.Released == "" || (a.Released == ReleaseNoChange && (a.Reason == ReasonAcceptance || a.Reason == ReasonCI)) {
+			// A confirmed no-change ran a real repair investigation, so it spends
+			// the PR's repair budget like any other repair of that kind. This keeps
+			// the three-attempt cap in force across heads.
 			consumed++
 		} else if a.Released != "no-change" && a.Released != "resource-busy" && a.Released != ReleaseOffloadUnavailable && a.Released != ReleaseCoordinationChanged && a.Released != ReleaseEnqueueDeduplicated {
 			infra++

@@ -205,6 +205,14 @@ func scanCIRepairJobs(ctx context.Context, reg *operator.Registry, client vcs.Cl
 		}
 		switch {
 		case conflict || ciFailing:
+			// A CI repair already found nothing to change for this exact head
+			// (flaky or environmental failure). Leave one PR comment and wait
+			// for a new head; never rerun CI here.
+			if !conflict && repairledger.CINoChangeAtHead(snapshot.DataDir(), repo, pr.Number, pr.HeadSHA) {
+				skip(pr.Number, errCIRepairNoChange)
+				ciRepairNoChangeNotice(client, repo, cfg, pr)
+				continue
+			}
 			// CI failure evidence: current behavior. A spent shared budget
 			// ends repair with one comment instead of a silent skip.
 			if err := checkRepairBudget(snapshot.DataDir(), repo, pr.Number, time.Now().UTC()); err != nil {
@@ -339,6 +347,10 @@ func checkCIRepair(ctx context.Context, j *runJob) error {
 		}
 		if status != vcs.CIStatusFailure {
 			return fmt.Errorf("CI no longer failing: %s", status)
+		}
+		// Workers have no ledger of their own; the controller checked at enqueue.
+		if j.hooks == nil && repairledger.CINoChangeAtHead(snapshot.DataDir(), j.repo, pr.Number, pr.HeadSHA) {
+			return errCIRepairNoChange
 		}
 	}
 	j.repair.PR = pr
@@ -702,8 +714,10 @@ func validateRepairOutcome(ctx context.Context, workdir string, j *runJob, outco
 	if outcome != "no-change" {
 		return "", nil
 	}
-	if j.repair == nil || (j.repair.Acceptance == nil && !j.repair.DevelopmentVerification && j.repair.Feedback == nil) || strings.TrimSpace(body) == "" {
-		return "", fmt.Errorf("no-change requires acceptance repair or development verification and a reason")
+	// A merge conflict is resolved only by a merge commit, so it can never be a
+	// no-op. Failed CI, acceptance, verification and feedback repairs can.
+	if j.repair == nil || j.repair.MergeConflict || strings.TrimSpace(body) == "" {
+		return "", fmt.Errorf("no-change requires a CI, acceptance or verification repair and a reason")
 	}
 	head, err := confirmedDevelopmentHead(ctx, workdir, j)
 	if err != nil {
@@ -828,6 +842,52 @@ func finishRepairFailure(ctx context.Context, j *runJob, reason string) error {
 	}
 	runLog.Warn("run/ci_repair_stopped", "repo", j.repo, "issue", j.sub.Number, "pr", j.repair.PR.Number, "reason", reason, "check", check, "err", err.Error())
 	return nil
+}
+
+// errCIRepairNoChange stops a CI repair for a head where an earlier repair
+// already concluded that the failure needs no code change.
+var errCIRepairNoChange = errors.New("CI repair already found nothing to change at this head")
+
+func ciRepairNoChangeMarker(pr vcs.PR) string {
+	return fmt.Sprintf("<!-- clawflow:ci-repair-no-change=pr-%d-head-%s -->", pr.Number, pr.HeadSHA)
+}
+
+// ciRepairNoChangeComment tells a person why automatic CI repair stopped on this
+// head. The repair's own explanation is already on the linked issue.
+func ciRepairNoChangeComment(pr vcs.PR, issue int) string {
+	return fmt.Sprintf("🤖 PR #%d: CI is failing on head %s, but an automatic repair judged the failure unrelated to this change and made no code change (its explanation is in the repair report on issue #%d). ClawFlow will not start another CI repair for this head and does not rerun CI itself. Rerun the failed checks, or have a person look at the failure. A new commit restores automatic repair.\n\n%s",
+		pr.Number, pr.HeadSHA, issue, ciRepairNoChangeMarker(pr))
+}
+
+// ciRepairNoChangeNotice leaves one PR comment per head for a CI no-change
+// conclusion. The ledger records that it was posted; an existing marker comment
+// (GitHub only, where PR comments are issue comments) covers a crash between
+// posting and recording. A failed post is retried on the next scan.
+func ciRepairNoChangeNotice(client vcs.Client, repo string, cfg config.Repo, pr vcs.PR) {
+	root := snapshot.DataDir()
+	if !repairledger.CINoChangeNeedsNotice(root, repo, pr.Number, pr.HeadSHA) {
+		return
+	}
+	record := func() {
+		if err := repairledger.MarkCINoChangeNotified(root, repo, pr.Number, pr.HeadSHA); err != nil {
+			runLog.Warn("run/ci_repair_notice_failed", "repo", repo, "pr", pr.Number, "err", err.Error())
+		}
+	}
+	if cfg.Platform != "gitlab" {
+		if existing, err := client.ListIssueComments(repo, pr.Number); err == nil {
+			for _, c := range existing {
+				if strings.Contains(c, ciRepairNoChangeMarker(pr)) {
+					record()
+					return
+				}
+			}
+		}
+	}
+	if err := client.PostPRComment(repo, pr.Number, ciRepairNoChangeComment(pr, extractClosesIssue(pr.Body))); err != nil {
+		runLog.Warn("run/ci_repair_notice_failed", "repo", repo, "pr", pr.Number, "err", err.Error())
+		return
+	}
+	record()
 }
 
 // Preserve the triggering check before repair can move the published head.
