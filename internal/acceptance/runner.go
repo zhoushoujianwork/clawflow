@@ -36,6 +36,9 @@ type Runner struct {
 	CIRequired   bool
 	// CI is queried immediately before review, after independent planning.
 	CI func() (vcs.CIEvidence, error)
+	// PRText is the redacted, bounded PR title and body, shown to the reviewer
+	// as untrusted reference data. It is never given to the planner.
+	PRText *PRText
 }
 
 func randomID() string { return execution.NewSessionKey() }
@@ -252,6 +255,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 		prompt += " Checkout prerequisite setup status: " + setupStatus + ". Setup output is private; do not publish it. A fallback placeholder is compilation support only, never proof of frontend behavior. If setup did not succeed and local execution is unavailable, reuse trustworthy successful exact-head CI covering the criterion instead of returning infrastructure_error. "
 	}
 	prompt += "The contract base_sha and its merge base with HEAD are available locally. Use git diff <base_sha>...HEAD and git log <base_sha>..HEAD for offline comparisons; no remote or credentials are available. "
+	prompt += runner.PRText.promptBlock()
 	reviewed, reviewErr := runner.executeRecorded(ctx, c, "acceptance-review", execute, prompt+string(input),
 		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "bypassPermissions"})
 	record.Reviewer = native(reviewed)
