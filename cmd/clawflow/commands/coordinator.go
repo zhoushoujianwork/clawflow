@@ -156,6 +156,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 			runReconcilePass(reconcileCtx,
 				func(c context.Context) error { return results.recoverResults(c, tasks) },
 				func(c context.Context) error { return endInactiveInterruptions(c, tasks) },
+				func(c context.Context) error { return results.endExhaustedInterruptions(c, tasks) },
 				func(c context.Context) error {
 					return reconcileActionsObservations(c, actions.Ledger{DB: db.DB()})
 				},

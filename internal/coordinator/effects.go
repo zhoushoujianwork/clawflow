@@ -363,6 +363,19 @@ func (s *Store) FinalizeApplication(ctx context.Context, id string, epoch int64,
 			}
 			retain = previous > 0
 		}
+		if failed && DurableTask(&t) && (t.Kind == "implement" || t.Kind == "repair") && retain && InterruptedResult(t.Result) && RecoveryExhausted(&t) {
+			// RecoverExecution refuses to authorize another resume, so keeping the
+			// reservation would hold this worker and repository slot forever. End
+			// the task as failed. The result, attempts, epoch and receipts stay as
+			// recorded, and no replacement task is created. The finalize callback
+			// has already announced the exhaustion. Older executors' blocked
+			// shapes are retained here and ended by EndExhaustedInterruptions,
+			// which announces them too.
+			if err := tx.Model(&t).Updates(values).Error; err != nil {
+				return err
+			}
+			return audit(tx, t.LeaseOwner, id, "recovery-exhausted")
+		}
 		if failed && DurableTask(&t) && (t.Kind == "implement" || t.Kind == "repair") && retain {
 			// A committed interruption reserves the same worker/task. Keep its
 			// receipt, but leave PendingResults so finalization runs only once.

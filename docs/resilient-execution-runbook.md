@@ -74,6 +74,10 @@ This supports controller/manager restarts and retained development/repair sessio
 
 恢复时发现 issue 已关闭，或 owner 加了 `clawflow-skip`，worker 以 `coordination context changed: coordination issue is closed or owner-skipped` 报告中断。这样的任务无法继续：工作已不再需要，报告里也没有可续跑的 session。控制器的 reconcile 循环（`EndInactiveInterruptions`）把它置为 `cancelled`，释放仓库名额，并在 controller 日志写 `coordinator/interruption_ended`。结束时只修改任务状态：保留结果、fencing epoch、回执和审计记录，不创建新任务、不写 VCS，也不触碰 worker 上的 journal、worktree 与 session 证据。只匹配已完成结果处理、lease 已过期、没有未应用 effect 的 durable 开发／修复任务；其他原因的 `coordination-changed`（讨论或需求变化、快照无效、读取失败）仍然保留。
 
+恢复次数用尽（`Attempt >= MaxInfrastructureAttempts-1`，上限和超时都不变）后，再一次 `execution-interrupted` 不可能再得到恢复授权。此前这样的任务停在 `leased`，worker 每次申请恢复都收到 409，名额一直被占。现在 `FinalizeApplication` 在保留中断之前检查预算：用尽就在同一事务里把任务置为 `failed`，审计记录为 `recovery-exhausted`。结果、attempt、fencing epoch 和回执保持原样，worker 的 journal、worktree 与 session 不动，也不创建新任务。结果处理的回调会先在 issue 上发一条幂等评论（标记 `recovery-exhausted-<task id>`，中英文各一段），写明次数已用尽、任务已 `failed`、名额已释放、证据保留在 worker 上；运行记录的 `error` 同样写明，并保留 worker 最后一次的错误文本。这是基础设施结束，不触发产品失败自动化，不加 `agent-failed`。
+
+旧控制器已经留在 `leased` 的用尽任务由 reconcile 循环的 `EndExhaustedInterruptions` 处理：先发同一条评论，成功后才置为 `failed` 并写 `coordinator/recovery_exhausted` 日志。评论失败时任务保持保留并记入 `application_attempts`，第三次失败后仍然结束，避免 VCS 故障长期占用名额。issue 已关闭或被 owner 跳过的中断仍归 `EndInactiveInterruptions`，不写 VCS。仍在运行、结果待处理、有未应用 effect 的任务以及非 durable 任务都不匹配。
+
 此路径不导入之前已经终结或被替代的历史超时任务。部署后需单独记录真实 backend 的超时续跑验收；无界面测试验证权限、预算、回执、锁与 worktree 保留，并不代表已做真实模型续跑。
 
 ## Validation boundary

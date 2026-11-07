@@ -149,8 +149,48 @@ func (s *coordinatorResults) reconcile(ctx context.Context, store coordinator.Ef
 			r.PRNumber, r.PRURL, r.Branch = pr.Number, pr.URL, pr.HeadBranch
 		}
 		r.Effects = nil
+		if failed && retainedInterruption(&current, r) && coordinator.RecoveryExhausted(&current) {
+			// The store ends this task instead of reserving it, so say why here.
+			if err := announceRecoveryExhausted(j, &current, r); err != nil {
+				return err
+			}
+		}
 		return s.apply(ctx, &current, j, r)
 	})
+}
+
+// recoveryExhaustedRunID is the stable marker that makes the issue comment
+// idempotent across replays, restarts and the sweep below.
+func recoveryExhaustedRunID(taskID string) string { return "recovery-exhausted-" + taskID }
+
+// announceRecoveryExhausted makes the end of a task visible on its issue and in
+// its run record: the recovery budget is spent, so the task failed and its slot
+// is free. Only controller-known facts go into the comment; worker-supplied
+// error text stays out of it.
+func announceRecoveryExhausted(j *runJob, t *coordinator.Task, r *coordinatorReport) error {
+	previous := strings.TrimSpace(r.Error)
+	r.Error = fmt.Sprintf("recovery attempts exhausted (%d of %d used); task failed and its slot was released. The worker keeps the worktree and session as evidence.", t.Attempt+1, coordinator.MaxInfrastructureAttempts)
+	if previous != "" && !strings.Contains(previous, "recovery attempts exhausted") {
+		r.Error += " Last interruption: " + sanitizeReviewerText(previous, 500)
+	}
+	number := t.Issue
+	if number <= 0 {
+		number = t.PR
+	}
+	if number <= 0 {
+		return nil
+	}
+	if j.client == nil {
+		return fmt.Errorf("cannot announce exhausted recovery for %s#%d: missing VCS client", t.Repo, number)
+	}
+	body := fmt.Sprintf("恢复次数已用尽（%d/%d）：%s 任务 %s 在 worker %s 上多次中断，已结束为 failed，仓库名额已释放。worker 上保留原 worktree 和 session 作为证据，不会自动创建新任务。\n\nRecovery attempts exhausted (%d of %d): the %s task %s was interrupted repeatedly on worker %s. It is now failed and the repository slot is released. The worker keeps the worktree and session as evidence, and no new task is created.",
+		t.Attempt+1, coordinator.MaxInfrastructureAttempts, t.Kind, t.ID, t.LeaseOwner,
+		t.Attempt+1, coordinator.MaxInfrastructureAttempts, t.Kind, t.ID, t.LeaseOwner)
+	err := j.client.PostIssueCommentIdempotent(t.Repo, number, body, recoveryExhaustedRunID(t.ID))
+	if errors.Is(err, vcs.ErrNotSupported) {
+		err = j.client.PostIssueComment(t.Repo, number, body)
+	}
+	return err
 }
 
 // coordinatorResultPR restores repair identity from the persisted job context.
@@ -323,6 +363,34 @@ func endInactiveInterruptions(ctx context.Context, store interface {
 	for _, t := range ended {
 		coordLog().Info("coordinator/interruption_ended", "task", t.ID, "repo", t.Repo, "issue", t.Issue, "kind", t.Kind, "worker", t.LeaseOwner, "epoch", t.FencingToken,
 			"reason", "issue is closed or owner-skipped; retained worktree and session are kept as evidence, the repository slot is released")
+	}
+	return err
+}
+
+// endExhaustedInterruptions fails retained interruptions that FinalizeApplication
+// kept before the recovery budget check existed. Each is announced on its issue
+// first, then ended; the worker's journal, worktree and session stay in place
+// and no task is created.
+func (s *coordinatorResults) endExhaustedInterruptions(ctx context.Context, store interface {
+	EndExhaustedInterruptions(context.Context, func(coordinator.Task) error) ([]coordinator.Task, error)
+}) error {
+	ended, err := store.EndExhaustedInterruptions(ctx, func(t coordinator.Task) error {
+		var r coordinatorReport
+		if err := json.Unmarshal(t.Result, &r); err != nil {
+			return err
+		}
+		j, err := s.loadJob(ctx, &t)
+		if err != nil {
+			return err
+		}
+		if err := announceRecoveryExhausted(j, &t, &r); err != nil {
+			return err
+		}
+		return s.apply(ctx, &t, j, &r)
+	})
+	for _, t := range ended {
+		coordLog().Info("coordinator/recovery_exhausted", "task", t.ID, "repo", t.Repo, "issue", t.Issue, "kind", t.Kind, "worker", t.LeaseOwner, "epoch", t.FencingToken,
+			"reason", "recovery attempts exhausted; task failed and its slot released; retained worktree and session are kept as evidence")
 	}
 	return err
 }
