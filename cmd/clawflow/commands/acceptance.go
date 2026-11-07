@@ -315,6 +315,25 @@ func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prN
 	return c, rc, ec, pr, c.Validate()
 }
 
+// Bounds for the PR title and body shown to the reviewer as untrusted data.
+const (
+	acceptancePRTitleLimit = 500
+	acceptancePRBodyLimit  = 16000
+)
+
+// acceptancePRText reduces the PR title and body to bounded, redacted data for
+// the reviewer. It returns nil when there is nothing to show.
+func acceptancePRText(pr vcs.PR) *acceptance.PRText {
+	text := &acceptance.PRText{
+		Title: sanitizeReviewerText(pr.Title, acceptancePRTitleLimit),
+		Body:  sanitizeReviewerText(pr.Body, acceptancePRBodyLimit),
+	}
+	if text.Empty() {
+		return nil
+	}
+	return text
+}
+
 func acceptanceRead(path string, limit int64) ([]byte, error) {
 	st, err := os.Lstat(path)
 	if err != nil || !st.Mode().IsRegular() || st.Size() > limit {
@@ -880,7 +899,7 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 	if provider, ok := client.(vcs.CIEvidenceProvider); ok {
 		ci = func() (vcs.CIEvidence, error) { return provider.GetCIEvidence(repo, prNumber) }
 	}
-	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, PlanStore: planStore, PlanPolicy: planPolicy, SavedPlan: savedPlan, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand, SetupCommand: rc.AcceptanceSetupCommand}).Run(ctx, c, scratch, workspace)
+	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, PlanStore: planStore, PlanPolicy: planPolicy, SavedPlan: savedPlan, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand, SetupCommand: rc.AcceptanceSetupCommand, PRText: acceptancePRText(pr)}).Run(ctx, c, scratch, workspace)
 	if r.Completed {
 		if publishErr := publishAcceptanceReport(ctx, client, r); publishErr != nil {
 			return r, errors.Join(err, publishErr)
