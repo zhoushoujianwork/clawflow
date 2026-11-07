@@ -32,6 +32,17 @@ func TestReportedInterruptionRetainsReservationAndRecoversBoundedly(t *testing.T
 		}
 		s = New(db.DB()) // Restart must neither lose the reservation nor reapply the result.
 		current, err := s.Task(ctx, task.ID)
+		if attempt == MaxInfrastructureAttempts-1 {
+			// The budget is spent: no resume can be authorized, so the task ends
+			// instead of holding its worker and repository slot. Evidence stays.
+			if err != nil || current.State != "failed" || current.LeaseExpiresAt != nil || current.Attempt != attempt || current.LeaseOwner != "w" || current.FencingToken != task.FencingToken || !MatchingReport(current, "w", task.FencingToken, raw, true) {
+				t.Fatalf("exhausted interruption not ended with its evidence: %+v, %v", current, err)
+			}
+			if _, err := s.RecoverExecution(ctx, task.ID, "w", task.FencingToken); !errors.Is(err, ErrStaleLease) {
+				t.Fatal("ended task was recovered", err)
+			}
+			break
+		}
 		if err != nil || current.State != "leased" || current.Attempt != attempt || current.LeaseOwner != "w" || current.FencingToken != task.FencingToken || !MatchingReport(current, "w", task.FencingToken, raw, true) {
 			t.Fatalf("lost reserved interruption: %+v, %v", current, err)
 		}
@@ -50,12 +61,6 @@ func TestReportedInterruptionRetainsReservationAndRecoversBoundedly(t *testing.T
 			t.Fatal("other worker recovered session", err)
 		}
 		next, err := s.RecoverExecution(ctx, task.ID, "w", task.FencingToken)
-		if attempt == MaxInfrastructureAttempts-1 {
-			if !errors.Is(err, ErrStaleLease) {
-				t.Fatal("recovery exceeded budget", err)
-			}
-			break
-		}
 		if err != nil || next.FencingToken != task.FencingToken+1 || next.Attempt != attempt+1 || len(next.Result) != 0 || next.ResultDigest != "" {
 			t.Fatal("bad recovered authority", next, err)
 		}
