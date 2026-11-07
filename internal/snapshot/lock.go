@@ -32,8 +32,14 @@ func LockDir() string {
 
 // LockPath returns the lockfile path for a (repo, issue) pair.
 func LockPath(repo string, issueNum int) string {
+	return LockPathIn(StateDir(), repo, issueNum)
+}
+
+// LockPathIn is LockPath for another state root, such as a local worker's.
+// repo may also be the filesystem slug (owner__repo).
+func LockPathIn(stateDir, repo string, issueNum int) string {
 	slug := strings.ReplaceAll(repo, "/", "__")
-	return filepath.Join(LockDir(), slug, fmt.Sprintf("issue-%d.lock", issueNum))
+	return filepath.Join(stateDir, "locks", slug, fmt.Sprintf("issue-%d.lock", issueNum))
 }
 
 // AcquireLock holds a kernel lock until ReleaseLock.

@@ -97,8 +97,8 @@ func runHousekeeping(ctx context.Context, cfg *config.Config, dry bool) (r house
 	}
 	// Database/query failures retain worktrees. Active includes queued work as
 	// well as held leases, protecting the window before a worker takes its lock.
-	active, err := activeCoordinatorIssues(ctx)
-	if err != nil {
+	active, activeErr := activeCoordinatorIssues(ctx)
+	if activeErr != nil {
 		r.Errors = append(r.Errors, "worktrees: active task state unavailable")
 	} else {
 		for repo, rc := range cfg.Repos {
@@ -121,6 +121,14 @@ func runHousekeeping(ctx context.Context, cfg *config.Config, dry bool) (r house
 			pruneFinishedWorktrees(ctx, &r, snapshot.StateDir(), repo, expandHomeStr(rc.LocalPath), prs, active[repo])
 		}
 	}
+
+	// Worktrees are created detached at the base branch, so the PR-based pass
+	// above never matches them. This pass needs no VCS state: it reclaims clean
+	// worktrees already contained in the default branch and prunes git records
+	// whose directory is gone. Unknown task state keeps every worktree.
+	reclaimIssueWorktrees(ctx, &r, cfg, worktreeRoots(snapshot.StateDir()),
+		time.Duration(limits.WorktreeGraceHours)*time.Hour, runLog,
+		func(context.Context) (map[string]map[int]bool, error) { return active, activeErr })
 
 	return r
 }

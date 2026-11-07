@@ -14,6 +14,7 @@ settings:
     review_cache_max_bytes: 2147483648
     min_free_bytes: 2147483648
     disk_warning_percent: 85
+    worktree_grace_hours: 24
 ```
 
 省略或填零使用上述默认值。`disabled` 关闭清理，但不会关闭升级前的
@@ -29,6 +30,31 @@ settings:
 执行锁且工作树干净时通过 Git 移除；数据库或 VCS 状态不可用时保留。
 这替代调度过程以前按“空工作树”判断的回收，避免误删打开的 PR 所用工作树。
 不强制移除，不遍历根目录内的符号链接。
+
+### 干净且已合并的 issue 工作树
+
+实现任务的工作树以 detached HEAD 创建，没有本地分支，所以上面按 PR 分支判断的
+回收对它们不生效。另有一遍独立的回收，不依赖 VCS 状态，只处理机器状态根下
+`worktrees/` 和内置 local worker 状态根（`local-worker/worktrees/`）里的
+`issue-<N>-*` 目录；数据目录之外的 worktree 一律不碰。目录同时满足下列条件才会
+通过 `git worktree remove`（不加 `--force`）移除：
+
+- 工作树干净（无未提交、未跟踪的改动）；
+- HEAD 已包含在默认分支中（仓库配置的 `base_branch`，未配置时为 `origin` 的默认分支）；
+- 该 issue 没有排队或持有租约的调度任务，且 issue 执行锁可取得，`git worktree lock` 未设置；
+- 工作树（目录、HEAD、索引）超过宽限期没有变化，默认 24 小时，由
+  `settings.housekeeping.worktree_grace_hours` 配置。
+
+任一条件不满足，或调度任务状态无法读取，目录都保留。只移除工作树，不删除分支。
+
+同一遍还会对相关仓库执行 `git worktree prune`，清掉目录已不存在、且超过同一宽限期的
+记录。如果该仓库还有位于数据目录之外的失效记录，则改为逐条清理数据目录内的记录，
+数据目录外的记录保持不变。
+
+每次执行都在 `run.log` 写入 `housekeeping/worktree_removed`（路径）、
+`housekeeping/worktree_kept`（路径和原因）以及汇总行 `housekeeping/worktrees`
+（移除数、清理记录数、保留数及按原因的计数）。结果文件的 `worktrees` 字段含同样的计数。
+`--dry-run` 给出同样的判断，不移除任何内容。
 
 自升级在分配构建目录前检查源目录、安装目标目录和临时目录所在卷。
 任一卷可用空间低于 `min_free_bytes`（或探测失败），先尝试清理，再次检查仍不满足

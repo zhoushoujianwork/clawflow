@@ -64,13 +64,31 @@ func Gate(ctx context.Context, temp string, exclusive bool) (func(), error) {
 	}
 }
 
+// WorktreeStats summarizes one pass over ClawFlow's per-issue worktrees.
+// SkippedBy counts kept worktrees by a stable reason key.
+type WorktreeStats struct {
+	Removed   int            `json:"removed"`
+	Pruned    int            `json:"pruned_records"`
+	Skipped   int            `json:"skipped"`
+	SkippedBy map[string]int `json:"skipped_by,omitempty"`
+}
+
 type Result struct {
-	At      time.Time `json:"at"`
-	DryRun  bool      `json:"dry_run"`
-	Paths   []string  `json:"paths"`
-	Bytes   int64     `json:"bytes"`
-	Skipped string    `json:"skipped,omitempty"`
-	Errors  []string  `json:"errors,omitempty"`
+	At        time.Time      `json:"at"`
+	DryRun    bool           `json:"dry_run"`
+	Paths     []string       `json:"paths"`
+	Bytes     int64          `json:"bytes"`
+	Skipped   string         `json:"skipped,omitempty"`
+	Errors    []string       `json:"errors,omitempty"`
+	Worktrees *WorktreeStats `json:"worktrees,omitempty"`
+}
+
+// WorktreeStats returns the worktree summary, creating it on first use.
+func (r *Result) WorktreeStats() *WorktreeStats {
+	if r.Worktrees == nil {
+		r.Worktrees = &WorktreeStats{}
+	}
+	return r.Worktrees
 }
 
 // SafeDir rejects symlink components below a trusted root. The root itself may
