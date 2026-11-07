@@ -126,3 +126,13 @@ Readiness gates are process-local caches and are excluded from generation and ex
 worker 回传时，由控制器从 VCS 确认 PR 已关闭或合并后，仅退役该未提交结果的 acceptance task。数据库事务核对原 owner、epoch、种类和状态，再撤销 authority 并保留审计；已经 accepted 的结果或新的 owner／epoch 不能被撤销。回传收到终态 stale 响应后停止重试，原 journal 及原通过记录继续保留。VCS 读取失败保持错误，不据此取消任务。
 
 2026-10-31 的 #626 故障保留了两条相同契约的审核：较早结果已通过且 PR 已合并，较晚结果停在 `pending_sync` 并收到 HTTP 500。运维在备份后核对实际合并 head、原通过记录、已完成 checkpoint 和原 owner／epoch，通过现有取消事务退役这条多余审核，随后 #624 自动开始验收；没有重跑模型、增加容量或改写 journal。修复由 #627 单独交付，不移动正在审核的 #624 提交。
+
+## 已成功任务的写回失败
+
+任务本身已成功（`status` 为 `success` 或 `skipped`）而结果写回遇到暂时性错误（超时、网络错误、HTTP 5xx）时，reconcile 循环不再把它记为 `failed`：
+
+- 结果、effect intent 和租约状态保持不变，`application_attempts` 不增加；错误文本写入 `application_error`，只写一条 `result-apply-deferred` 审计。
+- 按退避重试：首次间隔 30 秒，之后逐次加倍，上限 10 分钟。退避保存在 controller 内存中，controller 重启后立即重试一次。
+- 任务停留超过 10 分钟后，watchdog 的 `result_stuck` 规则报告它（`updated_at` 不被重试刷新，计时不会重置）。恢复后写回成功，任务转为 `done`。
+- 重试不会重复创建 PR 或评论：PR 按 head 分支查找后再创建，评论带固定的 run-id 标记。
+- 不可恢复的错误（4xx 校验或权限错误、解码错误）以及未成功的任务（`failed`、`blocked`、被中断）仍沿用原来的 3 次上限，第三次后转为 `failed`。

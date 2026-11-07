@@ -319,6 +319,10 @@ type coordinatorResults struct {
 	}
 	loadJob func(context.Context, *coordinator.Task) (*runJob, error)
 	apply   func(context.Context, *coordinator.Task, *runJob, *coordinatorReport) error
+	// backoff paces retries of results whose write-back failed transiently.
+	backoff resultBackoff
+	// now overrides the clock for tests.
+	now func() time.Time
 }
 
 // Execution output is stored by the underlying coordinator store; the embedded

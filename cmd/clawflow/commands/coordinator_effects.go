@@ -212,6 +212,10 @@ func (s *coordinatorResults) recoverResults(ctx context.Context, store coordinat
 	var first error
 	for i := range tasks {
 		t := &tasks[i]
+		if s.backoff.wait(t.ID, t.FencingToken, s.clock()) > 0 {
+			// A transient failure is already waiting out its backoff.
+			continue
+		}
 		taskCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 
 		var r coordinatorReport
@@ -238,8 +242,26 @@ func (s *coordinatorResults) recoverResults(ctx context.Context, store coordinat
 			coordLog().Warn("coordinator/result-apply-deferred", "task", t.ID, "retry_after", limited.After)
 			continue
 		}
-		if err != nil && ctx.Err() == nil {
+		if err == nil {
+			s.backoff.clear(t.ID)
+			continue
+		}
+		if ctx.Err() == nil {
 			message := sanitizeReviewerText(err.Error(), 4000)
+			if deferrable(err, t.Result) {
+				// The task itself succeeded; a slow or unreachable VCS must not
+				// fail it. Keep the result and its intents, retry with backoff
+				// and let the finalizing_stalled watchdog rule report the wait.
+				// Every effect is idempotent (stable comment markers, PR lookup
+				// by head before create), so a retry cannot duplicate one.
+				delay := s.backoff.failed(t.ID, t.FencingToken, s.clock())
+				coordLog().Warn("coordinator/result-apply-retrying", "task", t.ID, "repo", t.Repo, "issue", t.Issue, "failures", s.backoff.failures(t.ID), "retry_in", delay.String(), "err", message)
+				if recordErr := store.RecordDeferredApplication(ctx, t.ID, t.FencingToken, message); recordErr != nil && first == nil {
+					first = recordErr
+				}
+				continue
+			}
+			s.backoff.clear(t.ID)
 			coordLog().Warn("coordinator/result-apply-failed", "task", t.ID, "err", message)
 			if recordErr := store.RecordApplicationFailure(ctx, t.ID, t.FencingToken, message); recordErr != nil && first == nil {
 				first = recordErr

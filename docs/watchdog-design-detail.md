@@ -9,7 +9,7 @@
 | `Store.Board` / `deriveBoard`（`internal/coordinator/board.go`） | 只读快照，推导 stage 和 `waiting_reason` | 规则以 Board 为输入 |
 | `Store.Heartbeat`（`internal/coordinator/store.go`） | 只证明租约持有；durable 任务不因心跳续期 | 心跳不能代表进度 |
 | `ExpireLeases`（`internal/coordinator/store.go`） | 普通任务最多 3 次基础设施重试；durable 任务跳过 | 不改变隔离语义，只观察停留时长 |
-| `RecordApplicationFailure`（`internal/coordinator/effects.go`） | 写回失败 3 次后任务转为 failed | 不重复计数，只查长时间无变化 |
+| `RecordApplicationFailure`（`internal/coordinator/effects.go`） | 永久性写回错误 3 次后任务转为 failed；任务已成功时的暂时性错误（超时、网络错误、HTTP 5xx）改走 `RecordDeferredApplication`，不计数、不转 failed | 不重复计数，只查长时间无变化 |
 | `LiveStats`（`internal/execution/live_stats.go`） | 有 `Stalled`、`LastEventAt`，只覆盖本机，目前用于展示 | 不作为 controller 对远端任务的判断依据 |
 | App（`macos/Sources/ClawFlow/Models.swift`） | 显示 `waiting_reason` | 原因写入这个字段，不改 App |
 
@@ -20,7 +20,8 @@
 | 规则 | 条件 | 起算时间 | 初始阈值 |
 | --- | --- | --- | --- |
 | `recovery_stalled` | stage 为 `recovery_pending` | `lease_expires_at` | 30 分钟 |
-| `finalizing_stalled` | stage 为 `finalizing` | `updated_at` | 10 分钟 |
+| `finalizing_stalled` | stage 为 `finalizing`，没有写回错误 | `updated_at` | 10 分钟 |
+| `result_stuck` | stage 为 `finalizing`，且 `application_error` 非空（写回在失败或在退避重试） | `updated_at` | 10 分钟 |
 | `dispatch_stalled` | state 为 `pending`，且 Claim 的容量和路由检查都会放行 | `updated_at` | 10 分钟 |
 | `no_progress` | stage 为 `running`，且已知最后事件时间 | `last_event_at` | 30 分钟 |
 

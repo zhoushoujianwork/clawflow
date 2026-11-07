@@ -26,6 +26,8 @@ func TestWatchdogFindings(t *testing.T) {
 		{name: "recovery at threshold", task: BoardTask{State: "leased", Durable: true, LeaseExpiresAt: ago(recoveryStallAfter)}, rule: RuleRecoveryStalled},
 		{name: "finalizing below threshold", task: BoardTask{State: "leased", UpdatedAt: *ago(finalizingStallAfter - time.Second)}},
 		{name: "finalizing stalled", task: BoardTask{State: "leased", UpdatedAt: *ago(finalizingStallAfter)}, rule: RuleFinalizingStalled},
+		{name: "result stuck below threshold", task: BoardTask{State: "leased", ApplicationError: "context deadline exceeded", UpdatedAt: *ago(finalizingStallAfter - time.Second)}},
+		{name: "result stuck", task: BoardTask{State: "leased", ApplicationError: "context deadline exceeded", UpdatedAt: *ago(finalizingStallAfter)}, rule: RuleResultStuck},
 		{name: "unknown progress is not a finding", task: BoardTask{State: "leased", LeaseExpiresAt: &future, UpdatedAt: *ago(24 * time.Hour)}},
 		{name: "recent progress", task: BoardTask{State: "leased", LeaseExpiresAt: &future, LastEventAt: ago(noProgressAfter - time.Second)}},
 		{name: "no progress", task: BoardTask{State: "leased", LeaseExpiresAt: &future, LastEventAt: ago(noProgressAfter)}, rule: RuleNoProgress},

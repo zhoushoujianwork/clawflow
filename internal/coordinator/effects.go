@@ -64,6 +64,7 @@ type InboxEvent struct {
 type EffectStore interface {
 	PendingResults(context.Context) ([]Task, error)
 	RecordApplicationFailure(context.Context, string, int64, string) error
+	RecordDeferredApplication(context.Context, string, int64, string) error
 	ApplyEffects(context.Context, string, int64, func(EffectIntent) (EffectResult, error)) error
 	Cancel(context.Context, string) error
 	FinalizeApplication(context.Context, string, int64, bool, func(Task) error) error
@@ -416,6 +417,30 @@ func (s *Store) PRBlocked(ctx context.Context, repo string, pr int) (bool, error
 	var count int64
 	err := s.db.WithContext(ctx).Model(&Task{}).Where("repo = ? AND pr = ? AND state = 'head-mismatch' AND NOT EXISTS (SELECT 1 FROM coordinator_tasks newer WHERE newer.repo = coordinator_tasks.repo AND newer.pr = coordinator_tasks.pr AND newer.kind IN ('implement','repair') AND newer.state = 'done' AND newer.created_at > coordinator_tasks.created_at)", repo, pr).Count(&count).Error
 	return count > 0, err
+}
+
+// RecordDeferredApplication notes a transient write-back failure (timeout,
+// network error, HTTP 5xx) of a result whose task itself succeeded. The result,
+// intents and lease state stay as they are and the failure is not counted, so
+// the task never becomes `failed` because the VCS was slow. The diagnostic is
+// stored for the dashboard. updated_at is deliberately left alone: the
+// result_stuck watchdog rule measures how long the result has waited, and every
+// retry would otherwise restart that clock.
+func (s *Store) RecordDeferredApplication(ctx context.Context, id string, epoch int64, message string) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var t Task
+		if err := applicationTask(tx, id, epoch, &t); err != nil {
+			return err
+		}
+		if err := tx.Model(&Task{}).Where("id = ? AND fencing_token = ?", id, epoch).UpdateColumn("application_error", message).Error; err != nil {
+			return err
+		}
+		if t.ApplicationError != "" {
+			// One audit row per stuck episode; the retries themselves are logged.
+			return nil
+		}
+		return audit(tx, t.LeaseOwner, id, "result-apply-deferred")
+	})
 }
 
 // RecordApplicationFailure quarantines a poisoned report after three applications.
