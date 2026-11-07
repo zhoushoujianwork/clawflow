@@ -165,7 +165,30 @@ func (e *Engine) Plan(ctx context.Context, kind string, target, prior Artifact, 
 	if rec.Prior.Manifest.Inferred {
 		detail += " (prior schema inferred from the database)"
 	}
-	return detail, nil
+	snap, err := e.Host.Snapshot(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("read scheduling state: %w", err)
+	}
+	return detail + awaitingRecoveryNote(snap), nil
+}
+
+// awaitingRecoveryNote lists the leases that expired before the upgrade and
+// are waiting for their worker to resume them. It is empty when there are
+// none. Resuming advances the lease epoch, which verification accepts for
+// exactly these leases.
+func awaitingRecoveryNote(snap coordinator.UpgradeSnapshot) string {
+	var lines []string
+	for _, l := range snap.Leases {
+		if l.AwaitingRecovery {
+			lines = append(lines, fmt.Sprintf("  - %s#%d %s (task %s, worker %s)", l.Repo, l.Issue, l.Kind, short(l.TaskID), l.Owner))
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n%d task(s) are waiting for recovery because their lease expired before the upgrade. "+
+		"After the upgrade their workers resume them and each lease epoch advances by one per resume; verification accepts that change for these tasks only, "+
+		"and still fails if any lease that is valid now changes:\n%s", len(lines), strings.Join(lines, "\n"))
 }
 
 // OwnerView states who owns scheduling right now, from the host and the
@@ -565,11 +588,19 @@ func (e *Engine) settle(ctx context.Context, rec *Record, st *StageRecord) (stri
 	for _, t := range watched.Watched {
 		byID[t.ID] = t
 	}
+	awaiting := 0
 	for _, l := range watched.Leases {
 		t := byID[l.TaskID]
-		rec.LeasesBefore = append(rec.LeasesBefore, LeaseRef{TaskID: l.TaskID, Owner: l.Owner, Fence: l.Fence, Attempt: t.Attempt, ApplicationAttempts: t.ApplicationAttempts})
+		rec.LeasesBefore = append(rec.LeasesBefore, LeaseRef{TaskID: l.TaskID, Owner: l.Owner, Fence: l.Fence, Attempt: t.Attempt, ApplicationAttempts: t.ApplicationAttempts, AwaitingRecovery: l.AwaitingRecovery})
+		if l.AwaitingRecovery {
+			awaiting++
+		}
 	}
-	return fmt.Sprintf("handoff proven: %d durable lease(s) continue in independent executors", len(rec.LeasesBefore)), nil
+	summary := fmt.Sprintf("handoff proven: %d durable lease(s) continue in independent executors", len(rec.LeasesBefore))
+	if awaiting > 0 {
+		summary += fmt.Sprintf("; %d already-expired lease(s) await recovery, so their epoch may advance", awaiting)
+	}
+	return summary, nil
 }
 
 func (e *Engine) stopOld(ctx context.Context, rec *Record, _ *StageRecord) (string, error) {
@@ -753,20 +784,32 @@ func (e *Engine) checkContinuity(ctx context.Context, rec *Record) error {
 	}
 	for _, before := range rec.LeasesBefore {
 		t, ok := now[before.TaskID]
+		resumed := ok && before.resumedBy(t)
 		switch {
 		case !ok:
 			return fmt.Errorf("task %s disappeared", before.TaskID)
-		case t.Fence != before.Fence:
+		case t.Fence != before.Fence && !resumed:
 			return fmt.Errorf("task %s lease epoch changed from %d to %d", before.TaskID, before.Fence, t.Fence)
 		case t.State == "pending":
 			return fmt.Errorf("task %s returned to the queue and could be replayed", before.TaskID)
 		case t.State == "leased" && t.Owner != before.Owner:
 			return fmt.Errorf("task %s changed owner", before.TaskID)
-		case t.State == "leased" && (t.Attempt != before.Attempt || t.ApplicationAttempts != before.ApplicationAttempts):
+		case t.State == "leased" && !resumed && (t.Attempt != before.Attempt || t.ApplicationAttempts != before.ApplicationAttempts):
 			return fmt.Errorf("task %s retry counters changed during cutover", before.TaskID)
 		}
 	}
 	return nil
+}
+
+// resumedBy reports whether t is the lease in l after its worker resumed the
+// interrupted execution. Only a lease that had already expired before the
+// cutover can be resumed, and a resume advances the fencing token and the
+// attempt counter by the same amount while leaving application attempts
+// alone. A lease that was still valid never qualifies, and neither does an
+// epoch change without the matching attempt change.
+func (l LeaseRef) resumedBy(t coordinator.UpgradeTask) bool {
+	d := t.Fence - l.Fence
+	return l.AwaitingRecovery && d > 0 && int64(t.Attempt-l.Attempt) == d && t.ApplicationAttempts == l.ApplicationAttempts
 }
 
 func (e *Engine) resumeDispatch(ctx context.Context, rec *Record) (string, error) {
