@@ -64,6 +64,32 @@ Recovery does not run before the old authority expires. A still-running Offload 
 
 This supports controller/manager restarts and retained development/repair session continuation. It is not a memory checkpoint, arbitrary process adoption, transparent recovery of every task kind, controller HA, or a verified claim that all Offload backends survive host reboot. Native backend/profile configuration and credentials must remain available; pinning the Offload binary does not snapshot all external dependencies.
 
+## Detached background processes before recovery
+
+Offload can only prove that the original native process group ended. A tool that called `setsid` is outside that group, so neither `ReclaimRun` nor the `cli` engine can see it, and a still-running one would write the worktree at the same time as the resumed session.
+
+Before requesting a new epoch, `prepareWorkerRecovery` (every engine, automatic and `worker recover`) scans the host for other processes that use the retained worktree. A process counts when its working directory is inside the worktree or when it holds a file inside it open for writing. Read-only descriptors and executable mappings do not count. If any process counts, or the scan itself fails, recovery is postponed: the journal, the interruption receipt and the epoch stay unchanged, nothing is archived, and the next worker pass scans again. The reason is recorded as a `recovery_blocked` diagnostic (see `worker executions`) and in the `worker/recovery-blocked` log line, for example:
+
+```
+retained worktree is still in use by running processes; recovery is postponed until they exit: pid 4242 (sh): working directory inside worktree
+```
+
+Recovery continues on the first pass after those processes exit. ClawFlow never signals or kills them, and Offload's process-group behavior is unchanged.
+
+| | Linux | macOS and other systems |
+|---|---|---|
+| Source | `/proc/<pid>/cwd`, `fd`, `fdinfo` | one `lsof -nP -F pcfan -d cwd,0-65535` run |
+| External tool | none | `lsof` (PATH, then `/usr/sbin`, `/usr/bin`, `/sbin`) |
+| Cost | a few syscalls per process | measured 0.25–0.39 s on macOS 26 with about 600 processes and lsof 4.91 |
+| Worktree size | no effect | no effect (`+D` is not used; on a 905-file worktree it was not faster) |
+
+The Linux scanner is covered by a fixture proc tree on every OS and by a real-process test that runs where `/proc` exists (the Ubuntu CI job); no Linux host was available for timing, so its cost is not measured. Both sources have the same limits:
+
+- Only processes the worker user can inspect are visible. Another user's or root's process is not reported.
+- A process with neither its working directory nor a writable descriptor in the worktree is invisible, for example one that opens the file for each write.
+- A process can start between the scan and the resumed launch. The check narrows the window; it is not a lock.
+- A missing `lsof`, an unreadable `/proc`, or a scan longer than 5 seconds postpones recovery instead of skipping the check.
+
 ## 已回传的超时结果恢复
 
 开发／修复任务报告 `execution-interrupted` 后，控制器完成结果处理，仍保留原任务、worker、epoch 和回执，以过期 durable lease 表示 `recovery_pending`，阻止另一个 worker 或下一轮扫描新建替代任务。worker 在原授权到期、执行锁释放后，核对 journal、checkpoint 与报告的原生 session 一致，归档旧尝试，再申请新 epoch 并在原 worktree 续跑。每次真正授权恢复消耗一次既有基础设施预算；请求重放不重复扣减。
