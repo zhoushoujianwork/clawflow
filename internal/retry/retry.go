@@ -133,12 +133,21 @@ func ResponseError(status int, header http.Header, body []byte) error {
 	return &HTTPError{Status: status, After: after, RateLimited: limited}
 }
 
+// IsTransient reports whether err is a transport or server-side failure that
+// may succeed on a later attempt: an HTTP 429/5xx, a network error (including
+// timeouts and context.DeadlineExceeded, which implement net.Error) or a
+// truncated response. Validation, permission and decoding failures are not
+// transient.
+func IsTransient(err error) bool {
+	var response *HTTPError
+	var network net.Error
+	return err != nil && (errors.As(err, &response) || errors.As(err, &network) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
+}
+
 // RequestError keeps transport failures retryable and stops on validation or
 // decoding failures from reconciliation reads before a non-idempotent write.
 func RequestError(err error) error {
-	var response *HTTPError
-	var network net.Error
-	if errors.As(err, &response) || errors.As(err, &network) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if IsTransient(err) {
 		return err
 	}
 	return Permanent(err)

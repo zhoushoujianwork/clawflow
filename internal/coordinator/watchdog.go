@@ -21,8 +21,12 @@ const (
 const (
 	RuleRecoveryStalled   = "recovery_stalled"
 	RuleFinalizingStalled = "finalizing_stalled"
-	RuleDispatchStalled   = "dispatch_stalled"
-	RuleNoProgress        = "no_progress"
+	// RuleResultStuck: an accepted result keeps failing to write back (timeout,
+	// network error, rejected write). It replaces finalizing_stalled for that
+	// task so the dashboard can say why instead of only that it waits.
+	RuleResultStuck     = "result_stuck"
+	RuleDispatchStalled = "dispatch_stalled"
+	RuleNoProgress      = "no_progress"
 )
 
 // Finding explains why one task looks stuck. It carries no payload or report.
@@ -64,6 +68,8 @@ func (b *Board) applyFindings(now time.Time, workers []Worker, limits dispatchLi
 		switch {
 		case t.Stage == "recovery_pending" && t.LeaseExpiresAt != nil:
 			rule, since, after, reason = RuleRecoveryStalled, *t.LeaseExpiresAt, recoveryStallAfter, "recovery pending"
+		case t.Stage == "finalizing" && t.ApplicationError != "":
+			rule, since, after, reason = RuleResultStuck, t.UpdatedAt, finalizingStallAfter, "result write-back failing"
 		case t.Stage == "finalizing":
 			rule, since, after, reason = RuleFinalizingStalled, t.UpdatedAt, finalizingStallAfter, "result not applied"
 		case t.Stage == "running" && t.LastEventAt != nil:

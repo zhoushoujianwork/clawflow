@@ -112,6 +112,8 @@ final class DashboardPresentationTests: XCTestCase {
         }
         XCTAssertEqual(finding("recovery_stalled", 3 * 3600).text, "恢复挂起 3 小时")
         XCTAssertEqual(finding("finalizing_stalled", 25 * 60).text, "结果确认停滞 25 分钟")
+        XCTAssertEqual(finding("result_stuck", 25 * 60).text, "结果写回失败 25 分钟")
+        XCTAssertEqual(finding("result_stuck", 20 * 60).withinThresholdShare ?? 0, 0.5, accuracy: 0.0001)
         XCTAssertEqual(finding("dispatch_stalled", 15 * 60).text, "等待派发 15 分钟")
         XCTAssertEqual(finding("no_progress", 45 * 60).text, "45 分钟无进展")
         XCTAssertEqual(finding("new_rule", 60).text, "controller reason")

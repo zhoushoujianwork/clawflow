@@ -3,7 +3,10 @@ package retry_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"testing"
 	"time"
@@ -138,5 +141,35 @@ func TestCancellationPreservesRateLimitIdentity(t *testing.T) {
 	var limited *retry.HTTPError
 	if !errors.Is(err, context.Canceled) || !errors.As(err, &limited) || !limited.RateLimited {
 		t.Fatalf("lost rate limit on cancellation: %v", err)
+	}
+}
+
+func TestIsTransient(t *testing.T) {
+	timeout := &url.Error{Op: "Get", URL: "https://api.github.com/repos/o/r/pulls", Err: context.DeadlineExceeded}
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"nil":                 {nil, false},
+		"deadline exceeded":   {context.DeadlineExceeded, true},
+		"wrapped url timeout": {fmt.Errorf("list: %w", timeout), true},
+		"joined with timeout": {errors.Join(errors.New("context"), timeout), true},
+		"HTTP 502":            {&retry.HTTPError{Status: 502}, true},
+		"EOF":                 {io.ErrUnexpectedEOF, true},
+		"validation":          {errors.New("HTTP 422: Validation Failed"), false},
+		"permanent":           {retry.Permanent(errors.New("bad input")), false},
+		"canceled":            {context.Canceled, false},
+	} {
+		if got := retry.IsTransient(tc.err); got != tc.want {
+			t.Errorf("%s: IsTransient = %v, want %v", name, got, tc.want)
+		}
+	}
+	// RequestError must keep its previous behaviour: transient errors pass
+	// through unchanged, everything else stops retrying.
+	if err := retry.RequestError(timeout); err != timeout {
+		t.Fatalf("RequestError changed a transient error: %v", err)
+	}
+	if err := retry.RequestError(errors.New("decode")); err == nil {
+		t.Fatal("RequestError lost a permanent error")
 	}
 }

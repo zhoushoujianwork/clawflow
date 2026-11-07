@@ -154,6 +154,7 @@ extension Finding {
         switch rule {
         case "recovery_stalled": return "恢复挂起 \(age)"
         case "finalizing_stalled": return "结果确认停滞 \(age)"
+        case "result_stuck": return "结果写回失败 \(age)"
         case "dispatch_stalled": return "等待派发 \(age)"
         case "no_progress": return "\(age)无进展"
         default: return reason
@@ -161,7 +162,7 @@ extension Finding {
     }
     /// Watchdog threshold for the rule, in minutes.
     var thresholdMinutes: Int {
-        switch rule { case "finalizing_stalled", "dispatch_stalled": return 10; default: return 30 }
+        switch rule { case "finalizing_stalled", "result_stuck", "dispatch_stalled": return 10; default: return 30 }
     }
     /// Share of the elapsed time that was within the threshold, 0...1. Nil without an age.
     var withinThresholdShare: Double? {
