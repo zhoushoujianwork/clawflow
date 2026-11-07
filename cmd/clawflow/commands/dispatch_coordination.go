@@ -27,6 +27,11 @@ type coordinationTasks interface {
 }
 
 var errCoordinationChanged = coordinator.ErrCoordinationChanged
+
+// errCoordinationIssueInactive is the cause reported when the coordinated issue
+// is closed or carries clawflow-skip. Its text reaches the stored task result,
+// where the controller recognizes it (coordinator.EndInactiveInterruptions).
+var errCoordinationIssueInactive = coordinator.ErrCoordinationInactive
 var dispatchCoordinationExecute = execution.Execute
 
 // Test seam for selection-only fixtures; production always uses the real gate.
@@ -69,7 +74,7 @@ func collectCoordinationWithOrder(ctx context.Context, j *runJob, tasks coordina
 	}
 	s.Issue = *issue
 	if issue.State != "open" || issue.HasLabel("clawflow-skip") {
-		return s, errors.New("coordination issue is closed or owner-skipped")
+		return s, errCoordinationIssueInactive
 	}
 	s.Comments, err = j.client.ListIssueCommentsDetail(j.repo, issue.Number)
 	if err != nil {
