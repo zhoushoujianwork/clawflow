@@ -311,3 +311,18 @@ func retryRateLimited(ctx context.Context, apply func() error) error {
 		}
 	}
 }
+
+// endInactiveInterruptions finishes retained interruptions whose recovery found
+// the issue closed or owner-skipped. The store changes only the task row, so
+// the worker's journal, worktree and session evidence stay in place, no task is
+// created and nothing is written to the VCS. The reason goes to the log.
+func endInactiveInterruptions(ctx context.Context, store interface {
+	EndInactiveInterruptions(context.Context) ([]coordinator.Task, error)
+}) error {
+	ended, err := store.EndInactiveInterruptions(ctx)
+	for _, t := range ended {
+		coordLog().Info("coordinator/interruption_ended", "task", t.ID, "repo", t.Repo, "issue", t.Issue, "kind", t.Kind, "worker", t.LeaseOwner, "epoch", t.FencingToken,
+			"reason", "issue is closed or owner-skipped; retained worktree and session are kept as evidence, the repository slot is released")
+	}
+	return err
+}
