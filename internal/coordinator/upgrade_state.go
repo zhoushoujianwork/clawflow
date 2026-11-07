@@ -20,6 +20,9 @@ type UpgradeWorker struct {
 // worker tied to the controller process and must settle before cutover.
 type UpgradeLease struct {
 	TaskID string
+	Repo   string
+	Issue  int
+	Kind   string
 	Owner  string
 	Fence  int64
 	// Durable is true when the task runs in an independent durable executor.
@@ -29,6 +32,12 @@ type UpgradeLease struct {
 	ResultAccepted bool
 	// UnsettledEffects counts effect intents not yet applied.
 	UnsettledEffects int
+	// AwaitingRecovery means the durable lease had already expired when the
+	// snapshot was taken and RecoverExecution would accept it: the same worker
+	// resumes the interrupted execution, advancing the fencing token and the
+	// attempt counter together. Such a change is expected, unlike a change to
+	// a lease that was still valid.
+	AwaitingRecovery bool
 }
 
 // UpgradeTask is a point-in-time view of one task, used to prove a lease or
@@ -62,21 +71,28 @@ func (s *Store) UpgradeSnapshot(ctx context.Context, watch []string) (UpgradeSna
 		out.Workers = append(out.Workers, UpgradeWorker{Name: w.Name, Paused: w.Paused, Revoked: w.Revoked, MaxParallel: w.MaxParallel, LastSeen: w.LastSeen, Live: w.Live})
 	}
 	var rows []struct {
-		ID, LeaseOwner string
-		FencingToken   int64
-		Durable        bool
-		Accepted       bool
-		Unsettled      int
+		ID, LeaseOwner, Repo, Kind string
+		Issue                      int
+		FencingToken               int64
+		Attempt                    int
+		Durable                    bool
+		Expired                    bool
+		Accepted                   bool
+		Unsettled                  int
+		Result                     []byte
+		ResultDigest               string
 	}
-	if err := s.db.WithContext(ctx).Raw(`SELECT t.id, t.lease_owner, t.fencing_token,
+	if err := s.db.WithContext(ctx).Raw(`SELECT t.id, t.repo, t.issue, t.kind, t.lease_owner, t.fencing_token, t.attempt, t.result, t.result_digest,
  COALESCE(json_extract(t.payload, '$.durable_execution') = 1, false) AS durable,
+ (t.lease_expires_at IS NOT NULL AND t.lease_expires_at <= ?) AS expired,
  (t.lease_expires_at IS NULL AND t.result IS NOT NULL) AS accepted,
  (SELECT count(*) FROM effect_intents e WHERE e.task_id = t.id AND e.lease_epoch = t.fencing_token AND e.status IN ('pending','uncertain')) AS unsettled
- FROM coordinator_tasks t WHERE t.state = 'leased' ORDER BY t.id`).Scan(&rows).Error; err != nil {
+ FROM coordinator_tasks t WHERE t.state = 'leased' ORDER BY t.id`, out.Now.UTC()).Scan(&rows).Error; err != nil {
 		return out, err
 	}
 	for _, r := range rows {
-		out.Leases = append(out.Leases, UpgradeLease{TaskID: r.ID, Owner: r.LeaseOwner, Fence: r.FencingToken, Durable: r.Durable, ResultAccepted: r.Accepted, UnsettledEffects: r.Unsettled})
+		out.Leases = append(out.Leases, UpgradeLease{TaskID: r.ID, Repo: r.Repo, Issue: r.Issue, Kind: r.Kind, Owner: r.LeaseOwner, Fence: r.FencingToken, Durable: r.Durable, ResultAccepted: r.Accepted, UnsettledEffects: r.Unsettled,
+			AwaitingRecovery: r.Durable && r.Expired && recoveryEligible(r.Kind, r.Attempt, r.Result, r.ResultDigest)})
 	}
 	if len(watch) > 0 {
 		var tasks []Task
@@ -88,4 +104,15 @@ func (s *Store) UpgradeSnapshot(ctx context.Context, watch []string) (UpgradeSna
 		}
 	}
 	return out, nil
+}
+
+// recoveryEligible mirrors the task-state conditions under which
+// RecoverExecution accepts an expired durable lease. It only reads; recovery
+// itself is unchanged. The worker identity and executor presence are not
+// visible here, so the answer is "eligible", not a guarantee.
+func recoveryEligible(kind string, attempt int, result []byte, digest string) bool {
+	if kind != "implement" && kind != "repair" || attempt >= MaxInfrastructureAttempts-1 {
+		return false
+	}
+	return len(result) == 0 || (digest != "" && recoverableReport(result))
 }

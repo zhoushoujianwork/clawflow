@@ -100,6 +100,10 @@ type LeaseRef struct {
 	Fence               int64  `json:"fence"`
 	Attempt             int    `json:"attempt"`
 	ApplicationAttempts int    `json:"application_attempts"`
+	// AwaitingRecovery marks a durable lease that had already expired before
+	// the cutover and was waiting for its worker to resume it. Only such a
+	// lease may advance through a recovery; see resumedBy.
+	AwaitingRecovery bool `json:"awaiting_recovery,omitempty"`
 }
 
 // Artifact identifies one immutable binary. Paths are local; no credentials.

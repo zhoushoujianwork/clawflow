@@ -11,7 +11,7 @@
 | 项 | 保证 |
 | --- | --- |
 | 调度权 | 任意时刻至多一个 controller 持有调度与租约。切换在持有 `controller.lock` 的栅栏内改写服务定义，旧进程退出且锁释放前不会启动新进程。 |
-| 运行中的任务 | durable 执行器是独立进程，controller 重启不终止它们。升级不取消、不重放任务；切换前后逐项比对租约 owner、fencing token、`attempt` 与 `application_attempts`，任何变化都使验证失败。 |
+| 运行中的任务 | durable 执行器是独立进程，controller 重启不终止它们。升级不取消、不重放任务；切换前后逐项比对租约 owner、fencing token、`attempt` 与 `application_attempts`，任何变化都使验证失败。唯一例外：升级前租约已过期、正等待 worker 恢复的 durable 任务（`upgrade plan` 会列出），其恢复使 fencing token 与 `attempt` 同步加 1，这是预期变化，不算失败；升级前仍有效的租约发生任何变化仍然失败。回退校验使用同一规则。 |
 | 结果与写回 | 已接受但未落实效果的结果（`result-accepted`、待处理 effect intent）必须在停机前处理完。同一结果的第二次写回由 fencing 拒绝。 |
 | 内嵌 worker | 与 controller 进程绑定的（非 durable）租约必须先自然结束；超时则「推迟」，服务保持不变，任务不被取消。 |
 | API 中断 | 单机单 controller 切换**有**短暂中断，**不是零停机**。记录从停机前最后一次健康探测到启动后首次健康探测的时间，分辨率为 `--poll`。 |
