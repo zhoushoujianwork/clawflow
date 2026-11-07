@@ -726,7 +726,22 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 	if apiState == "merged" {
 		apiState = "closed"
 	}
-	path := fmt.Sprintf("/repos/%s/%s/pulls?state=%s&per_page=100", owner, name, apiState)
+	return c.listPRsAt(fmt.Sprintf("/repos/%s/%s/pulls?state=%s&per_page=100", owner, name, apiState), state)
+}
+
+// ListPRsForHead lists PRs in any state whose head is branch in repo's own
+// namespace. It asks GitHub to filter, so its cost does not grow with the
+// repository's PR history the way ListPRs(repo, "all") does.
+func (c *Client) ListPRsForHead(repo, branch string) ([]vcs.PR, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	head := url.QueryEscape(owner + ":" + branch)
+	return c.listPRsAt(fmt.Sprintf("/repos/%s/%s/pulls?state=all&head=%s&per_page=100", owner, name, head), "all")
+}
+
+func (c *Client) listPRsAt(path, state string) ([]vcs.PR, error) {
 	data, err := c.allPages(path)
 	if err != nil {
 		return nil, err

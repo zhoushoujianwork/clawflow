@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -587,5 +588,27 @@ func TestListSubIssuesFailsOnLaterPageError(t *testing.T) {
 	})
 	if _, err := client.ListSubIssues("owner/repo", 1); err == nil {
 		t.Fatal("expected an error for a failed later page, got a truncated list")
+	}
+}
+
+func TestListPRsForHeadFiltersByBranchOnServer(t *testing.T) {
+	var query url.Values
+	client := newTestClient(t, map[string]http.HandlerFunc{
+		"GET /repos/owner/repo/pulls": func(w http.ResponseWriter, r *http.Request) {
+			query = r.URL.Query()
+			jsonResp(w, 200, []map[string]any{
+				{"number": 9, "title": "t", "state": "closed", "merged_at": "2026-01-01T00:00:00Z", "head": map[string]any{"ref": "fix/a b"}},
+			})
+		},
+	})
+	prs, err := client.ListPRsForHead("owner/repo", "fix/a b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Get("head") != "owner:fix/a b" || query.Get("state") != "all" {
+		t.Fatalf("query = %v", query)
+	}
+	if len(prs) != 1 || prs[0].Number != 9 || prs[0].State != "merged" || prs[0].HeadBranch != "fix/a b" {
+		t.Fatalf("prs = %+v", prs)
 	}
 }

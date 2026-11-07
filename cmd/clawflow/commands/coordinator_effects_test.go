@@ -777,3 +777,32 @@ func TestInterruptedReportDoesNotWeakenEffectAuthority(t *testing.T) {
 		})
 	}
 }
+
+// headListerVCS fails the test's history walk: a provider that can filter by
+// head must never list the repository's whole PR history.
+type headListerVCS struct {
+	intentVCS
+	head   string
+	listed bool
+}
+
+func (c *headListerVCS) ListPRs(string, string) ([]vcs.PR, error) {
+	c.listed = true
+	return nil, errors.New("must not walk PR history")
+}
+
+func (c *headListerVCS) ListPRsForHead(_, branch string) ([]vcs.PR, error) {
+	c.head = branch
+	return []vcs.PR{{Number: 7, HeadBranch: branch, HeadRepo: "o/r", BaseBranch: "main", State: "open"}}, nil
+}
+
+func TestFindCoordinatorPRAsksProviderToFilterByHead(t *testing.T) {
+	c := &headListerVCS{}
+	got, err := findCoordinatorPR(c, jobEffect{Repo: "o/r", Head: "fix/1", Base: "main", RunID: "stable"})
+	if err != nil || got.Number != 7 {
+		t.Fatalf("PR=%+v err=%v", got, err)
+	}
+	if c.head != "fix/1" || c.listed {
+		t.Fatalf("head=%q listed=%v", c.head, c.listed)
+	}
+}
