@@ -116,9 +116,23 @@ func (s *Store) CancelSupersededAcceptance(ctx context.Context, repo string, pr 
 	})
 }
 
-// The caller must first observe the PR closed through the authenticated VCS.
-// Fence the exact late uploader, never an already accepted result or a newer owner.
-func (s *Store) RetireClosedAcceptance(ctx context.Context, id, worker string, fence int64) error {
+// Acceptance retirement reasons. Each is recorded as the audit action
+// "acceptance-<reason>".
+const (
+	AcceptanceRetiredClosed = "closed"
+	AcceptanceRetiredStale  = "stale"
+)
+
+// RetireAcceptance cancels the exact leased acceptance task held by worker at
+// fence and fails its pending effects, so a verdict that can never be accepted
+// stops being retried and releases the work waiting on it. The caller must
+// first observe through the authenticated VCS that the PR is closed
+// (AcceptanceRetiredClosed) or that its head moved past the reviewed head or
+// its development provenance is gone (AcceptanceRetiredStale).
+func (s *Store) RetireAcceptance(ctx context.Context, id, worker string, fence int64, reason string) error {
+	if reason != AcceptanceRetiredClosed && reason != AcceptanceRetiredStale {
+		return ErrInvalid
+	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var task Task
 		if err := tx.First(&task, "id = ?", id).Error; err != nil {
@@ -136,6 +150,6 @@ func (s *Store) RetireClosedAcceptance(ctx context.Context, id, worker string, f
 		if err := tx.Model(&TaskAttempt{}).Where("task_id = ? AND ended_at IS NULL", id).Updates(map[string]any{"status": "cancelled", "ended_at": time.Now().UTC()}).Error; err != nil {
 			return err
 		}
-		return audit(tx, worker, id, "acceptance-closed")
+		return audit(tx, worker, id, "acceptance-"+reason)
 	})
 }

@@ -275,19 +275,32 @@ func (s *coordinatorResults) finishAcceptance(ctx context.Context, t *coordinato
 	if err != nil {
 		return err
 	}
-	if pr.Number == t.PR && strings.EqualFold(pr.HeadRepo, t.Repo) && (pr.State == "closed" || pr.IsMerged()) {
+	retire := func(reason string) error {
 		retirer, ok := s.tasks.(interface {
-			RetireClosedAcceptance(context.Context, string, string, int64) error
+			RetireAcceptance(context.Context, string, string, int64, string) error
 		})
 		if !ok {
 			return coordinator.ErrInvalid
 		}
-		if err := retirer.RetireClosedAcceptance(ctx, t.ID, worker, fence); err != nil {
+		if err := retirer.RetireAcceptance(ctx, t.ID, worker, fence, reason); err != nil {
 			return err
 		}
 		return coordinator.ErrStaleLease
 	}
+	if pr.Number == t.PR && strings.EqualFold(pr.HeadRepo, t.Repo) && (pr.State == "closed" || pr.IsMerged()) {
+		return retire(coordinator.AcceptanceRetiredClosed)
+	}
+	// A verdict for a head the PR has since moved past can never be accepted.
+	// Retiring it ends the 409 path instead of retrying a 500 forever while
+	// development verification of the new head waits on this lease.
+	if pr.Number == t.PR && pr.HeadSHA != "" && pr.HeadSHA != p.Acceptance.HeadSHA {
+		return retire(coordinator.AcceptanceRetiredStale)
+	}
 	c, _, _, _, err := acceptanceContract(ctx, client, t.Repo, t.PR)
+	if errors.Is(err, errDevelopmentHeadMissing) || errors.Is(err, errDevelopmentHistoryMissing) {
+		// The coordinator has no development provenance for the current head.
+		return retire(coordinator.AcceptanceRetiredStale)
+	}
 	if err != nil {
 		return err
 	}
