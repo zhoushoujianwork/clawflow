@@ -449,3 +449,29 @@ func TestDetachedBackgroundProcessPostponesRecovery(t *testing.T) {
 		t.Fatalf("journal=%+v calls=%d err=%v", j, *calls, readErr)
 	}
 }
+
+// TestHostScanFindsWriterThroughSymlinkedWorktree passes the worktree through a
+// symlink; the host scanners report resolved paths and must still match.
+func TestHostScanFindsWriterThroughSymlinkedWorktree(t *testing.T) {
+	useHostWorktreeScan(t)
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "worktree-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	writer := startDetachedProcess(t, link, `exec 3>>"$1"; echo ready; exec sleep 300`, filepath.Join(link, "background.log"))
+	procs, err := hostWorktreeProcesses(context.Background(), link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writers, _ := splitWorktreeProcesses(procs)
+	for _, p := range writers {
+		if p.PID == writer.Process.Pid && p.Writes == "background.log" {
+			return
+		}
+	}
+	t.Fatalf("writer %d behind symlinked worktree not found: %+v", writer.Process.Pid, procs)
+}

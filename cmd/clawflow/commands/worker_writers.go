@@ -54,6 +54,11 @@ type worktreeProcess struct {
 // hostWorktreeProcesses asks the operating system which processes use the
 // worktree: /proc on Linux, lsof elsewhere.
 func hostWorktreeProcesses(ctx context.Context, workspace string) ([]worktreeProcess, error) {
+	// Both scanners report resolved paths, so a worktree reached through a
+	// symlink (macOS /tmp, /var) would otherwise never match and hide writers.
+	if resolved, err := filepath.EvalSymlinks(workspace); err == nil {
+		workspace = resolved
+	}
 	if runtime.GOOS == "linux" {
 		return scanProcWorktree("/proc", workspace, os.Getpid())
 	}
