@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -19,5 +20,8 @@ func TestMain(m *testing.M) {
 	issueAdmissionFn = func(_ vcs.Client, _ string, _ config.Repo, issue vcs.Issue) (*issueAdmission, string) {
 		return &issueAdmission{Author: issue.Author, Basis: "test", CheckedAt: time.Now().UTC()}, ""
 	}
+	// Recovery tests build their own worktrees; do not scan the host's real
+	// process table unless a test asks for it.
+	scanWorktreeProcesses = func(context.Context, string) ([]worktreeProcess, error) { return nil, nil }
 	os.Exit(m.Run())
 }
