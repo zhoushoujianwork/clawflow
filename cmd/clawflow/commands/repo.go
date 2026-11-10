@@ -344,6 +344,7 @@ func setRepoEnabled(cmd *cobra.Command, ownerRepo string, enabled bool) error {
 func newRepoSetCmd() *cobra.Command {
 	var acceptanceRequired string
 	var acceptanceOverlapCI string
+	var acceptanceIsolatedRun string
 	var ciRequired string
 	var autoMerge string
 	var selfUpgrade string
@@ -394,6 +395,9 @@ func newRepoSetCmd() *cobra.Command {
 			if cmd.Flags().Changed("acceptance-overlap-ci") && acceptanceOverlapCI != "on" && acceptanceOverlapCI != "off" {
 				return fmt.Errorf("--acceptance-overlap-ci must be on or off")
 			}
+			if cmd.Flags().Changed("acceptance-isolated-run") && acceptanceIsolatedRun != "on" && acceptanceIsolatedRun != "off" {
+				return fmt.Errorf("--acceptance-isolated-run must be on or off")
+			}
 			if cmd.Flags().Changed("acceptance-required") && acceptanceRequired != "on" && acceptanceRequired != "off" {
 				return fmt.Errorf("--acceptance-required must be on or off")
 			}
@@ -435,6 +439,9 @@ func newRepoSetCmd() *cobra.Command {
 				if cmd.Flags().Changed("acceptance-overlap-ci") {
 					v := acceptanceOverlapCI == "on"
 					r.AcceptanceOverlapCI = &v
+				}
+				if cmd.Flags().Changed("acceptance-isolated-run") {
+					r.AcceptanceIsolatedRun = acceptanceIsolatedRun == "on"
 				}
 				if cmd.Flags().Changed("acceptance-required") {
 					r.AcceptanceRequired = acceptanceRequired == "on"
@@ -501,6 +508,7 @@ func newRepoSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&testCommand, "test-command", "", "repository test command (empty clears it)")
 	cmd.Flags().StringVar(&ciRequired, "ci-required", "", "require successful CI before auto-merge: on or off")
 	cmd.Flags().StringVar(&acceptanceOverlapCI, "acceptance-overlap-ci", "", "start acceptance during pending CI: on or off (default on when CI is required)")
+	cmd.Flags().StringVar(&acceptanceIsolatedRun, "acceptance-isolated-run", "", "run one real task in an isolated candidate before accepting PRs that change controller, worker, scheduling or storage code (only for the repo holding ClawFlow's source): on or off")
 	cmd.Flags().StringVar(&acceptanceRequired, "acceptance-required", "", "require current independent acceptance before auto-merge: on or off")
 	cmd.Flags().StringVar(&autoMerge, "auto-merge", "", "enable/disable auto-merge: on or off")
 	cmd.Flags().StringVar(&selfUpgrade, "self-upgrade", "", "rebuild and replace the installed binary after a confirmed merge into this repo (only for the repo containing clawflow's source): on or off")

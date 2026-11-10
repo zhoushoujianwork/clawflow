@@ -1,11 +1,14 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zhoushoujianwork/clawflow/internal/candidate"
@@ -46,7 +49,9 @@ func NewCandidateCmd() *cobra.Command {
 	var sopRequired bool
 	var sopDigest string
 	var capabilities, machineCaps, fixtures []string
-	var keepSchema bool
+	var keepSchema, taskFixture, requireTask bool
+	var taskTimeout time.Duration
+	var buildCache, modCache string
 
 	root := &cobra.Command{Use: "candidate", Short: "Run an isolated development candidate beside the stable host", SilenceUsage: true,
 		Long: `Creates a per-commit runtime with its own HOME, state, config, locks, port,
@@ -70,7 +75,14 @@ write-back are disabled by default.`}
 				return candidate.Plan{}, err
 			}
 		}
-		return candidate.NewPlan(commit, base, port, candidate.Pin{SOPRequired: sopRequired, SOPDigest: sopDigest, Capabilities: capabilities})
+		p, err := candidate.NewPlan(commit, base, port, candidate.Pin{SOPRequired: sopRequired, SOPDigest: sopDigest, Capabilities: capabilities})
+		if err != nil {
+			return p, err
+		}
+		if taskFixture {
+			p = p.WithForge(0)
+		}
+		return p, nil
 	}
 	pinFlags := func(c *cobra.Command) {
 		c.Flags().IntVar(&port, "port", 0, "candidate loopback port (default: derived from the commit)")
@@ -99,6 +111,9 @@ write-back are disabled by default.`}
 			fx[name] = url
 		}
 		opts := candidate.ConfigOptions{Fixtures: fx, ExecutionEngine: candidateExecutionEngine()}
+		if taskFixture {
+			opts = p.TaskConfigOptions()
+		}
 		if _, err := p.BuildConfig(opts); err != nil {
 			return err
 		}
@@ -109,6 +124,17 @@ write-back are disabled by default.`}
 		if err := p.WriteConfig(opts); err != nil {
 			return err
 		}
+		if taskFixture {
+			// The forge port is part of the plan; keep it with the manifest so
+			// up, exercise and down act on the same fixture.
+			m.Plan = p
+			if err := m.Save(); err != nil {
+				return err
+			}
+			if err := candidate.SetupTaskFixture(p); err != nil {
+				return err
+			}
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "prepared candidate %s\nroot=%s\nport=%d\nschema=%s\nbundle=%s\n", m.Plan.ID, m.Plan.Root, m.Plan.Port, m.Plan.Schema, m.Plan.BundleID)
 		return nil
 	}}
@@ -117,6 +143,7 @@ write-back are disabled by default.`}
 	prepare.Flags().StringVar(&repoName, "repo", "", "repository whose primary-project testing SOP is pinned")
 	prepare.Flags().StringSliceVar(&machineCaps, "machine-capability", nil, "capabilities this machine declares")
 	prepare.Flags().StringSliceVar(&fixtures, "fixture", nil, "loopback fixture repo as owner/repo=URL")
+	prepare.Flags().BoolVar(&taskFixture, "task-fixture", false, "also create the loopback forge, git clone, fixture agent and profile that `candidate exercise` needs")
 
 	up := &cobra.Command{Use: "up", Short: "Build the pinned commit and start the dev controller and worker pair", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 		p, err := load()
@@ -162,7 +189,8 @@ write-back are disabled by default.`}
 		if err := writeJSON0600(filepath.Join(p.Root, "stable-before.json"), stableBefore); err != nil {
 			return err
 		}
-		binary, sha, err := candidate.BuildBinary(cmd.Context(), p, checkout)
+		p = m.Plan
+		binary, sha, err := candidate.BuildBinaryWith(cmd.Context(), p, candidate.BuildOptions{Checkout: checkout, GoCache: buildCache, ModCache: modCache})
 		if err != nil {
 			return err
 		}
@@ -186,6 +214,41 @@ write-back are disabled by default.`}
 	pinFlags(up)
 	up.Flags().StringVar(&checkout, "checkout", "", "disposable git checkout of the candidate commit (required)")
 	_ = up.MarkFlagRequired("checkout")
+	up.Flags().StringVar(&buildCache, "go-cache", "", "shared Go build cache directory (never the stable host's)")
+	up.Flags().StringVar(&modCache, "mod-cache", "", "existing Go module cache, reused with GOPROXY=off (nothing is downloaded into it)")
+
+	exercise := &cobra.Command{Use: "exercise", Short: "Run one real task through the running candidate and record the outcome", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		p, err := load()
+		if err != nil {
+			return err
+		}
+		m, err := candidate.ReadManifest(p.Root)
+		if err != nil {
+			return fmt.Errorf("candidate %s is not prepared: %w", p.ID, err)
+		}
+		if m.Plan.ForgePort == 0 {
+			return fmt.Errorf("candidate %s was prepared without --task-fixture", p.ID)
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), taskTimeout+time.Minute)
+		defer cancel()
+		run, err := candidate.Exercise(ctx, m, candidate.TaskOptions{Timeout: taskTimeout})
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(m.Plan.Root, "task-run.json"), run.Marshal(), 0o600); err != nil {
+			return err
+		}
+		for _, st := range run.Steps {
+			fmt.Fprintf(cmd.OutOrStdout(), "%-13s passed=%v  %s\n", st.Name, st.Passed, st.Evidence)
+		}
+		if run.Failure != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "task run failed: %s\n", run.Failure)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "task-run: %s (processes and locks are checked by `candidate down`)\n", filepath.Join(m.Plan.Root, "task-run.json"))
+		return nil
+	}}
+	flags(exercise)
+	exercise.Flags().DurationVar(&taskTimeout, "task-timeout", 3*time.Minute, "how long to wait for the task to finish")
 
 	down := &cobra.Command{Use: "down", Short: "Stop only owned candidate processes and write evidence", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		p, err := load()
@@ -203,6 +266,15 @@ write-back are disabled by default.`}
 		}
 		stopped, stopErr := m.Down()
 		fmt.Fprintf(cmd.OutOrStdout(), "stopped: %s\n", strings.Join(stopped, ", "))
+		taskRun, taskErr := readTaskRun(p.Root)
+		if taskErr != nil {
+			return taskErr
+		}
+		if taskRun != nil {
+			// Processes are checked after the services stopped: whatever is still
+			// alive was left behind by the run and fails the layer.
+			candidate.FinishTask(m, taskRun, 5*time.Second)
+		}
 		var before candidate.StableSnapshot
 		data, err := os.ReadFile(filepath.Join(p.Root, "stable-before.json"))
 		if err == nil {
@@ -220,6 +292,10 @@ write-back are disabled by default.`}
 			return rerr
 		}
 		ev.Layers["offline"] = offline
+		if taskRun != nil {
+			ev.TaskRequired, ev.Task = true, taskRun
+			ev.Command("exercise", []string{"candidate", "exercise"}, 0, "task "+taskRun.TaskID+" state "+taskRun.State)
+		}
 		if err == nil {
 			after, terr := candidate.TakeStable(stableHost(), candidate.DefaultStableProbe(config.RootDir(), p.Base))
 			if terr != nil {
@@ -262,17 +338,18 @@ write-back are disabled by default.`}
 	clean.Flags().BoolVar(&keepSchema, "keep-schema", false, "leave the database schema in place")
 
 	verify := &cobra.Command{Use: "verify EVIDENCE", Short: "Check that evidence matches the candidate commit under review", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		e, err := candidate.Verify(args[0], commit)
+		e, err := candidate.VerifyWith(args[0], commit, requireTask)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "evidence ok: commit=%s runtime=%s status=%s native-visual=%s\n", e.Commit, e.ID, e.Status, e.Layers["native-visual"])
+		fmt.Fprintf(cmd.OutOrStdout(), "evidence ok: commit=%s runtime=%s status=%s task-lifecycle=%s native-visual=%s\n", e.Commit, e.ID, e.Status, e.Layers[candidate.TaskLayer], e.Layers["native-visual"])
 		return nil
 	}}
 	verify.Flags().StringVar(&commit, "commit", "", "commit under review (required)")
 	_ = verify.MarkFlagRequired("commit")
+	verify.Flags().BoolVar(&requireTask, "require-task", false, "also require a passed real-task run in the evidence")
 
-	root.AddCommand(prepare, up, down, clean, verify)
+	root.AddCommand(prepare, up, exercise, down, clean, verify)
 	return root
 }
 
@@ -309,7 +386,7 @@ func writeJSON0600(path string, v any) error {
 // Every up attempt gets fresh evidence before setup can fail. Prior records
 // remain available for audit and can never supply this attempt's verdict.
 func beginCandidateAttempt(p candidate.Plan) (*candidate.Evidence, error) {
-	names := []string{"evidence.json", "evidence-partial.json", "stable-before.json"}
+	names := []string{"evidence.json", "evidence-partial.json", "stable-before.json", "task-run.json"}
 	var existing []string
 	for _, name := range names {
 		_, err := os.Lstat(filepath.Join(p.Root, name))
@@ -335,4 +412,27 @@ func beginCandidateAttempt(p candidate.Plan) (*candidate.Evidence, error) {
 		return nil, err
 	}
 	return ev, nil
+}
+
+// readTaskRun loads the run recorded by `candidate exercise`, or nil when the
+// candidate never exercised a task. An unreadable record is an error, not nil.
+func readTaskRun(root string) (*candidate.TaskRun, error) {
+	raw, err := os.ReadFile(filepath.Join(root, "task-run.json"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var run candidate.TaskRun
+	if err := json.Unmarshal(raw, &run); err != nil {
+		return nil, fmt.Errorf("task run record is unreadable: %w", err)
+	}
+	return &run, nil
+}
+
+// goEnv reads one Go environment value.
+func goEnv(name string) (string, error) {
+	out, err := exec.Command("go", "env", name).Output()
+	return strings.TrimSpace(string(out)), err
 }
