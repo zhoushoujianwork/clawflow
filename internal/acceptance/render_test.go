@@ -73,14 +73,22 @@ func TestRenderWorkflow(t *testing.T) {
 	if len(job.Steps) == 0 || job.Steps[0].With["ref"] != "${{ github.event.pull_request.head.sha }}" {
 		t.Fatal("render job does not check out exact PR head")
 	}
-	if job.Steps[len(job.Steps)-1].WorkingDirectory != "web" {
-		t.Fatal("render fixtures require the web working directory")
-	}
 	var commands string
 	for _, step := range job.Steps {
 		commands += step.Run + "\n"
 	}
-	for _, want := range []string{"--frozen-lockfile", "pnpm --dir web build", "install --with-deps chromium", "for fixture in scripts/check-*-render.mjs", `node "$fixture"`} {
+	for _, want := range []string{"scripts/verify.sh web-build", "install --with-deps chromium", "scripts/verify.sh render"} {
+		if !strings.Contains(commands, want) {
+			t.Fatalf("render workflow missing %q", want)
+		}
+	}
+	// CI and local runs share one entry; pin what it runs for render proof.
+	script, err := os.ReadFile("../../scripts/verify.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands = string(script)
+	for _, want := range []string{"--frozen-lockfile", "pnpm --dir web build", "cd web", "for fixture in scripts/check-*-render.mjs", `node "$fixture"`} {
 		if !strings.Contains(commands, want) {
 			t.Fatalf("render workflow missing %q", want)
 		}

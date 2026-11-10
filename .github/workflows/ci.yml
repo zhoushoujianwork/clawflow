@@ -15,9 +15,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Same entry as local runs: gofmt, vet, race tests and CLI smoke.
       # The suite runs on isolated SQLite files and needs no database service.
-      - name: Unit tests
-        run: go test -v -race ./...
+      - name: Go verification
+        run: scripts/verify.sh go
 
       # The one-time PostgreSQL importer is tested against an isolated schema in a
       # throwaway PostgreSQL service. The service exists only for this step.
@@ -32,30 +33,6 @@ jobs:
           CLAWFLOW_TEST_DATABASE_DSN: postgres://clawflow:clawflow@localhost:5432/clawflow_test?sslmode=disable
         run: go test -v -race -count=1 -run 'Import|Cutover|Rollback|Verify' ./internal/store/...
 
-      - name: CLI smoke tests
-        run: |
-          go build -o clawflow ./cmd/clawflow/
-          ./clawflow --help
-          ./clawflow version
-          ./clawflow run --help
-          ./clawflow db --help
-          ./clawflow operators list
-          # Hard fail if any embedded SKILL.md has bad frontmatter.
-          ./clawflow operators validate
-          ./clawflow repo --help
-          ./clawflow issue --help
-          ./clawflow label --help
-          ./clawflow pr --help
-          ./clawflow config --help
-          ./clawflow status --help
-          ./clawflow worktree --help
-          ./clawflow pr-check --help
-          ./clawflow update --help
-          ./clawflow web --help
-          ./clawflow controller --help
-          ./clawflow dashboard --help
-          ./clawflow worker join --help
-
   native:
     name: Native macOS
     runs-on: macos-15
@@ -65,7 +42,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Headless native tests
-        run: swift test --package-path macos
+        run: scripts/verify.sh native
       - name: Build app without opening it
         run: make native
       - uses: actions/upload-artifact@v4
@@ -96,7 +73,7 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Build web bundle
-        run: pnpm --dir web install --frozen-lockfile && pnpm --dir web build
+        run: scripts/verify.sh web-build
 
       - name: Restore Playwright browser cache
         id: playwright-cache
@@ -150,11 +127,6 @@ jobs:
           fi
 
       - name: Run all render fixtures
-        working-directory: web
         env:
           PLAYWRIGHT_MODULE: ${{ runner.temp }}/render-tools/node_modules/playwright/index.mjs
-        run: |
-          for fixture in scripts/check-*-render.mjs; do
-            echo "Running $fixture"
-            node "$fixture"
-          done
+        run: scripts/verify.sh render

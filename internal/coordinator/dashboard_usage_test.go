@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -54,7 +55,14 @@ func TestDashboardUsageBucketsInControllerLocalDayAndScopesRepos(t *testing.T) {
 	}
 }
 
+// The index plan and aggregates are checked on a small table by default; the
+// 100k-row cold-query budget is a measurement, opt in with
+// CLAWFLOW_MEASURE_SCALE=1 (it takes ~45s under the race detector).
 func TestDashboardUsageUsesStartedIndexAndMeasures100kRows(t *testing.T) {
+	rows, measure := 2000, os.Getenv("CLAWFLOW_MEASURE_SCALE") == "1"
+	if measure {
+		rows = 100000
+	}
 	db := storetest.New(t)
 	if _, err := db.Migrate(context.Background(), store.Migrations); err != nil {
 		t.Fatal(err)
@@ -62,12 +70,12 @@ func TestDashboardUsageUsesStartedIndexAndMeasures100kRows(t *testing.T) {
 	now := time.Now().UTC()
 	payload := `{"usage":{"cost_basis":"api"}}`
 	if err := db.DB().Exec(`WITH RECURSIVE rows(n) AS (
- SELECT 1 UNION ALL SELECT n + 1 FROM rows WHERE n < 100000
+ SELECT 1 UNION ALL SELECT n + 1 FROM rows WHERE n < ?
 )
 INSERT INTO runs
  (run_dir, repo, status, started_at, cost_usd, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, model, payload)
 SELECT printf('fixture/%06d', n), CASE WHEN n % 2 = 0 THEN 'o/a' ELSE 'o/b' END, 'success', ?,
-       0.01, 1, 2, 3, 4, CASE WHEN n % 3 = 0 THEN 'gpt-b' ELSE 'gpt-a' END, ? FROM rows`, now.Add(-time.Hour), payload).Error; err != nil {
+       0.01, 1, 2, 3, 4, CASE WHEN n % 3 = 0 THEN 'gpt-b' ELSE 'gpt-a' END, ? FROM rows`, rows, now.Add(-time.Hour), payload).Error; err != nil {
 		t.Fatal(err)
 	}
 	var plans []struct{ Detail string }
@@ -87,13 +95,13 @@ SELECT printf('fixture/%06d', n), CASE WHEN n % 2 = 0 THEN 'o/a' ELSE 'o/b' END,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Total.ThirtyDays.CostUSD == nil || math.Abs(*usage.Total.ThirtyDays.CostUSD-1000) > 0.001 || usage.Total.ThirtyDays.TotalTokens == nil || *usage.Total.ThirtyDays.TotalTokens != 1_000_000 {
-		t.Fatalf("100k aggregate wrong: %+v", usage.Total.ThirtyDays)
+	if usage.Total.ThirtyDays.CostUSD == nil || math.Abs(*usage.Total.ThirtyDays.CostUSD-0.01*float64(rows)) > 0.001 || usage.Total.ThirtyDays.TotalTokens == nil || *usage.Total.ThirtyDays.TotalTokens != int64(10*rows) {
+		t.Fatalf("%d-row aggregate wrong: %+v", rows, usage.Total.ThirtyDays)
 	}
-	t.Logf("dashboard usage 100k-row cold query: %s", elapsed)
+	t.Logf("dashboard usage %d-row cold query: %s", rows, elapsed)
 	// The race detector slows pure-Go SQLite by about 40x, so the budget only
 	// holds without it.
-	if !raceEnabled && elapsed > 2*time.Second {
+	if measure && !raceEnabled && elapsed > 2*time.Second {
 		t.Fatalf("dashboard usage cold query too slow: %s", elapsed)
 	}
 }
