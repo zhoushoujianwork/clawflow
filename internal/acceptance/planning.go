@@ -2,6 +2,7 @@ package acceptance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"time"
@@ -109,9 +110,17 @@ func (runner Runner) RequirementsPlan(ctx context.Context, c Contract, scratch s
 	plan.Planner = native(planned)
 	plan.Text = planned.Text
 	if c.EvidenceSchema == 1 {
-		if err = decodeStrict([]byte(unfenceReport(plan.Text)), &plan.Criteria); err != nil {
+		// Planner output is untrusted model text: keep only the criteria schema
+		// fields and save their canonical JSON, so extra keys (for example a
+		// "description") do not fail planning while stored plans stay strict.
+		if err = json.Unmarshal([]byte(unfenceReport(plan.Text)), &plan.Criteria); err != nil {
+			return Plan{}, errors.New("planner must return a requirement criteria array")
+		}
+		canonical, err := json.Marshal(plan.Criteria)
+		if err != nil {
 			return Plan{}, err
 		}
+		plan.Text = string(canonical)
 	}
 	plan.Digest = digest(plan.Text)
 	plan.CompletedAt = time.Now().UTC()
