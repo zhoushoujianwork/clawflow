@@ -95,7 +95,7 @@ func remoteReadPath(p string) bool {
 		return false
 	}
 	switch p {
-	case "/api/session", "/api/pipeline", "/api/run/status", "/api/runs", "/api/usage",
+	case "/api/session", "/api/pipeline", "/api/decisions", "/api/run/status", "/api/runs", "/api/usage",
 		"/data/meta.json", "/data/repos.json", "/data/pending.json", "/data/issues.json",
 		"/", "/index.html", "/dashboard", "/pipeline", "/usage", "/favicon.svg", "/logo.svg":
 		return true

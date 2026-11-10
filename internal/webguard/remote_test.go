@@ -16,6 +16,8 @@ func TestRemotePolicy(t *testing.T) {
 		{"ipv6 loopback", "[::1]:10", "DELETE", "/api/settings", "", nil, 200},
 		{"mapped loopback", "[::ffff:127.0.0.1]:10", "PUT", "/api/settings", "", nil, 200},
 		{"pipeline", "192.168.1.2:10", "GET", "/api/pipeline", "", nil, 200},
+		{"decisions read", "192.168.1.2:10", "GET", "/api/decisions", "", nil, 200},
+		{"decisions post", "192.168.1.2:10", "POST", "/api/decisions", "", nil, 403},
 		{"head", "192.168.1.2:10", "HEAD", "/data/issues.json", "", nil, 200},
 		{"post", "192.168.1.2:10", "POST", "/api/pipeline", "", nil, 403},
 		{"put", "192.168.1.2:10", "PUT", "/api/pipeline", "", nil, 403},
