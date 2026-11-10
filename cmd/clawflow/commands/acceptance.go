@@ -310,7 +310,11 @@ func acceptanceContract(ctx context.Context, client vcs.Client, repo string, prN
 		generation = 1
 	}
 	policy := acceptanceHash(struct{ Policy, TargetBranch string }{acceptancePolicy(repo, rc, ec), pr.BaseBranch})
-	c = acceptance.Contract{EvidenceSchema: acceptanceEvidenceSchema, Version: acceptance.Version, TaskID: repo + ":issue:" + strconv.Itoa(issueNum), Generation: generation, Repository: repo, PRNumber: prNumber, HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, PolicyDigest: policy, Requirements: requirements, Development: dev}
+	isolated, err := isolatedRunNeeded(client, rc, repo, pr)
+	if err != nil {
+		return c, rc, ec, pr, err
+	}
+	c = acceptance.Contract{EvidenceSchema: acceptanceEvidenceSchema, Version: acceptance.Version, TaskID: repo + ":issue:" + strconv.Itoa(issueNum), Generation: generation, Repository: repo, PRNumber: prNumber, HeadSHA: pr.HeadSHA, BaseSHA: pr.BaseSHA, PolicyDigest: policy, Requirements: requirements, Development: dev, IsolatedRun: isolated}
 	// IntegrationSHA stays empty: GitHub's merge_commit_sha is not test evidence.
 	return c, rc, ec, pr, c.Validate()
 }
@@ -899,7 +903,11 @@ func runAcceptance(ctx context.Context, client vcs.Client, repo string, prNumber
 	if provider, ok := client.(vcs.CIEvidenceProvider); ok {
 		ci = func() (vcs.CIEvidence, error) { return provider.GetCIEvidence(repo, prNumber) }
 	}
-	r, err := (acceptance.Runner{CIRequired: rc.CIRequired, CI: ci, Store: store, PlanStore: planStore, PlanPolicy: planPolicy, SavedPlan: savedPlan, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand, SetupCommand: rc.AcceptanceSetupCommand, PRText: acceptancePRText(pr)}).Run(ctx, c, scratch, workspace)
+	var isolatedHook func(context.Context, acceptance.Contract, string) (acceptance.IsolatedRun, error)
+	if c.IsolatedRun {
+		isolatedHook = isolatedRunner(client, repo, pr)
+	}
+	r, err := (acceptance.Runner{Isolated: isolatedHook, CIRequired: rc.CIRequired, CI: ci, Store: store, PlanStore: planStore, PlanPolicy: planPolicy, SavedPlan: savedPlan, Execute: execute, Inspect: inspect, Prepare: prepare, TestCommand: rc.TestCommand, SetupCommand: rc.AcceptanceSetupCommand, PRText: acceptancePRText(pr)}).Run(ctx, c, scratch, workspace)
 	if r.Completed {
 		if publishErr := publishAcceptanceReport(ctx, client, r); publishErr != nil {
 			return r, errors.Join(err, publishErr)

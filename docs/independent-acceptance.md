@@ -106,6 +106,38 @@ Local fixture tests do not establish a live provider or GitHub Actions result. S
 
 PR 评论只更新当前认证账号拥有的 `clawflow:acceptance-report` 评论；同一 attempt 重发无副作用，较旧或时间顺序冲突的结果被拒绝。发布前重新核对当前合约及最新 attempt；本机使用现有 PR 锁，分布式 worker 由 coordinator 接收 fenced 结果后发布。它不是跨多个独立 coordinator 的远端原子 CAS；继续遵循现有单 authority 部署边界。旧 issue 评论不删除。私有 store 保留每次审查；不会把未经清理的原始 transcript 发布到 PR。
 
+## 改动运行路径的 PR：先在隔离环境真实运行
+
+单元测试看不到只有真正运行才出现的缺陷，例如中断后预检一直 pending、验收期间 head 变化导致反复 500。对这类 PR，独立验收在审阅前先在隔离候选环境里完整跑一个任务，并把结果写进验收记录。
+
+开启（默认关闭；只对包含 ClawFlow 自身源码的仓库有意义，因为候选环境由该仓库的源码构建）：
+
+```bash
+clawflow repo set owner/repo --acceptance-isolated-run on
+```
+
+**什么时候触发。** 由 runner 根据平台返回的变更文件列表判断，不看 PR 正文，也不由 reviewer 决定。变更触及 controller、worker、调度、存储、验收或写回路径的非测试 Go 代码（`internal/coordinator`、`internal/store`、`internal/queue`、`internal/execution`、`internal/snapshot`、`cmd/clawflow/commands` 中的 `worker*`、`coordinator*`、`controller*`、`run*`、`harvest*`、`db*` 等），或 `go.mod`/`go.sum` 时触发。完整规则见 `internal/candidate/runtime_paths.go`。纯文档、SKILL 文本、前端与原生 App 样式、`*_test.go`、`testdata` 不触发，验收速度不变。平台无法返回文件列表时按读取错误处理并稍后重试，不会当作“没有运行路径改动”。
+
+**跑什么。** 复用 `candidate` 流程（见 [candidate-isolation.md](candidate-isolation.md)）：为被审 head 构建独立二进制，启动候选 controller 和开发/评审两条 worker，然后让一个固定任务走完整链路：
+
+| 步骤 | 判定依据 |
+| --- | --- |
+| claimed | 候选数据库中有 `claim` 审计，且由开发 worker 领取 |
+| executed | 执行器进程实际运行了一次 |
+| written-back | 回环 fixture 论坛收到 1 个 MR、至少 1 条评论和结果标签 |
+| finished | 任务状态为 `done` 且有 `result-applied` 审计 |
+
+停止候选后再检查：没有属于该候选的残留进程（含脱离进程组的后台进程），也没有任务引入且仍被持有的锁文件。所有结果来自进程、数据库和 fixture 论坛的观察，而不是模型输出。
+
+**结论怎么用这次运行。**
+
+- 运行记录（步骤、残留、证据文件 SHA-256）保存在验收记录的 `isolated_run`，并作为 `isolated-run: ...` 条目进入 evidence；reviewer 的提示也包含这次运行的结果。
+- 运行失败（任何步骤失败、残留进程或锁、无法编译）时，结论为 `failed`，并追加一条带精确 head 的 `defect` finding，`next_owner` 为 `implementer`，交给现有的失败验收修复流程，与 [Repair after a failed verdict](#repair-after-a-failed-verdict) 共用每 PR 三次的额度。reviewer 即使判定通过或 blocked 也不能覆盖失败的运行。
+- 合并门禁要求记录里有通过的运行：合约中的 `isolated_run` 为真时，没有运行、运行属于旧 head、状态与事实不一致都不能通过。该标志只在为真时进入合约摘要，旧记录的身份不变。
+- 无法尝试运行（端口被占、候选目录异常、稳定宿主在运行期间出现无法归因的变化）属于基础设施错误，沿用既有的重试上限，不判代码有缺陷，也不消耗修复次数。
+
+**限制。** 该运行验证任务生命周期和清理，不替代 CI，也不证明真实模型、真实论坛或 GitHub Actions 的行为：执行器用夹具 agent 代替模型 CLI，论坛是回环 fake。单次耗时主要是编译：在开发机上实测，冷构建缓存的编译约 4.5 至 5 分钟，使用已预热的共享构建缓存时，一次完整通过的运行约 50 秒；默认总时限 25 分钟。同一台机器上的隔离运行互斥，避免端口和 CPU 竞争被误判为缺陷。
+
 ## 特殊真实测试环境
 
 独立 review 在选择报告模式后读取执行机器上主项目的 `testing.md`，与开发共享 SOP 段落；不向 requirements-only planner 注入 SOP，也不向 review 注入项目开发上下文。无项目或无文档保持兼容输入。跨机器文档分发、环境门禁和共享宿主租约尚未实现；真实需求缺环境证据时不能降级为离线通过。通用声明、负例与实现边界见 [测试环境就绪契约](testing-environment-contract.md)。

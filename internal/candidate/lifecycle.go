@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,46 @@ import (
 // candidate's own bin directory. It refuses a checkout whose HEAD differs from
 // the pinned commit, and never writes outside the candidate root.
 func BuildBinary(ctx context.Context, p Plan, checkout string) (path, sha string, err error) {
+	return BuildBinaryWith(ctx, p, BuildOptions{Checkout: checkout})
+}
+
+// BuildError is a failed compile of the pinned commit. Compile is true when the
+// compiler rejected the source (a defect of the commit); false means the
+// toolchain or environment failed and says nothing about the commit.
+type BuildError struct {
+	Compile bool
+	Output  string
+	Err     error
+}
+
+func (e *BuildError) Error() string { return "build failed: " + e.Err.Error() + ": " + e.Output }
+func (e *BuildError) Unwrap() error { return e.Err }
+
+var compilerDiagnostic = regexp.MustCompile(`\.go:\d+:\d+: `)
+
+func buildError(err error, output string) error {
+	out := tail(output, 600)
+	return &BuildError{Compile: compilerDiagnostic.MatchString(output), Output: out, Err: err}
+}
+
+// BuildOptions tunes how the pinned commit is compiled. The zero value keeps the
+// strictest behaviour: every cache lives under the candidate root.
+type BuildOptions struct {
+	Checkout string
+	// GoCache is a content-addressed build cache shared between candidates. It
+	// must never be the stable host's cache directory; it only speeds up the
+	// repeated build of nearly identical sources.
+	GoCache string
+	// ModCache is an existing module cache reused with GOPROXY=off: nothing is
+	// downloaded into it and the build needs no network. A dependency missing
+	// from it is not a defect of the commit, so the build is retried once with
+	// the normal module settings.
+	ModCache string
+}
+
+// BuildBinaryWith is BuildBinary with explicit BuildOptions.
+func BuildBinaryWith(ctx context.Context, p Plan, o BuildOptions) (path, sha string, err error) {
+	checkout := o.Checkout
 	head, err := gitOutput(ctx, checkout, "rev-parse", "HEAD")
 	if err != nil {
 		return "", "", fmt.Errorf("read checkout revision: %w", err)
@@ -37,10 +78,33 @@ func BuildBinary(ctx context.Context, p Plan, checkout string) (path, sha string
 	cmd.Dir = checkout
 	cmd.Env = p.Env("")
 	cmd.Env = append(cmd.Env, "GOFLAGS=-mod=readonly", "GOPATH="+filepath.Join(p.Cache, "gopath"))
+	if o.GoCache != "" {
+		cmd.Env = append(cmd.Env, "GOCACHE="+o.GoCache)
+	}
+	if o.ModCache != "" {
+		cmd.Env = append(cmd.Env, "GOMODCACHE="+o.ModCache, "GOPROXY=off")
+	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {
-		return "", "", fmt.Errorf("build failed: %w: %s", err, tail(out.String(), 600))
+		// A dependency the PR adds is absent from an offline module cache. That
+		// says nothing about the commit, so retry once with the normal module
+		// settings before reporting a build failure.
+		if o.ModCache == "" || !strings.Contains(out.String(), "GOPROXY=off") && !strings.Contains(out.String(), "module lookup disabled") {
+			return "", "", buildError(err, out.String())
+		}
+		retry := exec.CommandContext(ctx, "go", "build", "-ldflags", flags, "-o", path, "./cmd/clawflow")
+		retry.Dir = checkout
+		retry.Env = p.Env("")
+		retry.Env = append(retry.Env, "GOFLAGS=-mod=readonly", "GOPATH="+filepath.Join(p.Cache, "gopath"))
+		if o.GoCache != "" {
+			retry.Env = append(retry.Env, "GOCACHE="+o.GoCache)
+		}
+		out.Reset()
+		retry.Stdout, retry.Stderr = &out, &out
+		if err := retry.Run(); err != nil {
+			return "", "", buildError(err, out.String())
+		}
 	}
 	if dirty, checkErr := gitOutput(ctx, checkout, "status", "--porcelain"); checkErr != nil || dirty != "" {
 		return "", "", fmt.Errorf("candidate checkout changed during build; refusing the resulting binary")

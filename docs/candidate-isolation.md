@@ -39,8 +39,11 @@ clawflow candidate up --commit <sha> --checkout <disposable-worktree>
 # 3. 停止（仅停止清单中仍属于本候选的进程），对比稳定宿主，写证据
 clawflow candidate down --commit <sha> --offline passed
 
-# 4. 独立评审：校验证据属于被评审的提交
-clawflow candidate verify <root>/evidence.json --commit <sha>
+# 3b. 可选：在运行中的候选里真实跑一个任务（prepare 时加 --task-fixture）
+clawflow candidate exercise --commit <sha>
+
+# 4. 独立评审：校验证据属于被评审的提交（--require-task 还要求任务运行已通过）
+clawflow candidate verify <root>/evidence.json --commit <sha> --require-task
 
 # 5. 清理：仅删除自己的根目录与 schema
 clawflow candidate clean --commit <sha>
@@ -94,13 +97,17 @@ clawflow candidate clean --commit <sha>
 
 `evidence.json`（权限 0600）绑定：候选提交、运行时身份（id、端口、schema、bundle id）、环境（OS、架构、Go 版本、候选二进制 SHA-256）、SOP 摘要与能力、各层结果、worker 身份、命令及结果、稳定宿主差异、状态。令牌、DSN 与密码在写入前脱敏。
 
-层级：`offline`、`environment-ready`、`candidate-loaded`、`lifecycle`、`live-write`、`save-reload`、`native-visual`。`live-write`/`save-reload` 默认 `not-run`，`native-visual` 默认 `pending`；任何一层都不由其他层推断。阻塞之后的步骤保持 `not-run`，整体状态为 `blocked`。稳定宿主的配置、数据（不含 `runs/` 历史）、监听端口或进程身份在运行前后不一致时，整体状态为 `failed`。配置与数据比较实际内容和文件类型/权限；单纯触碰修改时间不会被误判为内容变更。旧记录保存在候选根下的 `attempt-*` 目录中。 快照另外保存逐路径 SHA-256；发生变化时报告新增、删除或修改的相对路径（每类最多 50 条，余量显示数量），不保存文件内容或符号链接目标。旧快照缺少逐路径摘要时仍按原聚合摘要判定失败。路径证据仅用于定位，不识别写入者，也不将 GitHub 缓存或限流记录变化自动放行。
+层级：`offline`、`environment-ready`、`candidate-loaded`、`lifecycle`、`task-lifecycle`、`live-write`、`save-reload`、`native-visual`。`task-lifecycle` 记录真实任务的领取、执行、写回、结束，以及停止后没有残留进程和锁；它由 `candidate exercise` 产生，状态每次由记录的事实重新计算，而不是读取已保存的标志。需要任务运行的证据（`task_required`）不要求 `offline`，单元测试由精确提交上的 CI 负责。`live-write`/`save-reload` 默认 `not-run`，`native-visual` 默认 `pending`；任何一层都不由其他层推断。阻塞之后的步骤保持 `not-run`，整体状态为 `blocked`。稳定宿主的配置、数据（不含 `runs/` 历史）、监听端口或进程身份在运行前后不一致时，整体状态为 `failed`。配置与数据比较实际内容和文件类型/权限；单纯触碰修改时间不会被误判为内容变更。旧记录保存在候选根下的 `attempt-*` 目录中。 快照另外保存逐路径 SHA-256；发生变化时报告新增、删除或修改的相对路径（每类最多 50 条，余量显示数量），不保存文件内容或符号链接目标。旧快照缺少逐路径摘要时仍按原聚合摘要判定失败。路径证据仅用于定位，不识别写入者，也不将 GitHub 缓存或限流记录变化自动放行。
 
 ## 原生 App 与 GUI
 
 `CLAWFLOW_CANDIDATE_ID=<12 hex> CLAWFLOW_CANDIDATE_OUT=<绝对路径> CLAWFLOW_CANDIDATE_CLI=<候选 clawflow> macos/build-app.sh` 构建 `ClawFlow Dev.app`，bundle id 为 `com.clawflow.dashboard.dev.<id>`。脚本在创建任何目录前拒绝 `macos/dist`、`/Applications`、`~/Applications`（含符号链接后的路径）以及稳定 bundle id。该 App 只管理自己的 `.dev.<id>.` 标签，启动时不自动拉起服务，且不回落到已安装的 CLI。构建脚本不启动也不安装 App。
 
 自动验收不得打开、聚焦或操作桌面，不得读写剪贴板，也不得替换已安装的 App/CLI。原生目视检查在没有明确测试窗口时记录为 `pending`。
+
+## 任务运行（`prepare --task-fixture`、`exercise`）
+
+`candidate up` 只证明进程起来了，不证明任务能走通。`--task-fixture` 在候选根目录内再建一个回环 fixture 论坛、一个 git 远端与克隆、一个替代模型 CLI 的 fixture agent（放在候选 `bin/`，只在候选的 `PATH` 前部生效）和候选自己的 Offload profile，仍然不触碰稳定宿主。`exercise` 用候选二进制创建任务，由候选 worker 领取并执行，随后检查 fixture 论坛收到的写回；`down` 在停止服务后检查残留进程和锁，并把整次运行写入 `evidence.json`。验收如何使用见 [independent-acceptance.md](independent-acceptance.md#改动运行路径的-pr先在隔离环境真实运行)。
 
 ## 仍保留的门禁
 

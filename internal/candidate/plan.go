@@ -60,22 +60,25 @@ type Stable struct {
 
 // Plan lists every resource owned by one candidate.
 type Plan struct {
-	ID        string            `json:"id"`
-	Commit    string            `json:"commit"`
-	Base      string            `json:"base"`
-	Root      string            `json:"root"`
-	Home      string            `json:"home"`
-	State     string            `json:"state"`
-	ReviewDir string            `json:"review_state"`
-	Config    string            `json:"config"`
-	Locks     string            `json:"locks"`
-	Worktrees string            `json:"worktrees"`
-	Cache     string            `json:"cache"`
-	Logs      string            `json:"logs"`
-	Bin       string            `json:"bin"`
-	Tmp       string            `json:"tmp"`
-	Src       string            `json:"src"`
-	Port      int               `json:"port"`
+	ID        string `json:"id"`
+	Commit    string `json:"commit"`
+	Base      string `json:"base"`
+	Root      string `json:"root"`
+	Home      string `json:"home"`
+	State     string `json:"state"`
+	ReviewDir string `json:"review_state"`
+	Config    string `json:"config"`
+	Locks     string `json:"locks"`
+	Worktrees string `json:"worktrees"`
+	Cache     string `json:"cache"`
+	Logs      string `json:"logs"`
+	Bin       string `json:"bin"`
+	Tmp       string `json:"tmp"`
+	Src       string `json:"src"`
+	Port      int    `json:"port"`
+	// ForgePort is the loopback port of the fixture forge used by a task run;
+	// zero means the candidate has no built-in fixture.
+	ForgePort int               `json:"forge_port,omitempty"`
 	Schema    string            `json:"schema"`
 	Labels    map[string]string `json:"labels"`
 	BundleID  string            `json:"bundle_id"`
@@ -189,6 +192,16 @@ func (p Plan) Validate(stable Stable, probe Probe) error {
 	if probe != nil && !probe(p.Port) {
 		return collide("port %d is already in use", p.Port)
 	}
+	if p.ForgePort != 0 {
+		switch {
+		case p.ForgePort < 1024 || p.ForgePort > 65535 || p.ForgePort == p.Port:
+			return collide("fixture port %d is outside the unprivileged range or equals the controller port", p.ForgePort)
+		case slices.Contains(stable.Ports, p.ForgePort):
+			return collide("fixture port %d belongs to the stable host", p.ForgePort)
+		case probe != nil && !probe(p.ForgePort):
+			return collide("fixture port %d is already in use", p.ForgePort)
+		}
+	}
 	return nil
 }
 
@@ -211,7 +224,7 @@ func (p Plan) checkSiblings() error {
 			continue
 		}
 		switch {
-		case other.Plan.Port == p.Port:
+		case other.Plan.Port == p.Port, p.ForgePort != 0 && (other.Plan.Port == p.ForgePort || other.Plan.ForgePort == p.ForgePort):
 			return collide("port %d is claimed by candidate %s", p.Port, other.Plan.ID)
 		case other.Plan.Schema == p.Schema, other.Plan.BundleID == p.BundleID:
 			return collide("identity is claimed by candidate %s", other.Plan.ID)

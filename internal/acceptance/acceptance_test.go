@@ -352,13 +352,19 @@ func TestStoreBoundsAndContentDigests(t *testing.T) {
 
 func setupRunner(t *testing.T) (Runner, string, string) {
 	t.Helper()
+	return setupRunnerFor(t, contract())
+}
+
+// setupRunnerFor is setupRunner for a specific contract, whose plan key differs
+// when its digest does.
+func setupRunnerFor(t *testing.T, c Contract) (Runner, string, string) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	s := openTestStore(t)
 	scratch := t.TempDir()
 	workspace := t.TempDir()
 	scratch, _ = filepath.EvalSymlinks(scratch)
 	workspace, _ = filepath.EvalSymlinks(workspace)
-	c := contract()
 	r := Runner{Store: s, Inspect: func(context.Context, string) (Source, error) {
 		return Source{c.HeadSHA, c.BaseSHA, c.IntegrationSHA, true}, nil
 	}}
