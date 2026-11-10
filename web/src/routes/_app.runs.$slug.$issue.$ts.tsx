@@ -7,6 +7,7 @@ import { repoUrl, issueUrl, useRepoInfoMap } from '../lib/vcsUrls'
 import { VcsIcon } from '../components/VcsIcon'
 import { Markdown } from '../components/Markdown'
 import { workDetailKey } from '../components/WorkDetail'
+import { useReadOnly } from '../lib/session'
 import { TraceView, type RawEvent } from '../components/TraceView'
 
 interface ModelUsage {
@@ -68,6 +69,7 @@ export const Route = createFileRoute('/_app/runs/$slug/$issue/$ts')({
 
 function RunDetail() {
   const { slug, issue, ts } = Route.useParams()
+  const readonly = useReadOnly()
   useDocumentTitle(`${slug}#${issue}`)
   // Absolute path from the server root. `./data/...` would break here
   // because the current URL is /runs/slug/issue/ts and the dashboard
@@ -129,16 +131,23 @@ function RunDetail() {
 
   const repo = slug.replace(/__/g, '/')
   const issueNum = issue.replace(/^issue-/, '')
+  const missing = readonly && !rawLoading && !meta
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-6 min-w-0 [overflow-wrap:anywhere]">
-      <Link
-        to="/repos/$"
-        params={{ _splat: repo }}
-        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-4"
-      >
-        <ChevronLeft className="w-3.5 h-3.5" /> <span className="font-mono">{repo}</span>
-      </Link>
+      {readonly ? (
+        <Link to="/pipeline" search={{ workRepo: repo }} className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-4">
+          <ChevronLeft className="w-3.5 h-3.5" /> <span className="font-mono">{repo}</span>
+        </Link>
+      ) : (
+        <Link
+          to="/repos/$"
+          params={{ _splat: repo }}
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-4"
+        >
+          <ChevronLeft className="w-3.5 h-3.5" /> <span className="font-mono">{repo}</span>
+        </Link>
+      )}
 
       {meta ? (
         <div className="mb-6">
@@ -213,19 +222,21 @@ function RunDetail() {
               #{issueNum} <ExternalLink className="w-3 h-3" />
             </a>
             <span>·</span>
-            <span>meta.json not found — raw events below</span>
+            <span>{readonly ? 'no recorded attempt metadata' : 'meta.json not found — raw events below'}</span>
           </p>
         </div>
       )}
 
+      {missing && <p role="status" className="text-sm my-3">No recorded attempt was found for this link. It may have been removed by retention; the Work page lists the attempts that remain.</p>}
       <Link to="/pipeline" search={{ detail: workDetailKey(repo, Number(issueNum)) }} className="text-sm underline">Back to Work details</Link>
       <ExecutionEvidence meta={meta} />
       <ConclusionPanel meta={meta} />
 
       <UsagePanel meta={meta} />
 
-      {!traceEnabled && <button className="border rounded p-2" onClick={() => setTracePath(basePath)}>Load execution events / legacy transcript</button>}
-      {traceEnabled && <TraceView
+      {readonly && <p role="note" className="text-sm border rounded p-3 my-4">Read-only view: the failure reason above is redacted, and the execution transcript is available only on the machine that runs ClawFlow.</p>}
+      {!readonly && !traceEnabled && <button className="border rounded p-2" onClick={() => setTracePath(basePath)}>Load execution events / legacy transcript</button>}
+      {!readonly && traceEnabled && <TraceView
         events={events}
         loading={rawLoading}
         running={!meta || meta.status === 'running'}

@@ -22,7 +22,9 @@ function AppLayout() {
       .then(d => { setReadonly(d.readonly !== false); setSessionReady(true) })
       .catch(() => setSessionReady(true))
   }, [])
-  const allowedPage = ['/pipeline', '/usage'].includes(pathname)
+  // Run detail pages are linked from Work and Usage; their data comes from /api/runs,
+  // which returns a reduced view to read-only sessions.
+  const allowedPage = ['/pipeline', '/usage'].includes(pathname) || /^\/runs\/[^/]+\/issue-\d+\/[^/]+$/.test(pathname)
   const [currentVersion, setCurrentVersion] = useState<string | null>(null)
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
   const [channel, setChannel] = useState('')

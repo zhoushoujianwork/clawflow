@@ -94,10 +94,14 @@ type Execution struct {
 
 // RepoBoard is the board for one repository.
 type RepoBoard struct {
-	HostingPlatform    string `json:"hosting_platform,omitempty"`
-	Stale              bool   `json:"stale"`
-	Repo               string `json:"repo"`
-	Enabled            bool   `json:"enabled"`
+	HostingPlatform string `json:"hosting_platform,omitempty"`
+	Stale           bool   `json:"stale"`
+	Repo            string `json:"repo"`
+	Enabled         bool   `json:"enabled"`
+	// Stopped marks a registered repository whose monitoring is off. Its board
+	// is built from local records only (earlier board, run history): no VCS
+	// request, queue dispatch or execution is made on its behalf.
+	Stopped            bool   `json:"stopped,omitempty"`
 	Platform           string `json:"platform"`
 	AutoMerge          bool   `json:"auto_merge"`
 	CIRequired         bool   `json:"ci_required"`

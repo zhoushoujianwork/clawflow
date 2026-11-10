@@ -1,4 +1,4 @@
-export type WorkFilter = 'running' | 'waiting' | 'attention' | 'delivered'
+export type WorkFilter = 'running' | 'waiting' | 'attention' | 'delivered' | 'stopped'
 
 export interface WorkItem {
   stage: string
@@ -49,8 +49,10 @@ export function selectWorkItems<T extends WorkItem>(items: T[], filter: WorkFilt
   })
 }
 
+const TILE_LABELS: Record<WorkFilter, string> = { running: 'Running', waiting: 'Waiting', attention: 'Attention', delivered: 'Delivered', stopped: 'Automation off' }
+
 export function WorkSummary({ repos, sources, generatedAt, stale, refreshing, failed, filter, onFilter }: {
-  repos?: { items: WorkItem[] }[]
+  repos?: { items: WorkItem[]; stopped?: boolean }[]
   sources?: SourceHealth[]
   generatedAt?: string
   stale?: boolean
@@ -59,7 +61,11 @@ export function WorkSummary({ repos, sources, generatedAt, stale, refreshing, fa
   filter?: WorkFilter
   onFilter: (filter: WorkFilter) => void
 }) {
-  const items = repos?.flatMap(repo => repo.items) || []
+  // Stopped repositories keep their history but are not being processed, so
+  // they never count as running, waiting or needing attention.
+  const items = repos?.filter(repo => !repo.stopped).flatMap(repo => repo.items) || []
+  const stoppedRepos = repos?.filter(repo => repo.stopped) || []
+  const stoppedItems = stoppedRepos.flatMap(repo => repo.items).length
   const ready = !!repos && !!generatedAt
   const unknown = items.filter(unknownExecution).length
   const freshness = [...new Set(sources?.map(s => s.source))].map(source => {
@@ -70,15 +76,15 @@ export function WorkSummary({ repos, sources, generatedAt, stale, refreshing, fa
   }).join(' · ')
   const partial = failed || stale || sources?.some(s => s.stale || !s.last_success || s.error_category)
   return <section aria-label="Work summary" aria-busy={!ready || !!refreshing} className="mb-4 border rounded-xl p-4 min-h-[220px]">
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-      {(['running', 'waiting', 'attention', 'delivered'] as const).map(key => <button key={key}
+    <div className={`grid grid-cols-2 gap-3 ${stoppedRepos.length ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
+      {(stoppedRepos.length ? ['running', 'waiting', 'attention', 'delivered', 'stopped'] as const : ['running', 'waiting', 'attention', 'delivered'] as const).map(key => <button key={key}
         type="button" disabled={!ready} aria-pressed={filter === key} onClick={() => onFilter(key)}
         className={`rounded-lg border p-3 text-left hover:bg-secondary ${filter === key ? 'bg-secondary border-brand' : ''}`}>
-        <span className="block text-sm capitalize">{key}</span>
-        <span className="block text-2xl font-semibold tabular-nums">{ready ? selectWorkItems(items, key).length : '—'}</span>
+        <span className="block text-sm">{TILE_LABELS[key]}</span>
+        <span className="block text-2xl font-semibold tabular-nums">{ready ? key === 'stopped' ? stoppedItems : selectWorkItems(items, key).length : '—'}</span>
       </button>)}
     </div>
-    <p className="text-xs text-muted-foreground mt-3">All tracked repositories · items, not attempts. Running: observed Offload activity. Waiting: active items without running, attention or unknown execution. Attention counts items, not incidents, and may overlap running. Delivered: merges in the last 7 days. Select a count to browse matching items, up to 50 per page.</p>
+    <p className="text-xs text-muted-foreground mt-3">All tracked repositories · items, not attempts. Running: observed Offload activity. Waiting: active items without running, attention or unknown execution. Attention counts items, not incidents, and may overlap running. Delivered: merges in the last 7 days. Automation off: recorded issues of repositories whose automation is off; not counted above. Select a count to browse matching items, up to 50 per page.</p>
     <p role="status" className="text-xs text-muted-foreground mt-2 h-24 sm:h-16 overflow-y-auto">
       {!ready ? failed ? 'Work unavailable. Retry Refresh to load a snapshot.' : 'Loading work… Counts will appear with the first snapshot.' : <>
         {sources?.length ? freshness : 'Source freshness unknown'}

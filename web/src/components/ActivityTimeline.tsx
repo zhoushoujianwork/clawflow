@@ -106,6 +106,6 @@ export function EventTimeline({ events, filter, repo, issue = '', repos, update 
     </ol>
     {rows.length > pageSize && <button className="border rounded p-2 text-xs" onClick={() => setPageSize(n => n + 50)}>Load 50 more activity groups</button>}
     {!rows.length && <p className="text-xs text-muted-foreground">No matching activity.</p>}
-    <a href="/runs" className="text-xs text-brand underline">Browse retained run history</a>
+    <a href="/usage#run-history" className="text-xs text-brand underline">Browse retained run history</a>
   </details>
 }
