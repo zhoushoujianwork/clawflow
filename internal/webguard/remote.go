@@ -1,14 +1,26 @@
 package webguard
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
 	"path"
+	"regexp"
 	"strings"
 )
+
+type readOnlyKey struct{}
+
+// ReadOnlySession reports whether the request was admitted as a read-only
+// remote client. Handlers use it to return a reduced view of data that the
+// machine's owner may see in full.
+func ReadOnlySession(ctx context.Context) bool {
+	v, _ := ctx.Value(readOnlyKey{}).(bool)
+	return v
+}
 
 // RemotePolicy limits LAN clients using only the transport peer, never proxy headers.
 type RemotePolicy struct {
@@ -79,6 +91,9 @@ func (p *RemotePolicy) Middleware(next http.Handler) http.Handler {
 				return
 			}
 		}
+		if p.ReadOnly(r) {
+			r = r.WithContext(context.WithValue(r.Context(), readOnlyKey{}, true))
+		}
 		if p.ReadOnly(r) && r.Method == http.MethodHead {
 			read := r.Clone(r.Context())
 			read.Method = http.MethodGet
@@ -100,8 +115,14 @@ func remoteReadPath(p string) bool {
 		"/", "/index.html", "/dashboard", "/pipeline", "/usage", "/favicon.svg", "/logo.svg":
 		return true
 	}
-	return strings.HasPrefix(p, "/assets/")
+	return strings.HasPrefix(p, "/assets/") || runPage.MatchString(p)
 }
+
+// runPage is the single-attempt detail route that /usage and /pipeline link to.
+// It serves only the static page; the attempt's data comes from /api/runs, which
+// returns a reduced view to read-only sessions. The raw event stream under
+// /data/runs/ is not in the allowlist and stays private.
+var runPage = regexp.MustCompile(`^/runs/[A-Za-z0-9._-]{1,200}/issue-[0-9]{1,10}/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z$`)
 
 // Existing JSON handlers accept GET only; HEAD runs the same read without a body.
 type headResponseWriter struct{ http.ResponseWriter }

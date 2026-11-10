@@ -152,6 +152,24 @@ func loadRegistry() (*operator.Registry, error) {
 // requiring the repo to be enabled. A hidden repo is added to the returned map
 // so scanning and execution use the normal path, and callers keep it out of
 // the dashboard snapshots.
+// issueSnapshotKeep lists the repositories whose earlier issues.json entries
+// a pass leaves untouched: those another pass owns, plus every registered but
+// disabled repository. Stopping automation is not deleting history, so a
+// disabled repository keeps the issues last recorded for it and its read-only
+// history board can still list them. A removed registration is not kept.
+func issueSnapshotKeep(cfg *config.Config, preserve map[string]bool) map[string]bool {
+	keep := make(map[string]bool, len(preserve))
+	for name := range preserve {
+		keep[name] = true
+	}
+	for name, rc := range cfg.Repos {
+		if !rc.Enabled {
+			keep[name] = true
+		}
+	}
+	return keep
+}
+
 func resolveRunRepos(cfg *config.Config, onlyRepo string, onlyIssue int) (repos map[string]config.Repo, hidden string, err error) {
 	repos = cfg.EnabledRepos()
 	if onlyRepo == "" {
@@ -734,7 +752,8 @@ func runOnce(ctx context.Context, onlyRepo string, onlyIssue int, timeout time.D
 	if err := snapshot.WritePendingMerged(pending, preserveRepos); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot pending: %v\n", err)
 	}
-	if err := snapshot.WriteIssuesMerged(globalIssues, preserveRepos); err != nil {
+	issueKeep := issueSnapshotKeep(cfg, preserveRepos)
+	if err := snapshot.WriteIssuesMerged(globalIssues, issueKeep); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot issues: %v\n", err)
 	}
 

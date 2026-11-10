@@ -1298,7 +1298,17 @@ func ParseRepoInput(input string, gitlabHosts []string) (RepoInfo, error) {
 		return RepoInfo{OwnerRepo: parts[0] + "/" + parts[1], Platform: "github"}, nil
 	}
 
-	// GitLab (known host or self-hosted): keep full path as project identifier
+	// GitLab (known host or self-hosted): keep full path as project identifier.
+	// "/-/" is GitLab's reserved separator between a project path and its pages
+	// (issues, work_items, merge_requests, ...). A page link such as the web_url
+	// GitLab 18+ returns for an issue (".../-/work_items/1") names the project
+	// before it, never a project called "-".
+	if fullPath == "-" || strings.HasPrefix(fullPath, "-/") {
+		fullPath = "" // no project before the separator
+	} else if i := strings.Index(fullPath, "/-/"); i >= 0 {
+		fullPath = fullPath[:i]
+	}
+	fullPath = strings.TrimSuffix(fullPath, "/-")
 	if fullPath == "" || !strings.Contains(fullPath, "/") {
 		return RepoInfo{}, fmt.Errorf("URL %q does not contain a valid project path", input)
 	}

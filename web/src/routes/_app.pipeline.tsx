@@ -104,6 +104,8 @@ export interface RepoBoard {
   hosting_platform?: string
   repo: string
   enabled: boolean
+  /** Registered with automation off: this board is recorded history only. */
+  stopped?: boolean
   platform: string
   auto_merge: boolean
   ci_required: boolean
@@ -183,7 +185,7 @@ export function preferences(s: Record<string, unknown>): Preferences {
   return {
     ...workSearch(s),
     detail: typeof detail === 'string' && detail.length < 512 ? detail : undefined,
-    work: ['running', 'waiting', 'attention', 'delivered'].includes(String(s.work)) ? s.work as WorkFilter : undefined,
+    work: ['running', 'waiting', 'attention', 'delivered', 'stopped'].includes(String(s.work)) ? s.work as WorkFilter : undefined,
     tab: s.tab === 'active' || s.tab === 'delivered' || s.tab === 'all' ? s.tab : undefined,
     expanded: typeof s.expanded === 'string' ? s.expanded : undefined,
     events: s.events === 'important' || s.events === 'all' ? s.events : undefined,
@@ -192,7 +194,7 @@ export function preferences(s: Record<string, unknown>): Preferences {
   }
 }
 // Visible tab labels double as accessible names, so they are real words, not CSS-capitalized ids.
-const PIPELINE_TAB_LABELS = { active: 'Active', running: 'Running', waiting: 'Waiting', delivered: 'Delivered' } as const
+const PIPELINE_TAB_LABELS = { active: 'Active', running: 'Running', waiting: 'Waiting', delivered: 'Delivered', stopped: 'Automation off' } as const
 
 export const Route = createFileRoute('/_app/pipeline')({
   component: PipelinePage,
@@ -339,18 +341,19 @@ function PipelinePage() {
           <ExecutionCapacity board={board} failed={!!error} />
           <Attention board={board} schedules={scheduled.data} repoInfo={repoInfo} />
           <div className="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Pipeline items">
-            {(['active', 'running', 'waiting', 'delivered'] as const).map(tab => {
+            {(board.repos.some(r => r.stopped) ? ['active', 'running', 'waiting', 'delivered', 'stopped'] as const : ['active', 'running', 'waiting', 'delivered'] as const).map(tab => {
               const selected = search.work || (search.tab === 'delivered' ? 'delivered' : 'active')
               return <button key={tab} role="tab" aria-selected={selected === tab} onClick={() => update({ tab: tab === 'delivered' ? 'delivered' : 'active', work: tab === 'active' ? undefined : tab })} className={cn('px-3 py-1 rounded border text-sm', selected === tab && 'bg-secondary')}>{PIPELINE_TAB_LABELS[tab]}</button>
             })}
           </div>
           <WorkSearchControls search={search} repos={board.repos} projects={projects} projectError={projectError} update={update} />
+          <StoppedNotice repos={board.repos} />
           {board.repos.length === 0 ? (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
               <p role="status" className="text-sm">0 results</p>
-              <p className="text-base font-semibold text-foreground mb-1">{board.generated_at ? 'No repository is tracked yet' : 'Preparing pipeline snapshot…'}</p>
+              <p className="text-base font-semibold text-foreground mb-1">{board.generated_at ? 'No repository is registered yet' : 'Preparing pipeline snapshot…'}</p>
               {board.generated_at && <p className="text-sm text-muted-foreground">
-                Enable a repository with <code>clawflow repo enable</code> to see its eligible work.
+                Add one with <code>clawflow repo add</code> and enable it with <code>clawflow repo enable</code> to see its eligible work.
               </p>}
             </div>
           ) : (
@@ -365,6 +368,24 @@ function PipelinePage() {
       ) : null}
     </div>
   )
+}
+
+/** Explains stopped repositories so "no tasks" is never mistaken for "no issues". */
+export function StoppedNotice({ repos }: { repos: RepoBoard[] }) {
+  const stopped = repos.filter(r => r.stopped)
+  if (!stopped.length) return null
+  const live = repos.length - stopped.length
+  return <section aria-label="Repositories with automation off" className="mb-4 border rounded-xl p-3 text-sm">
+    <p className="font-semibold">{stopped.length} {stopped.length === 1 ? 'repository has' : 'repositories have'} automation off{live === 0 ? ' · nothing is being processed' : ''}</p>
+    <p className="text-xs text-muted-foreground mt-1">Registration, issues and past attempts are kept. This page only reads recorded history; it does not start work or turn automation back on. Shown data was last recorded by the scheduler and is not refreshed from the provider.</p>
+    <ul className="mt-2 space-y-1">
+      {stopped.map(r => <li key={r.repo} className="flex flex-wrap gap-x-3 gap-y-1">
+        <span className="font-mono break-all">{r.repo}</span>
+        <span>{r.items.length} recorded {r.items.length === 1 ? 'issue' : 'issues'}</span>
+        <a className="underline" href={`/pipeline?work=stopped&workRepo=${encodeURIComponent(r.repo)}`}>View history</a>
+      </li>)}
+    </ul>
+  </section>
 }
 
 export function RuntimeHeader({ runtime }: { runtime: Board['runtime'] }) {
