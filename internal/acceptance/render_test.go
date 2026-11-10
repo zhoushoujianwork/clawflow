@@ -67,7 +67,7 @@ func TestRenderWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := workflow.Jobs["web-render"]
-	if workflow.On.PullRequest == nil || job.Name != "Web render" || job.RunsOn != "ubuntu-latest" {
+	if workflow.On.PullRequest == nil || job.Name != "Web render" || job.RunsOn != "ubuntu-24.04" {
 		t.Fatal("missing dedicated PR render job")
 	}
 	if len(job.Steps) == 0 || job.Steps[0].With["ref"] != "${{ github.event.pull_request.head.sha }}" {
