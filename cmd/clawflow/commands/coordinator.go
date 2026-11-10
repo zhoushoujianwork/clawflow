@@ -210,6 +210,10 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 var localWorkerJob = buildWorkerJob
 
 // startLocalWorker uses the same authenticated HTTPS API as remote workers.
+// localWorkerPoll is how often the in-process worker asks for new work when
+// idle; tests shrink it.
+var localWorkerPoll = 5 * time.Second
+
 func startLocalWorker(ctx context.Context, settings config.LocalWorkerSettings, addr net.Addr, pin string, tasks *coordinator.Store, onError func(error)) (func(), error) {
 	if !settings.Enabled {
 		return func() {}, nil
@@ -259,7 +263,7 @@ func startLocalWorker(ctx context.Context, settings config.LocalWorkerSettings, 
 	go func() {
 		defer close(done)
 		defer api.client.CloseIdleConnections()
-		if err := runWorker(ctx, api, o, 30*time.Second, 5*time.Second, func(ctx context.Context, t *coordinator.Task) (*runJob, time.Duration, error) {
+		if err := runWorker(ctx, api, o, 30*time.Second, localWorkerPoll, func(ctx context.Context, t *coordinator.Task) (*runJob, time.Duration, error) {
 			return localWorkerJob(ctx, t, reg)
 		}); err != nil && ctx.Err() == nil {
 			coordLog().Warn("coordinator/local-worker", "err", err.Error())
