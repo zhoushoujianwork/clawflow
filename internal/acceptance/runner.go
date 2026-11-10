@@ -201,12 +201,8 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	if err = ctx.Err(); err != nil {
 		return record, err
 	}
-	var renderCI vcs.CIEvidence
 	if runner.CI != nil {
 		ci, ciErr := runner.CI()
-		if ciErr == nil {
-			renderCI = ci
-		}
 		if runner.CIRequired && ciErr == nil && ci.SuccessfulFor(c.HeadSHA) {
 			record.ReviewMode = CIVerified
 			record.CI = &ci
@@ -246,7 +242,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	}
 	// Add environment procedures after selecting the report mode, never to planning.
 	prompt += project.TestingHeaderForRepo(c.Repository, ctx)
-	prompt += renderReviewInstruction(c.HeadSHA, renderCI)
+	prompt += renderReviewInstruction()
 	execute := runner.Execute
 	if execute == nil {
 		execute = execution.Execute

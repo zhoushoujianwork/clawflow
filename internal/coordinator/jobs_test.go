@@ -1,11 +1,55 @@
 package coordinator
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/store"
+	"github.com/zhoushoujianwork/clawflow/internal/store/storetest"
 )
+
+var ctx = context.Background()
+
+// setup returns a coordinator Store over a fresh migrated SQLite file.
+func setup(t *testing.T) (*Store, *store.Store, string) {
+	t.Helper()
+	db, path := storetest.NewWithPath(t)
+	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	return New(db.DB()), db, path
+}
+
+func register(t *testing.T, s *Store, id string, slots int, tags ...string) {
+	t.Helper()
+	if err := s.RegisterWorker(ctx, Worker{ID: id, Tags: tags, RunUntagged: true, MaxParallel: slots}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func claim(t *testing.T, s *Store, id string) *Task {
+	t.Helper()
+	task, err := s.Claim(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+// leased registers a worker, queues one issue and leases it to that worker.
+func leased(t *testing.T, s *Store, worker string, issue int) *Task {
+	t.Helper()
+	register(t, s, worker, 2)
+	enqueueKind(t, s, "implement", issue, 0, `{}`)
+	task := claim(t, s, worker)
+	if task.ID == "" {
+		t.Fatal("no task claimed")
+	}
+	return task
+}
 
 func enqueueKind(t *testing.T, s *Store, kind string, issue, pr int, payload string, tags ...string) *Task {
 	t.Helper()

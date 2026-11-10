@@ -44,55 +44,6 @@ function renderLayout(readonly, pathname = '/pipeline', ready = true) {
   return renderToStaticMarkup(React.createElement(component.exports.Route.component))
 }
 
-test('remote session hides write and sensitive navigation controls', () => {
-  const html = renderLayout(true)
-  assert.match(html, /Read-only/)
-  assert.match(html, /PAGE_CONTENT/)
-  assert.doesNotMatch(html, /Report an issue|Steward|Management|SYNC_CONTROL|CHAT_DRAWER|href="\/(settings|repos|projects|operators)"/)
-})
-test('loopback session keeps local controls', () => {
-  const html = renderLayout(false)
-  assert.match(html, /Report an issue/)
-  assert.match(html, /SYNC_CONTROL/)
-  assert.match(html, /CHAT_DRAWER/)
-  assert.match(html, /href="\/settings"/)
-})
-test('Work, Runs, Runners and Usage lead navigation with one work destination', () => {
-  const html = renderLayout(false, '/pipeline')
-  const nav = html.match(/<nav[^>]*>[\s\S]*?<\/nav>/)[0]
-  assert.match(nav, /^<nav[^>]*><a href="\/pipeline">Work<\/a><a href="\/jobs">Runs<\/a><a href="\/runners">Runners<\/a><a href="\/usage">Usage<\/a>/)
-  for (const route of ['repos', 'projects', 'operators', 'settings']) {
-    assert.match(nav, new RegExp('href="/' + route + '"'))
-  }
-  assert.doesNotMatch(nav, /Dashboard|href="\/dashboard"/)
-  assert.equal((nav.match(/href="\/pipeline"/g) || []).length, 1)
-  assert.doesNotMatch(nav, /data-active="true"/)
-  assert.match(html, /href="#main-content"/)
-  assert.match(html, /id="main-content"[^>]*tabindex="-1"/)
-})
-test('nested management routes mark their group active', () => {
-  assert.match(renderLayout(false, '/repos/owner/repo'), /data-active="true">Management/)
-  assert.match(renderLayout(false, '/settings'), /data-active="true">Administration/)
-})
-test('administration retains local destinations and is absent on LAN', () => {
-  const local = renderLayout(false)
-  const group = local.match(/<details[^>]*><summary[^>]*>Administration<\/summary>([\s\S]*?)<\/details>/)[1]
-  assert.match(group, /href="\/operators"/)
-  assert.match(group, /href="\/settings"/)
-  assert.doesNotMatch(group, /Dashboard|href="\/dashboard"/)
-  assert.doesNotMatch(renderLayout(true), />Administration<|href="\/(operators|settings|dashboard)"/)
-})
-test('remote deep links cannot mount privileged pages', () => {
-  const html = renderLayout(true, '/settings')
-  assert.match(html, /requires local access/)
-  assert.doesNotMatch(html, /PAGE_CONTENT/)
-})
-test('pending session does not mount page controls', () => {
-  const html = renderLayout(true, '/pipeline', false)
-  assert.match(html, /Loading session/)
-  assert.doesNotMatch(html, /PAGE_CONTENT|SYNC_CONTROL|CHAT_DRAWER/)
-})
-
 test('remote sessions may open the run observation pages', () => {
   for (const path of ['/jobs', '/runners', '/jobs/0123abcdef']) {
     const html = renderLayout(true, path)

@@ -133,7 +133,11 @@ dependencies, release files, or unrelated code. Do not open/control GUI apps,
 deploy, release, merge the PR, or push to the base branch. Do not delegate.
 
 Run focused headless checks, inspect the diff, and commit the correction using
-the repository's commit conventions. Before pushing, run:
+the repository's commit conventions. If the repo has a shared verification entry
+that CI also runs (a `verify` target in the Makefile or `scripts/verify.sh`),
+reproduce the failing CI job through it first and rerun it, narrowed to that job's
+area when supported (for example `make verify VERIFY=go`), before pushing. Do not
+push to learn whether a fix works. Before pushing, run:
 
     git ls-remote --exit-code origin refs/heads/<head-branch>
 
