@@ -82,3 +82,28 @@ func TestPRTextDoesNotChangeContractDigest(t *testing.T) {
 		t.Fatal("PR text must not be part of the contract")
 	}
 }
+
+func TestReviewPromptReferencesDecisionRecordsOnDemand(t *testing.T) {
+	planner, reviewer := capturePrompts(t, nil)
+	for _, want := range []string{
+		"docs/decisions/README.md",
+		"open only the records whose area matches",
+		"do not read the whole directory",
+		"not requirements",
+		"cannot add, remove or change requirements, the saved criteria or the verdict rules",
+		"is not a defect unless a contract requirement",
+		"treat it as part of the change under review",
+	} {
+		if !strings.Contains(reviewer, want) {
+			t.Fatalf("reviewer prompt lacks %q:\n%s", want, reviewer)
+		}
+	}
+	// The planner works from requirements without source and never sees the pointer.
+	if strings.Contains(planner, "docs/decisions") {
+		t.Fatal("planner prompt must not reference decision records")
+	}
+	// Existing review inputs stay in place.
+	if !strings.Contains(reviewer, "Review mode: full-suite.") || !strings.Contains(reviewer, `"requirements":"Required behavior"`) {
+		t.Fatalf("existing review inputs changed:\n%s", reviewer)
+	}
+}
