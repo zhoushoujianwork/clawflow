@@ -69,6 +69,9 @@ here — run 'clawflow run' first if you want fresh data.`,
 			if err != nil {
 				return err
 			}
+			// LAN viewers never receive credentials or machine-local paths,
+			// whatever a handler or a run log happened to contain.
+			remotePolicy.WithRedactor(webguard.NewRedactor(sensitiveValues, localPathRoots))
 			// The embedded store must open: fail fast before touching any state
 			// or binding the port.
 			release, err := gateStore(cmd.Context())
@@ -297,6 +300,9 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/labels/add", api.HandleAddLabel)
 			mux.HandleFunc("/api/labels/remove", api.HandleRemoveLabel)
 			mux.HandleFunc("/api/runs", api.HandleRuns)
+			mux.HandleFunc("/api/jobs", api.HandleJobs)
+			mux.HandleFunc("/api/jobs/", api.HandleJobTree)
+			mux.HandleFunc("/api/runners", api.HandleRunners)
 			mux.HandleFunc("/api/usage", api.HandleUsage)
 			mux.HandleFunc("/api/run", api.HandleRun)
 			mux.HandleFunc("/api/run/status", api.HandleRunStatus)

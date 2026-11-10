@@ -7,8 +7,13 @@
 //   data: <payload>\n           — one or more lines accumulate into an event
 //   <blank line>                 — terminator: handlers fire with the joined data
 //
-// Multi-line `data:` per spec joins with '\n'. Other field names (`event:`,
-// `id:`, `retry:`) are ignored — the chat backend doesn't use them.
+// Multi-line `data:` per spec joins with '\n'. `id:` is passed to onEvent so a
+// caller can resume after a dropped connection; `event:` and `retry:` are
+// ignored — no backend here uses them.
+//
+// GET streams (e.g. the live job log) are consumed the same way as POST ones:
+// EventSource would also work, but this client gives the caller the abort
+// signal, the HTTP status and control over the reconnect schedule.
 //
 // Two synthetic conventions on top of plain SSE:
 //   - `data: [DONE]` → end of stream marker. onDone fires, loop exits.
@@ -16,14 +21,18 @@
 //     onError) so callers can cancel without an error toast.
 
 export interface SSEHandlers {
-  onEvent: (data: string) => void
+  /** id is the event's `id:` field when the server sent one. */
+  onEvent: (data: string, id?: string) => void
   onError: (err: Error) => void
-  onDone: () => void
+  /** explicit is true only when the server sent the `[DONE]` marker. */
+  onDone: (explicit?: boolean) => void
 }
 
 export interface SSEOptions {
   url: string
-  body: unknown
+  /** Ignored for GET. */
+  body?: unknown
+  method?: 'GET' | 'POST'
   signal?: AbortSignal
   headers?: Record<string, string>
 }
@@ -32,23 +41,25 @@ const DONE_PAYLOAD = '[DONE]'
 
 export async function streamSSE(opts: SSEOptions, handlers: SSEHandlers): Promise<void> {
   const { url, body, signal, headers } = opts
+  const method = opts.method ?? 'POST'
   let doneFired = false
-  const fireDone = () => {
+  const fireDone = (explicit = false) => {
     if (doneFired) return
     doneFired = true
-    handlers.onDone()
+    handlers.onDone(explicit)
   }
 
   let response: Response
   try {
     response = await fetch(url, {
-      method: 'POST',
+      method,
       headers: {
-        'Content-Type': 'application/json',
+        ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
         Accept: 'text/event-stream',
         ...(headers || {}),
       },
-      body: JSON.stringify(body),
+      ...(method === 'POST' ? { body: JSON.stringify(body) } : {}),
+      cache: 'no-store',
       signal,
     })
   } catch (err) {
@@ -75,16 +86,19 @@ export async function streamSSE(opts: SSEOptions, handlers: SSEHandlers): Promis
   // dataLines accumulates the `data:` payloads of the current event until the
   // blank-line terminator flushes them.
   let dataLines: string[] = []
+  let eventId: string | undefined
 
   const flushEvent = (): boolean => {
+    const id = eventId
+    eventId = undefined
     if (dataLines.length === 0) return true
     const payload = dataLines.join('\n')
     dataLines = []
     if (payload === DONE_PAYLOAD) {
-      fireDone()
+      fireDone(true)
       return false
     }
-    handlers.onEvent(payload)
+    handlers.onEvent(payload, id)
     return true
   }
 
@@ -123,7 +137,12 @@ export async function streamSSE(opts: SSEOptions, handlers: SSEHandlers): Promis
           dataLines.push(v.startsWith(' ') ? v.slice(1) : v)
           continue
         }
-        // Other fields (event:, id:, retry:) ignored.
+        if (line.startsWith('id:')) {
+          const v = line.slice(3)
+          eventId = v.startsWith(' ') ? v.slice(1) : v
+          continue
+        }
+        // Other fields (event:, retry:) ignored.
       }
     }
 

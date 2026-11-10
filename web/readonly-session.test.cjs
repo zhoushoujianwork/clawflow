@@ -57,10 +57,10 @@ test('loopback session keeps local controls', () => {
   assert.match(html, /CHAT_DRAWER/)
   assert.match(html, /href="\/settings"/)
 })
-test('Work and Usage lead navigation with one work destination', () => {
+test('Work, Runs, Runners and Usage lead navigation with one work destination', () => {
   const html = renderLayout(false, '/pipeline')
   const nav = html.match(/<nav[^>]*>[\s\S]*?<\/nav>/)[0]
-  assert.match(nav, /^<nav[^>]*><a href="\/pipeline">Work<\/a><a href="\/usage">Usage<\/a>/)
+  assert.match(nav, /^<nav[^>]*><a href="\/pipeline">Work<\/a><a href="\/jobs">Runs<\/a><a href="\/runners">Runners<\/a><a href="\/usage">Usage<\/a>/)
   for (const route of ['repos', 'projects', 'operators', 'settings']) {
     assert.match(nav, new RegExp('href="/' + route + '"'))
   }
@@ -91,4 +91,22 @@ test('pending session does not mount page controls', () => {
   const html = renderLayout(true, '/pipeline', false)
   assert.match(html, /Loading session/)
   assert.doesNotMatch(html, /PAGE_CONTENT|SYNC_CONTROL|CHAT_DRAWER/)
+})
+
+test('remote sessions may open the run observation pages', () => {
+  for (const path of ['/jobs', '/runners', '/jobs/0123abcdef']) {
+    const html = renderLayout(true, path)
+    assert.match(html, /PAGE_CONTENT/, path)
+    assert.doesNotMatch(html, /requires local access/, path)
+  }
+  const nav = renderLayout(true, '/jobs').match(/<nav[^>]*>[\s\S]*?<\/nav>/)[0]
+  assert.match(nav, /href="\/jobs"/)
+  assert.match(nav, /href="\/runners"/)
+})
+test('remote sessions cannot reach neighbours of the run pages', () => {
+  for (const path of ['/jobs/a/b', '/jobs/', '/jobs/x%2Fy', '/runners/x', '/jobsx']) {
+    const html = renderLayout(true, path)
+    assert.match(html, /requires local access/, path)
+    assert.doesNotMatch(html, /PAGE_CONTENT/, path)
+  }
 })

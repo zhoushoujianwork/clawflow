@@ -64,7 +64,7 @@ try {
       const nav = page.getByRole('navigation', { name: 'Primary' })
       const work = nav.getByRole('link', { name: 'Work', exact: true })
       assert.equal(await work.getAttribute('aria-current'), 'page')
-      assert.deepEqual(await nav.locator(':scope > a').allTextContents(), ['Work', 'Usage'])
+      assert.deepEqual(await nav.locator(':scope > a').allTextContents(), ['Work', 'Runs', 'Runners', 'Usage'])
       assert.equal(await nav.getByRole('link', { name: 'Work', exact: true }).count(), 1)
       assert.equal(await nav.getByRole('link', { name: 'Dashboard', exact: true }).count(), 0)
       assert.equal(await nav.locator('a[href="/dashboard"]').count(), 0)

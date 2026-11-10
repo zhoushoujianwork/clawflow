@@ -13,15 +13,19 @@ import { Route as AppRouteImport } from './routes/_app'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AppUsageRouteImport } from './routes/_app.usage'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
+import { Route as AppRunnersRouteImport } from './routes/_app.runners'
 import { Route as AppProjectsRouteImport } from './routes/_app.projects'
 import { Route as AppPipelineRouteImport } from './routes/_app.pipeline'
 import { Route as AppOperatorsRouteImport } from './routes/_app.operators'
+import { Route as AppJobsRouteImport } from './routes/_app.jobs'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppReposIndexRouteImport } from './routes/_app.repos.index'
 import { Route as AppProjectsIndexRouteImport } from './routes/_app.projects.index'
+import { Route as AppJobsIndexRouteImport } from './routes/_app.jobs.index'
 import { Route as AppReposAddRouteImport } from './routes/_app.repos.add'
 import { Route as AppReposSplatRouteImport } from './routes/_app.repos.$'
 import { Route as AppProjectsNameRouteImport } from './routes/_app.projects.$name'
+import { Route as AppJobsIdRouteImport } from './routes/_app.jobs.$id'
 import { Route as AppProjectsNamePilotRunsRouteImport } from './routes/_app.projects.$name_.pilot-runs'
 import { Route as AppRunsSlugIssueTsRouteImport } from './routes/_app.runs.$slug.$issue.$ts'
 
@@ -44,6 +48,11 @@ const AppSettingsRoute = AppSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AppRoute,
 } as any)
+const AppRunnersRoute = AppRunnersRouteImport.update({
+  id: '/runners',
+  path: '/runners',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppProjectsRoute = AppProjectsRouteImport.update({
   id: '/projects',
   path: '/projects',
@@ -57,6 +66,11 @@ const AppPipelineRoute = AppPipelineRouteImport.update({
 const AppOperatorsRoute = AppOperatorsRouteImport.update({
   id: '/operators',
   path: '/operators',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppJobsRoute = AppJobsRouteImport.update({
+  id: '/jobs',
+  path: '/jobs',
   getParentRoute: () => AppRoute,
 } as any)
 const AppDashboardRoute = AppDashboardRouteImport.update({
@@ -74,6 +88,11 @@ const AppProjectsIndexRoute = AppProjectsIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppProjectsRoute,
 } as any)
+const AppJobsIndexRoute = AppJobsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppJobsRoute,
+} as any)
 const AppReposAddRoute = AppReposAddRouteImport.update({
   id: '/repos/add',
   path: '/repos/add',
@@ -88,6 +107,11 @@ const AppProjectsNameRoute = AppProjectsNameRouteImport.update({
   id: '/$name',
   path: '/$name',
   getParentRoute: () => AppProjectsRoute,
+} as any)
+const AppJobsIdRoute = AppJobsIdRouteImport.update({
+  id: '/$id',
+  path: '/$id',
+  getParentRoute: () => AppJobsRoute,
 } as any)
 const AppProjectsNamePilotRunsRoute =
   AppProjectsNamePilotRunsRouteImport.update({
@@ -104,14 +128,18 @@ const AppRunsSlugIssueTsRoute = AppRunsSlugIssueTsRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dashboard': typeof AppDashboardRoute
+  '/jobs': typeof AppJobsRouteWithChildren
   '/operators': typeof AppOperatorsRoute
   '/pipeline': typeof AppPipelineRoute
   '/projects': typeof AppProjectsRouteWithChildren
+  '/runners': typeof AppRunnersRoute
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
+  '/jobs/$id': typeof AppJobsIdRoute
   '/projects/$name': typeof AppProjectsNameRoute
   '/repos/$': typeof AppReposSplatRoute
   '/repos/add': typeof AppReposAddRoute
+  '/jobs/': typeof AppJobsIndexRoute
   '/projects/': typeof AppProjectsIndexRoute
   '/repos/': typeof AppReposIndexRoute
   '/projects/$name/pilot-runs': typeof AppProjectsNamePilotRunsRoute
@@ -122,11 +150,14 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AppDashboardRoute
   '/operators': typeof AppOperatorsRoute
   '/pipeline': typeof AppPipelineRoute
+  '/runners': typeof AppRunnersRoute
   '/settings': typeof AppSettingsRoute
   '/usage': typeof AppUsageRoute
+  '/jobs/$id': typeof AppJobsIdRoute
   '/projects/$name': typeof AppProjectsNameRoute
   '/repos/$': typeof AppReposSplatRoute
   '/repos/add': typeof AppReposAddRoute
+  '/jobs': typeof AppJobsIndexRoute
   '/projects': typeof AppProjectsIndexRoute
   '/repos': typeof AppReposIndexRoute
   '/projects/$name/pilot-runs': typeof AppProjectsNamePilotRunsRoute
@@ -137,14 +168,18 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_app': typeof AppRouteWithChildren
   '/_app/dashboard': typeof AppDashboardRoute
+  '/_app/jobs': typeof AppJobsRouteWithChildren
   '/_app/operators': typeof AppOperatorsRoute
   '/_app/pipeline': typeof AppPipelineRoute
   '/_app/projects': typeof AppProjectsRouteWithChildren
+  '/_app/runners': typeof AppRunnersRoute
   '/_app/settings': typeof AppSettingsRoute
   '/_app/usage': typeof AppUsageRoute
+  '/_app/jobs/$id': typeof AppJobsIdRoute
   '/_app/projects/$name': typeof AppProjectsNameRoute
   '/_app/repos/$': typeof AppReposSplatRoute
   '/_app/repos/add': typeof AppReposAddRoute
+  '/_app/jobs/': typeof AppJobsIndexRoute
   '/_app/projects/': typeof AppProjectsIndexRoute
   '/_app/repos/': typeof AppReposIndexRoute
   '/_app/projects/$name_/pilot-runs': typeof AppProjectsNamePilotRunsRoute
@@ -155,14 +190,18 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/dashboard'
+    | '/jobs'
     | '/operators'
     | '/pipeline'
     | '/projects'
+    | '/runners'
     | '/settings'
     | '/usage'
+    | '/jobs/$id'
     | '/projects/$name'
     | '/repos/$'
     | '/repos/add'
+    | '/jobs/'
     | '/projects/'
     | '/repos/'
     | '/projects/$name/pilot-runs'
@@ -173,11 +212,14 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/operators'
     | '/pipeline'
+    | '/runners'
     | '/settings'
     | '/usage'
+    | '/jobs/$id'
     | '/projects/$name'
     | '/repos/$'
     | '/repos/add'
+    | '/jobs'
     | '/projects'
     | '/repos'
     | '/projects/$name/pilot-runs'
@@ -187,14 +229,18 @@ export interface FileRouteTypes {
     | '/'
     | '/_app'
     | '/_app/dashboard'
+    | '/_app/jobs'
     | '/_app/operators'
     | '/_app/pipeline'
     | '/_app/projects'
+    | '/_app/runners'
     | '/_app/settings'
     | '/_app/usage'
+    | '/_app/jobs/$id'
     | '/_app/projects/$name'
     | '/_app/repos/$'
     | '/_app/repos/add'
+    | '/_app/jobs/'
     | '/_app/projects/'
     | '/_app/repos/'
     | '/_app/projects/$name_/pilot-runs'
@@ -236,6 +282,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/runners': {
+      id: '/_app/runners'
+      path: '/runners'
+      fullPath: '/runners'
+      preLoaderRoute: typeof AppRunnersRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/projects': {
       id: '/_app/projects'
       path: '/projects'
@@ -255,6 +308,13 @@ declare module '@tanstack/react-router' {
       path: '/operators'
       fullPath: '/operators'
       preLoaderRoute: typeof AppOperatorsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/jobs': {
+      id: '/_app/jobs'
+      path: '/jobs'
+      fullPath: '/jobs'
+      preLoaderRoute: typeof AppJobsRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/dashboard': {
@@ -278,6 +338,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppProjectsIndexRouteImport
       parentRoute: typeof AppProjectsRoute
     }
+    '/_app/jobs/': {
+      id: '/_app/jobs/'
+      path: '/'
+      fullPath: '/jobs/'
+      preLoaderRoute: typeof AppJobsIndexRouteImport
+      parentRoute: typeof AppJobsRoute
+    }
     '/_app/repos/add': {
       id: '/_app/repos/add'
       path: '/repos/add'
@@ -299,6 +366,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppProjectsNameRouteImport
       parentRoute: typeof AppProjectsRoute
     }
+    '/_app/jobs/$id': {
+      id: '/_app/jobs/$id'
+      path: '/$id'
+      fullPath: '/jobs/$id'
+      preLoaderRoute: typeof AppJobsIdRouteImport
+      parentRoute: typeof AppJobsRoute
+    }
     '/_app/projects/$name_/pilot-runs': {
       id: '/_app/projects/$name_/pilot-runs'
       path: '/$name/pilot-runs'
@@ -315,6 +389,19 @@ declare module '@tanstack/react-router' {
     }
   }
 }
+
+interface AppJobsRouteChildren {
+  AppJobsIdRoute: typeof AppJobsIdRoute
+  AppJobsIndexRoute: typeof AppJobsIndexRoute
+}
+
+const AppJobsRouteChildren: AppJobsRouteChildren = {
+  AppJobsIdRoute: AppJobsIdRoute,
+  AppJobsIndexRoute: AppJobsIndexRoute,
+}
+
+const AppJobsRouteWithChildren =
+  AppJobsRoute._addFileChildren(AppJobsRouteChildren)
 
 interface AppProjectsRouteChildren {
   AppProjectsNameRoute: typeof AppProjectsNameRoute
@@ -334,9 +421,11 @@ const AppProjectsRouteWithChildren = AppProjectsRoute._addFileChildren(
 
 interface AppRouteChildren {
   AppDashboardRoute: typeof AppDashboardRoute
+  AppJobsRoute: typeof AppJobsRouteWithChildren
   AppOperatorsRoute: typeof AppOperatorsRoute
   AppPipelineRoute: typeof AppPipelineRoute
   AppProjectsRoute: typeof AppProjectsRouteWithChildren
+  AppRunnersRoute: typeof AppRunnersRoute
   AppSettingsRoute: typeof AppSettingsRoute
   AppUsageRoute: typeof AppUsageRoute
   AppReposSplatRoute: typeof AppReposSplatRoute
@@ -347,9 +436,11 @@ interface AppRouteChildren {
 
 const AppRouteChildren: AppRouteChildren = {
   AppDashboardRoute: AppDashboardRoute,
+  AppJobsRoute: AppJobsRouteWithChildren,
   AppOperatorsRoute: AppOperatorsRoute,
   AppPipelineRoute: AppPipelineRoute,
   AppProjectsRoute: AppProjectsRouteWithChildren,
+  AppRunnersRoute: AppRunnersRoute,
   AppSettingsRoute: AppSettingsRoute,
   AppUsageRoute: AppUsageRoute,
   AppReposSplatRoute: AppReposSplatRoute,
