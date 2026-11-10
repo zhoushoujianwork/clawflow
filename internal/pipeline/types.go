@@ -105,6 +105,10 @@ type RepoBoard struct {
 	MaxInFlight        int    `json:"max_in_flight"`
 	Items              []Item `json:"items"`
 	SkippedIssues      []Item `json:"skipped_issues,omitempty"`
+	// ConfirmationIssues are open issues carrying agent-needs-confirmation.
+	ConfirmationIssues []Item `json:"confirmation_issues,omitempty"`
+	// URL is the repository's web root, used to link issues and PRs.
+	URL string `json:"url,omitempty"`
 	// Error is set when the repository could not be read at all.
 	Error string `json:"error,omitempty"`
 }
@@ -122,6 +126,10 @@ type Item struct {
 	UpdatedAt     string   `json:"updated_at,omitempty"`
 	InQueue       bool     `json:"in_queue,omitempty"`
 	QueuePosition int      `json:"queue_position,omitempty"`
+	// RepairStop is set when automatic repair stopped on a PR that still fails:
+	// the shared repair budget is spent or blocked. It is evidence for the
+	// decision list and does not change the stage.
+	RepairStop string `json:"repair_stop,omitempty"`
 
 	Executions []ItemExecution `json:"executions"`
 
@@ -167,21 +175,25 @@ type AcceptanceInfo struct {
 	// MaxUnstructuredRetries is the number of fresh same-head acceptances allowed afterwards.
 	MaxUnstructuredRetries int `json:"max_unstructured_retries,omitempty"`
 	// BlockedRepairable marks a blocked verdict the implementer can repair automatically.
-	BlockedRepairable bool   `json:"-"`
-	Required          bool   `json:"required"`
-	Running           bool   `json:"running,omitempty"`
-	Verdict           string `json:"verdict,omitempty"` // passed | failed | blocked
-	Valid             bool   `json:"valid,omitempty"`   // record satisfies the current contract
-	Summary           string `json:"summary,omitempty"` // truncated reviewer summary
-	Attempts          int    `json:"attempts"`
-	InfraAttempts     int    `json:"infra_attempts"`
-	MaxInfraRetries   int    `json:"max_infra_attempts,omitempty"`
-	LatestIsInfra     bool   `json:"latest_is_infra,omitempty"`
-	NextRetryAt       string `json:"next_retry_at,omitempty"`
-	CompletedAt       string `json:"completed_at,omitempty"`
-	PlannerSession    string `json:"planner_session,omitempty"`
-	ReviewerSession   string `json:"reviewer_session,omitempty"`
-	Error             string `json:"error,omitempty"`
+	// A blocked verdict that is not repairable needs a person.
+	BlockedRepairable bool `json:"blocked_repairable,omitempty"`
+	// NextOwner and NextAction are the reviewer's hand-off for the latest record.
+	NextOwner       string `json:"next_owner,omitempty"`
+	NextAction      string `json:"next_action,omitempty"`
+	Required        bool   `json:"required"`
+	Running         bool   `json:"running,omitempty"`
+	Verdict         string `json:"verdict,omitempty"` // passed | failed | blocked
+	Valid           bool   `json:"valid,omitempty"`   // record satisfies the current contract
+	Summary         string `json:"summary,omitempty"` // truncated reviewer summary
+	Attempts        int    `json:"attempts"`
+	InfraAttempts   int    `json:"infra_attempts"`
+	MaxInfraRetries int    `json:"max_infra_attempts,omitempty"`
+	LatestIsInfra   bool   `json:"latest_is_infra,omitempty"`
+	NextRetryAt     string `json:"next_retry_at,omitempty"`
+	CompletedAt     string `json:"completed_at,omitempty"`
+	PlannerSession  string `json:"planner_session,omitempty"`
+	ReviewerSession string `json:"reviewer_session,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // Delivery is the merge result of a merged item.

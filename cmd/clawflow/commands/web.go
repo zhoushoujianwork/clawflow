@@ -116,6 +116,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			api.VersionInfo.Fetch = FetchLatestTag
 			api.VersionInfo.IsNewer = IsNewerVersion
 			api.PipelineSource = PipelineSnapshot
+			api.DecisionsSource = collectDecisions
 
 			// Open the web.log sink for the lifetime of this process. The
 			// nil-safe Logger keeps the rest of startup unaffected if the
@@ -304,6 +305,7 @@ here — run 'clawflow run' first if you want fresh data.`,
 			mux.HandleFunc("/api/run/pause", api.HandleRunPause)
 			mux.HandleFunc("/api/run/cancel", api.HandleRunCancel)
 			mux.HandleFunc("/api/pipeline", api.HandlePipeline)
+			mux.HandleFunc("/api/decisions", api.HandleDecisions)
 			mux.HandleFunc("/api/version", api.HandleVersion)
 			mux.HandleFunc("/api/update", api.HandleUpdate)
 			mux.HandleFunc("/api/repo/config", api.HandleRepoConfig)

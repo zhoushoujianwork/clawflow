@@ -2,6 +2,8 @@ import { ActivityTimeline } from '../components/ActivityTimeline'
 export { EventTimeline, foldEvents, importantEvent } from '../components/ActivityTimeline'
 import { ExecutionCapacity } from '../components/ExecutionCapacity'
 import { Attention } from '../components/Attention'
+import { Decisions } from '../components/Decisions'
+export { Decisions, DecisionsView } from '../components/Decisions'
 export { Attention } from '../components/Attention'
 import { WorkSummary, type WorkFilter, type WorkItem, type SourceHealth } from '../components/WorkSummary'
 import { WorkDetail, workDetailKey, type ExecutionAttempt } from '../components/WorkDetail'
@@ -319,6 +321,7 @@ function PipelinePage() {
       </WorkDetail>}
       <WorkSummary repos={board?.repos} sources={board?.sources} generatedAt={board?.generated_at} stale={board?.stale} refreshing={refreshing || board?.refreshing} failed={!!error} filter={search.work} onFilter={work => update({ work, tab: work === 'delivered' ? 'delivered' : 'active' })} />
       <ScheduledChecksPanel data={scheduled.data} error={scheduled.error} />
+      <Decisions />
 
       {loading && !board ? (
         <p className="text-sm text-muted-foreground text-center py-8 flex items-center justify-center gap-2">

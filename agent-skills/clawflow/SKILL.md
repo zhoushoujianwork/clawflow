@@ -365,6 +365,15 @@ clawflow pr list --repo <R> --state open
 clawflow repo disable <R>
 ```
 
+`clawflow decisions [--json]` lists what only a person can decide across all
+enabled repos, each with a reason, a link and the usual way to resolve it:
+`agent-needs-confirmation` issues, owner `clawflow-skip` issues, acceptance
+`blocked` verdicts not handed to the implementer, PRs still failing after the
+repair budget is spent, and blocked or rejected Offload setup. It is read-only
+(last board snapshot plus the cached Offload check, no provider calls) and adds
+no label or confirmation step; an "incomplete" section names sources it could
+not read. The Work page shows the same list at `/api/decisions`.
+
 `status` makes remote reads for enabled repos only and summarizes issue labels.
 It is not local execution history and has no JSON/repo filter. CLI lifecycle
 parity is incomplete: no run history/stream/cancel command, scheduler pause
