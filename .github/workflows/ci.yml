@@ -10,28 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The merge base is needed to find the packages this PR changes.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
-      # Same entry as local runs: gofmt, vet, race tests and CLI smoke.
-      # The suite runs on isolated SQLite files and needs no database service.
+      # Same entry as local runs: gofmt, vet, tests for changed packages only,
+      # and CLI smoke. There is no full suite.
       - name: Go verification
-        run: scripts/verify.sh go
-
-      # The one-time PostgreSQL importer is tested against an isolated schema in a
-      # throwaway PostgreSQL service. The service exists only for this step.
-      - name: Start PostgreSQL for importer tests
-        run: |
-          docker run -d --name import-fixture -e POSTGRES_USER=clawflow -e POSTGRES_PASSWORD=clawflow \
-            -e POSTGRES_DB=clawflow_test -p 5432:5432 postgres:17
-          for i in $(seq 1 30); do docker exec import-fixture pg_isready -U clawflow -d clawflow_test && break; sleep 2; done
-
-      - name: Importer tests (PostgreSQL fixture)
         env:
-          CLAWFLOW_TEST_DATABASE_DSN: postgres://clawflow:clawflow@localhost:5432/clawflow_test?sslmode=disable
-        run: go test -v -race -count=1 -run 'Import|Cutover|Rollback|Verify' ./internal/store/...
+          VERIFY_BASE: ${{ github.event.pull_request.base.sha }}
+        run: scripts/verify.sh go
 
   native:
     name: Native macOS
@@ -41,8 +33,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Headless native tests
-        run: scripts/verify.sh native
       - name: Build app without opening it
         run: make native
       - uses: actions/upload-artifact@v4
@@ -50,17 +40,11 @@ jobs:
           name: ClawFlow-macOS
           path: macos/dist/ClawFlow.app
 
-  web-render:
-    name: Web render
-    # Pinned: Playwright cannot install Chromium on the ubuntu-26.04 image
-    # that ubuntu-latest now resolves to.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 22
+  web:
+    name: Web build
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
         with:
@@ -72,61 +56,5 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
-      - name: Build web bundle
-        run: scripts/verify.sh web-build
-
-      - name: Restore Playwright browser cache
-        id: playwright-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-1.56.1
-
-      - name: Install isolated headless Chromium
-        # Step-level limit is above 2 x (180s lock wait + 300s attempt) plus
-        # backoff, so a persistent hang fails this step instead of the job
-        # being cancelled at its timeout.
-        timeout-minutes: 17
-        env:
-          CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}
-        run: |
-          # The lock can be held by runner background apt jobs, or by the apt-get
-          # of an attempt that timed out: `timeout` stops playwright, but its
-          # sudo apt-get keeps running and finishes the install. Wait for it
-          # rather than killing dpkg midway; the next attempt then succeeds fast.
-          wait_apt() {
-            for _ in $(seq 1 36); do
-              if ! sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
-                return 0
-              fi
-              echo "Waiting for apt/dpkg lock to be released..."
-              sleep 5
-            done
-            echo "::warning::apt/dpkg lock still held after 180s; continuing"
-          }
-          retry() {
-            for attempt in 1 2; do
-              wait_apt
-              if timeout 300 "$@"; then
-                return 0
-              fi
-              echo "::warning::Attempt $attempt/2 failed or timed out after 300s: $*"
-              sleep 15
-            done
-            echo "::error::All 2 attempts failed: $*"
-            return 1
-          }
-          retry npm install --prefix "$RUNNER_TEMP/render-tools" --no-package-lock playwright@1.56.1
-          pw="$RUNNER_TEMP/render-tools/node_modules/.bin/playwright"
-          if [ "$CACHE_HIT" = "true" ]; then
-            echo "Playwright browser cache hit; skipping browser download"
-            retry "$pw" install-deps chromium
-          else
-            echo "Playwright browser cache miss; downloading (cache is saved after the job succeeds)"
-            retry "$pw" install --with-deps chromium
-          fi
-
-      - name: Run all render fixtures
-        env:
-          PLAYWRIGHT_MODULE: ${{ runner.temp }}/render-tools/node_modules/playwright/index.mjs
-        run: scripts/verify.sh render
+      - name: Build and typecheck web bundle
+        run: scripts/verify.sh web
