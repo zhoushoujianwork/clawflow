@@ -80,6 +80,24 @@ This supports controller/manager restarts and retained development/repair sessio
 
 此路径不导入之前已经终结或被替代的历史超时任务。部署后需单独记录真实 backend 的超时续跑验收；无界面测试验证权限、预算、回执、锁与 worktree 保留，并不代表已做真实模型续跑。
 
+## 恢复前检查脱离进程组的写入者
+
+Offload 只能确认原进程组已经结束。工具用 `setsid` 启动的后台进程已脱离进程组，追踪不到，也可能仍在写保留的 worktree。恢复在向控制器申请新 epoch 之前，先问操作系统哪些进程在用这个 worktree，不杀任何进程，也不改 Offload 的进程组语义。
+
+- **写入者**：持有 worktree 内普通文件的可写描述符（写入或读写）的进程。发现时推迟恢复，恢复诊断（`worker executions` 的 `recovery_blocked`、worker 日志 `worker/recovery-blocked`）写明 pid、命令和文件。journal、worktree 和 session 都不动，进程结束后下一轮自动继续。
+- **只有工作目录在 worktree 内**的进程（闲置 shell、编辑器、App）不是写入者，不阻塞恢复，只写一条 `worker/recovery-worktree-cwd` 告警。
+- **推迟有上限**：从第一次发现写入者起算 15 分钟。超过后自动恢复不再扫描，每轮返回同一条 `errWorktreeWritersExhausted` 诊断，任务停在 `recovery_pending`，由 watchdog 的 `recovery_stalled` 规则（过期后 30 分钟）上报。处理方式：停掉这些进程，再执行 `clawflow worker recover --journal <path>`，它会重新扫描，进程已退出才继续。
+- **扫描失败**（lsof 缺失、超时、`/proc` 不可读）按推迟处理，同样受 15 分钟上限约束。
+- 等待起点保存在任务目录的 `worktree-writers.json`（私有文件），写入者全部退出后删除。
+
+已知限制，这项检查无法弥补：
+
+- 通过可写 mmap 写入、且已关闭描述符的进程检测不到。
+- 只在短时间内打开、写入、关闭文件的进程，只有扫描落在这段时间内才会被发现；扫描之后才启动的进程也看不到。
+- 只能看到 worker 用户有权检查的进程。Linux 读取 `/proc/<pid>/{cwd,fd,fdinfo}`，macOS 运行不带 root 的 `lsof`，其他用户的进程不可见。
+
+平台和开销：Linux 不依赖外部命令，按进程读取 `/proc`。macOS 一次 `lsof -nP -w +c 0 -F pcftan -d cwd,0-65535`，只列工作目录和数字描述符，不用 `+D` 遍历目录，耗时与 worktree 大小无关。在 503 个进程、约 7 万行输出的 macOS 主机上实测 0.2–0.4 秒。扫描超时 5 秒。Linux 路径用 `/proc` 夹具做单元测试，真实进程测试在 macOS 上用 lsof、在 Linux 上用 `/proc` 运行，Linux 结果以精确提交的 GitHub Actions 为准。
+
 ## Validation boundary
 
 Headless fixtures exercise durable authority, fencing, late/duplicate reports, journal corruption, admission generation transfer, checkpoint resume and a real subprocess crash with an inherited recovery lock. These tests do not invoke a paid provider or restart production services. Record real backend and first-production-cutover acceptance separately.

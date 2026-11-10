@@ -109,6 +109,11 @@ func prepareWorkerRecovery(ctx context.Context, api *workerAPI, path string) err
 	if j.Task.LeaseExpiresAt == nil || j.Task.LeaseExpiresAt.After(time.Now()) {
 		return fmt.Errorf("previous execution authority has not expired; recovery postponed")
 	}
+	// Offload proved the original process group ended; a process that detached
+	// from it (setsid) may still be writing the retained worktree.
+	if err := ensureNoWorktreeWriters(ctx, cp.Workspace, path); err != nil {
+		return err
+	}
 	if acknowledged {
 		// Archive before requesting authority; a lost response can be retried
 		// against the unchanged journal without losing the original receipt.
@@ -243,7 +248,7 @@ func newWorkerRecoveryCommands() []*cobra.Command {
 			return err
 		}
 		defer api.client.CloseIdleConnections()
-		if err := prepareWorkerRecovery(cmd.Context(), api, path); err != nil {
+		if err := prepareWorkerRecovery(withExplicitRecovery(cmd.Context()), api, path); err != nil {
 			return err
 		}
 		j, err = readWorkerJournal(path)
