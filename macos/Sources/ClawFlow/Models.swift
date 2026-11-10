@@ -252,6 +252,10 @@ struct RepoRow: Decodable, Identifiable, Sendable {
     let name: String
     let url: String
     let platform: String
+    /// Registered GitLab site alias; nil for GitHub and legacy sites.
+    let site: String?
+    /// Same one-line platform/site/path text as `clawflow repo list`.
+    let target: String?
     let enabled: Bool
     let ciRequired: Bool
     let acceptanceRequired: Bool

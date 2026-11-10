@@ -14,7 +14,7 @@ func (c *Client) MergePRAtHead(repo string, prNumber int, expectedHead string) (
 	if !canonicalMergeSHA(expectedHead) {
 		return "", fmt.Errorf("gitlab merge MR: invalid expected head SHA")
 	}
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d/merge", projectID(repo), prNumber)
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/merge", c.projectID(repo), prNumber)
 	data, status, err := c.doJSON("PUT", path, map[string]any{
 		"sha": expectedHead, "merge_when_pipeline_succeeds": false,
 	})

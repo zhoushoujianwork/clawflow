@@ -3,10 +3,10 @@ package commands
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -56,9 +56,15 @@ func newRepoListCmd() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "Add one with: clawflow repo add <owner/repo>")
 				return nil
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%-40s %-10s %-12s %-10s %s\n", "REPO", "STATUS", "BASE", "AUTO_MERGE", "DESCRIPTION")
-			fmt.Fprintln(cmd.OutOrStdout(), strings.Repeat("─", 100))
-			for name, r := range cfg.Repos {
+			fmt.Fprintf(cmd.OutOrStdout(), "%-40s %-10s %-12s %-10s %-34s %s\n", "REPO", "STATUS", "BASE", "AUTO_MERGE", "TARGET", "DESCRIPTION")
+			fmt.Fprintln(cmd.OutOrStdout(), strings.Repeat("─", 130))
+			names := make([]string, 0, len(cfg.Repos))
+			for name := range cfg.Repos {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				r := cfg.Repos[name]
 				status := "disabled"
 				if r.Enabled {
 					status = "enabled"
@@ -67,7 +73,7 @@ func newRepoListCmd() *cobra.Command {
 				if r.AutoMerge {
 					autoMerge = "on"
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%-40s %-10s %-12s %-10s %s\n", name, status, r.BaseBranch, autoMerge, r.Description)
+				fmt.Fprintf(cmd.OutOrStdout(), "%-40s %-10s %-12s %-10s %-34s %s\n", name, status, r.BaseBranch, autoMerge, config.DescribeRepo(name, r), r.Description)
 			}
 			return nil
 		},
@@ -80,14 +86,13 @@ func newRepoShowCmd() *cobra.Command {
 		Short: "Show details for a repository, including the projects it belongs to",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ownerRepo := args[0]
 			cfg, err := config.Load()
 			if err != nil {
 				return err
 			}
-			r, exists := cfg.Repos[ownerRepo]
-			if !exists {
-				return fmt.Errorf("repo %q not found", ownerRepo)
+			ownerRepo, r, err := configuredRepo(cfg, args[0])
+			if err != nil {
+				return err
 			}
 			if r.Platform == "" || r.Platform == "github" {
 				creds, err := config.LoadCredentials()
@@ -105,6 +110,15 @@ func newRepoShowCmd() *cobra.Command {
 				status = "enabled"
 			}
 			fmt.Printf("repo:         %s\n", ownerRepo)
+			fmt.Printf("target:       %s\n", config.DescribeRepo(ownerRepo, r))
+			if r.Platform == "gitlab" {
+				fmt.Printf("site:         %s\n", valueOr(r.Site, "(legacy, unregistered)"))
+				fmt.Printf("base_url:     %s\n", r.BaseURL)
+				fmt.Printf("project_path: %s\n", valueOr(r.ProjectPath, "(derived from key)"))
+				if r.ProjectID != 0 {
+					fmt.Printf("project_id:   %d (site-local)\n", r.ProjectID)
+				}
+			}
 			fmt.Printf("status:       %s\n", status)
 			fmt.Printf("ci_required:  %v\n", r.CIRequired)
 			fmt.Printf("acceptance_required: %v\n", r.AcceptanceRequired)
@@ -167,20 +181,29 @@ func newRepoAddCmd() *cobra.Command {
 				return err
 			}
 
-			info, err := config.ParseRepoInput(args[0], cfg.Settings.GitLabHosts)
+			target, err := cfg.Resolve(args[0])
 			if err != nil {
 				return err
 			}
+			info := config.RepoInfo{OwnerRepo: target.Path, Platform: target.Platform, BaseURL: target.BaseURL}
+			if input := strings.TrimSpace(args[0]); strings.HasPrefix(input, "/") || strings.HasPrefix(input, "~/") || strings.HasPrefix(input, "./") || input == "." {
+				info.LocalPath = input
+			}
 
-			// manual flags override auto-detected values
-			if platform != "" {
-				info.Platform = platform
+			// --platform and --base-url may confirm what the argument already
+			// selected; they can no longer re-point it at another site, which
+			// would bypass site and credential binding.
+			if platform != "" && platform != target.Platform {
+				return fmt.Errorf("--platform %s contradicts %q, which resolves to %s", platform, args[0], target.Describe())
 			}
 			if baseURL != "" {
-				info.BaseURL = baseURL
+				want, nerr := config.NormalizeSiteURL(baseURL)
+				if nerr != nil || (target.BaseURL != "" && want != target.BaseURL) {
+					return fmt.Errorf("--base-url %s contradicts %q, which resolves to %s; register a site with clawflow gitlab site add instead", baseURL, args[0], target.Describe())
+				}
 			}
 			if info.Platform == "gitlab" && info.BaseURL == "" {
-				return fmt.Errorf("cannot determine GitLab instance URL — pass --base-url or add the host to settings.gitlab_hosts")
+				return fmt.Errorf("cannot determine GitLab instance URL — pass the full project URL or register the site with clawflow gitlab site add")
 			}
 
 			// local path: from flag, or auto-detected from .git/config
@@ -189,19 +212,22 @@ func newRepoAddCmd() *cobra.Command {
 			}
 
 			if localPath != "" {
-				localPath, err = validateRepoCheckout(localPath, info)
+				localPath, err = validateRepoCheckout(localPath, target, cfg)
 				if err != nil {
 					return err
 				}
 			}
-			ownerRepo := info.OwnerRepo
-			parts := strings.SplitN(ownerRepo, "/", 2)
+			ownerRepo := target.Key
+			parts := strings.SplitN(target.Path, "/", 2)
 
-			if _, exists := cfg.Repos[ownerRepo]; exists {
-				return fmt.Errorf("repo %q already configured — use enable/disable to change status", ownerRepo)
+			if target.Configured {
+				return fmt.Errorf("repo %q already configured (%s) — use enable/disable to change status", ownerRepo, target.Describe())
+			}
+			if existing, exists := cfg.Repos[ownerRepo]; exists {
+				return fmt.Errorf("key %q is already used by %s; register this site with clawflow gitlab site add and add the project again", ownerRepo, config.DescribeRepo(ownerRepo, existing))
 			}
 
-			cfg.Repos[ownerRepo] = config.Repo{
+			newRepo := config.Repo{
 				Enabled:     !disabled,
 				Platform:    info.Platform,
 				BaseURL:     info.BaseURL,
@@ -211,6 +237,23 @@ func newRepoAddCmd() *cobra.Command {
 				Description: description,
 				AddedAt:     time.Now().Format("2006-01-02"),
 			}
+			if info.Platform == "gitlab" {
+				newRepo.Site, newRepo.ProjectPath, newRepo.SiteCfg = target.Site, target.Path, target.Repo.SiteCfg
+				// Pin the site-local project identity so a deleted-and-recreated
+				// project, or another site's project with the same path or ID, is
+				// never taken for this one. Best effort: an unreachable site is
+				// recorded again on the next scan.
+				if !disabled && !skipLabelInit {
+					if c, cerr := newVCSClient(newRepo); cerr == nil {
+						if ider, ok := c.(interface{ GetRepoID(string) (int64, error) }); ok {
+							if id, ierr := ider.GetRepoID(ownerRepo); ierr == nil {
+								newRepo.ProjectID = id
+							}
+						}
+					}
+				}
+			}
+			cfg.Repos[ownerRepo] = newRepo
 
 			// Stamp the new entry with the current time so LWW sync
 			// knows this machine created it.
@@ -227,6 +270,7 @@ func newRepoAddCmd() *cobra.Command {
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "repo %q added and enabled\n", ownerRepo)
 			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  target:      %s\n", config.DescribeRepo(ownerRepo, cfg.Repos[ownerRepo]))
 			fmt.Fprintf(cmd.OutOrStdout(), "  platform:    %s\n", info.Platform)
 			if info.BaseURL != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "  base url:    %s\n", info.BaseURL)
@@ -267,13 +311,13 @@ func newRepoRemoveCmd() *cobra.Command {
 		Aliases: []string{"rm"},
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ownerRepo := args[0]
 			cfg, err := config.Load()
 			if err != nil {
 				return err
 			}
-			if _, exists := cfg.Repos[ownerRepo]; !exists {
-				return fmt.Errorf("repo %q not found", ownerRepo)
+			ownerRepo, _, err := configuredRepo(cfg, args[0])
+			if err != nil {
+				return err
 			}
 			delete(cfg.Repos, ownerRepo)
 			if err := cfg.Save(); err != nil {
@@ -310,8 +354,12 @@ func newRepoDisableCmd() *cobra.Command {
 	}
 }
 
-func setRepoEnabled(cmd *cobra.Command, ownerRepo string, enabled bool) error {
+func setRepoEnabled(cmd *cobra.Command, input string, enabled bool) error {
 	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ownerRepo, _, err := configuredRepo(cfg, input)
 	if err != nil {
 		return err
 	}
@@ -319,9 +367,6 @@ func setRepoEnabled(cmd *cobra.Command, ownerRepo string, enabled bool) error {
 		if err := cfg.Settings.SchedulingError(); err != nil {
 			return err
 		}
-	}
-	if _, exists := cfg.Repos[ownerRepo]; !exists {
-		return fmt.Errorf("repo %q not found", ownerRepo)
 	}
 	config.TouchRepo(cfg, ownerRepo, func(r config.Repo) config.Repo {
 		r.Enabled = enabled
@@ -361,13 +406,13 @@ func newRepoSetCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		Example: "  clawflow repo set owner/repo --auto-merge on\n  clawflow repo set owner/repo --primary-project myproj",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ownerRepo := args[0]
 			cfg, err := config.Load()
 			if err != nil {
 				return err
 			}
-			if _, exists := cfg.Repos[ownerRepo]; !exists {
-				return fmt.Errorf("repo %q not found", ownerRepo)
+			ownerRepo, _, err := configuredRepo(cfg, args[0])
+			if err != nil {
+				return err
 			}
 			// --primary-project chooses the authoritative project whose
 			// context header is injected into operators/chat when the repo
@@ -551,9 +596,9 @@ func newRepoEnsureLocalCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			repoCfg, ok := cfg.Repos[repo]
-			if !ok {
-				return fmt.Errorf("repo %q not found in config", repo)
+			repo, repoCfg, err := configuredRepo(cfg, repo)
+			if err != nil {
+				return err
 			}
 			localPath, err := resolveLocalPath(cfg, repo, repoCfg)
 			if err != nil {
@@ -569,7 +614,9 @@ func newRepoEnsureLocalCmd() *cobra.Command {
 }
 
 // validateRepoCheckout checks the local origin without contacting the remote.
-func validateRepoCheckout(path string, target config.RepoInfo) (string, error) {
+// The origin must resolve, through the shared rules, to the same platform, site
+// and full project path as the registered target.
+func validateRepoCheckout(path string, target config.Target, cfg *config.Config) (string, error) {
 	if strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -595,22 +642,12 @@ func validateRepoCheckout(path string, target config.RepoInfo) (string, error) {
 			return "", fmt.Errorf("invalid checkout origin")
 		}
 	}
-	origin, err := config.ParseRepoInput(remote, nil)
+	origin, err := cfg.Resolve(remote)
 	if err != nil {
-		return "", fmt.Errorf("cannot parse checkout origin")
+		return "", fmt.Errorf("cannot match checkout origin to a configured site: %w", err)
 	}
-	host := func(info config.RepoInfo) string {
-		if info.Platform == "github" {
-			return "github.com"
-		}
-		u, _ := url.Parse(info.BaseURL)
-		if u == nil {
-			return ""
-		}
-		return strings.ToLower(u.Hostname())
-	}
-	if origin.Platform != target.Platform || host(origin) != host(target) || origin.OwnerRepo != target.OwnerRepo {
-		return "", fmt.Errorf("checkout origin does not match target provider, host and namespace")
+	if origin.Platform != target.Platform || origin.Path != target.Path || origin.Site != target.Site || (origin.Platform == "gitlab" && origin.BaseURL != target.BaseURL) {
+		return "", fmt.Errorf("checkout origin does not match target provider, site and namespace (origin: %s)", origin.Describe())
 	}
 	return abs, nil
 }

@@ -145,6 +145,7 @@ func inspectProject(name string) projectCheckResult {
 		r.add("sync", name, "passed", fmt.Sprintf("Local sync paused=%t; remote sync configuration unverified", paused), "")
 	}
 	if cfgOK {
+		cfg.BindGitLabRepos()
 		r.add("scheduler", name, "passed", fmt.Sprintf("Scheduler paused=%t, interval_minutes=%d; external schedulers unverified", cfg.Settings.RunPaused, cfg.Settings.RunIntervalMinutes), "")
 	}
 	reg, err := loadRegistry()
@@ -226,7 +227,7 @@ func inspectProject(name string) projectCheckResult {
 			r.add("checkout_origin", repo, "blocked", "Local checkout path is missing", "Configure the intended local checkout")
 			continue
 		}
-		path, err := validateRepoCheckout(rc.LocalPath, config.RepoInfo{OwnerRepo: repo, Platform: platform, BaseURL: rc.BaseURL})
+		path, err := validateRepoCheckout(rc.LocalPath, config.TargetOf(repo, rc), &cfg)
 		if err != nil {
 			r.add("checkout_origin", repo, "blocked", "Local checkout is missing or its origin does not match the registered repository", "Inspect local path and origin provider, host and namespace")
 			continue

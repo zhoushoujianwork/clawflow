@@ -543,7 +543,7 @@ func buildWorkerJob(ctx context.Context, t *coordinator.Task, reg *operator.Regi
 		return nil, 0, err
 	}
 	workerCloneMu.Lock()
-	local, err := clone.EnsureLocalCloneContext(ctx, cfg, p.Repo, rc, io.Discard, &clone.Token{GHToken: creds.GHToken, GitLabToken: creds.GitLabToken})
+	local, err := clone.EnsureLocalCloneContext(ctx, cfg, p.Repo, rc, io.Discard, clone.TokenFor(creds, rc))
 	workerCloneMu.Unlock()
 	if err != nil {
 		return nil, 0, err

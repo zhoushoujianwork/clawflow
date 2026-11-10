@@ -2,8 +2,10 @@ package commands
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -95,14 +97,14 @@ func newQueueMoveCmd() *cobra.Command {
 			}
 			p := queue.Placement{Top: top, Bottom: bottom}
 			if before != "" {
-				k, err := queue.ParseKey(before)
+				k, err := parseQueueKey(cfg, before)
 				if err != nil {
 					return err
 				}
 				p.Before = &k
 			}
 			if after != "" {
-				k, err := queue.ParseKey(after)
+				k, err := parseQueueKey(cfg, after)
 				if err != nil {
 					return err
 				}
@@ -126,7 +128,7 @@ func newQueueMoveCmd() *cobra.Command {
 // moveQueueItem edits the rank file only. Keys of repos that are not
 // configured are rejected; closed issues are pruned by the next pass.
 func moveQueueItem(cfg *config.Config, key string, p queue.Placement) ([]queue.Key, error) {
-	k, err := queue.ParseKey(key)
+	k, err := parseQueueKey(cfg, key)
 	if err != nil {
 		return nil, err
 	}
@@ -162,20 +164,20 @@ func newQueueAddCmd() *cobra.Command {
 			}
 			p := queue.Placement{Top: top, Bottom: !top && before == "" && after == ""}
 			if before != "" {
-				k, err := queue.ParseKey(before)
+				k, err := parseQueueKey(cfg, before)
 				if err != nil {
 					return err
 				}
 				p.Before = &k
 			}
 			if after != "" {
-				k, err := queue.ParseKey(after)
+				k, err := parseQueueKey(cfg, after)
 				if err != nil {
 					return err
 				}
 				p.After = &k
 			}
-			k, err := queue.ParseKey(args[0])
+			k, err := parseQueueKey(cfg, args[0])
 			if err != nil {
 				return err
 			}
@@ -217,7 +219,11 @@ func newQueueRemoveCmd() *cobra.Command {
 		Short: "Remove manual rank (does not exclude the issue)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			k, err := queue.ParseKey(args[0])
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			k, err := parseQueueKey(cfg, args[0])
 			if err != nil {
 				return err
 			}
@@ -230,4 +236,33 @@ func newQueueRemoveCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// parseQueueKey parses "<repo>#N" where <repo> is anything config.Resolve
+// accepts, so the queue follows the same target rules as every other command: a
+// shorthand shared by several configured repositories fails as ambiguous instead
+// of picking one, and a site-qualified key or full URL selects its own site. A
+// repository that is no longer configured still parses by its literal key so
+// stale ranks can be removed.
+func parseQueueKey(cfg *config.Config, s string) (queue.Key, error) {
+	literal, literalErr := queue.ParseKey(s)
+	i := strings.LastIndex(s, "#")
+	if i <= 0 {
+		return queue.Key{}, fmt.Errorf("invalid item key %q (want owner/repo#N)", s)
+	}
+	t, err := cfg.Resolve(s[:i])
+	if err != nil {
+		var amb *config.AmbiguousError
+		if errors.As(err, &amb) || literalErr != nil {
+			return queue.Key{}, err
+		}
+		if _, configured := cfg.Repos[literal.Repo]; configured {
+			return queue.Key{}, err
+		}
+		return literal, nil // stale rank of a repository that is gone
+	}
+	if !t.Configured && literalErr == nil {
+		return literal, nil
+	}
+	return queue.ParseKey(t.Key + s[i:])
 }

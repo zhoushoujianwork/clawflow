@@ -39,9 +39,9 @@ func newWorktreeCreateCmd() *cobra.Command {
 				return err
 			}
 
-			repoCfg, ok := cfg.Repos[repo]
-			if !ok {
-				return fmt.Errorf("repo %q not found in config", repo)
+			repo, repoCfg, err := configuredRepo(cfg, repo)
+			if err != nil {
+				return err
 			}
 
 			localPath, err := resolveLocalPath(cfg, repo, repoCfg)
@@ -91,9 +91,9 @@ func newWorktreeRemoveCmd() *cobra.Command {
 				return err
 			}
 
-			repoCfg, ok := cfg.Repos[repo]
-			if !ok {
-				return fmt.Errorf("repo %q not found in config", repo)
+			repo, repoCfg, err := configuredRepo(cfg, repo)
+			if err != nil {
+				return err
 			}
 
 			localPath, err := resolveLocalPath(cfg, repo, repoCfg)
@@ -270,11 +270,7 @@ to clean them up.`,
 // `clawflow run` see the clone happen.
 func resolveLocalPath(cfg *config.Config, ownerRepo string, repoCfg config.Repo) (string, error) {
 	creds, _ := config.LoadCredentials()
-	var token *clone.Token
-	if creds != nil {
-		token = &clone.Token{GHToken: creds.GHToken, GitLabToken: creds.GitLabToken}
-	}
-	return clone.EnsureLocalClone(cfg, ownerRepo, repoCfg, os.Stderr, token)
+	return clone.EnsureLocalClone(cfg, ownerRepo, repoCfg, os.Stderr, clone.TokenFor(creds, repoCfg))
 }
 
 func expandHomeStr(path string) string {

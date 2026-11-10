@@ -3,6 +3,8 @@ package pipeline
 import (
 	"strconv"
 	"strings"
+
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // RepoWebURL returns the browsable root of a repository. baseURL is the
@@ -10,6 +12,11 @@ import (
 // GitHub Enterprise serves its API under /api/v3 of the web host, and
 // github.com serves its API from api.github.com.
 func RepoWebURL(repo, platform, baseURL string) string {
+	// A site-qualified config key ("site:group/project") is not part of the
+	// web path; only the project path is.
+	if _, path := vcs.SplitRepoKey(repo); path != "" {
+		repo = path
+	}
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if platform == "gitlab" {
 		if base == "" {

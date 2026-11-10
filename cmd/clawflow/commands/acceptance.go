@@ -137,6 +137,7 @@ func acceptanceConfiguration(repo string) (config.Repo, execution.Config, error)
 	if err := readCheckYAML(config.ConfigPath(), &cfg); err != nil {
 		return config.Repo{}, execution.Config{}, errors.New("acceptance requires readable canonical configuration")
 	}
+	cfg.BindGitLabRepos()
 	rc, ok := cfg.Repos[repo]
 	parts := strings.Split(repo, "/")
 	if !ok || len(parts) < 2 || (rc.Platform != "gitlab" && len(parts) != 2) || strings.ContainsAny(repo, "\\\x00\r\n") || strings.Contains(repo, "..") {
@@ -569,6 +570,7 @@ func acceptanceEnrollment(repo string) (bool, error) {
 	if err := readCheckYAML(config.ConfigPath(), &cfg); err != nil {
 		return false, errors.New("merge blocked: repository policy configuration unreadable")
 	}
+	cfg.BindGitLabRepos()
 	return cfg.Repos[repo].AcceptanceRequired, nil
 }
 

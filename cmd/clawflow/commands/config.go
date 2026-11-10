@@ -116,9 +116,9 @@ func newConfigShowCmd() *cobra.Command {
 
 			// --repo + --field: print a single repo field value (for scripting)
 			if repoFlag != "" && fieldFlag != "" {
-				r, ok := cfg.Repos[repoFlag]
-				if !ok {
-					return fmt.Errorf("repo %q not found", repoFlag)
+				_, r, rerr := configuredRepo(cfg, repoFlag)
+				if rerr != nil {
+					return rerr
 				}
 				switch fieldFlag {
 				case "auto_merge":

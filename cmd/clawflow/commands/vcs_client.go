@@ -15,6 +15,28 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs/gitlab"
 )
 
+// gitlabSiteClient builds the GitLab client of the site a repository is bound
+// to. A registered site uses only its own credential: never the legacy global
+// token (unless that site opted in) and never another site's token. A legacy
+// repository, which names no registered site, keeps using base_url and the
+// legacy token it has always used.
+func gitlabSiteClient(repo config.Repo, creds *config.Credentials) (*gitlab.Client, error) {
+	if repo.BaseURL == "" {
+		return nil, fmt.Errorf("repo platform is gitlab but base_url is not set")
+	}
+	if repo.Site == "" {
+		return gitlab.New(creds.GitLabToken, repo.BaseURL), nil
+	}
+	if repo.SiteCfg == nil {
+		return nil, fmt.Errorf("GitLab site %q is not registered (clawflow gitlab site list)", repo.Site)
+	}
+	token, _ := creds.SiteToken(*repo.SiteCfg)
+	if token == "" {
+		return nil, &vcs.AuthError{Site: repo.Site, URL: repo.SiteCfg.URL, NoCred: true}
+	}
+	return gitlab.NewForSite(gitlab.Site{Name: repo.Site, URL: repo.SiteCfg.URL, Token: token, Unsupported: repo.SiteCfg.Unsupported}), nil
+}
+
 // newVCSClient returns a VCS client for the given repo config.
 // When the process is running as part of a Pilot wake (env var
 // CLAWFLOW_PILOT_BUDGET_PATH is set), the returned client is wrapped in a
@@ -41,10 +63,11 @@ func newVCSClient(repo config.Repo) (vcs.Client, error) {
 		c.UseCacheDir(filepath.Join(snapshot.DataDir(), "github-http"))
 		base = c
 	case "gitlab":
-		if repo.BaseURL == "" {
-			return nil, fmt.Errorf("repo platform is gitlab but base_url is not set")
+		c, err := gitlabSiteClient(repo, creds)
+		if err != nil {
+			return nil, err
 		}
-		base = gitlab.New(creds.GitLabToken, repo.BaseURL)
+		base = c
 	default:
 		return nil, fmt.Errorf("unsupported platform %q", platform)
 	}
@@ -55,53 +78,32 @@ func newVCSClient(repo config.Repo) (vcs.Client, error) {
 }
 
 // newVCSClientForRepo loads config and returns a client for the named repo,
-// plus the canonical "owner/repo" (or GitLab "namespace/project") identifier
-// that VCS API calls expect. Callers MUST use the returned canonical name when
-// invoking client methods — repoName may be a full URL, which the API layer
-// cannot split into owner/name.
+// plus the canonical config key that VCS API calls expect. Callers MUST use the
+// returned key when invoking client methods: repoName may be a full URL, an
+// SSH address or a shorthand, none of which the API layer can split.
 //
-// The repo need not be added via `clawflow repo add`: when it isn't in the
-// config, a transient config is inferred from the argument and the API is
-// tried directly. Access is enforced by the VCS (401/403/404), not membership.
+// Resolution is config.Resolve, shared by every command and the API: a full URL
+// or alias:path selects its own site, a shorthand with several candidates fails
+// as ambiguous, and nothing falls back to another platform, site or credential.
+// The repo need not be added via `clawflow repo add`; access is then enforced by
+// the VCS (401/403/404) on the one site the argument names.
 func newVCSClientForRepo(repoName string) (vcs.Client, string, config.Repo, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, "", config.Repo{}, err
 	}
-	if repo, ok := cfg.Repos[repoName]; ok {
-		client, err := newVCSClient(repo)
-		return client, repoName, repo, err
-	}
-
-	// Not a configured repo. Infer a transient config from the argument. The
-	// arg may be "owner/repo", a github.com URL, or a self-hosted GitLab URL
-	// (https://git.example.com/group/proj) — the URL form is the only way to
-	// learn a self-hosted GitLab base_url, since it can't be inferred from
-	// "owner/repo" alone.
-	info, err := config.ParseRepoInput(repoName, cfg.Settings.GitLabHosts)
+	t, err := cfg.Resolve(repoName)
 	if err != nil {
-		return nil, "", config.Repo{}, fmt.Errorf("repo %q not in config and could not be parsed: %w", repoName, err)
+		return nil, "", config.Repo{}, err
 	}
-	// The URL might actually point at a repo that IS configured (added by its
-	// owner/repo key). Prefer the stored config so its settings apply.
-	if repo, ok := cfg.Repos[info.OwnerRepo]; ok {
-		client, err := newVCSClient(repo)
-		return client, info.OwnerRepo, repo, err
-	}
-	repo := config.Repo{
-		Platform: info.Platform,
-		BaseURL:  info.BaseURL,
-		Owner:    info.OwnerRepo,
-	}
-	client, err := newVCSClient(repo)
-	return client, info.OwnerRepo, repo, err
+	client, err := newVCSClient(t.Repo)
+	return client, t.Key, t.Repo, err
 }
 
 // newGitLabClientForRepo resolves repoName to a concrete *gitlab.Client for
 // GitLab-only operations (CI/CD runners, pipelines, job logs) that have no
 // platform-agnostic vcs.Client equivalent. It errors when the resolved repo is
-// not a GitLab project. Resolution mirrors newVCSClientForRepo: configured repo
-// first, then a transient config inferred from a URL / owner/repo argument.
+// not a GitLab project. Resolution is the shared config.Resolve.
 //
 // The concrete client cannot use the platform-agnostic Pilot budget decorator.
 // Commands that write through this client must call budget.Reserve themselves.
@@ -110,38 +112,50 @@ func newGitLabClientForRepo(repoName string) (*gitlab.Client, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	build := func(repo config.Repo, canonical string) (*gitlab.Client, string, error) {
-		platform := repo.Platform
-		if platform == "" {
-			platform = "github"
-		}
-		if platform != "gitlab" {
-			return nil, "", fmt.Errorf("repo %q is not a GitLab project (platform=%q); ci commands are GitLab-only", canonical, platform)
-		}
-		if repo.BaseURL == "" {
-			return nil, "", fmt.Errorf("repo %q is gitlab but base_url is not set", canonical)
-		}
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			return nil, "", fmt.Errorf("load credentials: %w", err)
-		}
-		return gitlab.New(creds.GitLabToken, repo.BaseURL), canonical, nil
-	}
-	if repo, ok := cfg.Repos[repoName]; ok {
-		return build(repo, repoName)
-	}
-	info, err := config.ParseRepoInput(repoName, cfg.Settings.GitLabHosts)
+	t, err := cfg.Resolve(repoName)
 	if err != nil {
-		return nil, "", fmt.Errorf("repo %q not in config and could not be parsed: %w", repoName, err)
+		return nil, "", err
 	}
-	if repo, ok := cfg.Repos[info.OwnerRepo]; ok {
-		return build(repo, info.OwnerRepo)
+	if t.Platform != "gitlab" {
+		return nil, "", fmt.Errorf("repo %q is not a GitLab project (%s); ci commands are GitLab-only", t.Key, t.Describe())
 	}
-	return build(config.Repo{
-		Platform: info.Platform,
-		BaseURL:  info.BaseURL,
-		Owner:    info.OwnerRepo,
-	}, info.OwnerRepo)
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return nil, "", fmt.Errorf("load credentials: %w", err)
+	}
+	if devmode.Active() {
+		if err := devmode.CheckBaseURL(t.Repo.BaseURL); err != nil {
+			return nil, "", err
+		}
+	}
+	client, err := gitlabSiteClient(t.Repo, creds)
+	return client, t.Key, err
+}
+
+// configuredRepo resolves a user-supplied repository argument to an existing
+// config entry through the shared config.Resolve rules (full URL, alias:path,
+// SSH address or an unambiguous shorthand). It returns the canonical key.
+func configuredRepo(cfg *config.Config, input string) (string, config.Repo, error) {
+	t, err := cfg.ResolveConfigured(input)
+	if err != nil {
+		return "", config.Repo{}, err
+	}
+	return t.Key, t.Repo, nil
+}
+
+// repoSiteOf names the platform site a repository ID is read from.
+func repoSiteOf(r config.Repo) snapshot.RepoSite {
+	if r.Platform != "gitlab" {
+		return snapshot.RepoSite{}
+	}
+	return snapshot.RepoSite{Name: r.Site, URL: r.BaseURL}
+}
+
+func valueOr(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
 }
 
 // pollingAllowed only gates discovery; delivery and writes retain the reserve.

@@ -14,6 +14,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/gitexec"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // Token holds the VCS credentials used for clone authentication.
@@ -22,6 +23,44 @@ type Token struct {
 	githubApp   bool
 	GHToken     string
 	GitLabToken string
+}
+
+// TokenFor returns the clone credentials for one repository. A GitLab
+// repository bound to a registered site receives that site's token only, never
+// the legacy global token and never another site's token.
+func TokenFor(creds *config.Credentials, repo config.Repo) *Token {
+	if creds == nil {
+		return nil
+	}
+	t := &Token{GHToken: creds.GHToken}
+	if repo.Platform == "gitlab" {
+		t.GitLabToken = repo.GitLabCredential(creds)
+	}
+	return t
+}
+
+// sshRemote returns the SSH clone remote of a GitLab repository. A registered
+// site clones from its first bound ssh_hosts entry. A site without a binding
+// uses the host of its API URL (the deployment prefix and the API port belong to
+// HTTP and are dropped). The mapping is never inferred from another site.
+func sshRemote(repoCfg config.Repo, path string) string {
+	host := ""
+	if repoCfg.SiteCfg != nil && len(repoCfg.SiteCfg.SSHHosts) > 0 {
+		host = repoCfg.SiteCfg.SSHHosts[0]
+	} else {
+		host = strings.TrimSuffix(repoCfg.BaseURL, "/")
+		host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+		if i := strings.IndexByte(host, '/'); i >= 0 {
+			host = host[:i]
+		}
+		if h, _, ok := strings.Cut(host, ":"); ok {
+			host = h
+		}
+	}
+	if h, p, ok := strings.Cut(host, ":"); ok && p != "" {
+		return "ssh://git@" + h + ":" + p + "/" + path + ".git"
+	}
+	return "git@" + host + ":" + path + ".git"
 }
 
 // EnsureLocalClone returns the local repo path for `ownerRepo`,
@@ -87,7 +126,7 @@ func EnsureLocalCloneContext(ctx context.Context, cfg *config.Config, ownerRepo 
 	//   "owner/repo"           → ~/gitlab/repo
 	//   "ns/group/repo"        → ~/gitlab/repo  (NOT ~/gitlab/group/repo)
 	//   "ns/sub/group/repo"    → ~/gitlab/repo
-	parts := strings.Split(ownerRepo, "/")
+	parts := strings.Split(gitlabPath(ownerRepo, repoCfg), "/")
 	subPath := parts[len(parts)-1]
 	candidate := filepath.Join(cloneBase, subPath)
 
@@ -101,7 +140,7 @@ func EnsureLocalCloneContext(ctx context.Context, cfg *config.Config, ownerRepo 
 		// Name collision: the flat path is occupied by a different repo.
 		// Try a disambiguated path: <cloneBase>/<owner>-<repo>
 		// e.g. ~/github/daboluocc-bbclaw instead of ~/github/bbclaw
-		fallback := filepath.Join(cloneBase, strings.ReplaceAll(ownerRepo, "/", "-"))
+		fallback := filepath.Join(cloneBase, strings.NewReplacer("/", "-", ":", "-").Replace(ownerRepo))
 		if _, err := os.Stat(fallback); err == nil {
 			// Fallback path already exists — check if it's already the right clone.
 			if matchesRepo(fallback, ownerRepo, repoCfg) {
@@ -176,10 +215,7 @@ func buildCloneURL(ownerRepo string, repoCfg config.Repo, token *Token, protocol
 	// SSH mode (default): ignore the token for git transport entirely.
 	if protocol != "https" {
 		if isGitLab && repoCfg.BaseURL != "" {
-			host := strings.TrimSuffix(repoCfg.BaseURL, "/")
-			host = strings.TrimPrefix(host, "https://")
-			host = strings.TrimPrefix(host, "http://")
-			return "git@" + host + ":" + ownerRepo + ".git"
+			return sshRemote(repoCfg, gitlabPath(ownerRepo, repoCfg))
 		}
 		return "git@github.com:" + ownerRepo + ".git"
 	}
@@ -207,12 +243,10 @@ func buildCloneURL(ownerRepo string, repoCfg config.Repo, token *Token, protocol
 			} else if strings.HasPrefix(baseURL, "http://") {
 				host = strings.TrimPrefix(baseURL, "http://")
 			}
-			return scheme + "://oauth2:" + effectiveToken + "@" + host + "/" + ownerRepo + ".git"
+			return scheme + "://oauth2:" + effectiveToken + "@" + host + "/" + gitlabPath(ownerRepo, repoCfg) + ".git"
 		}
-		// SSH fallback: extract host from base_url
-		host := strings.TrimPrefix(baseURL, "https://")
-		host = strings.TrimPrefix(host, "http://")
-		return "git@" + host + ":" + ownerRepo + ".git"
+		// SSH fallback uses the same explicit binding as SSH mode.
+		return sshRemote(repoCfg, gitlabPath(ownerRepo, repoCfg))
 	}
 
 	// GitHub
@@ -225,6 +259,16 @@ func buildCloneURL(ownerRepo string, repoCfg config.Repo, token *Token, protocol
 	}
 	// SSH fallback
 	return "git@github.com:" + ownerRepo + ".git"
+}
+
+// gitlabPath is the project path inside the site: the repository key without
+// its site qualifier.
+func gitlabPath(key string, repoCfg config.Repo) string {
+	if repoCfg.ProjectPath != "" {
+		return repoCfg.ProjectPath
+	}
+	_, p := vcs.SplitRepoKey(key)
+	return p
 }
 
 // sanitizeURLForLog removes embedded credentials from a URL for safe logging.
@@ -256,20 +300,38 @@ func matchesRepo(dir, ownerRepo string, repoCfg config.Repo) bool {
 	if err != nil {
 		return false
 	}
-	// Normalize: strip trailing .git, protocol prefix, and user@ prefix
-	normalized := normalizeRemoteURL(remoteURL)
-	// Build expected suffixes for matching
-	// e.g. "github.com/owner/repo" or "gitlab.example.com/ns/repo"
-	var expected string
-	if repoCfg.Platform == "gitlab" && repoCfg.BaseURL != "" {
-		host := strings.TrimPrefix(repoCfg.BaseURL, "https://")
-		host = strings.TrimPrefix(host, "http://")
-		host = strings.TrimSuffix(host, "/")
-		expected = host + "/" + ownerRepo
-	} else {
-		expected = "github.com/" + ownerRepo
+	normalized := strings.ToLower(normalizeRemoteURL(remoteURL))
+	if repoCfg.Platform != "gitlab" || repoCfg.BaseURL == "" {
+		return normalized == strings.ToLower("github.com/"+ownerRepo)
 	}
-	return strings.EqualFold(normalized, expected)
+	path := strings.ToLower(gitlabPath(ownerRepo, repoCfg))
+	// HTTPS origin: <host[:port]>/<deployment prefix>/<path>. The deployment
+	// prefix and port are part of the site's identity.
+	hostPath := strings.TrimSuffix(repoCfg.BaseURL, "/")
+	hostPath = strings.TrimPrefix(strings.TrimPrefix(hostPath, "https://"), "http://")
+	if normalized == strings.ToLower(hostPath)+"/"+path {
+		return true
+	}
+	// SSH origin: the explicit ssh_hosts binding, or the API host when none is
+	// declared. Nothing else matches, so a checkout of the same path on another
+	// site is never mistaken for this one.
+	hosts := []string{}
+	if repoCfg.SiteCfg != nil {
+		hosts = append(hosts, repoCfg.SiteCfg.SSHHosts...)
+	}
+	if len(hosts) == 0 {
+		h := strings.ToLower(hostPath)
+		if i := strings.IndexByte(h, '/'); i >= 0 {
+			h = h[:i]
+		}
+		hosts = append(hosts, h)
+	}
+	for _, h := range hosts {
+		if normalized == strings.ToLower(h)+"/"+path {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeRemoteURL strips a git remote URL down to "host/path" form
@@ -310,7 +372,7 @@ func DetectLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo)
 		cloneBase = cfg.Settings.ResolveGitlabCloneDir()
 	}
 
-	parts := strings.Split(ownerRepo, "/")
+	parts := strings.Split(gitlabPath(ownerRepo, repoCfg), "/")
 	subPath := parts[len(parts)-1]
 	candidate := filepath.Join(cloneBase, subPath)
 
@@ -321,7 +383,7 @@ func DetectLocalClone(cfg *config.Config, ownerRepo string, repoCfg config.Repo)
 	}
 
 	// Also check the disambiguated fallback path used when the flat name collides.
-	fallback := filepath.Join(cloneBase, strings.ReplaceAll(ownerRepo, "/", "-"))
+	fallback := filepath.Join(cloneBase, strings.NewReplacer("/", "-", ":", "-").Replace(ownerRepo))
 	if _, err := os.Stat(fallback); err == nil {
 		if matchesRepo(fallback, ownerRepo, repoCfg) {
 			return fallback

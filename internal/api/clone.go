@@ -51,19 +51,16 @@ func HandleClone(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	repoCfg, ok := cfg.Repos[req.Repo]
-	if !ok {
-		writeJSON(w, 404, map[string]string{"error": "repo not found in config"})
+	repoKey, repoCfg, rerr := resolveConfigured(cfg, req.Repo)
+	if rerr != nil {
+		writeErr(w, rerr)
 		return
 	}
+	req.Repo = repoKey
 
 	var log bytes.Buffer
 	creds, _ := config.LoadCredentials()
-	var token *clone.Token
-	if creds != nil {
-		token = &clone.Token{GHToken: creds.GHToken, GitLabToken: creds.GitLabToken}
-	}
-	localPath, err := clone.EnsureLocalClone(cfg, req.Repo, repoCfg, &log, token)
+	localPath, err := clone.EnsureLocalClone(cfg, req.Repo, repoCfg, &log, clone.TokenFor(creds, repoCfg))
 	if err != nil {
 		writeJSON(w, 500, map[string]string{
 			"error": err.Error(),

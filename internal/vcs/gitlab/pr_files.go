@@ -7,7 +7,7 @@ import (
 
 // ListPRFiles returns changed paths without downloading patch contents.
 func (c *Client) ListPRFiles(repo string, prNumber int) ([]string, error) {
-	data, status, err := c.doJSON("GET", fmt.Sprintf("/projects/%s/merge_requests/%d/changes", projectID(repo), prNumber), nil)
+	data, status, err := c.doJSON("GET", fmt.Sprintf("/projects/%s/merge_requests/%d/changes", c.projectID(repo), prNumber), nil)
 	if err != nil {
 		return nil, err
 	}

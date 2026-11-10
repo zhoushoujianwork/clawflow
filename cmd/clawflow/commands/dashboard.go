@@ -15,6 +15,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/coordinator"
 	"github.com/zhoushoujianwork/clawflow/internal/project"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // NewDashboardCmd is a JSON-only bridge for the native app. TLS, token-file
@@ -140,14 +141,16 @@ func dashboardRepo(name string, r config.Repo) coordinator.DashboardRepo {
 		u.User = nil
 		u.RawQuery = ""
 		u.Fragment = ""
-		u.Path = strings.TrimSuffix(u.Path, "/") + "/" + name
+		// Site-qualified keys ("site:group/project") link by project path.
+		_, projectPath := vcs.SplitRepoKey(name)
+		u.Path = strings.TrimSuffix(u.Path, "/") + "/" + projectPath
 		link = u.String()
 	}
 	tags := r.WorkerTags
 	if tags == nil {
 		tags = []string{}
 	}
-	row := coordinator.DashboardRepo{Name: name, URL: link, Platform: r.Platform, Enabled: r.Enabled, CIRequired: r.CIRequired, AcceptanceRequired: r.AcceptanceRequired, AutoMerge: r.AutoMerge, WorkerTags: tags}
+	row := coordinator.DashboardRepo{Name: name, URL: link, Platform: r.Platform, Site: r.Site, Target: config.DescribeRepo(name, r), Enabled: r.Enabled, CIRequired: r.CIRequired, AcceptanceRequired: r.AcceptanceRequired, AutoMerge: r.AutoMerge, WorkerTags: tags}
 	row.IssueQueue = []queue.ListEntry{}
 	state, err := queue.LoadState(name)
 	if err != nil {

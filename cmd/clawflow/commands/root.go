@@ -59,6 +59,7 @@ entirely in VCS labels and comments. Run 'clawflow run' once, or schedule it.`,
 	root.AddCommand(NewFeedbackCmd())
 	root.AddCommand(NewOperatorsCmd())
 	root.AddCommand(NewRepoCmd())
+	root.AddCommand(NewGitLabCmd())
 	root.AddCommand(NewQueueCmd())
 	root.AddCommand(NewDecisionsCmd())
 	root.AddCommand(newPreflightCmd())

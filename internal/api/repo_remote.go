@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/clone"
@@ -40,6 +41,8 @@ type RemoteRepo struct {
 	Private       bool   `json:"private"`
 	HTMLURL       string `json:"html_url"`
 	BaseURL       string `json:"base_url,omitempty"`   // GitLab instance URL
+	Site          string `json:"site,omitempty"`       // registered GitLab site alias
+	Key           string `json:"key,omitempty"`        // config key: full_name, or "site:full_name" on a registered site
 	LocalPath     string `json:"local_path,omitempty"` // non-empty if a matching local clone exists
 }
 
@@ -55,6 +58,7 @@ type addRemoteRepoRequest struct {
 	DefaultBranch string `json:"default_branch"`
 	Description   string `json:"description"`
 	BaseURL       string `json:"base_url,omitempty"` // for GitLab self-hosted
+	Site          string `json:"site,omitempty"`     // registered GitLab site alias (preferred over base_url)
 }
 
 type addRemoteRepoResponse struct {
@@ -91,21 +95,24 @@ func HandleListRemoteRepos(w http.ResponseWriter, r *http.Request) {
 		}
 		repos, err = listGitHubRepos(creds.GHToken)
 	case "gitlab":
-		if creds.GitLabToken == "" {
-			writeJSON(w, 200, listRemoteReposResponse{TokenConfigured: false, Error: "GitLab token not configured. Please add your GitLab token in Settings."})
-			return
-		}
 		cfg, err := config.Load()
 		if err != nil {
 			writeJSON(w, 500, listRemoteReposResponse{Error: fmt.Sprintf("load config: %v", err)})
 			return
 		}
-		// Use first configured GitLab host or default to gitlab.com
-		baseURL := "https://gitlab.com"
-		if len(cfg.Settings.GitLabHosts) > 0 {
-			baseURL = normalizeGitLabURL(cfg.Settings.GitLabHosts[0])
+		token, baseURL, site, status, msg := gitlabListSource(cfg, creds, r.URL.Query().Get("site"))
+		if msg != "" {
+			writeJSON(w, status, listRemoteReposResponse{TokenConfigured: token != "", Error: msg})
+			return
 		}
-		repos, err = listGitLabRepos(creds.GitLabToken, baseURL)
+		repos, err = listGitLabRepos(token, baseURL)
+		for i := range repos {
+			repos[i].Site = site
+			repos[i].Key = repos[i].FullName
+			if site != "" {
+				repos[i].Key = site + ":" + repos[i].FullName
+			}
+		}
 	default:
 		writeJSON(w, 400, listRemoteReposResponse{Error: "unsupported platform"})
 		return
@@ -159,8 +166,26 @@ func HandleAddRemoteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Registered-site projects are keyed "site:path" so equal paths on two
+	// sites never collide; GitHub and legacy GitLab keep their bare key.
+	key := req.FullName
+	var siteCfg *config.GitLabSite
+	if req.Platform == "gitlab" && req.Site != "" {
+		s, ok := cfg.Settings.GitLabSite(req.Site)
+		if !ok {
+			writeJSON(w, 400, addRemoteRepoResponse{Error: "unknown GitLab site " + req.Site})
+			return
+		}
+		siteCfg = &s
+		key = s.Name + ":" + req.FullName
+		req.BaseURL = s.URL
+	} else if req.Platform == "gitlab" && len(cfg.Settings.GitLabSites) > 0 {
+		writeJSON(w, 400, addRemoteRepoResponse{Error: "site is required: GitLab sites are registered, so the repository must name the site it belongs to"})
+		return
+	}
+
 	// Check if repo already exists
-	if _, exists := cfg.Repos[req.FullName]; exists {
+	if _, exists := cfg.Repos[key]; exists {
 		writeJSON(w, 400, addRemoteRepoResponse{Error: "repository already configured"})
 		return
 	}
@@ -186,9 +211,12 @@ func HandleAddRemoteRepo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	repoCfg.Owner = owner
+	if siteCfg != nil {
+		repoCfg.Site, repoCfg.ProjectPath, repoCfg.SiteCfg = siteCfg.Name, req.FullName, siteCfg
+	}
 
 	// Add to config first (EnsureLocalClone expects it to be there)
-	cfg.Repos[req.FullName] = repoCfg
+	cfg.Repos[key] = repoCfg
 	if err := cfg.Save(); err != nil {
 		writeJSON(w, 500, addRemoteRepoResponse{Error: fmt.Sprintf("save config: %v", err)})
 		return
@@ -196,7 +224,7 @@ func HandleAddRemoteRepo(w http.ResponseWriter, r *http.Request) {
 
 	// Check if a matching local clone already exists — skip clone if so.
 	var localPath string
-	if detected := clone.DetectLocalClone(cfg, req.FullName, repoCfg); detected != "" {
+	if detected := clone.DetectLocalClone(cfg, key, repoCfg); detected != "" {
 		localPath = detected
 	} else {
 		// Clone the repository with output capture
@@ -204,13 +232,14 @@ func HandleAddRemoteRepo(w http.ResponseWriter, r *http.Request) {
 		creds, _ := config.LoadCredentials()
 		var token *clone.Token
 		if creds != nil {
-			token = &clone.Token{GHToken: creds.GHToken, GitLabToken: creds.GitLabToken}
+			// Per-repository: a site-bound repo gets its own site's token only.
+			token = clone.TokenFor(creds, repoCfg)
 		}
 		var cloneErr error
-		localPath, cloneErr = clone.EnsureLocalClone(cfg, req.FullName, repoCfg, &logBuf, token)
+		localPath, cloneErr = clone.EnsureLocalClone(cfg, key, repoCfg, &logBuf, token)
 		if cloneErr != nil {
 			// Remove from config on clone failure
-			delete(cfg.Repos, req.FullName)
+			delete(cfg.Repos, key)
 			_ = cfg.Save()
 			writeJSON(w, 500, addRemoteRepoResponse{
 				Error: fmt.Sprintf("clone failed: %v\nLog:\n%s", cloneErr, logBuf.String()),
@@ -221,7 +250,7 @@ func HandleAddRemoteRepo(w http.ResponseWriter, r *http.Request) {
 
 	// Update config with local path
 	repoCfg.LocalPath = localPath
-	cfg.Repos[req.FullName] = repoCfg
+	cfg.Repos[key] = repoCfg
 	if err := cfg.Save(); err != nil {
 		writeJSON(w, 500, addRemoteRepoResponse{Error: fmt.Sprintf("save local path: %v", err)})
 		return
@@ -306,6 +335,46 @@ func parseLinkNext(link string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// gitlabListSource picks the one GitLab site whose projects are listed, with
+// that site's credential. A named site is used as given. Without a name the
+// choice must be unambiguous: when several sites (or a site plus a legacy host)
+// exist, the caller has to pick one and nothing is defaulted.
+func gitlabListSource(cfg *config.Config, creds *config.Credentials, name string) (token, baseURL, site string, status int, msg string) {
+	if name == "" {
+		sites := cfg.Settings.GitLabSites
+		switch {
+		case len(sites) > 1 || (len(sites) == 1 && len(cfg.Settings.GitLabHosts) > 0):
+			names := make([]string, 0, len(sites))
+			for _, s := range sites {
+				names = append(names, s.Name)
+			}
+			return "", "", "", 400, "several GitLab sites are configured (" + strings.Join(names, ", ") + "); choose one with the site parameter"
+		case len(sites) == 1:
+			name = sites[0].Name
+		}
+	}
+	if name != "" {
+		s, ok := cfg.Settings.GitLabSite(name)
+		if !ok {
+			return "", "", "", 400, "unknown GitLab site " + name
+		}
+		t, _ := creds.SiteToken(s)
+		if t == "" {
+			return "", "", name, 200, "No credential is configured for GitLab site " + name + "; set one with: clawflow gitlab site set-token " + name
+		}
+		return t, s.URL, name, 0, ""
+	}
+	// No registered site: the pre-existing single-site behavior.
+	if creds.GitLabToken == "" {
+		return "", "", "", 200, "GitLab token not configured. Please add your GitLab token in Settings."
+	}
+	base := "https://gitlab.com"
+	if len(cfg.Settings.GitLabHosts) > 0 {
+		base = normalizeGitLabURL(cfg.Settings.GitLabHosts[0])
+	}
+	return creds.GitLabToken, base, "", 0, ""
 }
 
 // listGitLabRepos fetches repositories from GitLab API.

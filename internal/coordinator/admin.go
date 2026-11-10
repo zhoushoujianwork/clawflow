@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zhoushoujianwork/clawflow/internal/housekeeping"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // RepoRequest limits remote mutations to enrollment and existing repo options.
@@ -36,6 +37,13 @@ type PlatformStatus struct {
 type AdminService interface {
 	Repos(context.Context, RepoRequest) (any, error)
 	Status(context.Context) (PlatformStatus, error)
+}
+
+// RepoAuditor is optionally implemented by an AdminService that can resolve a
+// repository argument through the host configuration. It returns a credential-free
+// "platform site path" description, or "" when the argument cannot be resolved.
+type RepoAuditor interface {
+	AuditRepo(input string) string
 }
 
 // NewPlatformHandler mounts admin and worker APIs on the same listener.
@@ -192,6 +200,11 @@ func NewPlatformHandler(store WorkerStore, admin AdminService) http.Handler {
 					return nil
 				}
 				target = repoAuditTarget(input.Repo)
+				if auditor, ok := admin.(RepoAuditor); ok {
+					if resolved := auditor.AuditRepo(input.Repo); resolved != "" {
+						target = resolved
+					}
+				}
 				// Record the authorized intent before changing config. A failed audit prevents a write.
 				if r.Method == "POST" {
 					if err = store.AppendAudit(ctx, actor, target, "admin:"+action+":attempt"); err != nil {
@@ -254,36 +267,88 @@ func queryInt(v string) (int64, error) {
 	return n, nil
 }
 
-// repoAuditTarget records repository identity, excluding URL credentials and queries.
+// repoAuditTarget records repository identity, excluding URL credentials and
+// queries. This is the syntactic fallback used when the host cannot resolve the
+// argument. GitHub forms keep the bare "owner/repo" text; GitLab forms name the
+// platform and the site alias (alias:path) or host (URL, SSH) with the full path,
+// so a site-qualified key is never reduced to an empty target.
 func repoAuditTarget(input string) string {
 	key := strings.TrimSpace(input)
-	if strings.HasPrefix(key, "https://") || strings.HasPrefix(key, "http://") {
+	if len(key) > 1024 {
+		return ""
+	}
+	qualifier := "" // "site=<alias>" or "host=<host>" for GitLab forms
+	switch {
+	case strings.HasPrefix(key, "https://") || strings.HasPrefix(key, "http://") || strings.HasPrefix(key, "ssh://"):
 		u, err := url.Parse(key)
-		if err != nil {
+		if err != nil || u.Hostname() == "" {
 			return ""
 		}
 		key = strings.TrimPrefix(u.Path, "/")
-	} else if strings.HasPrefix(key, "git@") {
+		qualifier = auditHostQualifier(u.Host)
+		if qualifier == "" && !isGitHubHost(u.Hostname()) {
+			return ""
+		}
+	case strings.HasPrefix(key, "git@"):
 		parts := strings.SplitN(key, ":", 2)
 		if len(parts) != 2 {
 			return ""
 		}
+		host := strings.TrimPrefix(parts[0], "git@")
 		key = parts[1]
+		qualifier = auditHostQualifier(host)
+		if qualifier == "" && !isGitHubHost(host) {
+			return ""
+		}
+	default:
+		if alias, path := vcs.SplitRepoKey(key); alias != "" {
+			qualifier, key = "site="+alias, path
+		}
 	}
-	key = strings.TrimSuffix(key, ".git")
+	key = strings.TrimSuffix(strings.Trim(key, "/"), ".git")
+	if !validAuditPath(key) {
+		return ""
+	}
+	if qualifier != "" {
+		return "gitlab " + qualifier + " " + key
+	}
+	return key
+}
+
+func isGitHubHost(host string) bool {
+	h := strings.ToLower(host)
+	return h == "github.com" || h == "www.github.com"
+}
+
+// auditHostQualifier returns "host=<host[:port]>" for a non-GitHub host and ""
+// for GitHub or a malformed host.
+func auditHostQualifier(host string) string {
+	host = strings.ToLower(host)
+	if host == "" || len(host) > 255 || isGitHubHost(strings.SplitN(host, ":", 2)[0]) {
+		return ""
+	}
+	for _, c := range host {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-' || c == ':' || c == '[' || c == ']') {
+			return ""
+		}
+	}
+	return "host=" + host
+}
+
+func validAuditPath(key string) bool {
 	parts := strings.Split(key, "/")
 	if len(parts) < 2 || len(key) > 512 {
-		return ""
+		return false
 	}
 	for _, part := range parts {
 		if part == "" || part == "." || part == ".." {
-			return ""
+			return false
 		}
 		for _, c := range part {
 			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c == '.') {
-				return ""
+				return false
 			}
 		}
 	}
-	return key
+	return true
 }

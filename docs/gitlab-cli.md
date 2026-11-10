@@ -2,6 +2,8 @@
 
 这些命令用于已有 GitLab 项目的 CI 运维，不是 ClawFlow 本机调度的启动方式。返回[项目入口](../readme.md)。
 
+`--repo` 用完整项目 URL 或 `site:group/project` 时只发往所属站点；同名简写命中多个站点会报歧义。多站点配置见[多 GitLab 站点](gitlab-sites.md)。
+
 ## Trigger a manual GitLab deployment
 
 After approving a change and its target environment, start an existing manual

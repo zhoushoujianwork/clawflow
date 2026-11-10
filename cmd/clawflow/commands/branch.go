@@ -35,9 +35,9 @@ func resolveBranchContext(repo string, fetch bool) (localPath, base string, err 
 	if err != nil {
 		return "", "", err
 	}
-	repoCfg, ok := cfg.Repos[repo]
-	if !ok {
-		return "", "", fmt.Errorf("repo %q not found in config", repo)
+	_, repoCfg, err := configuredRepo(cfg, repo)
+	if err != nil {
+		return "", "", err
 	}
 	localPath, err = resolveLocalPath(cfg, repo, repoCfg)
 	if err != nil {

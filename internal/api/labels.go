@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -17,15 +18,42 @@ type labelRequest struct {
 	Labels []string `json:"labels"`
 }
 
+// resolveConfigured maps a request's repo argument to its configured entry with
+// the same rules as the CLI (config.Resolve). An ambiguous shorthand is a 409,
+// an unknown repository a 404; nothing falls back to another site.
+func resolveConfigured(cfg *config.Config, input string) (string, config.Repo, error) {
+	t, err := cfg.ResolveConfigured(input)
+	if err != nil {
+		var amb *config.AmbiguousError
+		if errors.As(err, &amb) {
+			return "", config.Repo{}, &httpError{Code: 409, Msg: err.Error()}
+		}
+		return "", config.Repo{}, &httpError{Code: 404, Msg: "repo not found in config: " + err.Error()}
+	}
+	return t.Key, t.Repo, nil
+}
+
 func clientForRepo(repo string) (vcs.Client, error) {
+	client, _, err := clientAndKeyForRepo(repo)
+	return client, err
+}
+
+// clientAndKeyForRepo returns the client together with the canonical key that
+// client methods must be called with.
+func clientAndKeyForRepo(input string) (vcs.Client, string, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	repoCfg, ok := cfg.Repos[repo]
-	if !ok {
-		return nil, &httpError{Code: 404, Msg: "repo not found in config"}
+	repo, repoCfg, err := resolveConfigured(cfg, input)
+	if err != nil {
+		return nil, "", err
 	}
+	client, err := buildClient(repoCfg)
+	return client, repo, err
+}
+
+func buildClient(repoCfg config.Repo) (vcs.Client, error) {
 	creds, err := config.LoadCredentials()
 	if err != nil {
 		return nil, err
@@ -43,10 +71,29 @@ func clientForRepo(repo string) (vcs.Client, error) {
 	case "github":
 		return github.New(creds.GHToken, repoCfg.BaseURL), nil
 	case "gitlab":
-		return gitlab.New(creds.GitLabToken, repoCfg.BaseURL), nil
+		return gitlabClientForRepo(repoCfg, creds)
 	default:
 		return nil, &httpError{Code: 400, Msg: "unsupported platform"}
 	}
+}
+
+// gitlabClientForRepo builds the client of the site a repository is bound to,
+// with that site's credential only (see cmd gitlabSiteClient).
+func gitlabClientForRepo(repo config.Repo, creds *config.Credentials) (*gitlab.Client, error) {
+	if repo.BaseURL == "" {
+		return nil, &httpError{Code: 400, Msg: "repo platform is gitlab but base_url is not set"}
+	}
+	if repo.Site == "" {
+		return gitlab.New(creds.GitLabToken, repo.BaseURL), nil
+	}
+	if repo.SiteCfg == nil {
+		return nil, &httpError{Code: 400, Msg: "GitLab site " + repo.Site + " is not registered"}
+	}
+	token, _ := creds.SiteToken(*repo.SiteCfg)
+	if token == "" {
+		return nil, &httpError{Code: 401, Msg: (&vcs.AuthError{Site: repo.Site, URL: repo.SiteCfg.URL, NoCred: true}).Error()}
+	}
+	return gitlab.NewForSite(gitlab.Site{Name: repo.Site, URL: repo.SiteCfg.URL, Token: token, Unsupported: repo.SiteCfg.Unsupported}), nil
 }
 
 type httpError struct {
@@ -85,12 +132,12 @@ func HandleAddLabel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "repo, issue, and labels are required"})
 		return
 	}
-	client, err := clientForRepo(req.Repo)
+	client, key, err := clientAndKeyForRepo(req.Repo)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if err := client.AddLabel(req.Repo, req.Issue, req.Labels...); err != nil {
+	if err := client.AddLabel(key, req.Issue, req.Labels...); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -112,12 +159,12 @@ func HandleRemoveLabel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "repo, issue, and labels are required"})
 		return
 	}
-	client, err := clientForRepo(req.Repo)
+	client, key, err := clientAndKeyForRepo(req.Repo)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if err := client.RemoveLabel(req.Repo, req.Issue, req.Labels...); err != nil {
+	if err := client.RemoveLabel(key, req.Issue, req.Labels...); err != nil {
 		writeErr(w, err)
 		return
 	}

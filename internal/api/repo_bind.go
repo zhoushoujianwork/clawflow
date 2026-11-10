@@ -60,6 +60,23 @@ func HandleRepoBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve every target through the shared rules before changing anything:
+	// an ambiguous shorthand rejects the request rather than binding one of
+	// several candidates, and an unknown repo is skipped as before.
+	resolved := make([]string, 0, len(targets))
+	for _, input := range targets {
+		key, _, rerr := resolveConfigured(cfg, input)
+		if rerr != nil {
+			if he, ok := rerr.(*httpError); ok && he.Code == 409 {
+				writeErr(w, rerr)
+				return
+			}
+			continue
+		}
+		resolved = append(resolved, key)
+	}
+	targets = resolved
+
 	hostname := ""
 	if req.Bind {
 		if req.Machine != "" {

@@ -47,7 +47,7 @@ func StateDir() string { return filepath.Join(snapshot.DataDir(), "queue-state")
 
 // StatePath returns the state file of one repo.
 func StatePath(repo string) string {
-	return filepath.Join(StateDir(), strings.ReplaceAll(repo, "/", "@")+".json")
+	return filepath.Join(StateDir(), strings.NewReplacer("/", "@", ":", "+").Replace(repo)+".json")
 }
 
 // LoadState reads a repo's state; a missing file is an empty state.

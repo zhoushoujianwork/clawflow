@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/zhoushoujianwork/clawflow/internal/devmode"
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // envOrFile returns the env value if set, otherwise the file value.
@@ -37,10 +38,22 @@ type Repo struct {
 	AllowedIssueAuthors []string            `yaml:"allowed_issue_authors,omitempty" json:"allowed_issue_authors,omitempty"`
 	Priority            int                 `yaml:"priority,omitempty" json:"priority,omitempty"`
 
-	PilotOverrideMerge bool              `yaml:"pilot_override_merge,omitempty" json:"pilot_override_merge,omitempty"`
-	Enabled            bool              `yaml:"enabled"`
-	Platform           string            `yaml:"platform,omitempty"` // "github" (default) or "gitlab"
-	BaseURL            string            `yaml:"base_url,omitempty"` // GitLab self-hosted instance URL
+	PilotOverrideMerge bool   `yaml:"pilot_override_merge,omitempty" json:"pilot_override_merge,omitempty"`
+	Enabled            bool   `yaml:"enabled"`
+	Platform           string `yaml:"platform,omitempty"` // "github" (default) or "gitlab"
+	BaseURL            string `yaml:"base_url,omitempty"` // GitLab self-hosted instance URL
+	// Site binds a GitLab repository to a registered settings.gitlab_sites
+	// entry. ProjectPath is the full nested project path inside that site and
+	// ProjectID the site-local numeric project ID (zero when not yet known).
+	// Two sites may hold the same path or the same ID: the binding, not the
+	// path, is the identity. Empty Site means a legacy repository addressed
+	// only by base_url.
+	Site        string `yaml:"site,omitempty" json:"site,omitempty"`
+	ProjectPath string `yaml:"project_path,omitempty" json:"project_path,omitempty"`
+	ProjectID   int64  `yaml:"project_id,omitempty" json:"project_id,omitempty"`
+	// SiteCfg is the registered site this repository is bound to, filled in
+	// when the config is loaded. It is never persisted.
+	SiteCfg            *GitLabSite       `yaml:"-" json:"-"`
 	BaseBranch         string            `yaml:"base_branch"`
 	LocalPath          string            `yaml:"local_path"`
 	Owner              string            `yaml:"owner"`
@@ -221,9 +234,11 @@ func (s HousekeepingSettings) Limits() HousekeepingSettings {
 type Settings struct {
 	Housekeeping HousekeepingSettings `yaml:"housekeeping,omitempty"`
 
-	GitHubApp   GitHubAppSettings   `yaml:"github_app,omitempty" json:"-"`
-	Platform    PlatformSettings    `yaml:"platform,omitempty"`
-	Pilot       PilotSettings       `yaml:"pilot,omitempty"`
+	GitHubApp GitHubAppSettings `yaml:"github_app,omitempty" json:"-"`
+	Platform  PlatformSettings  `yaml:"platform,omitempty"`
+	Pilot     PilotSettings     `yaml:"pilot,omitempty"`
+	// GitLabSites registers independent GitLab connections (see GitLabSite).
+	GitLabSites []GitLabSite        `yaml:"gitlab_sites,omitempty"`
 	Coordinator CoordinatorSettings `yaml:"coordinator,omitempty"`
 	Watchdog    WatchdogSettings    `yaml:"watchdog,omitempty"`
 	Execution   ExecutionSettings   `yaml:"execution,omitempty"`
@@ -239,7 +254,7 @@ type Settings struct {
 	AgentTimeout        int      `yaml:"agent_timeout"`
 	MaxConcurrentAgents int      `yaml:"max_concurrent_agents"`
 	NotificationChannel string   `yaml:"notification_channel"`
-	GitLabHosts         []string `yaml:"gitlab_hosts"`               // e.g. ["gitlab.company.com"] or ["http://git.internal.com:8080"]
+	GitLabHosts         []string `yaml:"gitlab_hosts"`               // legacy single-site hint, e.g. ["gitlab.company.com"]; prefer gitlab_sites
 	GithubCloneDir      string   `yaml:"github_clone_dir,omitempty"` // default: ~/github
 	GitlabCloneDir      string   `yaml:"gitlab_clone_dir,omitempty"` // default: ~/gitlab
 
@@ -508,8 +523,13 @@ func (p *ClaudeProvider) EffectiveModelForRole(role string) string {
 
 // Credentials holds sensitive config.
 type Credentials struct {
-	GHToken     string `yaml:"gh_token,omitempty"`
+	GHToken string `yaml:"gh_token,omitempty"`
+	// GitLabToken is the legacy single-site token. It is used only for
+	// repositories on an unregistered legacy site and is never copied to, or
+	// used for, a registered gitlab_sites entry.
 	GitLabToken string `yaml:"gitlab_token,omitempty"`
+	// GitLabTokens holds per-site tokens keyed by site name.
+	GitLabTokens map[string]string `yaml:"gitlab_tokens,omitempty"`
 
 	// GistID is the ID of the user's private "clawflow-config" GitHub Gist,
 	// discovered or created by `clawflow login`. Persisted here so subsequent
@@ -1019,6 +1039,7 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("cannot parse config: %w", err)
 		}
 		cfg.applyCandidateBoundary()
+		cfg.BindGitLabRepos()
 		if err := cfg.Settings.GitHubApp.Validate(); err != nil {
 			return nil, err
 		}
@@ -1036,6 +1057,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("cannot parse config: %w", err)
 	}
 	cfg.applyCandidateBoundary()
+	cfg.BindGitLabRepos()
 	if err := cfg.Settings.GitHubApp.Validate(); err != nil {
 		return nil, err
 	}
@@ -1100,7 +1122,22 @@ func RepoSlug(ownerRepo string) string {
 // paths. The double-underscore separator is unambiguous: a repo named
 // "foo-bar" under owner "foo" won't collide with owner "foo-bar" + repo "baz".
 func RepoSlugFS(ownerRepo string) string {
-	return strings.ReplaceAll(ownerRepo, "/", "__")
+	alias, path := vcs.SplitRepoKey(ownerRepo)
+	if alias == "" {
+		return strings.ReplaceAll(ownerRepo, "/", "__")
+	}
+	// Registered-site keys keep their site in the name: "alias+group__proj".
+	// '+' is in neither the alias nor the project-path alphabet, so the slug
+	// reverses unambiguously and equal paths on two sites never share a directory.
+	return alias + "+" + strings.ReplaceAll(path, "/", "__")
+}
+
+// RepoFromSlugFS is the inverse of RepoSlugFS.
+func RepoFromSlugFS(slug string) string {
+	if i := strings.IndexByte(slug, '+'); i > 0 {
+		return slug[:i] + ":" + strings.ReplaceAll(slug[i+1:], "__", "/")
+	}
+	return strings.ReplaceAll(slug, "__", "/")
 }
 
 // StateDir resolves runtime state independently of config and credentials.
