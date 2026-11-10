@@ -7,7 +7,7 @@ BRANCH := $(shell git symbolic-ref --short -q HEAD || echo main)
 CHANNEL := source
 LDFLAGS = -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$(VERSION) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildCommit=$(COMMIT) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildChannel=$(CHANNEL) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.SourceBranch=$(BRANCH)"
 
-.PHONY: install build release clean test fmt vet tidy dev web
+.PHONY: install build release clean test fmt vet tidy dev web verify
 
 # 构建前端
 web:
@@ -44,6 +44,12 @@ release:
 # 运行测试
 test:
 	go test -v -race ./...
+
+# Local verification shared with CI: go, web build + render, native on macOS.
+# Narrow it with VERIFY, e.g. `make verify VERIFY=go`.
+VERIFY ?= all
+verify:
+	./scripts/verify.sh $(VERIFY)
 
 # 格式化
 fmt:
