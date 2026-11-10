@@ -85,13 +85,19 @@ func reconcileRepoIdentityAt(runsRoot, repo string, currentID int64, site RepoSi
 	if data, err := os.ReadFile(identPath); err == nil {
 		var ident RepoIdentity
 		if json.Unmarshal(data, &ident) == nil && ident.RepoID != 0 {
-			sameSite := ident.Site == site.Name && ident.SiteURL == site.URL
+			sameSite := ident.Site == site.Name && sameSiteURL(ident.SiteURL, site.URL)
 			// Records written before sites existed carry no site. They are
 			// adopted once, and compared by ID only for the site they were
 			// created under.
 			legacyRecord := ident.Site == "" && ident.SiteURL == ""
-			if ident.RepoID == currentID && (sameSite || legacyRecord) {
-				if legacyRecord && (site.Name != "" || site.URL != "") {
+			// A repository that was scanned as an unregistered ("legacy")
+			// site carries a URL but no name. Registering that same URL as a
+			// named site is the documented upgrade step, so the record is
+			// adopted by the site with the same URL and pinned to its name.
+			// A different URL is a different site and is never adopted.
+			adoptedByName := ident.Site == "" && ident.SiteURL != "" && site.Name != "" && sameSiteURL(ident.SiteURL, site.URL)
+			if ident.RepoID == currentID && (sameSite || legacyRecord || adoptedByName) {
+				if (legacyRecord && (site.Name != "" || site.URL != "")) || adoptedByName {
 					return "", writeJSON(identPath, RepoIdentity{RepoID: currentID, CheckedAt: time.Now().UTC(), Site: site.Name, SiteURL: site.URL})
 				}
 				return "", nil
@@ -111,6 +117,22 @@ func reconcileRepoIdentityAt(runsRoot, repo string, currentID int64, site RepoSi
 		return "", err
 	}
 	return "", nil
+}
+
+// sameSiteURL compares two GitLab root URLs after normalization (scheme, host,
+// default port, trailing slash), so a stored base_url and a registered site URL
+// that spell the same origin differently still match. Unparseable values only
+// match when they are byte-identical.
+func sameSiteURL(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" {
+		return false
+	}
+	na, errA := config.NormalizeSiteURL(a)
+	nb, errB := config.NormalizeSiteURL(b)
+	return errA == nil && errB == nil && na == nb
 }
 
 // orphanTarget picks a non-existing archive path for repoDir. A second

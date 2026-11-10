@@ -3,6 +3,7 @@ package snapshot
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/zhoushoujianwork/clawflow/internal/config"
@@ -93,6 +94,57 @@ func TestLegacyIdentityRecordIsAdoptedThenSitePinned(t *testing.T) {
 	// Now pinned to site a: a different ID is a recreation.
 	if archived, err := reconcileRepoIdentityAt(runs, key, 9, site); err != nil || archived == "" {
 		t.Fatalf("recreation after pinning: %q, %v", archived, err)
+	}
+}
+
+// Upgrade path: the first scan after upgrade sees an unregistered ("legacy")
+// GitLab repo, which repoSiteOf reports as {Name:"", URL:base_url}. Registering
+// that same URL as a named site must keep the history and pin the record to the
+// name; a recreated project afterwards is still archived.
+func TestLegacyURLRecordIsAdoptedByNamedSiteWithSameURL(t *testing.T) {
+	runs := t.TempDir()
+	key := "team/tools/service"
+	hist := seedHistory(t, runs, key)
+	legacy := RepoSite{Name: "", URL: "http://gitlab-a.example.com"}
+	if archived, err := reconcileRepoIdentityAt(runs, key, 5, legacy); err != nil || archived != "" {
+		t.Fatalf("first scan: %q, %v", archived, err)
+	}
+	// Same origin spelled differently (case, default port, trailing slash).
+	named := RepoSite{Name: "old", URL: "http://GitLab-A.example.com:80/"}
+	if archived, err := reconcileRepoIdentityAt(runs, key, 5, named); err != nil || archived != "" {
+		t.Fatalf("registering the same URL must keep history: %q, %v", archived, err)
+	}
+	if !exists(hist) {
+		t.Fatal("history lost when the legacy site was registered by name")
+	}
+	data, err := os.ReadFile(filepath.Join(runs, config.RepoSlugFS(key), repoIdentityFile))
+	if err != nil || !strings.Contains(string(data), `"site": "old"`) && !strings.Contains(string(data), `"site":"old"`) {
+		t.Fatalf("record not pinned to the site name: %s %v", data, err)
+	}
+	// Pinned: the same name keeps matching, and a new ID is a recreation.
+	if archived, err := reconcileRepoIdentityAt(runs, key, 5, named); err != nil || archived != "" {
+		t.Fatalf("pinned record, same ID: %q, %v", archived, err)
+	}
+	if archived, err := reconcileRepoIdentityAt(runs, key, 9, named); err != nil || archived == "" {
+		t.Fatalf("recreation after pinning: %q, %v", archived, err)
+	}
+}
+
+// A legacy record that carries a URL is not adopted by a site with another URL,
+// even when the numeric project ID is the same.
+func TestLegacyURLRecordIsNotAdoptedByDifferentSite(t *testing.T) {
+	runs := t.TempDir()
+	key := "team/tools/service"
+	hist := seedHistory(t, runs, key)
+	if _, err := reconcileRepoIdentityAt(runs, key, 5, RepoSite{URL: "http://gitlab-a.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := reconcileRepoIdentityAt(runs, key, 5, RepoSite{Name: "b", URL: "https://gitlab-b.example.com:8443/gitlab"})
+	if err != nil || archived == "" {
+		t.Fatalf("history of another site must not be inherited: %q, %v", archived, err)
+	}
+	if exists(hist) {
+		t.Error("old history still in place")
 	}
 }
 

@@ -235,6 +235,27 @@ func (a *platformAdmin) Repos(ctx context.Context, input coordinator.RepoRequest
 	return map[string]bool{"ok": true}, nil
 }
 
+// AuditRepo resolves a repo argument with the same rules as the CLI and returns
+// "gitlab site=<alias> <url> <full path>" for GitLab projects. It returns "" for
+// GitHub (the bare owner/repo text is already unambiguous), for filesystem
+// inputs, and for anything that does not resolve; the caller then falls back to
+// the syntactic target. The result never contains credentials or queries.
+func (a *platformAdmin) AuditRepo(input string) string {
+	repo := strings.TrimSpace(input)
+	if repo == "" || strings.HasPrefix(repo, "-") || strings.HasPrefix(repo, ".") || strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "~") || strings.ContainsAny(repo, "\r\n\t") {
+		return ""
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return ""
+	}
+	t, err := cfg.Resolve(repo)
+	if err != nil || t.Platform != "gitlab" {
+		return ""
+	}
+	return t.Describe()
+}
+
 func (a *platformAdmin) Status(ctx context.Context) (coordinator.PlatformStatus, error) {
 	board, err := a.board(ctx)
 	out := coordinator.PlatformStatus{Version: Version, Queue: map[string]int{}, Workers: []coordinator.BoardWorker{}}
