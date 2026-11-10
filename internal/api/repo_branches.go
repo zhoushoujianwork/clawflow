@@ -43,10 +43,12 @@ func HandleRepoBranches(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if _, ok := cfg.Repos[repo]; !ok {
-		writeJSON(w, 404, map[string]string{"error": "repo not found in config"})
+	repoKey, _, rerr := resolveConfigured(cfg, repo)
+	if rerr != nil {
+		writeErr(w, rerr)
 		return
 	}
+	repo = repoKey
 
 	local := gitsync.LocalPath(cfg, repo)
 	if local == "" {

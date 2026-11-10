@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // Variable is a project-level CI/CD variable from Settings > CI/CD.
@@ -60,7 +62,7 @@ func validateVariable(key string, opts VariableOptions) error {
 func (c *Client) ListProjectVariables(repo string) ([]Variable, error) {
 	variables := []Variable{}
 	for page := 1; ; page++ {
-		path := fmt.Sprintf("/projects/%s/variables?per_page=100&page=%d", projectID(repo), page)
+		path := fmt.Sprintf("/projects/%s/variables?per_page=100&page=%d", c.projectID(repo), page)
 		data, status, err := c.doJSON("GET", path, nil)
 		if err != nil {
 			return nil, err
@@ -83,8 +85,8 @@ func (c *Client) ListProjectVariables(repo string) ([]Variable, error) {
 	}
 }
 
-func variablePath(repo, key, scope string) string {
-	path := fmt.Sprintf("/projects/%s/variables/%s", projectID(repo), url.PathEscape(key))
+func (c *Client) variablePath(repo, key, scope string) string {
+	path := fmt.Sprintf("/projects/%s/variables/%s", c.projectID(repo), url.PathEscape(key))
 	if scope != "" {
 		q := url.Values{"filter[environment_scope]": {scope}}
 		path += "?" + q.Encode()
@@ -99,7 +101,12 @@ func (c *Client) GetProjectVariable(repo, key, scope string) (Variable, error) {
 	if err := validateVariable(key, VariableOptions{}); err != nil {
 		return Variable{}, err
 	}
-	data, status, err := c.doJSON("GET", variablePath(repo, key, scope), nil)
+	if scope != "" {
+		if err := c.require(repo, vcs.CapCIVariableScope); err != nil {
+			return Variable{}, err
+		}
+	}
+	data, status, err := c.doJSON("GET", c.variablePath(repo, key, scope), nil)
 	if err != nil {
 		return Variable{}, err
 	}
@@ -127,11 +134,16 @@ func (c *Client) CreateProjectVariable(repo, key string, opts VariableOptions) (
 	if opts.Value == nil {
 		return Variable{}, fmt.Errorf("variable value is required")
 	}
+	if opts.EnvironmentScope != nil && *opts.EnvironmentScope != "" && *opts.EnvironmentScope != "*" {
+		if err := c.require(repo, vcs.CapCIVariableScope); err != nil {
+			return Variable{}, err
+		}
+	}
 	body := struct {
 		Key string `json:"key"`
 		VariableOptions
 	}{key, opts}
-	v, err := c.writeProjectVariable("POST", fmt.Sprintf("/projects/%s/variables", projectID(repo)), body, 201)
+	v, err := c.writeProjectVariable("POST", fmt.Sprintf("/projects/%s/variables", c.projectID(repo)), body, 201)
 	if err == nil && opts.EnvironmentScope != nil && v.EnvironmentScope != *opts.EnvironmentScope {
 		return Variable{}, fmt.Errorf("variable was created with scope %q instead of the requested scope; this server may not support environment scopes", v.EnvironmentScope)
 	}
@@ -148,7 +160,7 @@ func (c *Client) UpdateProjectVariable(repo, key, scope string, opts VariableOpt
 	if _, err := c.GetProjectVariable(repo, key, scope); err != nil {
 		return Variable{}, err
 	}
-	return c.writeProjectVariable("PUT", variablePath(repo, key, scope), opts, 200)
+	return c.writeProjectVariable("PUT", c.variablePath(repo, key, scope), opts, 200)
 }
 
 func (c *Client) writeProjectVariable(method, path string, body any, wantStatus int) (Variable, error) {
@@ -171,7 +183,7 @@ func (c *Client) DeleteProjectVariable(repo, key, scope string) error {
 	if _, err := c.GetProjectVariable(repo, key, scope); err != nil {
 		return err
 	}
-	_, status, err := c.doJSON("DELETE", variablePath(repo, key, scope), nil)
+	_, status, err := c.doJSON("DELETE", c.variablePath(repo, key, scope), nil)
 	if err != nil {
 		return err
 	}

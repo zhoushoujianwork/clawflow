@@ -44,9 +44,10 @@ func HandleRepoRemove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var removed, skipped []string
-	for _, name := range req.Repos {
-		if _, exists := cfg.Repos[name]; !exists {
-			skipped = append(skipped, name)
+	for _, input := range req.Repos {
+		name, _, rerr := resolveConfigured(cfg, input)
+		if rerr != nil {
+			skipped = append(skipped, input)
 			continue
 		}
 		delete(cfg.Repos, name)

@@ -32,7 +32,7 @@ App 更新与后台服务升级分开进行。`make dev` 不替换独立安装�
 
 符合条件的 Issue 进入开发流程。CI、独立验收和来源校验分别提供证据，任务执行成功不代表 PR 已验收或已合并。自动合并仍受项目配置和必需检查约束。
 
-当前闭环重点覆盖同仓 GitHub PR。CI 修复、验收修复保留重试预算；预算耗尽、证据不完整或需要范围决策时明确阻塞。无效审核报告不能授权代码修复或合并。现有 GitLab CI 运维功能保留，命令见[GitLab CLI 参考](docs/gitlab-cli.md)。
+当前闭环重点覆盖同仓 GitHub PR。CI 修复、验收修复保留重试预算；预算耗尽、证据不完整或需要范围决策时明确阻塞。无效审核报告不能授权代码修复或合并。现有 GitLab CI 运维功能保留，命令见[GitLab CLI 参考](docs/gitlab-cli.md)。多个自建 GitLab 站点可并存，配置和歧义处理见[多 GitLab 站点](docs/gitlab-sites.md)。
 
 执行中断后保留 worktree、journal 和 Offload session 来源。不能仅凭 heartbeat 丢失就重派任务。恢复操作见[持久 worker runbook](docs/resilient-execution-runbook.md)，架构见[可恢复执行设计](docs/resilient-execution-design.md)。
 

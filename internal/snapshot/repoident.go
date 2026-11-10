@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 )
 
 // RepoIdentity pins a repo-name slug under data/runs/ to the platform's
@@ -15,9 +17,21 @@ import (
 // (and restarts issue numbering at #1) but mints a new platform ID, so
 // without this file the new repo silently inherits the old repo's run
 // history (issue #272).
+//
+// The numeric ID is only unique inside one platform site, so the record also
+// pins the site (platform and URL). Two sites may legitimately report the same
+// path or ID; a record written for one never matches the other.
 type RepoIdentity struct {
 	RepoID    int64     `json:"repo_id"`
 	CheckedAt time.Time `json:"checked_at"`
+	Site      string    `json:"site,omitempty"`     // registered alias, empty for GitHub or a legacy site
+	SiteURL   string    `json:"site_url,omitempty"` // GitLab root URL, empty for GitHub
+}
+
+// RepoSite is the platform site a repository ID was read from.
+type RepoSite struct {
+	Name string
+	URL  string
 }
 
 // repoIdentityFile lives directly under runs/<owner__repo>/, next to the
@@ -49,36 +63,51 @@ func isOrphanedRepoDir(name string) bool {
 //
 // Returns the archive directory path when history was archived, "" otherwise.
 func ReconcileRepoIdentity(repo string, currentID int64) (string, error) {
-	return reconcileRepoIdentityAt(filepath.Join(DataDir(), "runs"), repo, currentID)
+	return ReconcileRepoIdentityAtSite(repo, currentID, RepoSite{})
+}
+
+// ReconcileRepoIdentityAtSite is ReconcileRepoIdentity for a repository bound
+// to a platform site. A record that names a different site is never adopted or
+// compared by ID: the history is archived and re-pinned to the new site.
+func ReconcileRepoIdentityAtSite(repo string, currentID int64, site RepoSite) (string, error) {
+	return reconcileRepoIdentityAt(filepath.Join(DataDir(), "runs"), repo, currentID, site)
 }
 
 // reconcileRepoIdentityAt is the testable core of ReconcileRepoIdentity.
-func reconcileRepoIdentityAt(runsRoot, repo string, currentID int64) (string, error) {
+func reconcileRepoIdentityAt(runsRoot, repo string, currentID int64, site RepoSite) (string, error) {
 	if currentID == 0 {
 		// Unknown ID (platform didn't return one) — never archive on a guess.
 		return "", nil
 	}
-	repoDir := filepath.Join(runsRoot, strings.ReplaceAll(repo, "/", "__"))
+	repoDir := filepath.Join(runsRoot, config.RepoSlugFS(repo))
 	identPath := filepath.Join(repoDir, repoIdentityFile)
 
 	if data, err := os.ReadFile(identPath); err == nil {
 		var ident RepoIdentity
 		if json.Unmarshal(data, &ident) == nil && ident.RepoID != 0 {
-			if ident.RepoID == currentID {
+			sameSite := ident.Site == site.Name && ident.SiteURL == site.URL
+			// Records written before sites existed carry no site. They are
+			// adopted once, and compared by ID only for the site they were
+			// created under.
+			legacyRecord := ident.Site == "" && ident.SiteURL == ""
+			if ident.RepoID == currentID && (sameSite || legacyRecord) {
+				if legacyRecord && (site.Name != "" || site.URL != "") {
+					return "", writeJSON(identPath, RepoIdentity{RepoID: currentID, CheckedAt: time.Now().UTC(), Site: site.Name, SiteURL: site.URL})
+				}
 				return "", nil
 			}
 			archived := orphanTarget(repoDir, ident.RepoID)
 			if err := os.Rename(repoDir, archived); err != nil {
 				return "", fmt.Errorf("archive recreated repo %s: %w", repo, err)
 			}
-			if err := writeJSON(identPath, RepoIdentity{RepoID: currentID, CheckedAt: time.Now().UTC()}); err != nil {
+			if err := writeJSON(identPath, RepoIdentity{RepoID: currentID, CheckedAt: time.Now().UTC(), Site: site.Name, SiteURL: site.URL}); err != nil {
 				return archived, err
 			}
 			return archived, nil
 		}
 		// Malformed / zero identity file — fall through and rewrite it.
 	}
-	if err := writeJSON(identPath, RepoIdentity{RepoID: currentID, CheckedAt: time.Now().UTC()}); err != nil {
+	if err := writeJSON(identPath, RepoIdentity{RepoID: currentID, CheckedAt: time.Now().UTC(), Site: site.Name, SiteURL: site.URL}); err != nil {
 		return "", err
 	}
 	return "", nil

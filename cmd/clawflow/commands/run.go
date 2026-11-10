@@ -114,6 +114,15 @@ Host affinity is enforced by worker task tags.`,
 			} else if err := cfg.Settings.SchedulingError(); err != nil {
 				return err
 			}
+			// --repo accepts anything config.Resolve does; the pass works on the
+			// one configured entry it selects, or fails as ambiguous/unknown.
+			if onlyRepo != "" {
+				if key, _, rerr := configuredRepo(cfg, onlyRepo); rerr == nil {
+					onlyRepo = key
+				} else if _, plain := cfg.Repos[onlyRepo]; !plain {
+					return rerr
+				}
+			}
 			// The embedded store must open: fail fast before any work.
 			release, err := gateStore(cmd.Context())
 			if err != nil {
@@ -914,7 +923,7 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 
 	if !pollingAllowed(client) {
 		// Only pending delivery may spend reserved quota on the identity guard.
-		paths, _ := filepath.Glob(filepath.Join(snapshot.DataDir(), "runs", strings.ReplaceAll(fullName, "/", "__"), "issue-*", "*", "writeback.json"))
+		paths, _ := filepath.Glob(filepath.Join(snapshot.DataDir(), "runs", config.RepoSlugFS(fullName), "issue-*", "*", "writeback.json"))
 		if !executeHere || len(paths) == 0 {
 			return nil, nil, vcs.ErrPollingDeferred
 		}
@@ -928,7 +937,7 @@ func scanRepoOnceQ(ctx context.Context, reg *operator.Registry, fullName string,
 	if ider, ok := client.(interface{ GetRepoID(string) (int64, error) }); ok {
 		if repoID, idErr := ider.GetRepoID(fullName); idErr != nil {
 			debugf("[%s] get repo id: %v (recreation check skipped)", fullName, idErr)
-		} else if archived, recErr := snapshot.ReconcileRepoIdentity(fullName, repoID); recErr != nil {
+		} else if archived, recErr := snapshot.ReconcileRepoIdentityAtSite(fullName, repoID, repoSiteOf(repoCfg)); recErr != nil {
 			runLog.Warn("run/scan", "repo", fullName, "phase", "repo_identity_err", "err", recErr.Error())
 		} else if archived != "" {
 			runLog.Info("run/scan", "repo", fullName, "phase", "repo_recreated", "archived_to", archived)
@@ -1958,7 +1967,7 @@ func runOneOperator(ctx context.Context, j *runJob, timeout time.Duration) (didF
 			return err
 		},
 		Repo:           j.repo,
-		RunID:          strings.ReplaceAll(j.repo, "/", "__") + "-" + strconv.Itoa(j.sub.Number) + "-" + filepath.Base(runDir),
+		RunID:          config.RepoSlugFS(j.repo) + "-" + strconv.Itoa(j.sub.Number) + "-" + filepath.Base(runDir),
 		CommentSaveDir: runDir,
 		Workdir:        workdir,
 		Timeout:        timeout,
@@ -2684,7 +2693,7 @@ func pruneOrphanedAnalysisWorktrees(cfg *config.Config) int {
 		if !repoCfg.Enabled {
 			continue
 		}
-		activeSlugs[strings.ReplaceAll(fullName, "/", "__")] = struct{}{}
+		activeSlugs[config.RepoSlugFS(fullName)] = struct{}{}
 	}
 
 	slugDirs, err := os.ReadDir(wtRoot)
@@ -2752,7 +2761,7 @@ func pruneEmptyIssueWorktrees(cfg *config.Config) int {
 		if base == "" {
 			base = "main"
 		}
-		slug := strings.ReplaceAll(fullName, "/", "__")
+		slug := config.RepoSlugFS(fullName)
 		slugDir := filepath.Join(wtRoot, slug)
 		entries, err := os.ReadDir(slugDir)
 		if err != nil {
@@ -2868,7 +2877,7 @@ func ensureAnalysisWorktreeContext(ctx context.Context, repoCfg config.Repo, ful
 	if base == "" {
 		base = "main"
 	}
-	slug := strings.ReplaceAll(fullName, "/", "__")
+	slug := config.RepoSlugFS(fullName)
 	localPath := repoCfg.LocalPath
 	wtPath := filepath.Join(snapshot.StateDir(), "worktrees", slug, "analysis-"+base)
 
@@ -3397,7 +3406,7 @@ func setupWorktree(ctx context.Context, repoCfg config.Repo, fullName string, is
 	if err := ctx.Err(); err != nil {
 		return worktreeResult{}, func() {}, err
 	}
-	slug := strings.ReplaceAll(fullName, "/", "__")
+	slug := config.RepoSlugFS(fullName)
 	parent := filepath.Join(snapshot.StateDir(), "worktrees", slug)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return worktreeResult{}, func() {}, fmt.Errorf("mkdir worktree parent: %w", err)

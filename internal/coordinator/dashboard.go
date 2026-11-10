@@ -28,6 +28,8 @@ type DashboardRepo struct {
 	Name               string            `json:"name"`
 	URL                string            `json:"url"`
 	Platform           string            `json:"platform"`
+	Site               string            `json:"site,omitempty"`   // registered GitLab site alias
+	Target             string            `json:"target,omitempty"` // "gitlab site=… url path", same text as `clawflow repo list`
 	Enabled            bool              `json:"enabled"`
 	CIRequired         bool              `json:"ci_required"`
 	AcceptanceRequired bool              `json:"acceptance_required"`

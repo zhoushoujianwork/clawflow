@@ -17,10 +17,11 @@ const MaxDependencies = 10
 // DefaultPriority is the tier of items without a valid priority label.
 const DefaultPriority Priority = 2
 
-var keyRe = regexp.MustCompile(`^(?P<repo>[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+)#(?P<n>[1-9][0-9]*)$`)
+var keyRe = regexp.MustCompile(`^(?P<repo>([a-z0-9][a-z0-9_-]*:)?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+)#(?P<n>[1-9][0-9]*)$`)
 
 // Key identifies one issue across repositories: owner/repo#N (GitLab:
-// group/sub/project#N).
+// group/sub/project#N, or alias:group/sub/project#N for a project on a
+// registered GitLab site, so equal paths and numbers on two sites never merge).
 type Key struct {
 	Repo   string
 	Number int

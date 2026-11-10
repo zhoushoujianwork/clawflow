@@ -31,9 +31,12 @@ func (c *Client) allPages(path string) ([]byte, error) {
 }
 
 func (c *Client) ListIssueEvents(repo string, number int) ([]vcs.IssueEvent, error) {
+	if err := c.require(repo, vcs.CapIssueEvents); err != nil {
+		return nil, err
+	}
 	out := []vcs.IssueEvent{}
 	for _, kind := range []string{"state", "label"} {
-		path := fmt.Sprintf("/projects/%s/issues/%d/resource_%s_events?per_page=100", projectID(repo), number, kind)
+		path := fmt.Sprintf("/projects/%s/issues/%d/resource_%s_events?per_page=100", c.projectID(repo), number, kind)
 		data, err := c.allPages(path)
 		if err != nil {
 			return nil, err

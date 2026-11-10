@@ -49,11 +49,12 @@ func HandleRepoConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	repo, ok := cfg.Repos[req.Repo]
-	if !ok {
-		writeJSON(w, 404, map[string]string{"error": "repo not found in config"})
+	repoKey, repo, rerr := resolveConfigured(cfg, req.Repo)
+	if rerr != nil {
+		writeErr(w, rerr)
 		return
 	}
+	req.Repo = repoKey
 
 	config.TouchRepo(cfg, req.Repo, func(r config.Repo) config.Repo {
 		if req.Enabled != nil {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
 // GitLab CI/CD helpers: runners, pipelines, manual jobs and job logs (traces).
@@ -68,7 +70,10 @@ type PipelineListOpts struct {
 // ListProjectRunners returns the runners available to the project
 // (project-specific plus shared/group runners).
 func (c *Client) ListProjectRunners(repo string) ([]Runner, error) {
-	path := fmt.Sprintf("/projects/%s/runners?per_page=100", projectID(repo))
+	if err := c.require(repo, vcs.CapRunners); err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/projects/%s/runners?per_page=100", c.projectID(repo))
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -102,7 +107,7 @@ func (c *Client) ListPipelines(repo string, opts PipelineListOpts) ([]Pipeline, 
 	if opts.Status != "" {
 		q.Set("status", opts.Status)
 	}
-	path := fmt.Sprintf("/projects/%s/pipelines?%s", projectID(repo), q.Encode())
+	path := fmt.Sprintf("/projects/%s/pipelines?%s", c.projectID(repo), q.Encode())
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -119,7 +124,7 @@ func (c *Client) ListPipelines(repo string, opts PipelineListOpts) ([]Pipeline, 
 
 // GetPipeline returns a single pipeline by its project-wide id.
 func (c *Client) GetPipeline(repo string, pipelineID int64) (Pipeline, error) {
-	path := fmt.Sprintf("/projects/%s/pipelines/%d", projectID(repo), pipelineID)
+	path := fmt.Sprintf("/projects/%s/pipelines/%d", c.projectID(repo), pipelineID)
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return Pipeline{}, err
@@ -136,7 +141,7 @@ func (c *Client) GetPipeline(repo string, pipelineID int64) (Pipeline, error) {
 
 // ListPipelineJobs returns the jobs of a pipeline.
 func (c *Client) ListPipelineJobs(repo string, pipelineID int64) ([]Job, error) {
-	path := fmt.Sprintf("/projects/%s/pipelines/%d/jobs?per_page=100", projectID(repo), pipelineID)
+	path := fmt.Sprintf("/projects/%s/pipelines/%d/jobs?per_page=100", c.projectID(repo), pipelineID)
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -156,7 +161,10 @@ func (c *Client) PlayJob(repo string, jobID int64) (Job, error) {
 	if jobID <= 0 {
 		return Job{}, fmt.Errorf("job id must be positive")
 	}
-	path := fmt.Sprintf("/projects/%s/jobs/%d/play", projectID(repo), jobID)
+	if err := c.require(repo, vcs.CapJobPlay); err != nil {
+		return Job{}, err
+	}
+	path := fmt.Sprintf("/projects/%s/jobs/%d/play", c.projectID(repo), jobID)
 	data, status, err := c.doJSON("POST", path, nil)
 	if err != nil {
 		return Job{}, err
@@ -174,7 +182,7 @@ func (c *Client) PlayJob(repo string, jobID int64) (Job, error) {
 // GetJobLog returns the raw trace (console log) of a job. The trace endpoint
 // returns plain text, not JSON. An empty trace (job not yet started) yields "".
 func (c *Client) GetJobLog(repo string, jobID int64) (string, error) {
-	path := fmt.Sprintf("/projects/%s/jobs/%d/trace", projectID(repo), jobID)
+	path := fmt.Sprintf("/projects/%s/jobs/%d/trace", c.projectID(repo), jobID)
 	data, status, err := c.evidenceGET(path)
 	if err != nil {
 		return "", err

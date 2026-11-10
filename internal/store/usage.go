@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"net/url"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -306,7 +306,7 @@ func (s *Store) Usage(ctx context.Context, f RunFilter, day int, selection ...Us
 				ts := filepath.Base(r.RunDir)
 				issue := filepath.Base(filepath.Dir(r.RunDir))
 				slug := filepath.Base(filepath.Dir(filepath.Dir(r.RunDir)))
-				if issue == fmt.Sprintf("issue-%d", r.IssueNumber) && slug == strings.ReplaceAll(r.Repo, "/", "__") {
+				if issue == fmt.Sprintf("issue-%d", r.IssueNumber) && slug == config.RepoSlugFS(r.Repo) {
 					h.Href = "/runs/" + url.PathEscape(slug) + "/" + url.PathEscape(issue) + "/" + url.PathEscape(ts)
 				}
 			} else {

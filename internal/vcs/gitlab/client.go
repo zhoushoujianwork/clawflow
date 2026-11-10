@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -21,12 +22,30 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
-// Client calls the GitLab REST API v4.
+// Client calls the GitLab REST API v4 of exactly one GitLab site. It holds that
+// site's URL and credential only; it cannot reach another site.
 type Client struct {
 	token   string
 	baseURL string // e.g. https://gitlab.company.com/api/v4
 	http    *http.Client
 	ctx     context.Context // optional; bounds every request (see SetRequestContext)
+
+	// Site identity. name is empty for a legacy, unregistered site.
+	name        string
+	rootURL     string
+	unsupported map[string]bool
+}
+
+// errRedirectRefused marks a redirect to another host that the client declined
+// to follow. It is permanent: retrying would only repeat the same redirect.
+var errRedirectRefused = errors.New("redirect to another host refused")
+
+// Site describes the connection a client is bound to.
+type Site struct {
+	Name        string   // registered alias; empty for a legacy site
+	URL         string   // GitLab root URL
+	Token       string   // this site's credential only
+	Unsupported []string // capabilities the site lacks (vcs.Cap*)
 }
 
 // SetRequestContext binds ctx to every subsequent request so the caller's
@@ -45,20 +64,154 @@ func (c *Client) reqContext() context.Context {
 // New returns a GitLab client. baseURL should be the GitLab instance root,
 // e.g. "https://gitlab.company.com". The /api/v4 prefix is appended automatically.
 func New(token, instanceURL string) *Client {
-	base := strings.TrimRight(instanceURL, "/") + "/api/v4"
-	return &Client{
-		token:   token,
-		baseURL: base,
-		http:    &http.Client{Timeout: 30 * time.Second},
-	}
+	return NewForSite(Site{Token: token, URL: instanceURL})
 }
 
-// projectID URL-encodes "namespace/repo" for use in API paths.
-func projectID(repo string) string {
-	return url.PathEscape(repo)
+// NewForSite returns a client bound to one site. Requests carry only that
+// site's token, and a redirect to another host is refused instead of followed,
+// so the credential cannot be forwarded elsewhere.
+func NewForSite(site Site) *Client {
+	root := strings.TrimRight(site.URL, "/")
+	c := &Client{
+		token:       site.Token,
+		baseURL:     root + "/api/v4",
+		name:        site.Name,
+		rootURL:     root,
+		unsupported: map[string]bool{},
+	}
+	for _, capability := range site.Unsupported {
+		c.unsupported[capability] = true
+	}
+	origin := originOf(root)
+	c.http = &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		if originOf(req.URL.String()) != origin && !(strings.HasPrefix(origin, "http://") && originOf(req.URL.String()) == "https://"+strings.TrimPrefix(origin, "http://")) {
+			return fmt.Errorf("%w: GitLab site %s answered with a redirect to another host; the site credential is not forwarded", errRedirectRefused, c.siteLabel())
+		}
+		return nil
+	}}
+	return c
+}
+
+func originOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host)
+}
+
+// send performs the request. A refused cross-host redirect is permanent.
+func (c *Client) send(req *http.Request) (*http.Response, error) {
+	resp, err := c.http.Do(req)
+	if err != nil && errors.Is(err, errRedirectRefused) {
+		return nil, retry.Permanent(err)
+	}
+	return resp, err
+}
+
+// responseError converts a response status into the error callers see. Every
+// failure names the GitLab site it came from, so a message is never ambiguous
+// when several sites are configured. The wrapped error keeps its retry class.
+func (c *Client) responseError(path string, status int, header http.Header, data []byte, checkTransient bool) error {
+	if err := c.failure(path, status); err != nil {
+		return err
+	}
+	if !checkTransient {
+		return nil
+	}
+	if err := retry.ResponseError(status, header, data); err != nil {
+		return fmt.Errorf("GitLab site %s (%s) %s: %w", c.siteLabel(), c.rootURL, redactedPath(path), err)
+	}
+	return nil
+}
+
+// SiteName returns the registered alias ("" for a legacy site).
+func (c *Client) SiteName() string { return c.name }
+
+// SiteURL returns the GitLab root URL the client talks to.
+func (c *Client) SiteURL() string { return c.rootURL }
+
+func (c *Client) siteLabel() string {
+	if c.name != "" {
+		return c.name
+	}
+	return c.rootURL
+}
+
+// require fails with a vcs.UnsupportedError when the site lacks capability.
+func (c *Client) require(repo, capability string) error {
+	if c.unsupported[capability] {
+		return &vcs.UnsupportedError{Site: c.siteLabel(), URL: c.rootURL, Repo: repo, Capability: capability}
+	}
+	return nil
+}
+
+// mismatchMark makes a request for a repository of another site fail before it
+// is sent. projectID cannot return an error, so it returns a marked value that
+// every transport function checks.
+const mismatchMark = "~clawflow-site-mismatch~"
+
+// projectID resolves a repository key to the URL-encoded GitLab project path.
+// Keys qualified "alias:path" must name this client's own site; bare keys are
+// the project path on the site the repository is bound to.
+func (c *Client) projectID(repo string) string {
+	alias, path := vcs.SplitRepoKey(repo)
+	if alias != "" && alias != c.name {
+		return url.PathEscape(mismatchMark + repo)
+	}
+	return url.PathEscape(path)
+}
+
+// checkPath rejects a request built from a repository that belongs to another site.
+func (c *Client) checkPath(path string) error {
+	i := strings.Index(path, mismatchMark)
+	if i < 0 {
+		return nil
+	}
+	rest := path[i+len(mismatchMark):]
+	if j := strings.IndexAny(rest, "/?"); j >= 0 {
+		rest = rest[:j]
+	}
+	repo, err := url.PathUnescape(rest)
+	if err != nil {
+		repo = rest
+	}
+	return &vcs.SiteMismatchError{ClientSite: c.siteLabel(), URL: c.rootURL, Repo: repo}
+}
+
+// failure converts a response into the error callers must not retry or
+// reinterpret. 401 is an authentication failure of this site's own credential.
+func (c *Client) failure(path string, status int) error {
+	if status == http.StatusUnauthorized {
+		return retry.Permanent(&vcs.AuthError{Site: c.siteLabel(), URL: c.rootURL, Status: status, Path: redactedPath(path), NoCred: c.token == ""})
+	}
+	return nil
+}
+
+// redactedPath drops the query so a path in a message cannot carry values.
+func redactedPath(path string) string {
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		return path[:i]
+	}
+	return path
+}
+
+// annotate appends the site to the body of a failed response so every
+// "gitlab ...: HTTP n: <body>" message names the site it came from.
+func (c *Client) annotate(data []byte, status int) []byte {
+	if status < 400 {
+		return data
+	}
+	return append(append([]byte{}, data...), []byte(fmt.Sprintf(" [GitLab site %s %s]", c.siteLabel(), c.rootURL))...)
 }
 
 func (c *Client) doOnce(method, path string, body url.Values) ([]byte, int, error) {
+	if err := c.checkPath(path); err != nil {
+		return nil, 0, retry.Permanent(err)
+	}
 	var r io.Reader
 	if body != nil {
 		r = strings.NewReader(body.Encode())
@@ -71,19 +224,22 @@ func (c *Client) doOnce(method, path string, body url.Values) ([]byte, int, erro
 	if body != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err == nil {
-		err = retry.ResponseError(resp.StatusCode, resp.Header, data)
+		err = c.responseError(path, resp.StatusCode, resp.Header, data, true)
 	}
-	return data, resp.StatusCode, err
+	return c.annotate(data, resp.StatusCode), resp.StatusCode, err
 }
 
 func (c *Client) doJSONOnce(method, path string, body any) ([]byte, int, error) {
+	if err := c.checkPath(path); err != nil {
+		return nil, 0, retry.Permanent(err)
+	}
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -100,16 +256,16 @@ func (c *Client) doJSONOnce(method, path string, body any) ([]byte, int, error) 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
-	if err == nil && method != "POST" {
-		err = retry.ResponseError(resp.StatusCode, resp.Header, data)
+	if err == nil {
+		err = c.responseError(path, resp.StatusCode, resp.Header, data, method != "POST")
 	}
-	return data, resp.StatusCode, err
+	return c.annotate(data, resp.StatusCode), resp.StatusCode, err
 }
 
 // GetRepoID returns GitLab's immutable numeric project ID. Like GitHub,
@@ -117,7 +273,7 @@ func (c *Client) doJSONOnce(method, path string, body any) ([]byte, int, error) 
 // recreated, but the ID is not — callers use this to detect recreation
 // and segregate local run history (issue #272).
 func (c *Client) GetRepoID(repo string) (int64, error) {
-	data, status, err := c.doJSON("GET", fmt.Sprintf("/projects/%s", projectID(repo)), nil)
+	data, status, err := c.doJSON("GET", fmt.Sprintf("/projects/%s", c.projectID(repo)), nil)
 	if err != nil {
 		return 0, err
 	}
@@ -134,7 +290,7 @@ func (c *Client) GetRepoID(repo string) (int64, error) {
 }
 
 func (c *Client) ListOpenIssues(repo string) ([]vcs.Issue, error) {
-	path := fmt.Sprintf("/projects/%s/issues?state=opened&per_page=100", projectID(repo))
+	path := fmt.Sprintf("/projects/%s/issues?state=opened&per_page=100", c.projectID(repo))
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -181,7 +337,7 @@ func (c *Client) PRExistsForIssue(repo string, issueNumber int) (bool, error) {
 }
 
 func (c *Client) getIssueLabels(repo string, issueNumber int) ([]string, error) {
-	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
+	path := fmt.Sprintf("/projects/%s/issues/%d", c.projectID(repo), issueNumber)
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -218,7 +374,7 @@ func (c *Client) AddLabel(repo string, issueNumber int, labels ...string) error 
 	for l := range existing {
 		all = append(all, l)
 	}
-	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
+	path := fmt.Sprintf("/projects/%s/issues/%d", c.projectID(repo), issueNumber)
 	form := url.Values{"labels": {strings.Join(all, ",")}}
 	data, status, err := c.do("PUT", path, form)
 	if err != nil {
@@ -245,7 +401,7 @@ func (c *Client) RemoveLabel(repo string, issueNumber int, labels ...string) err
 			remaining = append(remaining, l)
 		}
 	}
-	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
+	path := fmt.Sprintf("/projects/%s/issues/%d", c.projectID(repo), issueNumber)
 	form := url.Values{"labels": {strings.Join(remaining, ",")}}
 	data, status, err := c.do("PUT", path, form)
 	if err != nil {
@@ -270,12 +426,12 @@ func (c *Client) ListIssueComments(repo string, issueNumber int) ([]string, erro
 }
 
 func (c *Client) PostIssueComment(repo string, issueNumber int, body string) error {
-	path := fmt.Sprintf("/projects/%s/issues/%d/notes", projectID(repo), issueNumber)
+	path := fmt.Sprintf("/projects/%s/issues/%d/notes", c.projectID(repo), issueNumber)
 	return c.postComment(path, body, "", false)
 }
 
 func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.IssueComment, error) {
-	path := fmt.Sprintf("/projects/%s/issues/%d/notes?per_page=100", projectID(repo), issueNumber)
+	path := fmt.Sprintf("/projects/%s/issues/%d/notes?per_page=100", c.projectID(repo), issueNumber)
 	data, err := c.allPages(path)
 	if err != nil {
 		return nil, err
@@ -302,7 +458,7 @@ func (c *Client) ListIssueCommentsDetail(repo string, issueNumber int) ([]vcs.Is
 }
 
 func (c *Client) DeleteIssueComment(repo string, issueNumber int, commentID int64) error {
-	path := fmt.Sprintf("/projects/%s/issues/%d/notes/%d", projectID(repo), issueNumber, commentID)
+	path := fmt.Sprintf("/projects/%s/issues/%d/notes/%d", c.projectID(repo), issueNumber, commentID)
 	_, status, err := c.do("DELETE", path, nil)
 	if err != nil {
 		return err
@@ -314,7 +470,7 @@ func (c *Client) DeleteIssueComment(repo string, issueNumber int, commentID int6
 }
 
 func (c *Client) CreateIssue(repo string, title, body string) (vcs.Issue, error) {
-	path := fmt.Sprintf("/projects/%s/issues", projectID(repo))
+	path := fmt.Sprintf("/projects/%s/issues", c.projectID(repo))
 	form := url.Values{"title": {title}, "description": {body}}
 	data, status, err := c.do("POST", path, form)
 	if err != nil {
@@ -350,7 +506,7 @@ func (c *Client) UpdateIssue(repo string, issueNumber int, update vcs.IssueUpdat
 	if len(form) == 0 {
 		return vcs.Issue{}, fmt.Errorf("gitlab update issue: no fields to update")
 	}
-	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
+	path := fmt.Sprintf("/projects/%s/issues/%d", c.projectID(repo), issueNumber)
 	data, status, err := c.do("PUT", path, form)
 	if err != nil {
 		return vcs.Issue{}, err
@@ -384,7 +540,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 	if state == "open" {
 		glState = "opened"
 	}
-	path := fmt.Sprintf("/projects/%s/issues?state=%s&per_page=100", projectID(repo), glState)
+	path := fmt.Sprintf("/projects/%s/issues?state=%s&per_page=100", c.projectID(repo), glState)
 	if len(labels) > 0 {
 		path += "&labels=" + strings.Join(labels, ",")
 	}
@@ -422,7 +578,7 @@ func (c *Client) ListIssues(repo string, state string, labels []string) ([]vcs.I
 }
 
 func (c *Client) CloseIssue(repo string, issueNumber int) error {
-	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), issueNumber)
+	path := fmt.Sprintf("/projects/%s/issues/%d", c.projectID(repo), issueNumber)
 	form := url.Values{"state_event": {"close"}}
 	data, status, err := c.do("PUT", path, form)
 	if err != nil {
@@ -441,7 +597,7 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 	} else if state == "merged" {
 		glState = "merged"
 	}
-	path := fmt.Sprintf("/projects/%s/merge_requests?state=%s&per_page=100", projectID(repo), glState)
+	path := fmt.Sprintf("/projects/%s/merge_requests?state=%s&per_page=100", c.projectID(repo), glState)
 	data, err := c.allPages(path)
 	if err != nil {
 		return nil, err
@@ -473,7 +629,7 @@ func (c *Client) ListPRs(repo string, state string) ([]vcs.PR, error) {
 }
 
 func (c *Client) createPROnce(repo string, opts vcs.PRCreateOpts) (vcs.PR, error) {
-	path := fmt.Sprintf("/projects/%s/merge_requests", projectID(repo))
+	path := fmt.Sprintf("/projects/%s/merge_requests", c.projectID(repo))
 	form := url.Values{
 		"title":         {opts.Title},
 		"description":   {opts.Body},
@@ -505,7 +661,7 @@ func (c *Client) createPROnce(repo string, opts vcs.PRCreateOpts) (vcs.PR, error
 }
 
 func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d", projectID(repo), prNumber)
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d", c.projectID(repo), prNumber)
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return vcs.PR{}, err
@@ -554,12 +710,12 @@ func (c *Client) GetPR(repo string, prNumber int) (vcs.PR, error) {
 
 // PostPRCommentIdempotent reconciles the MR note marker before retrying.
 func (c *Client) PostPRCommentIdempotent(repo string, n int, body, runID string) error {
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), n)
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", c.projectID(repo), n)
 	return c.postComment(path, body, runID, runID != "")
 }
 
 func (c *Client) PostPRComment(repo string, prNumber int, body string) error {
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), prNumber)
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", c.projectID(repo), prNumber)
 	return c.postComment(path, body, "", false)
 }
 
@@ -597,7 +753,7 @@ func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue
 	default:
 		return nil, fmt.Errorf("invalid state %q (want open|closed|all)", state)
 	}
-	path := fmt.Sprintf("/projects/%s/issues?%s", projectID(repo), q.Encode())
+	path := fmt.Sprintf("/projects/%s/issues?%s", c.projectID(repo), q.Encode())
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -632,7 +788,7 @@ func (c *Client) SearchIssues(repo, query, state string, limit int) ([]vcs.Issue
 }
 
 func (c *Client) AuthorHasWriteAccess(repo, login string) (bool, error) {
-	path := fmt.Sprintf("/projects/%s/members/all?query=%s&per_page=100", projectID(repo), url.QueryEscape(login))
+	path := fmt.Sprintf("/projects/%s/members/all?query=%s&per_page=100", c.projectID(repo), url.QueryEscape(login))
 	data, err := c.allPages(path)
 	if err != nil {
 		return false, fmt.Errorf("gitlab project members: %w", err)
@@ -670,7 +826,7 @@ func (c *Client) ListIssuesByBodyKeyword(repo string, keyword string) ([]vcs.Iss
 // ClosePR closes a merge request without merging via
 // PUT /projects/:id/merge_requests/:iid with state_event=close.
 func (c *Client) ClosePR(repo string, prNumber int) error {
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d", projectID(repo), prNumber)
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d", c.projectID(repo), prNumber)
 	form := url.Values{"state_event": {"close"}}
 	data, status, err := c.do("PUT", path, form)
 	if err != nil {
@@ -683,7 +839,7 @@ func (c *Client) ClosePR(repo string, prNumber int) error {
 }
 
 func (c *Client) MergePR(repo string, prNumber int) error {
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d/merge", projectID(repo), prNumber)
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/merge", c.projectID(repo), prNumber)
 	data, status, err := c.doJSON("PUT", path, map[string]string{"merge_when_pipeline_succeeds": "false"})
 	if err != nil {
 		return err
@@ -700,7 +856,7 @@ func (c *Client) DeleteBranch(repo string, branch string) error {
 	if branch == "" {
 		return fmt.Errorf("gitlab delete branch: empty branch name")
 	}
-	path := fmt.Sprintf("/projects/%s/repository/branches/%s", projectID(repo), url.PathEscape(branch))
+	path := fmt.Sprintf("/projects/%s/repository/branches/%s", c.projectID(repo), url.PathEscape(branch))
 	data, status, err := c.doJSON("DELETE", path, nil)
 	if err != nil {
 		return err
@@ -712,7 +868,7 @@ func (c *Client) DeleteBranch(repo string, branch string) error {
 }
 
 func (c *Client) GetPRMergeability(repo string, prNumber int) (vcs.MergeStatus, error) {
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d", projectID(repo), prNumber)
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d", c.projectID(repo), prNumber)
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return vcs.MergeStatusUnknown, err
@@ -737,7 +893,7 @@ func (c *Client) GetPRMergeability(repo string, prNumber int) (vcs.MergeStatus, 
 }
 
 func (c *Client) InitLabels(repo string, labels []vcs.Label) error {
-	path := fmt.Sprintf("/projects/%s/labels?per_page=100", projectID(repo))
+	path := fmt.Sprintf("/projects/%s/labels?per_page=100", c.projectID(repo))
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return err
@@ -760,7 +916,7 @@ func (c *Client) InitLabels(repo string, labels []vcs.Label) error {
 			fmt.Printf("  [skip] %s\n", l.Name)
 			continue
 		}
-		createPath := fmt.Sprintf("/projects/%s/labels", projectID(repo))
+		createPath := fmt.Sprintf("/projects/%s/labels", c.projectID(repo))
 		form := url.Values{
 			"name":        {l.Name},
 			"color":       {"#" + l.Color},
@@ -792,7 +948,7 @@ func (c *Client) GetParentIssue(repo string, issueNumber int) (*vcs.Issue, error
 
 // GetIssue fetches a single issue by its IID (display number).
 func (c *Client) GetIssue(repo string, number int) (*vcs.Issue, error) {
-	path := fmt.Sprintf("/projects/%s/issues/%d", projectID(repo), number)
+	path := fmt.Sprintf("/projects/%s/issues/%d", c.projectID(repo), number)
 	data, status, err := c.doJSON("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -864,7 +1020,10 @@ func (c *Client) UploadAttachment(repo string, filePath string) (string, error) 
 		return "", err
 	}
 
-	path := fmt.Sprintf("/projects/%s/uploads", projectID(repo))
+	path := fmt.Sprintf("/projects/%s/uploads", c.projectID(repo))
+	if err := c.checkPath(path); err != nil {
+		return "", err
+	}
 	req, err := http.NewRequestWithContext(c.reqContext(), "POST", c.baseURL+path, &buf)
 	if err != nil {
 		return "", err
@@ -872,7 +1031,7 @@ func (c *Client) UploadAttachment(repo string, filePath string) (string, error) 
 	req.Header.Set("PRIVATE-TOKEN", c.token)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	resp, err := c.http.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return "", err
 	}
@@ -881,8 +1040,11 @@ func (c *Client) UploadAttachment(repo string, filePath string) (string, error) 
 	if err != nil {
 		return "", err
 	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", c.failure(path, resp.StatusCode)
+	}
 	if resp.StatusCode != 201 && resp.StatusCode != 200 {
-		return "", fmt.Errorf("gitlab upload attachment: HTTP %d: %s", resp.StatusCode, data)
+		return "", fmt.Errorf("gitlab upload attachment: HTTP %d: %s", resp.StatusCode, c.annotate(data, resp.StatusCode))
 	}
 	var out struct {
 		Markdown string `json:"markdown"`
@@ -907,7 +1069,7 @@ func (c *Client) UploadAttachment(repo string, filePath string) (string, error) 
 // method returns nil without posting again, making retries safe. Falls back
 // to a plain PostIssueComment when runID is empty (issue #278).
 func (c *Client) PostIssueCommentIdempotent(repo string, issueNumber int, body, runID string) error {
-	path := fmt.Sprintf("/projects/%s/issues/%d/notes", projectID(repo), issueNumber)
+	path := fmt.Sprintf("/projects/%s/issues/%d/notes", c.projectID(repo), issueNumber)
 	return c.postComment(path, body, runID, runID != "")
 }
 
@@ -1024,7 +1186,7 @@ func (c *Client) PublishAcceptanceComment(repo string, pr int, report vcs.Accept
 	if err := json.Unmarshal(data, &actor); err != nil {
 		return err
 	}
-	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", projectID(repo), pr)
+	path := fmt.Sprintf("/projects/%s/merge_requests/%d/notes", c.projectID(repo), pr)
 	return vcs.UpsertAcceptanceComment(report, actor.Username,
 		func() ([]vcs.IssueComment, error) {
 			data, err := c.allPages(path + "?per_page=100")
@@ -1056,7 +1218,7 @@ func (c *Client) PublishAcceptanceComment(repo string, pr int, report vcs.Accept
 
 // BranchHead reads GET /projects/:id/repository/branches/:branch.
 func (c *Client) BranchHead(repo, branch string) (string, error) {
-	data, status, err := c.doJSON("GET", fmt.Sprintf("/projects/%s/repository/branches/%s", projectID(repo), url.PathEscape(branch)), nil)
+	data, status, err := c.doJSON("GET", fmt.Sprintf("/projects/%s/repository/branches/%s", c.projectID(repo), url.PathEscape(branch)), nil)
 	if err != nil {
 		return "", err
 	}

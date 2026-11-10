@@ -2,9 +2,9 @@ package commands
 
 import (
 	"encoding/json"
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/zhoushoujianwork/clawflow/internal/operator"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
@@ -12,7 +12,7 @@ import (
 
 func replayRepoWriteBacks(client operator.VCS, repo string, onlyIssue int) map[int]bool {
 	pending := map[int]bool{}
-	root := filepath.Join(snapshot.DataDir(), "runs", strings.ReplaceAll(repo, "/", "__"))
+	root := filepath.Join(snapshot.DataDir(), "runs", config.RepoSlugFS(repo))
 	paths, err := filepath.Glob(filepath.Join(root, "issue-*", "*", "writeback.json"))
 	if err != nil {
 		return pending

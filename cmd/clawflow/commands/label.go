@@ -96,20 +96,20 @@ func newLabelInitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			info, err := config.ParseRepoInput(args[0], cfg.Settings.GitLabHosts)
+			t, err := cfg.Resolve(args[0])
 			if err != nil {
 				return err
 			}
-			repoCfg, ok := cfg.Repos[info.OwnerRepo]
-			if !ok {
-				return fmt.Errorf("repo %q not found in config — run: clawflow repo add %s", info.OwnerRepo, args[0])
+			if !t.Configured {
+				return fmt.Errorf("repo %q not found in config (%s) — run: clawflow repo add %s", t.Key, t.Describe(), args[0])
 			}
+			repoCfg := t.Repo
 			client, err := newVCSClient(repoCfg)
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Initializing ClawFlow labels in %s ...\n", info.OwnerRepo)
-			return client.InitLabels(info.OwnerRepo, vcs.ClawFlowLabels)
+			fmt.Printf("Initializing ClawFlow labels in %s ...\n", t.Key)
+			return client.InitLabels(t.Key, vcs.ClawFlowLabels)
 		},
 	}
 }

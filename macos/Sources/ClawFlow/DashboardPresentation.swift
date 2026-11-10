@@ -195,7 +195,13 @@ extension DashboardSnapshot {
 }
 
 extension RepoRow {
-    var shortName: String { name.split(separator: "/").last.map(String.init) ?? name }
+    /// Last path segment, keeping the site alias for a registered-site project so
+    /// the same project name on two sites reads differently ("b:service").
+    var shortName: String {
+        let last = name.split(separator: "/").last.map(String.init) ?? name
+        guard let site = site, !site.isEmpty else { return last }
+        return "\(site):\(last)"
+    }
     /// Why a repository has no rows.
     var idleNote: String {
         if !enabled { return "已暂停" }

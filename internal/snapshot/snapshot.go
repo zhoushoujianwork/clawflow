@@ -187,7 +187,7 @@ func RunDir(repo string, issueNum int, startedAt time.Time) string {
 	return filepath.Join(
 		DataDir(),
 		"runs",
-		strings.ReplaceAll(repo, "/", "__"),
+		config.RepoSlugFS(repo),
 		fmt.Sprintf("issue-%d", issueNum),
 		startedAt.UTC().Format("2006-01-02T15-04-05Z"),
 	)
@@ -212,13 +212,21 @@ func repoHostBinding(r config.Repo) string {
 // are deliberately NOT included — the dashboard is local but still renders
 // in a browser and we don't want tokens in the DOM.
 type RepoView struct {
-	FullName   string `json:"full_name"`
-	Platform   string `json:"platform"`
-	BaseURL    string `json:"base_url,omitempty"`
-	BaseBranch string `json:"base_branch"`
-	LocalPath  string `json:"local_path,omitempty"`
-	Enabled    bool   `json:"enabled"`
-	AutoMerge  bool   `json:"auto_merge"`
+	// FullName is the config key. It is unique across platforms and sites:
+	// "owner/repo", a legacy GitLab path, or "site:group/project".
+	FullName string `json:"full_name"`
+	Platform string `json:"platform"`
+	BaseURL  string `json:"base_url,omitempty"`
+	// Site and ProjectPath identify a GitLab project on a registered site;
+	// Target is the one-line "platform site=… url path" description the CLI
+	// prints, so CLI and App show the same identity.
+	Site        string `json:"site,omitempty"`
+	ProjectPath string `json:"project_path,omitempty"`
+	Target      string `json:"target,omitempty"`
+	BaseBranch  string `json:"base_branch"`
+	LocalPath   string `json:"local_path,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	AutoMerge   bool   `json:"auto_merge"`
 	// WorkerTags is the authoritative repository affinity and capability set.
 	WorkerTags []string `json:"worker_tags,omitempty"`
 	// BoundMachine is a compatibility display value derived from host tags.
@@ -625,6 +633,9 @@ func WriteRepos(cfg *config.Config) error {
 			FullName:        name,
 			Platform:        r.Platform,
 			BaseURL:         r.BaseURL,
+			Site:            r.Site,
+			ProjectPath:     r.ProjectPath,
+			Target:          config.DescribeRepo(name, r),
 			BaseBranch:      r.BaseBranch,
 			LocalPath:       r.LocalPath,
 			Enabled:         r.Enabled,
@@ -760,7 +771,7 @@ func MarkRunningAsCancelled(repo string, issueNum int, reason string) int {
 	issueRoot := filepath.Join(
 		DataDir(),
 		"runs",
-		strings.ReplaceAll(repo, "/", "__"),
+		config.RepoSlugFS(repo),
 		fmt.Sprintf("issue-%d", issueNum),
 	)
 	entries, err := os.ReadDir(issueRoot)
@@ -1463,7 +1474,7 @@ func reconcileStaleRunsAt(runsRoot string, staleAfter time.Duration) (int, error
 			return nil
 		}
 		repoSlug, issueDir, ts := parts[0], parts[1], parts[2]
-		repo := strings.ReplaceAll(repoSlug, "__", "/")
+		repo := config.RepoFromSlugFS(repoSlug)
 		var issueNum int
 		if _, err := fmt.Sscanf(issueDir, "issue-%d", &issueNum); err != nil {
 			return nil
@@ -1613,7 +1624,7 @@ func reconcilePilotRunsAt(pilotRoot string, staleAfter time.Duration) (int, erro
 // the issue for operators that exclude that label. Keep this retryable
 // independently of issue-level failures.
 func ConsecutiveFailures(repo string, issueNum int) int {
-	slug := strings.ReplaceAll(repo, "/", "__")
+	slug := config.RepoSlugFS(repo)
 	issueDir := filepath.Join(DataDir(), "runs", slug, fmt.Sprintf("issue-%d", issueNum))
 	if _, err := os.Stat(issueDir); os.IsNotExist(err) {
 		return 0
@@ -2075,7 +2086,7 @@ type PipelinePRs struct {
 // ReadPipelinePRs reads a scheduler listing without contacting the provider.
 func ReadPipelinePRs(repo string) (PipelinePRs, error) {
 	var s PipelinePRs
-	b, err := os.ReadFile(filepath.Join(DataDir(), "pipeline-prs", strings.ReplaceAll(repo, "/", "__")+".json"))
+	b, err := os.ReadFile(filepath.Join(DataDir(), "pipeline-prs", config.RepoSlugFS(repo)+".json"))
 	if err == nil {
 		err = json.Unmarshal(b, &s)
 	}
@@ -2084,5 +2095,5 @@ func ReadPipelinePRs(repo string) (PipelinePRs, error) {
 
 // WritePipelinePRs atomically records an already completed scheduler read.
 func WritePipelinePRs(repo string, prs []vcs.PR) error {
-	return writeJSON(filepath.Join(DataDir(), "pipeline-prs", strings.ReplaceAll(repo, "/", "__")+".json"), PipelinePRs{CapturedAt: time.Now().UTC(), PRs: prs})
+	return writeJSON(filepath.Join(DataDir(), "pipeline-prs", config.RepoSlugFS(repo)+".json"), PipelinePRs{CapturedAt: time.Now().UTC(), PRs: prs})
 }

@@ -175,9 +175,11 @@ func newPilotApplyCmd() *cobra.Command {
 					return err
 				}
 			}
-			if _, ok := cfg.Repos[repo]; !ok {
-				return fmt.Errorf("repo %q not configured", repo)
+			canonical, _, rerr := configuredRepo(cfg, repo)
+			if rerr != nil {
+				return rerr
 			}
+			repo = canonical
 			var creds *config.Credentials
 			if !dry {
 				creds, err = config.LoadCredentials()

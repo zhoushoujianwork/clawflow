@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 )
 
@@ -27,7 +27,7 @@ const runLockPrefix = "run-"
 // (~/.clawflow/locks/run-<owner>__<name>.lock). Every '/' becomes "__", so
 // GitLab subgroups (a/b/c) map to a single flat filename like issue locks do.
 func RepoRunLockPath(repo string) string {
-	return filepath.Join(LockDir(), runLockPrefix+strings.ReplaceAll(repo, "/", "__")+".lock")
+	return filepath.Join(LockDir(), runLockPrefix+config.RepoSlugFS(repo)+".lock")
 }
 
 // liveLegacyRunLock returns the holder of the legacy global run lock when its

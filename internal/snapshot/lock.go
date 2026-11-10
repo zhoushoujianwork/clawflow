@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/filelock"
 )
 
@@ -38,7 +38,7 @@ func LockPath(repo string, issueNum int) string {
 // LockPathIn is LockPath for another state root, such as a local worker's.
 // repo may also be the filesystem slug (owner__repo).
 func LockPathIn(stateDir, repo string, issueNum int) string {
-	slug := strings.ReplaceAll(repo, "/", "__")
+	slug := config.RepoSlugFS(repo)
 	return filepath.Join(stateDir, "locks", slug, fmt.Sprintf("issue-%d.lock", issueNum))
 }
 

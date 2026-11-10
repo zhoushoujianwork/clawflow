@@ -46,6 +46,9 @@ func (c *Client) evidenceText(s string, limit int) string {
 // evidenceGET bounds diagnostic downloads and refuses redirects so PRIVATE-TOKEN
 // cannot escape to a trace storage host. Errors never contain response bodies.
 func (c *Client) evidenceGET(path string) ([]byte, int, error) {
+	if err := c.checkPath(path); err != nil {
+		return nil, 0, err
+	}
 	req, err := http.NewRequestWithContext(c.reqContext(), "GET", c.baseURL+path, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("evidence request unavailable")
@@ -58,6 +61,9 @@ func (c *Client) evidenceGET(path string) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("evidence transport unavailable")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, resp.StatusCode, c.failure(path, resp.StatusCode)
+	}
 	const limit = 4 << 20
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil || len(data) > limit {
@@ -69,7 +75,12 @@ func (c *Client) evidenceGET(path string) ([]byte, int, error) {
 // mrHeadPipeline binds the MR's selected pipeline to the current source head.
 // A stale, missing or synthetic merge pipeline is not source-head evidence.
 func (c *Client) mrHeadPipeline(repo string, number int, expected string) (Pipeline, error) {
-	data, status, err := c.evidenceGET(fmt.Sprintf("/projects/%s/merge_requests/%d", projectID(repo), number))
+	// A site without head-pipeline data cannot prove CI state. Fail instead of
+	// reporting "no CI", which a gate could read as nothing to wait for.
+	if err := c.require(repo, vcs.CapMRPipeline); err != nil {
+		return Pipeline{}, err
+	}
+	data, status, err := c.evidenceGET(fmt.Sprintf("/projects/%s/merge_requests/%d", c.projectID(repo), number))
 	if err != nil {
 		return Pipeline{}, err
 	}
@@ -193,7 +204,7 @@ func (c *Client) RerunCancelled(repo string, jobID int64) error {
 	if jobID <= 0 {
 		return fmt.Errorf("invalid job ID")
 	}
-	data, status, err := c.doJSON("POST", fmt.Sprintf("/projects/%s/jobs/%d/retry", projectID(repo), jobID), nil)
+	data, status, err := c.doJSON("POST", fmt.Sprintf("/projects/%s/jobs/%d/retry", c.projectID(repo), jobID), nil)
 	if err != nil {
 		return err
 	}

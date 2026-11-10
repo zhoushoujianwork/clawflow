@@ -44,10 +44,12 @@ func HandleGitStatusRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Repo != "" {
-		if _, ok := cfg.Repos[req.Repo]; !ok {
-			writeJSON(w, 404, map[string]string{"error": "repo not found in config"})
+		repoKey, _, rerr := resolveConfigured(cfg, req.Repo)
+		if rerr != nil {
+			writeErr(w, rerr)
 			return
 		}
+		req.Repo = repoKey
 		st := gitsync.Refresh(cfg, req.Repo)
 		writeJSON(w, 200, []gitsync.Status{st})
 		return
@@ -97,10 +99,12 @@ func gitAction(w http.ResponseWriter, r *http.Request, action func(*config.Confi
 		writeErr(w, err)
 		return
 	}
-	if _, ok := cfg.Repos[req.Repo]; !ok {
-		writeJSON(w, 404, map[string]string{"error": "repo not found in config"})
+	repoKey, _, rerr := resolveConfigured(cfg, req.Repo)
+	if rerr != nil {
+		writeErr(w, rerr)
 		return
 	}
+	req.Repo = repoKey
 
 	out, st, actionErr := action(cfg, req.Repo)
 	resp := gitActionResponse{Status: "ok", Output: out, Git: st}

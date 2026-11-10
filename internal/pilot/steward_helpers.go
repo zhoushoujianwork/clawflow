@@ -50,7 +50,18 @@ func clientFor(repo string, cfg *config.Config, creds *config.Credentials) (vcs.
 	case "github":
 		return github.New(creds.GHToken, rc.BaseURL), nil
 	case "gitlab":
-		return gitlab.New(creds.GitLabToken, rc.BaseURL), nil
+		// A repository on a registered site uses that site's credential only.
+		if rc.Site == "" {
+			return gitlab.New(creds.GitLabToken, rc.BaseURL), nil
+		}
+		if rc.SiteCfg == nil {
+			return nil, fmt.Errorf("GitLab site %q of repo %q is not registered", rc.Site, repo)
+		}
+		token, _ := creds.SiteToken(*rc.SiteCfg)
+		if token == "" {
+			return nil, &vcs.AuthError{Site: rc.Site, URL: rc.SiteCfg.URL, NoCred: true}
+		}
+		return gitlab.NewForSite(gitlab.Site{Name: rc.Site, URL: rc.SiteCfg.URL, Token: token, Unsupported: rc.SiteCfg.Unsupported}), nil
 	default:
 		return nil, fmt.Errorf("unsupported platform %q for repo %q", platform, repo)
 	}

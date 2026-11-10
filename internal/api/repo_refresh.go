@@ -43,11 +43,12 @@ func HandleRepoRefreshIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := clientForRepo(req.Repo)
+	client, repoKey, err := clientAndKeyForRepo(req.Repo)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
+	req.Repo = repoKey
 
 	issues, err := client.ListIssues(req.Repo, "all", nil)
 	if err != nil {
