@@ -75,7 +75,9 @@ jobs:
 
   web-render:
     name: Web render
-    runs-on: ubuntu-latest
+    # Pinned: Playwright cannot install Chromium on the ubuntu-26.04 image
+    # that ubuntu-latest now resolves to.
+    runs-on: ubuntu-24.04
     timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
