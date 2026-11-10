@@ -11,6 +11,7 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/config"
 	"github.com/zhoushoujianwork/clawflow/internal/snapshot"
 	"github.com/zhoushoujianwork/clawflow/internal/store"
+	"github.com/zhoushoujianwork/clawflow/internal/webguard"
 )
 
 func historyFilter(r *http.Request) (store.RunFilter, error) {
@@ -116,6 +117,18 @@ func HandleRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	var payload []map[string]any
 	if f.RunDir != "" || f.AttemptID != "" {
+		if webguard.ReadOnlySession(r.Context()) {
+			// Remote viewers get the whitelisted attempt summary and a redacted
+			// failure reason, never the full recorded payload.
+			payload, err = readOnlyRunDetails(rows, snapshot.DataDir(), kind)
+			if err != nil {
+				http.Error(w, "decode runs failed", 500)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, 200, payload)
+			return
+		}
 		payload, err = store.RunPayloads(rows, snapshot.DataDir())
 		if err == nil {
 			var metadata []map[string]any
