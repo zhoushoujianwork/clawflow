@@ -117,11 +117,11 @@ Host affinity is enforced by worker task tags.`,
 			// --repo accepts anything config.Resolve does; the pass works on the
 			// one configured entry it selects, or fails as ambiguous/unknown.
 			if onlyRepo != "" {
-				if key, _, rerr := configuredRepo(cfg, onlyRepo); rerr == nil {
-					onlyRepo = key
-				} else if _, plain := cfg.Repos[onlyRepo]; !plain {
+				key, rerr := resolveRunRepo(cfg, onlyRepo)
+				if rerr != nil {
 					return rerr
 				}
+				onlyRepo = key
 			}
 			// The embedded store must open: fail fast before any work.
 			release, err := gateStore(cmd.Context())
@@ -137,6 +137,28 @@ Host affinity is enforced by worker task tags.`,
 	cmd.Flags().IntVar(&onlyIssue, "issue", 0, "Restrict to a single issue number (requires --repo)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Minute, "Per-operator Offload execution timeout")
 	return cmd
+}
+
+// resolveRunRepo maps the --repo argument to the canonical config key of one
+// configured repository through the shared config.Resolve rules. A shorthand
+// that matches several configured repositories is always an error, even when
+// the argument also happens to be a literal key in the config: the literal key
+// is one of the candidates, not a tie-breaker. The literal-key fallback is kept
+// only for an entry that Resolve rejects for another reason (for example a key
+// from an older config whose shape Resolve does not accept).
+func resolveRunRepo(cfg *config.Config, input string) (string, error) {
+	key, _, err := configuredRepo(cfg, input)
+	if err == nil {
+		return key, nil
+	}
+	var amb *config.AmbiguousError
+	if errors.As(err, &amb) {
+		return "", err
+	}
+	if _, literal := cfg.Repos[input]; literal {
+		return input, nil
+	}
+	return "", err
 }
 
 // loadRegistry builds a Registry from the embedded skills + the user's
