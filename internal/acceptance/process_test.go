@@ -78,6 +78,29 @@ func TestPlannerAcceptsDeliverablesFromMixedIssueBody(t *testing.T) {
 	}
 }
 
+func TestPlannerExtraCriterionFieldsAreDropped(t *testing.T) {
+	c := contract()
+	c.EvidenceSchema = 1
+	c.Requirements = "Required behavior: preserve supported configuration actions"
+	runner, scratch, _ := setupRunner(t)
+	runner.Execute = func(context.Context, string, execution.Options) (execution.Result, error) {
+		result := successful("planner", "extra-field-run")
+		result.Text = "```json\n[{\"id\":\"AC-001\",\"requirement\":\"preserve supported configuration actions\",\"proof\":\"execution\",\"description\":\"run the config tests\"}]\n```"
+		return result, nil
+	}
+	plan, err := runner.RequirementsPlan(context.Background(), c, scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Criterion{"AC-001", "preserve supported configuration actions", "execution"}
+	if len(plan.Criteria) != 1 || plan.Criteria[0] != want || strings.Contains(plan.Text, "description") {
+		t.Fatalf("unexpected plan: %+v", plan)
+	}
+	if err := validateCriteria(c, plan); err != nil {
+		t.Fatalf("saved plan must stay valid: %v", err)
+	}
+}
+
 func processGap() Finding {
 	return Finding{Kind: "requirement", Summary: "No demonstrated defect", Requirement: "Inspect current main before editing", Evidence: "Missing historical evidence that current main was inspected before editing"}
 }
