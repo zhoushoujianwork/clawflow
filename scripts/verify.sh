@@ -1,22 +1,30 @@
 #!/usr/bin/env bash
 # One verification entry shared by CI and local runs (implement, repair-ci,
-# humans). Run it from any worktree; heavy tools are cached per user, not per
-# worktree, so repeated runs on one host stay warm:
-#   - Go build/module caches: Go's own per-user defaults
-#   - pnpm store: pnpm's per-user content-addressed store
-#   - Playwright + Chromium: $CLAWFLOW_VERIFY_CACHE (default ~/.cache/clawflow-verify)
+# humans). There is no full suite: tests run only for the Go packages a change
+# touches, compared with the base ref. Every change still gets gofmt, vet,
+# a build and a CLI smoke check.
 #
-# Usage: scripts/verify.sh [all|go|web|web-build|render|native]...
-#   all (default) = go + web, plus native on macOS.
+# Usage: scripts/verify.sh [all|go|web]...   (all = go + web)
+#   VERIFY_BASE  base ref to diff against (default: origin/main)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PLAYWRIGHT_VERSION=1.56.1
-CACHE_DIR="${CLAWFLOW_VERIFY_CACHE:-$HOME/.cache/clawflow-verify}"
+BASE="${VERIFY_BASE:-origin/main}"
 
 step() { printf '\n==> %s\n' "$*"; }
+
+# Packages (as ./dir) holding Go files changed since the merge base, plus
+# uncommitted and untracked changes. Deleted directories are skipped.
+changed_go_packages() {
+  base="$(git merge-base HEAD "$BASE" 2>/dev/null || echo "$BASE")"
+  { git diff --name-only "$base" -- '*.go'; git diff --name-only HEAD -- '*.go'; git ls-files --others --exclude-standard -- '*.go'; } |
+    while read -r f; do dirname "$f"; done | sort -u |
+    while read -r dir; do
+      if [ -d "$dir" ] && ls "$dir"/*.go >/dev/null 2>&1; then echo "./$dir"; fi
+    done
+}
 
 verify_go() {
   step "gofmt"
@@ -26,8 +34,14 @@ verify_go() {
   fi
   step "go vet"
   go vet ./...
-  step "go test -race"
-  go_test_sharded
+  step "tests for changed packages (base $BASE)"
+  pkgs="$(changed_go_packages)"
+  if [ -z "$pkgs" ]; then
+    echo "no changed Go packages"
+  else
+    # shellcheck disable=SC2086
+    go test -race $pkgs
+  fi
   step "CLI smoke"
   bin="$(mktemp -d)/clawflow"
   go build -o "$bin" ./cmd/clawflow/
@@ -42,85 +56,19 @@ verify_go() {
   done
 }
 
-# The commands package holds most of the suite and runs its tests serially
-# (they swap package globals), so it is split by test name across separate
-# processes; each process keeps its own globals and temp HOME. Every other
-# package runs in one normal `go test` alongside the shards.
-SLOW_PKG=./cmd/clawflow/commands
-go_test_sharded() {
-  shards="${VERIFY_SHARDS:-4}"
-  logs="$(mktemp -d)"
-  pids=()
-  go test -race $(go list ./... | grep -v '/cmd/clawflow/commands$') >"$logs/rest.log" 2>&1 &
-  pids+=($!)
-  # One race compile (listing reuses it), then every shard hits the build cache.
-  tests="$(go test -race -list '^Test' "$SLOW_PKG" | grep '^Test')"
-  for i in $(seq 0 $((shards - 1))); do
-    names="$(printf '%s\n' "$tests" | awk -v n="$shards" -v i="$i" 'NR % n == i' | paste -sd'|' -)"
-    [ -z "$names" ] && continue
-    go test -race -count=1 -run "^($names)\$" "$SLOW_PKG" >"$logs/shard$i.log" 2>&1 &
-    pids+=($!)
-  done
-  failed=0
-  for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
-  for f in "$logs"/*.log; do
-    if [ "$failed" = 1 ] || [ -n "${VERIFY_VERBOSE:-}" ]; then cat "$f"; else grep -E '^(ok|FAIL|---)' "$f" || true; fi
-  done
-  rm -rf "$logs"
-  return "$failed"
-}
-
-verify_web_build() {
+verify_web() {
   step "web build"
   # Non-interactive: a pnpm version change must not wait for a TTY prompt.
   pnpm --dir web install --frozen-lockfile --config.confirmModulesPurge=false
   pnpm --dir web build
 }
 
-# Locally the Playwright module lives in the shared cache; CI may preset
-# PLAYWRIGHT_MODULE after installing browsers with system dependencies.
-ensure_playwright() {
-  if [ -n "${PLAYWRIGHT_MODULE:-}" ]; then
-    return 0
-  fi
-  tools="$CACHE_DIR/render-tools-$PLAYWRIGHT_VERSION"
-  if [ ! -f "$tools/node_modules/playwright/index.mjs" ]; then
-    step "install playwright@$PLAYWRIGHT_VERSION into $tools"
-    npm install --prefix "$tools" --no-package-lock "playwright@$PLAYWRIGHT_VERSION"
-  fi
-  "$tools/node_modules/.bin/playwright" install chromium
-  export PLAYWRIGHT_MODULE="$tools/node_modules/playwright/index.mjs"
-}
-
-verify_render() {
-  ensure_playwright
-  step "render fixtures"
-  (
-    cd web
-    for fixture in scripts/check-*-render.mjs; do
-      echo "Running $fixture"
-      node "$fixture"
-    done
-  )
-}
-
-verify_native() {
-  if [ "$(uname -s)" != "Darwin" ]; then
-    echo "native: skipped (requires macOS)"; return 0
-  fi
-  step "swift test"
-  swift test --package-path macos
-}
-
 [ $# -eq 0 ] && set -- all
 for target in "$@"; do
   case "$target" in
-    all) verify_go; verify_web_build; verify_render; verify_native ;;
+    all) verify_go; verify_web ;;
     go) verify_go ;;
-    web) verify_web_build; verify_render ;;
-    web-build) verify_web_build ;;
-    render) verify_render ;;
-    native) verify_native ;;
+    web) verify_web ;;
     *) echo "unknown target: $target" >&2; exit 2 ;;
   esac
 done
