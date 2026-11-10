@@ -85,25 +85,26 @@ clawflow label add/remove
 
 ## 测试
 
-### 运行测试
+2026-11-10 起删除了全部历史测试（Go、Web、Swift），之后按需新建。**不跑全量测试**，只为本次改动写并运行功能测试或单元测试。
 
 ```bash
-# 全量单元测试
-go test ./...
+# 与 CI 相同的入口：gofmt、vet、只测改动涉及的包（相对 origin/main）、CLI 冒烟
+make verify VERIFY=go
 
-# 带 verbose 输出
-go test -v ./...
+# Web：构建和类型检查
+make verify VERIFY=web
 
-# 单个包
-go test ./internal/operator/...
+# 开发中只跑自己新增的测试
+go test -run '<TestName>' ./path/to/pkg
 ```
 
 ### 测试规范
 
-- 新功能和 bug 修复必须附带测试
+- 新功能和 bug 修复附带针对本次行为的单元测试或功能测试，不为无关代码补测试
 - 测试文件与源文件同目录，命名 `*_test.go`
 - 使用标准 `testing` 包，不引入外部测试框架
-- 算子集成测试：在测试仓库上运行 `clawflow run`，验证 label 和 comment 结果
+- 测试中不做真实等待（sleep、重试退避、轮询间隔都要可调小）
+- 算子集成验证：在测试仓库上运行 `clawflow run`，检查 label 和 comment 结果
 
 ---
 

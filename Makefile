@@ -7,7 +7,7 @@ BRANCH := $(shell git symbolic-ref --short -q HEAD || echo main)
 CHANNEL := source
 LDFLAGS = -ldflags "-s -w -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.Version=$(VERSION) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildCommit=$(COMMIT) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.BuildChannel=$(CHANNEL) -X github.com/zhoushoujianwork/clawflow/cmd/clawflow/commands.SourceBranch=$(BRANCH)"
 
-.PHONY: install build release clean test fmt vet tidy dev web
+.PHONY: install build release clean test fmt vet tidy dev web verify
 
 # 构建前端
 web:
@@ -41,9 +41,15 @@ release:
 	GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o clawflow_linux_amd64   $(SRC)
 	@echo "release binaries built ($(VERSION))"
 
-# 运行测试
+# Tests for the Go packages changed since origin/main (there is no full suite).
 test:
-	go test -v -race ./...
+	./scripts/verify.sh go
+
+# Local verification shared with CI: gofmt, vet, changed-package tests, smoke, web build.
+# Narrow it with VERIFY, e.g. `make verify VERIFY=go`.
+VERIFY ?= all
+verify:
+	./scripts/verify.sh $(VERIFY)
 
 # 格式化
 fmt:
@@ -60,12 +66,9 @@ tidy:
 clean:
 	rm -f clawflow clawflow_darwin_arm64 clawflow_darwin_amd64 clawflow_linux_amd64
 
-.PHONY: native native-test legacy-web
+.PHONY: native legacy-web
 native: build
 	./macos/build-app.sh
-
-native-test:
-	swift test --package-path macos
 
 legacy-web: web
 	go build -tags legacyweb $(LDFLAGS) -o clawflow $(SRC)

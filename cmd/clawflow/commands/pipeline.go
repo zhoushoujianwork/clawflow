@@ -17,6 +17,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
@@ -241,6 +242,21 @@ func pipelineClip(s string, n int) string {
 	return s
 }
 
+// pipelineConfirmationReason returns the question dispatch coordination
+// recorded when it asked for a maintainer decision. It is untrusted model text:
+// bounded and stripped of comment delimiters. Empty when no record is readable.
+func pipelineConfirmationReason(repo string, issue int) string {
+	b, err := os.ReadFile(coordinationPath(repo, issue))
+	if err != nil {
+		return ""
+	}
+	var r coordination.Record
+	if json.Unmarshal(b, &r) != nil || r.Decision.Outcome != "needs-confirmation" {
+		return ""
+	}
+	return pipelineSummary(r.Decision.Reason)
+}
+
 func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.Repo, runs []snapshot.RunIndexEntry, events []pipeline.Event, now time.Time) pipeline.RepoBoard {
 	platform := rc.Platform
 	if platform == "" {
@@ -250,6 +266,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		Repo: repo, Enabled: rc.Enabled, Platform: platform, AutoMerge: rc.AutoMerge,
 		CIRequired: rc.CIRequired, AcceptanceRequired: rc.AcceptanceRequired,
 		Items: []pipeline.Item{}, MaxInFlight: rc.MaxInFlight,
+		URL: pipeline.RepoWebURL(repo, platform, rc.BaseURL),
 	}
 	if board.MaxInFlight <= 0 {
 		board.MaxInFlight = 1
@@ -418,6 +435,15 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 	}
 	sortBoardItems(board.SkippedIssues)
 
+	// Issues the coordination step parked for a maintainer decision.
+	for _, issue := range openIssues {
+		if issue.State == "open" && hasLabel(issue.Labels, coordination.ConfirmationLabel) {
+			board.ConfirmationIssues = append(board.ConfirmationIssues, pipeline.Item{Issue: issue.Number, Title: issue.Title, State: issue.State, UpdatedAt: issue.UpdatedAt,
+				Why: pipelineConfirmationReason(repo, issue.Number)})
+		}
+	}
+	sortBoardItems(board.ConfirmationIssues)
+
 	detailed := 0
 	for _, c := range cands {
 		item := pipeline.Item{State: c.state, Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
@@ -486,9 +512,11 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 					item.Attention = append(item.Attention, "waiting for review (manual merge)")
 				}
 				// A spent ledger alone is historical once the failure has recovered.
-				repairRelevant := item.PR.CI == "failure" || item.PR.CI == "unknown" || item.Stage == pipeline.StageRejected || item.Stage == pipeline.StageInfraRetry
+				repairRelevant := item.PR.CI == "failure" || item.PR.CI == "unknown" || item.Stage == pipeline.StageRejected || item.Stage == pipeline.StageInfraRetry ||
+					item.Acceptance != nil && item.Acceptance.Verdict == "blocked" && item.Acceptance.BlockedRepairable
 				if err := checkRepairBudget(snapshot.DataDir(), repo, item.PR.Number, now); repairRelevant && (errors.Is(err, errRepairExhausted) || errors.Is(err, errRepairBlocked)) {
 					item.Stage, item.Why = pipeline.StageBlocked, "needs a person: "+err.Error()
+					item.RepairStop = err.Error()
 					item.Attention = append(item.Attention, item.Why)
 				}
 			}
@@ -673,6 +701,8 @@ func pipelineAcceptanceRecords(info *pipeline.AcceptanceInfo, c acceptance.Contr
 	info.PlannerSession = pipelineSessionID(latest.Plan.Planner.SessionID)
 	info.ReviewerSession = pipelineSessionID(latest.Reviewer.SessionID)
 	info.Summary = pipelineSummary(latest.Report)
+	info.NextOwner = pipelineClip(strings.ToLower(strings.TrimSpace(latest.NextOwner)), 100)
+	info.NextAction = pipelineSummary(latest.NextAction)
 	if info.LatestIsInfra {
 		info.NextRetryAt = lastInfra.Add(harvestInfraCooldown).UTC().Format(time.RFC3339)
 		info.Verdict = ""

@@ -8,6 +8,12 @@ import (
 	"testing"
 )
 
+// The legacy candidate suite that defined these fixtures was removed.
+const (
+	commitA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
 func passedRun(commit string) *TaskRun {
 	r := &TaskRun{Commit: commit, RuntimeID: IDFor(commit), TaskID: "t1", State: "done", Settled: true,
 		ResidualProcesses: []string{}, ResidualLocks: []string{}}
