@@ -32,6 +32,7 @@ type resultStoreFake struct {
 	mu                   sync.Mutex
 	task                 coordinator.Task
 	conflictAfterPrepare bool
+	retired              []string
 }
 
 func (s *resultStoreFake) VerifyToken(context.Context, string) (*coordinator.Token, error) {

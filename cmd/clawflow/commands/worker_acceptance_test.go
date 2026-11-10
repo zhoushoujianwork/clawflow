@@ -85,7 +85,8 @@ func acceptanceUploadTask(t *testing.T, c acceptance.Contract) *resultStoreFake 
 	return &resultStoreFake{task: coordinator.Task{ID: "upload", Kind: "acceptance", Repo: "o/r", Issue: 42, PR: 11, Operator: "acceptance", Payload: payload, State: "leased", LeaseOwner: "w", FencingToken: 1, LeaseExpiresAt: &expires}}
 }
 
-func (s *resultStoreFake) RetireClosedAcceptance(_ context.Context, id, worker string, fence int64) error {
+func (s *resultStoreFake) RetireAcceptance(_ context.Context, id, worker string, fence int64, reason string) error {
+	s.retired = append(s.retired, reason)
 	if s.task.ID != id || s.task.LeaseOwner != worker || s.task.FencingToken != fence || s.task.State != "leased" {
 		return coordinator.ErrStaleLease
 	}
@@ -606,4 +607,204 @@ func TestWorkerAcceptanceRequirementsChangeRequeuesSameHead(t *testing.T) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// getPRFailer makes the authoritative PR read fail the way a network error does.
+type getPRFailer struct {
+	*acceptanceFake
+	err error
+}
+
+func (g getPRFailer) GetPR(string, int) (vcs.PR, error) { return vcs.PR{}, g.err }
+
+// staleAcceptanceUpload builds a valid uploaded verdict for the current head
+// with no local evidence, so only an accepted upload can create any.
+func staleAcceptanceUpload(t *testing.T) (*acceptanceFake, *resultStoreFake, []byte) {
+	t.Helper()
+	f, _ := acceptanceFixture(t)
+	r := produceAcceptance(t, f)
+	if err := os.RemoveAll(acceptanceStorePath("o/r", 11)); err != nil {
+		t.Fatal(err)
+	}
+	backing := acceptanceUploadTask(t, r.Contract)
+	raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "success"}, Acceptance: &r})
+	return f, backing, raw
+}
+
+func assertStaleRetired(t *testing.T, backing *resultStoreFake, err error) {
+	t.Helper()
+	if !errors.Is(err, coordinator.ErrStaleLease) {
+		t.Fatalf("stale verdict must end with ErrStaleLease (409), got %v", err)
+	}
+	if backing.task.State != "cancelled" || backing.task.FencingToken != 2 || backing.task.LeaseExpiresAt != nil {
+		t.Fatalf("task not retired: state=%s epoch=%d lease=%v", backing.task.State, backing.task.FencingToken, backing.task.LeaseExpiresAt)
+	}
+	if !reflect.DeepEqual(backing.retired, []string{coordinator.AcceptanceRetiredStale}) {
+		t.Fatalf("retirement reasons: %v", backing.retired)
+	}
+	if len(backing.task.Result) != 0 {
+		t.Fatal("stale verdict was accepted as a result")
+	}
+	if acceptanceStoreExists("o/r", 11) {
+		t.Fatal("stale verdict persisted acceptance evidence")
+	}
+}
+
+func TestAcceptanceUploadHeadMovedDuringRunEndsStale(t *testing.T) {
+	f, backing, raw := staleAcceptanceUpload(t)
+	spy := &commentSpy{acceptanceFake: f}
+	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return spy, nil }
+	f.pr.HeadSHA = strings.Repeat("c", 40)
+	s := &coordinatorResults{WorkerStore: backing, tasks: backing}
+	err := s.Complete(context.Background(), "upload", "w", 1, raw)
+	assertStaleRetired(t, backing, err)
+	if len(spy.comments) != 0 || len(f.expected) != 0 {
+		t.Fatalf("stale verdict had side effects: comments=%q merges=%v", spy.comments, f.expected)
+	}
+	// A replay of the same report finds no live lease and stays a 409.
+	if err := s.Complete(context.Background(), "upload", "w", 1, raw); !errors.Is(err, coordinator.ErrStaleLease) {
+		t.Fatalf("replay: %v", err)
+	}
+}
+
+func TestAcceptanceUploadMissingDevelopmentProvenanceEndsStale(t *testing.T) {
+	for _, mode := range []string{"head-missing", "history-missing"} {
+		t.Run(mode, func(t *testing.T) {
+			f, backing, raw := staleAcceptanceUpload(t)
+			if mode == "history-missing" {
+				if err := os.RemoveAll(filepath.Dir(snapshot.RunDir("o/r", 42, time.Now()))); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// Unchanged head, but no successful development run exists for it.
+				if err := os.RemoveAll(filepath.Dir(snapshot.RunDir("o/r", 42, time.Now()))); err != nil {
+					t.Fatal(err)
+				}
+				writeAcceptanceDevelopment(t, "failed", time.Now().Add(-time.Minute), nil)
+			}
+			_, _, _, _, contractErr := acceptanceContract(context.Background(), f, "o/r", 11)
+			if !errors.Is(contractErr, errDevelopmentHeadMissing) && !errors.Is(contractErr, errDevelopmentHistoryMissing) {
+				t.Fatalf("fixture did not produce a missing-provenance error: %v", contractErr)
+			}
+			s := &coordinatorResults{WorkerStore: backing, tasks: backing}
+			err := s.Complete(context.Background(), "upload", "w", 1, raw)
+			assertStaleRetired(t, backing, err)
+		})
+	}
+}
+
+func TestAcceptanceUploadCurrentHeadStillAccepted(t *testing.T) {
+	f, backing, raw := staleAcceptanceUpload(t)
+	s := &coordinatorResults{WorkerStore: backing, tasks: backing}
+	if err := s.Complete(context.Background(), "upload", "w", 1, raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(backing.retired) != 0 || backing.task.State != "done" || backing.task.FencingToken != 1 {
+		t.Fatalf("current verdict retired or unfinished: retired=%v state=%s epoch=%d", backing.retired, backing.task.State, backing.task.FencingToken)
+	}
+	if _, _, err := currentAcceptance(context.Background(), f, "o/r", 11); err != nil {
+		t.Fatalf("uploaded gate: %v", err)
+	}
+}
+
+func TestAcceptanceUploadTransientReadErrorIsRetriedNotRetired(t *testing.T) {
+	f, backing, raw := staleAcceptanceUpload(t)
+	boom := errors.New("connection reset")
+	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return getPRFailer{f, boom}, nil }
+	s := &coordinatorResults{WorkerStore: backing, tasks: backing}
+	err := s.Complete(context.Background(), "upload", "w", 1, raw)
+	if !errors.Is(err, boom) || errors.Is(err, coordinator.ErrStaleLease) {
+		t.Fatalf("transient error must surface for retry: %v", err)
+	}
+	if len(backing.retired) != 0 || backing.task.State != "leased" || backing.task.FencingToken != 1 || backing.task.LeaseExpiresAt == nil {
+		t.Fatalf("transient error retired the task: %+v retired=%v", backing.task, backing.retired)
+	}
+}
+
+func TestAcceptanceUploadRequirementsChangeStaysInvalidNotRetired(t *testing.T) {
+	f, backing, raw := staleAcceptanceUpload(t)
+	f.issue.Body = "Meet the NEW goal"
+	s := &coordinatorResults{WorkerStore: backing, tasks: backing}
+	err := s.Complete(context.Background(), "upload", "w", 1, raw)
+	if !errors.Is(err, coordinator.ErrInvalid) {
+		t.Fatalf("digest mismatch with unchanged head must stay ErrInvalid: %v", err)
+	}
+	if len(backing.retired) != 0 || backing.task.State != "leased" {
+		t.Fatalf("digest mismatch retired the task: %+v", backing.task)
+	}
+}
+
+// End to end against the real store: the late verdict ends with ErrStaleLease
+// (HTTP 409), the lease is fenced, and nothing is published.
+func TestAcceptanceUploadHeadMovedRetiresDurableTask(t *testing.T) {
+	f, rc := acceptanceFixture(t)
+	rc.AcceptanceWorker = "different"
+	spy := &commentSpy{acceptanceFake: f}
+	acceptanceClientFactory = func(config.Repo) (vcs.Client, error) { return spy, nil }
+	ctx := context.Background()
+	db, path := storetest.NewWithPath(t)
+	if _, err := db.Migrate(ctx, store.Migrations); err != nil {
+		t.Fatal(err)
+	}
+	oldStore, oldAllowed := requireStore, coordinatorPRAllowedFn
+	t.Cleanup(func() { requireStore, coordinatorPRAllowedFn = oldStore, oldAllowed })
+	requireStore = func(ctx context.Context) (*store.Store, error) { return store.Open(ctx, path) }
+	coordinatorPRAllowedFn = func(context.Context, string, int) error { return nil }
+	reviewed := produceAcceptance(t, f)
+	if err := os.RemoveAll(acceptanceStorePath("o/r", 11)); err != nil {
+		t.Fatal(err)
+	}
+	s := coordinator.New(db.DB())
+	for _, w := range []coordinator.Worker{{ID: "dev", MaxParallel: 1, RunUntagged: true}, {ID: "rev", MaxParallel: 1, RunUntagged: true, Roles: []string{"acceptance"}}} {
+		if err := s.RegisterWorker(ctx, w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload, _ := json.Marshal(coordinatorPayload{Testing: testingRequirements{SOPRequired: true, SOPDigest: "approved-revision"}})
+	if _, err := s.Enqueue(ctx, coordinator.Task{Repo: "o/r", Issue: 42, PR: 11, Kind: "implement", Operator: "implement", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := s.Claim(ctx, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	devResult, _ := json.Marshal(jobResult{Status: "success", HeadSHA: f.pr.HeadSHA, PRNumber: 11, SOPDigest: "approved-revision"})
+	if err := s.Complete(ctx, dev.ID, "dev", dev.FencingToken, devResult); err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueueWorkerAcceptance(ctx, spy, "o/r", rc, f.pr, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.Claim(ctx, "rev")
+	if err != nil || claimed == nil || claimed.Kind != "acceptance" {
+		t.Fatalf("acceptance not claimed: %+v %v", claimed, err)
+	}
+
+	// The developer pushes a new head while the review runs.
+	f.pr.HeadSHA = strings.Repeat("c", 40)
+	service := &coordinatorResults{WorkerStore: s, tasks: s}
+	raw, _ := json.Marshal(coordinatorReport{jobResult: jobResult{Status: "success"}, Acceptance: &reviewed})
+	err = service.Complete(ctx, claimed.ID, "rev", claimed.FencingToken, raw)
+	if !errors.Is(err, coordinator.ErrStaleLease) {
+		t.Fatalf("want ErrStaleLease, got %v", err)
+	}
+	got, err := s.Task(ctx, claimed.ID)
+	if err != nil || got.State != "cancelled" || got.FencingToken != claimed.FencingToken+1 || got.LeaseExpiresAt != nil || len(got.Result) != 0 {
+		t.Fatalf("task not retired: %+v %v", got, err)
+	}
+	var intents int64
+	if err := db.DB().Model(&coordinator.EffectIntent{}).Where("task_id = ?", claimed.ID).Count(&intents).Error; err != nil || intents != 0 {
+		t.Fatalf("stale verdict queued %d effect intents: %v", intents, err)
+	}
+	var audits []coordinator.Audit
+	if err := db.DB().Where("task = ? AND action LIKE 'acceptance-%'", claimed.ID).Find(&audits).Error; err != nil || len(audits) != 1 || audits[0].Action != "acceptance-stale" {
+		t.Fatalf("audit: %+v %v", audits, err)
+	}
+	if acceptanceStoreExists("o/r", 11) || len(spy.comments) != 0 {
+		t.Fatalf("stale verdict published: store=%v comments=%q", acceptanceStoreExists("o/r", 11), spy.comments)
+	}
+	// The worker retries the same report; the fenced lease keeps answering 409.
+	if err := service.Complete(ctx, claimed.ID, "rev", claimed.FencingToken, raw); !errors.Is(err, coordinator.ErrStaleLease) {
+		t.Fatalf("replay: %v", err)
+	}
 }
