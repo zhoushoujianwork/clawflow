@@ -3313,9 +3313,12 @@ func runGitWithRetryContext(ctx context.Context, makeCmd func() *exec.Cmd) error
 func runGitWithRetryOutput(makeCmd func() *exec.Cmd) (string, error) {
 	return runGitWithRetryOutputContext(context.Background(), makeCmd)
 }
+
+// baseGitDelay is the first lock-retry backoff; tests shrink it.
+var baseGitDelay = 100 * time.Millisecond
+
 func runGitWithRetryOutputContext(ctx context.Context, makeCmd func() *exec.Cmd) (string, error) {
 	const maxGitRetries = 5
-	const baseGitDelay = 100 * time.Millisecond
 
 	for attempt := 0; attempt <= maxGitRetries; attempt++ {
 		if err := ctx.Err(); err != nil {

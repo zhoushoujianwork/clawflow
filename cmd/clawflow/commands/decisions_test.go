@@ -22,6 +22,80 @@ import (
 	"github.com/zhoushoujianwork/clawflow/internal/vcs"
 )
 
+// decisionsT0 is the fixed clock of the board builder in these tests.
+var decisionsT0 = time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+
+// decisionsFake serves one repository to the board builder. Only the read
+// methods the board uses are implemented; every other vcs.Client method hits
+// the nil embedded interface and panics, so an unexpected call is loud. The
+// write methods are overridden to record the call instead.
+type decisionsFake struct {
+	vcs.Client
+	issues []vcs.Issue
+	open   []vcs.PR
+	ci     map[int]vcs.CIStatus
+	writes []string
+}
+
+func (f *decisionsFake) ListOpenIssues(string) ([]vcs.Issue, error) { return f.issues, nil }
+func (f *decisionsFake) ListRecentPRs(_, state string, _ int) ([]vcs.PR, error) {
+	if state == "open" {
+		return f.open, nil
+	}
+	return nil, nil
+}
+func (f *decisionsFake) GetCIStatus(_ string, n int) (vcs.CIStatus, error) {
+	if s, ok := f.ci[n]; ok {
+		return s, nil
+	}
+	return vcs.CIStatusSuccess, nil
+}
+func (f *decisionsFake) GetPRMergeability(string, int) (vcs.MergeStatus, error) {
+	return vcs.MergeStatusClean, nil
+}
+func (f *decisionsFake) PostIssueComment(string, int, string) error {
+	f.writes = append(f.writes, "PostIssueComment")
+	return nil
+}
+func (f *decisionsFake) PostPRComment(string, int, string) error {
+	f.writes = append(f.writes, "PostPRComment")
+	return nil
+}
+func (f *decisionsFake) AddLabel(string, int, ...string) error {
+	f.writes = append(f.writes, "AddLabel")
+	return nil
+}
+func (f *decisionsFake) RemoveLabel(string, int, ...string) error {
+	f.writes = append(f.writes, "RemoveLabel")
+	return nil
+}
+func (f *decisionsFake) MergePR(string, int) error {
+	f.writes = append(f.writes, "MergePR")
+	return nil
+}
+func (f *decisionsFake) ClosePR(string, int) error {
+	f.writes = append(f.writes, "ClosePR")
+	return nil
+}
+func (f *decisionsFake) CloseIssue(string, int) error {
+	f.writes = append(f.writes, "CloseIssue")
+	return nil
+}
+
+func decisionsTestDeps(f *decisionsFake, repos map[string]config.Repo) pipelineDeps {
+	return pipelineDeps{
+		cfg:       &config.Config{Repos: repos},
+		newClient: func(config.Repo) (vcs.Client, error) { return f, nil },
+		now:       func() time.Time { return decisionsT0 },
+		runs:      func() []snapshot.RunIndexEntry { return nil },
+		events:    func() ([]pipeline.Event, error) { return nil, nil },
+		locked:    func(string, int) bool { return false },
+		acceptance: func(context.Context, vcs.Client, string, config.Repo, vcs.PR, time.Time) (*pipeline.AcceptanceInfo, error) {
+			return nil, nil
+		},
+	}
+}
+
 func decisionKinds(r decisions.Report) map[decisions.Kind]decisions.Decision {
 	out := map[decisions.Kind]decisions.Decision{}
 	for _, d := range r.Decisions {
@@ -34,7 +108,7 @@ func decisionKinds(r decisions.Report) map[decisions.Kind]decisions.Decision {
 // real board builder into the list, with the right links.
 func TestDecisionsListEveryKindFromBoard(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	f := newPipelineFake()
+	f := &decisionsFake{}
 	head := strings.Repeat("a", 40)
 	f.issues = []vcs.Issue{
 		{Number: 10, Title: "needs an answer", State: "open", Labels: []string{coordination.ConfirmationLabel}},
@@ -63,7 +137,7 @@ func TestDecisionsListEveryKindFromBoard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, AcceptanceRequired: true, CIRequired: true}})
+	d := decisionsTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true, AcceptanceRequired: true, CIRequired: true}})
 	d.acceptance = func(_ context.Context, _ vcs.Client, _ string, _ config.Repo, pr vcs.PR, _ time.Time) (*pipeline.AcceptanceInfo, error) {
 		if pr.Number != 31 {
 			return nil, nil
@@ -74,9 +148,9 @@ func TestDecisionsListEveryKindFromBoard(t *testing.T) {
 	d.globalQueue = nil
 	snap := buildPipeline(context.Background(), d)
 
-	status := execution.Summarize(pipelineT0, []execution.Readiness{{State: execution.StateBlocked, Reason: execution.ReasonMissing, Worker: "mac",
+	status := execution.Summarize(decisionsT0, []execution.Readiness{{State: execution.StateBlocked, Reason: execution.ReasonMissing, Worker: "mac",
 		Summary: "Offload executable not found.", Guidance: &execution.Guidance{Steps: []string{"Install Offload."}, Recheck: execution.RecheckCommand}}})
-	report := decisions.Build(snap, &status, pipelineT0)
+	report := decisions.Build(snap, &status, decisionsT0)
 	got := decisionKinds(report)
 
 	for kind, link := range map[decisions.Kind]string{
@@ -111,19 +185,19 @@ func TestDecisionsListEveryKindFromBoard(t *testing.T) {
 // Resolving through the existing route empties the list on the next snapshot.
 func TestDecisionsClearAfterExistingRouteResolves(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	f := newPipelineFake()
+	f := &decisionsFake{}
 	f.issues = []vcs.Issue{
 		{Number: 10, Title: "asked", State: "open", Labels: []string{coordination.ConfirmationLabel}},
 		{Number: 20, Title: "parked", State: "open", Labels: []string{"clawflow-skip"}},
 	}
-	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
-	healthy := execution.Summarize(pipelineT0, []execution.Readiness{{State: execution.StateReady, Worker: "w"}})
-	if n := len(decisions.Build(buildPipeline(context.Background(), d), &healthy, pipelineT0).Decisions); n != 2 {
+	d := decisionsTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
+	healthy := execution.Summarize(decisionsT0, []execution.Readiness{{State: execution.StateReady, Worker: "w"}})
+	if n := len(decisions.Build(buildPipeline(context.Background(), d), &healthy, decisionsT0).Decisions); n != 2 {
 		t.Fatalf("before = %d", n)
 	}
 	// The person removes both labels on the provider; nothing else is touched.
 	f.issues[0].Labels, f.issues[1].Labels = nil, nil
-	report := decisions.Build(buildPipeline(context.Background(), d), &healthy, pipelineT0)
+	report := decisions.Build(buildPipeline(context.Background(), d), &healthy, decisionsT0)
 	if len(report.Decisions) != 0 || len(report.Incomplete) != 0 {
 		t.Fatalf("after = %+v", report)
 	}
@@ -131,12 +205,12 @@ func TestDecisionsClearAfterExistingRouteResolves(t *testing.T) {
 
 func TestDecisionsAreReadOnly(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	f := newPipelineFake()
+	f := &decisionsFake{}
 	f.issues = []vcs.Issue{{Number: 10, Title: "asked", State: "open", Labels: []string{coordination.ConfirmationLabel}}}
-	d := pipelineTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
+	d := decisionsTestDeps(f, map[string]config.Repo{"o/r": {Enabled: true}})
 	buildPipeline(context.Background(), d)
-	if len(f.sweepFake.comments) != 0 || len(f.sweepFake.merged) != 0 {
-		t.Fatalf("board build wrote to the provider: %+v", f.sweepFake)
+	if len(f.writes) != 0 {
+		t.Fatalf("board build wrote to the provider: %v", f.writes)
 	}
 }
 
