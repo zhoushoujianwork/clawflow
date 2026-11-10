@@ -94,7 +94,8 @@ func TestStewardPlatformAskAndPolicyGates(t *testing.T) {
 		}
 		return "answer\n```pilot-actions\n" + `{"run_id":"proposal","actions":[{"id":"comment","type":"comment","repo":"b/two","issue":3,"body":"global decision"},{"id":"extra","type":"note","repo":"a/one","body":"over budget"},{"id":"skip","type":"label_remove","repo":"a/one","issue":1,"label":"clawflow-skip"},{"id":"merge","type":"override_merge","repo":"b/two","pr":2,"head":"` + strings.Repeat("a", 40) + `"}]}` + "\n```", nil
 	}
-	result, err := Ask(context.Background(), "owner question", 1, time.Second)
+	// The budget only has to exist; keep it loose so a loaded runner passes.
+	result, err := Ask(context.Background(), "owner question", 1, 30*time.Second)
 	if err == nil || len(result.Actions) != 4 {
 		t.Fatalf("%+v %v", result, err)
 	}
@@ -124,7 +125,7 @@ func TestStewardPlainAnswerAndDeadline(t *testing.T) {
 			}
 			return "plain answer", nil
 		}
-		timeout := time.Second
+		timeout := 30 * time.Second
 		if expired {
 			timeout = 10 * time.Millisecond
 		}

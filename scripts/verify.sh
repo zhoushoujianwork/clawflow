@@ -53,9 +53,8 @@ go_test_sharded() {
   pids=()
   go test -race $(go list ./... | grep -v '/cmd/clawflow/commands$') >"$logs/rest.log" 2>&1 &
   pids+=($!)
-  # One compile, reused by every shard through the build cache.
-  go test -race -run '^$' "$SLOW_PKG" >/dev/null
-  tests="$(go test -list '^Test' "$SLOW_PKG" | grep '^Test')"
+  # One race compile (listing reuses it), then every shard hits the build cache.
+  tests="$(go test -race -list '^Test' "$SLOW_PKG" | grep '^Test')"
   for i in $(seq 0 $((shards - 1))); do
     names="$(printf '%s\n' "$tests" | awk -v n="$shards" -v i="$i" 'NR % n == i' | paste -sd'|' -)"
     [ -z "$names" ] && continue

@@ -207,9 +207,10 @@ func TestLibraryTimeoutRecoveryResumesOriginalSessionWithSingleWriter(t *testing
 	if err := recoverWorkerExecutor(options, journalPath); err != nil {
 		t.Fatalf("automatic recovery did not proceed: %v", err)
 	}
+	// The shell creates the file before printf writes to it; wait for content.
 	waitRecoveryCondition(t, "recovery executor launch", func() bool {
-		_, statErr := os.Stat(filepath.Join(fakeDir, "spawned"))
-		return statErr == nil
+		b, readErr := os.ReadFile(filepath.Join(fakeDir, "spawned"))
+		return readErr == nil && strings.HasSuffix(string(b), "\n")
 	})
 	if spawned, _ := os.ReadFile(filepath.Join(fakeDir, "spawned")); !strings.Contains(string(spawned), "worker execute --journal "+journalPath) {
 		t.Fatalf("executor args=%q", spawned)
