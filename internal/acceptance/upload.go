@@ -20,6 +20,11 @@ func ValidateUpload(c Contract, r Record) error {
 	if err := completeRecord(r); err != nil {
 		return err
 	}
+	if !IsInfrastructure(r) {
+		if err := validateIsolated(c, r); err != nil {
+			return err
+		}
+	}
 	if IsInfrastructure(r) {
 		if r.Verdict != Blocked || r.Cancelled {
 			return errors.New("invalid infrastructure record")

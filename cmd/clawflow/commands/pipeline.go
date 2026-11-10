@@ -17,6 +17,7 @@ import (
 
 	"github.com/zhoushoujianwork/clawflow/internal/acceptance"
 	"github.com/zhoushoujianwork/clawflow/internal/config"
+	"github.com/zhoushoujianwork/clawflow/internal/coordination"
 	clog "github.com/zhoushoujianwork/clawflow/internal/log"
 	"github.com/zhoushoujianwork/clawflow/internal/pipeline"
 	"github.com/zhoushoujianwork/clawflow/internal/queue"
@@ -58,6 +59,9 @@ type pipelineDeps struct {
 	runs      func() []snapshot.RunIndexEntry
 	events    func() ([]pipeline.Event, error)
 	locked    func(repo string, issue int) bool
+	// issues returns the scheduler's last issue snapshot. Boards of stopped
+	// repositories are built from it and never from a provider request.
+	issues func() []snapshot.IssueEntry
 	// globalQueue returns the unified queue in dispatch order; nil = none.
 	globalQueue func() []queue.ListEntry
 	// acceptance returns nil when the repo has no acceptance evidence to show.
@@ -81,6 +85,7 @@ func defaultPipelineDeps() (pipelineDeps, error) {
 			return pipeline.ReadEventsTail(filepath.Join(clog.LogsDir(), "run.log"), pipelineLogTailBytes)
 		},
 		locked:     snapshot.IsLocked,
+		issues:     readIssueSnapshot,
 		acceptance: pipelineAcceptance,
 		globalQueue: func() []queue.ListEntry {
 			rows, err := queueListRows("")
@@ -122,12 +127,14 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	}
 
 	names := make([]string, 0, len(d.cfg.Repos))
+	stopped := map[string]bool{}
 	for name, rc := range d.cfg.Repos {
 		// Every enabled repo dispatches work through the unified queue, so it
 		// belongs on the board even without auto-merge (e.g. MRs merged by hand).
-		if rc.Enabled || rc.AutoMerge {
-			names = append(names, name)
-		}
+		// A registered repo with monitoring off keeps a read-only history board:
+		// stopping automation is not the same as deleting the registration.
+		names = append(names, name)
+		stopped[name] = !rc.Enabled && !rc.AutoMerge
 	}
 	slices.Sort(names)
 
@@ -146,7 +153,7 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	for index, name := range names {
-		tracked[name] = true
+		tracked[name] = !stopped[name]
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(index int, name string) {
@@ -154,6 +161,10 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 			defer func() { <-sem }()
 			// A repository budget also bounds every individual HTTP call made by
 			// the provider's context-aware client, without abandoning goroutines.
+			if stopped[name] {
+				snap.Repos[index] = buildStoppedBoard(d, name, d.cfg.Repos[name], runs, now)
+				return
+			}
 			repoCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			board := buildRepoBoard(repoCtx, d, name, d.cfg.Repos[name], runs, events, now)
@@ -181,7 +192,7 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	snap.GlobalQueue = []pipeline.GlobalQueueEntry{}
 	if d.globalQueue != nil {
 		for _, r := range d.globalQueue() {
-			if _, ok := d.cfg.Repos[r.Repo]; !ok || skipped[queue.Key{Repo: r.Repo, Number: r.Number}] {
+			if _, ok := d.cfg.Repos[r.Repo]; !ok || stopped[r.Repo] || skipped[queue.Key{Repo: r.Repo, Number: r.Number}] {
 				continue
 			}
 			snap.GlobalQueue = append(snap.GlobalQueue, pipeline.GlobalQueueEntry{
@@ -230,6 +241,179 @@ func buildPipeline(ctx context.Context, d pipelineDeps) pipeline.Snapshot {
 	return snap
 }
 
+// stoppedBoardItemLimit bounds the history kept for one stopped repository.
+const stoppedBoardItemLimit = 200
+
+// readIssueSnapshot returns the scheduler's last all-issues snapshot, or nil
+// when it is missing or unreadable.
+func readIssueSnapshot() []snapshot.IssueEntry {
+	data, err := os.ReadFile(filepath.Join(snapshot.DataDir(), "issues.json"))
+	if err != nil {
+		return nil
+	}
+	var out []snapshot.IssueEntry
+	if json.Unmarshal(data, &out) != nil {
+		return nil
+	}
+	return out
+}
+
+// buildStoppedBoard is the read-only history board of a registered repository
+// whose monitoring is off. Stopping automation is not deleting the
+// registration: the issues the scheduler last saw, the recorded attempts and
+// the last known PR evidence stay visible, marked Stopped. It reads only local
+// records. It makes no VCS request, creates no queue entry and starts nothing,
+// so rendering it can never re-enable the repository or trigger execution.
+func buildStoppedBoard(d pipelineDeps, repo string, rc config.Repo, runs []snapshot.RunIndexEntry, now time.Time) pipeline.RepoBoard {
+	platform := rc.Platform
+	if platform == "" {
+		platform = "github"
+	}
+	board := pipeline.RepoBoard{
+		Repo: repo, Enabled: false, Stopped: true, Platform: platform,
+		CIRequired: rc.CIRequired, AcceptanceRequired: rc.AcceptanceRequired,
+		Items: []pipeline.Item{}, MaxInFlight: rc.MaxInFlight,
+		URL: pipeline.RepoWebURL(repo, platform, rc.BaseURL),
+	}
+	if board.MaxInFlight <= 0 {
+		board.MaxInFlight = 1
+	}
+
+	// Everything known about one issue, merged from the local sources in order
+	// of freshness: scheduler snapshot, then the previous board, then runs.
+	type known struct {
+		title, state, updated string
+		labels                []string
+		prev                  *pipeline.Item
+	}
+	byIssue := map[int]*known{}
+	get := func(n int) *known {
+		k := byIssue[n]
+		if k == nil {
+			k = &known{}
+			byIssue[n] = k
+		}
+		return k
+	}
+	if d.issues != nil {
+		for _, e := range d.issues() {
+			if e.Repo != repo {
+				continue
+			}
+			k := get(e.IssueNumber)
+			k.title, k.state, k.updated, k.labels = e.IssueTitle, e.State, e.UpdatedAt, e.Labels
+		}
+	}
+	prev := d.previous[repo]
+	for i := range prev.Items {
+		it := &prev.Items[i]
+		k := get(it.Issue)
+		if k.title == "" {
+			k.title = it.Title
+		}
+		if k.state == "" {
+			k.state = it.State
+		}
+		k.prev = it
+	}
+	for i := range prev.SkippedIssues {
+		it := prev.SkippedIssues[i]
+		k := get(it.Issue)
+		if k.title == "" {
+			k.title = it.Title
+		}
+		if k.state == "" {
+			k.state = it.State
+		}
+		if !hasLabel(k.labels, queue.SkipLabel) {
+			k.labels = append(slices.Clone(k.labels), queue.SkipLabel)
+		}
+	}
+	// Acceptance runs are keyed by PR number; they attach through the item's PR.
+	latest := map[int]snapshot.RunIndexEntry{}
+	for _, r := range runs {
+		if r.Repo != repo || strings.HasPrefix(r.Operator, "acceptance-") {
+			continue
+		}
+		if cur, ok := latest[r.IssueNumber]; !ok || r.StartedAt.After(cur.StartedAt) {
+			latest[r.IssueNumber] = r
+		}
+	}
+	for n, r := range latest {
+		k := get(n)
+		if k.title == "" {
+			k.title = r.IssueTitle
+		}
+		if k.state == "" {
+			k.state = r.IssueState
+		}
+	}
+
+	numbers := make([]int, 0, len(byIssue))
+	for n := range byIssue {
+		numbers = append(numbers, n)
+	}
+	slices.Sort(numbers)
+	for _, n := range numbers {
+		k := byIssue[n]
+		item := pipeline.Item{Issue: n, Title: k.title, State: k.state, UpdatedAt: k.updated}
+		ev := pipeline.Evidence{IssueState: k.state, Labels: k.labels, CIRequired: rc.CIRequired, AcceptanceRequired: rc.AcceptanceRequired, Now: now}
+		if r, ok := latest[n]; ok {
+			ri := &pipeline.RunInfo{Operator: r.Operator, Status: r.Status, Stage: r.RunMeta.Stage,
+				StartedAt: r.StartedAt.UTC().Format(time.RFC3339), Live: d.locked(repo, n)}
+			if r.EndedAt != nil {
+				ri.EndedAt = r.EndedAt.UTC().Format(time.RFC3339)
+			}
+			item.Run, ev.Run = ri, ri
+		} else if d.locked(repo, n) {
+			ri := &pipeline.RunInfo{Operator: "implement", Status: "running", Live: true}
+			item.Run, ev.Run = ri, ri
+		}
+		if k.prev != nil {
+			item.PR, item.Acceptance, item.Delivery = k.prev.PR, k.prev.Acceptance, k.prev.Delivery
+			ev.PR, ev.Acceptance = item.PR, item.Acceptance
+		}
+		item.Executions = pipelineItemExecutions(repo, item, runs)
+		// A closed issue with nothing recorded against it is not history.
+		if k.state == "closed" && item.Run == nil && item.PR == nil && len(item.Executions) == 0 {
+			continue
+		}
+		var stamps []string
+		stamps = append(stamps, k.updated)
+		if item.PR != nil {
+			stamps = append(stamps, item.PR.UpdatedAt)
+		}
+		if item.Run != nil {
+			stamps = append(stamps, item.Run.StartedAt, item.Run.EndedAt)
+		}
+		if item.Acceptance != nil {
+			stamps = append(stamps, item.Acceptance.CompletedAt)
+		}
+		if item.Delivery != nil {
+			stamps = append(stamps, item.Delivery.MergedAt)
+		}
+		item.UpdatedAt = pipeline.Latest(stamps...)
+
+		stage, why, evidence := pipeline.Derive(ev)
+		if k.state == "open" && hasLabel(k.labels, queue.SkipLabel) {
+			evidence = append(evidence, "owner label clawflow-skip")
+		}
+		// Derive says "waiting for the next run" for an idle issue. With
+		// automation off nothing will pick it up, so say that instead.
+		if stage == pipeline.StageQueued {
+			why = "not processed while automation is off for this repository"
+		}
+		item.Stage, item.Why = stage, why
+		item.Evidence = append(evidence, "automation is off: last recorded evidence, not refreshed")
+		board.Items = append(board.Items, item)
+	}
+	sortBoardItems(board.Items)
+	if len(board.Items) > stoppedBoardItemLimit {
+		board.Items = board.Items[:stoppedBoardItemLimit]
+	}
+	return board
+}
+
 func runLogWarn(msg string, err error) {
 	webLog.Warn("web/pipeline", "msg", msg, "err", pipelineClip(err.Error(), pipelineErrLimit))
 }
@@ -241,6 +425,21 @@ func pipelineClip(s string, n int) string {
 	return s
 }
 
+// pipelineConfirmationReason returns the question dispatch coordination
+// recorded when it asked for a maintainer decision. It is untrusted model text:
+// bounded and stripped of comment delimiters. Empty when no record is readable.
+func pipelineConfirmationReason(repo string, issue int) string {
+	b, err := os.ReadFile(coordinationPath(repo, issue))
+	if err != nil {
+		return ""
+	}
+	var r coordination.Record
+	if json.Unmarshal(b, &r) != nil || r.Decision.Outcome != "needs-confirmation" {
+		return ""
+	}
+	return pipelineSummary(r.Decision.Reason)
+}
+
 func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.Repo, runs []snapshot.RunIndexEntry, events []pipeline.Event, now time.Time) pipeline.RepoBoard {
 	platform := rc.Platform
 	if platform == "" {
@@ -250,6 +449,7 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 		Repo: repo, Enabled: rc.Enabled, Platform: platform, AutoMerge: rc.AutoMerge,
 		CIRequired: rc.CIRequired, AcceptanceRequired: rc.AcceptanceRequired,
 		Items: []pipeline.Item{}, MaxInFlight: rc.MaxInFlight,
+		URL: pipeline.RepoWebURL(repo, platform, rc.BaseURL),
 	}
 	if board.MaxInFlight <= 0 {
 		board.MaxInFlight = 1
@@ -418,6 +618,15 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 	}
 	sortBoardItems(board.SkippedIssues)
 
+	// Issues the coordination step parked for a maintainer decision.
+	for _, issue := range openIssues {
+		if issue.State == "open" && hasLabel(issue.Labels, coordination.ConfirmationLabel) {
+			board.ConfirmationIssues = append(board.ConfirmationIssues, pipeline.Item{Issue: issue.Number, Title: issue.Title, State: issue.State, UpdatedAt: issue.UpdatedAt,
+				Why: pipelineConfirmationReason(repo, issue.Number)})
+		}
+	}
+	sortBoardItems(board.ConfirmationIssues)
+
 	detailed := 0
 	for _, c := range cands {
 		item := pipeline.Item{State: c.state, Issue: c.number, Title: c.title, InQueue: c.queuePos > 0, QueuePosition: c.queuePos}
@@ -486,9 +695,11 @@ func buildRepoBoard(ctx context.Context, d pipelineDeps, repo string, rc config.
 					item.Attention = append(item.Attention, "waiting for review (manual merge)")
 				}
 				// A spent ledger alone is historical once the failure has recovered.
-				repairRelevant := item.PR.CI == "failure" || item.PR.CI == "unknown" || item.Stage == pipeline.StageRejected || item.Stage == pipeline.StageInfraRetry
+				repairRelevant := item.PR.CI == "failure" || item.PR.CI == "unknown" || item.Stage == pipeline.StageRejected || item.Stage == pipeline.StageInfraRetry ||
+					item.Acceptance != nil && item.Acceptance.Verdict == "blocked" && item.Acceptance.BlockedRepairable
 				if err := checkRepairBudget(snapshot.DataDir(), repo, item.PR.Number, now); repairRelevant && (errors.Is(err, errRepairExhausted) || errors.Is(err, errRepairBlocked)) {
 					item.Stage, item.Why = pipeline.StageBlocked, "needs a person: "+err.Error()
+					item.RepairStop = err.Error()
 					item.Attention = append(item.Attention, item.Why)
 				}
 			}
@@ -673,6 +884,8 @@ func pipelineAcceptanceRecords(info *pipeline.AcceptanceInfo, c acceptance.Contr
 	info.PlannerSession = pipelineSessionID(latest.Plan.Planner.SessionID)
 	info.ReviewerSession = pipelineSessionID(latest.Reviewer.SessionID)
 	info.Summary = pipelineSummary(latest.Report)
+	info.NextOwner = pipelineClip(strings.ToLower(strings.TrimSpace(latest.NextOwner)), 100)
+	info.NextAction = pipelineSummary(latest.NextAction)
 	if info.LatestIsInfra {
 		info.NextRetryAt = lastInfra.Add(harvestInfraCooldown).UTC().Format(time.RFC3339)
 		info.Verdict = ""

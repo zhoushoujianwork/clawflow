@@ -31,6 +31,7 @@ type syncableRepo struct {
 	Priority              int                 `yaml:"priority,omitempty"`
 
 	AcceptanceSetupCommand string `yaml:"acceptance_setup_command,omitempty"`
+	AcceptanceIsolatedRun  bool   `yaml:"acceptance_isolated_run,omitempty"`
 
 	Enabled            bool              `yaml:"enabled"`
 	Platform           string            `yaml:"platform,omitempty"`
@@ -59,6 +60,7 @@ type syncableRepo struct {
 func toSyncable(r Repo) syncableRepo {
 	return syncableRepo{
 		AcceptanceSetupCommand: r.AcceptanceSetupCommand,
+		AcceptanceIsolatedRun:  r.AcceptanceIsolatedRun,
 		AcceptanceMaxParallel:  r.AcceptanceMaxParallel, AcceptanceWorker: r.AcceptanceWorker, WorkerTags: r.WorkerTags, WorkerTagsByKind: r.WorkerTagsByKind, AllowedIssueAuthors: r.AllowedIssueAuthors, Priority: r.Priority,
 		Enabled:            r.Enabled,
 		Platform:           r.Platform,
@@ -87,6 +89,7 @@ func toSyncable(r Repo) syncableRepo {
 func fromSyncable(s syncableRepo, localPath string) Repo {
 	return Repo{
 		AcceptanceSetupCommand: s.AcceptanceSetupCommand,
+		AcceptanceIsolatedRun:  s.AcceptanceIsolatedRun,
 		AcceptanceMaxParallel:  s.AcceptanceMaxParallel, AcceptanceWorker: s.AcceptanceWorker, WorkerTags: s.WorkerTags, WorkerTagsByKind: s.WorkerTagsByKind, AllowedIssueAuthors: s.AllowedIssueAuthors, Priority: s.Priority,
 		Enabled:            s.Enabled,
 		Platform:           s.Platform,

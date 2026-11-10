@@ -46,10 +46,15 @@ type Evidence struct {
 	StableDiff   []string          `json:"stable_changes"`
 	// StableIgnored records normal stable scheduler activity; it never affects Status.
 	StableIgnored []string `json:"stable_ignored_activity,omitempty"`
-	Recorded      string   `json:"recorded"`
-	Status        string   `json:"status"`
-	NextOwner     string   `json:"next_owner,omitempty"`
-	NextAction    string   `json:"next_action,omitempty"`
+	// TaskRequired marks evidence of a run whose verdict depends on one real
+	// task passing through the candidate. Offline results then stay reported but
+	// are not required: exact-head CI owns the unit tests.
+	TaskRequired bool     `json:"task_required,omitempty"`
+	Task         *TaskRun `json:"task_run,omitempty"`
+	Recorded     string   `json:"recorded"`
+	Status       string   `json:"status"`
+	NextOwner    string   `json:"next_owner,omitempty"`
+	NextAction   string   `json:"next_action,omitempty"`
 
 	secrets []string
 }
@@ -63,7 +68,7 @@ func NewEvidence(p Plan, binarySHA string) *Evidence {
 		SOPDigest:   p.Pin.SOPDigest, Capabilities: p.Pin.Capabilities,
 		Layers: map[string]string{
 			"offline": NotRun, "environment-ready": NotRun, "candidate-loaded": NotRun,
-			"lifecycle": NotRun, "live-write": NotRun, "save-reload": NotRun, "native-visual": Pending,
+			"lifecycle": NotRun, TaskLayer: NotRun, "live-write": NotRun, "save-reload": NotRun, "native-visual": Pending,
 		},
 		Status: NotRun,
 	}
@@ -83,6 +88,12 @@ var (
 	kvPassword  = regexp.MustCompile(`(?i)(password\s*=\s*)([^\s"]+)`)
 	bearer      = regexp.MustCompile(`(?i)(bearer\s+)[^\s"]+`)
 )
+
+func scrubText(s string) string {
+	s = urlPassword.ReplaceAllString(s, "${1}****@")
+	s = kvPassword.ReplaceAllString(s, "${1}****")
+	return bearer.ReplaceAllString(s, "${1}****")
+}
 
 func (e *Evidence) scrub(s string) string {
 	for _, v := range e.secrets {
@@ -107,7 +118,21 @@ func (e *Evidence) Command(name string, args []string, code int, result string) 
 func (e *Evidence) Finish() {
 	e.Recorded = time.Now().UTC().Format(time.RFC3339)
 	var failed, blocked, unrun bool
-	for _, layer := range []string{"offline", "environment-ready", "candidate-loaded", "lifecycle"} {
+	required := []string{"offline", "environment-ready", "candidate-loaded", "lifecycle"}
+	if e.TaskRequired {
+		// The task layer is recomputed from the recorded facts, never trusted.
+		switch {
+		case e.Task == nil || (!e.Task.Settled && e.Task.Failure == ""):
+			// Not finished: the candidate has not been stopped and checked yet.
+			e.Layers[TaskLayer] = NotRun
+		case e.Task.Passed():
+			e.Layers[TaskLayer] = Passed
+		default:
+			e.Layers[TaskLayer] = Failed
+		}
+		required = []string{"environment-ready", "candidate-loaded", "lifecycle", TaskLayer}
+	}
+	for _, layer := range required {
 		switch e.Layers[layer] {
 		case Passed:
 		case Blocked:
@@ -156,7 +181,10 @@ func (e *Evidence) Write(path string) error {
 }
 
 // Verify checks a stored record against the commit under review.
-func Verify(path, commit string) (*Evidence, error) {
+func Verify(path, commit string) (*Evidence, error) { return VerifyWith(path, commit, false) }
+
+// VerifyWith is Verify that can additionally require a passed real-task run.
+func VerifyWith(path, commit string, requireTask bool) (*Evidence, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -165,18 +193,38 @@ func Verify(path, commit string) (*Evidence, error) {
 	if err := json.Unmarshal(data, &e); err != nil {
 		return nil, err
 	}
-	switch {
-	case !ValidCommit(commit) || e.Commit != commit:
-		return nil, fmt.Errorf("evidence is for %s, not the pinned candidate %s", e.Commit, commit)
-	case e.ID != IDFor(e.Commit):
-		return nil, fmt.Errorf("evidence runtime identity does not match its commit")
-	case e.Status != Passed:
-		return nil, fmt.Errorf("evidence status is %s", e.Status)
-	}
-	computed := e
-	computed.Finish()
-	if computed.Status != Passed {
-		return nil, fmt.Errorf("evidence claims passed but its recorded layers produce %s", computed.Status)
+	if err := CheckEvidence(e, commit, requireTask); err != nil {
+		return nil, err
 	}
 	return &e, nil
+}
+
+// CheckEvidence applies the Verify rules to an in-memory record, recomputing the
+// status from the recorded layers and task facts rather than trusting any flag.
+func CheckEvidence(e Evidence, commit string, requireTask bool) error {
+	switch {
+	case !ValidCommit(commit) || e.Commit != commit:
+		return fmt.Errorf("evidence is for %s, not the pinned candidate %s", e.Commit, commit)
+	case e.ID != IDFor(e.Commit):
+		return fmt.Errorf("evidence runtime identity does not match its commit")
+	case requireTask && (!e.TaskRequired || e.Task == nil):
+		return fmt.Errorf("evidence has no real task run (task-lifecycle is %s)", e.Layers[TaskLayer])
+	case requireTask && (e.Task.Commit != commit || e.Task.RuntimeID != e.ID):
+		return fmt.Errorf("task run belongs to another candidate")
+	case e.Status != Passed:
+		return fmt.Errorf("evidence status is %s", e.Status)
+	}
+	computed := e
+	computed.Layers = map[string]string{}
+	for k, v := range e.Layers {
+		computed.Layers[k] = v
+	}
+	computed.Finish()
+	if computed.Status != Passed {
+		return fmt.Errorf("evidence claims passed but its recorded layers produce %s", computed.Status)
+	}
+	if requireTask && !e.Task.Passed() {
+		return fmt.Errorf("the recorded task run did not pass")
+	}
+	return nil
 }

@@ -54,6 +54,12 @@ type Repo struct {
 	AutoMerge          bool              `yaml:"auto_merge,omitempty"`
 	AcceptanceRequired bool              `yaml:"acceptance_required,omitempty" json:"acceptance_required,omitempty"`
 
+	// AcceptanceIsolatedRun makes acceptance of a PR that changes controller, worker,
+	// scheduling or storage code run one real task in an isolated candidate of the
+	// exact head first. It only applies to the repository holding ClawFlow's own
+	// source, because the candidate is built from the checkout.
+	AcceptanceIsolatedRun bool `yaml:"acceptance_isolated_run,omitempty" json:"acceptance_isolated_run,omitempty"`
+
 	// AcceptanceSetupCommand prepares generated prerequisites in disposable checkouts.
 	AcceptanceSetupCommand string `yaml:"acceptance_setup_command,omitempty" json:"acceptance_setup_command,omitempty"`
 
@@ -1292,7 +1298,17 @@ func ParseRepoInput(input string, gitlabHosts []string) (RepoInfo, error) {
 		return RepoInfo{OwnerRepo: parts[0] + "/" + parts[1], Platform: "github"}, nil
 	}
 
-	// GitLab (known host or self-hosted): keep full path as project identifier
+	// GitLab (known host or self-hosted): keep full path as project identifier.
+	// "/-/" is GitLab's reserved separator between a project path and its pages
+	// (issues, work_items, merge_requests, ...). A page link such as the web_url
+	// GitLab 18+ returns for an issue (".../-/work_items/1") names the project
+	// before it, never a project called "-".
+	if fullPath == "-" || strings.HasPrefix(fullPath, "-/") {
+		fullPath = "" // no project before the separator
+	} else if i := strings.Index(fullPath, "/-/"); i >= 0 {
+		fullPath = fullPath[:i]
+	}
+	fullPath = strings.TrimSuffix(fullPath, "/-")
 	if fullPath == "" || !strings.Contains(fullPath, "/") {
 		return RepoInfo{}, fmt.Errorf("URL %q does not contain a valid project path", input)
 	}

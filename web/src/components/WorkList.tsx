@@ -22,6 +22,8 @@ export interface ListItem extends WorkItem {
 export interface ListRepo<T extends ListItem> {
   repo: string
   enabled: boolean
+  /** Registered with automation off: recorded history only. */
+  stopped?: boolean
   items: T[]
 }
 export interface QueueEntry {
@@ -56,9 +58,14 @@ export function workRows<T extends ListItem>(repos: ListRepo<T>[], queue: QueueE
     const key = JSON.stringify([repo.repo, item.issue])
     if (seen.has(key)) return []
     seen.add(key)
-    return [{ key, repo: repo.repo, enabled: repo.enabled, item, queue: positions.get(key) }]
+    return [{ key, repo: repo.repo, enabled: repo.enabled, stopped: !!repo.stopped, item, queue: positions.get(key) }]
   }))
-  const selected = new Set(selectWorkItems(rows.map(r => r.item), filter))
+  // The Stopped view lists every recorded item of stopped repositories; every
+  // other view leaves them out because nothing there is being processed.
+  const live = rows.filter(r => !r.stopped)
+  const selected = new Set(filter === 'stopped'
+    ? rows.filter(r => r.stopped).map(r => r.item)
+    : selectWorkItems(live.map(r => r.item), filter))
   const q = query.q?.trim().toLowerCase() || ''
   return rows.filter(row => selected.has(row.item)
     && (!query.workRepo || row.repo === query.workRepo)
@@ -84,7 +91,7 @@ export function workReason(item: ListItem, enabled: boolean, queue?: QueueEntry)
   // Explain explicit scheduler verdicts; do not estimate capacity from visible rows.
   if (item.stage === 'merged') return item.why || 'Pull request merged'
   const reasons: string[] = []
-  if (!enabled) reasons.push('Automation disabled for this repository')
+  if (!enabled) reasons.push('Automation is off for this repository; this is the last recorded state')
   if (item.stage === 'ci_pending') reasons.push('Waiting for CI on the current revision')
   if (item.stage === 'acceptance_pending') reasons.push('Waiting for independent acceptance')
   if (queue?.state === 'waiting:dependency') reasons.push('Waiting for dependencies to finish')
@@ -139,7 +146,8 @@ export function WorkList<T extends ListItem>({ repos, queue, filter = 'active', 
           return <li key={row.key} data-work-key={row.key} className="p-4 min-w-0 [overflow-wrap:anywhere]">
             <div className="flex flex-wrap items-start gap-2">
               <a className="text-base font-semibold text-brand flex-1 min-w-0 basis-56" href={issueUrl(row.repo, item.issue, repoInfo)} target="_blank" rel="noreferrer">{item.title || `Issue #${item.issue}`}</a>
-              <span data-stage={item.stage} className="text-xs border rounded-full px-2 py-1">{stageLabels[item.stage] || item.stage}</span>
+              {row.stopped && <span data-stopped className="text-xs border rounded-full px-2 py-1 bg-secondary">Automation off</span>}
+              <span data-stage={item.stage} className="text-xs border rounded-full px-2 py-1">{row.stopped && item.stage === 'queued' ? 'Not processed' : stageLabels[item.stage] || item.stage}</span>
             </div>
             <p data-work-reason className="text-sm mt-2 whitespace-normal">{workReason(item, row.enabled, row.queue)}</p>
             <div className="text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 mt-3">

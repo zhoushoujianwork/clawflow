@@ -39,6 +39,10 @@ type Contract struct {
 	PolicyDigest   string   `json:"policy_digest"`
 	Requirements   string   `json:"requirements"`
 	Development    Identity `json:"development"`
+	// IsolatedRun is set when the PR changes controller, worker, scheduling or
+	// storage code and the repository requires a real isolated run. It is part
+	// of the digest only when true, so existing contracts keep their identity.
+	IsolatedRun bool `json:"isolated_run,omitempty"`
 }
 
 func nonempty(values ...string) bool {
@@ -265,6 +269,8 @@ func (r Record) validateCorrection(c Contract) error {
 
 type Record struct {
 	EnvironmentNotes []string `json:"environment_notes,omitempty"`
+	// IsolatedRun is the runner-observed real-task run of the exact head.
+	IsolatedRun *IsolatedRun `json:"isolated_run,omitempty"`
 
 	Unstructured    bool               `json:"unstructured,omitempty"`
 	ValidationError string             `json:"validation_error,omitempty"`
@@ -314,7 +320,18 @@ func hasExecutedCommand(evidence []string) bool {
 // Evaluate returns nil only for a complete passing record for exactly expected.
 // Callers must obtain expected from their current authoritative inputs.
 func Evaluate(expected Contract, r Record) error {
-	return evaluate(expected, r, true, true)
+	if err := evaluate(expected, r, true, true); err != nil {
+		return err
+	}
+	if expected.IsolatedRun {
+		if err := validateIsolated(expected, r); err != nil {
+			return err
+		}
+		if r.IsolatedRun.Status != IsolatedPassed {
+			return errors.New("the isolated run of the exact head did not pass")
+		}
+	}
+	return nil
 }
 
 func evaluate(expected Contract, r Record, checkRequirements, requireExecution bool) error {

@@ -39,6 +39,11 @@ type Runner struct {
 	// PRText is the redacted, bounded PR title and body, shown to the reviewer
 	// as untrusted reference data. It is never given to the planner.
 	PRText *PRText
+	// Isolated runs one real task through an isolated build of the exact head
+	// when the contract requires it. An error is an infrastructure error of this
+	// attempt (the run could not be attempted); a run that was attempted and did
+	// not pass is returned with Status "failed" and no error.
+	Isolated func(ctx context.Context, c Contract, workspace string) (IsolatedRun, error)
 }
 
 func randomID() string { return execution.NewSessionKey() }
@@ -208,6 +213,24 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 			record.CI = &ci
 		}
 	}
+	if c.IsolatedRun {
+		// The run happens before the review so the reviewer can see its result,
+		// and a missing hook never lets the review pass without it.
+		if runner.Isolated == nil {
+			return record, errors.New("isolated run required but no runner is available")
+		}
+		run, isolatedErr := runner.Isolated(ctx, c, workspace)
+		if isolatedErr != nil {
+			return record, fmt.Errorf("isolated run could not be attempted: %w", isolatedErr)
+		}
+		if err = run.Validate(c); err != nil {
+			return record, err
+		}
+		if err = ctx.Err(); err != nil {
+			return record, err
+		}
+		record.IsolatedRun = &run
+	}
 	record.ReviewStartedAt = time.Now().UTC()
 	// Exclude development identity from the model prompt; the digest still pins
 	// the complete contract, and native identity is verified outside the model.
@@ -252,6 +275,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	}
 	prompt += "The contract base_sha and its merge base with HEAD are available locally. Use git diff <base_sha>...HEAD and git log <base_sha>..HEAD for offline comparisons; no remote or credentials are available. "
 	prompt += runner.PRText.promptBlock()
+	prompt += isolatedPrompt(record.IsolatedRun)
 	reviewed, reviewErr := runner.executeRecorded(ctx, c, "acceptance-review", execute, prompt+string(input),
 		execution.Options{Workspace: workspace, Role: "acceptance", PermissionMode: "bypassPermissions"})
 	record.Reviewer = native(reviewed)
@@ -400,11 +424,14 @@ func applyReviewReport(c Contract, record *Record, text string) error {
 	record.Checks, record.NextAction, record.NextOwner = output.Checks, output.NextAction, output.NextOwner
 	record.Verdict = output.Status
 	record.Report = output.Summary
+	// A failed isolated run is a demonstrated defect whatever the reviewer found.
+	enforceIsolatedRun(c, record)
 	if err := ValidateChecks(c, *record); err != nil {
 		return err
 	}
 	record.Findings = DeduplicateFindings(record.Findings)
 	record.Evidence = output.Evidence
+	record.citeIsolatedRun()
 	return nil
 }
 

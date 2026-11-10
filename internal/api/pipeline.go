@@ -85,13 +85,18 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 		snap = pipeline.Snapshot{Repos: []pipeline.RepoBoard{}, Events: []pipeline.Event{}, GlobalQueue: []pipeline.GlobalQueueEntry{}}
 	}
 	for _, repo := range snap.Repos {
-		stale = stale || repo.Stale
+		stale = stale || (repo.Stale && !repo.Stopped)
 	}
 	board := pipeline.Board{Snapshot: snap, Stale: stale, Refreshing: pipelineCache.refreshing, Error: pipelineCache.err}
 	deliveryAt, deliveryCategory := pipeline.ParseTime(snap.GeneratedAt), pipelineCache.err
 	allObserved := true
 	sources := []pipelineSourceHealth{{}}
 	for _, repo := range snap.Repos {
+		// A stopped repository is never refreshed from its provider, so it has
+		// no observation time to age; counting it would mark every board stale.
+		if repo.Stopped {
+			continue
+		}
 		category := pipelineCache.err
 		if repo.Error != "" {
 			category = pipelineErrorCategory(errors.New(repo.Error))
@@ -135,6 +140,9 @@ func HandlePipeline(w http.ResponseWriter, r *http.Request) {
 	liveHealth := projectPipelineExecutions(r.Context(), &board, now)
 	sources = append(sources, liveHealth)
 	for _, repo := range board.Repos {
+		if repo.Stopped {
+			continue
+		}
 		health := sourceHealth("execution", repo.Repo, time.Time{}, now, 30*time.Second, false, "no_data")
 		for _, items := range [][]pipeline.Item{repo.Items, repo.SkippedIssues} {
 			for _, item := range items {
@@ -250,6 +258,9 @@ func rememberPipelineDelivery(snap pipeline.Snapshot) {
 	observed := make(map[string]time.Time, len(snap.Repos))
 	at := pipeline.ParseTime(snap.GeneratedAt)
 	for _, repo := range snap.Repos {
+		if repo.Stopped {
+			continue
+		}
 		observed[repo.Repo] = pipelineCache.observed[repo.Repo]
 		if !repo.Stale && repo.Error == "" && !at.IsZero() {
 			observed[repo.Repo] = at
@@ -419,6 +430,12 @@ func projectPipelineExecutions(_ context.Context, board *pipeline.Board, now tim
 	var rows []store.Run
 	for i := range board.Repos {
 		repo := &board.Repos[i]
+		// Stopped repositories show recorded history only. Their attempts are
+		// never matched against live Offload activity, so reading the board
+		// cannot cause a live-status query on their behalf.
+		if repo.Stopped {
+			continue
+		}
 		repo.Items = slices.Clone(repo.Items)
 		repo.SkippedIssues = slices.Clone(repo.SkippedIssues)
 		for _, items := range [][]pipeline.Item{repo.Items, repo.SkippedIssues} {

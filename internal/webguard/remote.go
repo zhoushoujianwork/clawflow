@@ -1,6 +1,7 @@
 package webguard
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -10,6 +11,16 @@ import (
 	"regexp"
 	"strings"
 )
+
+type readOnlyKey struct{}
+
+// ReadOnlySession reports whether the request was admitted as a read-only
+// remote client. Handlers use it to return a reduced view of data that the
+// machine's owner may see in full.
+func ReadOnlySession(ctx context.Context) bool {
+	v, _ := ctx.Value(readOnlyKey{}).(bool)
+	return v
+}
 
 // RemotePolicy limits LAN clients using only the transport peer, never proxy headers.
 type RemotePolicy struct {
@@ -89,10 +100,13 @@ func (p *RemotePolicy) Middleware(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if p.ReadOnly(r) && p.redactor != nil {
-			rw := newRedactWriter(w, p.redactor)
-			defer rw.finish()
-			w = rw
+		if p.ReadOnly(r) {
+			r = r.WithContext(context.WithValue(r.Context(), readOnlyKey{}, true))
+			if p.redactor != nil {
+				rw := newRedactWriter(w, p.redactor)
+				defer rw.finish()
+				w = rw
+			}
 		}
 		if p.ReadOnly(r) && r.Method == http.MethodHead {
 			read := r.Clone(r.Context())
@@ -110,18 +124,24 @@ func remoteReadPath(p string) bool {
 		return false
 	}
 	switch p {
-	case "/api/session", "/api/pipeline", "/api/run/status", "/api/runs", "/api/usage",
+	case "/api/session", "/api/pipeline", "/api/decisions", "/api/run/status", "/api/runs", "/api/usage",
 		"/api/jobs", "/api/runners",
 		"/data/meta.json", "/data/repos.json", "/data/pending.json", "/data/issues.json",
 		"/", "/index.html", "/dashboard", "/pipeline", "/usage", "/jobs", "/runners", "/favicon.svg", "/logo.svg":
 		return true
 	}
-	return strings.HasPrefix(p, "/assets/") || jobPath.MatchString(p)
+	return strings.HasPrefix(p, "/assets/") || jobPath.MatchString(p) || runPage.MatchString(p)
 }
 
 // jobPath admits one job's page, detail and log stream. The id is the
 // controller-generated hex task id; anything else stays private.
 var jobPath = regexp.MustCompile(`^/(?:jobs/[A-Za-z0-9]{1,128}|api/jobs/[A-Za-z0-9]{1,128}(?:/logs)?)$`)
+
+// runPage is the single-attempt detail route that /usage and /pipeline link to.
+// It serves only the static page; the attempt's data comes from /api/runs, which
+// returns a reduced view to read-only sessions. The raw event stream under
+// /data/runs/ is not in the allowlist and stays private.
+var runPage = regexp.MustCompile(`^/runs/[A-Za-z0-9._-]{1,200}/issue-[0-9]{1,10}/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z$`)
 
 // Existing JSON handlers accept GET only; HEAD runs the same read without a body.
 type headResponseWriter struct{ http.ResponseWriter }

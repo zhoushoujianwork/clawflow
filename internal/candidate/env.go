@@ -25,9 +25,16 @@ var inheritedEnv = []string{"PATH", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME"}
 func (p Plan) Env(dsn string) []string {
 	env := []string{}
 	for _, name := range inheritedEnv {
-		if v, ok := os.LookupEnv(name); ok {
-			env = append(env, name+"="+v)
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			continue
 		}
+		if name == "PATH" {
+			// The candidate's own bin directory resolves first, so a fixture
+			// agent placed there replaces the real model CLI for this runtime only.
+			v = p.Bin + string(os.PathListSeparator) + v
+		}
+		env = append(env, name+"="+v)
 	}
 	env = append(env,
 		"HOME="+p.Home,
@@ -55,6 +62,17 @@ type ConfigOptions struct {
 	// Dispatch enables the fixture repositories. It is false by default so a
 	// fresh candidate cannot start any work.
 	Dispatch bool
+	// LocalPaths maps fixture repositories to clones below the candidate root;
+	// a repository whose clone lies elsewhere is disabled by the boundary.
+	LocalPaths map[string]string
+	// AllowedAuthors lists the fixture issue authors permitted to start work.
+	AllowedAuthors []string
+	// Profile selects the Offload profile of the candidate's own home.
+	Profile string
+	// NoAcceptance leaves acceptance off for the fixture repository. The task run
+	// exercises the implementation path, which would otherwise start the
+	// acceptance planner and need a real model.
+	NoAcceptance bool
 }
 
 // BuildConfig returns the candidate's configuration. It contains no
@@ -66,6 +84,10 @@ func (p Plan) BuildConfig(opts ConfigOptions) (*config.Config, error) {
 	cfg.Settings.RunIntervalMinutes = 0
 	cfg.Settings.Housekeeping.Disabled = true
 	cfg.Settings.Execution.Engine = opts.ExecutionEngine
+	cfg.Settings.Execution.Profile = opts.Profile
+	if opts.Profile != "" {
+		cfg.Settings.AgentTimeout = 120
+	}
 	names := make([]string, 0, len(opts.Fixtures))
 	for name := range opts.Fixtures {
 		names = append(names, name)
@@ -78,8 +100,9 @@ func (p Plan) BuildConfig(opts ConfigOptions) (*config.Config, error) {
 		}
 		cfg.Repos[name] = config.Repo{
 			Enabled: opts.Dispatch, Platform: "gitlab", BaseURL: base, BaseBranch: "main",
-			MaxInFlight: 1, AutoMerge: false, AcceptanceRequired: true, AcceptanceWorker: "different",
+			MaxInFlight: 1, AutoMerge: false, AcceptanceRequired: !opts.NoAcceptance, AcceptanceWorker: "different",
 			WorkerTags: []string{p.Lane("dev")}, WorkerTagsByKind: map[string][]string{"acceptance": {p.Lane("review")}},
+			LocalPath: opts.LocalPaths[name], AllowedIssueAuthors: opts.AllowedAuthors,
 			TestingSOPRequired: p.Pin.SOPRequired, TestingSOPDigest: p.Pin.SOPDigest, RequiredCapabilities: p.Pin.Capabilities,
 		}
 	}
