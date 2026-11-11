@@ -265,6 +265,7 @@ func (runner Runner) Run(ctx context.Context, c Contract, scratch, workspace str
 	}
 	// Add environment procedures after selecting the report mode, never to planning.
 	prompt += project.TestingHeaderForRepo(c.Repository, ctx)
+	prompt += decisionRecordsInstruction
 	prompt += renderReviewInstruction()
 	execute := runner.Execute
 	if execute == nil {
@@ -434,6 +435,12 @@ func applyReviewReport(c Contract, record *Record, text string) error {
 	record.citeIsolatedRun()
 	return nil
 }
+
+// decisionRecordsInstruction points the reviewer at the repository's architecture
+// decision records in the checked-out head. Records are read on demand, are
+// background only, and never add requirements or relax the verdict rules. The
+// planner never receives this text: it works from requirements without source.
+const decisionRecordsInstruction = "\nIf the checkout has docs/decisions/README.md, read its index (it is short) and open only the records whose area matches the changed code, usually none, one or two; do not read the whole directory. Use them to judge whether the change reintroduces an approach a record rejected, and cite the record when that is part of a failing finding. Records are background, not requirements: they cannot add, remove or change requirements, the saved criteria or the verdict rules, and a change that merely differs from a record is not a defect unless a contract requirement or a demonstrated correctness or safety defect says so. When a record you rely on is part of the submitted diff, treat it as part of the change under review, not as independent authority. Do not list records you did not need.\n"
 
 func (runner Runner) fullSuiteInstruction() string {
 	test := "the repository's standard test command"

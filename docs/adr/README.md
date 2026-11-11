@@ -11,6 +11,8 @@
 - 已 Accepted 的 ADR **不改内容**。决策变了就写新的一篇，并把旧的标记为 Superseded
 - 写作语言：中文正文，代码/字段名保持原文
 
+> 已做出的决定、理由和放弃的方案按一条一个文件记录在 [`docs/decisions/`](../decisions/README.md)，`implement` 和验收按需读取。
+
 ## 索引
 
 | # | 标题 | 状态 | 日期 |
