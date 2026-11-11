@@ -67,6 +67,7 @@ func openControllerLog(out io.Writer) {
 // startCoordinator binds synchronously so startup failures reach the CLI.
 func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, out io.Writer, onError func(error)) (func(), error) {
 	api.WorkerPoolSource = nil
+	api.JobSource = nil
 	if !settings.Enabled {
 		return func() {}, nil
 	}
@@ -128,6 +129,7 @@ func startCoordinator(ctx context.Context, settings config.CoordinatorSettings, 
 		return nil, err
 	}
 	api.WorkerPoolSource = tasks.Board
+	api.JobSource = tasks
 	fmt.Fprintf(out, "Coordinator HTTPS → %s\nSHA-256 fingerprint: %s\n", listener.Addr(), pin)
 	reconcileCtx, reconcileCancel := context.WithCancel(ctx)
 	reconcileDone := make(chan struct{})

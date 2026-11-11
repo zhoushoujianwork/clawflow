@@ -26,6 +26,15 @@ func ReadOnlySession(ctx context.Context) bool {
 type RemotePolicy struct {
 	readonly bool
 	networks []*net.IPNet
+	redactor *Redactor
+}
+
+// WithRedactor makes every response to a read-only (non-loopback) client pass
+// through r, which removes credentials and machine-local paths. Loopback
+// clients are the machine's owner and see responses unchanged.
+func (p *RemotePolicy) WithRedactor(r *Redactor) *RemotePolicy {
+	p.redactor = r
+	return p
 }
 
 func NewRemotePolicy(mode string, cidrs []string) (*RemotePolicy, error) {
@@ -93,6 +102,11 @@ func (p *RemotePolicy) Middleware(next http.Handler) http.Handler {
 		}
 		if p.ReadOnly(r) {
 			r = r.WithContext(context.WithValue(r.Context(), readOnlyKey{}, true))
+			if p.redactor != nil {
+				rw := newRedactWriter(w, p.redactor)
+				defer rw.finish()
+				w = rw
+			}
 		}
 		if p.ReadOnly(r) && r.Method == http.MethodHead {
 			read := r.Clone(r.Context())
@@ -111,12 +125,17 @@ func remoteReadPath(p string) bool {
 	}
 	switch p {
 	case "/api/session", "/api/pipeline", "/api/decisions", "/api/run/status", "/api/runs", "/api/usage",
+		"/api/jobs", "/api/runners",
 		"/data/meta.json", "/data/repos.json", "/data/pending.json", "/data/issues.json",
-		"/", "/index.html", "/dashboard", "/pipeline", "/usage", "/favicon.svg", "/logo.svg":
+		"/", "/index.html", "/dashboard", "/pipeline", "/usage", "/jobs", "/runners", "/favicon.svg", "/logo.svg":
 		return true
 	}
-	return strings.HasPrefix(p, "/assets/") || runPage.MatchString(p)
+	return strings.HasPrefix(p, "/assets/") || jobPath.MatchString(p) || runPage.MatchString(p)
 }
+
+// jobPath admits one job's page, detail and log stream. The id is the
+// controller-generated hex task id; anything else stays private.
+var jobPath = regexp.MustCompile(`^/(?:jobs/[A-Za-z0-9]{1,128}|api/jobs/[A-Za-z0-9]{1,128}(?:/logs)?)$`)
 
 // runPage is the single-attempt detail route that /usage and /pipeline link to.
 // It serves only the static page; the attempt's data comes from /api/runs, which

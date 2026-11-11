@@ -267,6 +267,7 @@ type LogEntry struct {
 // LogRead is the administrator view of one execution's output.
 type LogRead struct {
 	TaskID       string          `json:"task_id"`
+	TaskState    string          `json:"task_state,omitempty"`
 	Epoch        int64           `json:"epoch"`
 	Epochs       []LogEpoch      `json:"epochs"`
 	Active       bool            `json:"active"`
@@ -295,6 +296,7 @@ func (s *Store) ReadLog(ctx context.Context, taskID string, epoch, after int64, 
 		}
 		return out, err
 	}
+	out.TaskState = t.State
 	var attempts []TaskAttempt
 	if err := db.Where("task_id = ?", taskID).Order("lease_epoch").Find(&attempts).Error; err != nil {
 		return out, err
@@ -316,6 +318,7 @@ func (s *Store) ReadLog(ctx context.Context, taskID string, epoch, after int64, 
 		out.Availability = AvailabilityPending
 		return out, nil
 	}
+	out.TaskState = t.State
 	out.Active = t.State == "leased" && t.FencingToken == epoch
 	var streams []LogStream
 	if err := db.Where("task_id = ? AND lease_epoch = ?", taskID, epoch).Order("created_at, invocation").Find(&streams).Error; err != nil {

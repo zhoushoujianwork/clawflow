@@ -23,8 +23,11 @@ function AppLayout() {
       .catch(() => setSessionReady(true))
   }, [])
   // Run detail pages are linked from Work and Usage; their data comes from /api/runs,
-  // which returns a reduced view to read-only sessions.
-  const allowedPage = ['/pipeline', '/usage'].includes(pathname) || /^\/runs\/[^/]+\/issue-\d+\/[^/]+$/.test(pathname)
+  // which returns a reduced view to read-only sessions. /jobs and /runners read the
+  // coordinator through /api/jobs and /api/runners.
+  const allowedPage = ['/pipeline', '/usage', '/jobs', '/runners'].includes(pathname)
+    || /^\/jobs\/[A-Za-z0-9]+$/.test(pathname)
+    || /^\/runs\/[^/]+\/issue-\d+\/[^/]+$/.test(pathname)
   const [currentVersion, setCurrentVersion] = useState<string | null>(null)
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
   const [channel, setChannel] = useState('')
@@ -117,6 +120,8 @@ function AppLayout() {
             </a>
             <nav className="primary-nav" aria-label="Primary">
               <ShellLink to="/pipeline">Work</ShellLink>
+              <ShellLink to="/jobs">Runs</ShellLink>
+              <ShellLink to="/runners">Runners</ShellLink>
               <ShellLink to="/usage">Usage</ShellLink>
               {!readonly && <NavigationGroup label="Management" active={/^\/(repos|projects)(\/|$)/.test(pathname)} pathname={pathname}>
                 <ShellLink to="/repos">Repositories</ShellLink>
@@ -219,7 +224,7 @@ function StewardButton() {
     aria-label="与平台 steward 对话" title="与平台 steward 对话">Steward</button>
 }
 
-type ShellDestination = '/pipeline' | '/usage' | '/repos' | '/projects' | '/operators' | '/settings'
+type ShellDestination = '/pipeline' | '/jobs' | '/runners' | '/usage' | '/repos' | '/projects' | '/operators' | '/settings'
 
 function ShellLink({ to, children }: { to: ShellDestination; children: ReactNode }) {
   return <Link to={to} className="shell-link" activeProps={{ 'aria-current': 'page' }}>{children}</Link>
