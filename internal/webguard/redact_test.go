@@ -263,3 +263,20 @@ func TestRemoteJobPathsAreReadOnly(t *testing.T) {
 		t.Fatalf("loopback write = %d", w.Code)
 	}
 }
+
+// Agent logs wrap paths in Markdown; a path after a backtick, "*" or "_" is
+// still redacted and the closing markup is kept.
+func TestRedactPathsInMarkdown(t *testing.T) {
+	r := NewRedactor(nil, nil)
+	for in, want := range map[string]string{
+		"I edited `/Users/worker1/proj/main.go` and ran **/home/worker1/wt/x.go**": "I edited `[path]` and ran **[path]**",
+		"see _/home/bob/notes.md_":               "see _[path]", // "_" is valid in file names, so a closing "_" goes with the path
+		"built in `/workspace/repo/out`":         "built in `[path]`",
+		"route `/api/jobs/1` and `/data/x` stay": "route `/api/jobs/1` and `/data/x` stay",
+		"`~/proj/a.go`":                          "`[path]`",
+	} {
+		if got := r.Text(in); got != want {
+			t.Errorf("Text(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

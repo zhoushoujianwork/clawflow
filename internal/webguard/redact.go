@@ -110,7 +110,8 @@ func (r *Redactor) knownPaths() *regexp.Regexp {
 
 // subPath matches the "/a/b/c" tail of a path. macOS keeps user data under
 // "Application Support", the one common directory name that contains a space.
-const subPath = `(?:/(?:Application Support|[^\s"'<>(){}\[\],;|\\/]+))*/?`
+// A segment stops at a closing Markdown backtick or "*".
+const subPath = `(?:/(?:Application Support|[^\s"'<>(){}\[\],;|\\/*` + "`" + `]+))*/?`
 
 var (
 	pemRe     = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`)
@@ -124,11 +125,13 @@ var (
 	// "~" or an absolute path; pathRoots decides whether the first segment is
 	// one a build machine or CI runner uses. Server-relative URLs such as
 	// /api/... or /data/... never start with one of those roots.
-	pathRe = regexp.MustCompile(`(^|[\s"'(\[{=:,<>@|])(~|/[A-Za-z0-9_.@+-]*)(` + subPath + `)`)
+	// Markdown wraps paths in backticks, "*" and "_", so those also start one.
+	pathRe = regexp.MustCompile("(^|[\\s\"'(\\[{=:,<>@|`*_])(~|/[A-Za-z0-9_.@+-]*)(" + subPath + ")")
 )
 
 var pathRoots = map[string]bool{"Users": true, "home": true, "root": true, "var": true, "private": true, "tmp": true, "opt": true,
-	"Volumes": true, "etc": true, "usr": true, "mnt": true, "srv": true, "Library": true, "Applications": true, "proc": true, "nix": true}
+	"Volumes": true, "etc": true, "usr": true, "mnt": true, "srv": true, "Library": true, "Applications": true, "proc": true, "nix": true,
+	"workspace": true, "workspaces": true}
 
 func redactPaths(s string) string {
 	return pathRe.ReplaceAllStringFunc(s, func(m string) string {
